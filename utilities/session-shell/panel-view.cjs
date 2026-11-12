@@ -747,8 +747,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       return null;
     }
     // The context row's columns: the gauge, the percent right-aligned under the others, and
-    // the elapsed time at the right edge (Fleet's ROUTES CONTEXT cell, the producer's gauge at
-    // the panel's width; an exact token count with no window stands in the percent column).
+    // the elapsed time at the right edge (the head's context gauge and level colors, at the
+    // panel's width; an exact token count with no window stands in the percent column).
     const gaugeOf=r=>{const g=painted(r.paint?.gauge_row||r.paint?.gauge5);
       return g.length>=4?{bar:g.slice(0,2),pct:g.slice(3)}:{bar:[],pct:g.length?g:r.paint?.ctx?[r.paint.ctx]:[]};};
     const barWidth=Math.max(0,...listed.map(r=>size(gaugeOf(r).bar))),pctWidth=Math.max(0,...listed.map(r=>size(gaugeOf(r).pct)));

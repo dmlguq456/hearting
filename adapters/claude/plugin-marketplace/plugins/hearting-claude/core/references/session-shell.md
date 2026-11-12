@@ -205,8 +205,8 @@ role as a dim label in one column (`owner`, `frame` for a frame or
 frame-alternative leg, `worker` for a stage worker; empty when the record names
 none), then harness, model, effort and a one-step route's open tool (only where
 it fits), in the colors of Fleet's ROUTES row (`⠏ owner  claude Opus 5.5 xhigh`).
-Context and time, two cells in: the context gauge (Fleet's CONTEXT gauge at the
-panel's width, about eight cells in 40) and percent, and the elapsed time at
+Context and time, two cells in: the context gauge (the head's context gauge and
+level colors at the panel's width, about eight cells in 40) and percent, and the elapsed time at
 the right edge, each in its own column so they stand one above the other; an
 unknown context leaves its cells empty, and with neither value the row is left
 out. What: two cells in, its title on at most two rows, the second ending in

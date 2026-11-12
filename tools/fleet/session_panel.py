@@ -321,7 +321,8 @@ def route_row(row, now=None, *, cells=None):
         shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
                      gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
         if cells:
-            # Spec E9 rule 38: the folded route's own context row, the same gauge at the panel's width.
+            # Spec E9 rule 38: the folded route's own context row: the head's context gauge
+            # (``gauge_parts``, its level colors) at the panel's width.
             shown["gauge_row"] = [list(part) for part in gauge_parts(percent, cells=cells)]
     elif token_text(row.get("ctx_tokens")):
         # No window known: the exact token count, as Fleet writes it, never a made-up percent.
