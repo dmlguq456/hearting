@@ -129,10 +129,13 @@ messages dim. An opened route carries what Fleet's ROUTES row unfolds, from the
 same route records: kind and owner (with profile and context), each stage with
 its mark, verdict and doer (harness, model, effort, live workers' context, the
 open tool and sub-agents on the running stage, time, round, unit, output), how
-it was run and checked (age, legs, the evidence summary), the next step, and
+it was run and checked (age, legs, the evidence summary, and the note Fleet
+writes right of the detail band), the next step, and
 why it stopped (the worker line and where it resumes). Values are whole: a long
 one goes on to the next rows, and a detail short of rows keeps its first rows
-and `+N lines ›`, which opens the route page where every value reads.
+and `+N lines ›`, which opens the route page where every value reads. Opening
+the route page reads the owner's raw output once, with the reader Fleet's route
+page uses, and shows its last rows under the route.
 An opened route detail is indented inside its box, never a box in a box,
 and nothing is drawn for an empty route list or message list. Box rows are
 laid out at the box's inner width. Beside the native area a folded route takes
@@ -177,6 +180,11 @@ or route binding; configured defaults never masquerade as observed selection.
 An official startup callback's active-model field may travel with its existing
 birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
+A native source that exists but was not read (an I/O error, or a replacement
+during the read) keeps the panel's last model and context for the same live
+session, as Fleet's native reader does; the next projection reads it again.
+Another session, a new process, an absent or refused source and an ended
+process still clear them, and an unobserved value is never made up.
 The route box carries `route N` in its top border (the producer's own label
 alone, over a `Checking` row, while its rows are not read yet). Each current
 route (the ones the statusline counts) is one folded row: Fleet's route marker

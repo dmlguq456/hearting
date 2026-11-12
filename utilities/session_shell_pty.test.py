@@ -47,11 +47,11 @@ while True:
         line,pending=pending.split('\r',1)
         line=line.replace('\x1b[200~','').replace('\x1b[201~','')
         callback_missing='PEER_NO_CALLBACK' in line
-        if not callback_missing:event('prompt')
+        if not callback_missing and line!='turn-close':event('prompt')
         if line=='spawn-child':
             subprocess.run([sys.executable,__file__,sid,'--headless-event'],
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
-        if not callback_missing:event('stop')
+        if not callback_missing and line!='turn-open':event('stop')
         print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
         if line.startswith('geometry'):print('GEOMETRY_'+line+'_'+str(os.get_terminal_size(0).columns)+'x'+str(os.get_terminal_size(0).lines)+'\r\n',end='',flush=True)
         if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
@@ -88,7 +88,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left','state-border'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -239,7 +239,19 @@ function existing(file){return new Promise((resolve,reject)=>{
    const log=cfg.peer.herdrLog&&fs.existsSync(cfg.peer.herdrLog)?fs.readFileSync(cfg.peer.herdrLog,'utf8'):'';
    peer.push({herdr_calls:log.split('\n').filter(Boolean).length});
  }
- const displayLag=[];
+ const displayLag=[],stateLag=[];
+ if(cfg.scenario==='state-border'){
+   // The border's own state word, read from the painted top border.
+   const border=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ \S+ (running|idle|waiting) /);if(m)return m[1];}return '';};
+   const until=async(word,began)=>{while(Date.now()-began<4000){await new Promise(resolve=>sideTerm.write('',resolve));if(border()===word)return Date.now()-began;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('the border never showed '+word+' (shows '+border()+')');};
+   await until('idle',Date.now());
+   // Every projection from here waits on a held backend: only the event itself can repaint.
+   fs.writeFileSync(cfg.hold,'1');
+   for(const [line,word] of [['turn-open','running'],['turn-close','idle']]){
+     const began=Date.now();await rpc(cfg.inlet,{batch:Buffer.from(line+'\r').toString('base64')});
+     stateLag.push(await until(word,began));
+   }
+ }
  if(cfg.scenario==='route-pages'){
    const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
    value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
@@ -303,11 +315,12 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,peer}));
+ console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
    if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);}
+   if(cfg.hold){try{fs.unlinkSync(cfg.hold);}catch{}const gate=fs.openSync(cfg.holdGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1111'));fs.closeSync(gate);}
    if(cfg.actionGate){const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);}
    if(child&&alive){
      const exitFD=fs.openSync(cfg.exit_fifo,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(exitFD,Buffer.from('q'));fs.closeSync(exitFD);
@@ -379,6 +392,15 @@ class SessionShellPTYTest(unittest.TestCase):
                                    .replace('{"ok":True,"lines":["ACTION_DONE"]}',
                                             '{"ok":False,"reason":"ANSWER_DONE"}'))
             backend.chmod(0o700)
+        if scenario=='state-border':
+            backend=directory/'held-python';hold=directory/'hold';hold_gate=directory/'hold-gate';os.mkfifo(hold_gate,0o600)
+            backend.write_text('#!'+sys.executable+'\nimport os,sys\nsys.path.insert(0,'+repr(str(ROOT/'utilities'))+')\nimport session_shell as m\n'
+                               'original=m.panel_projection\ndef projection(*args,**kwargs):\n'
+                               ' if os.path.exists('+repr(str(hold))+'):\n'
+                               '  fd=os.open('+repr(str(hold_gate))+',os.O_RDWR);os.read(fd,1);os.close(fd)\n'
+                               ' return original(*args,**kwargs)\n'
+                               'm.panel_projection=projection\nraise SystemExit(m._backend())\n')
+            backend.chmod(0o700)
         config={'directory':str(directory),'host':str(ROOT/'utilities/session-shell/host.cjs'),
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
                 'entry':str(ROOT/'utilities/session-shell/entry.py'),'hostPidFile':str(directory/'host-pid'),
@@ -388,6 +410,7 @@ class SessionShellPTYTest(unittest.TestCase):
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
         if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
+        if scenario=='state-border':config.update(hold=str(hold),holdGate=str(hold_gate))
         if peer is not None:
             audit=directory/'audit.py'
             # Counts every subprocess the sender starts and its wall time; nothing else changes.
@@ -398,7 +421,7 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border'}:
             config.update(columns=180,rows=40)
         if scenario=='route-pages':config.update(columns=80,rows=24)
         if scenario=='fleet-modal':
@@ -414,7 +437,7 @@ class SessionShellPTYTest(unittest.TestCase):
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left'} else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -511,6 +534,14 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_a_blocked_read_action_does_not_delay_event_driven_values(self):
         result=self.run_loop('action-display')
         self.assertFalse(result['status']['focused'])
+
+    def test_the_border_state_follows_the_event_while_the_projection_is_held(self):
+        # The border's running/idle is the host's own state: it is painted when the
+        # native event arrives, not after a (here held) display projection returns.
+        result=self.run_loop('state-border')
+        print(json.dumps({'event':'session-shell-border-state','lag_ms':result['state_lag_ms']}))
+        self.assertEqual(len(result['state_lag_ms']),2)
+        self.assertLess(max(result['state_lag_ms']),1000)
 
     def test_a_blocked_answer_keeps_projection_and_native_keyboard_responsive(self):
         self.assertFalse(self.run_loop('answer-display')['status']['focused'])
