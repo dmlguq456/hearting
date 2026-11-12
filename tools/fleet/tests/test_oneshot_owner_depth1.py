@@ -137,11 +137,11 @@ console.log(JSON.stringify(out));'''
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # Beside the native area a folded route takes two rows (spec rules 19, 24): its
-            # glyph with harness and time, then its title on the row below.
+            # Beside the native area a folded route reads who / context and time / what (spec
+            # rules 24, 36, 38): its glyph, role and harness, then its time, then its title.
             lines = side.splitlines()
-            rows = [lines[i - 1] for i, line in enumerate(lines) if i and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("codex" in line and "5m" in line for line in rows), side)
+            rows = [lines[i - 2:i] for i, line in enumerate(lines) if i > 1 and "│ │ " in line and "Fixture solo route" in line]
+            self.assertTrue(any("owner" in who and "codex" in who and "5m" in time for who, time in rows), side)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)
             self.assertNotIn("hb_", side + bottom)

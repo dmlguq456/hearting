@@ -95,13 +95,20 @@ def native_binary(harness: str) -> str | None:
 # Loopback model fixture
 # --------------------------------------------------------------------------
 
+GATE_LIMIT = 170.0   # the longest a gated reply waits, so a forgotten gate never hangs a run
+
+
 class Reply:
     """One scripted model answer: plain text, a single shell tool call, or one
     named tool call (``tool=(name, arguments)``) such as a skill load.
-    ``input_tokens`` is the prompt size the answer reports (default 1)."""
+    ``input_tokens`` is the prompt size the answer reports (default 1).
+    ``gate`` (a ``threading.Event``) holds the answer: the request is recorded at once, the
+    reply is sent only once the event is set (or after ``GATE_LIMIT`` seconds), so a turn
+    stays running on the model's side."""
 
     def __init__(self, text: str = "", shell: str | None = None, tool=None,
-                 input_tokens: int = 1):
+                 input_tokens: int = 1, gate=None):
+        self.gate = gate
         self.text = text
         self.shell = shell
         self.tool = tool
@@ -335,6 +342,8 @@ class ModelFixture:
                 else (self.side and self.side(record)) or Reply("fixture title")
             record["reply"] = reply.as_dict()
             self.requests.append(record)
+        if reply.gate is not None:
+            reply.gate.wait(GATE_LIMIT)
         streaming = bool(payload.get("stream", protocol != "anthropic"))
         if protocol == "anthropic":
             return self._anthropic(reply, streaming, names)
