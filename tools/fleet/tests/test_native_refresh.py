@@ -411,6 +411,24 @@ class OpenCodeDatabaseReadTests(unittest.TestCase):
         self.assertEqual((kept['model'], kept['effort']), ('DB model', first['effort']))
         self.assertIsNone(plain['model'])   # nothing is made up without a previous observation
 
+    def test_a_failed_database_read_after_the_selection_moved_clears(self):
+        # Review RV-PR1556: the TUI selection moved A -> B before a failed DB read; the
+        # unread error must not outrank the existing session check (#1518 rule).
+        reader = fast.NativeDisplayReader()
+        self.assertEqual(self.model(reader.read(self.snapshot)), 'DB model')
+        first, _paths = self.session_view.observe('opencode', self.pid, self.start, self.sid)
+        self.set_model('New DB model')   # a new generation the reader has to read
+
+        def moved(sess):
+            sess.session_id = 'ses_fixture_other'
+            return sess.session_id
+        with mock.patch.object(self.opencode, '_resolve_current_identity', side_effect=moved), self.locked():
+            self.assertIsNone(self.model(reader.read(self.snapshot)))
+            self.assertEqual(self.session_view.observe('opencode', self.pid, self.start, self.sid,
+                                                       raise_unread=True), ({}, mock.ANY))
+            self.assertEqual(self.session_view.observe('opencode', self.pid, self.start, self.sid,
+                                                       previous=first)[0], {})
+
     def test_a_refused_or_absent_database_still_clears(self):
         reader = fast.NativeDisplayReader()
         self.assertEqual(self.model(reader.read(self.snapshot)), 'DB model')

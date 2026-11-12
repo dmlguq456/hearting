@@ -119,7 +119,9 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
         try:
             opencode.enrich(sess, raise_unread=raise_unread or keep is not None)
         except OSError:
-            if raise_unread:
+            # Identity first: an unread DB of another session or process birth clears
+            # (below) instead of letting the caller keep the previous selection's cells.
+            if raise_unread and sess.session_id == sid and read_proc_start(pid) == proc_start:
                 raise
             unread.extend(_TAP_CELLS)
         if sess.session_id != sid:
