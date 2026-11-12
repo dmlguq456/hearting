@@ -11,7 +11,9 @@ requirement applies to every new SD-111 test file regardless.
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
+import shutil
 import os
 import stat
 import subprocess
@@ -1426,6 +1428,161 @@ class PruneTest(IsolatedRootMixin, unittest.TestCase):
             PD.main(["prune", "--root", str(self.root), "--apply", "--json"])
         self.assertEqual(json.loads(buf.getvalue())["pruned_records"], 1)
         self.assertFalse(old_acked.exists())
+
+
+class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
+    """SD-111 §(7) `pending-delivery-ttl-exceeded` for open notice records.
+
+    One rule (reviews R1-R3 of PR #1529): a notice expires only when a
+    successful, valid registry observation confirms its owner is absent;
+    everything else is kept.
+    """
+
+    DAY = 86400
+    LINEAGE = "session-notice-lineage-v1:"
+    ROW = ("2026-08-28T00:00:00Z\tdone\t/r\t/w\texecute\t"
+           "attempt_id={attempt},route_id=rt-fixture,harness=claude")
+
+    def setUp(self):
+        super().setUp()
+        self.jobs = self.root / "jobs.log"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.jobs.write_text("", encoding="utf-8")   # a valid, empty registry
+
+    def _notice(self, letter, *, age_days, answer=False, route_node="notice",
+                binding=None, jobs=None, receipt_extra=None):
+        receipt = {"schema_version": 1, "kind": "notice", "key": "notice:" + letter,
+                   "subject": "s", "text": "t", "required_action": "read-notice"}
+        if answer:
+            receipt["answer_binding"] = {"request_id": "fixture"}
+        delivery_id = "delivery-" + letter * 64
+        notice = route_node == "notice"
+        lineage = []
+        if binding is not None:
+            lineage = [self.LINEAGE + json.dumps(
+                {"jobs": str(jobs or self.jobs), "binding": binding}, sort_keys=True)]
+        PD.create(
+            self.root, recipient_kind="claude-parent-runtime", recipient_key="sess-gone",
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[] if notice else ["att-" + letter * 32],
+            parent_attempt_id="" if notice else "att-" + "a" * 32,
+            route_id="route-free", route_node=route_node, receipt=receipt,
+            receipt_digest=_digest(receipt),
+            row_revisions={} if notice else {"att-" + letter * 32: "deadbeef"},
+            lineage=lineage)
+        path = PD.record_path(self.root, "sess-gone", delivery_id)
+        old = time.time() - age_days * self.DAY
+        os.utime(path, (old, old))
+        return path
+
+    def _owner(self, attempt):
+        return {"kind": "owner-session", "harness": "claude", "session_id": "sess-gone",
+                "attempt_id": attempt}
+
+    def _archive(self, *raws, torn=False):
+        segment = self.root / "archive" / "registry-2026-08"
+        segment.mkdir(parents=True, exist_ok=True)
+        text = "".join(json.dumps({"raw": raw}) + "\n" for raw in raws)
+        (segment / "rows.jsonl").write_text(text + ('{"raw": "2026' if torn else ""),
+                                            encoding="utf-8")
+
+    def _state(self, path):
+        value = json.loads(path.read_text("utf-8"))
+        return value["state"], value.get("expiry_reason")
+
+    def _reconcile(self):
+        import dispatch_completion_join as join
+        return join.reconcile_pending_delivery(self.jobs)
+
+    def test_a_valid_empty_registry_confirms_an_unowned_notice_absent(self):
+        stale = self._notice("1", age_days=8)
+        fresh = self._notice("2", age_days=1)
+        answer = self._notice("3", age_days=30, answer=True)
+        completion = self._notice("4", age_days=30, route_node="execute")
+        result = self._reconcile()
+        self.assertEqual(result["expired"], 1)
+        self.assertEqual(self._state(stale), ("expired", "pending-delivery-ttl-exceeded"))
+        self.assertEqual(self._state(fresh)[0], "pending")
+        # The person's own answer and a non-notice completion keep their rules.
+        self.assertEqual(self._state(answer)[0], "pending")
+        self.assertEqual(self._state(completion)[0], "pending")
+        # Already terminal: a second sweep changes nothing.
+        self.assertEqual(self._reconcile()["expired"], 0)
+
+    def test_a_named_owner_absent_from_registry_and_archive_expires(self):
+        self.jobs.write_text(self.ROW.format(attempt="att-other") + "\n", encoding="utf-8")
+        self._archive(self.ROW.format(attempt="att-archived-other"))
+        stale = self._notice("5", age_days=8, binding=self._owner("att-gone-owner"))
+        self.assertEqual(self._reconcile()["expired"], 1)
+        self.assertEqual(self._state(stale), ("expired", "pending-delivery-ttl-exceeded"))
+
+    def test_anything_but_a_confirmed_absence_is_kept(self):
+        row = self.ROW.format(attempt="att-owner")
+        cases = {
+            # The named owner has a live row: the dead-recipient rule decides.
+            "live-owner-row": lambda: self.jobs.write_text(row + "\n", encoding="utf-8"),
+            # The named owner's row moved to the archive: it exists.
+            "archived-owner-row": lambda: self._archive(row),
+            # No archive to look in, a torn archive line, an unreadable segment.
+            "archive-missing": lambda: None,
+            "archive-torn": lambda: self._archive(self.ROW.format(attempt="att-x"), torn=True),
+            "archive-segment-unreadable": lambda: (
+                self.root / "archive" / "registry-2026-08").mkdir(parents=True),
+            # A registry row that does not parse makes the whole read unobserved.
+            "unparsed-other-row": lambda: self.jobs.write_text(
+                self.ROW.format(attempt="att-x") + "\textra\n", encoding="utf-8"),
+            "registry-missing": lambda: self.jobs.unlink(),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(case=name):
+                for path in (self.root / "pending-delivery").glob("*/*"):
+                    path.unlink()
+                shutil.rmtree(self.root / "archive", ignore_errors=True)
+                self.jobs.write_text("", encoding="utf-8")
+                kept = self._notice("6", age_days=8, binding=self._owner("att-owner"))
+                unowned = self._notice("7", age_days=8)
+                arrange()
+                result = self._reconcile()
+                self.assertEqual(self._state(kept)[0], "pending")
+                # An unowned notice expires only on a valid registry observation.
+                expect = "pending" if name in {"unparsed-other-row", "registry-missing"} \
+                    else "expired"
+                self.assertEqual(self._state(unowned)[0], expect)
+                self.assertEqual(result["expired"], 1 if expect == "expired" else 0)
+
+    def test_a_lineage_naming_another_registry_is_kept(self):
+        other = self.root.parent / "other-root" / "jobs.log"
+        kept = self._notice("8", age_days=8, binding=self._owner("att-elsewhere"), jobs=other)
+        self.assertEqual(self._reconcile()["expired"], 0)
+        self.assertEqual(self._state(kept)[0], "pending")
+
+    def test_an_unreadable_receipt_is_kept_not_aged_out(self):
+        # bool / int / other non-mapping receipts (review R1): kept, never raised.
+        import dispatch_completion_join as join
+        path = self._notice("9", age_days=8)
+        value = json.loads(path.read_text("utf-8"))
+        observation = join.NoticeOwnerObservation(self.root, [])
+        before = path.read_bytes()
+        for receipt in (True, 7, "notice", [], None):
+            self.assertFalse(join.notice_ttl_eligible(dict(value, receipt=receipt), observation))
+            with unittest.mock.patch.object(PD, "_record_reference_lock",
+                                            side_effect=lambda _p: contextlib.nullcontext(
+                                                dict(value, receipt=receipt))):
+                self.assertEqual(PD.expire_notice_past_ttl(
+                    path, actor="dispatch-reconcile",
+                    eligible=lambda v: join.notice_ttl_eligible(v, observation)), "skipped")
+        self.assertEqual(path.read_bytes(), before)
+        # The eligibility judgment raising or answering anything but True keeps it.
+        for verdict in (lambda _v: 1 / 0, lambda _v: "yes", lambda _v: None):
+            self.assertEqual(PD.expire_notice_past_ttl(
+                path, actor="dispatch-reconcile", eligible=verdict), "skipped")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_only_the_declared_actor_expires(self):
+        stale = self._notice("5", age_days=8)
+        with self.assertRaises(PD.PendingDeliveryError):
+            PD.expire_notice_past_ttl(stale, actor="fleet", eligible=lambda _v: True)
+        self.assertEqual(self._state(stale)[0], "pending")
 
 
 class BoundedPruneTest(IsolatedRootMixin, unittest.TestCase):
