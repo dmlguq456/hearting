@@ -678,7 +678,8 @@ def _codex_disk_resumes() -> int:
 
 REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuses",
                      "full_metadata_parses", "invalidations", "prefix_reuses",
-                     "prefix_segments_reused", "line_parse_reuses")
+                     "prefix_segments_reused", "line_parse_reuses",
+                     "segment_resyncs", "segment_rebuilds")
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
 
 
@@ -1029,8 +1030,8 @@ class Step:
     """One mutation. ``resume`` (E24..E27): also start a new process that finds the
     Codex cursor the warm process left on disk; ``"used"`` means it must have
     continued from it, ``"rejected"`` that it must have read the file from the start.
-    ``expect``: which counters of the warm process must grow (``"+"``) or stay
-    still (``"0"``) during the step's warm pass, so an event cannot pass without
+    ``expect``: which counters of the warm process must grow (``"+"``), stay
+    still (``"0"``) or move by an exact amount (an int) during the step's warm pass, so an event cannot pass without
     taking the incremental path it is about; see ``counters`` and ``UNCHANGED_PASS``."""
 
     def __init__(self, label, mutate, *, clock_only=False, resume=None, expect=None):
@@ -1334,6 +1335,37 @@ def e29(run):  # the claude transcript's agent type changes, size and mtime_ns r
     assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
 
 
+def _append_batches(run, names=("batch-a", "batch-b", "batch-c")) -> None:
+    """Rows arrive by append, one batch each: the registry then holds segments of unequal sizes."""
+    sizes = (2, 3, 1)
+    for number, name in enumerate(names):
+        run.fx.append_rows([_new_open_row(run.fx, "%s-%d" % (name, row)) for row in range(sizes[number])])
+
+
+def e42_batches(run):
+    _append_batches(run)
+
+
+def e42a(run):  # a middle row is replaced in place by a longer one: later segments keep their bytes
+    rows = run.fx.current_rows()
+    rows[9] = rows[9].replace("fixture-history", "fixture-history-edited-in-place", 1)
+    run.fx.replace_registry(rows)
+
+
+def e42b(run):  # two rows, one in the middle and one near the end, change with their length kept
+    rows = run.fx.current_rows()
+    rows[7] = rows[7].replace("fixture-history", "fixture-histor!", 1)
+    assert "batch-b-2" in rows[-2]
+    rows[-2] = rows[-2].replace("batch-b-2", "batch-b-9", 1)
+    run.fx.replace_registry(rows)
+
+
+def e42c(run):  # an early row is deleted: every later row moves up, no old segment can be kept
+    rows = run.fx.current_rows()
+    del rows[1]
+    run.fx.replace_registry(rows)
+
+
 EVENTS = [
     ("E01", "registry append: a new attempt row",
      [Step("append", e01, expect={**REG_APPEND, **CODEX_STILL})]),
@@ -1410,6 +1442,20 @@ EVENTS = [
       Step("same size and mtime, other content", e28b, expect={**REG_STILL, **CODEX_STILL})]),
     ("E29", "a claude transcript rewritten with the same size and mtime",
      [Step("same stat", e29, expect={**REG_STILL, **CODEX_STILL})]),
+    # E42: a rewrite after the registry grew by appended batches (segments of unequal size). Only
+    # the segments whose own bytes or first order changed are built again; the others keep their rows.
+    ("E42a", "in-place replacement of a middle row with a longer one, after appended batches",
+     [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("replace middle row", e42a, expect={**REG_KEEP_PREFIX, "segment_rebuilds": 1,
+                                              "segment_resyncs": "+", **CODEX_STILL})]),
+    ("E42b", "in-place replacement of two rows with the same lengths",
+     [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("replace two rows", e42b, expect={**REG_KEEP_PREFIX, "segment_rebuilds": 2,
+                                            "segment_resyncs": "+", **CODEX_STILL})]),
+    ("E42c", "an early row deleted: the order of every later row shifts",
+     [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("delete early row", e42c, expect={**REG_REPARSE, "segment_resyncs": "0",
+                                             "segment_rebuilds": "+", **CODEX_STILL})]),
 ]
 
 
@@ -1535,6 +1581,8 @@ class IncrementalEquivalenceTests(unittest.TestCase):
             got = delta[name]
             if want == "+":
                 ok, text = got > 0, "grow"
+            elif isinstance(want, int):
+                ok, text = got == want, "move by exactly %d" % want
             else:
                 ok, text = got == 0, "stay still"
             self.assertTrue(

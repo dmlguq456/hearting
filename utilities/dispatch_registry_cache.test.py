@@ -1375,12 +1375,22 @@ class PrefixReuseAfterReplacementTest(unittest.TestCase):
                 self.assertIsNot(first, second)
                 self.assertIs(second._segments[0], first._segments[0])
                 self.assertIsNot(second._segments[1], first._segments[1])
+                # The two segments after the changed one hold the same rows at the same order:
+                # new objects at new byte positions that share the old rows and indexes.
+                for index in (2, 3):
+                    self.assertIsNot(second._segments[index], first._segments[index])
+                    self.assertIs(second._segments[index].records, first._segments[index].records)
+                    self.assertEqual(second._segments[index].content_sha256,
+                                     first._segments[index].content_sha256)
+                self.assertIsNot(second._segments[1].records, first._segments[1].records)
                 metrics = CACHE.metrics_snapshot()
                 self.assertEqual(metrics["full_metadata_parses"], 1)
                 self.assertEqual(metrics["prefix_reuses"], 1)
                 self.assertEqual(metrics["prefix_segments_reused"], 1)
                 self.assertGreater(metrics["prefix_bytes_reused"], 0)
-                self.assertEqual(metrics["metadata_rows_parsed"], 14 + 15 - 4)
+                self.assertEqual(metrics["segment_resyncs"], 2)
+                self.assertEqual(metrics["segment_rebuilds"], 4 + 2)   # first read's four, the changed one, the new row
+                self.assertEqual(metrics["metadata_rows_parsed"], 14 + 15 - 4 - 6)
                 self.assertEqual(second.completion_attempt("att-5")[0].status, "killed")
                 self._assert_digests(second)
                 self._assert_same_as_fresh_read(second)
