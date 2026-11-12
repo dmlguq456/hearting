@@ -1222,6 +1222,101 @@ assert.deepEqual(bottom({model:{context_side:undefined}}),bottom());
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_a_route_shows_its_owner_first_and_its_live_workers_under_it(self):
+        # Spec E9 rule 43: beside the native area a route's first row is its owner; each stage
+        # worker running now hangs under it on a dim branch, two cells in; the route's time ends
+        # the title; the context rows start with a dim `CTX` in the role column. Short of rows a
+        # worker folds to one row, then the workers go (the kind row counts them), then the rows
+        # as before. An older backend's row (no `workers_live`) keeps its one doer.
+        script = self.FIXTURE + r'''
+const D=t=>({text:t,dim:true});
+const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
+const solo={id:'s',title:'셸 상태·표시 고치기',kind:'working',state:'working',elapsed:'41m',shape:'one-shot-owner',kind_word:'code',role:'owner',tool:'Edit',
+ stages:[{name:'one-shot',current:true,mark:'●'}],paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','38%','━━━')},workers_live:[]};
+const worker=(h,m,e,pct,bar,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',...o,paint:{glyph:P(o.kind==='idle'?'●':'⠋'),...doer(h,m,e,pct,bar)}});
+const one={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'worker',doer_worker:true,
+ owner_model:'Opus 5.5',paint:{glyph:P('⠋'),...doer('claude','Sonnet 5.5','high','22%','━━')},owner_paint:doer('claude','Opus 5.5','xhigh','52%','━━━━'),
+ workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'utilities/panel.py'})]};
+const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:false,owner_paint:undefined,paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','61%','━━━━')},
+ workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m'})]};
+const box=rows=>rows.slice(rows.findIndex(s=>s.includes('╭─ route')),rows.findIndex(s=>s.includes('╰'))+1);
+const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+// No worker: owner / CTX / title with the route's time at its end / kind; no branch, no `│`.
+let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
+assert(at>0&&/^│ │   CTX   ━━━───── 38% +│ │$/.test(b[at+1])&&/^│ │   셸 상태·표시 고치기 +41m │ │$/.test(b[at+2])&&b[at+3].includes('│   code · one-shot · Edit'),b.join('\n'));
+assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+1],'━'),col(b[at],'claude'));
+assert(!b.join('\n').includes('└─')&&!b.some(s=>/^│ │ │/.test(s))&&!b[at+1].includes('41m'),b.join('\n'));
+// One worker: the owner's own values first, then `│` down the owner's rows, then the worker two cells in.
+b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh'));
+for(const [i,want] of [[1,/^│ │ │ CTX    ━━━━──── 52% +│ │$/],[2,/^│ │ │ 속도 3단계 +2h 10m │ │$/],[3,/^│ │ │ code · staged 3\/7 · execute ● +│ │$/],
+ [4,/^│ │ └─⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │     CTX    ━━────── 22% +│ │$/],[6,/^│ │     execute · Edit panel\.py +12m │ │$/]])
+ assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
+assert.equal(col(b[at+5],'CTX'),col(b[at+4],'worker'));assert.equal(col(b[at+5],'━'),col(b[at+4],'claude'));
+assert(!b.join('').includes('owner Opus'),b.join('\n'));
+const ownerRow=view.render({width:40,height:60,side:true,model:{...head,routes:[one],route_count:1},configuration:{},questions:()=>[]}).rows.find(r=>r.map(p=>p.text).join('').includes('⠋ owner'));
+assert(ownerRow.find(p=>p.text==='owner ').dim&&ownerRow.some(p=>p.text==='Opus 5.5'),JSON.stringify(ownerRow));
+// Two workers: `├─` then `└─`, `│` down the first worker's rows; each with its own mark.
+b=box(draw([two],40,60));at=b.findIndex(s=>s.includes('├─⠋ worker codex gpt-5.5 high'));
+assert(at>0&&/^│ │ │   CTX    ━━/.test(b[at+1])&&/^│ │ │   execute · Bash +12m │ │$/.test(b[at+2])&&b[at+3].includes('└─● worker opencode glm-5.2 max')
+ &&/^│ │     execute +8m │ │$/.test(b[at+5]),b.join('\n'));
+// No role recorded anywhere: no role column, `CTX` and one space.
+b=box(draw([{...solo,role:undefined}],40,60));
+assert(b.some(s=>s.includes('│ ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │   CTX ━━━───── 38%/.test(s)),b.join('\n'));
+// An unknown context: no CTX row; the time stays at the title's end.
+b=box(draw([{...solo,paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}}],40,60));
+assert(!b.join('').includes('CTX')&&b.some(s=>/셸 상태·표시 고치기 +41m │ │$/.test(s)),b.join('\n'));
+// A title on two rows: the time at the right end of the second, the title folded beside it.
+b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
+assert(!b[at].includes('41m')&&/ 41m │ │$/.test(b[at+1])&&b[at+2].includes('code · one-shot'),b.join('\n'));
+for(const s of b)assert.equal(cells(s),40,s);
+// Short of cells a worker's row (two cells less than the owner's) lets the effort go, then the
+// harness; the role and the model stay.
+assert(box(draw([one],44,60)).some(s=>/└─⠋ worker claude Sonnet 5\.5 high +│ │$/.test(s)));
+assert(box(draw([one],34,60)).some(s=>/└─⠋ worker Sonnet 5\.5 +│ │$/.test(s)),box(draw([one],34,60)).join('\n'));
+b=box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],40,60));
+assert(b.some(s=>/└─⠋ worker deepseek-v4\.1-flash +│ │$/.test(s))&&b.some(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh')),b.join('\n'));
+// Short of rows: a worker folds to one row (model, percent, time), then the workers go and the
+// kind row counts them, then the context row folds into the first row (the rows as before).
+const states=[];
+for(let h=60;h>=12;h--){
+ const r=box(draw([solo,one,two],40,h)),all=r.join('\n');
+ const state=r.some(s=>/^│ │     CTX/.test(s))?'full':r.some(s=>/└─⠋ worker Sonnet 5\.5 +22% 12m │ │$/.test(s))?'one':/· worker 2/.test(all)?'gone':r.some(s=>/owner +Opus 5\.5 +52% +2h 10m/.test(s))?'folded':'';
+ if(state&&!states.includes(state))states.push(state);
+ if(state==='one')assert(r.some(s=>/├─⠋ worker gpt-5\.5 +34% 12m │ │$/.test(s))&&!r.some(s=>s.includes('execute · Bash')),h+'\n'+all);
+ if(state==='gone')assert(!all.includes('└─')&&!r.some(s=>/^│ │ │/.test(s))&&all.includes('· worker 1'),h+'\n'+all);
+}
+assert.deepEqual(states,['full','one','gone','folded']);
+// An older backend's row: one doer, its context row keeps the time, no CTX, no branch.
+const older={...one,owner_paint:undefined,workers_live:undefined};
+b=box(draw([older],60,60));
+assert(!/CTX|└─/.test(b.join(''))&&b.some(s=>/⠋ worker claude Sonnet 5\.5 high/.test(s))&&b.some(s=>/━━────── 22% +2h 10m │ │$/.test(s))
+ &&b.some(s=>s.includes('owner Opus 5.5')),b.join('\n'));
+// The bottom layout keeps its rows whatever the route carries.
+assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},older,{...two,workers_live:undefined}],120,20,{side:false}));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_the_title_value_is_bold_in_the_sessions_harness_color(self):
+        # Spec E9 rule 44: the TITLE row's value bold, in the session's harness color (Fleet's
+        # `hb_*`), on every row it takes; the label stays dim; without color no weight either.
+        script = self.FIXTURE + r'''
+const styles={dim:{dim:true},loc_repo:{foreground:7},hb_claude:{foreground:116},hb_codex:{foreground:182},hb_opencode:{foreground:110},hb_other:{foreground:-1}};
+const paint=(harness,o={})=>view.render({width:40,height:50,side:true,harness,model:{...head,routes:[],route_count:0,styles,...o},state:'working',configuration:{},questions:()=>[]}).rows;
+const seen=new Set();
+for(const harness of ['claude','codex','opencode']){
+ const rows=paint(harness),at=rows.findIndex(r=>r.some(p=>p.text==='TITLE  '));
+ const label=rows[at].find(p=>p.text==='TITLE  '),values=[rows[at],rows[at+1]].map(r=>r.filter(p=>p.text.trim()&&p.text!=='TITLE  '&&!p.role));
+ assert(label.dim===true&&label.bold!==true,JSON.stringify(label));
+ assert(values.every(v=>v.length&&v.every(p=>p.bold===true&&p.foreground===styles['hb_'+harness].foreground)),harness+JSON.stringify(values));
+ seen.add(values[0][0].foreground);
+ // NOW keeps its own color and weight.
+ assert(rows.find(r=>r.some(p=>p.text==='NOW    ')).every(p=>p.bold!==true),harness);
+}
+assert.equal(seen.size,3);
+assert(paint('codex',{no_color:true}).flat().every(p=>p.bold!==true));
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_a_bottom_route_row_names_its_kind_before_its_tool(self):
         # Spec E9 rule 34 (d): after model and context, before the tool, the side layout's
         # and Fleet's words: `one-shot`, `staged 3/7 execute ●`, a failed `staged 2/3 execute ✕`;

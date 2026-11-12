@@ -180,6 +180,66 @@ class CommonSessionLineTest(unittest.TestCase):
                          "route 12 ⠏7 ●3 ✕1")
         self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"]), "route 12")
 
+    def test_route_rows_carry_the_owner_and_each_live_worker_apart(self):
+        # Spec E9 rule 43: the owner and each stage worker running now, apart, from the jobs of
+        # the same pass (Fleet's own live workers, its row's ``worker_contexts``); a finished
+        # stage's worker is not listed; two parallel workers are two entries.
+        from types import SimpleNamespace
+        from unittest import mock
+        from tools.fleet import session_line
+        from tools.fleet.explorer import live
+        from tools.fleet.session_panel import route_row
+        job = lambda **kw: SimpleNamespace(key=kw.get("attempt_id"), **kw)
+        owner = job(attempt_id="o", depth=1, worker_type="owner", liveness="idle", harness="claude", model="opus",
+                    effort="xhigh", ctx_pct=52, elapsed_min=130.0)
+        first = job(attempt_id="w1", depth=2, route_node="execute", liveness="working", harness="codex",
+                    resolved_model="gpt-fixture", effort="high", ctx_pct=22, exec_tool={"name": "Edit", "target": "tools/x.py"},
+                    elapsed_min=12.0)
+        second = job(attempt_id="w2", depth=2, route_node="execute", liveness="idle", harness="opencode",
+                     model="glm-fixture", effort="max", ctx_pct=71, elapsed_min=8.0)
+        done = job(attempt_id="w0", depth=2, route_node="plan", liveness="dead", harness="claude", model="sonnet", elapsed_min=30.0)
+        get = live._get
+
+        def contexts(*workers):
+            # The row's live workers as Fleet's route record lists them.
+            return [{"stage": get(w, "route_node"), "harness": get(w, "harness"),
+                     "model": live._model_pair(get(w, "resolved_model", "model"))[0],
+                     "ctx_pct": round(session_line.job_context(w, get)[0], 1)} for w in workers]
+
+        def rows(jobs, workers):
+            route = {"id": "rt", "state": "working", "activity": "running", "current": True, "worker_stage": "execute"}
+            panels = {"claude\0s": [{"id": "rt", "state": "working", "worker_stage": "execute", "worker_contexts": contexts(*workers)}]}
+            with mock.patch.object(live, "_collect_routes", return_value={"rt": {"jobs": jobs}}):
+                session_line.route_details(object(), panels, {"rt": route}, now=10_000.0)
+            return panels["claude\0s"][0]
+        # One worker leads the row: the owner's own values ride apart; the finished one is not listed.
+        one = rows([owner, done, first], [first])
+        self.assertEqual((one["role"], one["harness"]), ("worker", "codex"))
+        self.assertEqual(one["owner_doer"], {"harness": "claude", "model": live._model_pair("opus")[0], "effort": "xhigh",
+                                             "ctx_pct": round(session_line.job_context(owner, get)[0], 1)})
+        self.assertEqual([(w["stage"], w["marker"], w["role"], w["harness"], w["effort"], w["tool"], w["target"], w["since"])
+                          for w in one["workers_live"]],
+                         [("execute", "working", "worker", "codex", "high", "Edit", "tools/x.py", 10_000.0 - 12 * 60)])
+        # Two parallel workers: the owner leads the row itself, both workers are listed.
+        two = rows([owner, first, second, done], [first, second])
+        self.assertEqual(two["role"], "owner"); self.assertNotIn("owner_doer", two)
+        self.assertEqual([(w["harness"], w["marker"]) for w in two["workers_live"]], [("codex", "working"), ("opencode", "idle")])
+        self.assertNotIn("tool", two["workers_live"][1])   # an idle worker has no open tool
+        # The worker finished: no worker is listed and the owner leads again.
+        ended = rows([owner, SimpleNamespace(**{**vars(first), "liveness": "dead"})], [])
+        self.assertEqual((ended["role"], ended["workers_live"]), ("owner", []))
+        # The painted row: the owner's values and each worker's mark, role, stage, tool and own time.
+        painted = route_row(one, now=10_000.0, cells=8)
+        self.assertEqual((painted["owner_paint"]["harness"], painted["owner_paint"]["effort"], painted["owner_paint"]["ctx"]),
+                         ("claude", "xhigh", "52%"))
+        worker = painted["workers_live"][0]
+        self.assertEqual((worker["kind"], worker["role"], worker["stage"], worker["tool"], worker["target"], worker["elapsed"],
+                          worker["harness"], worker["effort"], worker["ctx"]),
+                         ("working", "worker", "execute", "Edit", "tools/x.py", "12m", "codex", "high", "22%"))
+        self.assertEqual(len(worker["gauge_row"]), 4)
+        # A row from an older producer has neither, and its painted row neither.
+        self.assertNotIn("workers_live", route_row({"id": "rt", "state": "working"}, now=10_000.0))
+
     def test_a_doer_reads_its_recorded_role_word(self):
         # Spec E9 rule 36 (a): Fleet's own words. Fleet's shared doer names a stage worker;
         # its route body line says whether that worker is a frame leg. Without a shared doer

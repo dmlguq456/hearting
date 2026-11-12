@@ -290,28 +290,10 @@ def route_gauge_cells(columns):
     return max(5, min(10, (int(columns or 40) - 8) // 4))
 
 
-def route_row(row, now=None, *, cells=None):
-    """A route row's painted values (spec rules 5-7); an unreported value is left out."""
-    import time
-    from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
-                               stage_glyph, token_text, _number)
-    from .explorer.live import _short_capability
-    now = time.time() if now is None else now
-    # The producer's Fleet marker; an older cache row has only its state.
-    marker = row.get("marker")
-    if marker not in ("working", "idle", "blocked", "dead", "done", "stale"):
-        state = str(row.get("state") or "")
-        marker = {"failed": "dead", "attention": "dead", "degraded": "dead"}.get(state, state)
-        marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
-    glyph, key = route_glyph(marker)
-    shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
-    # Spec E9 rule 36: the doer's recorded role (owner, frame or worker; none unrecorded) and
-    # the route's kind in Fleet's own word (``code``, ``lab``, ``frame``: Fleet's KIND).
-    if row.get("role") in ROLES:
-        shown["role"] = row["role"]
-    kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
-    if kind_word:
-        shown["kind_word"] = kind_word
+def doer_paint(row, cells=None):
+    """A doer's painted harness, model, effort and context (gauge at ``cells`` for the folded row)."""
+    from .session_line import effort_label, gauge_parts, token_text
+    shown = {}
     harness = sanitize_title(str(row.get("harness") or ""))[:32]
     if harness:
         shown.update(harness=harness, harness_key="hb_" + harness)
@@ -335,6 +317,32 @@ def route_row(row, now=None, *, cells=None):
         shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
         if cells:
             shown["gauge_row"] = [[tokens, "dim"]]
+    return shown
+
+
+def route_row(row, now=None, *, cells=None):
+    """A route row's painted values (spec rules 5-7); an unreported value is left out."""
+    import time
+    from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
+                               stage_glyph, token_text, _number)
+    from .explorer.live import _short_capability
+    now = time.time() if now is None else now
+    # The producer's Fleet marker; an older cache row has only its state.
+    marker = row.get("marker")
+    if marker not in ("working", "idle", "blocked", "dead", "done", "stale"):
+        state = str(row.get("state") or "")
+        marker = {"failed": "dead", "attention": "dead", "degraded": "dead"}.get(state, state)
+        marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
+    glyph, key = route_glyph(marker)
+    shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
+    # Spec E9 rule 36: the doer's recorded role (owner, frame or worker; none unrecorded) and
+    # the route's kind in Fleet's own word (``code``, ``lab``, ``frame``: Fleet's KIND).
+    if row.get("role") in ROLES:
+        shown["role"] = row["role"]
+    kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
+    if kind_word:
+        shown["kind_word"] = kind_word
+    shown.update(doer_paint(row, cells))
     minutes = None
     if _number(row.get("since")) is not None:
         minutes = max(0.0, (now - row["since"]) / 60)
@@ -342,6 +350,28 @@ def route_row(row, now=None, *, cells=None):
         minutes = row["elapsed_min"]
     if minutes is not None:
         shown["elapsed"] = elapsed_text(minutes)
+    # Spec E9 rule 43: the owner's values when a worker leads the row, and each stage worker
+    # running now (its mark, role, stage, open tool and its own time); a row from an older
+    # producer has neither and keeps its one doer.
+    if isinstance(row.get("owner_doer"), dict):
+        shown["owner_paint"] = doer_paint(row["owner_doer"], cells)
+    if isinstance(row.get("workers_live"), list):
+        shown["workers_live"] = []
+        for item in row["workers_live"][:8]:
+            if not isinstance(item, dict):
+                continue
+            marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
+            glyph, key = route_glyph(marker)
+            worker = {"glyph": glyph, "glyph_key": key, "kind": marker,
+                      "role": "frame" if item.get("role") == "frame" else "worker",
+                      "stage": sanitize_title(str(item.get("stage") or ""))[:64], **doer_paint(item, cells)}
+            for name, limit in (("tool", 48), ("target", 120)):
+                value = sanitize_title(str(item.get(name) or ""))[:limit]
+                if value and (name == "tool" or worker.get("tool")):
+                    worker[name] = value
+            if _number(item.get("since")) is not None:
+                worker["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+            shown["workers_live"].append(worker)
     # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
     tool = sanitize_title(str(row.get("tool") or ""))[:48]
     if tool:

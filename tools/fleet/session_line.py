@@ -701,6 +701,67 @@ def route_doer(route, jobs, get, live):
                if key in activity}}
 
 
+_DOER_LIMITS = (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64), ("target", 120), ("tool_age", 16))
+
+
+def _doer_values(doer):
+    """A doer's bounded display values for a panel row (as ``route_details`` keeps the lead's)."""
+    shown = {key: doer[key] for key, limit in _DOER_LIMITS
+             if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit}
+    if doer.get("percent") is not None:
+        shown["ctx_pct"] = round(doer["percent"], 1)
+    elif type(doer.get("tokens")) is int:
+        shown["ctx_tokens"] = doer["tokens"]
+    return shown
+
+
+def route_tree(row, jobs, owner, doer, get, live, now, state=None):
+    """Spec E9 rule 43: the owner and each stage worker running now, apart.
+
+    The workers are Fleet's own (the row's ``worker_contexts``, the live workers its route
+    record selected), each matched back to its job in the same pass, read with the same
+    ``route_doer`` and nothing collected again. ``owner_doer`` carries the owner's values when
+    a worker leads the row; with a worker leading and no single owner, no worker is listed
+    (the row keeps its one doer). A finished stage's worker is not live, so not listed.
+    """
+    lead_works = bool(doer) and (doer.get("worker") is True or doer.get("role") in ("frame", "worker"))
+    tree = {"workers_live": []}
+    if lead_works and owner is not None:
+        values = route_doer({"state": state}, [owner], get, live)
+        if values:
+            tree["owner_doer"] = _doer_values(values)
+    if lead_works and owner is None:
+        return tree
+    used = list(live._owner_jobs(jobs))
+    for item in (row.get("worker_contexts") or ())[:8]:
+        if not isinstance(item, dict) or not item.get("stage"):
+            continue
+
+        def fits(job, exact):
+            if (any(job is seen for seen in used) or get(job, "route_node") != item["stage"]
+                    or get(job, "liveness") not in ("working", "idle", "blocked")
+                    or item.get("harness") and get(job, "harness") != item["harness"]):
+                return False
+            if not exact:
+                return True
+            pair = live._model_pair(get(job, "resolved_model", "model"))
+            percent = job_context(job, get)[0]
+            return ((pair[0][:64] if pair else None) == item.get("model")
+                    and (None if percent is None else round(percent, 1)) == item.get("ctx_pct"))
+        job = next((job for job in jobs if fits(job, True)), None) or next((job for job in jobs if fits(job, False)), None)
+        if job is None:
+            continue
+        used.append(job)
+        values = route_doer({"worker_stage": item["stage"], "state": state}, [job], get, live) or {}
+        worker = {"stage": str(item["stage"])[:64], "marker": get(job, "liveness"),
+                  "role": "frame" if values.get("role") == "frame" else "worker", **_doer_values(values)}
+        elapsed = _number(get(job, "elapsed_min"))
+        if elapsed is not None:
+            worker["since"] = now - elapsed * 60
+        tree["workers_live"].append(worker)
+    return tree
+
+
 def _worker_role(route):
     """``frame`` or ``worker``: the role word of Fleet's route body line for its live stage worker
     (``_worker_segments``: a frame/frame-alternative leg reads ``frame``)."""
@@ -752,6 +813,8 @@ def route_details(snapshot, panels, routes=None, now=None):
                 else:
                     row["elapsed_min"] = round(max(elapsed), 1)
             doer = route_doer(route if isinstance(route, dict) else row, jobs, get, live)
+            row.update(route_tree(row, jobs, owner, doer, get, live, now,
+                                  (route if isinstance(route, dict) else row).get("state")))
             if not doer:
                 continue
             for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
