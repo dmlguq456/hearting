@@ -46,8 +46,8 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import (ANSI_RE, Reply, Scenario,  # noqa: E402
                                         enable_session_shell, wait_for)
-from harness_behavior_cases_b import (fixture_python, long_shell, send_peer,  # noqa: E402
-                                      session_id)
+from harness_behavior_cases_b import (OPTION_A, fixture_python, long_shell,  # noqa: E402
+                                      native_question, send_peer, session_id)
 from harness_behavior_cases_d import NOTICE_CODE  # noqa: E402
 
 KEY_TEXT = "SCENARIO-UPGRADE-KEY"
@@ -58,7 +58,8 @@ FAIL_ENV = "HEARTING_UPGRADE_FIXTURE_FAIL"
 FAIL_LINE = ("if(process.env.%s==='1'&&Number(process.env.HEARTING_SHELL_GENERATION||0)>0)"
              "throw new Error('fixture: successor refuses');\n" % FAIL_ENV)
 NOT_PRODUCED = "not-produced"
-QUESTION = "[답변 필요] SCENARIO-UPGRADE-Q 하나만 정해 주세요."
+# Claude Code refuses a foreground `sleep N` command, so the long step is a python sleep.
+LONG_COMMAND = ("python3 -c \"import time; time.sleep(90); print('SCENARIO-UPGRADE-LONG-DONE')\"")
 
 # Lines that change with time, not with the session: spinners, clocks, elapsed counters.
 VOLATILE = (
@@ -66,24 +67,80 @@ VOLATILE = (
     re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
     re.compile(r"\(\s*\d+(?:\.\d+)?\s*[smh]\b"),
     re.compile(r"\b\d+(?:\.\d+)?s\s*[·•|]"),
+    re.compile(r"\b\d+m \d+s\b|\(\d+s\)|·\s*\d+s\s*$"),
+    re.compile(r"ctrl\+b to run in background"),
 )
+# The one-line note the host paints while a new release waits for a safe moment, and the
+# one it paints after a switch without scrollback.  A held state is expected to show it, so
+# the "nothing else changed" comparison drops it (and counts that it was there).
+WAIT_NOTE = (re.compile(r"New release waiting|새 판 대기|새 판 기다"),)
 VOLATILE_RULE = ("drop rows with a spinner glyph plus an elapsed/interrupt hint, a clock "
-                 "(h:mm[:ss]), '(12s' elapsed, or '12s ·'; trailing blanks and ANSI are removed")
+                 "(h:mm[:ss]), '(12s' or '(1m 5s)' elapsed, '12s ·', or a background-run hint; trailing "
+                 "blanks and ANSI are removed")
 
 
 # --------------------------------------------------------------------------
 # Pure helpers (offline-testable)
 # --------------------------------------------------------------------------
 
-def screen_digest(text: str, volatile=VOLATILE) -> dict:
-    """A digest of the screen text without the rows that change with time alone."""
-    rows = [ANSI_RE.sub("", line).rstrip() for line in (text or "").splitlines()]
+def native_part(row: str) -> str:
+    """The row without the host's right-hand panel (its box starts at the last left border)."""
+    end = row.rstrip()
+    if not end or end[-1] not in "│┐┘":
+        return end
+    body = end[:-1]
+    cut = max(body.rfind(char) for char in "│┌└")
+    return end if cut < 0 else end[:cut].rstrip()
+
+
+def screen_rows(text: str, blank=(), native=False) -> list[str]:
+    """Screen rows without ANSI; ``blank`` patterns are cut out of a row and the gap closed.
+
+    ``native`` keeps only what the native program paints, left of the host's own panel.
+    """
+    rows = []
+    for line in (text or "").splitlines():
+        row = ANSI_RE.sub("", line)
+        if native:
+            row = native_part(row)
+        if blank:
+            for rule in blank:
+                row = rule.sub("", row)
+            row = re.sub(r" {2,}", " ", row)
+        rows.append(row.rstrip())
+    return rows
+
+
+def kept_rows(rows: list[str], volatile=VOLATILE) -> list[str]:
+    return [row for row in rows if not any(rule.search(row) for rule in volatile)]
+
+
+def screen_digest(text: str, volatile=VOLATILE, blank=(), native=False) -> dict:
+    """A digest of the screen text without the rows that change with time alone.
+
+    ``blank`` patterns (the "new release waiting" note) are cut out of their row instead of
+    dropping it, so a row that also carries panel text still compares.
+    """
+    rows = screen_rows(text, blank, native)
     while rows and not rows[-1]:
         rows.pop()
-    kept = [row for row in rows if not any(rule.search(row) for rule in volatile)]
+    kept = kept_rows(rows, volatile)
     body = "\n".join(kept)
     return {"sha": hashlib.sha256(body.encode("utf-8")).hexdigest()[:16], "rows": len(kept),
             "dropped": len(rows) - len(kept)}
+
+
+def row_diff(before: list[str], after: list[str], limit: int = 8) -> list[str]:
+    """The first rows that differ between two screens, for a failure row."""
+    found = []
+    for index in range(max(len(before), len(after))):
+        one = before[index] if index < len(before) else ""
+        two = after[index] if index < len(after) else ""
+        if one != two:
+            found.append(f"{index}: {one.strip()[:90]!r} -> {two.strip()[:90]!r}")
+            if len(found) >= limit:
+                break
+    return found
 
 
 def runtime_home(harness: str, env: dict) -> Path:
@@ -123,11 +180,12 @@ def inject_failure(host_text: str) -> str:
     return FAIL_LINE + host_text
 
 
-def release_copy(source: Path, dest: Path, *, fail: bool = False) -> Path:
+def release_copy(source: Path, dest: Path, *, label: str = "B", fail: bool = False) -> Path:
     """A copy of the tree being measured with a harmless marker file (a different release).
 
-    The working tree is copied (tracked and untracked, not ignored) so release B has the
-    same content as the release A that was installed from ``source``.
+    The working tree is copied (tracked and untracked, not ignored, no ``.git``) so release B
+    has the same content as release A; only the marker file tells them apart, which is what
+    gives each its own bundle hash.
     """
     names = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached", "--others",
                             "--exclude-standard"], capture_output=True, check=True).stdout
@@ -146,7 +204,7 @@ def release_copy(source: Path, dest: Path, *, fail: bool = False) -> Path:
         else:
             shutil.copy2(origin, target)
     shell = dest / "utilities" / "session-shell"
-    (shell / MARKER_FILE).write_text("fixture release B marker\n", encoding="utf-8")
+    (shell / MARKER_FILE).write_text(f"fixture release {label} marker\n", encoding="utf-8")
     if fail:
         host = shell / "host.cjs"
         host.write_text(inject_failure(host.read_text(encoding="utf-8")), encoding="utf-8")
@@ -176,9 +234,10 @@ def tmux_numbers(text: str) -> tuple[int | None, int | None]:
 
 
 COLUMNS = ("native_before", "native_after", "host_before", "host_after", "deferred",
-           "switched", "switched_after_release", "screen_same", "cursor_same", "key_reached",
+           "waiting_note", "switched", "switched_after_release", "switched_after_next_prompt",
+           "screen_same", "cursor_same", "key_reached",
            "l1_before", "l1_after", "l3_before", "l3_after", "scrollback_line", "fail_injection",
-           "routes", "notice")
+           "routes", "notice", "delivery_arrivals")
 
 
 def render_table(rows: list[dict]) -> str:
@@ -210,10 +269,13 @@ def _tmux(tui, *args):
     return tui._tmux(*args)
 
 
-def snapshot(run) -> dict:
-    """PIDs, screen digest, cursor and outer history of the tmux pane right now."""
+def snapshot(run, quiet: float = 3, timeout: float = 20) -> dict:
+    """PIDs, screen digest, cursor and outer history of the tmux pane right now.
+
+    A held state (a running step) keeps repainting a timer, so it waits only briefly to settle.
+    """
     tui = run.tui
-    tui.settle(3, 20)
+    tui.settle(quiet, timeout)
     screen = _tmux(tui, "capture-pane", "-p", "-t", "scenario").stdout or ""
     cursor = tmux_numbers(_tmux(tui, "display", "-p", "-t", "scenario",
                                 "#{cursor_x},#{cursor_y}").stdout)
@@ -230,22 +292,84 @@ def pane_key(run, *keys):
     run.tui.key(*keys)
 
 
-def install_release_b(run, *, fail=False) -> dict:
-    """Install the marked copy of the measured tree into the same fixture HOME."""
+def activation_argv(source_root: Path, harness: str, release: Path) -> list[str]:
+    """The packaged activation of ``release`` (the real code that flips the ``hearting`` link)."""
+    return ["sh", str(source_root / "tools/install/harness.sh"), "runtime", "activate",
+            "--runtime", harness, "--mode", "packaged", "--source", str(release), "--json"]
+
+
+def activate_release(run, release: Path, name: str) -> dict:
+    """Packaged-activate ``release`` into the fixture's runtime home.
+
+    A fixture ``harness.sh install`` is a source (linked) install: it links each item into
+    the checkout and makes no ``<runtime_home>/hearting`` link, so only a packaged activation
+    gives the link the session shell host watches.  Activation also writes the hooks and
+    settings the oracles need.  The scheduler step stays off so no user-level unit is touched.
+    """
     base = _base(run)
-    runtime = Path(run.home.root) / "release-b"
-    copy = release_copy(Path(base.SOURCE), runtime, fail=fail)
-    env = dict(run.home.env, AGENT_HOME=str(copy), GIT_CONFIG_VALUE_0=str(copy))
-    for step in (["init", "-q"], ["add", "-A"],
-                 ["-c", "user.name=fx", "-c", "user.email=fx@example.invalid", "commit", "-qm", "b"]):
-        subprocess.run(["git", "-C", str(copy), *step], env=env, capture_output=True)
-    log = Path(run.home.root) / "install-b.log"
+    env = dict(run.home.env, HARNESS_SCHEDULER_NO_ACTIVATE="1")
+    log = Path(run.home.root) / f"activate-{name}.log"
     started = time.time()
-    with log.open("w", encoding="utf-8") as handle:
-        done = subprocess.run(["bash", str(copy / "tools/install/harness.sh"), "install",
-                               run.harness], cwd=str(copy), env=env, stdout=handle,
-                              stderr=subprocess.STDOUT, timeout=900)
-    return {"exit": done.returncode, "seconds": round(time.time() - started, 1), "log": str(log)}
+    done = subprocess.run(activation_argv(Path(base.SOURCE), run.harness, release),
+                          cwd=str(release), env=env, capture_output=True, text=True, timeout=900)
+    log.write_text(done.stdout + "\n" + done.stderr, encoding="utf-8")
+    link = runtime_home(run.harness, run.home.env) / "hearting"
+    target = os.path.realpath(link) if link.exists() else None
+    result = {"exit": done.returncode, "seconds": round(time.time() - started, 1),
+              "log": str(log), "link_target": target}
+    if done.returncode != 0:   # the fixture is removed afterwards; keep what failed
+        result["log_tail"] = (done.stdout + done.stderr)[-900:]
+    return result
+
+
+def to_packaged(run) -> dict:
+    """Replace the base harness's linked install with a packaged activation of release A."""
+    base = _base(run)
+    home = runtime_home(run.harness, run.home.env)
+    # The fixture's own runtime home; the linked install is not a base for a packaged one.
+    shutil.rmtree(home, ignore_errors=True)
+    release_a = release_copy(Path(base.SOURCE), Path(run.home.root) / "release-a", label="A")
+    result = activate_release(run, release_a, "a")
+    if result["exit"] == 0:
+        run.home.configure_model()
+        if run.harness == "codex":
+            run.evidence["hook_trust"] = run.home.trust_codex_hooks(run.binary)
+    return result
+
+
+def install_release_b(run, *, fail=False) -> dict:
+    """"Install" the marked copy: packaged-activate release B into the same fixture HOME."""
+    base = _base(run)
+    copy = release_copy(Path(base.SOURCE), Path(run.home.root) / "release-b", label="B", fail=fail)
+    return activate_release(run, copy, "b")
+
+
+def host_status(run) -> dict:
+    """The host's own readiness answer (state, empty, focus, held bytes) for a diagnosis row.
+
+    Asking is the same control request the product's own tools make; it is only used after a
+    switch failed to show, so it never changes a measurement.
+    """
+    base = _base(run)
+    found = bindings(run.home.env, run.harness)
+    if not found:
+        return {"ok": False, "reason": "no live binding"}
+    sys.path.insert(0, str(Path(base.SOURCE) / "utilities"))
+    import session_shell  # noqa: E402
+    old = {key: os.environ.get(key) for key in run.home.env if key in ("XDG_STATE_HOME", "HOME")}
+    os.environ.update({key: run.home.env[key] for key in ("XDG_STATE_HOME", "HOME")})
+    try:
+        answer = session_shell.control(found[0], "status")
+    except Exception as exc:  # a diagnosis must not fail the run
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    keep = ("ok", "reason", "state", "empty", "alive", "focused", "held_bytes", "projection_state")
+    return {key: answer.get(key) for key in keep if key in answer}
 
 
 def wait_host_change(run, old_host: int, timeout: float = SWITCH_WAIT):
@@ -302,17 +426,20 @@ class SessionUpgradeScenario(Scenario):
             if KEY_TEXT in text:
                 return Reply("key noted")
             if "SCENARIO-UPGRADE-LONG" in text:
-                return Reply(shell=long_shell("sleep 240; echo SCENARIO-UPGRADE-LONG-DONE", 240000))
+                return Reply(shell=long_shell(LONG_COMMAND, 110000))
             if "SCENARIO-UPGRADE-SCROLL" in text:
                 return Reply("\n".join(f"scroll row {i:03d} SCENARIO-UPGRADE" for i in range(rows * 3)))
             if "SCENARIO-UPGRADE-ASK" in text:
-                return Reply("확인했습니다.\n\n" + QUESTION)
+                return Reply(text="I need one choice.", shell=native_question())
             return Reply(f"upgrade idle {record['main_index']}")
         return answer
 
     # -- terminal ----------------------------------------------------------
     def prepare(self, run):
         enable_session_shell(run.home)
+        run.evidence["activate_a"] = to_packaged(run)
+        if run.evidence["activate_a"]["exit"] != 0:
+            raise RuntimeError("release A activation failed: " + run.evidence["activate_a"]["log"])
         if self.fail:
             run.home.env[FAIL_ENV] = "1"
 
@@ -339,6 +466,16 @@ class SessionUpgradeScenario(Scenario):
             run.note("no first model request")
             return False
         run.wait_idle(6, 90)
+        if self.scrollback:
+            # The history view is native input: the host cannot prove an empty composer after
+            # keys that were not submitted, so measure the view once, then submit a second
+            # (identical) screenful so the input frontier is exact again before the install.
+            run.evidence.setdefault("upgrade", {})["l1_before"] = history_ops(run)
+            run.prompt(text)
+            if not run.wait_requests(2, 90):
+                run.note("no second scrollback request")
+                return False
+            run.wait_idle(6, 90)
         return True
 
     # -- the measurement ---------------------------------------------------
@@ -356,31 +493,51 @@ class SessionUpgradeScenario(Scenario):
             ev.update(deferred=f"{NOT_PRODUCED}: {reason}")
             run.note(f"{NOT_PRODUCED}: {reason}")
             return NOT_PRODUCED
-        before = snapshot(run)
+        quick = (1, 3) if self.hold else (3, 20)
+        before = snapshot(run, *quick)
+        before_text = run.tui.screen()
+        before_quiet = screen_digest(before_text, blank=WAIT_NOTE, native=True)
         ev.update(native_before=before["native_pid"], host_before=before["host_pid"])
         if not before["host_pid"] or not before["native_pid"]:
             run.note("no live session-shell binding before the install")
             return "inconclusive"
         if self.scrollback:
-            ev["l1_before"] = history_ops(run)
             ev["l3_before"] = {"digest": before["history"], "history_size": before["history_size"]}
         ev["install_b"] = install_release_b(run, fail=self.fail)
         if ev["install_b"]["exit"] != 0:
-            run.note("release B install failed")
+            run.note("release B activation failed")
             return "inconclusive"
         verdict = "pass"
         if self.hold:
             time.sleep(DEFER_WAIT)
-            held = snapshot(run)
+            held = snapshot(run, *quick)
+            shown = run.tui.screen()
+            quiet = screen_digest(shown, blank=WAIT_NOTE, native=True)
+            ev["waiting_note"] = "yes" if any(rule.search(row) for rule in WAIT_NOTE
+                                              for row in screen_rows(shown)) else "no"
             same = (held["host_pid"] == before["host_pid"]
                     and held["native_pid"] == before["native_pid"]
-                    and held["digest"] == before["digest"])
+                    and quiet["sha"] == before_quiet["sha"])
             ev["deferred"] = "yes" if same else "NO"
             if not same:
+                ev["held_before"] = before
+                ev["held_after"] = held
+                ev["held_row_diff"] = row_diff(kept_rows(screen_rows(before_text, WAIT_NOTE, True)),
+                                               kept_rows(screen_rows(shown, WAIT_NOTE, True)))
                 verdict = "fail"
                 run.note("the switch was not deferred while the state was held")
             self.release_state(run)
         moved = wait_host_change(run, before["host_pid"])
+        if not moved:
+            ev["host_status_after_wait"] = host_status(run)
+            ev["screen_tail_after_wait"] = "\n".join(run.tui.screen().rstrip().splitlines()[-6:])
+            if self.hold:
+                # Information only: does one more submitted prompt let the held switch happen?
+                count = len(run.main_requests())
+                run.prompt("SCENARIO-UPGRADE follow-up")
+                run.wait_requests(count + 1, 60)
+                run.wait_idle(6, 90)
+                ev["switched_after_next_prompt"] = bool(wait_host_change(run, before["host_pid"], 20))
         after = snapshot(run)
         ev.update(native_after=after["native_pid"], host_after=after["host_pid"])
         if self.fail:
@@ -389,6 +546,10 @@ class SessionUpgradeScenario(Scenario):
             ev["fail_injection"] = "old host kept" if kept else "FAILED: host changed"
             ev["screen_same"] = after["digest"] == before["digest"]
             ev["cursor_same"] = after["cursor"] == before["cursor"]
+            if not ev["screen_same"] or not ev["cursor_same"]:
+                ev["cursor"] = {"before": before["cursor"], "after": after["cursor"]}
+                ev["screen_row_diff"] = row_diff(kept_rows(screen_rows(before_text)),
+                                                 kept_rows(screen_rows(run.tui.screen())))
             ev["key_reached"] = key_reaches_native(run)
             return "pass" if kept and ev["screen_same"] and ev["key_reached"] and verdict == "pass" \
                 else "fail"
@@ -454,17 +615,20 @@ class TurnScenario(SessionUpgradeScenario):
         if not run.wait_requests(before + 1, 60):
             raise NotProduced("the long turn never started")
         time.sleep(3)
+        self.step_count = len(run.main_requests())
         return "long shell step running"
 
     def release_state(self, run):
-        for _ in range(3):
-            run.tui.key("Escape")
-            time.sleep(1)
+        # The step ends by itself (a turn the person stops with Escape fires no Stop hook on
+        # every harness, which is a different state): wait for the model's next request
+        # (the tool result) and for the turn to be idle again.
+        run.wait_requests(self.step_count + 1, 150)
+        run.wait_idle(6, 90)
 
 
 class QuestionScenario(SessionUpgradeScenario):
     name = "session-upgrade-question"
-    summary = "An answer question is open: the switch waits until it is answered."
+    summary = "A native question is open: the switch waits until it is answered."
     hold = True
 
     def hold_state(self, run):
@@ -472,33 +636,77 @@ class QuestionScenario(SessionUpgradeScenario):
         run.tui.type_text("SCENARIO-UPGRADE-ASK please ask")
         if not run.wait_requests(before + 1, 60):
             raise NotProduced("no model request for the question")
-        run.wait_idle(4, 60)
-        if not wait_for(lambda: "SCENARIO-UPGRADE-Q" in run.tui.screen(), 20):
-            raise NotProduced("the question never reached the screen")
-        return "question on screen"
+        if not wait_for(lambda: OPTION_A in run.tui.screen(), 30):
+            raise NotProduced("the question form never reached the screen")
+        time.sleep(3)
+        self.step_count = len(run.main_requests())
+        rows = [row.strip()[-60:] for row in screen_rows(run.tui.screen()) if "question" in row.lower()]
+        run.evidence.setdefault("upgrade", {})["question_rows"] = rows[:4]
+        return "question form on screen"
 
     def release_state(self, run):
-        run.tui.type_text("answer alpha")
-        run.wait_idle(4, 60)
+        # Pick the first option; each TUI may need one confirmation more.
+        for keys in (["Enter"], ["Enter"], ["Tab", "Enter"]):
+            run.tui.key(*keys)
+            if wait_for(lambda: len(run.main_requests()) > self.step_count, 8):
+                break
+        run.wait_idle(5, 60)
 
 
 class PageScenario(SessionUpgradeScenario):
     name = "session-upgrade-page"
     summary = "A panel read page is open: the switch waits until it is closed."
     hold = True
+    LONG = "SCENARIO-UPGRADE-PAGE " + " ".join(f"line{i:02d}" for i in range(80))
+
+    @staticmethod
+    def panel_text(screen: str) -> list[tuple[int, int, str]]:
+        """(row, left border column, text) of the host panel's own rows."""
+        rows = []
+        for index, line in enumerate(screen.splitlines()):
+            plain = ANSI_RE.sub("", line).rstrip()
+            cut = max(plain[:-1].rfind(char) for char in "│┌└") if plain[-1:] in ("│", "┐", "┘") else -1
+            rows.append((index, cut, plain[cut:] if cut >= 0 else ""))
+        return rows
+
+    def openers(self, run):
+        """Panel rows that open a read page: a route row, or a message that reads on (``›``)."""
+        found = []
+        for index, cut, text in self.panel_text(run.tui.screen()):
+            inner = text.strip(" │")
+            if cut >= 0 and (re.search(r"\brt-[0-9a-f]{6}", inner) or "⇄" in inner
+                                or inner.rstrip().endswith("›")):
+                found.append((index, cut, inner))
+        return found
 
     def hold_state(self, run):
-        rows = [(i, line) for i, line in enumerate(run.tui.screen().splitlines())
-                if re.search(r"\broute\b", line, re.I)]
+        ev = run.evidence.setdefault("upgrade", {})
+        sent = send_peer(run, self.LONG, obligation=False)
+        ev["page_message_ref"] = bool(sent.get("ref"))
+        # An idle Claude takes a pending peer message with its next prompt; once it has, the
+        # panel lists it among the received messages.
+        count = len(run.main_requests())
+        run.prompt("SCENARIO-UPGRADE-PAGE-NEXT go on")
+        run.wait_requests(count + 1, 60)
+        run.wait_idle(5, 60)
+        wait_for(lambda: self.openers(run), 30)
+        ev["panel_rows"] = [f"{i}:{text.strip(' │')[:60]}" for i, c, text in
+                            self.panel_text(run.tui.screen()) if c >= 0 and text.strip(" │┌└┐┘─")][:20]
+        rows = self.openers(run)
         if not rows:
-            raise NotProduced("the panel shows no route row to open (needs an open route)")
-        index, line = rows[-1]
-        column = line.lower().index("route") + 1
-        # An SGR mouse click on the row; the host reads it from stdin like a terminal would.
+            raise NotProduced("the panel shows no route row or long message to open as a read page")
+        index, cut, inner = rows[0]
+        column = cut + 4
+        # An SGR mouse click (press, release) on the row, as a terminal sends it.
         _tmux(run.tui, "send-keys", "-t", "scenario", "-l",
               f"\x1b[<0;{column};{index + 1}M\x1b[<0;{column};{index + 1}m")
-        time.sleep(1.5)
-        return f"clicked panel row {index}"
+        time.sleep(2)
+        shown = run.tui.screen()
+        ev["page_rows"] = [f"{i}:{text.strip(' │')[:60]}" for i, c, text in
+                           self.panel_text(shown) if c >= 0 and text.strip(" │┌└┐┘─")][:12]
+        if not any(re.search(r"Back|‹|messages\s*·|route\s*·", text) for _i, _c, text in self.panel_text(shown)):
+            raise NotProduced(f"the click at row {index} col {column} did not open a read page")
+        return f"clicked panel row {index}: {inner[:40]}"
 
     def release_state(self, run):
         run.tui.key("Escape")
@@ -520,6 +728,21 @@ class DeliveryScenario(SessionUpgradeScenario):
 
     def release_state(self, run):
         TurnScenario.release_state(self, run)
+        # The pending delivery follows the turn; it must reach the model, once.
+        wait_for(lambda: any(self.TOKEN in r["text"] for r in run.main_requests()), 60)
+        run.wait_idle(6, 60)
+
+    def drive(self, run):
+        verdict = super().drive(run)
+        ev = run.evidence.setdefault("upgrade", {})
+        # Every later request carries the delivered text in its history, so the most any one
+        # request holds is how many times it was delivered.
+        arrivals = max([r["text"].count(self.TOKEN) for r in run.main_requests()] or [0])
+        ev["delivery_arrivals"] = arrivals
+        if verdict == "pass" and arrivals != 1:
+            run.note(f"the peer delivery reached the model {arrivals} times, not once")
+            return "fail"
+        return verdict
 
 
 class FailScenario(SessionUpgradeScenario):
@@ -541,7 +764,8 @@ try:
     data = json.loads(path.read_text())
 except (OSError, ValueError):
     pass
-print(json.dumps({"route_id": data.get("route_id"), "mtime": path.stat().st_mtime if path.exists() else None}))
+receipt = data.get("receipt") if isinstance(data.get("receipt"), dict) else data
+print(json.dumps({"route_id": receipt.get("route_id"), "saved_at": data.get("saved_at"), "mtime": path.stat().st_mtime if path.exists() else None}))
 """
 
 
@@ -555,6 +779,9 @@ class RouteResumeScenario(Scenario):
         from harness_behavior_cases_c import hide_herdr
         hide_herdr(run)
         enable_session_shell(run.home)
+        run.evidence["activate_a"] = to_packaged(run)
+        if run.evidence["activate_a"]["exit"] != 0:
+            raise RuntimeError("release A activation failed: " + run.evidence["activate_a"]["log"])
         env, root = run.home.env, run.home.root
         tmp = root / "tmp"
         tmp.mkdir(exist_ok=True)
@@ -586,12 +813,23 @@ class RouteResumeScenario(Scenario):
             return (f"git -C {repo} -c user.name=fx -c user.email=fx@example.invalid commit "
                     f"-qam 'fx change {k}' && echo FX-COMMIT-{k}-OK")
 
+        def compose(k):
+            cr = shlex.quote(str(Path(_base(run).SOURCE) / "utilities/capability-route.py")) \
+                if run is not None else "capability-route.py"
+            repo = shlex.quote(str(self.repos[k - 1]))
+            return (f"python3 {cr} compose --shape direct --campaign-key other{k} --slug commit "
+                    f"--cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
+
         def answer(record, earlier):
             text, kind = record["last_text"], record["last_kind"]
             if kind != "tool":
                 found = re.search(r"SCENARIO-RR (\d)", text)
                 if found:
                     self.state["current"] = int(found.group(1))
+                    if self.state["current"] > 1:
+                        # The first refusal names the compose command; once the session has a
+                        # route the gate lets later projects through, so route each one by hand.
+                        return Reply(shell=compose(self.state["current"]))
                     return Reply(shell=commit(self.state["current"]))
                 return Reply(f"route resume idle {record['main_index']}")
             k = self.state["current"]

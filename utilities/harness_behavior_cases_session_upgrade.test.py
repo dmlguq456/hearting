@@ -88,6 +88,27 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(other["dropped"], 2)
         self.assertIn("spinner", su.VOLATILE_RULE)
 
+    def test_waiting_note_and_panel_are_left_out_of_a_held_comparison(self):
+        before = "native row   │ ┌ idle ┐\n❯           │ │ ◑ to answer 1 │\n"
+        held = "native row   │ ┌ idle ┐\n❯  New release waiting │ │ ◑ to answer 1  ⚠ │\n"
+        one = su.screen_digest(before, blank=su.WAIT_NOTE, native=True)
+        two = su.screen_digest(held, blank=su.WAIT_NOTE, native=True)
+        self.assertEqual(one["sha"], two["sha"])
+        self.assertNotEqual(su.screen_digest(before)["sha"], su.screen_digest(held)["sha"])
+        # A real change on the native side still differs.
+        changed = held.replace("❯", "X")
+        self.assertNotEqual(one["sha"], su.screen_digest(changed, blank=su.WAIT_NOTE, native=True)["sha"])
+
+    def test_tool_timers_are_time_only_rows(self):
+        base = "Scenario step\nprompt"
+        timed = "Scenario step\n⎿ $ python3 x (1m 26s)\n(ctrl+b to run in background)\nprompt"
+        self.assertEqual(su.screen_digest(base)["sha"], su.screen_digest(timed)["sha"])
+
+    def test_native_part_cuts_at_the_panel_left_border(self):
+        self.assertEqual(su.native_part("abc    │ x │"), "abc")
+        self.assertEqual(su.native_part("abc    ┌── ┐"), "abc")
+        self.assertEqual(su.native_part("plain"), "plain")
+
     def test_ansi_is_ignored(self):
         self.assertEqual(su.screen_digest("\x1b[31mred\x1b[0m")["sha"], su.screen_digest("red")["sha"])
 
@@ -133,6 +154,24 @@ class ReleaseCopyTest(unittest.TestCase):
             self.assertIn("HEARTING_SHELL_GENERATION", text)
             self.assertEqual(su.inject_failure(text), text)   # idempotent
             self.assertTrue(su.inject_failure("x();").startswith("if("))
+
+
+class ActivationTest(unittest.TestCase):
+    def test_activation_is_the_packaged_runtime_activate_of_the_release_copy(self):
+        argv = su.activation_argv(Path("/src"), "codex", Path("/fx/release-b"))
+        self.assertEqual(argv[:2], ["sh", "/src/tools/install/harness.sh"])
+        self.assertEqual(argv[2:], ["runtime", "activate", "--runtime", "codex", "--mode", "packaged",
+                                    "--source", "/fx/release-b", "--json"])
+
+    def test_release_copies_differ_only_by_their_marker_and_carry_no_git_dir(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = ReleaseCopyTest().make_source(Path(raw))
+            one = su.release_copy(source, Path(raw) / "a", label="A")
+            two = su.release_copy(source, Path(raw) / "b", label="B")
+            marker = Path("utilities/session-shell") / su.MARKER_FILE
+            self.assertNotEqual((one / marker).read_text(), (two / marker).read_text())
+            self.assertFalse((one / ".git").exists())
+            self.assertEqual((one / "kept.txt").read_text(), (two / "kept.txt").read_text())
 
 
 class BindingTest(unittest.TestCase):
@@ -189,9 +228,11 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("upgrade idle", answer(self.record("SCENARIO-UPGRADE idle"), []).text)
         scroll = answer(self.record("SCENARIO-UPGRADE-SCROLL fill"), [])
         self.assertGreaterEqual(len(scroll.text.splitlines()), 150)
-        self.assertIn(su.QUESTION, answer(self.record("SCENARIO-UPGRADE-ASK x"), []).text)
+        self.assertIn("native-question", str(answer(self.record("SCENARIO-UPGRADE-ASK x"), []).shell))
         long_turn = answer(self.record("SCENARIO-UPGRADE-LONG run"), [])
-        self.assertIn("sleep 240", str(long_turn.shell))
+        # Claude Code refuses a foreground `sleep N`; the long step must not start with one.
+        self.assertIn("long-shell: python3 -c", str(long_turn.shell))
+        self.assertNotIn("long-shell: sleep", str(long_turn.shell))
         self.assertEqual(answer(self.record(su.KEY_TEXT), []).text, "key noted")
 
     def test_route_resume_script_composes_then_commits_and_finishes_only_the_closed_one(self):
@@ -213,7 +254,9 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(scenario.state["routes"][1], "rt-abc12345")
         finish = answer(self.record("FX-COMMIT-1-OK", "tool"), [])
         self.assertIn("FX-FINISH-1-RC", finish.shell)
-        answer(self.record("SCENARIO-RR 2 commit"), [])
+        second = answer(self.record("SCENARIO-RR 2 commit"), [])
+        self.assertIn("compose --shape direct --campaign-key other2", second.shell)
+        self.assertIn("FX-COMPOSE-2-RC", second.shell)
         answer(self.record('FX-COMPOSE-2-RC=0 "route_id": "rt-def67890"', "tool"), [])
         open_route = answer(self.record("FX-COMMIT-2-OK", "tool"), [])
         self.assertEqual(open_route.text, "route 2 done")
