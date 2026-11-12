@@ -776,6 +776,11 @@ def indexed_paths(index_path=None) -> tuple[list[Path], list[dict]]:
     return paths, diagnostics
 
 
+_REGISTRY_GENERATIONS = {}
+_REGISTRY_GENERATION_LIMIT = 1024
+_REGISTRY_GENERATION_MAX_BYTES = 4 * 1024 * 1024
+
+
 def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
     """Read once with path identity; only ordinary ENOENT is a negative fact.
 
@@ -804,6 +809,17 @@ def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
             if not current.is_dir():
                 raise ValueError(f"registry-ancestor-not-directory:{current}")
             parents.append(entry)
+    # A link-free path whose regular leaf keeps its full generation since a
+    # verified read names the same bytes; reuse them instead of re-reading NFS.
+    generation = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if (stat.S_ISREG(info.st_mode) and ".." not in path.parts
+            and not any("link" in item for item in (*parents, entry))):
+        cached = _REGISTRY_GENERATIONS.get(str(path))
+        if cached is not None and cached[0] == generation:
+            digest, data = cached[1], cached[2]
+            return {"kind": "file", "path": str(path), "resolved_path": str(path),
+                    "device": info.st_dev, "inode": info.st_ino, "ancestors": parents,
+                    "leaf": entry, "sha256": digest, "size": len(data)}, data
     resolved = path.resolve(strict=True)
     # NONBLOCK also prevents a raced FIFO replacement from hanging the scan.
     fd = os.open(resolved, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
@@ -827,9 +843,16 @@ def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
             raise ValueError(f"registry-link-changed-during-read:{path}")
     if path.resolve(strict=True) != resolved:
         raise ValueError(f"registry-path-changed-during-read:{path}")
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+    if (str(resolved) == str(path) and len(data) <= _REGISTRY_GENERATION_MAX_BYTES
+            and not any("link" in item for item in (*parents, entry))):
+        if len(_REGISTRY_GENERATIONS) >= _REGISTRY_GENERATION_LIMIT and str(path) not in _REGISTRY_GENERATIONS:
+            _REGISTRY_GENERATIONS.pop(next(iter(_REGISTRY_GENERATIONS)))
+        _REGISTRY_GENERATIONS[str(path)] = (
+            (last.st_dev, last.st_ino, last.st_size, last.st_mtime_ns, last.st_ctime_ns), digest, data)
     return {"kind": "file", "path": str(path), "resolved_path": str(resolved),
             "device": last.st_dev, "inode": last.st_ino, "ancestors": parents,
-            "leaf": entry, "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            "leaf": entry, "sha256": digest,
             "size": len(data)}, data
 
 

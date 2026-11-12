@@ -40,9 +40,11 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 
 from __future__ import annotations
 from collections import OrderedDict
+import contextvars
 import threading
 
 import contextlib
+import copy
 from dataclasses import dataclass, replace
 import hashlib
 import importlib.util
@@ -166,21 +168,70 @@ def _snapshot_signature():
     return tuple(observed)
 
 
+# Long-lived readers that pass over the same ledgers continuously (the
+# obligation runner) may trust an unchanged stat generation instead of
+# re-reading bytes. Every other reader keeps the documented fresh read, which
+# also surfaces a transient read failure on an unchanged ledger.
+_TRUST_LEDGER_GENERATIONS = contextvars.ContextVar(
+    "dispatch_seat_handover_trust_ledger_generations", default=False)
+
+
+def trust_unchanged_ledgers() -> None:
+    """Let this thread reuse ledger reads whose stat generation is unchanged."""
+    _TRUST_LEDGER_GENERATIONS.set(True)
+
+
+# Readable ledger bytes per lineage directory, keyed by each file's full stat
+# generation (inode, ctime, mtime, size, mode). Ledgers are append-only or
+# replaced whole, so an unchanged generation means unchanged bytes.
+_READABLE_LEDGERS: dict[str, dict[str, tuple]] = {}
+_READABLE_LEDGERS_LOCK = threading.Lock()
+
+
 def _readable_lineage_signature(directory: Path):
     """Observe current readable bytes once and retain them for the parser.
 
-    Stat alone cannot expose transient read failures. Use the normal no-follow
-    reader even on cache hits, binding its bytes to the observed generation.
+    A ledger is read with the normal no-follow reader whenever its stat
+    generation differs from the bytes last read; an unchanged generation reuses
+    those bytes, bound to the same observed generation.
     """
     location, files, generation = _lineage_signature(directory)
     observed, contents = [], {}
+    trusted = _TRUST_LEDGER_GENERATIONS.get()
+    with _READABLE_LEDGERS_LOCK:
+        held = dict(_READABLE_LEDGERS.get(location, {})) if trusted else {}
+    current = {}
     for filename, *file_generation in files:
-        raw = _observed_ledger_bytes(directory / filename, file_generation)
-        observed.append((filename, *file_generation, hashlib.sha256(raw).hexdigest()))
+        file_generation = tuple(file_generation)
+        prior = held.get(filename)
+        if prior is not None and prior[0] == file_generation:
+            # The same inode, size, mtime and ctime as the bytes read before:
+            # an unchanged ledger is not read and hashed again on every pass.
+            raw, digest = prior[1], prior[2]
+        else:
+            raw = _observed_ledger_bytes(directory / filename, file_generation)
+            digest = hashlib.sha256(raw).hexdigest()
+        current[filename] = (file_generation, raw, digest)
+        observed.append((filename, *file_generation, digest))
         contents[filename] = raw
     if generation is not None and _lineage_generation(directory.stat()) != generation:
         raise OSError("lineage-directory-changed")
+    if not trusted:
+        return (location, tuple(observed), generation), contents
+    with _READABLE_LEDGERS_LOCK:
+        _READABLE_LEDGERS[location] = current
+        while len(_READABLE_LEDGERS) > 4:
+            _READABLE_LEDGERS.pop(next(iter(_READABLE_LEDGERS)))
     return (location, tuple(observed), generation), contents
+
+
+def _replace_pass_graph(read_context, signature, graph):
+    replace = getattr(read_context, "replace_lineage_graph", None)
+    if replace is not None:
+        replace(signature, graph)
+    else:
+        read_context.invalidate_lineage_graph()
+        read_context.lineage_graph(signature, lambda: graph)
 
 
 def _build_lineage_graph(read_context=None) -> LineageGraph:
@@ -213,8 +264,7 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
         if read_context is not None:
             # A normal observation replaces the pass, even if only readable
             # bytes changed. Metadata never substitutes for this observation.
-            read_context.invalidate_lineage_graph()
-            read_context.lineage_graph(metadata, lambda: graph)
+            _replace_pass_graph(read_context, metadata, graph)
         return graph
     except (OSError, ValueError, TypeError):
         _LINEAGE_GRAPH_CACHE.clear()
@@ -271,8 +321,7 @@ def _build_compact_lineage_graph(directory: Path, read_context=None):
     graph = _build_lineage_graph_uncached((location, files, generation), contents,
                                           compact_rows=compact_rows)
     if read_context is not None:
-        read_context.invalidate_lineage_graph()
-        read_context.lineage_graph((location, files, generation), lambda: graph)
+        _replace_pass_graph(read_context, (location, files, generation), graph)
     return graph
 
 
@@ -879,21 +928,82 @@ def _peer_message():
     return module
 
 
+# Steward transition rows of each seat ledger, keyed by the ledger's stat
+# generation. Role resolution reads every seat ledger (~800 files / 14 MB on the
+# live store) several times per steward duty; an unchanged ledger is not read
+# again. Ledgers are append-only or replaced whole, so any change moves the
+# size, mtime/ctime or inode. Rows are shared read-only, as under
+# ``seat_ledger_readonly_scope``.
+_TRANSITION_ROWS: dict[str, tuple[tuple, tuple]] = {}
+_TRANSITION_ROWS_LOCK = threading.Lock()
+
+
+def _ledger_generation(path: str):
+    """``(is_symlink, generation)`` of one ledger path; generation ``None`` when absent."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False, None
+    return stat.S_ISLNK(info.st_mode), (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                                        info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _seat_transition_rows(st, path: str, key: str):
+    """This seat ledger's steward rows, or ``None`` for a symlinked ledger."""
+    def read():
+        with st.seat_ledger_readonly_scope():
+            return tuple(row for row in st._read_ledger_lines(st.Seat("pane", key))
+                         if row.get("event") in {ROW_EVENT, "steward-release"})
+    link, before = _ledger_generation(path)
+    if link:
+        return None
+    if st._LEDGER_READ_SCOPE.get() is not None or not _TRUST_LEDGER_GENERATIONS.get():
+        return read()  # an open read pass keeps its own pinned rows
+    with _TRANSITION_ROWS_LOCK:
+        held = _TRANSITION_ROWS.get(path)
+    if held is not None and before is not None and held[0] == before:
+        return held[1]
+    rows = read()
+    with _TRANSITION_ROWS_LOCK:
+        if before is not None and before == _ledger_generation(path)[1]:
+            _TRANSITION_ROWS[path] = (before, rows)
+        else:
+            _TRANSITION_ROWS.pop(path, None)
+    return rows
+
+
 def _transition_rows(seat_key: Optional[str] = None) -> list[tuple[str, dict]]:
     """Read only confirmed steward transitions and releases from the existing seat ledgers."""
+    if seat_key:
+        return _seat_keys_transition_rows((seat_key,))
     st = _st()
     directory = st.state_root() / "sessions"
-    paths = ([directory / f"{seat_key}.jsonl"] if seat_key else
-             sorted(path for path in directory.glob("*.jsonl") if path.is_file() and not path.is_symlink()))
+    paths = sorted(path for path in directory.glob("*.jsonl")
+                   if path.is_file() and not path.is_symlink())
     out = []
     for path in paths:
-        if path.is_symlink():
-            continue
-        key = path.stem
-        with st.seat_ledger_readonly_scope():
-            for row in st._read_ledger_lines(st.Seat("pane", key)):
-                if row.get("event") in {ROW_EVENT, "steward-release"}:
-                    out.append((key, row))
+        rows = _seat_transition_rows(st, str(path), path.stem)
+        if rows is not None:
+            out.extend((path.stem, row) for row in rows)
+    # A ledger that left the directory leaves the cache with it.
+    present = {str(path) for path in paths}
+    prefix = str(directory) + os.sep
+    with _TRANSITION_ROWS_LOCK:
+        for stale in [name for name in _TRANSITION_ROWS
+                      if name.startswith(prefix) and name not in present]:
+            _TRANSITION_ROWS.pop(stale, None)
+    return out
+
+
+def _seat_keys_transition_rows(keys) -> list[tuple[str, dict]]:
+    """`_transition_rows` of each seat key in order, resolving the ledger directory once."""
+    st = _st()
+    prefix = os.path.join(str(st.state_root() / "sessions"), "")
+    out = []
+    for key in keys:
+        rows = _seat_transition_rows(st, prefix + f"{key}.jsonl", key)
+        if rows is not None:
+            out.extend((key, row) for row in rows)
     return out
 
 
@@ -1025,7 +1135,7 @@ def _marker_relation(harness: str, sid: str, marker: dict, evidence: list[dict],
 
 
 def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str] = None, *,
-                               seat_key: Optional[str] = None, include_released: bool = False) -> list[dict]:
+                                seat_key: Optional[str] = None, include_released: bool = False) -> list[dict]:
     """Resolve valid original role evidence to its confirmed current same-seat holder.
 
     This is a read-only projection. It never creates or copies a marker. Ordinary
