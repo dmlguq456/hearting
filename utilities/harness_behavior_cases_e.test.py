@@ -112,6 +112,62 @@ class OwnerRouteTest(unittest.TestCase):
         self.assertIn("git push origin HEAD:refs/heads/hb-unscoped", command)
 
 
+class RegisteredOwnerTest(unittest.TestCase):
+    """PG-34: the owner the normal start registers runs only on the fixture model."""
+
+    def test_fixture_models_conf_leaves_no_account_model_for_any_owner_profile(self):
+        import model_profile
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(harness=harness):
+                    shipped = (root / "adapters" / harness / "config" / "models.conf").read_text()
+                    model = ce.fixture_model_id(harness)
+                    path = Path(tmp) / f"{harness}.conf"
+                    path.write_text(ce.fixture_models_conf(shipped, model))
+                    for profile in ce.OWNER_PROFILES:
+                        self.assertEqual(model_profile.resolve_profile(harness, path, profile)["model"],
+                                         model, profile)
+                    tiers = {line.split("=", 1)[1] for line in shipped.splitlines()
+                             if line.startswith("CFG_TIER_") and "_MODEL=" in line}
+                    for line in path.read_text().splitlines():
+                        if line.lstrip().startswith("#") or line.startswith("CFG_MAIN_SESSION_ONLY_MODELS="):
+                            continue
+                        for tier in tiers:
+                            self.assertNotRegex(line, rf"(?<![\w./-]){tier}(?![\w./-])")
+
+    def test_script_probes_once_then_ends_the_owner_with_a_typed_handoff(self):
+        scenario = ce.OwnerPublishRegisteredScenario()
+        scenario.port = 9
+        answer = scenario.script(None)
+        first = {"text": "Assignment: SCENARIO-OWNER-REG-PUSH-report: push", "last_kind": "user",
+                 "last_text": "Assignment: SCENARIO-OWNER-REG-PUSH-report: push"}
+        reply = answer(first, [])
+        self.assertIn("git push origin HEAD:refs/heads/hb-reg-report", reply.shell)
+        self.assertNotIn("HB-NET-reg-report-REACHED", reply.shell)
+        earlier = [{"reply": reply.as_dict()}]
+        after = answer({**first, "last_kind": "tool", "last_text": "tool output"}, earlier)
+        self.assertEqual(after.text, "artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
+        self.assertIsNone(after.shell)
+        again = answer({**first, "last_kind": "user", "last_text": "resume"}, earlier)
+        self.assertIsNone(again.shell)
+        self.assertEqual(answer({"text": "title", "last_kind": "user", "last_text": "title"}, []).text,
+                         "OK")
+
+    def test_registry_rows_and_receipt_parsing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("2026-11-12T00:00:00Z\tdone\t/r\t/w\thb-owner-reg-report-owner\t"
+                            "worker_type=owner,attempt_id=att-1,runtime_sandbox=workspace-write\n"
+                            "malformed line\n")
+            rows = ce.registry_rows(jobs)
+        self.assertEqual(rows, [{"status": "done", "slug": "hb-owner-reg-report-owner",
+                                 "worker_type": "owner", "attempt_id": "att-1",
+                                 "runtime_sandbox": "workspace-write"}])
+        self.assertEqual(ce.last_json_object('card text\n{"a": 1}\n{"b": 2}\ntrailer'), {"b": 2})
+        self.assertEqual(ce.last_json_object("no json"), {})
+
+
 class DelinkTest(unittest.TestCase):
     def test_only_links_into_the_measured_tree_become_copies(self):
         with tempfile.TemporaryDirectory() as tmp:

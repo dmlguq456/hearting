@@ -1023,9 +1023,11 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'jobs_lock = WRAPPER_COMMON.jobs_lock' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'registry_lock={jobs}.lock' utilities/launch_receipt.py \
     || ! grep -Fq 'launch_receipt.attempt_lines(' adapters/codex/bin/dispatch-headless.py \
-    || ! grep -Fq 'close_attempt_row' adapters/codex/bin/dispatch-harvest.py \
-    || ! grep -Fq 'ROUTE.complete_node' adapters/codex/bin/dispatch-harvest.py \
-    || ! grep -Fq 'registry_lock={jobs}.lock' adapters/codex/bin/dispatch-harvest.py; then
+    || ! grep -Fq 'utilities" / "dispatch-harvest.py"' adapters/codex/bin/dispatch-harvest.py \
+    || ! grep -Fq 'SHARED.main(argv, CODEX)' adapters/codex/bin/dispatch-harvest.py \
+    || ! grep -Fq 'close_attempt_row' utilities/dispatch-harvest.py \
+    || ! grep -Fq 'ROUTE.complete_node' utilities/dispatch-harvest.py \
+    || ! grep -Fq 'registry_lock={jobs}.lock' utilities/dispatch-harvest.py; then
     fail_msg "adapters/codex/bin/dispatch-headless.py must validate dispatch inputs and wrap assignments with the portable typed worker bootstrap"
   fi
   if ! grep -Fq 'native Skills, native Agents, and native Modes' adapters/codex/README.md \
@@ -1175,7 +1177,7 @@ check_codex_bin_wrappers() {
     || grep -Fq 'session-end' adapters/codex/hooks/stop-lifecycle.py \
     || grep -Fq 'join_session_batch(' adapters/codex/hooks/stop-lifecycle.py \
     || grep -Fq 'decision' adapters/codex/hooks/stop-lifecycle.py \
-    || ! grep -Fq 'parent_completion_harvested' adapters/codex/bin/dispatch-harvest.py \
+    || ! grep -Fq 'parent_completion_harvested' utilities/dispatch-harvest.py \
     || grep -Fq 'register_parent_stop_attempt(args, jobs)' adapters/codex/bin/dispatch-headless.py \
     || grep -Fq 'sys.stdout.write(result.stdout)' adapters/codex/hooks/sessionend-lifecycle.py \
     || ! grep -Fq 'probes.submit(run_preflight, "briefing", current_cwd)' adapters/codex/hooks/userprompt-lifecycle.py \
