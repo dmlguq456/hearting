@@ -4078,13 +4078,20 @@ def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
                 "reason": "recovery-process-failed"}
 
 
-def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
+def settle_finished_attempt(
+    jobs: Path, row: ChildRow, previous: tuple[object, object] | None = None
+) -> dict[str, object]:
     """Commit exact terminal evidence before a runtime join can deliver it.
 
     Reapers and joiners use the same terminal writers. The canonical row, not
     a writer's exit code, proves that the transition actually committed.
+    ``previous`` is the join's own last ``(closed, reason)`` for this attempt:
+    a completion refusal that repeats it closes the row typed.
     """
     reason = ""
+    refused_before = ""
+    if previous and previous[0] is False and str(previous[1]).startswith("completion-"):
+        refused_before = str(previous[1])
     try:
         support = _route_free_support_row(row)
         if support:
@@ -4123,7 +4130,7 @@ def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
             reason = apply_exact_route_free_review_classification(
                 fresh, jobs=jobs, classification=classification)
         else:
-            reason = close_reaped_child(row, jobs=jobs)
+            reason = close_reaped_child(row, jobs=jobs, refused_before=refused_before)
         current = exact_attempt_row(jobs, row.attempt_id)
         if support and launched_attempt_identity(current.raw.split("\t")) != selected_identity:
             return {"attempt_id": row.attempt_id, "closed": False,
@@ -4154,7 +4161,7 @@ def _join_snapshot(
     env: dict[str, str] | None,
     recovery: Callable[[ChildRow], dict[str, object]] | None = None,
     observation_jobs: Path | None = None,
-    settlement: Callable[[ChildRow], dict[str, object]] | None = None,
+    settlement: Callable[[ChildRow, tuple[object, object] | None], dict[str, object]] | None = None,
     observation_context=None,
     registry_append_only: bool = False,
 ) -> dict[str, object]:
@@ -4297,12 +4304,19 @@ def _join_snapshot(
                     backoff["interval"] = 2.0
                 if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= backoff["interval"]:
                     last_settlement[row.attempt_id] = time.monotonic()
-                    outcome = settlement(row)
+                    outcome = settlement(row, backoff["result"])
                     recovery_results[row.attempt_id] = outcome
                     recovered = recovered or outcome.get("closed") is True
                     result_key = (outcome.get("closed"), outcome.get("reason"))
+                    # A completion refusal is not new progress: it keeps the
+                    # backed-off cadence, so the pass that confirms it (and
+                    # closes the row typed) comes after a short NAS or
+                    # finish-in-progress hiccup has had time to clear.
+                    refused = (outcome.get("closed") is False
+                               and str(outcome.get("reason") or "").startswith("completion-"))
                     backoff["interval"] = (
-                        2.0 if result_key != backoff["result"] else min(60.0, backoff["interval"] * 2)
+                        2.0 if result_key != backoff["result"] and not refused
+                        else min(60.0, backoff["interval"] * 2)
                     )
                     backoff["result"] = result_key
                     backoff["registry_key"] = registry_key
@@ -4469,7 +4483,7 @@ def join_selected_attempts(*, jobs: Path, expected_attempts: set[str],
         liveness_probe_timeout=30.0, env=None,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover else None,
         observation_jobs=jobs if recover else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -4505,7 +4519,7 @@ def join_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover_receiptless else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -4552,7 +4566,7 @@ def join_session_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover_receiptless else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -5359,19 +5373,26 @@ def close_wrapper_pass(
     return _close_refused_completion(row, jobs=jobs, reason=reason)
 
 
-def close_reaped_child(row: ChildRow, *, jobs: str | Path) -> str:
+def close_reaped_child(
+    row: ChildRow, *, jobs: str | Path, refused_before: str | bool = False
+) -> str:
     """Close one route-bound child whose process is already proven gone.
 
     The wrapper's reap watcher, and the runtime join that repeats its drain
     when that watcher was lost, both reach this state. They share this one
     step: commit the exact terminal evidence, and when ``complete`` refuses
-    it, close the still-open row as the typed contract failure the watcher
-    has always written. A refusal does not change by waiting, so the join no
-    longer retries it in silence while the owner waits.
+    it again, close the still-open row as the typed contract failure the
+    watcher has always written. A first refusal may be transient (a route
+    file briefly unreadable on NAS, a finish in progress), so it stays open
+    for the next attempt; ``refused_before`` names the refusal that attempt
+    repeats (the join's previous pass), or ``True`` for the watcher's own
+    second attempt. The join therefore no longer retries a refusal in silence
+    while the owner waits.
     """
 
     reason = close_finished_child(row, jobs=jobs)
-    if reason.startswith("completion-") and row.status in OPEN_STATES:
+    if (reason.startswith("completion-") and row.status in OPEN_STATES
+            and (refused_before is True or (refused_before and refused_before == reason))):
         return _close_refused_completion(row, jobs=jobs, reason=reason)
     return reason
 
@@ -5385,13 +5406,11 @@ def _close_refused_completion(row: ChildRow, *, jobs: str | Path, reason: str) -
         return reason
     if current.status == "done" and success_note(current.metadata):
         return ""
-    if current.status == "done" and deferred_completion(current.metadata):
-        # C13: already closed typed-deferred by an earlier budget exhaustion
-        # (this attempt's own retry above just failed transiently again).
-        # Re-closing a terminal row here would only manufacture a terminal
-        # conflict (`completion-deferred` -> `dead-route-completion-rejected`)
-        # against a row that already has a committed outcome; the caller
-        # keeps retrying via the ordinary settlement path instead.
+    if current.status not in OPEN_STATES:
+        # C13: another writer (an earlier budget exhaustion's
+        # `completion-deferred`, or the join's own typed close) already
+        # committed this row. Re-closing it would only manufacture a terminal
+        # conflict against a row that has a committed outcome.
         return reason
     if reason.startswith("completion-transient:"):
         try:

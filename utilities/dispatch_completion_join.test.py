@@ -701,7 +701,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(fresh.metadata["launch_outcome"], "governed-process-group-drained")
         self.assertEqual(D.attempt_process_quiescence(fresh.metadata, terminal_receipt=True).state, "quiescent")
 
-        def settle(_jobs, current):
+        def settle(_jobs, current, _previous=None):
             self.assertEqual(current.attempt_id, child.attempt_id)
             self.assertEqual(current.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
             self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t")
@@ -746,7 +746,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                                  .replace("note=,", "note=completed-subsession,"))
             return {"attempt_id": child.attempt_id, "closed": True, "reason": "completed-subsession"}
 
-        with mock.patch.object(JOIN, "settle_finished_attempt", side_effect=lambda jobs, child: settle(child)):
+        with mock.patch.object(JOIN, "settle_finished_attempt", side_effect=lambda jobs, child, *_: settle(child)):
             receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=5,
                                       interval=0.05, recover_receiptless=True)
         self.assertEqual(receipt["state"], "ready", receipt)
@@ -4114,26 +4114,94 @@ class RefusedCompletionHandOverTest(FinishedChildClosure):
         return JOIN.ChildRow(order=0, status=status, slug=f"{attempt_id}-slug",
                              attempt_id=attempt_id, raw=raw, metadata=meta)
 
-    def test_join_settlement_closes_a_refused_pass_typed_for_every_harness(self):
+    def completion_sequence(self, child: JOIN.ChildRow, *results: str):
+        """Stub `complete`: answer each result in turn; "" commits it as `complete` does."""
+
+        calls = []
+        answers = list(results)
+
+        def complete(command, **_kw):
+            calls.append(command)
+            answer = answers.pop(0) if answers else results[-1]
+            if not answer:
+                self.jobs.write_text(
+                    self.jobs.read_text().replace("\topen\t", "\tdone\t", 1)
+                    .replace("launch_outcome=", "note=completed,failure_class=pass,launch_outcome=", 1),
+                    encoding="utf-8")
+            return answer
+
+        return calls, mock.patch.object(JOIN, "run_route_completion", side_effect=complete)
+
+    def test_join_closes_a_refusal_typed_when_the_next_pass_repeats_it(self):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 child = self.harness_child(harness)
-                calls = []
-                with mock.patch.object(JOIN, "run_route_completion",
-                                       side_effect=lambda command, **_kw: calls.append(command)
-                                       or "completion-rejected"):
-                    outcome = JOIN.settle_finished_attempt(self.jobs, child)
+                calls, stub = self.completion_sequence(child, "completion-rejected")
+                with stub:
+                    first = JOIN.settle_finished_attempt(self.jobs, child)
+                    # A first refusal may be transient: the row stays open.
+                    self.assertEqual((first["closed"], first["reason"]), (False, "completion-rejected"))
+                    self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
+                    second = JOIN.settle_finished_attempt(
+                        self.jobs, child, (first["closed"], first["reason"]))
                 current = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
-                self.assertTrue(outcome["closed"], outcome)
-                self.assertEqual(outcome["reason"], "completion-rejected")
+                self.assertTrue(second["closed"], second)
+                self.assertEqual(second["reason"], "completion-rejected")
                 self.assertEqual(current.status, "done")
                 self.assertEqual(current.metadata.get("note"), "dead-route-completion-rejected")
                 self.assertEqual(current.metadata.get("failure_class"), "contract")
                 self.assertEqual(current.metadata.get("classifier_source"),
                                  "registered-wrapper-completion-v1")
-                # The budget's one immediate retry, then the typed close -- not
-                # one more completion transaction per join pass.
-                self.assertEqual(len(calls), 2, calls)
+                # Each pass is the budget's call plus its one immediate retry.
+                self.assertEqual(len(calls), 4, calls)
+
+    def test_join_closes_a_refusal_that_clears_by_the_next_pass_as_success(self):
+        # Review RV-PR1561 T2: a route file unreadable for a few seconds on NAS
+        # refuses `complete`, then clears; the stage must still complete.
+        child = self.harness_child("codex")
+        calls, stub = self.completion_sequence(child, "completion-rejected", "completion-rejected", "")
+        with stub:
+            first = JOIN.settle_finished_attempt(self.jobs, child)
+            second = JOIN.settle_finished_attempt(self.jobs, child, (first["closed"], first["reason"]))
+        current = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+        self.assertFalse(first["closed"], first)
+        self.assertTrue(second["closed"], second)
+        self.assertEqual((current.status, current.metadata.get("note")), ("done", "completed"))
+        self.assertEqual(len(calls), 3, calls)
+
+    def test_a_different_earlier_outcome_does_not_close_the_refusal(self):
+        child = self.harness_child("codex")
+        for previous in (None, (False, "completion-transient:TimeoutExpired"),
+                         (False, "terminal-commit-unconfirmed"), (True, "completion-rejected")):
+            with self.subTest(previous=previous):
+                _calls, stub = self.completion_sequence(child, "completion-rejected")
+                with stub:
+                    outcome = JOIN.settle_finished_attempt(self.jobs, child, previous)
+                self.assertFalse(outcome["closed"], outcome)
+                self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
+
+    def test_watcher_keeps_its_two_completion_attempts_before_the_typed_close(self):
+        # The reap watcher's sequence (`dispatch-reap-watch.py`): one shared
+        # step, then its second completion attempt that closes typed.
+        def watcher(child):
+            row = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+            if JOIN.close_reaped_child(row, jobs=self.jobs).startswith("completion-"):
+                JOIN.close_reaped_child(row, jobs=self.jobs, refused_before=True)
+            return JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+
+        child = self.harness_child("codex")
+        calls, stub = self.completion_sequence(child, "completion-rejected", "completion-rejected", "")
+        with stub:
+            current = watcher(child)
+        self.assertEqual((current.status, current.metadata.get("note")), ("done", "completed"))
+        self.assertEqual(len(calls), 3, calls)
+
+        child = self.harness_child("codex")
+        calls, stub = self.completion_sequence(child, "completion-rejected")
+        with stub:
+            current = watcher(child)
+        self.assertEqual(current.metadata.get("note"), "dead-route-completion-rejected")
+        self.assertEqual(len(calls), 4, calls)
 
     def test_join_hands_the_refused_pass_to_its_owner_instead_of_waiting(self):
         child = self.harness_child("codex")
@@ -4141,18 +4209,26 @@ class RefusedCompletionHandOverTest(FinishedChildClosure):
         fields[5] += ",parent_attempt_id=att-parent"
         self.jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
         initial = JOIN.current_children(self.jobs, "att-parent")
-        with mock.patch.object(JOIN, "run_route_completion", return_value="completion-rejected"), \
+        calls = []
+        with mock.patch.object(JOIN, "run_route_completion",
+                               side_effect=lambda command, **_kw: calls.append(command)
+                               or "completion-rejected"), \
              mock.patch.object(dispatch_supervision, "materialize", return_value=[]) as notice:
             receipt = JOIN._join_snapshot(
                 jobs=self.jobs, initial=initial,
                 refresh=lambda _attempts: JOIN.current_children(self.jobs, "att-parent"),
-                identity={"parent_attempt_id": "att-parent"}, interval=0.001, timeout=5.0,
+                identity={"parent_attempt_id": "att-parent"}, interval=0.01, timeout=8.0,
                 liveness_command=None, liveness_probe_timeout=1.0, env=None, recovery=None,
                 observation_jobs=self.jobs,
-                settlement=lambda row: JOIN.settle_finished_attempt(self.jobs, row),
+                settlement=lambda row, previous=None: JOIN.settle_finished_attempt(
+                    self.jobs, row, previous),
             )
         self.assertEqual(receipt["state"], "ready", receipt)
         self.assertEqual(receipt["children"][0]["status"], "done", receipt)
+        self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).metadata.get("note"),
+                         "dead-route-completion-rejected")
+        # Closed on the second settlement pass, not retried pass after pass.
+        self.assertEqual(len(calls), 4, calls)
         notice.assert_not_called()
 
     def test_a_reason_other_than_a_completion_refusal_keeps_the_row_open(self):
@@ -4161,7 +4237,8 @@ class RefusedCompletionHandOverTest(FinishedChildClosure):
             with self.subTest(reason=reason), \
                  mock.patch.object(JOIN, "close_finished_child", return_value=reason), \
                  mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
-                self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs), reason)
+                self.assertEqual(
+                    JOIN.close_reaped_child(child, jobs=self.jobs, refused_before=reason), reason)
                 close.assert_not_called()
         self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
 
@@ -4169,8 +4246,28 @@ class RefusedCompletionHandOverTest(FinishedChildClosure):
         child = self.harness_child("codex", status="done")
         with mock.patch.object(JOIN, "close_finished_child", return_value="completion-rejected"), \
              mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
-            self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs), "completion-rejected")
+            self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs, refused_before=True),
+                             "completion-rejected")
         close.assert_not_called()
+
+    def test_a_row_closed_by_another_writer_meanwhile_is_not_rewritten(self):
+        # Review RV-PR1561 R2: the join closed the row dead while the watcher's
+        # budget was still running; its later transient end must not write
+        # `completion-deferred` over it (a terminal conflict).
+        child = self.harness_child("codex")
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t", 1).replace(
+            "launch_outcome=", "note=dead-route-completion-rejected,failure_class=contract,"
+            "launch_outcome=", 1), encoding="utf-8")
+        before = self.jobs.read_bytes()
+        for reason in ("completion-transient:TimeoutExpired", "completion-rejected"):
+            with self.subTest(reason=reason), \
+                 mock.patch.object(JOIN, "close_finished_child", return_value=reason), \
+                 mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
+                # `child` is the caller's earlier, still-open read of the row.
+                self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs, refused_before=True),
+                                 reason)
+                close.assert_not_called()
+        self.assertEqual(self.jobs.read_bytes(), before)
 
 
 class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
@@ -5776,7 +5873,7 @@ class JoinClosureBlockedTest(unittest.TestCase):
         settlement_calls = []
         notices = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "should-not-be-called"}
@@ -5884,7 +5981,7 @@ class JoinClosureBlockedTest(unittest.TestCase):
         settlement_calls = []
         notices = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "should-not-be-called"}
@@ -5917,7 +6014,7 @@ class JoinClosureBlockedTest(unittest.TestCase):
         row = self._blocked_owner_row()
         settlement_calls = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "producer-finalize-failed"}
@@ -6021,7 +6118,7 @@ class SettlementBackoffTest(unittest.TestCase):
                 clock["t"] += 0.5
                 return clock["t"]
 
-            def settlement(child_row):
+            def settlement(child_row, _previous=None):
                 settlement_call_times.append(clock["t"])
                 return {"attempt_id": child_row.attempt_id, "closed": False,
                         "reason": "same-every-time"}
@@ -6067,7 +6164,7 @@ class SettlementBackoffTest(unittest.TestCase):
                 clock["t"] += 0.5
                 return clock["t"]
 
-            def settlement(child_row):
+            def settlement(child_row, _previous=None):
                 settlement_call_times.append(clock["t"])
                 if len(settlement_call_times) == 3:
                     # Real content/mtime change -- a fresh stat() key.

@@ -373,7 +373,10 @@ def watch(args: argparse.Namespace) -> int:
         # before any supervisor may resume the parent.
         if record[1].get("route_file") and record[1].get("route_node"):
             try:
-                close_reaped_child(exact_attempt_row(args.jobs, args.attempt_id), jobs=args.jobs)
+                row = exact_attempt_row(args.jobs, args.attempt_id)
+                reason = close_reaped_child(row, jobs=args.jobs)
+                if reason.startswith("completion-"):
+                    close_reaped_child(row, jobs=args.jobs, refused_before=True)
             except JoinContractError:
                 return 65
         return 0
