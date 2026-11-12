@@ -247,13 +247,27 @@ class ClaudeRegisteredTest(unittest.TestCase):
         self.assertIsNone(payload["ctx_pct"])
 
     def test_live_run_before_the_terminal_window_never_guesses_one_million(self):
+        # At or under 200K the attempt's own usage fits either window: nothing is chosen.
         job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"},
-                        self._rows(300_000, result=False))
+                        self._rows(200_000, result=False))
         payload, row = self._collect(job)
-        self.assertEqual(payload["active_context_tokens"], 300_000)
+        self.assertEqual(payload["active_context_tokens"], 200_000)
         self.assertIsNone(payload["context_window_tokens"])
         self.assertIsNone(payload["ctx_pct"])
         self.assertNotIn("%", row.replace("—", ""))
+
+    def test_its_own_usage_over_200k_is_the_one_million_window_before_the_result(self):
+        # 300K cannot sit in a 200K window, so this attempt's own stream settles 1M.
+        job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"},
+                        self._rows(300_000, result=False))
+        payload, _row = self._collect(job)
+        self.assertEqual(payload["active_context_tokens"], 300_000)
+        self.assertEqual(payload["context_window_tokens"], 1_000_000)
+        self.assertEqual(job._context_window_source, "claude-own-usage-over-standard")
+        self.assertEqual(render._native_context_gauge(job), (30, 1_000_000))
+        # The compaction policy keeps waiting for its reported raw window.
+        self.assertIsNone(payload["context_display_window_tokens"])
+        self.assertIsNone(payload["ctx_pct"])
 
     def test_a_small_launch_window_is_provable_before_the_terminal_row(self):
         job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "150000"},

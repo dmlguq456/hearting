@@ -418,6 +418,25 @@ assert(idle.some(x=>x.includes('>_ no tool')),idle.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_a_folded_one_step_route_adds_its_tool_only_where_the_row_has_room(self):
+        # Supervisor 2026-11-12: the second row of a folded route may add Fleet's `>_ tool`
+        # for a one-step route, never pushing out harness, model, context or time (rule 19).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const P=(c)=>({glyph:{text:'⠋'},harness:{text:'claude'},model_text:{text:'Opus 5.5'},ctx:{text:c}});
+const one={id:'a',title:'one step',state:'working',kind:'working',elapsed:'47m',tool:'python3',target:'tools/run-tests.py',paint:P('24%')};
+const staged={...one,id:'b',title:'staged',flow:'plan ✓ › execute ● › review',stages:[{name:'plan'},{name:'execute'},{name:'review'}]};
+const paint=(width)=>view.render({width,height:30,side:true,model:{routes:[one,staged],route_count:2,messages:[]},sid:'s',
+ configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
+const narrow=paint(40),wide=paint(52);
+assert(narrow.some(x=>x.includes('claude Opus 5.5 24% · 47m')),narrow.join('\n'));
+assert(!narrow.some(x=>x.includes('>_')),narrow.join('\n'));
+assert(wide.some(x=>x.includes('claude Opus 5.5 24% · 47m · >_ python3')),wide.join('\n'));
+assert.equal(wide.filter(x=>x.includes('>_')).length,1,wide.join('\n'));
+assert(!wide.some(x=>x.includes('tools/run-tests.py')),wide.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_route_rows_follow_the_route_line_setting_and_open_in_place(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

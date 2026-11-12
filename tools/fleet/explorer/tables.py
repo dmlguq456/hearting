@@ -844,6 +844,53 @@ def _route_rail_text(route):
     return " › ".join(str(stage.get("name") or "·") for stage in stages)
 
 
+def route_now_texts(route):
+    """What a one-step route's folded row shows in its progress cell while its doer works:
+    the open tool's allow-listed summary, widest first and each a whole value
+    (``python3 tools/run-tests.py``, ``python3 run-tests.py``, ``python3``); a path gives way
+    to its file name, then the tool name stands alone. Empty for a staged or chained route,
+    or when nothing open is observed (the row keeps ``one-shot ●``)."""
+    doer = route.get("doer")
+    stages = route.get("stages") or ()
+    if (not isinstance(doer, Mapping) or not doer.get("tool") or len(stages) != 1
+            or len(route.get("legs") or ()) > 1 or route.get("resume")
+            or route.get("state") == "stale" or stages[0].get("st") != "active"
+            or route.get("capability") == "frame"):
+        return []
+    tool = str(doer["tool"])
+    target = str(doer.get("target") or "")
+    out = [tool + " " + target] if target else []
+    name = target.rstrip("/").rsplit("/", 1)[-1] if target else ""
+    if name and name != target:
+        out.append(tool + " " + name)
+    out.append(tool)
+    return out
+
+
+def _draw_route_now(grid, x, end, y, route, texts):
+    """``● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress cell.
+    The widest summary that fits wins, with the tool's time and agent count when they fit
+    too (the agent count goes first). False when not even the tool name fits (the caller
+    keeps the stage rail)."""
+    doer = route["doer"]
+    age = ("  " + str(doer["tool_age"])) if doer.get("tool_age") else ""
+    agents = int(doer.get("agents") or 0)
+    agent_text = f" · +{agents} agent" if agents else ""
+    room = end - x - 2
+    for text in texts:
+        for extras in ((age, agent_text), (age, ""), ("", "")):
+            if _seg_width(text) + sum(_seg_width(part) for part in extras) <= room:
+                lit = bool(getattr(grid, "beat", 1))
+                cursor = grid.put(x, y, "●", "work" if lit else "g_work_off", limit=end)
+                cursor = grid.put(cursor, y, " " + text, "soft", limit=end)
+                if extras[0]:
+                    cursor = grid.put(cursor, y, extras[0], "dim", limit=end)
+                if extras[1]:
+                    grid.put(cursor, y, extras[1], "dim", limit=end)
+                return True
+    return False
+
+
 def route_activity_rows(route):
     """What the route's doer is on now and just finished, one row each, from its own stream:
 
@@ -967,6 +1014,12 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     title = str(route.get("title") or "")
     if not title_below and title and _seg_width(title) > (title_room if room else 0):
         dropped.insert(0, [(title, "soft")])
+    # A one-step route shows what its doer is on now in the progress cell (``● python3
+    # tools/run-tests.py  3m``); the tool cell then gives its room to that summary and time.
+    now = route_now_texts(route)
+    if now and _draw_route_now(grid, cursor, age_x - GAP, y, route, now):
+        grid.put(age_x, y, age, "dim")
+        return dropped
     # ``>_ Bash · +1 agent``: the open tool and live sub-agents, only while the work runs.
     tool_text = ">_ " + str(tool) if tool else ""
     agent_text = f" · +{agents} agent" if tool_text and agents else ""

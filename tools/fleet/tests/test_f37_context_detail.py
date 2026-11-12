@@ -575,7 +575,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
     def _first_turn_and_finished_turn(self, finished_model="claude-fable-5", version="9.9.9"):
         running = self._job("att-running-first-turn")
         self._write_log(running, [self._init("sid-run", version="9.9.9"),
-                                  self._assistant("sid-run", "claude-fable-5", 250136)])
+                                  self._assistant("sid-run", "claude-fable-5", 150136)])
         finished = self._job("att-finished-turn")
         finished.liveness = "done"
         self._write_log(finished, [
@@ -589,19 +589,19 @@ class ClaudeStreamSessionTest(unittest.TestCase):
     def test_a_running_turn_never_takes_another_attempts_window(self):
         # Same model, same Claude Code version: the other attempt's window is still not this
         # attempt's (CLAUDE_CODE_DISABLE_1M_CONTEXT alone splits 1M and 200K), so the running
-        # first turn keeps its exact token count and no percent.
+        # first turn whose own usage fits either window keeps its exact token count.
         running, finished = self._first_turn_and_finished_turn()
         for job in (running, finished):
             dispatch_collector._enrich_claude_stream_session(job)
         self.assertEqual(finished.context_window_tokens, 1000000)
-        self.assertEqual(running.active_context_tokens, 250136)
+        self.assertEqual(running.active_context_tokens, 150136)
         self.assertIsNone(running.context_window_tokens)
         self.assertIsNone(running.ctx_pct)
         self.assertEqual(render._native_context_gauge(running), (None, None))
         # A later pass without the finished attempt keeps nothing from it either.
         later = self._job("att-later-first-turn")
         self._write_log(later, [self._init("sid-later", version="9.9.9"),
-                                self._assistant("sid-later", "claude-fable-5", 250136)])
+                                self._assistant("sid-later", "claude-fable-5", 150136)])
         dispatch_collector._enrich_claude_stream_session(later)
         self.assertIsNone(later.context_window_tokens)
         self.assertEqual(render._native_context_gauge(later), (None, None))
@@ -629,10 +629,28 @@ class ClaudeStreamSessionTest(unittest.TestCase):
             job = self._job("att-d1m-unknown-%d" % index)
             job._registry_metadata = self._launch_metadata(**case)
             self._write_log(job, [self._init("sid-u%d" % index, version="9.9.9"),
-                                  self._assistant("sid-u%d" % index, "claude-fable-5", 250136)])
+                                  self._assistant("sid-u%d" % index, "claude-fable-5", 150136)])
             dispatch_collector._enrich_claude_stream_session(job)
             self.assertIsNone(job.context_window_tokens, case)
             self.assertEqual(render._native_context_gauge(job), (None, None))
+
+    def test_its_own_usage_over_200k_settles_the_one_million_window(self):
+        # 250136 tokens cannot sit in a 200K window: this attempt's own stream settles 1M
+        # from its first observation, whatever another attempt reported (#1514 F1 holds).
+        running, _finished = self._first_turn_and_finished_turn()
+        self._write_log(running, [self._init("sid-run", version="9.9.9"),
+                                  self._assistant("sid-run", "claude-fable-5", 250136)])
+        dispatch_collector._enrich_claude_stream_session(running)
+        self.assertEqual(running.context_window_tokens, 1000000)
+        self.assertEqual(running._context_window_source, "claude-own-usage-over-standard")
+        self.assertEqual(render._native_context_gauge(running), (25, 1000000))
+        self.assertIsNone(running.ctx_pct)       # the compaction policy is not derived
+        # Exactly 200K fits a 200K window: still unknown.
+        edge = self._job("att-edge")
+        self._write_log(edge, [self._init("sid-edge", version="9.9.9"),
+                               self._assistant("sid-edge", "claude-fable-5", 200000)])
+        dispatch_collector._enrich_claude_stream_session(edge)
+        self.assertIsNone(edge.context_window_tokens)
 
     def test_open_tool_summary_start_and_last_finished_call_come_from_the_attempts_own_stream(self):
         tree = os.path.join(self.tmp.name, "tree")

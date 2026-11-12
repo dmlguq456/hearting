@@ -451,7 +451,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const H=value(p.harness),M=value(p.model_text),C=value(p.ctx),E=r.elapsed?[text(r.elapsed)]:[];
       const build=(h,m,c,e)=>{const left=[h,m,c].filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);return [text('  '),...left,...(e.length?[...(left.length?[text(' · ')]:[]),...e]:[])];};
       const drops=routeLine==='model'?[[H,M,C,E],[H,M,C,[]],[H,M,[],[]],[H,[],[],[]],[[],[],[],[]]]:[[H,M,C,E],[H,[],C,E],[H,[],[],E],[[],[],[],E],[[],[],[],[]]];
-      for(const pick of drops){const row=build(...pick);if(size(row)<=inner)return size(row)>2?row:null;}
+      // A one-step route (no stage flow) adds its open tool's name, Fleet's `>_ Bash`,
+      // only where the row still has room for it; it never pushes a value out.
+      const tool=r.tool&&!r.flow&&!(Array.isArray(r.stages)&&r.stages.length>1)?[text(' · '),{...text('>_ ','lvl_g'),dim:true},{...text(r.tool,'loc_repo'),dim:true}]:[];
+      for(const pick of drops){const row=build(...pick);if(size(row)<=inner){if(size(row)<=2)return null;return tool.length&&size(row)+size(tool)<=inner?[...row,...tool]:row;}}
       return null;
     }
     const routeRows=[],detailRows=[];

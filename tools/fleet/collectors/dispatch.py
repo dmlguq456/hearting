@@ -2678,17 +2678,19 @@ def _parse_claude_stream_tail(path):
 
 
 _CLAUDE_STANDARD_WINDOW = 200_000
+_CLAUDE_EXTENDED_WINDOW = 1_000_000
 
 
-def _claude_own_window(metadata, model_id):
+def _claude_own_window(metadata, model_id, active_tokens=None):
     """This attempt's own Claude context window before its first turn result, or None.
 
     ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` holds a Claude 4+ model at its standard 200K window
     (each has at least 200K), so that switch as this attempt's launch recorded it
     (``claude_compaction_disable_1m``, the home settings value beside it) settles the
-    window from the first observation. Without it the window is 200K or 1M and stays
-    unknown until the attempt's own result reports it: no usage-based guess and nothing
-    from another attempt (#1514 F1). A disagreeing pair stays unknown too.
+    window from the first observation. Otherwise the window is 200K or 1M: this attempt's
+    own active context above 200K cannot sit in a 200K window, so it is the 1M window.
+    At or under 200K it stays unknown until the attempt's own result reports it; nothing
+    comes from another attempt (#1514 F1). A disagreeing pair stays unknown too.
     """
     from ..context_policy import _claude_model_output_floor, _truthy
     if _claude_model_output_floor(model_id) is None:
@@ -2697,6 +2699,8 @@ def _claude_own_window(metadata, model_id):
                                             "claude_settings_disable_1m")} - {None, "", "absent"}
     if len(values) == 1 and _truthy(next(iter(values))):
         return _CLAUDE_STANDARD_WINDOW, "claude-launch-disable-1m"
+    if type(active_tokens) is int and active_tokens > _CLAUDE_STANDARD_WINDOW:
+        return _CLAUDE_EXTENDED_WINDOW, "claude-own-usage-over-standard"
     return None, None
 
 
@@ -2800,7 +2804,8 @@ def _enrich_claude_stream_session(job, fast_first=False):
     job._context_window_source = "claude-result-model-usage" if context_window_tokens else None
     if not context_window_tokens:
         context_window_tokens, job._context_window_source = _claude_own_window(
-            getattr(job, "_registry_metadata", None) or {}, parsed.get("model"))
+            getattr(job, "_registry_metadata", None) or {}, parsed.get("model"),
+            active_context_tokens)
     telemetry = telemetry_from_explicit(
         adapter="claude", session_id=parsed.get("session_id"),
         active_context_tokens=active_context_tokens,
@@ -2813,9 +2818,13 @@ def _enrich_claude_stream_session(job, fast_first=False):
             "session_cached_input_tokens", "session_output_tokens", "session_total_tokens"):
         setattr(job, field_name, getattr(telemetry, field_name))
     metadata = getattr(job, "_registry_metadata", None) or {}
+    # The gauge may read 1M from this attempt's own usage over 200K; the compaction policy
+    # (JSON ``ctx_pct``) keeps its reported or launch-settled raw window only.
+    policy_window = (None if job._context_window_source == "claude-own-usage-over-standard"
+                     else context_window_tokens)
     policy = _claude_attempt_policy(
         metadata, runtime_version=parsed.get("runtime_version"), model_id=parsed.get("model"),
-        raw_window=context_window_tokens, max_output=parsed.get("max_output_tokens"),
+        raw_window=policy_window, max_output=parsed.get("max_output_tokens"),
         session_id=parsed.get("session_id"), attempt_id=job.attempt_id)
     job.context_policy = policy
     job.context_display_window_tokens = (
