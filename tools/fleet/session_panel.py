@@ -121,6 +121,8 @@ def route_kind(row):
     for key in ("age", "resume", "worker_unit"):
         if row.get(key):
             shown[key] = sanitize_title(str(row[key]))[:64]
+    if row.get("after"):
+        shown["after"] = sanitize_title(str(row["after"]))[:200]
     if type(row.get("legs")) is int and row["legs"] > 0:
         shown["legs"] = row["legs"]
     return shown

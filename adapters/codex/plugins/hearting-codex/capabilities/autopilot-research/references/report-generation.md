@@ -232,7 +232,7 @@ Derive rigor from `--intensity`; see [CONVENTIONS §1.1](../../../core/CONVENTIO
 | `light` | One fast review | Skip | Skip | Up to two |
 | `standard` | One deep review | One fast fact-check | Skip | Up to two |
 | `thorough` | Two deep reviews | One fast fact-check | Skip | Up to two |
-| `adversarial` | Two deep reviews plus external adversary | One fast fact-check | One skeptical N-vote verifier | Two plus one external pass |
+| `adversarial` | Two deep reviews plus external adversary | One fast fact-check | The skeptical verifiers the route's `claim-verify` node launches | Two plus one external pass |
 
 The quality reviewer owns coverage, non-fabrication, progressive disclosure, and roadmap actionability. The fact-checker compares report claims verbatim against cards. The adversarial claim verifier searches for external contradictory evidence under [claim-verify](../../../roles/units/research/claim-verify.md).
 
@@ -256,11 +256,12 @@ Loop:
     Write round_{round}_factcheck.md and return path plus one-line verdict.
 
   Adversarial claim-verify prompt:
-    For up to 25 material claims, run three skeptical voters that try to refute
-    each claim using external evidence, source quality, recency, and support.
-    Kill on at least two refutes. Require two valid votes; otherwise abstain.
-    Output every kill and abstention with confidence and contradiction URL to
-    round_{round}_claimverify.md.
+    Verify every material claim in batches of at most 25, trying to refute each
+    with external evidence, source quality, recency, and support. Your own vote
+    settles your result (a refute kills, an unjudged claim abstains); the
+    route's peer legs aggregate wider votes. Keep judged rows of an earlier
+    claimverify log and verify only the rest. Output every kill and abstention
+    with confidence and contradiction URL to round_{round}_claimverify.md.
 
   if no red findings: exit
   if quick: write unresolved.md with any residuals and exit

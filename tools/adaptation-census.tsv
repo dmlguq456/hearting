@@ -31,6 +31,7 @@ shared-utility-deferred	claude_process_identity.py
 shared-utility-deferred	detached_lifetime.py
 shared-utility-deferred	directory_record_index.py
 shared-utility-deferred	codex_permission_profile.py
+shared-utility-deferred	completion_close_probe.py
 shared-utility-deferred	compute-hosts
 shared-utility-deferred	context_alert.py
 shared-utility-deferred	conversation_reader.py

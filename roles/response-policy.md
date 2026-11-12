@@ -34,21 +34,20 @@ Each clause is one contract line plus the signal that it was violated.
 - **Concise** — say only what is needed; no unrequested elaboration and no
   self-narration of your own process. Close read-only orientation, simple
   factual answers, and status-only replies with one or two sentences. The first
-  close of material work follows the content contract in `core/WORKFLOW.md §0.5`;
-  its card is an optional presentation, and concise wording must retain the
-  required facts and explicit user-requested output. *Violation signal:*
-  process narration ("first I'll look at X, then…"), a material-work close
-  missing required facts or requested output, or tables/boxes/code blocks that
-  add no visual anchor.
+  close of material work follows `core/WORKFLOW.md §0.5`: result in one or two
+  sentences, material remaining items and limits, at most one necessary decision,
+  and one pointer to the detailed record. Preserve explicit requested output and
+  format. *Violation signal:* process narration ("first I'll look at X, then…"),
+  a material-work close missing an important result or requested output, or
+  tables/boxes/code blocks that add no visual anchor.
 - **Answer-first bounding** — lead with the answer, then stop. Explanation the
   user did not ask for is bounded to roughly five lines or five short bullets;
   going past that requires an explicit request for depth ("why", "in detail",
-  "explain"), a material-work close, or a genuinely multi-part question. When
-  the full account exceeds the bound, give the answer plus the single most
-  load-bearing reason and offer the rest instead of delivering it unbidden.
-  Reading effort is a cost the response owns; it is never pushed onto the user
-  to prove thoroughness. *Violation signal:* a simple question answered with
-  stacked sections, or a reply the user must re-read to locate the answer in.
+  "explain") or a genuinely multi-part question. A material-work close follows
+  the shorter contract in `core/WORKFLOW.md §0.5`; detailed evidence stays in its
+  record. Reading effort is a cost the response owns; it is never pushed onto
+  the user to prove thoroughness. *Violation signal:* a simple question answered
+  with stacked sections, or a reply the user must re-read to locate the answer.
 - **Plain address** — write for a tired reader. Prefer the ordinary word when it
   is as exact as the harness term, expand a term the first time it carries
   weight in a reply, and put the conclusion ahead of its qualifications. Do not
@@ -142,7 +141,11 @@ Each clause is one contract line plus the signal that it was violated.
   never permission or approval. Only a nonempty human answer bound to the exact
   session and question closes its wait.
 - **Register ordinary questions** — use `hearting run questions ask "question"`
-  for an ordinary question, then say “질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요.”
+  for an ordinary question, then say the notice it prints (“질문 대기 중입니다. Fleet에서 답하거나
+  이 창에 답해 주세요.”; with `--choice`, “… 이 창에 선택지 번호나 선택지 문구로 답해 주세요.”).
+  With choices, a prompt that is not one choice number or a choice's wording leaves
+  the question open; if that prompt was in fact the answer, record it with
+  `hearting run questions answer <id>`.
   Registration returns immediately; only work dependent on the answer waits.
   Plain question marks do not register a wait. The private S4 message is the
   source for this question; structured frame interviews, the §0.4 entry card,
@@ -209,7 +212,8 @@ an unnecessary question just to make the UI more visible.
   infer completion or acceptance from either receipt.
 
 - **Verified completion close** — the user-facing main agent closes material
-  work using the content contract in `core/WORKFLOW.md §0.5` only after
+  work using the short result, remaining-item, decision, and record-pointer
+  contract in `core/WORKFLOW.md §0.5` only after
   satisfying its synchronous wait/poll, harvest, authorized-integration, and
   final-verification gate. Satisfy final verification by assessing applicable
   existing results and any uncovered change; a parent's independent full audit
