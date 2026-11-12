@@ -128,7 +128,7 @@ from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_supervisor_terminal import (  # noqa: E402
     classify_supervisor_log, missing_result_terminal,
 )
-from dispatch_registry_cache import registry_lines, registry_view  # noqa: E402
+from dispatch_registry_cache import registry_lines, registry_snapshot, registry_view  # noqa: E402
 
 INVALID_ENVELOPE_CLASSIFIER_SOURCE = "completion-join-invalid-envelope-v1"
 OPEN_STATES = frozenset({"open", "running"})
@@ -714,9 +714,10 @@ NOTICE_LINEAGE_PREFIX = "session-notice-lineage-v1:"
 class NoticeOwnerObservation:
     """What one reconcile pass saw of the registry, for the notice TTL alone.
 
-    ``attempts`` is the set of attempt ids of a registry that was read and
-    whose every row was parsed (six fields, an attempt id); anything else --
-    an unreadable, missing, broken-link or directory path, a row that did not
+    ``attempts`` is the set of attempt ids of a registry generation the shared
+    reader called complete and whose every row was parsed (six fields, an
+    attempt id); anything else -- an unreadable, missing, broken-link or
+    directory path, a torn last line or invalid UTF-8, a row that did not
     parse -- leaves it ``None``: nothing was observed, so no owner is absent.
     The archive is read lazily, after the live file, with the same rule: the
     archive writes and syncs a row before the live file drops it, so a row is
@@ -926,8 +927,11 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     registry_complete = True
     registry_cursor = None
     try:
-        lines = registry_lines(jobs)
-        observed_lines = lines
+        snapshot = registry_snapshot(jobs)
+        lines = snapshot.view.lines
+        # The shared reader already says when a generation is not whole (a torn
+        # last line, invalid UTF-8, a malformed row): such a read observed nothing.
+        observed_lines = lines if snapshot.complete else None
     except (OSError, ValueError):
         lines = []
         observed_lines = None

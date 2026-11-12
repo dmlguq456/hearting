@@ -1550,6 +1550,29 @@ class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
                 self.assertEqual(self._state(unowned)[0], expect)
                 self.assertEqual(result["expired"], 1 if expect == "expired" else 0)
 
+    def test_a_registry_the_shared_reader_calls_incomplete_is_kept(self):
+        # Review e7 of PR #1545: a torn last line and invalid UTF-8 still come
+        # back as string lines; the shared reader marks the generation
+        # incomplete, so the owner's absence is not observed.
+        row = self.ROW.format(attempt="att-owner").encode("utf-8")
+        cases = {
+            "registry-partial-tail": row[:-len(b"owner,route_id=rt-fixture,harness=claude")],
+            "registry-invalid-utf8": row.replace(b"att-owner", b"att-\xffowner") + b"\n",
+        }
+        import dispatch_registry_cache as cache
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                for path in (self.root / "pending-delivery").glob("*/*"):
+                    path.unlink()
+                self._archive()   # a readable, empty archive keeps nothing by itself
+                self.jobs.write_bytes(data)
+                self.assertEqual(cache.registry_snapshot(self.jobs).reason, name)
+                kept = self._notice("9", age_days=8, binding=self._owner("att-owner"))
+                unowned = self._notice("0", age_days=8)
+                self.assertEqual(self._reconcile()["expired"], 0)
+                self.assertEqual(self._state(kept)[0], "pending")
+                self.assertEqual(self._state(unowned)[0], "pending")
+
     def test_a_lineage_naming_another_registry_is_kept(self):
         other = self.root.parent / "other-root" / "jobs.log"
         kept = self._notice("8", age_days=8, binding=self._owner("att-elsewhere"), jobs=other)
