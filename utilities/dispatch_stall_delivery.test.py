@@ -350,6 +350,29 @@ class StallDeliveryLoopTest(unittest.TestCase):
                     self.assertNotEqual(next_notice["delivery_id"], record["delivery_id"])
                     self.assertEqual(self.jobs.read_text(encoding="utf-8").split("\t")[1], "open")
 
+    def test_a_notice_observes_its_attempt_once_per_collection_pass(self):
+        """notice_is_current asks about the stall twice (revision, then pending). Inside a Fleet pass the
+        first observation is the pass's; outside one, and in the next pass, each question observes."""
+        from fleet import pass_scope
+        _metadata, _carrier, record, _duty = self._materialize_stall("claude")
+        env = {"XDG_STATE_HOME": str(self.root / "xdg-state"),
+               "AGENT_PEER_LEDGER_ROOT": str(self.root / "peer-state")}
+        real = supervision.update_attempt_stall_observation
+        with mock.patch.dict(os.environ, env), mock.patch.object(supervision, "_attempt_human_wait", return_value=False):
+            with mock.patch.object(supervision, "update_attempt_stall_observation", wraps=real) as observe:
+                supervision.notice_is_current(record)
+                outside = observe.call_count
+            with mock.patch.object(supervision, "update_attempt_stall_observation", wraps=real) as observe:
+                with pass_scope.collection_pass():
+                    supervision.notice_is_current(record)
+                    first_pass = observe.call_count
+                with pass_scope.collection_pass():
+                    supervision.notice_is_current(record)
+                    both_passes = observe.call_count
+        self.assertEqual(outside, 2)                 # no pass: every question observes
+        self.assertEqual(first_pass, 1)              # in a pass one observation serves both questions
+        self.assertEqual(both_passes, 2)             # the next pass observes again
+
     def test_normal_observer_reentry_discovers_sidecarless_open_attempt_once(self):
         metadata, carrier = self._row("codex")
         before = self.jobs.read_bytes()
