@@ -1623,6 +1623,62 @@ class TestStatusProjection(WorkflowFixture):
         self.assertEqual([child["run_id"] for child in payload["resource_children"]],
                          ["fixture-run"])
 
+    def test_status_shows_owner_completion_delivery_state_and_reason(self):
+        # #1410: a completion left with no recipient after a plain `/clear` is visible in status,
+        # and so is the reason its record was later settled.
+        import dispatch_pending_delivery as pending
+
+        route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
+        canonical = ROUTE.canonical_route_path(self.artifact_root, route["route_id"])
+        canonical.parent.mkdir(parents=True)
+        path = path.rename(canonical)
+        self.base.chmod(0o700)
+        jobs = self.base / "jobs.log"
+        attempt, delivery_id = "att-" + "1" * 32, "delivery-" + "2" * 32
+        jobs.write_text(
+            f"now\tdone\t1\tp\towner\tattempt_id={attempt},dispatch_depth=1,worker_type=owner,"
+            f"owner_route_id={route['route_id']},parent_sid=sess-before-clear,delivery_intent=1,"
+            f"delivery_id={delivery_id}\n", encoding="utf-8")
+        receipt = {"schema_version": 2, "state": "ready", "children": [{"attempt_id": attempt}]}
+        pending.create(
+            self.base, recipient_kind="claude-parent-runtime", recipient_key="sess-before-clear",
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[attempt], parent_attempt_id="att-" + "3" * 32, route_id=route["route_id"],
+            route_node="execute", receipt=receipt,
+            receipt_digest=pending._canonical_receipt_digest(receipt),
+            row_revisions={attempt: "revision-1"})
+
+        def status(as_json=True):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(SUP.cmd_status(SimpleNamespace(
+                    route=str(path), jobs=str(jobs), json=as_json)), 0)
+            return json.loads(out.getvalue()) if as_json else out.getvalue()
+
+        # The route is still open: the record is pending and no reason is given.
+        entry, = status()["owner_completion_delivery"]
+        self.assertEqual((entry["attempt_id"], entry["state"], entry["reason"], entry["recipient"]),
+                         (attempt, "pending", "-", "sess-bef"))
+        # Closed with the record still open: undelivered, in both outputs.
+        ROUTE.outcome_path(path).write_text(json.dumps({
+            "route_id": route["route_id"], "route_hash": route["route_hash"]}), encoding="utf-8")
+        entry, = status()["owner_completion_delivery"]
+        self.assertEqual((entry["state"], entry["reason"]), ("pending", "undelivered"))
+        self.assertIn(f"delivery   {attempt} pending undelivered", status(as_json=False))
+        # Settled by the next session's notice: the reason says so.
+        pending.expire_if_due(self.base, "sess-before-clear", delivery_id,
+                              actor="dispatch-reconcile", reason="recipient-session-replaced")
+        entry, = status()["owner_completion_delivery"]
+        self.assertEqual((entry["state"], entry["reason"]), ("expired", "recipient-session-replaced"))
+        self.assertIn(f"delivery   {attempt} expired recipient-session-replaced", status(as_json=False))
+        # A route without a registered owner completion has nothing to show.
+        jobs.write_text("", encoding="utf-8")
+        self.assertEqual(status()["owner_completion_delivery"], [])
+        text = status(as_json=False)
+        self.assertNotIn("delivery   ", text)
+        # An unreadable registry is a missing field, never a failed status.
+        self.assertIsNone(SUP.owner_completion_delivery(route, path, self.base / "no-such.log"))
+
     def test_resource_child_is_listed_even_when_the_global_index_misses_it(self):
         route, path = self.two_stage_route()
         registry = self.resource_registry(exit_code=0)

@@ -8096,7 +8096,7 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
     CARRIER = "claude-parent-runtime"
 
     def _registered_duty(self, attempt, *, status="done", pid=None, start=None,
-                         worker_type="stage"):
+                         worker_type="stage", ns=None):
         import dispatch_completion_join as join
         import dispatch_contract as D
 
@@ -8129,6 +8129,8 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             metadata["parent_runtime_pid"] = str(pid)
         if start is not None:
             metadata["parent_runtime_pid_start"] = str(start)
+        if ns is not None:
+            metadata["parent_runtime_ns"] = str(ns)
         pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
         initial_status = "open" if status == "done" else status
         jobs.write_text(
@@ -8204,6 +8206,185 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
         retained = join.pending_delivery.read(
             self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
         self.assertEqual(retained["state"], "pending")
+
+    def _close_route(self, root, route_id, route_hash):
+        import artifact_lifecycle
+
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        closed_at = "2026-10-23T00:00:00Z"
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": closed_at,
+        }), encoding="utf-8")
+        return closed_at
+
+    def _own_runtime(self):
+        import dispatch_contract_process as process
+
+        _visibility, start, _state = process._proc_observation(os.getpid())
+        return os.getpid(), start
+
+    def test_closed_route_with_live_parent_runtime_keeps_completion_undelivered(self):
+        # #1410: a plain `/clear` leaves the registered parent runtime alive under a new session
+        # id. A closed route alone does not make the still-open completion "not required".
+        import dispatch_completion_join as join
+
+        pid, start = self._own_runtime()
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-replaced", pid=pid, start=start)
+        closed_at = self._close_route(root, route_id, route_hash)
+        self._resume_with_agents(duty, store)
+        kept = store.get(duty["id"])
+        self.assertNotEqual(kept["state"], "complete")
+        self.assertEqual(kept["observation"], {
+            "reason": "completion-undelivered", "route_id": route_id, "route_hash": route_hash,
+            "closed_at": closed_at, "recipient_sid": row.metadata["parent_sid"],
+            "recipient_pid": str(pid), "recipient_pid_start": str(start)})
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual((retained["state"], retained["attempts"]), ("pending", record["attempts"]))
+        # The same observation is not written again on a later wake.
+        path = store._record_path(duty["id"])
+        before = (kept["revision"], kept["updated_at"], path.stat().st_mtime_ns)
+        self._resume_with_agents(kept, store)
+        again = store.get(duty["id"])
+        self.assertEqual((again["revision"], again["updated_at"], path.stat().st_mtime_ns), before)
+        # The session that holds the record may still receive it: its own ACK closes the duty
+        # through the ordinary settled-record branch.
+        sid = row.metadata["parent_sid"]
+        join.pending_delivery.claim(self.jobs_path.parent, sid, record["delivery_id"],
+                                    claim_owner="session-sweep:" + sid, lease_seconds=30,
+                                    require_generation_proof=False, jobs=self.jobs_path)
+        join.pending_delivery.ack(self.jobs_path.parent, sid, record["delivery_id"],
+                                  acked_by="session-sweep:" + sid)
+        self._resume_with_agents(again, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "acked", "complete"))
+
+    def test_closed_route_with_dead_parent_runtime_expires_before_completing(self):
+        import dispatch_completion_join as join
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-dead-closed", pid=999999999, start="123456789")
+        self._close_route(root, route_id, route_hash)
+        self._resume_with_agents(duty, store)
+        expired = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual((expired["state"], expired["expiry_reason"]),
+                         ("expired", "recipient-session-gone"))
+        first = store.get(duty["id"])
+        self.assertEqual(first["state"], "pending")
+        self.assertEqual(first["observation"]["reason"], "recipient-session-gone")
+        self._resume_with_agents(first, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "expired", "complete"))
+
+    def test_closed_route_with_unobservable_parent_runtime_stays_not_required(self):
+        import dispatch_completion_join as join
+
+        pid, start = self._own_runtime()
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-unresolved", pid=pid, start=start)
+        self._close_route(root, route_id, route_hash)
+        with mock.patch("dispatch_contract.process_identity_disposition", return_value="unresolved"):
+            self._resume_with_agents(duty, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "not-required", "complete"))
+        self.assertEqual(settled["observation"]["reason"], "route-closed")
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])["state"], "pending")
+
+    def test_closed_route_with_live_runtime_still_settles_a_notice_duty_not_required(self):
+        # The new "stay open" rule is for the owner's completion record. A supervision or gate
+        # notice duty (`notice_delivery_id`) has no hook that shows or expires its record, so it
+        # keeps the route-closed settlement even while the registered runtime is live.
+        import dispatch_completion_join as join
+
+        pid, start = self._own_runtime()
+        store, completion_duty, row, _record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-notice", pid=pid, start=start)
+        self._close_route(root, route_id, route_hash)
+        sid = row.metadata["parent_sid"]
+        body = {"schema_version": 1, "kind": "supervision", "owner_attempt_id": row.attempt_id,
+                "reason": "attempt-stalled"}
+        notice_id = "delivery-" + "9" * 32
+        notice = join.pending_delivery.create(
+            self.jobs_path.parent, recipient_kind=self.CARRIER, recipient_key=sid,
+            delivery_id=notice_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[row.attempt_id], parent_attempt_id=row.attempt_id, route_id=route_id,
+            route_node="execute", receipt=body,
+            receipt_digest=join.pending_delivery._canonical_receipt_digest(body),
+            row_revisions={row.attempt_id: "revision-notice"})
+        identity = {"jobs": str(self.jobs_path), "attempt_id": row.attempt_id, "harness": "claude",
+                    "session_id": sid, "server": "default"}
+        notice_duty = store.create(
+            "registered-batch-d3-notice-duty", "registered-batch", identity,
+            {"carrier": self.CARRIER, "notice_delivery_id": notice_id,
+             "notice_digest": notice["receipt_digest"]})
+        # Control: the owner's completion duty on the same row and runtime stays open.
+        self._resume_with_agents(completion_duty, store)
+        self.assertEqual(store.get(completion_duty["id"])["observation"]["reason"],
+                         "completion-undelivered")
+        current = {"owner_attempt_id": row.attempt_id, "job_registry": str(self.jobs_path),
+                   "sealed_batch_id": ""}
+        with mock.patch("dispatch_supervision.validate", return_value=current), \
+             mock.patch("dispatch_supervision.notice_is_current", return_value=True):
+            self._resume_with_agents(notice_duty, store)
+        settled = store.get(notice_duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "not-required", "complete"))
+        self.assertEqual(settled["observation"]["reason"], "route-closed")
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, sid, notice_id)["state"], "pending")
+
+    def test_clear_scenario_settles_through_notice_and_closes_the_duty(self):
+        # The whole #1410 path: the duty stays open, the next prompt of the new session in the same
+        # pane and runtime shows one notice and expires the record, and the duty then completes.
+        import dispatch_completion_join as join
+        import dispatch_contract_process as process
+        import session_tidy
+
+        pid, start = self._own_runtime()
+        ns = process.process_namespace_identity(os.getpid())
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-clear", pid=pid, start=start, ns=ns)
+        self._close_route(root, route_id, route_hash)
+        os.environ["HERDR_PANE_ID"] = "fixture:clear-scenario-" + self.tmp_root.name
+        self.addCleanup(os.environ.pop, "HERDR_PANE_ID", None)
+        original = row.metadata["parent_sid"]
+        for sid, source in ((original, "startup"), ("sess-after-clear", "clear")):
+            session_tidy.run_hook("claude", "start", sid, source=source, cwd=str(self.tmp_root),
+                                  env=dict(os.environ), render_context=False)
+        self._resume_with_agents(duty, store)
+        self.assertEqual(store.get(duty["id"])["observation"]["reason"], "completion-undelivered")
+
+        hook_spec = importlib.util.spec_from_file_location(
+            "clear_scenario_sweep_hook", Path(__file__).resolve().parents[1] / "hooks/dispatch-session-sweep.py")
+        hook = importlib.util.module_from_spec(hook_spec)
+        hook_spec.loader.exec_module(hook)
+        output = io.StringIO()
+        with mock.patch.object(hook, "resolve_agent_home", return_value=Path(__file__).resolve().parents[1]), \
+             mock.patch.object(hook, "dispatch_state_roots", return_value=(self.jobs_path.parent,)), \
+             mock.patch.object(hook, "request_obligation_reconciliation"), \
+             mock.patch.object(process, "runtime_ancestry_binding", return_value=(str(pid), str(start), ns)), \
+             mock.patch.object(sys, "stdin", io.StringIO(json.dumps({
+                 "session_id": "sess-after-clear", "hook_event_name": "UserPromptSubmit"}))), \
+             mock.patch.object(sys, "stdout", output):
+            self.assertEqual(hook.main(), 0)
+        context = json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(sum(line.startswith("previous_session_completion:") for line in context.splitlines()), 1)
+        expired = join.pending_delivery.read(
+            self.jobs_path.parent, original, record["delivery_id"])
+        self.assertEqual((expired["state"], expired["expiry_reason"]),
+                         ("expired", "recipient-session-replaced"))
+        self._resume_with_agents(store.get(duty["id"]), store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "expired", "complete"))
 
     def test_first_same_seat_adoption_keeps_closed_route_duty_pending(self):
         import artifact_lifecycle

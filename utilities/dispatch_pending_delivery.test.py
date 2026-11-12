@@ -2056,6 +2056,22 @@ class ExpiryTest(IsolatedRootMixin, unittest.TestCase):
         )
         self.assertEqual(result["state"], "pending")
 
+    def test_recipient_session_replaced_is_a_declared_expiry_reason(self):
+        # #1410: a plain `/clear` replaces the session while its runtime lives on.
+        self.assertIn("recipient-session-replaced", PD.EXPIRY_REASONS)
+        with self.assertRaises(PD.PendingDeliveryError) as ctx:
+            PD.expire_if_due(
+                self.root, "sess-expiry", self.kwargs["delivery_id"],
+                actor="dispatch-reconcile", reason="recipient-session-undeclared",
+            )
+        self.assertEqual(ctx.exception.reason, "pending-delivery-identity-conflict")
+        expired = PD.expire_if_due(
+            self.root, "sess-expiry", self.kwargs["delivery_id"],
+            actor="dispatch-reconcile", reason="recipient-session-replaced",
+        )
+        self.assertEqual(expired["state"], "expired")
+        self.assertEqual(expired["expiry_reason"], "recipient-session-replaced")
+
     def test_expired_record_is_never_deleted(self):
         PD.expire_if_due(
             self.root, "sess-expiry", self.kwargs["delivery_id"],

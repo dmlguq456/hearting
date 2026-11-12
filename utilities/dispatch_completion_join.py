@@ -613,6 +613,38 @@ def expire_pending_for_dead_recipient(
     Returns expired, pending (not positively dead), protected (successor or
     identity changed), or skipped (incomplete/unreadable).
     """
+    return _expire_exact_pending(
+        jobs, owner_metadata, record, attempt_id=attempt_id,
+        reason="recipient-session-gone", disposition_wanted="dead")
+
+
+def expire_pending_for_replaced_recipient(
+    jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
+    runtime_binding: tuple[str, str, str],
+) -> str:
+    """Expire one exact pending delivery whose session was replaced inside a live runtime.
+
+    A plain `/clear` leaves the registered parent runtime running while its
+    session id changes. The caller is the next session of that same runtime
+    (``runtime_binding`` is its `(pid, start, pid_namespace)`), and it has just
+    shown the owner's completion as a notice. The record expires only when the
+    owner row names exactly that live runtime and the original parent is still
+    the effective recipient (no handover). The same exact row and record checks
+    as the dead-recipient rule apply.
+
+    Returns expired, pending (the runtime differs or is not live), protected
+    (successor or identity changed), or skipped (incomplete/unreadable).
+    """
+    return _expire_exact_pending(
+        jobs, owner_metadata, record, attempt_id=attempt_id,
+        reason="recipient-session-replaced", disposition_wanted="live",
+        runtime_binding=tuple(runtime_binding))
+
+
+def _expire_exact_pending(
+    jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
+    reason: str, disposition_wanted: str, runtime_binding: tuple[str, str, str] | None = None,
+) -> str:
     if not isinstance(owner_metadata, dict) or not isinstance(record, dict):
         return "skipped"
     recipient_key = owner_metadata.get("parent_sid", "")
@@ -639,6 +671,11 @@ def expire_pending_for_dead_recipient(
             return "skipped"
     except (TypeError, ValueError):
         return "skipped"
+    if runtime_binding is not None and (
+            len(runtime_binding) != 3 or not all(runtime_binding)
+            or (raw_pid, pid_start, owner_metadata.get("parent_runtime_ns", "")) != tuple(
+                str(part) for part in runtime_binding)):
+        return "pending"
 
     from dispatch_seat_handover import effective_parent, lineage_effect_lock
 
@@ -664,7 +701,7 @@ def expire_pending_for_dead_recipient(
         disposition = process_identity_disposition(pid, pid_start)
     except (ValueError, OSError):
         return "pending"
-    if disposition != "dead":
+    if disposition != disposition_wanted:
         return "pending"
 
     root = jobs.resolve(strict=False).parent
@@ -698,14 +735,14 @@ def expire_pending_for_dead_recipient(
             expired = pending_delivery.expire_if_due(
                 root, recipient_key, delivery_id,
                 actor="dispatch-reconcile",
-                reason="recipient-session-gone",
+                reason=reason,
                 liveness="known",
             )
     except (JoinContractError, pending_delivery.PendingDeliveryError, OSError, ValueError,
             TypeError, RuntimeError, BlockingIOError):
         return "skipped"
     return ("expired" if expired.get("state") == "expired"
-            and expired.get("expiry_reason") == "recipient-session-gone" else "protected")
+            and expired.get("expiry_reason") == reason else "protected")
 
 
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,

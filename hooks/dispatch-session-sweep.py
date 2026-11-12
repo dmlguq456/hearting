@@ -39,6 +39,8 @@ from dispatch_session_sweep import (  # noqa: E402
     claude_hook_evidence,
     fit_inline,
     release_claims,
+    replaced_session_notices,
+    settle_replaced_session_notices,
     settle_stop_sends,
     request_obligation_reconciliation,
     sweep_deliver,
@@ -183,6 +185,23 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
     prompt = _event_name(payload) == "UserPromptSubmit"
     if rest and prompt:
         release_claims(session_id, rest, RECIPIENT_KIND, reason="claude-prompt-context-over-limit")
+    # A plain `/clear` leaves the earlier session's completion with no recipient. One notice line per
+    # such completion joins this prompt's context when it fits whole; the rest wait for the next prompt.
+    # The notices are collected whole before any line joins the context, so a failure while collecting
+    # leaves the context exactly as the ordinary delivery built it.
+    candidate_notices = []
+    if prompt:
+        try:
+            candidate_notices = list(replaced_session_notices(roots, session_id, deadline_ns=deadline_ns))
+        except Exception:  # noqa: BLE001 -- fail-open: a notice never blocks the prompt
+            candidate_notices = []
+    shown_notices = []
+    for notice in candidate_notices:
+        joined = f"{context}\n{notice.line}" if context else notice.line
+        if len(joined) > CLAUDE_CONTEXT_CHARS:
+            break
+        context = joined
+        shown_notices.append(notice)
     if not context:
         return 0
     print(
@@ -206,6 +225,11 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
             except Exception:  # noqa: BLE001
                 pass
         _note_turn_received(payload, session_id, batches)
+        if shown_notices:
+            try:
+                settle_replaced_session_notices(shown_notices)
+            except Exception:  # noqa: BLE001
+                pass
     return 0
 
 
@@ -214,14 +238,19 @@ def _note_turn_received(payload: object, session_id: str, batches) -> None:
 
     The same per-turn record Codex's prompt bridge keeps; Claude's Stop
     (``peer-message-record.py stop``) applies the one pass. Keyed by Claude's
-    ``prompt_id``; fail-soft.
+    ``prompt_id``; fail-soft. ``batches`` holds the ordinary records the prompt showed. A prompt
+    that showed none (only a previous-session notice line, which is information and owes no
+    action) records nothing, as before the notice existed: ``note_received`` would otherwise
+    start this turn's state with nothing in it.
     """
     try:
         turn = payload.get("prompt_id") if isinstance(payload, dict) else None
         if not isinstance(turn, str) or not turn or str(payload.get("agent_id") or "").strip():
             return
-        import codex_turn_carrier as carrier
         records = [record for _root, rows in batches for record in rows]
+        if not records:
+            return
+        import codex_turn_carrier as carrier
         carrier.note_received(session_id, turn, carrier.owed_items(records),
                               rendered=[str(record.get("delivery_id")) for record in records])
     except Exception:  # noqa: BLE001
