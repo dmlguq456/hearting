@@ -330,6 +330,7 @@ for(let height=10;height<=22;height++){
         # a switch) the projection carries the runtime's own turn record, the one the
         # pane reader uses; a known host state asks nothing.
         from unittest import mock
+        import human_wait_state
         import terminal_surface
         shell.registry_root()
         sid = "00000000-0000-4000-8000-000000001112"
@@ -337,7 +338,10 @@ for(let height=10;height<=22;height++){
         def turn(harness, pid, session):
             calls.append((harness, pid, session))
             return "idle"
-        with mock.patch.object(terminal_surface, "native_turn", side_effect=turn):
+        # No answer-wait producer is asked for these reads (it would publish a cache
+        # the other projection tests read).
+        quiet = mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, ""))
+        with quiet, mock.patch.object(terminal_surface, "native_turn", side_effect=turn):
             unknown = shell.panel_projection("claude", sid, native_pid=os.getpid(), native_start="0",
                                              columns=40, rows=30, state="unknown")
             known = shell.panel_projection("claude", sid, native_pid=os.getpid(), native_start="0",
@@ -347,7 +351,8 @@ for(let height=10;height<=22;height++){
         self.assertNotIn("native_turn", known)
         self.assertNotIn("native_turn", unbound)
         self.assertEqual(calls, [("claude", os.getpid(), sid)])
-        with mock.patch.object(terminal_surface, "native_turn", return_value="unknown"):
+        with mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")), \
+                mock.patch.object(terminal_surface, "native_turn", return_value="unknown"):
             self.assertNotIn("native_turn", shell.panel_projection("codex", sid, native_pid=os.getpid(),
                                                                     native_start="0", columns=40, rows=30))
 
