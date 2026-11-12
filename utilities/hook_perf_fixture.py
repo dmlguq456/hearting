@@ -328,7 +328,10 @@ def _padded_row(stamp: str, status: str, slug: str, metadata: dict, size: int) -
 
 
 def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
-                    target_attempts: list[str], ledgers: int, now: float) -> dict:
+                    target_attempts: list[str], ledgers: int, now: float,
+                    depth1_open_every: int = DEPTH1_OPEN_EVERY,
+                    min_bytes: int = MIN_JOBS_BYTES, open_rows: list[str] | None = None,
+                    history_style: str = "filler") -> dict:
     """The jobs registry: target rows, unrelated depth-1 owner rows, then filler.
 
     The depth-1 rows carry every ``REGISTRY_DEPTH1_START`` stamp of
@@ -359,7 +362,7 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
         depth1 = max(0, min(depth1, rows - written))
         holders = max(1, ledgers - 1)
         for index in range(depth1):
-            status = "open" if index % DEPTH1_OPEN_EVERY == 0 else "done"
+            status = "open" if index % depth1_open_every == 0 else "done"
             depth1_open += status == "open"
             parent = f"perf-from-{index % holders + 1:05d}"
             metadata = {
@@ -383,7 +386,15 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
             stamp = _iso(now - (300 + index if status == "open" else 86_400 + index))
             handle.write(_padded_row(stamp, status, f"perf-owner-{index:05d}", metadata, row_bytes))
             written += 1
+        # Open-route attempt rows (e2e fixtures only; the default has none).
+        for raw in open_rows or ():
+            handle.write(raw)
+            written += 1
         for index in range(max(0, rows - written)):
+            if history_style == "history":
+                handle.write(_history_row(index, row_bytes, now))
+                written += 1
+                continue
             metadata = {
                 "attempt_id": f"att-perf-filler-{index:05d}",
                 "parent_sid": f"perf-filler-{index % 97:03d}",
@@ -397,7 +408,7 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
                                      metadata, row_bytes))
             written += 1
         # Top up to the byte floor when the row target alone is smaller.
-        while handle.tell() < MIN_JOBS_BYTES:
+        while handle.tell() < min_bytes:
             metadata = {
                 "attempt_id": f"att-perf-pad-{written:05d}",
                 "parent_sid": "perf-pad",
@@ -411,6 +422,158 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
     os.chmod(jobs, 0o600)
     return {"jobs_rows": written, "jobs_bytes": jobs.stat().st_size,
             "depth1_rows": depth1, "depth1_open": depth1_open}
+
+
+HISTORY_ROWS_PER_ATTEMPT = 3  # live 2026-11-12: 7,738 rows over ~2,800 attempts
+HISTORY_EXTRA_KEYS = 110      # live attempt rows carry ~130 key=value fields
+
+
+def _history_metadata(attempt: str, index: int) -> dict:
+    metadata = {
+        "capability": "autopilot-code", "attempt_schema_version": "2",
+        "dispatch_depth": "2", "transport": "headless", "harness": "claude",
+        "parent_sid": f"perf-hist-{index % 211:04d}", "parent_harness": "claude",
+        "worker_type": "stage", "route_id": f"rt-hist-{index // 20:05d}",
+        "route_hash": "sha256:hist", "route_node": "execute", "attempt_id": attempt,
+    }
+    for key in range(HISTORY_EXTRA_KEYS):
+        metadata[f"k{key:03d}"] = f"v{(index + key) % 97}"
+    return metadata
+
+
+def _history_row(index: int, row_bytes: int, now: float) -> str:
+    """One finished-attempt row: ~3 rows per attempt (open, progress, done), rich metadata."""
+    attempt_index, phase = divmod(index, HISTORY_ROWS_PER_ATTEMPT)
+    attempt = f"att-hist-{attempt_index:06d}"
+    status = ("open", "open", "done")[phase]
+    stamp = _iso(now - 86_400 - (900_000 - index) * 5)
+    return _padded_row(stamp, status, f"hist-{attempt_index:06d}",
+                       _history_metadata(attempt, attempt_index), row_bytes)
+
+
+def e2e_session_id(index: int) -> str:
+    return f"00000000-0000-4000-8000-{index:012d}"
+
+
+def e2e_route_id(index: int) -> str:
+    return f"rt-e2e-{index:05d}"
+
+
+def e2e_route_record(index: int, *, slug: str | None = None, stage: str = "execute",
+                     state: str = "running", route_hash: str | None = None) -> dict:
+    """A small route record in the shape the route-chain reader consumes."""
+    nodes = []
+    ids = ("plan", "execute", "test", "report")
+    for node_id in ids:
+        status = "done" if ids.index(node_id) < ids.index(stage) else (
+            state if node_id == stage else "pending")
+        nodes.append({"id": node_id, "kind": "pipeline-stage", "unit": f"{node_id}/e2e",
+                      "dispatch_depth": 2, "status": status})
+    return {
+        "schema_version": 2, "capability": "autopilot-code", "capability_mode": "dev",
+        "requested_intensity": "standard", "effective_intensity": "standard",
+        "execution_topology": "staged", "slug": slug or f"e2e-route-{index:05d}",
+        "route_id": e2e_route_id(index),
+        "route_hash": route_hash or f"sha256:e2e{index:05d}",
+        "selection": {"shape": "staged", "route_origin": "compose"},
+        "nodes": nodes, "owner_attempt_id": f"att-e2e-owner-{index:05d}",
+    }
+
+
+def e2e_open_row(index: int, *, jobs_log: Path, route_file: Path, session_id: str,
+                 pid: int | None, pid_start: str | None, log_file: Path | None,
+                 row_bytes: int, now: float, stage: str = "execute") -> str:
+    metadata = {
+        "capability": "autopilot-code", "capability_mode": "dev",
+        "attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
+        "harness": "claude", "parent_sid": session_id, "parent_harness": "claude",
+        "worker_type": "owner", "route_file": str(route_file),
+        "route_id": e2e_route_id(index), "route_hash": f"sha256:e2e{index:05d}",
+        "route_node": stage, "attempt_id": f"att-e2e-owner-{index:05d}",
+        "launch_claimed": "1", "launch_started": "1",
+    }
+    if pid:
+        metadata["pid"] = str(pid)
+        metadata["pid_start"] = str(pid_start or "")
+    if log_file is not None:
+        metadata["log_file"] = str(log_file)
+    for key in range(HISTORY_EXTRA_KEYS):
+        metadata[f"k{key:03d}"] = f"v{(index + key) % 97}"
+    return _padded_row(_iso(now - 300 - index), "open", f"e2e-owner-{index:05d}",
+                       metadata, row_bytes)
+
+
+def _proc_start_ticks(pid: int) -> str | None:
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return handle.read().rsplit(b")", 1)[1].split()[19].decode()
+    except (OSError, IndexError):
+        return None
+
+
+def _write_e2e_state(fixture: dict, *, open_routes: int, live_sessions: int,
+                     worker_streams: bool, session_pids: list, jobs: Path, home: Path,
+                     work: Path, row_bytes: int, now: float) -> list[str]:
+    """Sessions, route records, ledger lines and worker streams for the e2e fixture.
+
+    Returns the open-route registry rows. The route-chain ledger lines are
+    written by the real ``route_chain.append`` so the Fleet reader meets what it
+    meets in production. Everything here lives under the fixture ``base``.
+    """
+    import sys
+    root = str(Path(__file__).resolve().parents[1])
+    for entry in (root, str(Path(root) / "tools")):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+    from fleet import route_chain
+    base = Path(fixture["base"])
+    routes_dir = _private_dir(base / "routes")
+    streams_dir = _private_dir(base / "streams")
+    sessions_dir = _private_dir(home / ".claude" / "sessions")
+    cwd = _private_dir(work / "e2e-project")
+    sessions, routes, streams, rows = [], [], [], []
+    for index in range(live_sessions):
+        pid, start = (session_pids[index] if index < len(session_pids) else (None, None))
+        sid = e2e_session_id(index)
+        record = {"pid": pid or 100000 + index, "sessionId": sid, "cwd": str(cwd),
+                  "startedAt": int((now - 3600) * 1000), "procStart": start,
+                  "kind": "interactive", "entrypoint": "cli", "status": "idle",
+                  "updatedAt": int(now * 1000), "version": "e2e"}
+        _write(sessions_dir / f"{record['pid']}.json", json.dumps(record) + "\n")
+        sessions.append({"index": index, "session_id": sid, "pid": record["pid"],
+                         "pid_start": start, "cwd": str(cwd), "harness": "claude"})
+    for index in range(open_routes):
+        owner = sessions[index % len(sessions)] if sessions else None
+        sid = owner["session_id"] if owner else e2e_session_id(index)
+        route_file = routes_dir / f"{e2e_route_id(index)}.json"
+        record = e2e_route_record(index)
+        _write(route_file, json.dumps(record, sort_keys=True) + "\n")
+        log_file = None
+        if worker_streams:
+            log_file = streams_dir / f"att-e2e-owner-{index:05d}.jsonl"
+            _write(log_file, json.dumps({
+                "type": "system", "subtype": "init", "session_id": sid}) + "\n")
+            streams.append(str(log_file))
+        with applied_env(fixture):
+            line = route_chain.build_line(record, event="start", harness="claude",
+                                          session_id=sid, route_file=route_file, now=now - 300 - index)
+            route_chain.append("claude", sid, line)
+        owner_pid, owner_start = (session_pids[live_sessions + index]
+                                  if live_sessions + index < len(session_pids) else (None, None))
+        rows.append(e2e_open_row(
+            index, jobs_log=jobs, route_file=route_file, session_id=sid,
+            pid=owner_pid, pid_start=owner_start, log_file=log_file,
+            row_bytes=row_bytes, now=now))
+        routes.append({"index": index, "route_id": e2e_route_id(index),
+                       "route_file": str(route_file), "session_id": sid,
+                       "attempt_id": f"att-e2e-owner-{index:05d}",
+                       "owner_pid": owner_pid, "owner_pid_start": owner_start,
+                       "log_file": str(log_file) if log_file else None})
+    # ``sessions`` already names the ledger directory in the base fixture.
+    fixture["e2e_sessions"] = sessions
+    fixture["e2e_routes"] = routes
+    fixture["e2e_streams"] = streams
+    return rows
 
 
 def _write_transcript(path: Path, rows: int) -> None:
@@ -428,8 +591,21 @@ def _write_transcript(path: Path, rows: int) -> None:
 
 def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DEFAULT_JOBS_ROWS,
           record_size: int = JOBS_ROW_BYTES, prime: bool = True,
-          prime_via: str = "hook", depth1_rows: int | None = None) -> dict:
-    """Build one fixed fixture tree and return its paths, env and counts."""
+          prime_via: str = "hook", depth1_rows: int | None = None,
+          open_routes: int = 0, live_sessions: int = 0, worker_streams: bool = False,
+          history_rows: int | None = None, session_pids: list | None = None,
+          depth1_open_every: int = DEPTH1_OPEN_EVERY,
+          min_jobs_bytes: int = MIN_JOBS_BYTES) -> dict:
+    """Build one fixed fixture tree and return its paths, env and counts.
+
+    The keyword-only e2e options default to the original behaviour: with none
+    of them set the tree is exactly what it was. ``history_rows`` makes the
+    unrelated registry rows finished-attempt history (about three rows per
+    attempt, rich metadata) and fixes the registry row count at that number;
+    ``open_routes``/``live_sessions``/``worker_streams`` add open route
+    attempts, native session files and worker stream logs for end-to-end
+    latency measurement.
+    """
     if scale < 1:
         raise ValueError("scale must be >= 1")
     if base is None:
@@ -499,10 +675,25 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
     # scale. Only the share of unrelated depth-1 owner rows grows with
     # ``scale`` (they replace filler rows), so a scan's per-row cost shows up
     # as growth while its read volume does not change.
+    home_work = _private_dir(base / "work")
+    open_rows: list[str] = []
+    e2e_head: dict = {}
+    if open_routes or live_sessions or worker_streams:
+        e2e_head = {"base": str(base), "env": {
+            "HOME": str(home), "XDG_STATE_HOME": str(xdg),
+            "HARNESS_STATE_ROOT": str(state), "AGENT_DISPATCH_JOBS": str(jobs),
+            "AGENT_PEER_LEDGER_ROOT": str(peer_root)}}
+        open_rows = _write_e2e_state(
+            e2e_head, open_routes=open_routes, live_sessions=live_sessions,
+            worker_streams=worker_streams, session_pids=list(session_pids or []),
+            jobs=jobs, home=home, work=home_work, row_bytes=record_size, now=now)
     registry = _write_registry(
-        jobs, rows=jobs_rows,
+        jobs, rows=history_rows if history_rows is not None else jobs_rows,
         depth1=DEFAULT_DEPTH1_ROWS * scale if depth1_rows is None else depth1_rows,
-        row_bytes=record_size, target_attempts=target_attempts, ledgers=ledgers, now=now)
+        row_bytes=record_size, target_attempts=target_attempts, ledgers=ledgers, now=now,
+        depth1_open_every=depth1_open_every, min_bytes=min_jobs_bytes,
+        open_rows=open_rows,
+        history_style="history" if history_rows is not None else "filler")
 
     transcript = home / ".claude" / "projects" / "-perf-work" / f"{TARGET_SESSION}.jsonl"
     _write_transcript(transcript, TRANSCRIPT_ROWS)
@@ -578,6 +769,9 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
         },
         "terminal_delivery_ids": terminal_delivery_ids,
     }
+    for key in ("e2e_sessions", "e2e_routes", "e2e_streams"):
+        if key in e2e_head:
+            fixture[key] = e2e_head[key]
     if prime:
         prime_inbox(fixture, via_runner=prime_via == "runner")
     # The measurement tool reads this to replay the fixture's exact environment.

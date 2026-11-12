@@ -1,0 +1,1 @@
+../../../../tools/e2e_latency/opencode_chain.mjs
