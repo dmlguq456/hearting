@@ -7496,7 +7496,7 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
     CARRIER = "claude-parent-runtime"
 
     def _registered_duty(self, attempt, *, status="done", pid=None, start=None,
-                         worker_type="stage"):
+                         worker_type="stage", ns=None):
         import dispatch_completion_join as join
         import dispatch_contract as D
 
@@ -7529,6 +7529,8 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             metadata["parent_runtime_pid"] = str(pid)
         if start is not None:
             metadata["parent_runtime_pid_start"] = str(start)
+        if ns is not None:
+            metadata["parent_runtime_ns"] = ns
         pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
         initial_status = "open" if status == "done" else status
         jobs.write_text(
@@ -7578,6 +7580,68 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
         self.assertEqual(retained["state"], "expired")
         self.assertEqual(retained["expiry_reason"], "recipient-session-gone")
+
+    def _retained_rewake(self):
+        spec = importlib.util.spec_from_file_location(
+            "_retained_rewake", peer_steward._UTILITIES_DIR.parent / "hooks/dispatch-owner-rewake.py")
+        module = sys.modules.get(spec.name)
+        if module is None:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+        return module
+
+    def test_a_holder_armed_again_in_a_reopened_runtime_keeps_the_retained_wake_waiting(self):
+        # BC-IDLE-WAKE-MISSED-1112: the launching Claude process is gone, but the
+        # same conversation reopened in a new process armed a live waiter; the
+        # retained wake must not take its record (a plain terminal has no path in).
+        import dispatch_completion_join as join
+
+        rewake = self._retained_rewake()
+        live = list(rewake._process_identity(os.getpid()))
+        # The launching runtime is provably gone (same pid namespace, no such pid).
+        store, duty, row, record, _root, _route_id, _route_hash = self._registered_duty(
+            "att-d3-reopened", pid=999999999, start="123456789", ns=live[2])
+        arm = rewake.arm_path(self.jobs_path, "att-d3-reopened")
+        arm.parent.mkdir(parents=True, exist_ok=True)
+        base = {"schema": 1, "attempt_id": "att-d3-reopened", "session_id": row.metadata["parent_sid"],
+                "holder": live, "state": "waiting", "arms": 2, "gate_delivery_id": None}
+        arm.write_text(json.dumps({**base, "runtime": live}), encoding="utf-8")
+
+        def read():
+            return join.pending_delivery.read(
+                self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+
+        with mock.patch.object(join, "reconcile_pending_delivery",
+                               side_effect=AssertionError("global sweep")):
+            self._resume_with_agents(duty, store)
+            self.assertEqual((read()["state"], read()["claim_owner"]), ("pending", None))
+            self.assertEqual(store.get(duty["id"])["state"], "pending")
+            # An arm that names no runtime belongs to the row's launch-time runtime, gone here.
+            arm.write_text(json.dumps(base), encoding="utf-8")
+            self._resume_with_agents(store.get(duty["id"]), store)
+        self.assertEqual(read()["state"], "expired")
+
+    def test_an_arm_its_live_holder_lapsed_does_not_keep_the_retained_wake_waiting(self):
+        # RV-PR1565 required 2 (1b): one boundary wait holding several rows lapses the
+        # rows it did not wake for and lives on carrying another; it watches them no more.
+        import dispatch_completion_join as join
+
+        rewake = self._retained_rewake()
+        live = list(rewake._process_identity(os.getpid()))
+        store, duty, row, record, _root, _route_id, _route_hash = self._registered_duty(
+            "att-d3-lapsed", pid=999999999, start="123456789", ns=live[2])
+        arm = rewake.arm_path(self.jobs_path, "att-d3-lapsed")
+        arm.parent.mkdir(parents=True, exist_ok=True)
+        arm.write_text(json.dumps({"schema": 1, "attempt_id": "att-d3-lapsed",
+                                   "session_id": row.metadata["parent_sid"], "holder": live,
+                                   "runtime": live, "state": "lapsed", "arms": 2,
+                                   "gate_delivery_id": None}), encoding="utf-8")
+        with mock.patch.object(join, "reconcile_pending_delivery",
+                               side_effect=AssertionError("global sweep")):
+            self._resume_with_agents(duty, store)
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])["state"], "expired")
 
     def test_closed_route_without_runtime_pid_is_not_required(self):
         import dispatch_completion_join as join

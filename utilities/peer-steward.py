@@ -5600,10 +5600,15 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                 "reason": ("received-delivery-ack-pending" if bound_received else
                            "received-delivery-identity-unresolved")})
             return
-    parent = [row.metadata.get(key, "") for key in
-              ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")]
-    # A native hook belongs to its original runtime. A live holder cannot wake
-    # a replacement process after that runtime died. Unknown identity stays protected.
+    # A native hook belongs to the runtime that started it: the arm names it,
+    # and an older arm without that field belongs to the row's launch-time
+    # runtime. A live holder cannot wake a replacement process after its own
+    # runtime died; a holder armed again inside a resumed runtime can, so the
+    # retained wake waits for it. Unknown identity stays protected.
+    armed_runtime = (arm or {}).get("runtime")
+    parent = (list(armed_runtime) if isinstance(armed_runtime, list) and len(armed_runtime) == 3
+              else [row.metadata.get(key, "") for key in
+                    ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")])
     # The duty follows confirmed handover; the signed queue stays under the
     # registered parent, even when its current recipient is a successor.
     recipient_sid, recipient_harness = _effective(row.metadata, jobs, read_context=read_context)
@@ -5754,7 +5759,9 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
             return
     if transferred_is_current and transferred and transferred.get("state") in {"queued", "unverified"}:
         return  # The existing message courier owns this accepted/ambiguous send.
-    if not notice_id and holder and rewake._holder_alive(holder) and rewake._holder_alive(parent):
+    # A `lapsed` arm is not watched, even while its holder carries another row's wake.
+    if (not notice_id and holder and (arm or {}).get("state") != "lapsed"
+            and rewake._holder_alive(holder) and rewake._holder_alive(parent)):
         return
     old_server = _HERDR_SESSION
     globals()["_HERDR_SESSION"] = None if identity["server"] == "default" else identity["server"]
