@@ -57,15 +57,20 @@ transition, with no timer. While a newer host is installed and not yet taken,
 the tidy-notice slot shows one lowest-priority line (`session_shell.upgrade_pending`),
 never over another notice; beside the native area the panel's thin rule that parts the
 session's content from the head goes with it, and nothing else on the screen changes.
+An open route or message page has no notice slot: the same words stand in its head,
+one row under the page counter, until the page closes.
 The host asks the PTY owner for a successor only at a safe moment: idle, an
 empty composer, no open form or answerable question, no route page, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
 action worker. Keys that reached native since the last submitted turn leave the
 composer unproven (an erased draft, a form answered with Enter, history-scroll
 keys, a turn stopped without a stop callback), so the switch then follows the
-next submitted turn. A window with no selected session (OpenCode on its home route) has
+next submitted turn. A start or selection (a resume picker's Enter, `/clear`,
+OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
+delivery readiness does; keys after that Enter still wait for the next submitted turn.
+A window with no selected session (OpenCode on its home route) has
 no such proof and waits for one; OpenCode's plugin reload (deselect, then select of the
-same session, no keys between) keeps that frontier. The owner starts the successor from the same installed path. The old host stops
+same session, no keys between) keeps an open route page. The owner starts the successor from the same installed path. The old host stops
 reading, withdraws its binding and writes a private seed: the native screen
 with every line above the viewport, cursor, modes, scroll region and display
 state. The successor restores it, takes the same `control.sock` path by an
@@ -75,7 +80,11 @@ conversation, the draft and pending deliveries stay; success shows nothing. A
 failure or timeout before the commit resumes the old host as it was (its
 display is painted whole once, and the successor's stderr never reaches the
 terminal), and keys
-typed meanwhile wait in the terminal buffer for whichever host reads next.
+typed meanwhile wait in the terminal buffer for whichever host reads next. An old
+host that loses its own display while frozen falls to the plain relay and ends its
+side of the hand-over channel, so the owner drops the successor before it reads;
+a `retire` that was already sent still ends that host. The PTY and the keys never
+have two readers.
 After three failures toward one installed file the window stops asking and
 keeps the waiting line. When the seed cannot carry the lines above the viewport
 (over 8 MiB, or their serialization fails), the switch still happens with the
@@ -92,12 +101,16 @@ rather than a signal from the installer, so no install path has to find live
 windows; where the link's directory cannot be watched, only the idle check
 remains.
 A session reopened under the same native session ID (Claude `--resume`, Codex
-`resume`, OpenCode `-s`) takes back its own routes. The existing resume-notice
-step also starts, once per resume, a detached `utilities/session_route_resume.py`
-that runs `capability-route.py start --route` for every route this session's
-route-chain ledger names whose file exists and has no outcome, oldest first: the
-start a person used to run by hand, so a live owner is reused, a dead one is
-replaced, and the existing gates still refuse. Each result is kept under the
+`resume`, OpenCode `-s`) takes back the routes it left running. Its SessionStart
+hook (never the steward's periodic resume pass) starts, once per resume, a detached
+`utilities/session_route_resume.py` that runs `capability-route.py start --route`
+for every route this session's route-chain ledger names whose file exists, has no
+outcome, and has work this session launched still open in the dispatch registry:
+the latest owner attempt is `open`/`running` (a route without an owner: any of its
+attempts). Oldest first, this is the start a person used to run by hand, so a live
+owner is reused, a dead one is replaced, and the existing gates still refuse. A
+route that was only composed, or whose owner ended (`done`, `killed`, `cancelled`),
+waits for a person's own `start`. Each result is kept under the
 session state's `route-resume/`. Only the last started route's receipt reaches
 the next prompt; the others show in the panel and Fleet. Resume aliases are a
 display join and are not read. An automatic display switch keeps the native

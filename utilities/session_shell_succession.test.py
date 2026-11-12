@@ -113,6 +113,10 @@ if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
   net.Server.prototype.listen=function(target,...rest){
    if(typeof target==='string'&&target.endsWith('.next')&&mode().split(',').includes('listen-error')){setImmediate(()=>this.emit('error',Object.assign(new Error('injected listen'),{code:'EACCES'})));return this;}
    return listen.call(this,target,...rest);};
+  // The old host loses its display just after its seed went out (an uncaught exception while frozen).
+  const renameSeed=fs.renameSync;
+  fs.renameSync=function(a,b){const r=renameSeed.call(this,a,b);
+   if(/succession-\d+\.json$/.test(String(b))&&mode().split(',').includes('old-throw-after-seed'))setImmediate(()=>{throw Error('injected old host failure');});return r;};
  }
  const rename=fs.renameSync;
  fs.renameSync=function(a,b){const r=rename.call(this,a,b);
@@ -641,6 +645,14 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.point('rel-b'); window.pump(2.0)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])
+        # The page has no notice slot: its head says a new release waits, one row under the page counter.
+        wait = re.compile(r'New release waiting|새 판 대기')
+        end = time.monotonic()+8
+        while time.monotonic() < end and not any(wait.search(row) for row in window.screen()['lines']):
+            window.pump(.3)
+        rows = window.screen()['lines']
+        counter = [index for index, row in enumerate(rows) if 'PgUp/PgDn' in row]
+        self.assertEqual([index for index, row in enumerate(rows) if wait.search(row)], [counter[0]+1], rows)
         window.type(b'\x1b')  # closes the page; nothing else happens
         self.switched(window, first['host_pid'])
         self.assert_keeps_native(window, native)
@@ -770,6 +782,30 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.type('relay\r'); window.until('DONE_relay', 15)
         self.assertEqual((window.root/'native-read').read_bytes().count(b'relay\r'), 1)
         self.assertTrue(process_row(first['host_pid'])['live'])
+        self.assertEqual(process_row(native['pid']), native)
+
+    def test_an_old_host_that_loses_its_display_after_its_seed_drops_the_successor(self):
+        """Review F1: the frozen old host falls to the plain relay after its seed went out. It tells the
+        owner, so the successor is dropped before it reads: the PTY and the keys have one reader."""
+        window = self.window()
+        first = window.wait_binding(); self.settle(window)
+        native = process_row(window.native_pid())
+        window.fault('old-throw-after-seed')
+        window.point('rel-b')
+        end = time.monotonic()+15
+        while not window.seeds() and time.monotonic() < end:
+            window.pump(.05)
+        self.assertTrue(window.seeds(), 'the old host never wrote its seed')
+        successor = int(window.spawns()[0].split()[0])
+        end = time.monotonic()+5
+        while process_row(successor)['live'] and time.monotonic() < end:
+            window.pump(.05)
+        self.assertFalse(process_row(successor)['live'], 'the successor went on beside the relay')
+        window.pump(3.0)  # past the 2 s a retired host is given
+        self.assertTrue(process_row(first['host_pid'])['live'])
+        self.assertEqual(len(window.spawns()), 1)  # a relay never asks again
+        window.type('relay\r'); window.until('DONE_relay', 15)
+        self.assertEqual((window.root/'native-read').read_bytes().count(b'relay\r'), 1)
         self.assertEqual(process_row(native['pid']), native)
 
     def test_keys_typed_while_the_successor_is_still_switching_all_arrive(self):

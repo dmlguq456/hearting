@@ -945,6 +945,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
         panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
         panel["tidy_upgrade"] = upgrade_note == "pending"
+    # An open route page has no notice slot: it shows the same words on its own page row.
+    panel["upgrade_waiting"] = ui_text("session_shell.upgrade_pending") if upgrade_note == "pending" else ""
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]

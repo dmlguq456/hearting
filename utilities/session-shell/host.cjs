@@ -677,7 +677,9 @@ function rawRelay() {
   if(relay||ended)return;
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
   // A display lost while frozen for hand-over reads again: the relay needs the PTY and the keyboard.
-  if(succeeding){succeeding=false;try{child.resume();process.stdin.resume();}catch{}}
+  // Ending this side of the hand-over channel first tells the owner (`eof`), so it drops the successor
+  // before that one is told to read; a `retire` already sent still arrives and ends this host.
+  if(succeeding){succeeding=false;try{successionChannel?.end();}catch{}try{child.resume();process.stdin.resume();}catch{}}
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
@@ -942,7 +944,6 @@ async function lifecycle(req) {
       ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];
     const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
-    submitted=again?unselected.submitted:-1;
     // The same session selected again with no key between keeps its open read page as well.
     routeDetail=again?unselected.routeDetail:false;routePage=again?unselected.routePage:0;routeScroll=again?unselected.routeScroll:0;unselected=null;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
@@ -960,7 +961,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    unselected={sid:req.sid,submitted,nativeEpoch,routeDetail,routePage,routeScroll};
+    unselected={sid:req.sid,nativeEpoch,routeDetail,routePage,routeScroll};
     selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
@@ -1191,7 +1192,7 @@ function buildSeed() {
     // The host's own turn observation (what the panel shows as the state), so the successor shows the same
     // state at its first paint and goes on reading the native's turn record; its marks keep their order.
     turn:{nativeTurn,turnMark,eventMark,clock,seenTurn,turnRecord,formSeen},
-    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{})},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
+    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
     terminal:captured.terminal,scrollback:captured.scrollback,
     outer:{cols,rows,last:Array.from(last,value=>value??null),nativeLast:Array.from(nativeLast,value=>value??null),footerLast}};
   let json=JSON.stringify(seed);
@@ -1270,7 +1271,8 @@ function forward(entry) {
   });
 }
 async function retireHost() {
-  if(!succeeding)return;
+  // The owner retires only a host it froze; one that fell to the relay meanwhile leaves as well.
+  if(!succeeding&&!relay)return;
   await new Promise(resolve=>setImmediate(resolve));
   await Promise.all(bound.splice(0).map(forward));
   try{backend?.stdin.end();}catch{}

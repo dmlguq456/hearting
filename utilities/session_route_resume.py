@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""A reopened session takes over the routes it left open, with no hand command.
+"""A reopened session takes over the routes it left running, with no hand command.
 
-`session_resume.register` calls `request` once per resume generation. A detached
-`run` then does what a person did by hand for each still-open route of this
-session: `capability-route.py start --route <file>`. Every existing gate (verify,
-route-chain record, start receipt, human-gate) runs unchanged; nothing here
-decides ownership. Failures are recorded for diagnosis and never reach the
-resumed session or the existing notice flow.
+The SessionStart hook of a reopened session (`session_tidy.run_hook`, `start` with
+source `resume`) calls `reopened` once; the steward's periodic pass does not. A
+detached `run` then does what a person did by hand for each route this session
+launched whose work is still running: `capability-route.py start --route <file>`.
+A route that was only composed, or whose owner already ended, stays for a person's
+own `start`. Every existing gate (verify, route-chain record, start receipt,
+human-gate) runs unchanged; nothing here decides ownership. Failures are recorded
+for diagnosis and never reach the resumed session or the existing notice flow.
 """
 from __future__ import annotations
 
@@ -43,15 +45,58 @@ def _tools():
         sys.path.insert(0, tools)
 
 
-def open_routes(harness, sid):
-    """Unique route files of this session's ledger, oldest first, that have no outcome yet.
+LIVE = frozenset({"open", "running"})
+
+
+def _identity(route_file):
+    try:
+        value = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) and isinstance(value.get("route_id"), str) else None
+
+
+def _running_here(view, sid, route):
+    """This session launched an attempt of `route`, and that work has not ended.
+
+    The latest owner attempt decides for a route that has one (`done`, `killed` or
+    `cancelled` ends it); a route without an owner counts while any attempt runs."""
+    rid, digest = route["route_id"], route.get("route_hash")
+    latest = {}
+    for record in view.route_alias_candidates(rid):
+        meta = record.completion_metadata()
+        if rid not in (meta.get("route_id"), meta.get("owner_route_id")):
+            continue
+        if digest and digest not in (meta.get("route_hash"), meta.get("owner_route_hash")):
+            continue
+        latest[meta.get("attempt_id") or record.order] = (record.order, record.status, meta)
+    rows = sorted(latest.values(), key=lambda row: row[0])
+    if not any(meta.get("parent_sid") == sid for _order, _status, meta in rows):
+        return False
+    owners = [status for _order, status, meta in rows if meta.get("worker_type") == "owner"]
+    if owners:
+        return owners[-1] in LIVE
+    return any(status in LIVE for _order, status, _meta in rows)
+
+
+def open_routes(harness, sid, *, jobs=None):
+    """Route files of this session's ledger, oldest first, whose launched work still runs.
 
     Every ledger line counts whatever its event: a route this session composed and
     started has only the compose line (`_record_route_chain` skips a repeated start).
+    The dispatch registry then keeps only a route with no outcome yet that this
+    session launched and whose latest owner (or, without one, any attempt) is
+    `open`/`running`. A composed-only route has no attempt and is left alone.
     """
     _tools()
     from fleet import route_chain
     import capability_route_close
+    import session_notice
+    from dispatch_registry_cache import registry_view
+    registry = session_notice._registry(jobs)
+    if not registry.is_file():
+        return []
+    view = registry_view(registry)
     session = types.SimpleNamespace(harness=harness, session_id=sid, session_aliases=[])
     seen, found = set(), []
     for line in route_chain.session_lines(session, full_history=True):
@@ -59,7 +104,10 @@ def open_routes(harness, sid):
         if not isinstance(path, str) or path in seen:
             continue
         seen.add(path)
-        if Path(path).is_file() and not capability_route_close.outcome_path(path).is_file():
+        if not Path(path).is_file() or capability_route_close.outcome_path(path).is_file():
+            continue
+        route = _identity(path)
+        if route is not None and _running_here(view, sid, route):
             found.append(path)
     return found
 
@@ -79,10 +127,28 @@ def child_env(harness, sid, env=None):
     return child
 
 
+def reopened(harness, sid, *, env=None):
+    """The SessionStart(resume) hook's one call. Never raises.
+
+    `env` is the hook's marker environment: a dispatched worker takes over nothing.
+    """
+    try:
+        import session_tidy as tidy
+        import session_resume
+        if tidy.is_worker(env) or harness not in HARNESSES or not isinstance(sid, str) or not sid:
+            return False
+        resume = session_resume._resume(harness, sid)
+        if resume is None:
+            return False
+        return request(harness, sid, resume=resume, env=env)
+    except Exception:
+        return False
+
+
 def request(harness, sid, *, resume, env=None):
     """Spawn the detached takeover once per resume generation. Never raises.
 
-    `env` is the caller's marker environment, already checked by `register`
+    `env` is the caller's marker environment, already checked by `reopened`
     (`tidy.is_worker`); the child starts from this process's own environment.
     """
     try:
@@ -145,7 +211,7 @@ def _start_one(route_file):
 
 
 def run(harness, sid):
-    """Start each open route, oldest first, so the newest receipt is saved last."""
+    """Start each running route, oldest first, so the newest receipt is saved last."""
     routes = open_routes(harness, sid)
     if not routes:
         return []

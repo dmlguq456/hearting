@@ -388,13 +388,6 @@ def register(harness, sid, *, source, env=None, jobs=None):
     resume = _resume(harness, sid)
     if resume is None:
         return None
-    # The reopened session takes over its own open routes whatever the native state:
-    # before the notice filter, once per resume generation (its own ledger dedupe).
-    try:
-        import session_route_resume
-        session_route_resume.request(harness, sid, resume=resume, env=env)
-    except Exception:
-        pass
     state = observation(harness, sid, resume)
     if state not in ATTENTION and state != "waiting-background":
         return None

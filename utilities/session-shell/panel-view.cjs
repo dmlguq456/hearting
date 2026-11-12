@@ -299,13 +299,17 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const raw=(Array.isArray(attempts)?attempts:[]).find(a=>a&&a.route===route.id&&Array.isArray(a.lines)&&a.lines.length);
       if(raw){wrap([text('owner raw','loc_repo'),text(' · attempt-view '+(raw.att||'·'))],Infinity);for(const value of raw.lines)wrap(line(value),Infinity);}
     }
-    const detail=content.splice(start),budget=Math.max(1,height-3-start);
+    // A newer release waiting for this page to close says so in the page's head, one row under the
+    // page counter (the panel's notice slot is not drawn while the page is open).
+    const waiting=typeof model.upgrade_waiting==='string'?clean(model.upgrade_waiting).trim():'';
+    const detail=content.splice(start),budget=Math.max(1,height-3-start-(waiting?1:0));
     routePages=Math.max(1,Math.ceil(detail.length/budget));
     const page=Math.max(0,Math.min(routePages-1,routePage));
     const counter=` ‹ ${page+1}/${routePages} › `;
     hits.push({row:content.length+1,left:2,right:4,action:'route-prev'});
     hits.push({row:content.length+1,left:5,right:2+measure(counter),action:'route-next'});
     add(line(counter+' · PgUp/PgDn'));
+    if(waiting)add(line(waiting));
     for(const row of detail.slice(page*budget,(page+1)*budget))add(row);
   }else{
     // Spec C3 (2026-11-11): session, model/context, the answer wait and the task

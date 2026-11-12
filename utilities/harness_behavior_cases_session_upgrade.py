@@ -16,7 +16,8 @@ model and private tmux server.  Nothing here touches the operator's HOME.
 ``session-upgrade-page``       a panel read page is open (``not-produced`` without a route row)
 ``session-upgrade-delivery``   a peer delivery is in flight (``not-produced`` without a reference)
 ``session-upgrade-fail``       the successor throws: the old host stays, nothing is lost
-``route-resume``               reopen the same sid: its open routes start, a waiting notice arrives
+``route-resume``               reopen the same sid: of three solo routes (never started / owner running /
+                               owner ended) only the running one starts; a waiting notice arrives
 
 The real TUIs run only under ``autopilot-lab:host-run``; ``harness_behavior_cases_session_upgrade.test.py``
 checks the registration, argv, digest and table pieces offline.
@@ -256,7 +257,7 @@ COLUMNS = ("native_before", "native_after", "host_before", "host_after", "deferr
            "waiting_note", "held_screen_same", "switched", "switched_after_release", "switched_after_next_prompt",
            "screen_same", "cursor_same", "key_reached",
            "l1_before", "l1_after", "l3_before", "l3_after", "scrollback_line", "fail_injection",
-           "routes", "notice", "delivery_arrivals")
+           "routes", "running_start", "notice", "delivery_arrivals")
 
 
 def render_table(rows: list[dict]) -> str:
@@ -903,11 +904,31 @@ print(json.dumps({"route_id": receipt.get("route_id"), "saved_at": data.get("sav
 """
 
 
+def owner_row(route: dict, route_file: str, sid: str, harness: str, status: str, child=None) -> str:
+    """One six-field registry row for a synthetic owner attempt of `route` that this session launched.
+
+    The shape of ``harness_behavior_cases_a``'s registered child: an attempt row, with a real
+    ``sleep`` child's pid when the owner is to read as running. No owner model is ever started."""
+    node = next((n.get("id") for n in route.get("nodes") or () if n.get("worker_type") == "owner"), "one-shot")
+    meta = ["attempt_schema_version=2", f"attempt_id=att-fx{hashlib.sha256(route['route_id'].encode()).hexdigest()[:24]}",
+            f"capability={route.get('capability') or 'autopilot-code'}", "dispatch_depth=1", "worker_type=owner",
+            "transport=headless", "execution_surface=registered-headless", "registered_worker=1",
+            f"harness={harness}", f"parent_sid={sid}", f"route_file={route_file}", f"route_id={route['route_id']}",
+            f"route_hash={route.get('route_hash') or ''}", f"route_node={node}", "launch_claimed=1", "launch_started=1"]
+    if child:
+        meta += [f"pid={child['pid']}", f"pgid={child['pid']}", f"pid_start={child['start']}",
+                 f"pid_ns={child['ns']}", f"pid_observer_ns={child['ns']}"]
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return "\t".join([stamp, status, "/fx", "/fx", "fx-resume-owner", ",".join(meta)])
+
+
 class RouteResumeScenario(Scenario):
     name = "route-resume"
-    summary = ("Reopen a session by its id: its open routes start by themselves, oldest first, "
-               "and a notice left while it was closed arrives without a prompt.")
-    ROUTES = (("closed", True), ("older", False), ("later", False))
+    summary = ("Reopen a session by its id: of three solo routes it composed, only the one whose owner "
+               "still runs starts again (never-started and ended ones stay), and a notice left while it "
+               "was closed arrives without a prompt.")
+    # label, the status of this session's owner attempt in the registry (None: composed, never started)
+    ROUTES = (("never-started", None), ("running", "open"), ("ended", "done"))
 
     def prepare(self, run):
         from harness_behavior_cases_c import hide_herdr
@@ -922,17 +943,14 @@ class RouteResumeScenario(Scenario):
         env["TMPDIR"] = env["TMP"] = env["TEMP"] = str(tmp)
         git = ["git", "-c", "user.name=fx", "-c", "user.email=fx@example.invalid"]
         self.repos = []
-        for index, (label, _close) in enumerate(self.ROUTES, 1):
+        for index, (label, _status) in enumerate(self.ROUTES, 1):
             repo = root / f"other{index}"
             subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
             (repo / "lib.txt").write_text("one\n", encoding="utf-8")
             subprocess.run(git + ["-C", str(repo), "add", "lib.txt"], check=True, env=env)
             subprocess.run(git + ["-C", str(repo), "commit", "-qm", "base"], check=True, env=env)
-            (repo / "lib.txt").write_text("two\n", encoding="utf-8")
             self.repos.append(repo)
-        (root / "fx-evidence.txt").write_text("fixture evidence\n", encoding="utf-8")
-        (root / "fx-summary.md").write_text("fixture summary: one-line change\n", encoding="utf-8")
-        self.root, self.state = root, {"current": 0, "routes": {}}
+        self.root, self.state, self.children = root, {"current": 0, "routes": {}}, []
 
     def make_tui(self, run, root, argv):
         base = _base(run)
@@ -942,16 +960,11 @@ class RouteResumeScenario(Scenario):
                                run.home.workspace)
 
     def script(self, run):
-        def commit(k):
-            repo = shlex.quote(str(self.repos[k - 1]))
-            return (f"git -C {repo} -c user.name=fx -c user.email=fx@example.invalid commit "
-                    f"-qam 'fx change {k}' && echo FX-COMMIT-{k}-OK")
-
         def compose(k):
             cr = shlex.quote(str(Path(_base(run).SOURCE) / "utilities/capability-route.py")) \
                 if run is not None else "capability-route.py"
             repo = shlex.quote(str(self.repos[k - 1]))
-            return (f"python3 {cr} compose --shape direct --campaign-key other{k} --slug commit "
+            return (f"python3 {cr} compose --shape solo --campaign-key other{k} --slug resume{k} "
                     f"--cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
 
         def answer(record, earlier):
@@ -960,42 +973,26 @@ class RouteResumeScenario(Scenario):
                 found = re.search(r"SCENARIO-RR (\d)", text)
                 if found:
                     self.state["current"] = int(found.group(1))
-                    if self.state["current"] > 1:
-                        # The first refusal names the compose command; once the session has a
-                        # route the gate lets later projects through, so route each one by hand.
-                        return Reply(shell=compose(self.state["current"]))
-                    return Reply(shell=commit(self.state["current"]))
+                    return Reply(shell=compose(self.state["current"]))
                 return Reply(f"route resume idle {record['main_index']}")
             k = self.state["current"]
             if not k:
                 return Reply("nothing to do")
-            if "has no route for" in text:
-                plain = text.replace("\\n", "\n").replace('\\"', '"')
-                lines = [ln.strip() for ln in plain.splitlines()
-                         if "capability-route.py" in ln and " compose" in ln]
-                if lines:
-                    cmd = lines[0][lines[0].index("python3"):] if "python3" in lines[0] else lines[0]
-                    return Reply(shell=cmd + f" 2>&1; echo FX-COMPOSE-{k}-RC=$?")
-                return Reply("refused without a command")
             if f"FX-COMPOSE-{k}-RC=" in text:
                 found = re.findall(r'"route_id": "(rt-[A-Za-z0-9_-]+)"', text) or \
                     re.findall(r"\b(rt-[0-9a-f]{8,})\b", text)
                 if found:
                     self.state["routes"][k] = found[0]
-                return Reply(shell=commit(k))
-            if f"FX-COMMIT-{k}-OK" in text and self.ROUTES[k - 1][1] and \
-                    f"FX-FINISH-{k}" not in text:
-                route = self.state["routes"].get(k, "")
-                cr = shlex.quote(str(Path(_base(run).SOURCE) / "utilities/capability-route.py"))
-                arg = f"--route {shlex.quote(route)} " if route else ""
-                return Reply(shell=(f"python3 {cr} finish {arg}--evidence "
-                                    f"{shlex.quote(str(self.root / 'fx-evidence.txt'))} --summary-file "
-                                    f"{shlex.quote(str(self.root / 'fx-summary.md'))} 2>&1; "
-                                    f"echo FX-FINISH-{k}-RC=$?"))
+                return Reply(f"route {k} composed")
             return Reply(f"route {k} done")
         return answer
 
     def cleanup(self, run):
+        for child in getattr(self, "children", ()):
+            with contextlib.suppress(OSError):
+                child.kill()
+            with contextlib.suppress(Exception):
+                child.wait(5)
         # The reopened pane's tmux server is not the one the base run holds.
         with contextlib.suppress(Exception):
             run.tui.stop()
@@ -1008,12 +1005,36 @@ class RouteResumeScenario(Scenario):
                 return json.loads(path.read_text(encoding="utf-8"))
         return {}
 
+    def _route_file(self, run, route_id):
+        for path in sorted(self.root.rglob(f"routes/{route_id}.json")):
+            return path
+        return None
+
+    def _owner(self, run, sid, route_id, status) -> dict:
+        """This session's owner attempt for `route_id` in the fixture registry; a live child when open."""
+        path = self._route_file(run, route_id)
+        if path is None:
+            return {"error": "route file not found"}
+        route = json.loads(path.read_text(encoding="utf-8"))
+        child = None
+        if status == "open":
+            proc = subprocess.Popen(["sleep", "900"], start_new_session=True, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.children.append(proc)
+            stat = Path(f"/proc/{proc.pid}/stat").read_text()
+            child = {"pid": proc.pid, "start": stat.rsplit(")", 1)[1].split()[19],
+                     "ns": os.readlink(f"/proc/{proc.pid}/ns/pid")}
+        jobs = Path(run.home.env["AGENT_DISPATCH_JOBS"])
+        with jobs.open("a", encoding="utf-8") as handle:
+            handle.write(owner_row(route, str(path), sid, run.harness, status, child) + "\n")
+        return {"status": status, "pid": child and child["pid"]}
+
     def drive(self, run):
         base = _base(run)
         ev = run.evidence.setdefault("upgrade", {})
         for k in range(1, len(self.ROUTES) + 1):
             before = len(run.main_requests())
-            run.tui.type_text(f"SCENARIO-RR {k} commit in project {k}")
+            run.tui.type_text(f"SCENARIO-RR {k} compose a solo route for project {k}")
             if not run.wait_requests(before + 1, 60):
                 run.note(f"no model request for project {k}")
                 return "inconclusive"
@@ -1023,10 +1044,12 @@ class RouteResumeScenario(Scenario):
             run.note("session id not found")
             return "inconclusive"
         routes = self.state["routes"]
-        ev["created_routes"] = {str(k): v for k, v in routes.items()}
+        ev["created_routes"] = {label: routes.get(k) for k, (label, _s) in enumerate(self.ROUTES, 1)}
         if len(routes) < len(self.ROUTES):
             run.note("not every project got a route; the live conditions were not built")
             return "inconclusive"
+        ev["owners"] = {label: self._owner(run, sid, routes[k], status)
+                        for k, (label, status) in enumerate(self.ROUTES, 1) if status}
         receipt_before = fixture_python(run, RECEIPT_CODE, {"harness": run.harness, "sid": sid})
         # Close the window: the native ends with the tmux server.
         run.tui.stop()
@@ -1042,23 +1065,20 @@ class RouteResumeScenario(Scenario):
         run.tui.start()
         wait_for(lambda: run.tui.alive() and run._ready(run.tui.screen()), 90)
         run._dismiss_startup(run.tui)
-        wanted = [routes[2], routes[3]]
-        diag = wait_for(lambda: (lambda d: d if len(d.get("routes") or []) >= 2 else None)(
-            self._diagnostic(run, sid)), 120) or self._diagnostic(run, sid)
+        diag = wait_for(lambda: self._diagnostic(run, sid) or None, 150) or self._diagnostic(run, sid)
         results = diag.get("routes") or []
         ids = [r.get("route_id") for r in results]
-        rcs = {r.get("route_id"): r.get("returncode") for r in results}
-        ev["routes"] = {"order": ids, "rc": rcs}
-        ev["closed_route_absent"] = routes[1] not in ids
-        ev["open_in_order"] = ids[-2:] == wanted if len(ids) >= 2 else False
+        by_label = {label: routes[k] for k, (label, _s) in enumerate(self.ROUTES, 1)}
+        ev["routes"] = {label: ("started" if rid in ids else "left") for label, rid in by_label.items()}
+        running = next((r for r in results if r.get("route_id") == by_label["running"]), {})
+        ev["running_start"] = {"returncode": running.get("returncode"), "state": running.get("state"),
+                               "reason": (running.get("reason") or "")[-200:]}
         receipt_after = fixture_python(run, RECEIPT_CODE, {"harness": run.harness, "sid": sid})
         ev["receipt"] = {"before": receipt_before.get("route_id"), "after": receipt_after.get("route_id")}
-        ev["receipt_last"] = receipt_after.get("route_id") == routes[3]
         arrived = wait_for(lambda: any("SCENARIO-RR-NOTICE" in r["text"]
                                        for r in run.main_requests()), 60)
         ev["notice"] = "arrived without a prompt" if arrived else "not-delivered"
-        ok = (ev["open_in_order"] and ev["closed_route_absent"]
-              and all(rcs.get(r) == 0 for r in wanted) and ev["receipt_last"] and arrived)
+        ok = ids == [by_label["running"]] and bool(arrived)
         if not ok:
             # The base run reads the screen of the first window; this is the reopened one.
             with contextlib.suppress(Exception):

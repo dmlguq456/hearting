@@ -277,7 +277,7 @@ class ScriptTest(unittest.TestCase):
         self.assertTrue(scenario.gate.is_set())
         self.assertEqual(answer(self.record(su.KEY_TEXT), []).text, "key noted")
 
-    def test_route_resume_script_composes_then_commits_and_finishes_only_the_closed_one(self):
+    def test_route_resume_script_composes_one_solo_route_per_project(self):
         scenario = su.RouteResumeScenario()
         scenario.repos = [Path("/fx/o1"), Path("/fx/o2"), Path("/fx/o3")]
         scenario.state = {"current": 0, "routes": {}}
@@ -285,23 +285,31 @@ class ScriptTest(unittest.TestCase):
         run = type("R", (), {})()
         run.__class__.__module__ = "harness_behavior_scenarios"
         answer = scenario.script(run)
-        first = answer(self.record("SCENARIO-RR 1 commit"), [])
-        self.assertIn("FX-COMMIT-1-OK", first.shell)
-        refusal = ("has no route for /fx/o1\n  python3 /x/capability-route.py compose --shape s\n")
-        compose = answer(self.record(refusal, "tool"), [])
-        self.assertIn("FX-COMPOSE-1-RC", compose.shell)
-        scenario_text = 'FX-COMPOSE-1-RC=0 "route_id": "rt-abc12345"'
-        commit = answer(self.record(scenario_text, "tool"), [])
-        self.assertIn("FX-COMMIT-1-OK", commit.shell)
+        first = answer(self.record("SCENARIO-RR 1 compose"), [])
+        self.assertIn("compose --shape solo --campaign-key other1", first.shell)
+        self.assertIn("FX-COMPOSE-1-RC", first.shell)
+        self.assertNotIn("--start", first.shell)
+        composed = answer(self.record('FX-COMPOSE-1-RC=0 "route_id": "rt-abc12345"', "tool"), [])
+        self.assertEqual(composed.text, "route 1 composed")
         self.assertEqual(scenario.state["routes"][1], "rt-abc12345")
-        finish = answer(self.record("FX-COMMIT-1-OK", "tool"), [])
-        self.assertIn("FX-FINISH-1-RC", finish.shell)
-        second = answer(self.record("SCENARIO-RR 2 commit"), [])
-        self.assertIn("compose --shape direct --campaign-key other2", second.shell)
-        self.assertIn("FX-COMPOSE-2-RC", second.shell)
-        answer(self.record('FX-COMPOSE-2-RC=0 "route_id": "rt-def67890"', "tool"), [])
-        open_route = answer(self.record("FX-COMMIT-2-OK", "tool"), [])
-        self.assertEqual(open_route.text, "route 2 done")
+        second = answer(self.record("SCENARIO-RR 2 compose"), [])
+        self.assertIn("--cwd /fx/o2", second.shell)
+        self.assertEqual([label for label, _status in scenario.ROUTES], ["never-started", "running", "ended"])
+
+    def test_owner_row_is_the_registry_shape_the_route_resume_filter_reads(self):
+        import dispatch_registry_cache as cache
+        route = {"route_id": "rt-fx1", "route_hash": "sha256:fx1", "capability": "autopilot-code",
+                 "nodes": [{"id": "one-shot", "worker_type": "owner"}]}
+        child = {"pid": 4242, "start": "99", "ns": "pid:[1]"}
+        fields = su.owner_row(route, "/fx/routes/rt-fx1.json", "sid-1", "claude", "open", child).split("\t")
+        self.assertEqual(len(fields), 6)
+        self.assertEqual(fields[1], "open")
+        meta = dict(cache._parse_completion(fields[5]))
+        self.assertEqual((meta["route_id"], meta["route_hash"], meta["parent_sid"], meta["worker_type"],
+                          meta["route_node"], meta["pid"], meta["attempt_schema_version"]),
+                         ("rt-fx1", "sha256:fx1", "sid-1", "owner", "one-shot", "4242", "2"))
+        ended = dict(cache._parse_completion(su.owner_row(route, "/r", "sid-1", "codex", "done").split("\t")[5]))
+        self.assertNotIn("pid", ended)
 
 
 class VerdictTest(unittest.TestCase):
