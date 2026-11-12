@@ -1012,16 +1012,16 @@ class ClaudeSidechainTest(unittest.TestCase):
             self.assertEqual(len(subs), 1)
             self.assertEqual(subs[0].agent_type, "explore")
 
-    def test_cache_keyed_on_mtime_and_size(self):
+    def test_cache_keyed_on_exact_stat_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "t.jsonl")
             _write_transcript(path, [_tool_use_line("t1", "explore")])
             first = claude._tail_subagents(path)
             self.assertEqual(len(first), 1)
             st = os.stat(path)
-            claude._SUBAGENT_CACHE[path] = (st.st_mtime, st.st_size, [])   # poison the cache
+            claude._SUBAGENT_CACHE[path] = (claude._file_identity(st), [])   # poison the cache
             cached = claude._tail_subagents(path)
-            self.assertEqual(cached, [], "재읽기 없이 (mtime,size) 캐시를 그대로 반환해야 함")
+            self.assertEqual(cached, [], "재읽기 없이 같은 신원의 캐시를 그대로 반환해야 함")
 
 
 class NoRegressionTest(unittest.TestCase):

@@ -81,6 +81,11 @@ _LIFECYCLE_CURSOR_STAMP = "cursor-v1"
 _LIFECYCLE_CURSOR_LIMITS = [_LIFECYCLE_BOUNDARY_BYTES, _LIFECYCLE_HEAD_BYTES]
 _LIFECYCLE_DISK_MARK = {}               # path -> offset last written to (or resumed from) the disk cache
 _LIFECYCLE_DISK_RESUMES = 0             # cursors a new process continued from the disk cache
+# How each observation was served: "hits" = the saved cursor already covered the file,
+# "append_reads" = only the bytes after the saved offset were read, "full_reads" = the
+# file was read from byte zero. Read-only counters (the equivalence test checks that an
+# incremental path was really taken); they never feed a decision.
+_LIFECYCLE_STATS = {"hits": 0, "append_reads": 0, "full_reads": 0}
 _EXACT_LIFECYCLE_DISK_HITS = 0
 _TURN_CONTEXT_CACHE_MAX = 512
 _TURN_CONTEXT_CACHE = OrderedDict()
@@ -691,6 +696,7 @@ def _latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
             cached = None
         elif before.st_size == cached.offset:
             _LIFECYCLE_CACHE.move_to_end(canonical_path)
+            _LIFECYCLE_STATS["hits"] += 1
             return cached.lifecycle
     else:
         cached = _load_disk_lifecycle_cursor(canonical_path, before)
@@ -711,6 +717,7 @@ def _latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
         except (OSError, ValueError):
             updated = None
         else:
+            _LIFECYCLE_STATS["append_reads"] += 1
             if resumed:
                 _LIFECYCLE_DISK_RESUMES += 1
     if updated is None:
@@ -724,6 +731,7 @@ def _latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
             _LIFECYCLE_CACHE.pop(canonical_path, None)
             return None
         initialized = True
+        _LIFECYCLE_STATS["full_reads"] += 1
 
     _LIFECYCLE_CACHE[canonical_path] = updated
     _LIFECYCLE_CACHE.move_to_end(canonical_path)

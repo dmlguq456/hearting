@@ -20,7 +20,7 @@ The comparison is exact except for the small allow-list ``ALLOWED``.  There is
 no timing assertion in this file; speed is measured by
 ``tools/measure_e2e_latency.py`` and is never a gate here.
 
-A failure message starts with the event id (``E01``..``E27``) and the JSON
+A failure message starts with the event id (``E01``..``E29``) and the JSON
 pointer of the first difference, so a falsifier run can tell which event caught
 it.  Weakening a scenario or widening ``ALLOWED`` to make a stale value pass is
 the thing this file exists to prevent.
@@ -676,6 +676,45 @@ def _codex_disk_resumes() -> int:
     return int(getattr(module, "_LIFECYCLE_DISK_RESUMES", 0)) if module is not None else 0
 
 
+REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuses",
+                     "full_metadata_parses", "invalidations", "prefix_reuses",
+                     "prefix_segments_reused", "line_parse_reuses")
+CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
+
+
+def counters() -> dict:
+    """What the warm process's incremental paths have done so far (monotone totals).
+
+    Registry reader counters come from ``metrics_snapshot()``; ``codex_*`` from the
+    lifecycle cursor, summed over both import spellings of the collector."""
+    import dispatch_registry_cache as registry_cache
+    snapshot = registry_cache.metrics_snapshot()
+    out = {name: int(snapshot[name]) for name in REGISTRY_COUNTERS}
+    for name in CODEX_COUNTERS:
+        out["codex_" + name] = 0
+    for pkg in FLEET_PACKAGES:
+        module = sys.modules.get(pkg + ".collectors.codex")
+        stats = getattr(module, "_LIFECYCLE_STATS", None) or {}
+        for name in CODEX_COUNTERS:
+            out["codex_" + name] += int(stats.get(name, 0))
+    return out
+
+
+class ClockedTime:
+    """``time`` as the registry reader sees it: its 30 s observation gap follows the
+    injected clock, so whether the warm side may take a retained-descriptor shortcut
+    never depends on how slow this machine is (E12 moves the clock past the gap)."""
+
+    def __init__(self, clock: FixtureClock):
+        self._clock = clock
+
+    def monotonic(self) -> float:
+        return self._clock.now
+
+    def __getattr__(self, name):
+        return getattr(_time, name)
+
+
 def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict | None = None,
             cache_home=None) -> dict:
     """O1..O4 for the fixture as it is now: a pure function of fixture and clock.
@@ -696,7 +735,8 @@ def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict 
         chunk = WARM_CHUNK_LINES if mode == "warm" else registry_cache._PARSE_CHUNK_LINES
         resumed_before = _codex_disk_resumes()
         try:
-            with mock.patch.object(registry_cache, "_PARSE_CHUNK_LINES", chunk):
+            with mock.patch.object(registry_cache, "_PARSE_CHUNK_LINES", chunk), \
+                    mock.patch.object(registry_cache, "time", ClockedTime(clock)):
                 observed = {
                     "o1_registry": observe_registry(fx, capacity, clock),
                     "o2_streams": observe_streams(fx),
@@ -989,12 +1029,36 @@ class Step:
     """One mutation. ``resume`` (E24..E27): also start a new process that finds the
     Codex cursor the warm process left on disk; ``"used"`` means it must have
     continued from it, ``"rejected"`` that it must have read the file from the start.
-    ``prefix`` (E21..E23): what the warm registry reader must have reused, so a
-    replacement event cannot pass without exercising the reuse it is about."""
+    ``expect``: which counters of the warm process must grow (``"+"``) or stay
+    still (``"0"``) during the step's warm pass, so an event cannot pass without
+    taking the incremental path it is about; see ``counters`` and ``UNCHANGED_PASS``."""
 
-    def __init__(self, label, mutate, *, clock_only=False, resume=None, prefix=None):
+    def __init__(self, label, mutate, *, clock_only=False, resume=None, expect=None):
         self.label, self.mutate, self.clock_only = label, mutate, clock_only
-        self.resume, self.prefix = resume, prefix
+        self.resume, self.expect = resume, dict(expect or {})
+
+
+# An unchanged pass after any step: every reader answers from what it kept.
+UNCHANGED_PASS = {
+    "full_metadata_parses": "0", "prefix_reuses": "0", "append_reuses": "0",
+    "line_parse_reuses": "0", "invalidations": "0", "content_reads": "0",
+    "codex_append_reads": "0", "codex_full_reads": "0", "codex_hits": "+",
+}
+
+# What the registry reader must have done for the registry event of a step.  The
+# fixture's warm side cuts the registry into 3-row segments, so "leading rows kept"
+# is observable as reused segments.
+REG_STILL = {"full_metadata_parses": "0", "prefix_reuses": "0", "append_reuses": "0",
+             "invalidations": "0", "content_reads": "0", "cache_hits": "+"}
+REG_APPEND = {"append_reuses": "+", "full_metadata_parses": "0", "prefix_reuses": "0"}
+# Leading bytes identical: their segments are proven by digest and kept.  An append
+# is a different path, so ``append_reuses`` must not be what moved.
+REG_KEEP_PREFIX = {"prefix_reuses": "+", "append_reuses": "0", "full_metadata_parses": "0"}
+# Nothing at the front survives (or the cache was dropped): every row is parsed again.
+REG_REPARSE = {"full_metadata_parses": "+", "prefix_reuses": "0", "append_reuses": "0"}
+CODEX_STILL = {"codex_append_reads": "0", "codex_full_reads": "0", "codex_hits": "+"}
+CODEX_APPEND = {"codex_append_reads": "+", "codex_full_reads": "0"}
+CODEX_REREAD = {"codex_full_reads": "+", "codex_append_reads": "0"}
 
 
 def _new_open_row(fx: Fixture, name: str, **extra) -> str:
@@ -1239,47 +1303,113 @@ def e27(run):  # truncated in place and written again, longer than the saved off
     run.fx.write_stream(run.fx.codex_rollout(), rows, run.clock.now - 1)
 
 
+def e28a(run):  # a closed-route sidecar the registry row names (as E17b, other time)
+    record = route_record(run.fx.root, 0)
+    write_json(run.fx.outcome_path(0), {
+        "route_id": record["route_id"], "route_hash": record["route_hash"],
+        "terminal_gate_proven": True, "closed_at": iso(CLOCK_BASE - 2000)}, CLOCK_BASE - 1)
+
+
+def e28b(run):  # the same sidecar, one digit of closed_at changed, size and mtime_ns restored
+    path = run.fx.outcome_path(0)
+    before = path.stat()
+    raw = path.read_bytes()
+    stamp = iso(CLOCK_BASE - 2000).encode()
+    other = iso(CLOCK_BASE - 2000 + 600).encode()
+    assert stamp in raw and len(stamp) == len(other) and stamp != other
+    path.write_bytes(raw.replace(stamp, other, 1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
+def e29(run):  # the claude transcript's agent type changes, size and mtime_ns restored
+    path = run.fx.claude_stream()
+    before = path.stat()
+    raw = path.read_bytes()
+    assert b"reviewer" in raw
+    path.write_bytes(raw.replace(b"reviewer", b"reviewex", 1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
 EVENTS = [
-    ("E01", "registry append: a new attempt row", [Step("append", e01)]),
-    ("E02", "the same attempt appended several times", [Step("append x3", e02)]),
-    ("E03", "whole registry replaced by the real writer, lineage recorded", [Step("replace", e03)]),
-    ("E04", "whole registry replaced, lineage sidecar missing", [Step("replace", e04)]),
-    ("E05", "whole registry replaced, lineage lies about the preserved prefix", [Step("replace", e05)]),
+    ("E01", "registry append: a new attempt row",
+     [Step("append", e01, expect={**REG_APPEND, **CODEX_STILL})]),
+    ("E02", "the same attempt appended several times",
+     [Step("append x3", e02, expect={**REG_APPEND, **CODEX_STILL})]),
+    ("E03", "whole registry replaced by the real writer, lineage recorded",
+     [Step("replace", e03, expect={**REG_KEEP_PREFIX, "line_parse_reuses": "+", **CODEX_STILL})]),
+    ("E04", "whole registry replaced, lineage sidecar missing",
+     [Step("replace", e04, expect={**REG_KEEP_PREFIX, "line_parse_reuses": "+", **CODEX_STILL})]),
+    ("E05", "whole registry replaced, lineage lies about the preserved prefix",
+     [Step("replace", e05, expect={**REG_KEEP_PREFIX, "line_parse_reuses": "+", **CODEX_STILL})]),
     ("E06", "an unfinished last line, completed on the next step",
-     [Step("torn append", e06a), Step("completed", e06b)]),
-    ("E07", "content changed with size and mtime_ns restored", [Step("same stat", e07)]),
-    ("E08", "truncate: the registry shrinks", [Step("truncate", e08)]),
-    ("E09", "rotation: renamed away, a new file under the name", [Step("rotate", e09)]),
+     [Step("torn append", e06a, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("completed", e06b, expect={**REG_APPEND, **CODEX_STILL})]),
+    # E07: the changed bytes sit in the first segment, so no segment may be kept.
+    ("E07", "content changed with size and mtime_ns restored",
+     [Step("same stat", e07, expect={**REG_REPARSE, **CODEX_STILL})]),
+    # E08/E09: the leading rows are byte-identical, so a digest-proven prefix is kept;
+    # what must not happen is that a shrink or a new file is treated as an append.
+    ("E08", "truncate: the registry shrinks",
+     [Step("truncate", e08, expect={**REG_KEEP_PREFIX, **CODEX_STILL})]),
+    ("E09", "rotation: renamed away, a new file under the name",
+     [Step("rotate", e09, expect={**REG_KEEP_PREFIX, **CODEX_STILL})]),
     ("E10", "deleted, then recreated",
-     [Step("deleted", e10a), Step("recreated", e10b)]),
+     [Step("deleted", e10a, expect={"invalidations": "+", "append_reuses": "0",
+                                    "prefix_reuses": "0", **CODEX_STILL}),
+      Step("recreated", e10b, expect={**REG_REPARSE, **CODEX_STILL})]),
     ("E12", "the clock only moves (+120 s, +61 s)",
-     [Step("+120 s", e12a, clock_only=True), Step("+61 s", e12b, clock_only=True)]),
+     [Step("+120 s", e12a, clock_only=True, expect={**REG_STILL, **CODEX_STILL}),
+      Step("+61 s", e12b, clock_only=True, expect={**REG_STILL, **CODEX_STILL})]),
     ("E13", "liveness only: not alive, then another process start",
-     [Step("not alive", e13a), Step("pid reused", e13b)]),
-    ("E14", "a different set of sessions", [Step("replace sessions", e14)]),
-    ("E15", "another route generation: the route file is rewritten", [Step("rewrite route", e15)]),
+     [Step("not alive", e13a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("pid reused", e13b, expect={**REG_STILL, **CODEX_STILL})]),
+    ("E14", "a different set of sessions",
+     [Step("replace sessions", e14, expect={**REG_STILL, "codex_append_reads": "0",
+                                            "codex_full_reads": "0"})]),
+    ("E15", "another route generation: the route file is rewritten",
+     [Step("rewrite route", e15, expect={**REG_STILL, **CODEX_STILL})]),
     ("E16", "a worker stream grows (an open tool call, then closed)",
-     [Step("open tool", e16a), Step("closed", e16b)]),
+     [Step("open tool", e16a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("closed", e16b, expect={**REG_STILL, **CODEX_STILL})]),
     ("E17", "only the route .outcome.json sidecar changes",
-     [Step("chain sidecar", e17a), Step("registry sidecar", e17b)]),
-    ("E18", "only the file a session-chain node names changes", [Step("chain node file", e18)]),
-    ("E19", "external write into a directory the warm pass created", [Step("demand", e19)]),
+     [Step("chain sidecar", e17a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("registry sidecar", e17b, expect={**REG_STILL, **CODEX_STILL})]),
+    ("E18", "only the file a session-chain node names changes",
+     [Step("chain node file", e18, expect={**REG_STILL, **CODEX_STILL})]),
+    ("E19", "external write into a directory the warm pass created",
+     [Step("demand", e19, expect={**REG_STILL, **CODEX_STILL})]),
     ("E20", "codex lifecycle log: append, truncate, rotate",
-     [Step("append", e20a), Step("truncate", e20b), Step("rotate", e20c)]),
+     [Step("append", e20a, expect={**REG_STILL, **CODEX_APPEND}),
+      Step("truncate", e20b, expect={**REG_STILL, **CODEX_REREAD}),
+      Step("rotate", e20c, expect={**REG_STILL, **CODEX_REREAD})]),
     ("E21", "whole registry replaced, leading rows kept, a middle row changed",
-     [Step("replace", e21, prefix="reuse")]),
+     [Step("replace", e21, expect={**REG_KEEP_PREFIX, **CODEX_STILL})]),
+    # E22: nothing at the front survives, but lines that only moved keep their parse.
     ("E22", "whole registry replaced, the first rows removed (order shifts)",
-     [Step("replace", e22, prefix="lines")]),
+     [Step("replace", e22, expect={**REG_REPARSE, "line_parse_reuses": "+", **CODEX_STILL})]),
     ("E23", "whole registry replaced, a middle row deleted and a row added",
-     [Step("replace", e23, prefix="reuse")]),
+     [Step("replace", e23, expect={**REG_KEEP_PREFIX, "line_parse_reuses": "+", **CODEX_STILL})]),
     ("E24", "a new process continues the codex cursor from disk, the log grew",
-     [Step("append after saved cursor", e24, resume="used")]),
+     [Step("append after saved cursor", e24, resume="used",
+           expect={**REG_STILL, **CODEX_APPEND})]),
     ("E25", "a new process finds the bytes before the saved offset changed",
-     [Step("boundary rewritten, then appended", e25, resume="rejected")]),
+     [Step("boundary rewritten, then appended", e25, resume="rejected",
+           expect={**REG_STILL, **CODEX_REREAD})]),
     ("E26", "a new process finds the log rotated (new inode)",
-     [Step("rotate", e26, resume="rejected")]),
+     [Step("rotate", e26, resume="rejected", expect={**REG_STILL, **CODEX_REREAD})]),
     ("E27", "a new process finds the log truncated and written longer",
-     [Step("truncate and rewrite", e27, resume="rejected")]),
+     [Step("truncate and rewrite", e27, resume="rejected",
+           expect={**REG_STILL, **CODEX_REREAD})]),
+    # E28/E29: caches keyed by (mtime, size) only; the content changes behind the key.
+    ("E28", "a route .outcome.json sidecar rewritten with the same size and mtime",
+     [Step("sidecar written", e28a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("same size and mtime, other content", e28b, expect={**REG_STILL, **CODEX_STILL})]),
+    ("E29", "a claude transcript rewritten with the same size and mtime",
+     [Step("same stat", e29, expect={**REG_STILL, **CODEX_STILL})]),
 ]
 
 
@@ -1354,7 +1484,6 @@ class IncrementalEquivalenceTests(unittest.TestCase):
         return run, fresh
 
     def check_step(self, run: Run, step: Step, before: dict) -> dict:
-        import dispatch_registry_cache as registry_cache
         step.mutate(run)
         fresh = run.fresh()
         if step.resume:
@@ -1371,25 +1500,48 @@ class IncrementalEquivalenceTests(unittest.TestCase):
                 self.assertEqual(
                     used, 0, "%s: the new process continued from a disk cursor that no longer "
                     "matched the file" % run.eid)
-        metrics = registry_cache.metrics_snapshot()
+        counted = counters()
         warm = run.warm()
         problem = run.mismatch(step.label, warm, fresh)
         self.assertIsNone(problem, problem)
-        if step.prefix:
-            after = registry_cache.metrics_snapshot()
-            key = "prefix_reuses" if step.prefix == "reuse" else "line_parse_reuses"
-            self.assertGreater(
-                after[key], metrics[key], "%s: the warm reader did not reuse anything across the "
-                "replacement (%s), so this event tested nothing" % (run.eid, key))
+        self.check_counters(run, step.label, counted, step.expect)
         # Self-check B: an event that cannot move the answer tests nothing.
         self.assertTrue(
             changed(before, fresh),
-            "%s step '%s' did not change the fresh output: the event tests nothing" % (
+            "%s step '%s' did not change the fresh output: the event tested nothing" % (
                 run.eid, step.label))
+        counted = counters()
         again = run.warm()
         problem = run.mismatch(step.label + " (unchanged pass)", again, fresh)
         self.assertIsNone(problem, problem)
+        still = dict(UNCHANGED_PASS)
+        if run.fx.jobs.exists():
+            still["cache_hits"] = "+"
+        self.check_counters(run, step.label + " (unchanged pass)", counted, still)
         return fresh
+
+    def check_counters(self, run: Run, label: str, before: dict, expect: dict) -> None:
+        """The incremental path the event is about was really taken (or really not).
+
+        ``expect`` maps a counter name to ``"+"`` (it must have grown during this warm
+        pass) or ``"0"`` (it must not have moved).  A counter that is not listed is not
+        judged, so an event names exactly what it is evidence of."""
+        after = counters()
+        delta = {name: after[name] - before[name] for name in after}
+        if os.environ.get("EQUIV_SHOW_COUNTERS"):
+            sys.stderr.write("COUNTERS %s %s %s\n" % (run.eid, label, _canonical(
+                {k: v for k, v in delta.items() if v})))
+        for name, want in sorted(expect.items()):
+            got = delta[name]
+            if want == "+":
+                ok, text = got > 0, "grow"
+            else:
+                ok, text = got == 0, "stay still"
+            self.assertTrue(
+                ok, "%s step '%s': counter %s must %s in the warm pass but moved by %d "
+                "(all moved: %s) - the warm side did not take the path this event is about" % (
+                    run.eid, label, name, text, got,
+                    _canonical({k: v for k, v in delta.items() if v})))
 
     def run_event(self, eid: str, steps: list[Step]) -> None:
         run, fresh = self.prime(eid)
