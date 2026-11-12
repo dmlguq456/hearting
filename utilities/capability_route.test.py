@@ -7666,6 +7666,45 @@ class ComposeRouteTest(TestRoute):
    self.assertEqual(json.loads(out.getvalue())["state"],"inline")
    self.assertEqual(err.getvalue().count(exact),1)
 
+ def test_non_git_explain_reaches_the_same_refusal_as_start(self):
+  # BC-SMALL-SURFACE-1112 #1: the same arguments get the same judgment; explain is a preview of start.
+  route=self.compose()
+  self.assertTrue(R._isolates_worktree(route))
+  with tempfile.TemporaryDirectory(prefix="compose-explain-non-git-") as tmp, \
+       mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT),"AGENT_DISPATCH_ATTEMPT_ID":"",
+                                   "AGENT_DISPATCH_DEPTH":"0"}):
+   root=Path(tmp); cwd=root/"project"; cwd.mkdir()
+   prompt=root/"task.md"; prompt.write_text("Fix one line")
+   base=[str(P),"compose","--shape","staged","--graph","execute,test,report","--slug","explain-start",
+         "--unassigned","--cwd",str(cwd),"--artifact-root",str(root/"artifacts"),"--prompt-file",str(prompt)]
+   messages=[]
+   for action in ("--explain","--start"):
+    with self.subTest(action=action), mock.patch.object(sys,"argv",base+[action]), \
+         mock.patch.object(R,"compose_route",return_value=route), \
+         contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+     with self.assertRaises(ValueError) as raised:
+      R.main()
+     messages.append(str(raised.exception))
+  self.assertEqual(messages[0],messages[1])
+  self.assertIn("source-mutating worker route",messages[0])
+  self.assertIn("--shape direct",messages[0])
+
+ def test_mini_owner_refusal_names_the_profiles_that_can_run(self):
+  # BC-SMALL-SURFACE-1112 #2: help and refusal say when mini applies and what to give instead.
+  registry=R.TOPO.load_registry()
+  with self.assertRaises(ValueError) as raised:
+   R._resolve_owner_profile("quick",registry,explicit_profile="mini")
+  message=str(raised.exception)
+  self.assertTrue(message.startswith("owner-profile-ineligible-for-registered-dispatch: mini"),message)
+  self.assertIn("--profile deep|balanced-deep|balanced|light",message)
+  self.assertIn("--shape direct",message)
+  self.assertEqual(R._resolve_owner_profile("direct",registry,explicit_profile="mini")[0],None)
+  out=io.StringIO()
+  with mock.patch.object(sys,"argv",[str(P),"compose","--help"]),contextlib.redirect_stdout(out), \
+       self.assertRaises(SystemExit):
+   R.main()
+  self.assertIn("mini only with --shape direct"," ".join(out.getvalue().split()))
+
  def test_non_git_classified_research_modes_compile_and_seal_as_direct(self):
   with tempfile.TemporaryDirectory() as tmp:
    for mode in ("academic","market","technology"):

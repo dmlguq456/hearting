@@ -1431,6 +1431,9 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
             owner = W.contract_read_prompt(SimpleNamespace(worker_type="owner", assigned_contract="autopilot-code"), harness)
             owners.append(owner)
             self.assertIn("capabilities/autopilot-code/references/owner-execution.md", owner)
+            # An owner in another project must not miss its contract on a relative path.
+            path = Path(owner.split("`")[1])
+            self.assertTrue(path.is_absolute() and path.is_file(), owner)
             self.assertIn("Route steps and the latest receipt print", owner)
             self.assertIn("never assemble a runtime command yourself", owner)
             self.assertNotIn("SKILL.md", owner)
