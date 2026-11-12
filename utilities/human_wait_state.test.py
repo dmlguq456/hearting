@@ -3493,6 +3493,49 @@ class MessageCompletionTests(unittest.TestCase):
             completion = self.source(signal)["completion"]
             self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
 
+    def _prompt_with_unread_claims(self, signal, text):
+        import errno
+        from unittest import mock
+        read, pending, faults = Path.read_text, state.message_answer_pending, []
+
+        def fail_once(path, *args, **kwargs):
+            if path == state._cache_path() and not faults:
+                faults.append(path)
+                raise OSError(errno.EIO, "claim record unreadable")
+            return read(path, *args, **kwargs)
+
+        def unread(value):
+            # Only the claim check that decides this prompt meets the one failed read.
+            with mock.patch.object(Path, "read_text", fail_once):
+                return pending(value)
+        with mock.patch.object(state, "message_answer_pending", side_effect=unread):
+            context = self.prompt(signal, text)
+        self.assertEqual(len(faults), 1)
+        return context
+
+    def test_unreadable_claim_record_never_lets_a_prompt_take_the_panel_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            for choices, text in ((["A", "B", "C"], "1"), ([], "ordinary unrelated prompt")):
+                with self.subTest(harness=harness, choices=bool(choices)):
+                    signal, envelope = self.f.ask(harness, text="unread " + harness, choices=choices)
+                    self.f.submit(envelope, "B")
+                    wire, _ref, recipient = self.f.prepare(signal)
+                    self._prompt_with_unread_claims(signal, text)
+                    self.assertEqual(self.source(signal)["lifecycle"], "open")
+                    self.assertEqual(state._selected_entry(envelope)["response"],
+                                     {"answers": {"message-response": ["B"]}})
+                    self.f.peer.receive_peer_message(wire, recipient)
+                    completion = self.source(signal)["completion"]
+                    self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+
+    def test_unreadable_claim_record_only_defers_a_prompt_until_the_next_readable_one(self):
+        signal, _ = self.f.ask(text="free unread")
+        self._prompt_with_unread_claims(signal, "first answer")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.prompt(signal, "second answer")
+        completion = self.source(signal)["completion"]
+        self.assertEqual((completion["actor"], completion["answer"]), ("direct", "second answer"))
+
     def test_question_without_choices_still_takes_the_next_prompt(self):
         for harness in ("claude", "codex", "opencode"):
             signal, _ = self.f.ask(harness, text="free " + harness)

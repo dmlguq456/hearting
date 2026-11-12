@@ -821,8 +821,15 @@ def message_prompt_answer(signal, text):
 
 
 def message_answer_pending(signal):
-    """A Fleet/CLI answer is claimed and not yet settled; it, not a later prompt, is the answer."""
-    entry = _selected_entry(_message_envelope(signal)) or {}
+    """A Fleet/CLI answer is claimed and not yet settled; it, not a later prompt, is the answer.
+
+    An unreadable claim record is not "no claim": this prompt then registers no
+    automatic answer, the question and any claim stay as they are, and the next
+    readable prompt or the claim's own delivery decides."""
+    entry, known = _selected_lookup(_message_envelope(signal))
+    if not known:
+        return True
+    entry = entry or {}
     return bool(entry.get("action_id")) and not entry.get("source_terminal")
 
 
@@ -1242,20 +1249,32 @@ def _valid_selected_overlay(value):
     return True
 
 
-def _selected_entry(envelope):
+def _selected_lookup(envelope):
+    """(entry or None, known). ``known`` is False when a claim record may exist
+    but could not be read; only an absent or readable record confirms "none"."""
     identity = _selected_identity(envelope)
     if identity is None:
-        return None
+        return None, True
     projection = _read_cache_file()
     if projection is None:
-        return None
+        try:
+            os.lstat(_cache_path())
+        except FileNotFoundError:
+            return None, True
+        except OSError:
+            pass
+        return None, False
     overlay = projection.get("selected_responses", {})
     if not _valid_selected_overlay(overlay):
-        return None
+        return None, False
     entry = overlay.get(_selected_entry_key(identity))
     if not entry or entry.get("identity") != identity:
-        return None
-    return dict(entry)
+        return None, True
+    return dict(entry), True
+
+
+def _selected_entry(envelope):
+    return _selected_lookup(envelope)[0]
 
 
 def _store_selected_entry(envelope, entry):
