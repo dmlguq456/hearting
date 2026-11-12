@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ import harness_behavior_cases_session_upgrade as su  # noqa: E402
 
 NAMES = ("session-upgrade", "session-upgrade-scrollback", "session-upgrade-draft",
          "session-upgrade-turn", "session-upgrade-question", "session-upgrade-page",
-         "session-upgrade-delivery", "session-upgrade-fail", "route-resume")
+         "session-upgrade-delivery", "session-upgrade-fail", "session-upgrade-fail-old", "route-resume")
 
 
 def fixture_env(root: Path) -> dict:
@@ -160,6 +161,27 @@ class ReleaseCopyTest(unittest.TestCase):
             self.assertIn("HEARTING_SHELL_GENERATION", text)
             self.assertEqual(su.inject_failure(text), text)   # idempotent
             self.assertTrue(su.inject_failure("x();").startswith("if("))
+
+    def test_fail_old_copy_fails_only_the_first_host_after_its_seed_and_runs_in_node(self):
+        with tempfile.TemporaryDirectory() as raw:
+            copy = su.release_copy(self.make_source(Path(raw)), Path(raw) / "a", label="A", fail_old=True)
+            text = (copy / "utilities/session-shell/host.cjs").read_text()
+            self.assertTrue(text.startswith("#!/usr/bin/env node\n"))
+            self.assertIn(su.FAIL_OLD_ENV, text)
+            self.assertNotIn(su.FAIL_ENV + "==", text)
+            self.assertEqual(su.inject_failure(text, su.FAIL_OLD_LINE, su.FAIL_OLD_ENV), text)
+            node = shutil.which("node")
+            if not node:
+                self.skipTest("node not installed")
+            probe = Path(raw) / "probe.cjs"
+            probe.write_text(su.FAIL_OLD_LINE + "const fs=require('node:fs'),d=process.argv[2];"
+                             "process.on('uncaughtException',e=>{console.log('THREW '+e.message);process.exit(0);});"
+                             "fs.writeFileSync(d+'/x.tmp','{}');fs.renameSync(d+'/x.tmp',d+'/succession-1.json');"
+                             "setTimeout(()=>console.log('NO THROW'),200);\n")
+            for generation, expected in (("0", "THREW fixture: old host fails after its seed"), ("1", "NO THROW")):
+                env = dict(os.environ, **{su.FAIL_OLD_ENV: "1", "HEARTING_SHELL_GENERATION": generation})
+                done = subprocess.run([node, str(probe), raw], env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(done.stdout.strip(), expected, done.stderr)
 
 
 class ActivationTest(unittest.TestCase):

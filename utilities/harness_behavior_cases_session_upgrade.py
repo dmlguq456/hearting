@@ -16,6 +16,7 @@ model and private tmux server.  Nothing here touches the operator's HOME.
 ``session-upgrade-page``       a panel read page is open (``not-produced`` without a route row)
 ``session-upgrade-delivery``   a peer delivery is in flight (``not-produced`` without a reference)
 ``session-upgrade-fail``       the successor throws: the old host stays, nothing is lost
+``session-upgrade-fail-old``   the old host fails after its seed: it relays alone, the successor is dropped
 ``route-resume``               reopen the same sid: of three solo routes (never started / owner running /
                                owner ended) only the running one starts; a waiting notice arrives
 
@@ -60,6 +61,12 @@ MARKER_FILE = "upgrade-fixture-release.txt"
 FAIL_ENV = "HEARTING_UPGRADE_FIXTURE_FAIL"
 FAIL_LINE = ("if(process.env.%s==='1'&&Number(process.env.HEARTING_SHELL_GENERATION||0)>0)"
              "throw new Error('fixture: successor refuses');\n" % FAIL_ENV)
+# The old host (generation 0) loses its display just after its seed went out (review F1).
+FAIL_OLD_ENV = "HEARTING_UPGRADE_FIXTURE_FAIL_OLD"
+FAIL_OLD_LINE = ("if(process.env.%s==='1'&&Number(process.env.HEARTING_SHELL_GENERATION||0)===0){"
+                 "const f=require('node:fs'),r=f.renameSync;f.renameSync=function(a,b){const v=r.call(this,a,b);"
+                 "if(/succession-\\d+\\.json$/.test(String(b)))setImmediate(()=>{throw new Error('fixture: old host "
+                 "fails after its seed');});return v;};}\n" % FAIL_OLD_ENV)
 NOT_PRODUCED = "not-produced"
 # What a successor that throws at load writes with node's own error printer.
 LOAD_ERROR_MARKS = ("Module._load", "Node.js v", "successor refuses")
@@ -190,17 +197,19 @@ def resume_native(harness: str, binary: str, sid: str, model: str) -> list[str]:
     return [binary, "--standalone", "-s", sid]
 
 
-def inject_failure(host_text: str) -> str:
-    """``host.cjs`` text whose successor (generation > 0) throws when the fixture asks."""
-    if FAIL_ENV in host_text:
+def inject_failure(host_text: str, line: str = FAIL_LINE, marker: str = FAIL_ENV) -> str:
+    """``host.cjs`` text whose successor (generation > 0) throws when the fixture asks
+    (with ``FAIL_OLD_LINE``: whose first host fails just after writing its seed)."""
+    if marker in host_text:
         return host_text
     if host_text.startswith("#!"):
         head, _, rest = host_text.partition("\n")
-        return head + "\n" + FAIL_LINE + rest
-    return FAIL_LINE + host_text
+        return head + "\n" + line + rest
+    return line + host_text
 
 
-def release_copy(source: Path, dest: Path, *, label: str = "B", fail: bool = False) -> Path:
+def release_copy(source: Path, dest: Path, *, label: str = "B", fail: bool = False,
+                 fail_old: bool = False) -> Path:
     """A copy of the tree being measured with a harmless marker file (a different release).
 
     The working tree is copied (tracked and untracked, not ignored, no ``.git``) so release B
@@ -228,7 +237,26 @@ def release_copy(source: Path, dest: Path, *, label: str = "B", fail: bool = Fal
     if fail:
         host = shell / "host.cjs"
         host.write_text(inject_failure(host.read_text(encoding="utf-8")), encoding="utf-8")
+    if fail_old:
+        host = shell / "host.cjs"
+        host.write_text(inject_failure(host.read_text(encoding="utf-8"), FAIL_OLD_LINE, FAIL_OLD_ENV),
+                        encoding="utf-8")
     return dest
+
+
+def host_processes(env: dict) -> list[int]:
+    """Live session-shell host processes of this fixture (by its own state root)."""
+    mine = ("XDG_STATE_HOME=" + env["XDG_STATE_HOME"]).encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        with contextlib.suppress(OSError, IndexError):
+            if (b"session-shell/host.cjs" in (entry / "cmdline").read_bytes()
+                    and mine in (entry / "environ").read_bytes().split(b"\0")
+                    and (entry / "stat").read_text().rsplit(")", 1)[1].split()[0] not in ("Z", "X")):
+                found.append(int(entry.name))
+    return sorted(found)
 
 
 def pid_alive(pid) -> bool:
@@ -342,13 +370,14 @@ def activate_release(run, release: Path, name: str) -> dict:
     return result
 
 
-def to_packaged(run) -> dict:
+def to_packaged(run, *, fail_old: bool = False) -> dict:
     """Replace the base harness's linked install with a packaged activation of release A."""
     base = _base(run)
     home = runtime_home(run.harness, run.home.env)
     # The fixture's own runtime home; the linked install is not a base for a packaged one.
     shutil.rmtree(home, ignore_errors=True)
-    release_a = release_copy(Path(base.SOURCE), Path(run.home.root) / "release-a", label="A")
+    release_a = release_copy(Path(base.SOURCE), Path(run.home.root) / "release-a", label="A",
+                             fail_old=fail_old)
     result = activate_release(run, release_a, "a")
     if result["exit"] == 0:
         run.home.configure_model()
@@ -439,6 +468,7 @@ class SessionUpgradeScenario(Scenario):
                "the screen and cursor are the same, and the next key reaches the native.")
     hold = False            # a held state must defer the switch until it is released
     fail = False
+    fail_old = False
     scrollback = False
     DRAFT = ""
     next_turn_ok = False
@@ -471,11 +501,13 @@ class SessionUpgradeScenario(Scenario):
     # -- terminal ----------------------------------------------------------
     def prepare(self, run):
         enable_session_shell(run.home)
-        run.evidence["activate_a"] = to_packaged(run)
+        run.evidence["activate_a"] = to_packaged(run, fail_old=self.fail_old)
         if run.evidence["activate_a"]["exit"] != 0:
             raise RuntimeError("release A activation failed: " + run.evidence["activate_a"]["log"])
         if self.fail:
             run.home.env[FAIL_ENV] = "1"
+        if self.fail_old:
+            run.home.env[FAIL_OLD_ENV] = "1"
 
     def make_tui(self, run, root, argv):
         base = _base(run)
@@ -886,6 +918,52 @@ class FailScenario(SessionUpgradeScenario):
     fail = True
 
 
+class FailOldScenario(SessionUpgradeScenario):
+    """Review F1: the frozen old host falls to the plain relay just after its seed went out.
+
+    It must tell the owner, so the successor is dropped before it reads: afterwards the one host
+    process of this window is the old one (unbound, relaying), the native is the same and keys
+    reach it. Before the fix the owner went on, the successor ran and the old host was ended
+    two seconds later, so the two read the same PTY and keys in between."""
+    name = "session-upgrade-fail-old"
+    summary = "The old host fails after its seed: it relays alone, the successor is dropped, keys reach."
+    fail_old = True
+
+    def drive(self, run):
+        ev = run.evidence.setdefault("upgrade", {})
+        if not self.first_turn(run):
+            return "inconclusive"
+        before = snapshot(run, 3, 20)
+        ev.update(native_before=before["native_pid"], host_before=before["host_pid"])
+        if not before["host_pid"] or not before["native_pid"]:
+            run.note("no live session-shell binding before the install")
+            return "inconclusive"
+        ev["install_b"] = install_release_b(run)
+        if ev["install_b"]["exit"] != 0:
+            run.note("release B activation failed")
+            return "inconclusive"
+        old, seen = before["host_pid"], set()
+        end = time.monotonic() + SWITCH_WAIT
+        while time.monotonic() < end:
+            hosts = host_processes(run.home.env)
+            seen.update(hosts)
+            if len(seen) > 1 and hosts == [old]:
+                break               # a successor came and went
+            time.sleep(0.1)
+        time.sleep(4)               # past the 2 s the owner gives a retired host
+        hosts = host_processes(run.home.env)
+        unbound = not bindings(run.home.env, run.harness)
+        ev["host_after"] = hosts[0] if len(hosts) == 1 else hosts
+        ev["native_after"] = before["native_pid"] if pid_alive(before["native_pid"]) else None
+        ev["native_same"] = ev["native_after"] == before["native_pid"]
+        dropped = sorted(seen - {old})
+        kept = hosts == [old] and unbound
+        ev["fail_injection"] = (("old host relays alone; successor %s dropped" % dropped) if kept
+                                else "FAILED: hosts %s, bound %s" % (hosts, not unbound))
+        ev["key_reached"] = key_reaches_native(run)
+        return "pass" if kept and ev["native_same"] and ev["key_reached"] else "fail"
+
+
 # --------------------------------------------------------------------------
 # route-resume
 # --------------------------------------------------------------------------
@@ -1091,7 +1169,7 @@ def argv_native(base, run) -> list[str]:
 
 
 SCENARIOS = (SessionUpgradeScenario, ScrollbackScenario, DraftScenario, TurnScenario,
-             QuestionScenario, PageScenario, DeliveryScenario, FailScenario,
+             QuestionScenario, PageScenario, DeliveryScenario, FailScenario, FailOldScenario,
              RouteResumeScenario)
 
 
