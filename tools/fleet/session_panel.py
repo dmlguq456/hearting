@@ -224,7 +224,7 @@ def session_brief(values):
 NOTICE_NEWS_SECONDS = 600
 
 
-def notice_line(values, routes, questions, display, now):
+def notice_line(values, routes, questions, display, now, upgrade_note=""):
     """The one line under Claude's input while the panel paints the status area.
 
     Only what the person must know now, one item by priority: an answer this
@@ -271,7 +271,12 @@ def notice_line(values, routes, questions, display, now):
                               (ui_text("fleet.session_panel.ready") + " · ", "lvl_g"),
                               (route.get("title") or route.get("id") or "", "loc_repo"),
                               (" · " + route["outcome"], "dim")]))
-    return max(news, key=lambda item: item[0])[1] if news else []
+    if news:
+        return max(news, key=lambda item: item[0])[1]
+    # Below everything above: a newer release this window has not taken yet, or a switch without scrollback.
+    if upgrade_note in ("pending", "scrollback"):
+        return [(ui_text("session_shell.upgrade_" + upgrade_note), "dim")]
+    return []
 
 
 def route_row(row, now=None):

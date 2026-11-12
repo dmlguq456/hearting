@@ -49,6 +49,51 @@ display worker. VT, scratch-display, layout and display-host failures degrade
 to a plain relay of that same process; they never restart the CLI or request
 manual recovery. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
+A running window follows a new install without restarting its CLI. Each
+display host compares the installed link it was started from
+(`HEARTING_SHELL_HOST_PATH`, never resolved) with its own resolved file; it
+notices a change from a watch on the link's directory and at each idle
+transition, with no timer. While a newer host is installed and not yet taken,
+the notice slot shows one lowest-priority line (`session_shell.upgrade_pending`).
+The host asks the PTY owner for a successor only at a safe moment: idle, an
+empty composer (a draft typed and erased waits for the next submitted turn), no
+open form or answerable question, no route page, settings, Fleet explorer or
+panel focus, and no delivery, held bytes, paste, drag or action worker. The
+owner starts the successor from the same installed path. The old host stops
+reading, withdraws its binding and writes a private seed: the native screen
+with every line above the viewport, cursor, modes, scroll region and display
+state. The successor restores it, takes the same `control.sock` path by an
+atomic rename, registers, paints only the differences, and reads the PTY and
+keyboard only after the owner commits the switch. The native process, its
+conversation, the draft and pending deliveries stay; success shows nothing. A
+failure or timeout before the commit resumes the old host as it was, and keys
+typed meanwhile wait in the terminal buffer for whichever host reads next.
+After three failures toward one installed file the window stops asking and
+keeps the waiting line. When the seed cannot carry the lines above the viewport
+(over 8 MiB, or their serialization fails), the switch still happens with the
+visible screen and shows `session_shell.upgrade_scrollback` until the next
+submitted prompt; an unreadable scroll region keeps the old host. What a person
+scrolls back to is native's own history view (same process) or the outer
+terminal's history from before the shell entered the alternate screen, which
+neither host leaves. A raw relay window is not revived. The protocol version is
+`HEARTING_SHELL_SUCCESSION`; the PTY owner never changes during a window's life,
+so a later host speaks the version of the owner that started it or does not
+succeed. A window started before this protocol (v4.20.0 and earlier) is reopened
+once; later installs need no reopen. The host sees the install through the link
+rather than a signal from the installer, so no install path has to find live
+windows; where the link's directory cannot be watched, only the idle check
+remains.
+A session reopened under the same native session ID (Claude `--resume`, Codex
+`resume`, OpenCode `-s`) takes back its own routes. The existing resume-notice
+step also starts, once per resume, a detached `utilities/session_route_resume.py`
+that runs `capability-route.py start --route` for every route this session's
+route-chain ledger names whose file exists and has no outcome, oldest first: the
+start a person used to run by hand, so a live owner is reused, a dead one is
+replaced, and the existing gates still refuse. Each result is kept under the
+session state's `route-resume/`. Only the last started route's receipt reaches
+the next prompt; the others show in the panel and Fleet. Resume aliases are a
+display join and are not read. An automatic display switch keeps the native
+process and needs none of this.
 During an admitted paste, its delayed Enter and held human bytes belong to the
 retained PTY owner. The display publishes a held count only after those bytes
 are retained outside its own memory. Input returns to the direct path after
