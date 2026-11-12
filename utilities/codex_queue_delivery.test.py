@@ -230,6 +230,16 @@ class QueueDeliveryTest(unittest.TestCase):
             recipient.receipt_marker(singleton[0], THREAD)
         )
         self.assertEqual(QUEUE.prior_followup_text(current_followup), prior_followup)
+        # PG-35: an open-row line from the previous release named the Codex wrapper.
+        import dispatch_completion_join as JOIN
+        harvest = JOIN.completion_harvest_command("att-q", "complete-open", jobs="/j/jobs.log")
+        bookkeeping = "Completion bookkeeping for the listed attempts:\n" + harvest + "\ntail"
+        self.assertEqual(QUEUE.prior_followup_text(bookkeeping),
+                         "Completion bookkeeping for the listed attempts:\n"
+                         f"{JOIN.ROOT / 'adapters/codex/bin/preflight.sh'} harvest --jobs /j/jobs.log "
+                         "--attempt-id att-q --status open --mark-done\ntail")
+        self.assertIsNone(QUEUE.prior_followup_text("Completion bookkeeping for the listed attempts:\n"
+                                                    "(no harvest command; advance the route)"))
         self.assertEqual(QUEUE.native_completion_body(
             THREAD, singleton, own_receipt,
             QUEUE.prior_followup_text(current_followup)), expected_prior_body)

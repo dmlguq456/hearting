@@ -211,6 +211,7 @@ utility-deferred	dispatch-artifact-root.test.py
 utility-deferred	dispatch-attempt-ready.py
 utility-deferred	dispatch-batch.py
 utility-deferred	dispatch-concurrency.test.sh
+utility-deferred	dispatch-harvest.py
 utility-deferred	dispatch-liveness.sh
 utility-deferred	dispatch-liveness.test.sh
 utility-deferred	dispatch-node.py

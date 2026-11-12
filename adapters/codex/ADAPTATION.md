@@ -608,10 +608,12 @@ Do not project the shared `dispatch-liveness.sh`; it is the cross-harness
 registry/wait fallback, while Codex uses the adapter-owned
 `adapters/codex/bin/dispatch-liveness.py`, exposed as
 `adapters/codex/bin/preflight.sh liveness [jobs.log]`, and maps open dispatch
-jobs to `~/.codex/sessions/**/*.jsonl` by transcript `cwd`. Codex harvest is
-adapter-owned under `adapters/codex/bin/preflight.sh harvest` and only updates
-the portable jobs registry from `open` to `done`; it never performs merge or
-worktree cleanup. Do not project material/design helpers such as `extract_web_figures.py` until a Codex
+jobs to `~/.codex/sessions/**/*.jsonl` by transcript `cwd`. Codex
+`adapters/codex/bin/preflight.sh harvest` runs the shared harvest body
+`utilities/dispatch-harvest.py` with the Codex home pointer and default registry;
+completion receipts on every harness name that shared entry point. It only
+updates the portable jobs registry from `open` to `done`; it never performs
+merge or worktree cleanup. Do not project material/design helpers such as `extract_web_figures.py` until a Codex
 capability uses them directly.
 
 ### SD-15 limit-death detection (OPERATIONS §5.10 ⑨) — parity: realized
