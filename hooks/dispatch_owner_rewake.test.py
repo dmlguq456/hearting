@@ -1068,12 +1068,15 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn("--attempt-id att-owner-1", message)
         self.assertIn("--status open --mark-done", message)
 
-    def test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root(self) -> None:
+    def test_receipt_names_the_shared_harvest_entry_point_not_a_mutable_root(self) -> None:
+        # The open-row line names this tree's shared entry point on every
+        # harness (PG-35), never the Codex wrapper and never a mutable
+        # AGENT_HOME checkout the hook may have inherited.
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
         sealed_home = self.root / "sealed-release"
-        (sealed_home / "adapters" / "codex" / "bin").mkdir(parents=True)
-        (sealed_home / "adapters" / "codex" / "bin" / "preflight.sh").write_text("#!/bin/sh\n")
+        (sealed_home / "core").mkdir(parents=True)
+        (sealed_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self.jobs.write_text(
             "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
             f"attempt_schema_version=2,attempt_id=att-owner-1,launch_home={sealed_home}\n",
@@ -1082,39 +1085,25 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         mutable_root = self.root / "mutable-checkout"
         mutable_root.mkdir()
         message = rewake.receipt(launch, "attention", "terminal-quiescent", mutable_root)
-        self.assertIn(
-            str(sealed_home / "adapters" / "codex" / "bin" / "preflight.sh"),
-            message,
-        )
+        commands = JOIN.harvest_command_lines(message)
+        self.assertEqual(len(commands), 1, message)
+        self.assertEqual(shlex.split(commands[0])[:2],
+                         ["python3", str(JOIN.ROOT / "utilities" / "dispatch-harvest.py")])
+        self.assertNotIn("/adapters/", message)
         self.assertNotIn(str(mutable_root), message)
-
-    def test_receipt_falls_back_to_root_when_launch_home_is_absent(self) -> None:
-        launch = rewake.parse_launch(self.payload())
-        assert launch is not None
-        self.jobs.write_text(
-            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
-            "attempt_schema_version=2,attempt_id=att-owner-1\n",
-            encoding="utf-8",
-        )
-        message = rewake.receipt(launch, "attention", "terminal-quiescent", self.root)
-        self.assertIn(
-            str(self.root / "adapters" / "codex" / "bin" / "preflight.sh"),
-            message,
-        )
 
     def test_sealed_launch_home_harvest_is_admitted_after_release_rotation(self) -> None:
         # SD-115 axis 4 R1 (conditional, plan.md §8): once (a) seals a row's
         # `launch_home` to the resolved OLD release, a rotation that moves
-        # `current`/AGENT_HOME/ROOT to a NEW release means the harvest
-        # command this hook renders (naming the OLD sealed release's
-        # preflight.sh) must still be admitted by the supervisor's own
-        # command guard -- `dispatch_completion_join.py`'s
-        # `_local_contract_path` -- not just rendered by this hook.
+        # `current`/AGENT_HOME/ROOT to a NEW release means a harvest command
+        # naming the OLD sealed release's shared entry point must still be
+        # admitted by the supervisor's own command guard --
+        # `dispatch_completion_join.py`'s `_local_contract_path`.
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
         sealed_home = self.root / "sealed-old-release"
-        (sealed_home / "adapters" / "codex" / "bin").mkdir(parents=True)
-        (sealed_home / "adapters" / "codex" / "bin" / "preflight.sh").write_text("#!/bin/sh\n")
+        (sealed_home / "utilities").mkdir(parents=True)
+        (sealed_home / "utilities" / "dispatch-harvest.py").write_text("", encoding="utf-8")
         (sealed_home / "core").mkdir()
         (sealed_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self.jobs.write_text(
@@ -1126,14 +1115,9 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         (new_release / "core").mkdir(parents=True)
         (new_release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
 
-        message = rewake.receipt(launch, "attention", "terminal-quiescent", new_release)
-        commands = JOIN.harvest_command_lines(message)
-        self.assertEqual(len(commands), 1, message)
-        harvest_line = commands[0]
-        # The command this hook renders does name the sealed OLD release --
-        # that half of the pipeline already works (see the sibling
-        # `test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root`).
-        self.assertIn(str(sealed_home), harvest_line)
+        harvest_line = (f"python3 {sealed_home / 'utilities' / 'dispatch-harvest.py'} "
+                        f"--jobs {self.jobs} --attempt-id att-owner-1 --status open --mark-done")
+        self.assertEqual(JOIN.harvest_command_lines(harvest_line), [harvest_line])
 
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(new_release)}, clear=False), \
              patch_split(JOIN, "ROOT", new_release):

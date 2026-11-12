@@ -2927,6 +2927,9 @@ class NormalReadyCleanupJoinTest(unittest.TestCase):
 class HarvestVocabularyTest(unittest.TestCase):
     """DC-3, DC-4 (plan SS5.7 / SS3.4 D1, D1b): one harvest vocabulary."""
 
+    HARVEST = f"python3 {JOIN.ROOT / 'utilities/dispatch-harvest.py'}"
+    CODEX_WRAPPER = f"{JOIN.ROOT / 'adapters/codex/bin/preflight.sh'} harvest"
+
     def setUp(self):
         self.claude = load_supervisor("claude-session-supervisor")
         self.codex = load_supervisor("codex-app-server-supervisor")
@@ -2948,22 +2951,26 @@ class HarvestVocabularyTest(unittest.TestCase):
         )
 
     def test_command_projection_preserves_exact_arguments_without_prose_punctuation(self):
-        surface = "/fixture root/owner's preflight.sh"
-        jobs = "/fixture root/exact jobs.log"
-        command = JOIN.completion_harvest_command("att-exact", "complete-open", jobs=jobs, surface=surface)
-        self.assertEqual(shlex.split(command), [surface, "harvest", "--jobs", jobs,
-                         "--attempt-id", "att-exact", "--status", "open", "--mark-done"])
-        command = JOIN.completion_harvest_command("att-exact", "inspect-done-failure", jobs=jobs, surface=surface)
+        jobs = "/fixture root/owner's exact jobs.log"
+        command = JOIN.completion_harvest_command("att-exact", "complete-open", jobs=jobs)
+        tokens = shlex.split(command)
+        self.assertEqual(tokens[0], "python3")
+        self.assertTrue(tokens[1].endswith("/utilities/dispatch-harvest.py"))
+        self.assertTrue(Path(tokens[1]).is_file())
+        self.assertNotIn("/adapters/", command)
+        self.assertEqual(tokens[2:], ["--jobs", jobs, "--attempt-id", "att-exact",
+                                      "--status", "open", "--mark-done"])
+        command = JOIN.completion_harvest_command("att-exact", "inspect-done-failure", jobs=jobs)
         tokens = shlex.split(command)
         self.assertEqual(tokens[0], "python3")
         self.assertTrue(tokens[1].endswith("/utilities/dispatch-registry.py"))
         self.assertEqual(tokens[2:], ["observed-status", "--jobs", jobs, "--attempt", "att-exact"])
-        self.assertEqual(JOIN.completion_harvest_command("att-exact", "advance-completed", jobs=jobs, surface=surface), "")
+        self.assertEqual(JOIN.completion_harvest_command("att-exact", "advance-completed", jobs=jobs), "")
 
     def test_incident_command_with_jobs_now_classifies(self):
         # D-1: the exact command string the incident denied.
         line = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"{self.HARVEST} --jobs {self.jobs} "
             "--attempt-id att-a --status done --failure-detail"
         )
         action = self._classify(line)
@@ -2976,7 +2983,7 @@ class HarvestVocabularyTest(unittest.TestCase):
     def test_open_status_with_jobs_and_mark_done_classifies(self):
         # D-2
         line = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"{self.HARVEST} --jobs {self.jobs} "
             "--attempt-id att-a --status open --mark-done"
         )
         action = self._classify(line)
@@ -2986,19 +2993,44 @@ class HarvestVocabularyTest(unittest.TestCase):
     def test_jobs_supplied_twice_or_valueless_is_rejected(self):
         # D-3: the value-option arity check still rejects malformed --jobs.
         twice = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"{self.HARVEST} --jobs {self.jobs} "
             f"--jobs {self.jobs} --attempt-id att-a --status open --mark-done"
         )
         self.assertIsNone(self._classify(twice))
         valueless = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs "
+            f"{self.HARVEST} --jobs "
             "--attempt-id att-a --status open --mark-done"
         )
         self.assertIsNone(self._classify(valueless))
 
+    def test_codex_wrapper_line_from_an_earlier_receipt_still_classifies(self):
+        line = f"{self.CODEX_WRAPPER} --jobs {self.jobs} --attempt-id att-a --status open --mark-done"
+        action = self._classify(line)
+        self.assertIsNotNone(action)
+        self.assertTrue(action.mark_done)
+        self.assertEqual(JOIN.harvest_command_lines(line), [line])
+
+    def test_previous_wording_names_the_codex_wrapper_of_the_same_tree(self):
+        current = JOIN.completion_harvest_command("att-a", "complete-open", jobs=self.jobs)
+        text = "Completion bookkeeping for the listed attempts:\n" + current + "\ntail"
+        previous = JOIN.previous_harvest_wording(text)
+        self.assertEqual(previous, "Completion bookkeeping for the listed attempts:\n"
+                         f"{self.CODEX_WRAPPER} --jobs {self.jobs} --attempt-id att-a "
+                         "--status open --mark-done\ntail")
+        inspect = JOIN.completion_harvest_command("att-a", "inspect-done-failure", jobs=self.jobs)
+        self.assertEqual(JOIN.previous_harvest_wording(inspect), inspect)
+
+    def test_every_owner_harness_is_shown_the_same_shared_line(self):
+        receipt = {"children": [{"attempt_id": "att-a", "required_action": "complete-open"}]}
+        lines = {name: JOIN.harvest_command_lines(module.completion_prompt(receipt, jobs=self.jobs))
+                 for name, module in (("claude-session", self.claude), ("codex-app-server", self.codex))}
+        self.assertEqual(lines["claude-session"], lines["codex-app-server"])
+        self.assertEqual(len(lines["claude-session"]), 1)
+        self.assertTrue(lines["claude-session"][0].startswith(self.HARVEST + " "))
+
     def test_jobs_pointed_at_another_registry_is_rejected(self):
         line = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs /other/jobs.log "
+            f"{self.HARVEST} --jobs /other/jobs.log "
             "--attempt-id att-a --status open --mark-done"
         )
         self.assertIsNone(self._classify(line))
@@ -4646,13 +4678,13 @@ class NextLegReceiptTest(unittest.TestCase):
             "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1"}))
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed",
                                  "next_leg": self.NEXT_LEG}]}
-        text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+        text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
         self.assertIn("Original request/format apply", text)
         self.assertIn(self.NEXT_LEG["compose_command"], text)
         self.assertIn("If this next leg is already approved, execute it in this turn", text)
         self.assertIn("Receipt/ACK isn't execution", text)
         plain = JOIN.completion_followup_text({"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]},
-                                              jobs=str(jobs), surface="/fixture/preflight.sh")
+                                              jobs=str(jobs))
         self.assertNotIn("next leg", plain)
 
     def test_completion_followup_preserves_original_task_and_requested_output(self):
@@ -4664,7 +4696,7 @@ class NextLegReceiptTest(unittest.TestCase):
         receipt = {"children": [{"attempt_id": "owner",
                                  "required_action": "advance-completed"}]}
         text = JOIN.completion_followup_text(
-            receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+            receipt, jobs=str(jobs))
         from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
         fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
         required = ("Original request/format apply", "Review the result",
@@ -4692,12 +4724,12 @@ class NextLegReceiptTest(unittest.TestCase):
             "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1",
             "owner_route_file": str(route_file)}))
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]}
-        before = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+        before = JOIN.completion_followup_text(receipt, jobs=str(jobs))
         slot = DTC.terminal_slot(root, "rt-owner", "owner")
         slot.mkdir(parents=True)
         summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
         (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
-        text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+        text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
         self.assertIn("First close: give the result in one or two sentences", before)
         self.assertIn("point to the detailed record", before)
         self.assertIn("ask only what only the person can decide", before)
@@ -4710,8 +4742,7 @@ class NextLegReceiptTest(unittest.TestCase):
         self.assertNotIn("show the runtime summary below to the person", text)
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
-        self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs),
-                                                             surface="/fixture/preflight.sh"))
+        self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs)))
 
 
 class MaterializePendingDeliveryTest(unittest.TestCase):
@@ -6220,7 +6251,7 @@ class WorkContinuationReceiptTest(unittest.TestCase):
 
     def render(self, actions):
         return JOIN.completion_followup_text({"children":[{"attempt_id":aid,"required_action":action}
-            for aid,action in actions]},jobs=str(self.jobs),surface="/fixture/preflight.sh")
+            for aid,action in actions]},jobs=str(self.jobs))
 
     def test_two_frame_receipts_return_one_existing_work_handle_even_on_failure(self):
         self.jobs.write_text(self.record("first")+self.record("second"))
@@ -6297,7 +6328,7 @@ class NextReadyReceiptTest(unittest.TestCase):
 
     def render(self, jobs=None):
         receipt = {"children": [{"attempt_id": "stage-1", "required_action": "advance-completed"}]}
-        return JOIN.completion_followup_text(receipt, jobs=str(self.jobs if jobs is None else jobs), surface="/fixture/preflight.sh")
+        return JOIN.completion_followup_text(receipt, jobs=str(self.jobs if jobs is None else jobs))
 
     def old_text(self):
         with mock.patch.object(JOIN, "_next_ready_start_lines", return_value=[]):
@@ -6382,13 +6413,13 @@ class NextReadyReceiptTest(unittest.TestCase):
         with self.subTest("no jobs"):
             self.assertEqual(self.render(jobs=""), JOIN.completion_followup_text(
                 {"children": [{"attempt_id": "stage-1", "required_action": "advance-completed"}]},
-                jobs="", surface="/fixture/preflight.sh"))
+                jobs=""))
             self.assertNotIn("Next ready", self.render(jobs=""))
 
     def test_a_harvest_command_row_keeps_the_existing_branch(self):
         self.jobs.write_text(self.stage_row("stage-1", "plan"))
         receipt = {"children": [{"attempt_id": "stage-1", "required_action": "inspect-done-failure"}]}
-        text = JOIN.completion_followup_text(receipt, jobs=str(self.jobs), surface="/fixture/preflight.sh")
+        text = JOIN.completion_followup_text(receipt, jobs=str(self.jobs))
         self.assertIn("--attempt stage-1", text)
         self.assertNotIn("Next ready", text)
 

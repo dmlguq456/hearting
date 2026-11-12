@@ -1077,14 +1077,15 @@ def classified_receipt(
     # The row's sealed launch_home (SD-49) is the checkout the attempt actually
     # ran under; `root` (agent_home(), preferring env AGENT_HOME) may point at a
     # mutable primary checkout instead when this hook inherits that env var --
-    # a harvest command built from `root` can then be rejected by a parent
-    # guard that expects the sealed path. Prefer the sealed value and fall back
-    # to `root` only when it is missing or no longer names a real checkout.
+    # a release or resume command built from `root` can then be rejected by a
+    # parent guard that expects the sealed path. Prefer the sealed value and fall
+    # back to `root` only when it is missing or no longer names a harness root.
+    # Harvest and inspection lines name their own shared entry point
+    # (`completion_harvest_command`).
     sealed = row.metadata.get("launch_home") if row is not None else None
     home = Path(sealed) if sealed else root
-    if not (home / "adapters" / "codex" / "bin" / "preflight.sh").is_file():
+    if not (home / "core" / "CORE.md").is_file():
         home = root
-    harvest = home / "adapters" / "codex" / "bin" / "preflight.sh"
     status = delivery.status if delivery is not None else ""
     row_revision = delivery.row_revision if delivery is not None else "unavailable"
     marker_current = bool(delivery and _completion_evidence_current(delivery))
@@ -1163,7 +1164,7 @@ def classified_receipt(
             instruction = (
                 "Exact completion bookkeeping command:\n"
                 + completion_harvest_command(launch.attempt_id, required_action,
-                    jobs=str(launch.jobs), surface=str(harvest))
+                    jobs=str(launch.jobs))
             )
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
@@ -1179,7 +1180,7 @@ def classified_receipt(
             instruction = (
                 "Inspect the exact current row and completion marker with:\n"
                 + completion_harvest_command(launch.attempt_id, "inspect-done-failure",
-                    jobs=str(launch.jobs), surface=str(harvest))
+                    jobs=str(launch.jobs))
             )
     elif transaction_error:
         state = "attention"
