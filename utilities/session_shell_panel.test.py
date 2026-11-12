@@ -458,7 +458,8 @@ for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
 const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
 const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── messages '));
-assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-10&&rows.at(-2).includes('7d 60%'),rows.join('\n'));
+// Spec rule 34 (b): short of rows the messages fold to one row each before a route gives up its second row.
+assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%')&&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
 const ra=rows.findIndex(s=>s.includes('╭─ route 3 '));
 assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
@@ -510,9 +511,10 @@ const route={id:'r',title:'PR 맞추기',state:'working',kind:'working',elapsed:
  target:'python3 tools/run-tests.py',tool_age:'3m',after_tool:after,paint:{glyph:{text:'⠏'},harness:{text:'claude'}}};
 const paint=(r,width,side)=>view.render({width,height:30,side,model:{routes:[r],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:['route:r'],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
-for(const [width,side] of [[40,true],[80,false]]){
- const rows=paint(route,width,side),flat=rows.join('').replace(/[│┆ ]/g,'');
- assert(flat.includes('>_Bash·python3tools/run-tests.py3m'),rows.join('\n'));
+for(const [width,side,call] of [[40,true,'>_ Bash · run-tests.py 3m'],[80,false,'>_ Bash · python3 tools/run-tests.py 3m']]){
+ const rows=paint(route,width,side);
+ // Spec rule 34 (a): short of cells the path gives way to its file name before the call folds.
+ assert(rows.some(s=>s.includes(call)),rows.join('\n'));
  const line=rows.filter(x=>x.includes('after Edit'));
  assert.equal(line.length,1,rows.join('\n'));assert(line[0].includes('…'),line[0]);
 }
@@ -579,8 +581,10 @@ const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.inc
 // Spec rule 32: the doer's model and context are the folded first row's; the detail hangs behind its guide.
 assert(opened.some(s=>s.includes('gpt-6.1-sol')&&s.includes('72%'))&&detail.slice(0,-2).every(s=>/┆|│ │ +│ │/.test(s)),detail.join('\n'));
 assert(detail.some(s=>s.includes('plan ✓ › execute ● › review')));assert(detail.some(s=>s.includes('>_ apply_patch · +1 agent')));
-const openedModel=paint({route_line:'model'},['route:a']);
-assert(openedModel.join('\n').includes('high')&&openedModel.some(s=>s.includes('42m')),openedModel.join('\n'));
+const openedModel=paint({route_line:'model'},['route:a']),openedWide=paint({route_line:'model'},['route:a'],48);
+// Spec rule 34 (a): the doer row lets its effort, then its harness go before it would fold.
+assert(openedModel.some(s=>s.includes('┆ DOER   gpt-6.1-sol · 72%'))&&openedModel.some(s=>s.includes('42m')),openedModel.join('\n'));
+assert(openedWide.some(s=>s.includes('┆ DOER   codex gpt-6.1-sol high · 72%')),openedWide.join('\n'));
 // A message row opens to its whole retained text and closes again.
 const messageKey=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.find(h=>h.action.startsWith('message:')).action;
 const message=paint({},[messageKey]);assert(message.join('').includes('RV-PR1506-R2-1111.md'));
@@ -637,9 +641,9 @@ const model={routes,route_count:2,styles};
 const paint=(extra={})=>view.render({width:40,height:60,side:true,model,configuration:{},expandedKeys:['route:a','route:b'],questions:()=>[],...extra});
 const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
 // Spec rule 32: label rows and one row per stage in columns, behind a guide; every value kept.
-const wide=rows(paint({width:60})),all=wide.join('\n'),flat=all.replace(/[│┆ \n]+/g,' ');
+const wide=rows(paint({width:70})),all=wide.join('\n'),flat=all.replace(/[│┆ \n]+/g,' ');
 for(const word of ['OWNER claude (Opus 5.5·high) · 31% · balanced-deep','KIND autopilot-code(dev·std)','✓ plan PASS gpt-fixture 12m',
- '● execute R2 gpt-fixture 72% 30m','>_ apply_patch · +1 agent','NOTE NOTE_R2','└ 2 claude Sonnet 5.5 12%','· review pending',
+ '● execute R2 gpt-fixture 72% 30m','>_ apply_patch · +1 agent','NOTE NOTE_R2','└ 2 claude Sonnet 5.5 12%','· review INFO',
  'INFO 42m · 2 legs · staged · test ✓ · before this leg: frame ✓ — outside this snapshot · plan done 22:34 plan/code gate ✓ · execute dev/backend · review review/code',
  'NEXT resume · execute','✕ execute','WHY worker claude · failed 3m','RESUME execute'])
  assert(flat.includes(word),word+'\n'+all);
@@ -860,6 +864,137 @@ assert.deepEqual(unknown.slice(1,4).map(x=>x.foreground),[186,null,null]);
 assert(v.appearance(rows,{theme:'mono',shade:'none'},{colors:256,background:'dark'})[0].slice(1,4).every(x=>x.foreground===null));
 assert.equal(v.appearance(rows,{shade:'none'},{noColor:true,background:'dark'}),rows);
 """
+        self.node(script, "panel-view.cjs")
+
+    # Spec E9 rule 34: the narrow and short panel's finish. One fixture, the routes the
+    # supervisor's screens drew: a one-shot route on a tool, a staged route on its third of
+    # seven stages, a route waiting between stages and a failed one.
+    FIXTURE = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const P=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const seven=at=>['plan','plan-check','execute','impl-review','test','report','close'].map((name,i)=>i<at
+ ?{name,mark:'✓',verdict:'PASS',harness:'claude',model:'Opus 5.5',elapsed:['12m','4m'][i]}
+ :i===at?{name,mark:'●',current:true,harness:'claude',model:'Sonnet 5.5',elapsed:'1h',round:2}:{name,mark:''});
+const owner='owner · claude (Opus 5.5·xhigh)';
+const oneShot={id:'a',title:'셸 상태·표시 고치기',kind:'working',state:'working',elapsed:'41m',tool:'Edit',target:'utilities/session-shell/host.cjs',
+ tool_age:'3m',shape:'one-shot-owner',stages:[{name:'one-shot',current:true,mark:'●'}],owner,owner_ctx:'38%',kind_text:'autopilot-code(dev·q)',
+ owner_model:'Opus 5.5',visibility:{summary:'검증 ?'},paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh'),ctx:P('38%'),gauge5:[P('━━─── 38%')]}};
+const staged={id:'b',title:'세션 간 소통 도구 단계 1',kind:'working',state:'idle',elapsed:'1h 0m',tool:'Edit',target:'utilities/peer-message.py',step:'execute ● 3/7',
+ tool_age:'3m',shape:'staged',stages:seven(2),owner,owner_ctx:'22%',profile:'deep',kind_text:'autopilot-code(dev·std)',owner_model:'Opus 5.5',
+ doer_worker:true,workers:[{stage:'execute',harness:'claude',model:'Sonnet 5.5',ctx:'12%'}],visibility:{summary:'검증 ?'},
+ paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P('12%'),gauge5:[P('━──── 12%')]}};
+const waiting={id:'c',title:'새 판으로 자연스럽게 넘어가기',kind:'idle',state:'idle',elapsed:'7h 0m',shape:'staged',
+ stages:[...['plan','plan-check','execute'].map(name=>({name,mark:'✓'})),...['host-run','test','report','close'].map(name=>({name,mark:''}))],
+ paint:{glyph:P('●'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}};
+const failed={id:'e',title:'PG-50 휠 입력',kind:'dead',state:'dead',elapsed:'54m',shape:'staged',owner,resume:'execute',step:'execute ✕ 2/3',
+ reason:'worker claude (Sonnet 5.5·high) · failed 3m',visibility:{summary:'검증 ?'},
+ stages:[{name:'plan',mark:'✓',verdict:'PASS',model:'Opus 5.5',elapsed:'8m'},{name:'execute',mark:'✕',model:'Sonnet 5.5',elapsed:'46m',note:'checked by Sonnet 5.5'},{name:'test',mark:''}],
+ paint:{glyph:P('✕'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high')}};
+const TITLE='하팅 v4-open 감독 — 셸 상태·표시 고치기와 Fleet 세션 줄 다듬기',NOW='검토 결과 3건을 기다리는 중이며 CI 결과를 확인하고 있음';
+const message=(way,who,when,body,at,delivery)=>({way,who,harness:'claude',when,body,text:body,at,...(delivery?{delivery:[delivery,'dim']}:{})});
+const messages=[message('→','[e8]','02:59','fact-verify 설치됨, 재개 명령 안내',1,'미전달 5h'),message('→','[73]','04:00','#1549·#1505 한 묶음으로 출판 요청',2,'전달됨'),
+ message('←','[52]','05:00','#1556 수정 후 병합, P2 한 건: 세션이 바뀐 뒤 DB 오류면 앞 값이 남음',3),message('←','[e7]','07:50','v4.23.0 설치 완료, 다음 판 준비',4),
+ message('→','[e9]','07:58','검토 요청 — 셸 패널 시안 C7',5,'보냄')];
+const head={repo:[P('hearting/')],git:[P('(fix/fleet-opencode-dup-sid 🚧 3)')],selected:[P('claude-fable-5-2 high')],context:[P('context ━━━━────── 41%')],
+ quota:[P('5h 12% │ 7d 66%')],session_title:TITLE,now:NOW,wait:'◑답 대기 1',messages};
+const draw=(routes,width,height,{side=true,open=[]}={})=>view.render({width,height,side,fill:side,model:{...head,routes,route_count:routes.length},state:'working',
+ configuration:{},expandedKeys:open,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+'''
+
+    def test_a_value_breaks_only_between_tokens_after_its_lesser_pieces_go(self):
+        # Spec E9 rule 34 (a), (e): an opened route at 40 cells lets effort, then the harness
+        # and brackets, then a kind's brackets go, the tool's path give way to its file name,
+        # and folds only between tokens (`Sonnet 5.5` is one); stages not reached yet share one row.
+        script = self.FIXTURE + r'''
+const rows=draw([oneShot,staged,failed],40,64,{open:['route:a','route:b','route:e']}),all=rows.join('\n');
+for(const s of rows)assert.equal(cells(s),40,s);
+for(const want of ['┆ OWNER  Opus 5.5 · 38%','┆ KIND   autopilot-code(dev·q)','┆   >_ Edit · host.cjs 3m','┆ OWNER  Opus 5.5 · 22% · deep',
+ '┆ DOER   Sonnet 5.5 · 12%','┆   >_ Edit · peer-message.py ','┆ OWNER  claude (Opus 5.5) ','┆ WHY    worker Sonnet 5.5 '])assert(all.includes(want),want+'\n'+all);
+assert(rows.some(s=>/┆ KIND   autopilot-code +│/.test(s))&&!all.includes('(dev·st'),all);
+// The reason's rest goes on at its own token, the `·` with the word after it.
+assert(rows[rows.findIndex(s=>s.includes('┆ WHY'))+1].includes('┆        · failed 3m'),all);
+// A model name keeps its version on its row (`checked by` / `Sonnet 5.5`).
+const note=rows.findIndex(s=>s.includes('NOTE   checked by'));
+assert(note>0&&rows[note+1].includes('┆          Sonnet 5.5'),all);
+// No model name, version or path is cut apart.
+for(const s of rows)assert(!/\((Opus|Sonnet) *│|┆ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
+// Stages not reached yet: one dim row, broken before a `›`; only stages with values are table rows.
+const at=rows.findIndex(s=>s.includes('┆ · impl-review › test'));
+assert(at>0&&rows[at+1].includes('┆   › report › close'),all);
+const own=rows.slice(rows.findIndex(s=>s.includes('세션 간 소통')),rows.findIndex(s=>s.includes('PG-50')));
+assert.equal(own.filter(s=>/┆ [✓●·] /.test(s)).length,4,own.join('\n'));
+assert(rows.some(s=>s.includes('┆ · test'))&&!all.includes('lines ›'),all);
+// The same function breaks TITLE and NOW at word boundaries, as before.
+const title=rows.findIndex(s=>s.includes('TITLE'));
+assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TITLE  하팅 v4-open 감독 — 셸','       상태·표시 고치기와 Fleet 세션',
+ '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음'],all);
+// With room the whole values stand on one row each.
+const wide=draw([oneShot,staged,failed],80,64,{open:['route:a','route:b','route:e']}).join('\n');
+for(const want of ['┆ OWNER  claude (Opus 5.5·xhigh) · 38%','┆ KIND   autopilot-code(dev·std)','>_ Edit · utilities/session-shell/host.cjs 3m',
+ '┆ WHY    worker claude (Sonnet 5.5·high) · failed 3m','┆ · impl-review › test › report › close'])assert(wide.includes(want),want+'\n'+wide);
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_route_rows_outlast_message_bodies_and_the_rule_outlasts_empty_rows(self):
+        # Spec E9 rule 34 (b), (c): empty rows, then the messages' extra rows, then details,
+        # then one-row messages go before the routes' third and second rows; the messages
+        # grow only into rows the routes leave in their three-row form; the rule under the
+        # metadata stays while TITLE or NOW takes more than one row.
+        script = self.FIXTURE + r'''
+const nine=[...Array(9)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'n'+i,title:r.title+' '+(i+1)};});
+const place=rows=>rows.filter(s=>/│ │   (one-shot|staged)/.test(s)).length,names=rows=>rows.filter(s=>/│ │   (셸|세션|새 판)/.test(s)).length;
+const section=rows=>{const m=rows.findIndex(s=>s.includes('── messages'));return m<0?[]:rows.slice(m+1,rows.findIndex((s,i)=>i>m&&/^│ ─+( \+\d+ ─)? │$/.test(s)));};
+// 40×44: every route keeps its three rows and the three messages fold to one row each.
+const r44=draw(nine,40,44),m44=section(r44);
+assert(place(r44)===9&&names(r44)===9&&m44.length===3&&m44.every(s=>/^│ [←→] \[/.test(s)),r44.join('\n'));
+// The messages fold to one row each before a route gives up its third row: from 40×44 on the routes keep three rows.
+for(let h=44;h<=60;h++)assert.equal(place(draw(nine,40,h)),9,h+'\n'+draw(nine,40,h).join('\n'));
+assert(place(draw(nine,40,43))<9);
+// 40×60: rows to spare after the routes' three-row form give the messages their two rows and more.
+const r60=draw(nine,40,60),m60=section(r60);
+assert(place(r60)===9&&m60.length>6&&m60.filter(s=>/^│   \S/.test(s)).length>3,r60.join('\n'));
+// 40×30: the routes fold to one row; the rows that frees go back to the messages' two-row form, none left empty.
+const r30=draw(nine,40,30);
+assert(place(r30)===0&&section(r30).length===6&&!r30.some(s=>/^│ +│$/.test(s)),r30.join('\n'));
+for(let h=16;h<=72;h++){
+ const rows=draw(nine,40,h),all=rows.join('\n'),body=section(rows);
+ // Extra message rows only while every route stands in its three-row form.
+ if(place(rows)<9)assert(body.filter(s=>/^│ [←→] /.test(s)).length<=3&&body.length<=6,h+'\n'+all);
+ // The rule under the metadata goes only once TITLE and NOW are one row each.
+ const title=rows.findIndex(s=>s.startsWith('│ TITLE'));
+ if(title>0&&/^│ {8}\S/.test(rows[title+1]))assert(/^│ ─+ │$/.test(rows[title-1]),h+'\n'+all);
+}
+const tall=draw(nine,40,60);
+assert(/^│ ─+ │$/.test(tall[tall.findIndex(s=>s.startsWith('│ TITLE'))-1]),tall.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_a_bottom_route_row_names_its_kind_before_its_tool(self):
+        # Spec E9 rule 34 (d): after model and context, before the tool, the side layout's
+        # and Fleet's words: `one-shot`, `staged 3/7 execute ●`, a failed `staged 2/3 execute ✕`;
+        # short of cells the tool goes, then `staged`, then the whole column.
+        script = self.FIXTURE + r'''
+const four=[oneShot,staged,waiting,failed];
+const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
+const r140=draw(four,140,20,{side:false});
+for(const [title,kind] of [['셸 상태','one-shot'],['세션 간','staged 3/7 execute ●'],['새 판으로','staged 4/7 host-run'],['PG-50','staged 2/3 execute ✕']]){
+ const s=row(r140,title);assert(s&&s.includes('│ '+kind),title+'\n'+r140.join('\n'));
+ assert(s.indexOf('claude')<s.indexOf(kind),s);
+ for(const s of r140)assert.equal(cells(s),140,s);
+}
+for(const title of ['셸 상태','세션 간']){const s=row(r140,title);assert(s.indexOf(s.includes('one-shot')?'one-shot':'staged')<s.indexOf('>_ Edit'),s);}
+assert(!r140.some(s=>/execute ✕ 2\/3/.test(s)),r140.join('\n'));
+// 80 cells: the tool goes first, then the `staged` word; the stage and its mark stay.
+const r80=draw(four,80,20,{side:false});
+assert(row(r80,'세션 간').includes('│ 3/7 execute ●')&&row(r80,'PG-50').includes('│ 2/3 execute ✕')&&row(r80,'셸 상태').includes('│ one-shot')
+ &&!r80.join('').includes('staged')&&!r80.join('').includes('>_'),r80.join('\n'));
+// Narrower still the whole column goes; the earlier columns stay.
+const r64=draw(four,64,20,{side:false});
+assert(!r64.join('').includes('one-shot')&&!r64.join('').includes('3/7')&&/claude Opus 5\.5 xhigh +│ ━━─── 38%/.test(row(r64,'셸')),r64.join('\n'));
+// At every width the tool shows whole or not at all, and a route that names its kind never reads the older `execute ✕ 2/3`.
+for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:false}).filter(s=>s.startsWith('│ │ ')))
+ assert(!/>_ ?\S*…|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
+'''
         self.node(script, "panel-view.cjs")
 
     def node(self, script, name):

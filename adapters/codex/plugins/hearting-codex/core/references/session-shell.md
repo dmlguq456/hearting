@@ -162,8 +162,15 @@ its mark, verdict and doer (harness, model, effort, live workers' context, the
 open tool and sub-agents on the running stage, time, round, unit, output), how
 it was run and checked (age, legs, the evidence summary, and the note Fleet
 writes right of the detail band), the next step, and
-why it stopped (the worker line and where it resumes). Values are whole: a long
-one goes on to the next rows, and a detail short of rows keeps its first rows
+why it stopped (the worker line and where it resumes). Values are whole: a value
+that does not fit one row first lets its lesser pieces go (effort, then the
+harness and its brackets: `OWNER Opus 5.5 · 38%`; then a kind's brackets), a
+tool's target gives way to its file name, then the tool stands alone (as on the
+third row); only then does it go on to the next rows, and only between tokens
+(a model name with its version, `Sonnet 5.5`, is one token; a lone `·` or `›`
+goes with the word after it); a token wider than a row runs on by character
+cells. The same break applies to TITLE, NOW, route titles and message bodies.
+A detail short of rows keeps its first rows
 and `+N lines ›`, which opens the route page where every value reads. Opening
 the route page reads the owner's raw output once, with the reader Fleet's route
 page uses, and shows its last rows under the route.
@@ -192,11 +199,18 @@ thin dim guide two cells in: `OWNER` (and `DOER` when a stage worker leads, or
 no owner is known) and `KIND` as label rows, one row per stage in columns (mark,
 name, verdict, doer model, context, time right-aligned; a column that does not
 fit goes whole: context, then model, then verdict), the running stage's tool and
-further workers under it, a stage's `OUT` and `NOTE`, then `INFO` (age, legs,
+further workers under it, a stage's `OUT` and `NOTE`; stages not reached yet,
+with nothing of their own, share one dim row (`· impl-review › test › report`,
+broken before a `›`); then `INFO` (age, legs,
 the evidence summary, the band note and each stage's time, unit and gate),
 `NEXT`, `WHY`, `RESUME` and `OUT`. One empty row parts an opened route from the
 next; a cut keeps whole items. The bottom layout
-keeps its one folded row. Groups are divided by
+keeps its one folded row: title, harness·model·effort, context, then the kind in
+the third row's and Fleet's words (`one-shot`, `staged 3/7 execute ●`, a failed
+one `staged 2/3 execute ✕`), then the open tool, and the elapsed time at the
+right edge. Short of cells the tool goes first, then the word `staged`
+(`3/7 execute ●`), the title keeping ten cells through both; narrower still the
+kind column goes whole, and the tool shows whole or not at all. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
 `messages`, stage names, `5h`/`7d`); only real content and
 language-dependent text follows the screen language: the answer wait reads
@@ -206,13 +220,18 @@ time and quota resets alike.
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run
 short, the question (its body and choices) and the top groups stay, and the
-others give way first: spacer rows and the head's rule, an opened route
-detail shortens and closes, a value on several rows (title, NOW, a route title)
-keeps one row ending in `…`, the routes' third row goes, then their second,
-then messages fold to one row each and fewer show (`+N` at the end of the lower
-rule); only then does the route box scroll in place, showing fewer
+others give way first, in this order: empty rows; the messages' extra rows
+(past three, and a body's rows after its first); an opened route detail (and an
+opened message) shortens and closes; a value on several rows (title, NOW, a
+route title) keeps one row ending in `…`; then the head's rule (it is not an
+empty row: it goes only once TITLE and NOW are one row each); the messages fold
+to one row each (three of them); the routes' third row goes, then their second;
+fewer messages show (three down to one, `+N` at the end of the lower rule); only
+then does the route box scroll in place, showing fewer
 routes (down to one) without dropping any; then the Git row, the route box and
-running jobs go; the messages section goes only last, then 5h/7d. A section is
+running jobs go; the messages section goes only last, then 5h/7d. Rows a later
+step frees beyond its need go back to the steps before it, the most important
+first, so no row stays empty that an earlier value could fill. A section is
 placed whole or not at all.
 Inside the box, an opened route's gauge bar gives way before its percent.
 Variable-width text (titles, message
@@ -277,7 +296,11 @@ is its own evidence (usage above 200K is the 1M window), else the window its
 launch recorded as configured (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in launch and
 settings env, 100K..1M; `CLAUDE_CODE_DISABLE_1M_CONTEXT` holds 200K). A start,
 resume, `/clear` or switch keeps this seat's own values drawn (the folder, Git
-and usage); session values clear until read again. The judgment lives in one place
+and usage); session values clear until read again. A `/clear` (the native start
+hook's own `source`) keeps the same process and model, so the model and effort
+row also stays as last observed while its context starts empty; a start, a
+resume or a switch reads the model anew (a configured value never stands in for
+an observed selection). The judgment lives in one place
 (`tools/fleet/session_line.py`) and uses Fleet's shared functions once they
 exist. The display is as fresh as that cache. Pressing the
 box's top border opens the existing read-only route evidence pages, which
@@ -290,8 +313,9 @@ arrow in its direction's color, the other session's number, then dim harness,
 `delivered`/`sent` dim, `not delivered 5h` in the caution color after 30 minutes,
 `failed` red) and, two cells in, the text in the body color from its first
 meaningful words (leading bracket frames and heading marks left out, nothing
-else changed). Three show; rows to spare (left whole, or left after a route form gave
-way) give bodies up to three rows and more messages (up to eight); short of rows a message folds to one row (arrow,
+else changed). Three show; rows to spare once every route stands in its three-row
+form (and an opened detail whole) give bodies up to three rows and more messages
+(up to eight); short of rows a message folds to one row (arrow,
 number, bright text), then fewer show from the oldest and the lower rule counts
 them. Pressing a message shows its whole retained text in place. Two limits differ: the
 source keeps a received input's first 384 characters and a sent message's

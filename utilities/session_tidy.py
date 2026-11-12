@@ -3520,13 +3520,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # applies its worker/attachment checks before selecting a terminal.
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if is_worker(env) or harness not in HARNESSES or not sid or event not in ("start", "prompt", "compact", "runtime-status"):
         return ""
     if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness == "claude":
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if event == "runtime-status":
         if harness == "opencode":
             observed = False

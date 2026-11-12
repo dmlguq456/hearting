@@ -584,8 +584,11 @@ def _lifecycle_owner(harness: str, sid: str, env: dict):
     return current, env
 
 
-def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
-    """Silent native hook report, separate from all prompt classification."""
+def lifecycle(harness: str, event: str, sid: str, *, env=None, source: str = "") -> None:
+    """Silent native hook report, separate from all prompt classification.
+
+    A start carries the native's own start reason (``clear`` keeps the process and its
+    model, spec E9 rule 34 (f))."""
     env = os.environ if env is None else env
     native_model = env.get("HEARTING_SHELL_NATIVE_MODEL")
     if harness not in HARNESSES or not _SID.fullmatch(sid or ""):
@@ -610,6 +613,8 @@ def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
            "token": token, "pid": me["pid"], "start": me["start"], "seq": time.monotonic_ns() // 1000}
     if isinstance(native_model, str) and 0 < len(native_model) <= 128 and all(ord(c) >= 32 and ord(c) != 127 for c in native_model):
         req["native_model"] = native_model
+    if event == "start" and source in {"startup", "resume", "clear", "compact"}:
+        req["source"] = source
     try:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(0.5)

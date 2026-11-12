@@ -250,6 +250,49 @@ vm.createContext(c);vm.runInContext(helpers,c);
                                 text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_clear_keeps_the_model_row_and_a_start_or_switch_reads_it_anew(self):
+        # Spec E9 rule 34 (f): `/clear` keeps the process and its model, so the head keeps
+        # the model and effort it last observed (context starts empty); a start, a
+        # `/resume` or a switch keeps the contract that configured values never stand in
+        # for an observed selection.
+        script = r"""
+const fs=require('node:fs'),vm=require('node:vm'),a=require('node:assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const begin=source.indexOf('async function lifecycle(req)');
+const body=source.slice(begin,source.indexOf('async function request(req)',begin));
+const row={pid:10,start:'s'},noop=()=>{};
+const c={processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,sameTerminal:()=>true,token:'t',harness:'claude',sequence:0,
+ nativeFooter:null,paintedCommon:[],nativeContext:undefined,sid:'',nativeSelected:{},displayValues:{},panelModel:{},panelSections:undefined,panelLines:[],
+ projectionKey:'',footer:'',footerSegments:[],routeDetail:false,routeScroll:0,selection:0,native:null,state:'unknown',nativeTurn:'',turnMark:0,
+ seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,block:{leave:noop,update:noop},publishNativeDisplay:noop,
+ queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,source:()=>Promise.resolve(),projection:noop};
+vm.createContext(c);vm.runInContext(body,c);
+const plain=v=>JSON.parse(JSON.stringify(v??null));
+let seq=0;
+const observed=()=>{
+ c.nativeSelected={model:'Opus 5.5',effort:'xhigh'};c.displayValues={model:'Opus 5.5',effort:'xhigh',context:'41%'};
+ c.panelModel={...c.panelModel,selected:[{text:'Opus 5.5'},{text:' xhigh'}],model_value:'claude-opus-5-5',effort_value:'xhigh',
+  context:[{text:'context 41%'}],session_title:'BEFORE',repo:[{text:'hearting/'}],git:[{text:'(main)'}],quota:[{text:'5h 12%'}]};
+};
+const start=(sid,how,harness='claude',event='start')=>{c.harness=harness;return c.lifecycle({token:'t',harness,pid:10,start:'s',sid,seq:++seq,event,...(how?{source:how}:{})});};
+(async()=>{
+ a.equal((await start('A','startup')).ok,true);observed();
+ a.equal((await start('B','clear')).ok,true);
+ a.deepEqual(plain(c.nativeSelected),{model:'Opus 5.5',effort:'xhigh'});
+ a.deepEqual(plain(c.displayValues),{model:'Opus 5.5',effort:'xhigh'},'its context starts empty');
+ a.deepEqual(plain(c.panelModel.selected),[{text:'Opus 5.5'},{text:' xhigh'}]);a.equal(c.panelModel.effort_value,'xhigh');
+ a.equal(c.panelModel.context,undefined);a.equal(c.panelModel.session_title,undefined);a.equal(c.panelModel.repo[0].text,'hearting/');
+ for(const [how,harness,event] of [['resume','claude','start'],['startup','claude','start'],[undefined,'claude','start'],[undefined,'codex','select']]){
+  observed();a.equal((await start('S'+seq,how,harness,event)).ok,true);
+  a.deepEqual(plain(c.nativeSelected),{},how+' '+event);a.equal(c.panelModel.selected,undefined,how+' '+event);
+  a.equal(c.panelModel.repo[0].text,'hearting/',how+' '+event);
+ }
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/host.cjs')],
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 class FooterReaderParityTests(unittest.TestCase):
     """The host frame and the Python footer reader name the same current thread."""
     FIXTURES = ROOT / 'utilities/fixtures/codex-0.163-shared-footer'

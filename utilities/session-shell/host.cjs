@@ -907,11 +907,15 @@ async function lifecycle(req) {
      ||typeof req.sid!=='string'||!/^[A-Za-z0-9._-]{1,256}$/.test(req.sid))return {ok:false,reason:'event-identity'};
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
+    // Spec E9 rule 34 (f): `/clear` keeps the process and its model, so the model and
+    // effort row stays as last observed (its context starts empty); a start or a
+    // switch (`/resume`) reads them anew.
+    const cleared=req.event==='start'&&req.source==='clear'&&!!sid;
     nativeFooter=null;paintedCommon=[];
     if(nativeContext?.sid!==req.sid)nativeContext=undefined;
     // Preserve a current TUI-selected model across its first SID binding only.
     // Context and session data are never carried from the previous selection.
-    if(sid&&harness!=='opencode')nativeSelected={};
+    if(sid&&harness!=='opencode'&&!cleared)nativeSelected={};
     if(typeof req.native_model==='string'&&req.native_model.length>0&&req.native_model.length<=128&&!/[\x00-\x1f\x7f]/.test(req.native_model)){
       nativeSelected={model:req.native_model,...(nativeSelected.model===req.native_model?{effort:nativeSelected.effort}:{})};
     }
@@ -919,7 +923,8 @@ async function lifecycle(req) {
     // Spec E9 rule 33 (c): this seat's own values (its folder, Git, the account usage)
     // stay drawn across a start, resume, /clear or switch; session values clear.
     panelModel={labels:panelModel.labels,styles:panelModel.styles,repo:panelModel.repo,git:panelModel.git,quota:panelModel.quota,
-      head:Array.isArray(panelModel.head)?panelModel.head.filter(part=>!/^\[/.test(String(part?.text))):undefined};panelSections=undefined;panelLines=[];
+      head:Array.isArray(panelModel.head)?panelModel.head.filter(part=>!/^\[/.test(String(part?.text))):undefined,
+      ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
