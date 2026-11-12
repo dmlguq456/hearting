@@ -757,7 +757,10 @@ def _panel_common_rows(panel, columns):
         first = " │ ".join(part for part in (head, selected, context) if part)
         rows = [first, git] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context, git]
     else:
-        rows = [head, git, selected, context]
+        # Beside the native area the Git row is painted without the worktree count (spec E9
+        # rule 37 (a)): the row compared is the row painted.
+        side_git = text("git_side") if panel.get("git_side") is not None else git
+        rows = [head, side_git, selected, context]
     return [row for row in rows + [quota] if row]
 
 
@@ -844,7 +847,8 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
-                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
+                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
+                     upgrade_note="") -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -859,7 +863,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count
+    from fleet.session_work import observe as observe_work, open_count, latest_memory
     from fleet.session_panel import presentation
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
@@ -898,8 +902,15 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     def styled(parts):
         return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    work, work_paths = observe_work(values.get("cwd"))
+    # Spec E9 rule 37 (b): the repo's newest saved memory row (the journal Fleet reads, read
+    # again only when it changed); its headline rides the open-work query below.
+    memory_row, memory_paths = latest_memory(values.get("cwd"))
+    work, work_paths = observe_work(values.get("cwd"),
+                                    (memory_row["headline_id"],) if memory_row and memory_row.get("headline_id") else ())
+    if memory_row:
+        values["memory_latest"] = {**memory_row, "headline": work.headlines.get(str(memory_row.get("headline_id")), "")}
     watched.extend(work_paths)
+    watched.extend(memory_paths)
     human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
                         received=peers, human=human_line,
@@ -938,13 +949,21 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # field: Claude's `notice` below is the native status row's segments.
     notice, notice_paths = session_tidy.waiting_notice_display(seat, harness, sid)
     panel["tidy_notice"] = _plain(notice, 400)
+    # A newer installed release this window has not switched to yet, or a switch that could
+    # not carry the scrollback: the lowest-priority line, never over another notice.
+    panel["tidy_upgrade"] = False
+    if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
+        panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
+        panel["tidy_upgrade"] = upgrade_note == "pending"
+    # An open route page has no notice slot: it shows the same words on its own page row.
+    panel["upgrade_waiting"] = ui_text("session_shell.upgrade_pending") if upgrade_note == "pending" else ""
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "repo", "git", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
     for row in panel["routes"]:
         paint = {}
@@ -952,7 +971,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                           ("effort", "effort_key"), ("ctx", "ctx_key")):
             if row.get(name):
                 paint[name] = styled([(row[name], row.get(key) or "dim")])[0]
-        for name in ("gauge", "gauge5"):
+        for name in ("gauge", "gauge5", "gauge_row"):
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
         row["paint"] = paint
@@ -963,7 +982,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["messages"] = peer_message_rows(received, sent, assigned_tag, limit=8)
     if harness == "claude":
         from fleet.session_panel import notice_line
-        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
+        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time(), upgrade_note=upgrade_note))
+        # A waiting-release line stands only for this host: the next one starts without it.
+        panel["notice_upgrade"] = upgrade_note == "pending" and not notice_line(
+            values, panel["routes"], board, display, time.time())
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
@@ -1224,7 +1246,8 @@ def _backend_operation(request: dict) -> dict:
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
-            answer_busy=request.get("answer_busy") is True)}
+            answer_busy=request.get("answer_busy") is True,
+            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "")}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":

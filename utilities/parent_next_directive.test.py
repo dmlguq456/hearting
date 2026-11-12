@@ -366,7 +366,7 @@ class PrintedCommandHomeTest(unittest.TestCase):
     def test_completion_notices_name_the_installed_release(self):
         import dispatch_completion_join as join
         with unittest.mock.patch("parent_next_directive.command_home", return_value=str(self.pointer)):
-            finish = join.completion_harvest_command("att-x", "finish-workflow", jobs="/j/jobs.log", surface="-")
+            finish = join.completion_harvest_command("att-x", "finish-workflow", jobs="/j/jobs.log")
         self.assertIn(f"{self.pointer}/utilities/dispatch_terminal_commit.py finish", finish)
 
 

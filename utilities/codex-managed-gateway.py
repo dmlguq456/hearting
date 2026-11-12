@@ -2540,8 +2540,7 @@ class ManagedGateway:
         context = (
             "AGENT_HARNESS_COMPLETION_V1\n"
             + canonical(receipt) + "\n"
-            + completion_followup_text(receipt, jobs=str(receipt["job_registry"]),
-                surface=str(AGENT_HOME / "adapters" / "codex" / "bin" / "preflight.sh"))
+            + completion_followup_text(receipt, jobs=str(receipt["job_registry"]))
         )
         if len(context.encode("utf-8")) > MAX_CONTEXT_BYTES:
             raise GatewayError("completion-context-oversized")

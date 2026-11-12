@@ -40,6 +40,11 @@ Owner execution posture (PG-34)
                               wrapper computes; Claude/OpenCode: their headless
                               posture) runs a task-branch push to a loopback git
                               daemon and a loopback network step.
+    ``owner-publish-registered``  the same push and connection from inside an
+                              owner the normal start registers and launches
+                              (``compose --start --shape solo`` ->
+                              ``dispatch-owner.py`` -> ``adapters/<harness>/bin/
+                              dispatch-headless.py``), on the fixture model only.
 
 Native custom agents (PG-28)
     ``custom-agent-spawn``    the model spawns Hearting's ``memory-scout`` custom
@@ -86,6 +91,7 @@ PG = {
     "subsession-completion": "PG-31", "quoted-peer-from": "PG-32",
     "foreign-report": "PG-32", "completion-notice-same-root": "PG-32",
     "herdr-peer-prompt": "PG-33,PG-25", "owner-publish": "PG-34",
+    "owner-publish-registered": "PG-34",
     "custom-agent-spawn": "PG-28",
 }
 
@@ -1320,6 +1326,269 @@ class OwnerPublishScenario(Scenario):
         return "pass"
 
 
+# Every portable profile a registered owner may be sealed with; each must resolve to
+# the fixture model before any owner launches (no account model is ever named).
+OWNER_PROFILES = ("top", "deep", "balanced-deep", "balanced", "light", "mini")
+# Row fields that describe the posture the wrapper actually applied.
+POSTURE_FIELDS = ("harness", "model", "effort", "runtime_sandbox", "permission_mode",
+                  "permission_mode_reason", "nested_headless_network", "network_access",
+                  "execution_surface", "transport", "completion_delivery", "worker_type",
+                  "dispatch_depth", "note", "failure_class", "reconcile_reason")
+TERMINAL_STATES = {"done", "killed", "cancelled"}
+
+
+def fixture_model_id(harness: str) -> str:
+    return f"fixture/{base.FIXTURE_MODEL}" if harness == "opencode" else base.FIXTURE_MODEL
+
+
+def fixture_models_conf(text: str, model: str) -> str:
+    """The shipped ``models.conf`` with every model id its tiers name replaced by ``model``.
+
+    Only values change; keys, efforts, variants and comments stay, so the user copy
+    is the shipped policy aimed at the loopback provider. The main-session-only list
+    keeps its own ids (no tier names them afterwards)."""
+    ids = {m.group(1).strip("\"'") for m in
+           re.finditer(r"(?m)^CFG_TIER_[A-Z_]+_MODEL=(\S+)", text)}
+    ids |= set(re.findall(r"[a-z0-9-]+/[A-Za-z0-9._-]+(?=:)", text))
+    lines = []
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and not key.lstrip().startswith("#") and key.strip() != "CFG_MAIN_SESSION_ONLY_MODELS":
+            for old in sorted(ids, key=len, reverse=True):
+                value = re.sub(rf"(?<![\w./-]){re.escape(old)}(?![\w./-])", model, value)
+        lines.append(key + sep + value)
+    return "\n".join(lines) + "\n"
+
+
+def last_json_object(text: str) -> dict:
+    for line in reversed(text.splitlines()):
+        with contextlib.suppress(ValueError):
+            value = json.loads(line)
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def registry_rows(jobs: Path) -> list[dict]:
+    rows = []
+    with contextlib.suppress(OSError):
+        for line in jobs.read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t", 5)
+            if len(fields) != 6:
+                continue
+            meta = dict(item.partition("=")[::2] for item in fields[5].split(",") if "=" in item)
+            rows.append({"status": fields[1], "slug": fields[4], **meta})
+    return rows
+
+
+class OwnerPublishRegisteredScenario(OwnerPublishScenario):
+    name = "owner-publish-registered"
+    summary = ("A registered owner, started by compose --start through the harness's dispatch "
+               "wrapper, pushes a task branch to a loopback git daemon and opens a loopback "
+               "connection (unscoped, complete, report).")
+    MARKER = "SCENARIO-OWNER-REG-PUSH"
+    OWNER_SECONDS = 300
+
+    def probe(self, shape: str) -> str:
+        return super().probe(f"reg-{shape}")
+
+    def script(self, run):
+        def answer(record, earlier):
+            match = re.search(rf"{self.MARKER}-(\w+)", record["text"])
+            if not match:
+                return Reply("OK")
+            shape = match.group(1)
+            probed = any(f"hb-reg-{shape}" in str(r["reply"].get("shell") or "") for r in earlier)
+            if record["last_kind"] != "tool" and not probed:
+                return Reply(shell=self.probe(shape))
+            # A one-step probe is not the requested work: end the owner with a typed
+            # handoff, so no supervisor continuation or completion gate is waited on.
+            return Reply("artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
+        return answer
+
+    def prepare(self, run):
+        super().prepare(run)
+        env = run.home.env
+        # The normal start prepares the owner's worktree from the remote default branch.
+        subprocess.run(["git", "-C", str(run.home.workspace), "push", "-q", "origin",
+                        "HEAD:refs/heads/main"], check=True, env=env, capture_output=True)
+        subprocess.run(["git", "--git-dir", str(run.home.root / "remotes" / "task.git"),
+                        "symbolic-ref", "HEAD", "refs/heads/main"], check=True, env=env,
+                       capture_output=True)
+        env["HEARTING_PRIOR_ART"] = "off"
+        sys.path.insert(0, str(_base().SOURCE / "utilities"))
+        import model_config
+        model = fixture_model_id(run.harness)
+        user = model_config.user_path(run.harness, environ=env)
+        user.parent.mkdir(parents=True, exist_ok=True)
+        shipped = _base().SOURCE / "adapters" / run.harness / "config" / "models.conf"
+        user.write_text(fixture_models_conf(shipped.read_text(encoding="utf-8"), model),
+                        encoding="utf-8")
+        if run.harness == "codex":
+            # The owner's own Codex home links an auth file read-only; the loopback
+            # provider never reads it (requires_openai_auth = false). Not a credential.
+            auth = Path(env["CODEX_HOME"]) / "auth.json"
+            if not auth.exists():
+                auth.write_text(json.dumps({"OPENAI_API_KEY": "sk-hearting-fixture-not-a-key"}),
+                                encoding="utf-8")
+                auth.chmod(0o600)
+            run.evidence["runtime_projection"] = self.complete_codex_projection(run)
+        if run.harness == "opencode":
+            run.evidence["fixture_auth"] = self.opencode_fixture_auth(run)
+            run.evidence["guard_render"] = self.render_opencode_guard(run)
+        resolved = self.resolved_models(run)
+        run.evidence["resolved_models"] = resolved
+        wrong = {name: value for name, value in resolved.items() if value != model}
+        if wrong:
+            raise RuntimeError(f"owner model would leave the fixture: {wrong}")
+
+    @staticmethod
+    def complete_codex_projection(run) -> dict:
+        """Wire the fixture Codex home the way the adapter's own projection installer does.
+
+        A source install leaves the plugin-marketplace link and part of the Skill links
+        out, so the readiness probe reads the Codex owner as unavailable. The provider
+        config the fixture wrote must survive."""
+        env = run.home.env
+        done = subprocess.run([str(_base().SOURCE / "adapters/codex/bin/install-runtime-projection.sh")],
+                              env=env, cwd=str(run.home.workspace), text=True, capture_output=True,
+                              timeout=300)
+        config = (Path(env["CODEX_HOME"]) / "config.toml").read_text(encoding="utf-8")
+        if done.returncode or 'model_provider = "hearting_fixture"' not in config:
+            raise RuntimeError(f"codex projection or fixture provider lost: {done.stdout[-300:]}")
+        return {"exit": done.returncode, "status": next(
+            (line for line in done.stdout.splitlines() if line.startswith("status=")), "")}
+
+    @staticmethod
+    def opencode_fixture_auth(run) -> dict:
+        """Store a placeholder key for the fixture provider; the probe needs a stored entry.
+
+        OpenCode 2 reads an API key only from an interactive prompt, so it is typed into
+        a private tmux server. The key names the loopback provider only."""
+        env = run.home.env
+        tui = base.PrivateTui(run.home.root, env, ["opencode", "auth", "login", "fixture",
+                                                   "--standalone", "--method", "key"],
+                              run.home.workspace)
+        tui.start()
+        try:
+            prompted = bool(wait_for(lambda: "api key" in tui.screen().lower(), 60, 0.5))
+            tui._tmux("send-keys", "-t", "scenario", "-l", "hearting-fixture-not-a-key")
+            time.sleep(1)
+            tui.key("Enter")
+            wait_for(lambda: not tui.alive(), 60, 0.5)
+            finished = "HEARTING-SCENARIO-TUI-EXIT=0" in tui.screen()
+        finally:
+            tui.stop()
+        listed = subprocess.run(["opencode", "auth", "list"], env=env, cwd=str(run.home.workspace),
+                                text=True, capture_output=True, timeout=120)
+        stored = any(line.split()[-1:] == ["stored"] for line in listed.stdout.splitlines())
+        if not stored:
+            raise RuntimeError("fixture provider key was not stored")
+        return {"prompted": prompted, "login_exit_0": finished, "stored": stored}
+
+    @staticmethod
+    def render_opencode_guard(run) -> list[str]:
+        """Render the guard package the way release activation does (unresolved root).
+
+        A source install writes the import from the resolved checkout path, which the
+        headless probe's guard check rejects (`opencode-guard-projection-invalid`)."""
+        env = run.home.env
+        code = ("import json,pathlib,sys; sys.path.insert(0, sys.argv[1]); import projector\n"
+                "home = pathlib.Path(sys.argv[2]); fixture = pathlib.Path(sys.argv[3]); out = []\n"
+                "for e in projector.opencode_guard_layout(home / 'hearting', home)['entries']:\n"
+                "    dest = pathlib.Path(e['dest'])\n"
+                "    if e.get('guard') and e.get('action') == 'render' and fixture in dest.parents:\n"
+                "        dest.write_text(e['content']); out.append(str(dest.relative_to(fixture)))\n"
+                "layout = projector.opencode_guard_layout(home / 'hearting', home)\n"
+                "print(json.dumps({'rendered': out, 'issues': projector.opencode_guard_health(layout)}))")
+        home = Path(env["XDG_CONFIG_HOME"]) / "opencode"
+        done = subprocess.run([sys.executable, "-B", "-c", code, str(_base().SOURCE / "tools/install"),
+                               str(home), str(run.home.root)], env=env, text=True,
+                              capture_output=True, timeout=120)
+        value = last_json_object(done.stdout)
+        if not value or value.get("issues"):
+            raise RuntimeError(f"guard render failed: {value or done.stderr[-300:]}")
+        return value["rendered"]
+
+    @staticmethod
+    def resolved_models(run) -> dict:
+        code = ("import json,sys; sys.path.insert(0, sys.argv[1]); import model_config, model_profile; "
+                "path = model_config.user_path(sys.argv[2]); out = {}\n"
+                "for name in sys.argv[3:]:\n"
+                "    try: out[name] = model_profile.resolve_profile(sys.argv[2], path, name)['model']\n"
+                "    except Exception as exc: out[name] = 'error: %s' % exc\n"
+                "print(json.dumps(out))")
+        done = subprocess.run([sys.executable, "-B", "-c", code, str(_base().SOURCE / "utilities"),
+                               run.harness, *OWNER_PROFILES], env=run.home.env, text=True,
+                              capture_output=True, timeout=60)
+        return last_json_object(done.stdout) or {"error": done.stderr[-400:]}
+
+    def start_owner(self, run, shape: str) -> dict:
+        root, ws, env = run.home.root, run.home.workspace, run.home.env
+        task = root / f"task-{shape}.md"
+        task.write_text(f"{self.MARKER}-{shape}: push the task branch and check the loopback "
+                        "connection, then report.\n", encoding="utf-8")
+        command = [sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"),
+                   "compose", "--start", "--shape", "solo", "--intensity", "quick",
+                   "--capability", "autopilot-code", "--capability-mode", "dev",
+                   "--pin", f"owner={run.harness}", "--prompt-file", str(task),
+                   "--cwd", str(ws), "--artifact-root", env["AGENT_ARTIFACT_ROOT"],
+                   "--jobs", env["AGENT_DISPATCH_JOBS"], "--unassigned",
+                   "--slug", f"hb-owner-reg-{shape}"]
+        if shape in ("complete", "report"):
+            command += ["--execution-scope", shape]
+        done = subprocess.run(command, env=env, cwd=str(ws), text=True, capture_output=True,
+                              timeout=300, stdin=subprocess.DEVNULL)
+        receipt = last_json_object(done.stdout)
+        return {"exit": done.returncode, "receipt": receipt,
+                "stdout_tail": done.stdout[-600:], "stderr_tail": done.stderr[-600:]}
+
+    def owner_row(self, run, shape: str) -> dict | None:
+        rows = [row for row in registry_rows(Path(run.home.env["AGENT_DISPATCH_JOBS"]))
+                if row.get("worker_type") == "owner" and f"hb-owner-reg-{shape}" in row["slug"]]
+        return rows[-1] if rows else None
+
+    def drive(self, run):
+        rows = {}
+        for shape in self.SHAPES:
+            started = time.time()
+            launch = self.start_owner(run, shape)
+            row = wait_for(lambda: (lambda r: r if r and r["status"] in TERMINAL_STATES else None)(
+                self.owner_row(run, shape)), self.OWNER_SECONDS, 2) or self.owner_row(run, shape)
+            pushed = subprocess.run(["git", "--git-dir", str(run.home.root / "remotes/task.git"),
+                                     "rev-parse", "--verify", "-q", f"refs/heads/hb-reg-{shape}"],
+                                    capture_output=True, text=True).returncode == 0
+            texts = "\n".join(r["text"] for r in run.main_requests() if r["at"] >= started)
+            network = ("ok" if f"HB-NET-reg-{shape}-REACHED" in texts else
+                       "blocked" if f"HB-NET-reg-{shape}-BLOCKED" in texts else "not-run")
+            rows[shape] = {"compose_exit": launch["exit"],
+                           "posture": {k: row[k] for k in POSTURE_FIELDS if row and k in row},
+                           "row_status": row["status"] if row else "absent",
+                           "attempt_id": row.get("attempt_id") if row else None,
+                           # The adapter wrapper's own launch line, as the start receipt keeps it.
+                           "wrapper_surface": sorted(set(re.findall(
+                               r"runtime_surface=([a-z-]+)",
+                               json.dumps(launch["receipt"].get("launches", ""))))),
+                           "pushed": pushed, "network": network,
+                           "receipt_keys": sorted(launch["receipt"])[:20],
+                           "stdout_tail": launch["stdout_tail"], "stderr_tail": launch["stderr_tail"]}
+        run.evidence["shapes"] = rows
+        run.note("; ".join(
+            f"{s}: owner={r['row_status']} via={','.join(r['wrapper_surface']) or '-'} "
+            f"push={'ok' if r['pushed'] else 'blocked'} net={r['network']} "
+            f"sandbox={r['posture'].get('runtime_sandbox', '-')}"
+            for s, r in rows.items()))
+        if not all(r["row_status"] != "absent" and r["network"] != "not-run" for r in rows.values()):
+            run.note("a registered owner did not launch or never ran the probe")
+            return "inconclusive"
+        if not all(rows[s]["pushed"] and rows[s]["network"] == "ok" for s in ("unscoped", "complete")):
+            return "fail"
+        if rows["report"]["network"] != "ok":
+            run.note("the report-scope owner has no network (PG-51)")
+            return "fail"
+        return "pass"
+
+
 def _port_open(port: int) -> bool:
     with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port), 1):
         return True
@@ -1494,4 +1763,4 @@ class CustomAgentSpawnScenario(Scenario):
 SCENARIOS = [ReportBurstScenario, ReportLongScenario, ReportAfterErrorScenario,
              SubsessionCompletionScenario, QuotedPeerFromScenario, ForeignReportScenario,
              CompletionNoticeSameRootScenario, HerdrPeerPromptScenario, OwnerPublishScenario,
-             CustomAgentSpawnScenario]
+             OwnerPublishRegisteredScenario, CustomAgentSpawnScenario]

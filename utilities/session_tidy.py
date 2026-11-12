@@ -3499,6 +3499,12 @@ def run_hook(*args, **kwargs) -> str:
     try:
         result = _run_hook(*args, _closed=closed, **kwargs)
         if len(args) >= 3 and args[1] == "start" and kwargs.get("source") == "resume":
+            # Only the reopening itself takes over this session's running routes
+            # (before the notice filter, once per resume generation); the steward's
+            # periodic `register` pass does not.
+            with contextlib.suppress(Exception):
+                import session_route_resume
+                session_route_resume.reopened(args[0], args[2], env=kwargs.get("env"))
             with contextlib.suppress(Exception):
                 import session_resume
                 session_resume.register(args[0], args[2], source="resume", env=kwargs.get("env"))

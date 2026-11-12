@@ -1384,55 +1384,48 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             },
             jobs="/tmp/fixture-jobs.log",
         )
-        self.assertEqual(prompt.count("preflight.sh harvest --jobs"), 2)
         self.assertEqual(
             prompt.count(
-                str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh")
-                + " harvest --jobs /tmp/fixture-jobs.log --attempt-id"
+                "python3 " + str(ROOT / "utilities" / "dispatch-harvest.py")
+                + " --jobs /tmp/fixture-jobs.log --attempt-id"
             ),
             2,
         )
+        self.assertNotIn("/adapters/", prompt)
         self.assertIn("shared, runtime-neutral registry harvest compatibility surface", prompt)
         self.assertIn("does not select or change the owner or child harness", prompt)
         self.assertIn("--attempt-id att-child-a --status open --mark-done", prompt)
         self.assertIn("--attempt-id att-child-b --status open --mark-done", prompt)
         self.assertNotIn("RAW_CLAUDE_SENTINEL", prompt)
 
-    def test_harvest_surface_survives_a_release_rotation(self):
-        # Regression for the 2026-08-14 candidate 3 deadlock. Launched through a
-        # managed `current` pointer, the supervisor used to resolve the harvest
-        # surface down to the versioned release directory. After `current`
-        # rotated, the owner's park guard no longer recognized that path, so it
-        # denied every command the receipt told the owner to run.
+    def test_harvest_line_survives_a_release_rotation(self):
+        # Regression for the 2026-08-14 candidate 3 deadlock. A receipt that
+        # names the versioned release directory behind a managed `current`
+        # pointer stops matching once `current` rotates, so the owner was
+        # denied every command it was told to run. The shared line names the
+        # `current` pointer, which follows the rotation.
+        import dispatch_completion_join as join
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         for name in ("v1", "v2"):
             release = tmp / "releases" / name
             (release / "core").mkdir(parents=True)
             (release / "core" / "CORE.md").write_text("x", encoding="utf-8")
-            (release / "adapters" / "codex" / "bin").mkdir(parents=True)
-            (release / "adapters" / "codex" / "bin" / "preflight.sh").write_text(
-                "#!/bin/sh\n", encoding="utf-8"
-            )
             (release / "utilities").mkdir()
+            (release / "utilities" / "dispatch-harvest.py").write_text("", encoding="utf-8")
         current = tmp / "current"
         current.symlink_to(tmp / "releases" / "v1")
-        launched = current / "utilities" / "claude-session-supervisor.py"
 
-        surface = supervisor.harvest_surface(str(launched))
+        with mock.patch.object(join, "ROOT", tmp / "releases" / "v1"):
+            line = join.completion_harvest_command("att-x", "complete-open", jobs="/j/jobs.log")
+        printed = Path(shlex.split(line)[1])
 
-        self.assertEqual(
-            surface, str(current / "adapters" / "codex" / "bin" / "preflight.sh")
-        )
+        self.assertEqual(printed, current / "utilities" / "dispatch-harvest.py")
         # Rotate `current` the way a managed release upgrade does.
         current.unlink()
         current.symlink_to(tmp / "releases" / "v2")
-        self.assertTrue(Path(surface).is_file())
-        self.assertEqual(
-            Path(surface).resolve(),
-            (tmp / "releases" / "v2" / "adapters" / "codex" / "bin"
-             / "preflight.sh").resolve(),
-        )
+        self.assertEqual(printed.resolve(),
+                         (tmp / "releases" / "v2" / "utilities" / "dispatch-harvest.py").resolve())
 
     def test_missing_result_has_no_false_terminal(self):
         broken = self.base / "broken.py"

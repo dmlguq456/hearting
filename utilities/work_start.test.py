@@ -892,10 +892,16 @@ class WorkStartTest(unittest.TestCase):
 
     def test_running_owner_receipt_states_the_parent_role(self):
         self.start(); self.ready = self.released = True; self.start()
+        launched = len(self.calls)
         with mock.patch.object(W, "join_selected_attempts", return_value={"state": "timeout", "children": []}):
             result = self.start()
+            # A session that reopens runs `start --route` on a route whose owner is alive (route resume):
+            # that is this same typed state and launches nothing.
+            again = self.start()
         self.assertEqual(result["state"], "running", result)
         self.assertIn("parent_next", result)
+        self.assertEqual((again["state"], again["launches"]), ("running", []), again)
+        self.assertEqual(len(self.calls), launched)
 
     def test_open_but_exited_or_unobservable_owner_is_never_reported_running(self):
         import dispatch_contract as D

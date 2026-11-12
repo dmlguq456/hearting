@@ -1216,11 +1216,7 @@ def _native_queue_delivery_once(
         raise CompletionError("native-queue-thread-identity-invalid")
     if thread.get("cwd") and not isinstance(thread.get("cwd"), str):
         raise CompletionError("native-queue-thread-cwd-invalid")
-    followup = completion_followup_text(
-        receipt,
-        jobs=str(args.jobs),
-        surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"),
-    )
+    followup = completion_followup_text(receipt, jobs=str(args.jobs))
     prior_followup = _prior_followup_text(followup)
     client_message_id = codex_queue_delivery.native_client_message_id(
         args.thread_id, [row.metadata.get("delivery_id", "") for row in rows])
