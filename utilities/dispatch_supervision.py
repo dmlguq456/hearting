@@ -1006,7 +1006,7 @@ def _awaiting_answers(jobs: Path, aid: str) -> list[str]:
 def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
     """A claimed replacement or linked retry owns the route's live attempt now."""
     from dispatch_replacement import (
-        _plain_retry_successor, _replacement_in_flight, registry_rows,
+        _plain_retry_successor, _replacement_in_flight, _replacement_row_of, registry_rows,
     )
     try:
         rows = registry_rows(jobs)
@@ -1016,9 +1016,7 @@ def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
         return True
     if _replacement_in_flight(jobs, rows, metadata) or _plain_retry_successor(rows, aid):
         return True
-    if any(candidate.get("replacement_original_attempt_id") == aid
-           and fields[1] in {"open", "running", "done"}
-           for fields, candidate in rows.values()):
+    if _replacement_row_of(rows, aid):
         return True
     marker_path = metadata.get("completion_marker", "")
     route_file = metadata.get("owner_route_file") or metadata.get("route_file") or ""

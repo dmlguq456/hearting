@@ -6888,4 +6888,42 @@ class RegistryRowsSharedViewTest(unittest.TestCase):
             self.assertEqual(rows[0], self._oracle(self.jobs))
 
 
+class SuccessorSetsTests(unittest.TestCase):
+    """The per-generation successor sets answer exactly what scanning every row answered."""
+
+    @staticmethod
+    def _scan_plain(rows, aid):
+        return any((meta.get('automatic_retry_of') == aid or meta.get('prior_attempt_id') == aid)
+                   and not meta.get('replacement_family_id') for _, meta in rows.values())
+
+    @staticmethod
+    def _scan_replaced(rows, aid):
+        return any(meta.get('replacement_original_attempt_id') == aid
+                   and fields[1] in {'open', 'running', 'done'} for fields, meta in rows.values())
+
+    def test_sets_agree_with_a_scan_of_every_row(self):
+        import dispatch_replacement as mod
+        rows = {
+            'att-a': (['t', 'done'], {'attempt_id': 'att-a'}),
+            'att-b': (['t', 'open'], {'attempt_id': 'att-b', 'automatic_retry_of': 'att-a'}),
+            'att-c': (['t', 'done'], {'attempt_id': 'att-c', 'prior_attempt_id': 'att-b'}),
+            'att-d': (['t', 'open'], {'attempt_id': 'att-d', 'prior_attempt_id': 'att-x',
+                                      'replacement_family_id': 'fam'}),
+            'att-e': (['t', 'killed'], {'attempt_id': 'att-e', 'replacement_original_attempt_id': 'att-y'}),
+            'att-f': (['t', 'running'], {'attempt_id': 'att-f', 'replacement_original_attempt_id': 'att-z'}),
+        }
+        for aid in ('att-a', 'att-b', 'att-c', 'att-d', 'att-x', 'att-y', 'att-z', 'att-nobody'):
+            self.assertEqual(mod._plain_retry_successor(rows, aid), self._scan_plain(rows, aid), aid)
+            self.assertEqual(mod._replacement_row_of(rows, aid), self._scan_replaced(rows, aid), aid)
+        self.assertTrue(mod._plain_retry_successor(rows, 'att-a'))
+        self.assertFalse(mod._plain_retry_successor(rows, 'att-x'))     # only a replacement claim names it
+        self.assertTrue(mod._replacement_row_of(rows, 'att-z'))
+        self.assertFalse(mod._replacement_row_of(rows, 'att-y'))        # that replacement was killed
+        # Another rows object, even an equal one, is scanned on its own; a longer one is not stale.
+        longer = dict(rows)
+        longer['att-g'] = (['t', 'open'], {'attempt_id': 'att-g', 'automatic_retry_of': 'att-nobody'})
+        self.assertTrue(mod._plain_retry_successor(longer, 'att-nobody'))
+        self.assertFalse(mod._plain_retry_successor(rows, 'att-nobody'))
+
+
 if __name__=='__main__':unittest.main()
