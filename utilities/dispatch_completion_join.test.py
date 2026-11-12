@@ -4069,6 +4069,110 @@ class DeferredCompletionClosureTest(FinishedChildClosure):
         self.assertTrue(outcome["closed"], outcome)
 
 
+class RefusedCompletionHandOverTest(FinishedChildClosure):
+    """A finished worker whose reap watcher was lost reaches the owner.
+
+    2026-11-12: a Codex execute worker ended its turn with a PASS naming its
+    cycle output directory, `complete` refused that evidence, and its reap
+    watcher had exited before the drain receipt. The join repeated the drain
+    and then retried the refused completion for six hours with the row open.
+    The watcher itself closes such a row typed; the join now does the same.
+    """
+
+    TERMINAL_ROWS = {
+        "claude": lambda text: [{"type": "result", "subtype": "success", "is_error": False,
+                                 "result": text}],
+        "codex": lambda text: [{"type": "item.completed",
+                                "item": {"type": "agent_message", "text": text}},
+                               {"type": "turn.completed"}],
+        "opencode": lambda text: [{"type": "text", "part": {"type": "text", "text": text}},
+                                  {"type": "step_finish",
+                                   "part": {"type": "step-finish", "reason": "stop"}}],
+    }
+
+    def harness_child(self, harness: str, *, status: str = "open") -> JOIN.ChildRow:
+        attempt_id = f"att-{harness}-refused"
+        # The refusal itself is stubbed at `run_route_completion`; any readable
+        # in-root evidence reaches it (the observed one named a directory).
+        evidence = self.artifact / "execute-report.md"
+        evidence.write_text("evidence\n", encoding="utf-8")
+        log = self.base / f"{attempt_id}.{harness}.jsonl"
+        text = f"artifact: {evidence}\nverdict: PASS\nblocker: none"
+        log.write_text("\n".join(json.dumps(item) for item in self.TERMINAL_ROWS[harness](text))
+                       + "\n", encoding="utf-8")
+        meta = {
+            "attempt_id": attempt_id, "attempt_schema_version": "2", "dispatch_depth": "2",
+            "transport": "headless", "execution_surface": "registered-headless",
+            "registered_worker": "1", "fallback_hop": "cross-harness-headless",
+            "harness": harness, "log_file": str(log), "artifact_root": str(self.artifact),
+            "launch_outcome": "reaped-before-publish",
+            "route_file": str(self.base / "route.json"), "route_node": "execute",
+        }
+        raw = "\t".join(["2026-11-11T21:52:17Z", status, str(self.base), str(self.base),
+                         f"{attempt_id}-slug", ",".join(f"{k}={v}" for k, v in meta.items())])
+        self.jobs.write_text(raw + "\n", encoding="utf-8")
+        return JOIN.ChildRow(order=0, status=status, slug=f"{attempt_id}-slug",
+                             attempt_id=attempt_id, raw=raw, metadata=meta)
+
+    def test_join_settlement_closes_a_refused_pass_typed_for_every_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                child = self.harness_child(harness)
+                calls = []
+                with mock.patch.object(JOIN, "run_route_completion",
+                                       side_effect=lambda command, **_kw: calls.append(command)
+                                       or "completion-rejected"):
+                    outcome = JOIN.settle_finished_attempt(self.jobs, child)
+                current = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+                self.assertTrue(outcome["closed"], outcome)
+                self.assertEqual(outcome["reason"], "completion-rejected")
+                self.assertEqual(current.status, "done")
+                self.assertEqual(current.metadata.get("note"), "dead-route-completion-rejected")
+                self.assertEqual(current.metadata.get("failure_class"), "contract")
+                self.assertEqual(current.metadata.get("classifier_source"),
+                                 "registered-wrapper-completion-v1")
+                # The budget's one immediate retry, then the typed close -- not
+                # one more completion transaction per join pass.
+                self.assertEqual(len(calls), 2, calls)
+
+    def test_join_hands_the_refused_pass_to_its_owner_instead_of_waiting(self):
+        child = self.harness_child("codex")
+        fields = child.raw.split("\t")
+        fields[5] += ",parent_attempt_id=att-parent"
+        self.jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
+        initial = JOIN.current_children(self.jobs, "att-parent")
+        with mock.patch.object(JOIN, "run_route_completion", return_value="completion-rejected"), \
+             mock.patch.object(dispatch_supervision, "materialize", return_value=[]) as notice:
+            receipt = JOIN._join_snapshot(
+                jobs=self.jobs, initial=initial,
+                refresh=lambda _attempts: JOIN.current_children(self.jobs, "att-parent"),
+                identity={"parent_attempt_id": "att-parent"}, interval=0.001, timeout=5.0,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=self.jobs,
+                settlement=lambda row: JOIN.settle_finished_attempt(self.jobs, row),
+            )
+        self.assertEqual(receipt["state"], "ready", receipt)
+        self.assertEqual(receipt["children"][0]["status"], "done", receipt)
+        notice.assert_not_called()
+
+    def test_a_reason_other_than_a_completion_refusal_keeps_the_row_open(self):
+        child = self.harness_child("codex")
+        for reason in ("subsession-not-quiescent", "evidence-absent", "pending"):
+            with self.subTest(reason=reason), \
+                 mock.patch.object(JOIN, "close_finished_child", return_value=reason), \
+                 mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
+                self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs), reason)
+                close.assert_not_called()
+        self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
+
+    def test_a_closed_row_is_never_reclosed_by_the_shared_step(self):
+        child = self.harness_child("codex", status="done")
+        with mock.patch.object(JOIN, "close_finished_child", return_value="completion-rejected"), \
+             mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
+            self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs), "completion-rejected")
+        close.assert_not_called()
+
+
 class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
     """SD-110 plan.md §6 A-18 (receipt v1/v2 byte-identity for un-negotiated
     consumers, proved with golden-byte comparison rather than mere successful

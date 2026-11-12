@@ -4123,7 +4123,7 @@ def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
             reason = apply_exact_route_free_review_classification(
                 fresh, jobs=jobs, classification=classification)
         else:
-            reason = close_finished_child(row, jobs=jobs)
+            reason = close_reaped_child(row, jobs=jobs)
         current = exact_attempt_row(jobs, row.attempt_id)
         if support and launched_attempt_identity(current.raw.split("\t")) != selected_identity:
             return {"attempt_id": row.attempt_id, "closed": False,
@@ -5356,6 +5356,29 @@ def close_wrapper_pass(
     reason = close_finished_child(row, jobs=jobs)
     if not reason:
         return ""
+    return _close_refused_completion(row, jobs=jobs, reason=reason)
+
+
+def close_reaped_child(row: ChildRow, *, jobs: str | Path) -> str:
+    """Close one route-bound child whose process is already proven gone.
+
+    The wrapper's reap watcher, and the runtime join that repeats its drain
+    when that watcher was lost, both reach this state. They share this one
+    step: commit the exact terminal evidence, and when ``complete`` refuses
+    it, close the still-open row as the typed contract failure the watcher
+    has always written. A refusal does not change by waiting, so the join no
+    longer retries it in silence while the owner waits.
+    """
+
+    reason = close_finished_child(row, jobs=jobs)
+    if reason.startswith("completion-") and row.status in OPEN_STATES:
+        return _close_refused_completion(row, jobs=jobs, reason=reason)
+    return reason
+
+
+def _close_refused_completion(row: ChildRow, *, jobs: str | Path, reason: str) -> str:
+    """Record a refused or transport-failed completion on its exact row."""
+
     try:
         current = exact_attempt_row(Path(jobs), row.attempt_id)
     except JoinContractError:
