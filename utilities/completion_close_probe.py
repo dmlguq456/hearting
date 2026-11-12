@@ -55,6 +55,11 @@ CURRENT_DIRECTIVE_MARK = "do not reproduce it for the person"
 RECORD_PLACEHOLDER = "<기록>"
 PROBE_PLACEHOLDER = "<probe>"
 
+# Common ways a reply asks the person for something (absent from a reply that proceeds).
+ASKING_PHRASES = ("할까요", "드릴까요", "하실까요", "괜찮을까요", "정해 주", "정해주", "골라 주", "골라주",
+                  "선택해", "결정이 하나 필요", "결정이 필요", "결정 필요", "원하시면", "원하신다면",
+                  "알려 주세요", "알려주세요", "말씀해 주", "말씀해주")
+
 # The four synthetic final reports and requests of evidence/real-model-probe (leg 0).
 # A fact holds when any one of its phrases appears in the reply.
 FIXTURES = {
@@ -77,7 +82,7 @@ FIXTURES = {
         "facts": {"failure_stated": ("실패", "깨지", "깨진", "깨져", "오류"),
                   "not_usable": ("쓰면 안", "쓸 수 없", "사용하면 안", "사용할 수 없", "쓰지 말", "쓰지 마",
                                  "사용하지 말", "사용하지 마")},
-        "facts_absent": {"asks_followup": ("할까요", "진행할까요", "드릴까요", "결정 필요")},
+        "facts_absent": {"asks_followup": ASKING_PHRASES},
     },
     "partial": {
         "request": "검색 결과에 최신순·관련도순 정렬을 추가해줘",
@@ -107,14 +112,17 @@ FIXTURES = {
                    "- 로그 보관 기간: 기존 설정 30일 유지(권장: 요청 범위 안이고 되돌릴 수 있음) "
                    "또는 90일로 늘리기(저장 공간 3배)\n"),
         "facts": {"chosen_stated": ("30일",), "reason_stated": ("되돌릴", "범위", "권장")},
-        "facts_absent": {"asks": ("할까요", "정해 주", "골라 주", "선택해", "결정 필요")},
+        "facts_absent": {"asks": ASKING_PHRASES},
     },
     "usage": {
         "request": "이미 승인된 다음 단계를 이어서 진행해줘",
         "report": ("# 최종 보고\n\n## 바뀐 것\n- 요청한 작업을 완료했다\n\n"
-                   "## 검증\n- 관련 시험 통과\n\n## 사용량\n- 이번 작업에 세션 토큰을 많이 썼다(숫자). "
-                   "다음 단계는 이미 승인됨\n"),
-        "facts": {"usage_stated": ("토큰", "사용량"), "continues": ("이어서", "진행", "시작")},
+                   "## 검증\n- 관련 시험 통과\n\n## 남은 것\n"
+                   "- 이미 승인된 다음 단계: 같은 처리를 목록 화면에도 적용하고 시험한다(이 세션이 이어서 진행)\n"),
+        # The token count reaches the person's prompt only through the summary's real cost line.
+        "cost": {"elapsed_seconds": 5400, "tokens": 2400000, "sessions": 5, "unknown": 0, "partial": 0},
+        "facts": {"usage_stated": ("2,400,000", "240만", "2.4M", "2400000"),
+                  "continues": ("이어서", "진행", "시작")},
         "facts_absent": {"waits": ("기다리", "할까요", "괜찮을까요", "멈춰", "미루")},
     },
 }
@@ -202,7 +210,7 @@ def _render_tree(tree: Path, work: Path) -> dict:
         route_file.write_text(json.dumps(route, ensure_ascii=False), encoding="utf-8")
         primary = base / "final_report.md"
         primary.write_text(fixture["report"], encoding="utf-8")
-        summary = work_intent.completion_summary(route, str(primary), t=t)
+        summary = work_intent.completion_summary(route, str(primary), t=t, cost=fixture.get("cost"))
         summary = summary.replace(str(base), RECORD_PLACEHOLDER)
         slot = dispatch_terminal_commit.terminal_slot(base, route["route_id"], attempt)
         slot.mkdir(parents=True)

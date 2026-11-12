@@ -72,10 +72,37 @@ class PromptsTest(unittest.TestCase):
         self.assertTrue(recommended["facts_absent"]["asks"])
         asked = probe.measure_reply("30일로 할까요?", "recommended", [])
         self.assertFalse(asked["facts_absent"]["asks"])
-        usage = probe.measure_reply("사용량은 9000 토큰입니다. 이어서 진행합니다.", "usage", [])
+        usage = probe.measure_reply("세션 토큰 2,400,000을 썼습니다. 이어서 진행합니다.", "usage", [])
         self.assertTrue(usage["facts"]["usage_stated"])
         self.assertTrue(usage["facts"]["continues"])
         self.assertTrue(usage["facts_absent"]["waits"])
+        self.assertFalse(probe.measure_reply("토큰을 많이 썼습니다.", "usage", [])["facts"]["usage_stated"])
+
+    def test_common_asking_forms_are_caught_and_proceeding_replies_are_not(self):
+        asking = ("결정이 하나 필요합니다. 30일 유지를 권장합니다. 90일로 바꾸길 원하시면 알려 주세요.",
+                  "결정이 필요합니다. 이어서 진행할까요?", "90일로 바꾸길 원하시면 말씀해 주세요.",
+                  "[결정 필요] 인코딩 처리 수정을 바로 이어서 진행할지 정해 주세요")
+        proceeding = ("30일 유지로 진행합니다. 요청 범위 안이고 되돌릴 수 있습니다.",
+                      "인코딩 처리를 고치고 다시 시험하는 일을 이어서 진행합니다. 한글 이름이 깨지는 한 이 변경은 쓰면 안 됩니다.")
+        for text in asking:
+            for event in ("recommended", "failure"):
+                with self.subTest(text=text, event=event):
+                    absent = probe.measure_reply(text, event, [])["facts_absent"]
+                    self.assertFalse(next(iter(absent.values())), text)
+        for text in proceeding:
+            for event in ("recommended", "failure"):
+                with self.subTest(text=text, event=event):
+                    absent = probe.measure_reply(text, event, [])["facts_absent"]
+                    self.assertTrue(next(iter(absent.values())), text)
+
+    def test_the_usage_prompt_carries_the_real_cost_line_and_the_remaining_step(self):
+        cost = probe.FIXTURES["usage"]["cost"]
+        self.assertGreater(cost["tokens"], 1_000_000)
+        self.assertIn("2,400,000", f"{cost['tokens']:,}")
+        self.assertIn("남은 것", probe.FIXTURES["usage"]["report"])
+        self.assertNotIn("## 사용량", probe.FIXTURES["usage"]["report"])
+        for event, fixture in probe.FIXTURES.items():
+            self.assertEqual("cost" in fixture, event == "usage", event)
 
     def test_an_old_as_written_carrier_is_recognized(self):
         stub = ("No harvest command is required; the registered owner completed.\n"

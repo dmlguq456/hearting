@@ -987,8 +987,8 @@ approval; an absent answer stays absent.
 After a material-work attempt, the user-facing main agent's first close gives
 the result in one or two sentences, names any remaining failure, unfinished
 work, or user-impacting limit, asks for at most one decision the person must
-make in the self-contained form of `roles/response-policy.md` Decision requests;
-a clear recommended follow-up is reported as proceeding, not asked, and ends with
+make in the self-contained form of `roles/response-policy.md` Decision requests
+(a clear recommended follow-up is reported as proceeding, not asked), and gives
 one pointer to the detailed record. Preserve unknowns and explicitly requested
 output or format. Render any labels in the
 user's communication language. In Korean, one optional presentation is:
