@@ -36,6 +36,7 @@ import hashlib
 import json
 import math
 import os
+import pwd
 import py_compile
 import re
 import shutil
@@ -455,10 +456,86 @@ def build_isolated_env(tmpdir: Path, repo_root: Path = ROOT) -> dict[str, str]:
     # parent site itself, its .pth files, and customization modules stay private.
     _install_user_yaml(_child_user_site(home))
     env[CHILD_STDERR_ENV] = str(child_stderr)
+    # Every suite's first lines re-enter through direct_run() unless this is set.
+    env[DIRECT_RUN_MARKER] = "1"
     # _EXPLICIT_UNSET_KEYS are simply omitted from `env` (env -i semantics: a
     # subprocess launched with this dict as its full environment never sees
     # them, regardless of what the caller's ambient shell has set).
     return env
+
+
+# A suite started by hand (`python3 x.test.py`, `bash x.test.sh`) gets none of the
+# above: its first lines check DIRECT_RUN_MARKER and otherwise exec
+# `run-tests.py --direct-run <its own command>`, so it runs under the same
+# isolation instead of the caller's HOME, state roots, herdr socket and tmux
+# server (2026-11-11: three direct runs in one day reached the real HOME).
+DIRECT_RUN_MARKER = "HEARTING_TEST_ISOLATED"
+# Caller switches a suite reads to demand a stricter run (CI sets
+# HEARTING_REQUIRE_PIDNS for dispatch_namespace_e2e). They name no path.
+_DIRECT_RUN_PASSTHROUGH_PREFIX = "HEARTING_REQUIRE_"
+
+
+def _home_is_account_home(env: dict[str, str]) -> bool:
+    home = env.get("HOME")
+    if not home:
+        return True
+    try:
+        account_home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        return True
+    return os.path.realpath(home) == os.path.realpath(account_home)
+
+
+def direct_run(command: list[str]) -> int:
+    """Run one hand-started suite command under build_isolated_env().
+
+    A caller that already chose a non-account HOME (a suite re-running itself
+    with a fixture HOME) keeps its environment. Otherwise the suite gets a fresh
+    private root that is removed, with every process still using it, at exit.
+    """
+    if not command:
+        print("usage: run-tests.py --direct-run <command...>", file=sys.stderr)
+        return 2
+    if not _home_is_account_home(dict(os.environ)):
+        os.execvpe(command[0], command, {**os.environ, DIRECT_RUN_MARKER: "caller-home"})
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="hearting-direct-test-", dir=str(choose_suite_temp_parent())))
+    except (OSError, SystemExit) as exc:
+        print(f"direct-test-refused: no private test root could be made ({exc}); nothing was run",
+              file=sys.stderr)
+        return 2
+    identity = register_fixture_root(tmp)
+    try:
+        env = build_isolated_env(tmp)
+    except OSError as exc:
+        cleanup_suite_tmp_root(tmp, expected_identity=identity)
+        print(f"direct-test-refused: the private test root could not be prepared ({exc}); nothing was run",
+              file=sys.stderr)
+        return 2
+    env.update({key: value for key, value in os.environ.items()
+                if key.startswith(_DIRECT_RUN_PASSTHROUGH_PREFIX)})
+    print(f"direct-test-isolated: HOME, state, tmux and temp under {tmp}, removed afterwards",
+          file=sys.stderr)
+    proc = subprocess.Popen(command, env=env, start_new_session=True)
+
+    def forward(signum, _frame):
+        try:
+            os.killpg(proc.pid, signum)
+        except OSError:
+            pass
+
+    previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        rc = proc.wait()
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        cleanup_suite_tmp_root(tmp, expected_identity=identity)
+    return rc if rc >= 0 else 128 - rc
 
 
 def build_installed_layout_env(tmpdir: Path, install_prefix: Path) -> dict[str, str]:
@@ -3198,6 +3275,8 @@ def _flaky_name_lines(relpath: str, attempts) -> list[str]:
 
 def main(argv: list[str]) -> int:
     """Run one invocation and retire its shared layout on every exit path."""
+    if argv[:1] == ["--direct-run"]:
+        return direct_run(argv[1:])
     try:
         return _run_main(argv)
     finally:

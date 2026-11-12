@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../run-tests.py" --direct-run bash "$0" "$@"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
 hearting_test_isolate
 # Cluster J (v15, D-37/D-38/D-39) — write-events 저널 + mem log + mem doctor.

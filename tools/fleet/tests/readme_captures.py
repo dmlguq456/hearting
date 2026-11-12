@@ -48,6 +48,11 @@ def isolate():
     for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
                  "FLEET_DEMO", "HEARTING_HOME", "AGENT_HOME"):
         os.environ.pop(name, None)
+    # Nor the calling session's own pointers (an agent shell names the real dispatch jobs log,
+    # state roots, herdr socket and tmux server in these).
+    for name in [key for key in os.environ if key != "FLEET_NOW_LANG" and key.startswith(
+            ("AGENT_", "HARNESS_", "HERDR_", "TMUX", "CLAUDE", "CODEX_", "OPENCODE_", "FLEET_"))]:
+        os.environ.pop(name, None)
     os.environ["TZ"] = "UTC"
     time.tzset()
 
