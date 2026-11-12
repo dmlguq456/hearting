@@ -443,8 +443,8 @@ def pending_human_waits(route, *, jobs, outcome=None):
     This reads only the exact route's registry-selected workflow journal and, for
     frame-review, answer files beside the artifact named by the latest raise.
     It never repairs ledger state or changes gate state. A caller that keeps the result can
-    name what it depends on: ``_WAIT_READS`` collects every file besides the journal this call
-    looked at (a frame-review artifact and its two answer files).
+    name what it depends on: ``_WAIT_READS`` collects ``(path, identity)`` of every file besides
+    the journal this call looked at (a frame-review artifact and its two answer files).
     """
     if not isinstance(route, dict) or not route.get("route_id") or not route.get("route_hash"):
         return []
@@ -495,8 +495,10 @@ def pending_human_waits(route, *, jobs, outcome=None):
                     question_path = Path(artifact).resolve(strict=True)
                     sink = _WAIT_READS.get()
                     if sink is not None:
-                        sink.extend((question_path, question_path.parent / "answers.native.json",
-                                     question_path.parent / "answers.json"))
+                        # Identified before they are read, so a change after the read is seen next time.
+                        sink.extend((read, _stamp(read)) for read in (
+                            question_path, question_path.parent / "answers.native.json",
+                            question_path.parent / "answers.json"))
                     digest = resolution.get("artifact_sha256")
                     current = not digest or hashlib.sha256(question_path.read_bytes()).hexdigest() == digest
                     if current and FI.is_interview(_json_file(question_path)):
@@ -513,9 +515,11 @@ def pending_human_waits(route, *, jobs, outcome=None):
 
 # The S2 judgment of one route (``pending_human_waits``) is a pure function of its sealed record, the
 # route's outcome sidecars, its workflow journal and, for a raised frame-review gate, the artifact and
-# the two answer files. Each of those is read through an exact file identity (``_stamp``), and the
-# record and outcome are the objects ``_route_outcome`` keeps while their stamps hold. So a result is
-# reused while the same objects and the same stamps are found, and computed again as soon as one differs.
+# the two answer files. Every one of those is a file read through its exact identity (``_stamp``: device,
+# inode, mtime, ctime, size), so a result is kept together with those identities and reused while all of
+# them are found again, and computed anew as soon as one differs. The record itself is not kept (it is
+# covered by its file's identity, and ``_ROUTE_OUTCOME_CACHE`` holds it for the few routes that need it),
+# so the number of routes a pass can answer from memory does not depend on that cache's size.
 # Time, process liveness and lineage are not inputs; the caller still computes them every pass.
 # One entry per route triple; entries the latest full pass did not see are dropped.
 _WAIT_MEMO = {}
@@ -524,18 +528,43 @@ _METRICS["route_wait_recomputes"] = 0
 _METRICS["route_wait_reuses"] = 0
 
 
-def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
-    """``pending_human_waits`` for one route, reused while none of its inputs changed."""
-    jobs_key = str(path)
-    journal = (Path(ledger_root) / str(route_key[0]) / "journal.jsonl") if ledger_root is not None else None
+def _route_file_stamps(route_file, record, route_id):
+    """The identities ``_route_outcome`` keys on: record file, outcome sidecar, inline-finish file."""
+    route_path = Path(route_file)
+    outcome_path = route_path.with_name(route_path.stem + ".outcome.json")
+    artifact_root = record.get("artifact_root") if record else None
+    finish = (Path(artifact_root) / ".runtime" / "inline-finish" / "v1" / str(route_id) / "finish.json"
+              if artifact_root else None)
+    return (_stamp(route_path), _stamp(outcome_path), _stamp(finish) if finish else None), finish
+
+
+def _journal_path_of(ledger_root, route_id):
+    return Path(ledger_root) / str(route_id) / "journal.jsonl" if ledger_root is not None else None
+
+
+def _kept_waits(route_key, path, ledger_root):
+    """The kept judgment of this route when every input is the file it was made from, else None."""
     entry = _WAIT_MEMO.get(route_key)
-    journal_stamp = _stamp(journal) if journal is not None else None
-    if (entry is not None and journal is not None and entry[0] is raw_record and entry[1] is outcome
-            and entry[2] == jobs_key and entry[3] == journal_stamp
-            and all(_stamp(read) == stamp for read, stamp in entry[4])):
-        _METRICS["route_wait_reuses"] += 1
-        return [dict(wait) for wait in entry[5]]
+    journal = _journal_path_of(ledger_root, route_key[0])
+    if entry is None or journal is None or entry[0] != str(path):
+        return None
+    jobs_key, route_stamps, finish, journal_stamp, reads, waits = entry
+    route_path = Path(route_key[2])
+    outcome_path = route_path.with_name(route_path.stem + ".outcome.json")
+    if ((_stamp(route_path), _stamp(outcome_path), _stamp(finish) if finish else None) != route_stamps
+            or _stamp(journal) != journal_stamp
+            or any(_stamp(read) != stamp for read, stamp in reads)):
+        return None
+    _METRICS["route_wait_reuses"] += 1
+    return [dict(wait) for wait in waits]
+
+
+def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_root):
+    """``pending_human_waits`` for one route, kept with the identity of every file it read."""
     _METRICS["route_wait_recomputes"] += 1
+    journal = _journal_path_of(ledger_root, route_key[0])
+    journal_stamp = _stamp(journal) if journal is not None else None
+    route_stamps, finish = _route_file_stamps(route_key[2], raw_record, route_key[0])
     reads = []
     token = _WAIT_READS.set(reads)
     try:
@@ -543,10 +572,18 @@ def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
     finally:
         _WAIT_READS.reset(token)
     if journal is not None:
-        _WAIT_MEMO[route_key] = (raw_record, outcome, jobs_key, journal_stamp,
-                                 tuple((read, _stamp(read)) for read in reads),
+        _WAIT_MEMO[route_key] = (str(path), route_stamps, finish, journal_stamp,
+                                 tuple(reads),
                                  tuple(dict(wait) for wait in waits))
     return waits
+
+
+def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
+    """The judgment of one route: the kept one while its inputs hold, else computed (and kept)."""
+    kept = _kept_waits(route_key, path, ledger_root)
+    if kept is not None:
+        return kept
+    return _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_root)
 
 
 def _session_liveness_probe():
@@ -919,18 +956,26 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                         # The route row is already a narrow candidate; full lineage
                         # metadata is needed only when it actually has a pending wait.
                         meta = None
-                        route_record, outcome = _route_outcome(route_module, route_file,
-                                                               route_id, route_digest)
-                        if route_record is None:
-                            continue
-                        seen_routes.add((route_id, route_digest, route_file))
-                        # The loader's private schema tag is not covered by the
-                        # sealed route hash; pending_human_waits must see sealed bytes.
-                        raw_record = route_record
-                        route_record = {name: value for name, value in route_record.items()
-                                        if name != "_fleet_schema_status"}
-                        for wait in _waits_for((route_id, route_digest, route_file), raw_record,
-                                               route_record, outcome, path, ledger_root):
+                        route_key = (route_id, route_digest, route_file)
+                        # A route none of whose input files changed keeps its judgment, and
+                        # its record is not even loaded unless a wait has to be shown.
+                        waits = _kept_waits(route_key, path, ledger_root)
+                        route_record = None
+                        if waits is None or waits:
+                            route_record, outcome = _route_outcome(route_module, route_file,
+                                                                   route_id, route_digest)
+                            if route_record is None:
+                                continue
+                            # The loader's private schema tag is not covered by the
+                            # sealed route hash; pending_human_waits must see sealed bytes.
+                            raw_record = route_record
+                            route_record = {name: value for name, value in route_record.items()
+                                            if name != "_fleet_schema_status"}
+                            if waits is None:
+                                waits = _compute_waits(route_key, raw_record, route_record, outcome,
+                                                       path, ledger_root)
+                        seen_routes.add(route_key)
+                        for wait in waits:
                             if meta is None:
                                 meta = row.completion_metadata()
                             parent_sid = meta.get("parent_sid")
