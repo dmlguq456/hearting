@@ -400,16 +400,29 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
         top.push(labelled('REPO',withCount?[...sideRepo,...count]:cut(sideRepo,room)));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
-      // Short of cells the branch (the first part) gives way so the status and a warning stay whole.
-      const gitValue=(parts,room)=>{
+      // Short of cells the first part (the branch, the model name) gives way so what follows
+      // it (the status and a warning, the effort) stays whole.
+      const firstGives=(parts,room)=>{
         if(size(parts)<=room||parts.length<2)return cut(parts,room);
         const rest=parts.slice(1),left=room-size(rest);
         return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
       };
-      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',gitValue(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
+      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
       if(top.length){metaGaps.add(top.length);top.push([]);}
-      top.push(selected);
-      if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}
+      if(labelWidth){
+        // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
+        // `context` (a backend without `context_side` has its word taken off here).
+        const word=parts=>{const first=parts[0],rest=String(first?.text??'').replace(/^context /,'');
+          return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
+        const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
+        const value=mcp.length?joined([gauge,mcp]):gauge;
+        top.push(labelled('MODEL',firstGives(selected,inner-labelWidth)));
+        if(value.length){top.push(labelled('CTX',cut(value,inner-labelWidth)));mark(top.length-1,'context');}
+      }else{
+        // Narrower than 30 cells inside, the rows as they were, without labels.
+        top.push(selected);
+        if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}
+      }
       if(jobs.length){const from=top.length;put(top,jobs,2);mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
       if(model.warning)top.push(line(model.warning,'lvl_r'));

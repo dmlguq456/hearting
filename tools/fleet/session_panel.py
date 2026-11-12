@@ -554,6 +554,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "repo_side": session_repo_side(values),
             "memory": session_memory(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
+            # Spec E9 rule 42 (b): beside the native area the `CTX` label stands for the word.
+            "context_side": gauge,
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
             "session_title": sanitize_title(str(values.get("title") or ""))[:320],

@@ -229,7 +229,12 @@ words are unchanged. Beside the
 native area one empty row then parts the repository and Git from the model
 (without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (two rows beside
-the native area, one `│`-separated row with the repo row at the bottom);
+the native area, one `│`-separated row with the repo row at the bottom). Beside
+the native area these two rows take the same dim labels, `MODEL` and `CTX`
+(`MODEL  Fable 5.2 high`, `MODEL  Checking` before the model is known;
+`CTX    ━━━━──── 41%`, the label standing for the word `context`); short of
+cells the model name is cut with `…` and the effort stays whole, and narrower
+than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
 then parts it from this session's content: `TITLE` and `NOW` (Fleet's words, dim,

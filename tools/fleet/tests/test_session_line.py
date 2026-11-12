@@ -214,6 +214,13 @@ class CommonSessionLineTest(unittest.TestCase):
         side = lambda parts: ("".join(text for text, _key in parts), {key for _text, key in parts})
         self.assertEqual((presented["repo_side"], presented["worktrees"], side(presented["git_side"])),
                          ([("hearting", "loc_repo")], [("wt 12", "dim")], ("main ↑2", {"dim"})))
+        # 42 (b): beside the native area the `CTX` label stands for the word `context`; the
+        # bottom layout's fragment keeps it, and an unknown reading has neither.
+        self.assertEqual(presented["context"][0], ("context ", "dim"))
+        self.assertEqual(presented["context_side"], presented["context"][1:])
+        self.assertEqual("".join(text for text, _key in presented["context_side"]), "━━━━────── 37%")
+        unknown = session_panel.presentation({**values, "ctx_pct": None}, {}, "claude", "s", 40)
+        self.assertEqual((unknown["context"], unknown["context_side"]), ([], []))
         for count in (0, None):
             other = {**values, "git": {**values["git"], "extra_worktrees": count}}
             self.assertEqual(session_panel.session_worktrees(other), [])

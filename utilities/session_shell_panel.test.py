@@ -160,7 +160,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
@@ -453,7 +453,7 @@ assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes
 // Spec rule 29 (b), 30 (a), 35 (b): the metadata block is two groups parted by one empty row
 // ([repository, Git] / [model, context]), then a thin rule, then the session's content with
 // its labels; an empty row parts the head from the route box.
-assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].includes('context')&&/^│ ─+ │$/.test(rows[6]),rows.join('\n'));
+assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].startsWith('│ CTX    42%')&&/^│ ─+ │$/.test(rows[6]),rows.join('\n'));
 assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ route'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('── messages '));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
@@ -1016,7 +1016,7 @@ for(const [config,background,extra,number] of [[{theme:'terminal'},'dark',{},[21
 }
 // (b) The metadata's two groups: with Git, and without it (the row parts the repository from the model).
 const r50=draw([oneShot,staged],40,50);
-assert(r50[1].includes('hearting/')&&r50[2].includes('(fix/fleet')&&blank(r50[3])&&r50[4].includes('claude-fable-5-2 high')&&r50[5].includes('context'),r50.join('\n'));
+assert(r50[1].includes('hearting/')&&r50[2].includes('(fix/fleet')&&blank(r50[3])&&r50[4].includes('claude-fable-5-2 high')&&r50[5].startsWith('│ CTX    ━━━━'),r50.join('\n'));
 const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,git:[],routes:[oneShot],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
 // (c) Six routes and eight messages at 40×58 (spec rule 38: each route with its context
@@ -1172,6 +1172,53 @@ for(let h=18;h<=72;h++){
 // The step itself: a height where MEM has gone and the empty row under the route box stays.
 assert([...Array(55).keys()].map(i=>i+18).some(h=>{const rows=text(paint(six,40,h)),at=rows.findIndex(s=>s.includes('── messages'));
  return !rows.some(s=>s.startsWith('│ MEM'))&&/^│ +│$/.test(rows[at-1])&&rows[at-2].includes('╰');}));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_model_and_context_rows_take_the_model_and_ctx_labels(self):
+        # Spec E9 rule 42: beside the native area `MODEL` and `CTX` start the model and context
+        # rows as REPO's and GIT's; `CTX` stands for the word `context`; short of cells the model
+        # name gives way so the effort stays whole; narrower than 30 cells inside all four labels
+        # go and the rows are as they were. The bottom layout keeps its rows.
+        script = self.FIXTURE + r'''
+const D=t=>({text:t,dim:true}),gauge=[P('━━━━'),D('──────'),D(' '),P('41%')];
+const side={...head,repo_side:[P('hearting')],worktrees:[D('wt 12')],git_side:[D('fix/fleet-opencode-… ✓')],
+ selected:[P('claude-fable-5-2'),D(' '),P('high')],context:[D('context '),...gauge],context_side:gauge};
+const paint=(width,o={})=>view.render({width,height:50,side:o.side!==false,fill:o.side!==false,model:{...side,...(o.model||{}),routes:[oneShot],route_count:1},
+ native:o.native||{},state:'working',configuration:{},questions:()=>[]});
+const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+// (a) 38 cells: four labels in one column, dim and seven cells; no word `context` beside them.
+const v38=paint(38),r38=text(v38),meta=r38.slice(1,6);
+assert(meta[0].startsWith('│ REPO   hearting · wt 12')&&meta[1].startsWith('│ GIT    fix/fleet-opencode-… ✓')&&/^│ +│$/.test(meta[2])
+ &&meta[3].startsWith('│ MODEL  claude-fable-5-2 high ')&&meta[4].startsWith('│ CTX    ━━━━────── 41% '),r38.join('\n'));
+const labels=[1,2,4,5].map(i=>v38.rows[i].find(p=>/^(REPO|GIT|MODEL|CTX) +$/.test(p.text)));
+assert(labels.every(p=>p&&p.dim===true&&p.text.length===7),JSON.stringify(labels));
+assert(!r38.slice(0,8).join('\n').includes('context'),r38.join('\n'));
+assert(v38.groups.includes('context'),v38.groups);
+// (b) A long model: the name gives way with `…`, the effort stays whole (as GIT's branch).
+for(const o of [{model:{selected:[P('opencode-go/deepseek-v4.1-flash'),D(' '),P('max')]}},{native:{model:'opencode-go/deepseek-v4.1-flash',effort:'max'}}]){
+ const row=text(paint(38,o))[4];
+ assert(/^│ MODEL  opencode-go\/deepseek-v\S*… max │$/.test(row)&&cells(row)===38,row);
+}
+// (c) 30 cells inside keep the labels; 29 cells inside, all four go and `context` comes back.
+assert(text(paint(34))[5].startsWith('│ CTX    ━━━━'),text(paint(34)).join('\n'));
+const r33=text(paint(33));
+assert(r33[1].startsWith('│ hearting · wt 12')&&r33[2].startsWith('│ fix/fleet-opencode-… ✓')&&r33[4].startsWith('│ claude-fable-5-2 high')
+ &&r33[5].startsWith('│ context ━━━━────── 41%')&&!/REPO|GIT |MODEL|CTX/.test(r33.join('')),r33.join('\n'));
+// (d) A model not known yet.
+assert(text(paint(38,{model:{selected:[]}}))[4].startsWith('│ MODEL  Checking '),text(paint(38,{model:{selected:[]}})).join('\n'));
+// (e) OpenCode's MCP count stays on the CTX row; the MODEL row carries none.
+const mcp=text(paint(38,{model:{mcp:[D('MCP '),P('3/4')]}}));
+assert(mcp[5].startsWith('│ CTX    ━━━━────── 41% │ MCP 3/4 ')&&!mcp[4].includes('MCP'),mcp.join('\n'));
+// (f) An older backend without `context_side`: the word goes, never `CTX    context`.
+for(const context of [[D('context '),...gauge],[P('context ━━━━────── 41%')]]){
+ const old=text(paint(38,{model:{context,context_side:undefined}}));
+ assert(old[5].startsWith('│ CTX    ━━━━────── 41% ')&&!old.join('').includes('context'),old.join('\n'));
+}
+// (g) The bottom layout keeps its rows, whatever the side fragments say.
+const bottom=o=>text(paint(140,{side:false,...o}));
+assert(bottom().some(s=>s.includes('claude-fable-5-2 high │ context ━━━━────── 41%'))&&!/MODEL|CTX/.test(bottom().join('')),bottom().join('\n'));
+assert.deepEqual(bottom({model:{context_side:undefined}}),bottom());
 '''
         self.node(script, "panel-view.cjs")
 
