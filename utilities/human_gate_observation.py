@@ -41,9 +41,9 @@ _S1_LOG_CHUNK_BYTES = 64 * 1024
 def _stamp(path):
     """Stable identity for an existing or missing input; never follows symlinks."""
     try:
-        meta = Path(path).lstat()
+        meta = os.lstat(path)
         return (meta.st_dev, meta.st_ino, meta.st_mtime_ns, meta.st_ctime_ns, meta.st_size)
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return None
 
 
@@ -528,30 +528,23 @@ _METRICS["route_wait_recomputes"] = 0
 _METRICS["route_wait_reuses"] = 0
 
 
-def _route_file_stamps(route_file, record, route_id):
-    """The identities ``_route_outcome`` keys on: record file, outcome sidecar, inline-finish file."""
+def _route_file_paths(route_file, record, route_id):
+    """The files ``_route_outcome`` keys on, as plain strings: record, outcome sidecar, inline-finish file."""
     route_path = Path(route_file)
-    outcome_path = route_path.with_name(route_path.stem + ".outcome.json")
     artifact_root = record.get("artifact_root") if record else None
-    finish = (Path(artifact_root) / ".runtime" / "inline-finish" / "v1" / str(route_id) / "finish.json"
+    finish = (str(Path(artifact_root) / ".runtime" / "inline-finish" / "v1" / str(route_id) / "finish.json")
               if artifact_root else None)
-    return (_stamp(route_path), _stamp(outcome_path), _stamp(finish) if finish else None), finish
-
-
-def _journal_path_of(ledger_root, route_id):
-    return Path(ledger_root) / str(route_id) / "journal.jsonl" if ledger_root is not None else None
+    return (str(route_path), str(route_path.with_name(route_path.stem + ".outcome.json")), finish)
 
 
 def _kept_waits(route_key, path, ledger_root):
     """The kept judgment of this route when every input is the file it was made from, else None."""
     entry = _WAIT_MEMO.get(route_key)
-    journal = _journal_path_of(ledger_root, route_key[0])
-    if entry is None or journal is None or entry[0] != str(path):
+    if entry is None or ledger_root is None or entry[0] != str(path):
         return None
-    jobs_key, route_stamps, finish, journal_stamp, reads, waits = entry
-    route_path = Path(route_key[2])
-    outcome_path = route_path.with_name(route_path.stem + ".outcome.json")
-    if ((_stamp(route_path), _stamp(outcome_path), _stamp(finish) if finish else None) != route_stamps
+    _jobs_key, files, stamps, journal, journal_stamp, reads, waits = entry
+    if (_stamp(files[0]) != stamps[0] or _stamp(files[1]) != stamps[1]
+            or (files[2] is not None and _stamp(files[2]) != stamps[2])
             or _stamp(journal) != journal_stamp
             or any(_stamp(read) != stamp for read, stamp in reads)):
         return None
@@ -562,9 +555,16 @@ def _kept_waits(route_key, path, ledger_root):
 def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_root):
     """``pending_human_waits`` for one route, kept with the identity of every file it read."""
     _METRICS["route_wait_recomputes"] += 1
-    journal = _journal_path_of(ledger_root, route_key[0])
+    journal = str(Path(ledger_root) / str(route_key[0]) / "journal.jsonl") if ledger_root is not None else None
+    files = _route_file_paths(route_key[2], raw_record, route_key[0])
+    # The identities the record and outcome were loaded under (taken before they were read), so a
+    # change after that load is seen on the next pass; stamped now only when they are not at hand.
+    held = _ROUTE_OUTCOME_CACHE.get((str(Path(route_key[2]).absolute()), route_key[0], route_key[1]))
+    if held is not None and held[1] is raw_record and held[2] is outcome and len(held[0]) == 3:
+        stamps = tuple(held[0])
+    else:
+        stamps = (_stamp(files[0]), _stamp(files[1]), _stamp(files[2]) if files[2] is not None else None)
     journal_stamp = _stamp(journal) if journal is not None else None
-    route_stamps, finish = _route_file_stamps(route_key[2], raw_record, route_key[0])
     reads = []
     token = _WAIT_READS.set(reads)
     try:
@@ -572,8 +572,7 @@ def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_ro
     finally:
         _WAIT_READS.reset(token)
     if journal is not None:
-        _WAIT_MEMO[route_key] = (str(path), route_stamps, finish, journal_stamp,
-                                 tuple(reads),
+        _WAIT_MEMO[route_key] = (str(path), files, stamps, journal, journal_stamp, tuple(reads),
                                  tuple(dict(wait) for wait in waits))
     return waits
 
