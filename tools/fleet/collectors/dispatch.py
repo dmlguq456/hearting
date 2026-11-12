@@ -2594,11 +2594,11 @@ def _supervised_claude_transcript(job, receipt_path):
 def _parse_claude_stream_tail(path):
     """Read one bounded exact-attempt tail for identity, context, and open tool.
 
-    The tool state is settled only from what was read without a gap (``tool_observed``):
-    a whole small file, or, past the unread middle, a call opened in the tail (its close
-    could only come later) and absence once the tail shows a turn end or a model row after
-    a tool result. Calls opened or closed in the head are not carried across the gap, and
-    an empty or gapped log with no such anchor settles neither a tool nor "no tool".
+    "No tool" (``tool_observed``) is settled only when the whole file was read. Past an
+    unread middle the only tool state shown is a call opened in the tail whose close never
+    follows; calls opened or closed in the head are not carried across the gap, and an
+    empty or gapped log settles no "no tool" (a sub-agent's rows can fill the tail while
+    the parent's call stays open).
     """
     try:
         st = os.stat(path)
@@ -2610,7 +2610,7 @@ def _parse_claude_stream_tail(path):
         return cached[1]
     disk_key = parse_cache.key("claude-attempt", path, cache_key,
                                (_CLAUDE_STREAM_HEAD_BYTES, _CLAUDE_STREAM_TAIL_BYTES,
-                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-subject-v3"))
+                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-subject-v4"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
@@ -2650,8 +2650,6 @@ def _parse_claude_stream_tail(path):
     open_tools = {}
     last_tool = None
     rows = 0
-    settled = not gap      # past a gap, absence needs an anchor read in the tail
-    after_result = False
     for index, line in enumerate(lines):
         if index == tail_from:
             open_tools.clear()   # a head call may have closed in the unread middle
@@ -2673,9 +2671,6 @@ def _parse_claude_stream_tail(path):
                 latest_model = payload["model"]
             if isinstance(payload.get("claude_code_version"), str):
                 runtime_version = payload["claude_code_version"][:32]
-        if gap and index >= tail_from and (
-                row_type == "result" or (row_type == "assistant" and after_result)):
-            settled = True       # every call before this row had returned
         if row_type == "assistant" and isinstance(message, dict):
             usage = message.get("usage")
             if isinstance(usage, dict):
@@ -2700,7 +2695,6 @@ def _parse_claude_stream_tail(path):
                     if isinstance(item, dict) and item.get("type") == "tool_result":
                         done = open_tools.pop(item.get("tool_use_id"), None)
                         last_tool = done or last_tool
-                        after_result = after_result or (gap and index >= tail_from)
         elif row_type == "result":
             usage = payload.get("usage")
             if isinstance(usage, dict):
@@ -2740,7 +2734,7 @@ def _parse_claude_stream_tail(path):
         "exec_tool": (_tool_call(*next(reversed(open_tools.values())))
                       if open_tools else None),
         "last_tool": _tool_call(*last_tool) if last_tool else None,
-        "tool_observed": bool(rows) and settled,
+        "tool_observed": bool(rows) and not gap,
     }
     _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)

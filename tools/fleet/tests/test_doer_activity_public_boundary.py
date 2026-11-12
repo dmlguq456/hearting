@@ -258,8 +258,8 @@ process.stdout.write(JSON.stringify(out));"""
 
 
 class ToolStateNeedsCompleteObservationTest(unittest.TestCase):
-    """R2 P2: an open call and "no tool" are settled only from what was read without a gap;
-    an empty log or an unread middle that may hold the deciding rows draws neither."""
+    """R2 P2 / R3: "no tool" is settled only when the whole log was read; past an unread
+    middle only a call opened in the tail is drawn, and an empty log draws neither."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="pr1552-gap-")
@@ -339,23 +339,67 @@ class ToolStateNeedsCompleteObservationTest(unittest.TestCase):
         job, doer = self._claude([init, self._use("old", "sleep 1"), self._pad(700000),
                                   self._use("now", "sleep 9")])
         self.assertEqual(doer.get("tool"), "sleep")
-        # A model row after a tool result in the tail: every earlier call had returned.
+        # Past a gap nothing in the tail settles "no tool": the just-finished call stays.
         job, doer = self._claude([init, self._use("old", "sleep 1"), self._pad(700000),
                                   self._use("t", "git push"), self._result("t"),
                                   self._assistant([{"type": "text", "text": "."}])])
         self.assertIsNone(job.exec_tool)
-        self.assertTrue(doer.get("idle_tool"))
+        self.assertFalse(job._tool_observed)
+        self.assertNotIn("idle_tool", doer)
         self.assertEqual(job.last_tool, {"name": "git", "target": "push"})
-        # A turn end read in the tail settles absence too.
         job, doer = self._claude([init, self._use("old", "sleep 1"), self._pad(700000),
                                   {"type": "result", "session_id": self.SID}])
-        self.assertTrue(doer.get("idle_tool"))
+        self.assertNotIn("idle_tool", doer)
         self.assertIsNone(job.last_tool)   # the head's close may be superseded in the gap
+        # The whole small file read: closed then text settles "no tool".
+        job, doer = self._claude([init, self._use("t", "git push"), self._result("t"),
+                                  self._assistant([{"type": "text", "text": "."}])])
+        self.assertTrue(job._tool_observed)
+        self.assertTrue(doer.get("idle_tool"))
         # Head and tail meet without a gap: the row across the 64KiB seam is still read.
         job, doer = self._claude([init, self._pad(65000), self._use("seam", "sleep 9"),
                                   self._pad(70000)])
         self.assertEqual(doer.get("tool"), "sleep")
         self.assertTrue(job._tool_observed)
+
+    def _sub(self, row):
+        return dict(row, parent_tool_use_id="agent")
+
+    def test_claude_sub_agent_rows_never_settle_no_tool_past_a_gap(self):
+        init = {"type": "system", "subtype": "init", "session_id": self.SID,
+                "model": "claude-fable-5"}
+        agent = self._assistant([{"type": "tool_use", "id": "agent", "name": "Agent",
+                                  "input": {"description": "look", "prompt": "p"}}])
+
+        def sub_work(count, size):
+            rows = []
+            for n in range(count):
+                rows += [self._sub(self._use("s%d" % n, "cat notes.txt")),
+                         self._sub(self._result("s%d" % n)),
+                         self._sub(self._pad(size))]
+            return rows
+
+        cases = {
+            # The Agent call is open; its sub-agent's rows fill the tail, last a tool result.
+            "agent_in_head": [init, agent] + sub_work(48, 15000)
+            + [self._sub(self._use("z", "cat notes.txt")), self._sub(self._result("z"))],
+            "agent_in_gap": [init, self._pad(100000), agent] + sub_work(48, 15000)
+            + [self._sub(self._use("z", "cat notes.txt")), self._sub(self._result("z"))],
+        }
+        for case, rows in cases.items():
+            job, doer = self._claude(rows)
+            self.assertGreater(os.path.getsize(job._log_file), 700000, case)
+            self.assertIsNone(job.exec_tool, case)
+            self.assertFalse(job._tool_observed, case)
+            self.assertNotIn("idle_tool", doer, case)
+            self.assertIsNone(doer.get("tool"), case)
+        # Controls: the small complete log shows the open Agent call, and a big log whose
+        # tail ends in the sub-agent's own open call shows that call.
+        job, doer = self._claude([init, agent] + sub_work(3, 15000))
+        self.assertEqual(doer.get("tool"), "Agent")
+        job, doer = self._claude([init, agent] + sub_work(48, 15000)
+                                 + [self._sub(self._use("z", "sleep 9"))])
+        self.assertEqual(doer.get("tool"), "sleep")
 
     def test_codex_gap_settles_no_command_only_after_a_turn_boundary(self):
         path = os.path.join(self.tmp.name, "owner.att-codex-gap.codex.jsonl")
