@@ -41,7 +41,7 @@ _MODEL_CELLS = ("model", "effort")
 _TOKEN_CELLS = ("ctx_pct", "active_context_tokens", "context_window_tokens", "compaction_pressure")
 
 
-def observe(harness, pid, proc_start, sid, *, previous=None):
+def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False):
     """Read the selected session through Fleet's parsers and report watch inputs.
 
     ``previous`` is the caller's last observation of this exact live session
@@ -50,6 +50,8 @@ def observe(harness, pid, proc_start, sid, *, previous=None):
     its last display, and the next call reads the source again. Absence,
     refusal, another session and an ended process still clear; a cell that
     was never observed stays empty. Without it the result is unchanged.
+    ``raise_unread`` lets an unread OpenCode database raise ``OSError`` for a
+    caller that keeps its own last display (Fleet's native reader).
     """
     from .collectors.procscan import read_proc_start
     keep = previous if isinstance(previous, dict) else None
@@ -114,7 +116,14 @@ def observe(harness, pid, proc_start, sid, *, previous=None):
     else:
         db = opencode._db()
         paths.extend((db, db + "-wal"))
-        opencode.enrich(sess)
+        try:
+            opencode.enrich(sess, raise_unread=raise_unread or keep is not None)
+        except OSError:
+            # Identity first: an unread DB of another session or process birth clears
+            # (below) instead of letting the caller keep the previous selection's cells.
+            if raise_unread and sess.session_id == sid and read_proc_start(pid) == proc_start:
+                raise
+            unread.extend(_TAP_CELLS)
         if sess.session_id != sid:
             # A delayed callback must never borrow the newly selected session.
             return {}, [str(path) for path in paths if path]
