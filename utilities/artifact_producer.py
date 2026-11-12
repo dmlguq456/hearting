@@ -138,6 +138,7 @@ from artifact_producer_store import (  # noqa: F401
     _record_content_digest, _record_cycle_manifest_path, _reference_path, _rfc3339,
     _rfc3339_precise, _rfc3339_to_epoch, _SEALED_CYCLE_STATES, _stream_file_facts,
     _valid_cycle_state, _walk_cycle_files, _walk_files, _write_atomic, _write_campaign,
+    _write_seed_copy,
     _write_campaign_runtime_record, _write_cycle_binding, _write_cycle_record,
     _write_exclusive, ABANDON_REASONS, activate, ACTIVATION_KINDS, ALGORITHM_VERSION,
     artifact_index_observation_scope, BLOCKED, BUCKET_TYPES, campaign_dir,
