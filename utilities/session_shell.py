@@ -279,6 +279,12 @@ def pane_seat(info, harness: str | None = None, *, rows=None, birth=None) -> dic
 PASSTHROUGH = "passthrough"
 
 
+# Why a shell seat's screen could not be read; tidy names the cause in its one notice line.
+SCREEN_HOST_OUTDATED = "shell-host-outdated"   # a host started before it learned `screen`
+SCREEN_EDITOR_OPEN = "shell-editor-open"       # settings, the Fleet explorer or a question holds the keys
+SCREEN_NO_ANSWER = "shell-no-answer"           # no or no usable answer
+
+
 def native_screen(binding: dict):
     """The screen a key typed into this seat's pane reaches, as ``(char, faint)`` cell lines.
 
@@ -290,25 +296,35 @@ def native_screen(binding: dict):
     ``PASSTHROUGH`` only when the host relays the pane raw: the pane is then the
     native screen and its keys go straight to native.
     """
+    return native_screen_reason(binding)[0]
+
+
+def native_screen_reason(binding: dict):
+    """``(lines | None | PASSTHROUGH, reason)``: :func:`native_screen` and, for None, why."""
     result = control(binding, "screen")
-    if isinstance(result, dict) and result.get("ok") is False and result.get("reason") == "display-unavailable":
-        return PASSTHROUGH
+    if isinstance(result, dict) and result.get("ok") is False:
+        if result.get("reason") == "display-unavailable":
+            return PASSTHROUGH, ""
+        if result.get("reason") == "unsupported-operation":
+            return None, SCREEN_HOST_OUTDATED
+    if isinstance(result, dict) and result.get("ok") and result.get("focused") is True:
+        return None, SCREEN_EDITOR_OPEN
     screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
               and result.get("focused") is False else None)
     if not isinstance(screen, list) or len(screen) > 512:
-        return None
+        return None, SCREEN_NO_ANSWER
     lines = []
     for runs in screen:
         if not isinstance(runs, list):
-            return None
+            return None, SCREEN_NO_ANSWER
         line = []
         for run in runs:
             if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
                     or type(run[1]) is not bool):
-                return None
+                return None, SCREEN_NO_ANSWER
             line.extend((char, run[1]) for char in run[0])
         lines.append(line)
-    return lines
+    return lines, ""
 
 
 def open_panel(harness: str, sid: str) -> dict:
