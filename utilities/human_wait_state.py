@@ -38,6 +38,11 @@ _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
+# While a display wants routes, the producer checks the dispatch registries this
+# often between passes and starts the next pass at most once per pass duration
+# (never sooner than _REGISTRY_MIN_GAP after the previous one ended).
+_REGISTRY_WAKE_SECONDS = 1.0
+_REGISTRY_MIN_GAP = 2.0
 _ROUTE_DEMAND_LIMIT = 64
 _ROUTE_DEMAND_MAX_BYTES = 32 * 1024
 _ROUTE_DEMAND_TTL = 600.0
@@ -579,6 +584,10 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
         return False
     # A physical prompt bumps the sequence; a courier consumes the question's
     # exact recorded sequence. No late old prompt may complete a newer question.
+    # Claims are made under this same seat lock, so this read, before the source
+    # write, is the one that decides: a prompt never ends an answer already chosen.
+    if action_id is None and _message_claim_open(signal):
+        return False
     completion = {"actor": actor, "action_id": action_id, "at": time.time(),
                   "answer_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
     if not signal["detail"]["questions"][0].get("is_secret"):
@@ -826,6 +835,10 @@ def message_answer_pending(signal):
     An unreadable claim record is not "no claim": this prompt then registers no
     automatic answer, the question and any claim stay as they are, and the next
     readable prompt or the claim's own delivery decides."""
+    return _message_claim_open(signal)
+
+
+def _message_claim_open(signal):
     entry, known = _selected_lookup(_message_envelope(signal))
     if not known:
         return True
@@ -4657,6 +4670,58 @@ def _notification_delay(items, now, *, enabled):
     return min(deadlines) if deadlines else None
 
 
+def _registry_generation():
+    """The dispatch registries' (inode, size, mtime): a route start, stage or close writes them."""
+    try:
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet.collectors import dispatch
+        paths = dispatch.human_gate_registry_paths()
+    except Exception:
+        return None
+    generation = []
+    for path in paths:
+        try:
+            info = os.stat(path)
+            generation.append((str(path), info.st_ino, info.st_size, info.st_mtime_ns))
+        except OSError:
+            generation.append((str(path), None))
+    return tuple(generation)
+
+
+def _sleep_until_registry_change(delay, generation, ready_at):
+    """Sleep `delay` seconds, or less once a registry changed since `generation`.
+
+    A route's start, stage change and close are registry writes, so the session
+    panels see them on the next pass instead of on the 30 second cadence. A
+    change is honoured no earlier than `ready_at`, so a registry that keeps
+    changing gets at most one pass per pass duration.
+    """
+    if not generation or all(len(row) == 2 for row in generation):
+        time.sleep(delay)   # no registry to watch yet: the cadence alone
+        return
+    deadline = time.monotonic() + delay
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            return
+        time.sleep(min(_REGISTRY_WAKE_SECONDS, deadline - now))
+        if _registry_generation() != generation:
+            remaining = ready_at - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(remaining, max(0.0, deadline - time.monotonic())))
+            return
+
+
+def _timed_refresh():
+    """Run one pass; return the registry generation it read and its duration."""
+    generation = _registry_generation()
+    began = time.monotonic()
+    _refresh_cache()
+    return generation, time.monotonic() - began
+
+
 def _producer_loop(fd: int) -> None:
     global _producer_root
     root = state_root()
@@ -4664,7 +4729,7 @@ def _producer_loop(fd: int) -> None:
     try:
         if not root.is_dir():
             return
-        _refresh_cache()
+        generation, duration = _timed_refresh()
         while True:
             now = time.time()
             try:
@@ -4703,10 +4768,11 @@ def _producer_loop(fd: int) -> None:
             delay = min(30.0, max(1.0, 600.0 - idle))
             if boundary is not None:
                 delay = min(delay, max(1.0, boundary))
-            time.sleep(delay)
+            _sleep_until_registry_change(delay, generation,
+                                         time.monotonic() + max(_REGISTRY_MIN_GAP, duration))
             if not root.is_dir():
                 return
-            _refresh_cache()
+            generation, duration = _timed_refresh()
     except Exception:
         return
     finally:
