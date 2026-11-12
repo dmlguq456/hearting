@@ -83,14 +83,18 @@ def receipt_marker_for_identity(delivery_id: str, identity: dict) -> str:
 
 
 def _delivery_heads() -> tuple[str, ...]:
-    """Opening lines only Hearting's own delivery bodies start with: every shipped
-    ``delivery_context`` block header, its overflow pointer, the completion envelope."""
+    """Openings only Hearting's own delivery text starts with, each with its separator:
+    every shipped ``delivery_context`` block header and its overflow pointer, the
+    completion and gate envelopes, and a needs-attention notice's fixed first words."""
     import dispatch_session_sweep as sweep
-    return (sweep.GATE_DELIVERY_HEADER, sweep.NOTICE_DELIVERY_HEADER,
-            sweep.COMPLETION_DELIVERY_HEADER, sweep._PREVIOUS_GATE_DELIVERY_HEADER,
-            sweep._PREVIOUS_NOTICE_DELIVERY_HEADER, sweep._PREVIOUS_COMPLETION_DELIVERY_HEADER,
-            sweep._LEGACY_COMPLETION_DELIVERY_HEADER, sweep.OVERFLOW_HEADER,
-            "AGENT_HARNESS_COMPLETION_V1")
+    import dispatch_supervision
+    import human_gate_receipt
+    headers = (sweep.GATE_DELIVERY_HEADER, sweep.NOTICE_DELIVERY_HEADER,
+               sweep.COMPLETION_DELIVERY_HEADER, sweep._PREVIOUS_GATE_DELIVERY_HEADER,
+               sweep._PREVIOUS_NOTICE_DELIVERY_HEADER, sweep._PREVIOUS_COMPLETION_DELIVERY_HEADER,
+               sweep._LEGACY_COMPLETION_DELIVERY_HEADER, sweep.OVERFLOW_HEADER,
+               "AGENT_HARNESS_COMPLETION_V1", human_gate_receipt.NATIVE_HEAD)
+    return tuple(header + "\n" for header in headers) + (dispatch_supervision.NEEDS_ATTENTION_HEAD,)
 
 
 def _bound_record(delivery_id: str, digest: str, storage_recipient: str, roots) -> dict | None:
@@ -105,10 +109,13 @@ def _bound_record(delivery_id: str, digest: str, storage_recipient: str, roots) 
 
 
 def _sent_notice_text(record: dict) -> str | None:
+    """A session notice's native text: rendered from its stored receipt alone."""
+    receipt = record.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("kind") != "notice":
+        return None
     try:
         import dispatch_notice_receipt as notice_receipt
-        receipt = record.get("receipt")
-        return notice_receipt.native_text(receipt) if notice_receipt.is_notice(receipt) else None
+        return notice_receipt.native_text(receipt)
     except Exception:  # noqa: BLE001 - an unrenderable notice proves nothing
         return None
 
@@ -120,8 +127,10 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
     person can paste it with words of their own, so the prompt as a whole must be what
     Hearting sent: every marker line is complete (the Codex queue recovery's fullmatch),
     one ends the prompt, each binds to a record stored for this recipient, and the text
-    above the last one is exactly that notice's native text or opens with a fixed
-    Hearting delivery heading. Anything else stays the person's prompt.
+    above the last one opens with a fixed Hearting delivery heading or is exactly a session
+    notice's native text (rendered from its stored receipt alone; other notices re-render
+    from live registry state, so their fixed opening is the comparison). Anything else
+    stays the person's prompt.
     """
     if not isinstance(text, str) or "HEARTING_RECEIPT_V1" not in text or not storage_recipient:
         return []
@@ -141,13 +150,12 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
         if record is None:
             return []
         records.append(record)
-    if len(records) == 1 and above == _sent_notice_text(records[0]):
-        return ids
     try:
-        heads = _delivery_heads()
+        if body.startswith(_delivery_heads()):
+            return ids
     except Exception:  # noqa: BLE001 - no heading to compare is no proof
-        return []
-    return ids if any(body.startswith(head + "\n") for head in heads) else []
+        pass
+    return ids if len(records) == 1 and above == _sent_notice_text(records[0]) else []
 
 
 def _text_content(value: Any) -> str:

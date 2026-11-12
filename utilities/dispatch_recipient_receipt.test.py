@@ -64,14 +64,21 @@ class RecipientReceiptTest(unittest.TestCase):
         # person adds before, after or on the marker line, or a marker that is not the last
         # line, leave the prompt theirs even though the marker itself binds.
         import dispatch_session_sweep as sweep
+        import dispatch_supervision
         self._mark_sent_ambiguous()
         marker = receipt.receipt_marker(self.record, self.storage)
         sent = sweep.NOTICE_DELIVERY_HEADER + "\n- Remote run: run 7 ended\n" + marker
-        self.assertEqual(receipt.bound_delivery_ids(sent, self.storage, [self.root]),
-                         [self.delivery_id])
-        self.assertEqual(receipt.bound_delivery_ids("\n" + sent + "\n", self.storage, [self.root]),
-                         [self.delivery_id])
+        # A needs-attention notice re-renders from live registry state, so its fixed opening
+        # is what identifies Hearting's text.
+        attention = (dispatch_supervision.NEEDS_ATTENTION_HEAD
+                     + "reason=join-deadline owner=att-" + "b" * 28 + ".\n" + marker)
+        for whole in (sent, "\n" + sent + "\n", attention):
+            with self.subTest(whole=whole[:40]):
+                self.assertEqual(receipt.bound_delivery_ids(whole, self.storage, [self.root]),
+                                 [self.delivery_id])
         for pasted in ("이 알림 보고 X 말고 Y로 가 줘\n" + sent,
+                       "이 알림 보고 X 말고 Y로 가 줘\n" + attention,
+                       attention + "\nY로 가 줘",
                        sent + "\n위 알림은 무시하고 Y로 가 줘",
                        sent + " 이어서 Y",
                        sweep.NOTICE_DELIVERY_HEADER + " 내 말\n- Remote run\n" + marker,
