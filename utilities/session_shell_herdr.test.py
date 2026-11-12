@@ -52,20 +52,22 @@ class PaneAttachmentTest(unittest.TestCase):
   for child in self.children:child.stdin.close();child.wait(timeout=5)
  def test_only_the_exact_foreground_owner_can_join_an_existing_native_binding(self):
   with mock.patch.object(self.shell,'exact_binding',return_value=(self.binding,'')), mock.patch.object(self.peer,'_retire_pane_info',return_value=self.info):
-   self.assertEqual(self.peer._pane_shell_binding('private:p1','claude','owned-native-session'),self.binding)
+   self.assertEqual(self.peer._pane_shell_binding_result('private:p1','claude','owned-native-session')[0],self.binding)
    other=self.children[1].pid
    with mock.patch.object(self.peer,'_retire_pane_info',return_value={'foreground_process_group_id':other,'foreground_processes':[{'pid':other}]}):
-    self.assertIsNone(self.peer._pane_shell_binding('private:p1','claude','owned-native-session'))
+    self.assertIsNone(self.peer._pane_shell_binding_result('private:p1','claude','owned-native-session')[0])
    with mock.patch.object(self.peer,'_proc_start_ticks',return_value='different-birth'):
-    self.assertIsNone(self.peer._pane_shell_binding('private:p1','claude','owned-native-session'))
-   self.assertIsNone(self.peer._pane_shell_binding('private:p1','claude','owned-native-session',expected={**self.binding,'incarnation':'old-attachment'}))
+    self.assertIsNone(self.peer._pane_shell_binding_result('private:p1','claude','owned-native-session')[0])
+   self.assertIsNone(self.peer._pane_shell_binding_result('private:p1','claude','owned-native-session',expected={**self.binding,'incarnation':'old-attachment'})[0])
  def test_pane_owner_change_at_submission_never_writes_or_queues_native_input(self):
+  # The attachment observed at resolution is rechecked at submission; when it no
+  # longer owns the session nothing is written to the host or queued natively.
   args=SimpleNamespace(target='private:p1',ref=[],no_trailer=False)
   for harness in ('claude','codex','opencode'):
    binding={**self.binding,'harness':harness}
-   with mock.patch.object(self.peer.peer_message,'prepare_peer_message',return_value=('sealed fixture','fixture-ref')), mock.patch.object(self.peer.peer_message,'_read_pending',return_value={'state':'pending'}), mock.patch.object(self.peer,'_pane_shell_binding',return_value=None) as check, mock.patch.object(self.shell,'deliver_pending') as shell_send, mock.patch.object(self.peer.peer_message,'deliver_pending_codex') as queue_send, mock.patch.object(self.peer,'_schedule_message_obligation'), mock.patch.object(self.peer,'_record'), mock.patch.object(self.peer,'_prompt_carrier_note'), contextlib.redirect_stdout(io.StringIO()) as output:
-    self.peer._cmd_prompt_shell(args,'fixture',binding,from_identity=(None,'runtime',''),from_name='fixture',pane='private:p1')
-    check.assert_called_once_with('private:p1',harness,'owned-native-session',expected=binding)
+   with mock.patch.object(self.peer.peer_message,'prepare_peer_message',return_value=('sealed fixture','fixture-ref')), mock.patch.object(self.peer.peer_message,'_read_pending',return_value={'state':'pending'}), mock.patch.object(self.shell,'exact_binding',return_value=(None,'attachment-not-found')) as check, mock.patch.object(self.shell,'deliver_pending') as shell_send, mock.patch.object(self.peer.peer_message,'deliver_pending_codex') as queue_send, mock.patch.object(self.peer,'_schedule_message_obligation'), mock.patch.object(self.peer,'_record'), mock.patch.object(self.peer,'_prompt_carrier_note'), contextlib.redirect_stdout(io.StringIO()) as output:
+    self.peer._cmd_prompt_native(args,'fixture',harness,'owned-native-session',binding=binding,from_identity=(None,'runtime',''),from_name='fixture')
+    check.assert_called_once_with(harness,'owned-native-session')
     shell_send.assert_not_called();queue_send.assert_not_called()
     self.assertIn('target-process-changed',output.getvalue())
 if __name__=='__main__':unittest.main()

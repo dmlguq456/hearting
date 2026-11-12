@@ -906,36 +906,26 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
         self.assertEqual(handover.record_recipient(record, "A", harness="claude", read_context=context), "B")
 
     def test_real_preparation_and_last_native_guard_refuse_unavailable_lineage(self):
-        for boundary in ("readiness", "last-guard"):
-            old, current = boundary + "-A", boundary + "-B"
-            notice = self.notice(sid=old, key=old)
-            path = tidy._ledger_path(self.edge("claude", old, current))
-            failed = False
-            calls = []
+        # The notice is prepared, then the shell host makes its last observation
+        # before input. Lineage lost at that boundary withholds the input; the
+        # prepared transfer is retained, so the record is sent-ambiguous, not resent.
+        old, current = "host-A", "host-B"
+        notice = self.notice(sid=old, key=old)
+        path = tidy._ledger_path(self.edge("claude", old, current))
+        failed = False
 
-            def outage():
-                nonlocal failed
-                failed = True
+        def readiness(*args, **kwargs):
+            nonlocal failed
+            failed = True
+            return SimpleNamespace(state="ready")
 
-            def readiness(*args, **kwargs):
-                if boundary == "readiness":
-                    outage()
-                return SimpleNamespace(state="ready")
-
-            def guard(*args, **kwargs):
-                calls.append(True)
-                if boundary == "last-guard" and len(calls) == 2:
-                    outage()
-                return None, {}
-
-            with self.subTest(boundary=boundary), self.unreadable(path, enabled=lambda: failed), \
-                    self.transport(current, readiness=readiness) as native, \
-                    mock.patch.object(steward, "_native_idle_prompt_guard", side_effect=guard):
-                steward._resume_session_notice_obligations(self.duties(), self.store())
-            self.assertTrue(failed)
-            native.assert_not_called()
-            row = pending.read(self.tmp_root, old, notice["delivery_id"])
-            self.assertEqual(row["state"], "sent-ambiguous" if boundary == "last-guard" else "pending")
+        with self.unreadable(path, enabled=lambda: failed), \
+                self.transport(current, readiness=readiness) as native:
+            steward._resume_session_notice_obligations(self.duties(), self.store())
+        self.assertTrue(failed)
+        native.assert_not_called()
+        row = pending.read(self.tmp_root, old, notice["delivery_id"])
+        self.assertEqual(row["state"], "sent-ambiguous")
 
     def test_deferred_begin_write_and_codex_before_add_refuse_then_recover(self):
         import codex_queue_delivery

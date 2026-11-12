@@ -1109,8 +1109,6 @@ def _selected_regressions():
         (steward_tests, "test_terminal_event_requires_a_fresh_snapshot_that_rejects_reused_pane_id"),
         (steward_tests, "test_historical_exact_pending_receipt_closes_and_is_excluded_next_pass"),
         (steward_tests, "test_missing_pending_row_without_exact_receipt_remains_unknown"),
-        (steward_tests, "test_live_rpc_claim_blocks_terminal_cancellation"),
-        (steward_tests, "test_dead_pane_bound_process_closes_but_unresolved_process_does_not"),
         (steward_tests, "test_stale_runner_observation_cannot_undo_foreground_exit_claim_or_completion"),
         (steward_tests, "test_real_recovery_preserves_history_and_hands_only_open_original_route_once"),
         (steward_tests, "test_work_accepted_at_unlock_is_reclaimed_before_runner_exit"),

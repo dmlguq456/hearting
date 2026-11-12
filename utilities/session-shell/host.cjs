@@ -238,7 +238,7 @@ function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return geometry().side?rows:rows-height();}
 function panelRow(){return geometry().side?0:rows-height();}
 function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
-function panelContent(){
+function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
@@ -246,7 +246,16 @@ function panelContent(){
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
-  panelHits=view.hits;routePageCount=view.routePages;return view.rows;
+  routePageCount=view.routePages;return view;
+}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;return view.rows;}
+// A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
+// only while it is on screen. Collapsed, under Fleet or the settings editor,
+// relayed, or no longer kept, it leaves them to the native like any other key;
+// key ownership is not left to the next paint.
+function readPageShown(){
+  if(!routeDetail||relay||ended||!activated||fleetView||settings||!expanded)return false;
+  return panelViewNow().hits.some(hit=>hit.action==='route-prev')&&!!routeDetail;
 }
 function height(){
   if(fleetView)return 0;
@@ -702,8 +711,9 @@ function inputBytes(data) {
     // Mouse-opened shell editors own their visible keys even while a peer's
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
-    if(routeDetail&&!relay&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
-    if(!relay&&routeDetail&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
+    const page=!!routeDetail&&readPageShown();
+    if(page&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
+    if(page&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
     if(currentDelivery&&(!block.focused||relay)){
       inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
       if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
@@ -739,7 +749,7 @@ function inputBytes(data) {
     // Escape has already reached native. Ctrl+] cannot continue an Escape/CSI
     // prefix; keeping that lone byte pending would disable focus after a modal.
     if(keyTail==='\x1b'&&!paste)keyTail='';
-    if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];block.enter();queueLayout();}
+    if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];routeDetail=false;routePage=0;block.enter();queueLayout();}
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
   }
