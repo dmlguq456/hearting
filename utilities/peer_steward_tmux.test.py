@@ -166,20 +166,37 @@ class TmuxPeerStewardTest(unittest.TestCase):
             time.sleep(.05)
         self.fail("the fake Claude never took the pane")
 
-    def book(self):
+    def book(self, harness="claude"):
         import session_tidy as st
         import session_tidy_clear as clear
-        seat = st.Seat("pane", st._digest("pane", self.address), self.address, "claude", "")
+        seat = st.Seat("pane", st._digest("pane", self.address), self.address, harness, "")
         now = time.time()
         with st.seat_lock(seat.key):
-            card = st.write_card(seat, "claude", OLD, "card body", prompt_seq=0)
+            card = st.write_card(seat, harness, OLD, "card body", prompt_seq=0)
             clear._write_reservation({
                 "schema": 1, "nonce": "n0nce", "status": "reserved", "created": now, "deadline": now + 600,
-                "seat": {"kind": "pane", "key": seat.key, "pane": self.address, "harness": "claude",
+                "seat": {"kind": "pane", "key": seat.key, "pane": self.address, "harness": harness,
                          "project_key": ""},
-                "harness": "claude", "sid": OLD, "cwd": str(self.root),
+                "harness": harness, "sid": OLD, "cwd": str(self.root),
                 "card_generation": card["generation"], "prompt_seq": 0})
         return clear.reservation_path(seat.key)
+
+    def rollout(self, *rows):
+        """Append Codex rollout rows (a turn start, a turn's input, a compaction) to its file."""
+        path = self.root / "codex-rollout.jsonl"
+        shapes = {"turn": {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}},
+                  "input": {"type": "response_item", "payload": {
+                      "type": "message", "role": "user",
+                      "content": [{"type": "input_text", "text": "Hearting supervision needs attention."}]}},
+                  "developer": {"type": "response_item", "payload": {
+                      "type": "message", "role": "developer", "content": []}},
+                  "compacted": {"type": "compacted", "payload": {
+                      "message": "summary", "replacement_history": [{"role": "user"}]}},
+                  "end": {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t2"}}}
+        with path.open("a", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps({"timestamp": "2026-11-13T00:00:00.000Z", **shapes[row]}) + "\n")
+        return path
 
     def steward(self, *argv):
         out = io.StringIO()
@@ -255,6 +272,82 @@ class TmuxPeerStewardTest(unittest.TestCase):
                 self.assertEqual(steward.call_count, 2 if second_wait == "idle" else 1)
                 if second_wait == "timeout":
                     self.assertEqual(held["reason"], "timeout")
+
+    def test_a_compact_codex_dropped_for_a_queued_turn_is_typed_again_after_that_turn(self):
+        # PG-9: a queued notice turn starts between the helper's last look and its keys; Codex
+        # disables /compact while that task runs, so the first keys never compact anything.
+        import session_tidy_clear as clear
+        path = self.book("codex")
+        key = json.loads(path.read_text())["seat"]["key"]
+        rollout = self.rollout("end")
+        claims = []
+
+        def steward(*_args):
+            claim, why = clear.claim_clear(path, "n0nce")
+            self.assertEqual(why, "")
+            claims.append(claim["clear_claim"])
+            # First keys: the queued turn had started (its input row lands after the claim).
+            # Second keys: typed at idle, the session compacts.
+            self.rollout(*(("turn", "input", "developer", "end") if len(claims) == 1 else ("compacted",)))
+            return {"cleared": "unverified", "reason": "compact-pending"}
+
+        steward = mock.Mock(side_effect=steward)
+        wait = mock.Mock(return_value="idle")
+        with mock.patch("tidy_transcripts.locate_transcript", return_value=rollout), \
+                mock.patch.object(clear, "COMPACT_CONFIRM_SEC", 1.0):
+            result = clear.run_helper(key, "n0nce", wait=wait, steward=steward,
+                                      continuer=mock.Mock(return_value={"continued": "true"}),
+                                      sleep=lambda _s: None)
+        held = clear.read_reservation(key)
+        self.assertIn(result, ("continued", "cleared"))
+        self.assertEqual(held["status"], "cleared")
+        self.assertEqual(steward.call_count, 2)          # typed again once, after that turn ended
+        self.assertEqual(wait.call_count, 2)
+        self.assertEqual(held["compact_typed"]["dropped"], 1)
+        # The second claim reads a compaction from the first typing on, so none is typed twice.
+        self.assertEqual(claims[1]["first_offset"], claims[0]["offset"])
+        self.assertGreater(claims[1]["offset"], claims[0]["offset"])
+
+    def test_only_a_codex_turn_input_before_any_compaction_means_the_keys_were_dropped(self):
+        import session_tidy_clear as clear
+        path = self.book("codex")
+        rollout = self.rollout("end")
+        with mock.patch("tidy_transcripts.locate_transcript", return_value=rollout):
+            claim, _why = clear.claim_clear(path, "n0nce")
+        self.assertFalse(clear.compact_preempted(claim))                 # nothing after the keys yet
+        self.rollout("turn", "developer")
+        self.assertFalse(clear.compact_preempted(claim))                 # no turn input yet
+        self.rollout("compacted", "turn", "input")
+        self.assertFalse(clear.compact_preempted(claim))                 # the keys compacted first
+        later = {**claim, "clear_claim": {**claim["clear_claim"], "offset": rollout.stat().st_size}}
+        self.rollout("turn", "input")
+        self.assertTrue(clear.compact_preempted(later))
+        for changed in ({"harness": "claude"}, {"harness": "opencode"},
+                        {"seat": {**claim["seat"], "pane": "w1:p1"}},       # a Herdr pane
+                        {"seat": {**claim["seat"], "kind": "native"}},
+                        {"clear_claim": {**later["clear_claim"], "state": "sent"}}):
+            with self.subTest(changed=sorted(changed)):
+                self.assertFalse(clear.compact_preempted({**later, **changed}))
+
+    def test_typing_again_is_skipped_when_the_dropped_looking_compact_compacted_after_all(self):
+        import session_tidy_clear as clear
+        path = self.book("codex")
+        key = json.loads(path.read_text())["seat"]["key"]
+        rollout = self.rollout("end")
+        with mock.patch("tidy_transcripts.locate_transcript", return_value=rollout):
+            claim, _why = clear.claim_clear(path, "n0nce")
+            self.rollout("turn", "input", "end", "compacted")
+            self.assertTrue(clear.compact_preempted(claim))
+            self.assertTrue(clear.release_unsent_compact(key, "n0nce", claim["clear_claim"]))
+            self.assertNotIn("clear_claim", clear.read_reservation(key))
+            with mock.patch.object(peer_steward, "_surface_missing", return_value=False), \
+                    mock.patch.object(peer_steward, "_clear_look",
+                                      return_value=(None, {"pane": self.address}, [])), \
+                    mock.patch.object(peer_steward, "_herdr_prompt") as keys:
+                rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
+        self.assertEqual(rc, 0, line)
+        self.assertIn("cleared=true", line)
+        keys.assert_not_called()
 
     def test_the_continue_reads_a_shell_seats_codex_thread_like_the_clear_looks(self):
         foreground = {"pid": 4242, "start": "77", "group": 4242, "argv": ["codex"],

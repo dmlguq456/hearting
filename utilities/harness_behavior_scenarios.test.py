@@ -255,6 +255,33 @@ class TidyCompactFlowTest(unittest.TestCase):
         claude = {"protocol": "anthropic", "text": "user\ntext\n이어서해\nsystem\ntext\nx"}
         self.assertEqual(len(self.tc._inputs(claude)), 1)
 
+    def test_queued_start_holds_the_first_new_turn_after_the_keys_were_held(self):
+        """``tidy-compact-queued-start``: the turn that starts while the /compact keys wait
+        is held at the model, once; its steward is the stock one with that one wrapper."""
+        from types import SimpleNamespace
+        tc = self.tc
+        with tempfile.TemporaryDirectory() as tmp:
+            run = SimpleNamespace(home=SimpleNamespace(
+                env={"XDG_STATE_HOME": str(Path(tmp) / "state")}, root=Path(tmp)))
+            scenario = tc.TidyCompactQueuedStart()
+            marks = scenario.marks(run)
+            marks.mkdir(parents=True)
+            answer = scenario.script(run)
+
+            def record(kind):
+                return {"last_kind": kind, "last_text": "x", "text": "x", "user_inputs": [],
+                        "main_index": 3}
+            self.assertIsNone(answer(record("user"), []).gate)     # nothing held before the keys
+            (marks / "armed").write_text("1")
+            self.assertIsNone(answer(record("tool"), []).gate)     # a tool result starts no turn
+            self.assertIs(answer(record("developer"), []).gate, scenario.release)
+            self.assertTrue((marks / "running").exists())
+            self.assertIsNone(answer(record("user"), []).gate)     # only the first turn
+            source = tc.QUEUED_START_STEWARD.format(
+                python=sys.executable, util=str(Path(hb.__file__).resolve().parent), marks=str(marks))
+            compile(source, "queued-start-steward", "exec")
+            self.assertIn("steward._herdr_prompt = queued_start", source)
+
 
 if __name__ == "__main__":
     unittest.main()
