@@ -324,12 +324,52 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertIn("검증: 명령 1개", text)
         self.assertNotIn("check-very-long-command", text)
 
+    def test_prose_that_only_starts_like_a_command_word_is_never_folded(self):
+        for prose in ("Good coverage of the export path", "github 연동 확인 실패", "makes sure the file opens",
+                      "Gopher scan 오류 3건"):
+            self.assertFalse(WI._COMMAND_LINE.search(prose), prose)
+            self.report.write_text(f"## 검증\n{prose}\npython3 tools/check.py 통과\n")
+            text = WI.completion_summary(self.route, self.report)
+            self.assertIn(prose, text)
+            self.assertIn("명령 1개 · 통과 1 · 실패 0", text)
+
+    def test_command_group_without_pass_or_fail_words_says_so(self):
+        self.report.write_text("## 검증\npython3 tools/check.py\n")
+        text = WI.completion_summary(self.route, self.report)
+        self.assertIn("검증: 명령 1개 · 결과 표시 없음", text)
+        self.assertNotIn("통과 0 · 실패 0", text)
+
+    def test_command_line_with_only_an_error_word_is_not_zero_failures(self):
+        self.report.write_text("## 검증\npython3 tools/check.py -> 오류 발생\n")
+        text = WI.completion_summary(self.route, self.report)
+        self.assertIn("명령 1개 · 통과 0 · 실패 1", text)
+        self.report.write_text("## 검증\npython3 tools/check.py -> Traceback error\n")
+        self.assertIn("실패 1", WI.completion_summary(self.route, self.report))
+        self.report.write_text("## 검증\npython3 tools/check.py -> 오류 없음\n")
+        negated = WI.completion_summary(self.route, self.report)
+        self.assertIn("결과 표시 없음", negated)
+        self.assertNotIn("실패 1", negated)
+
+    def test_a_remaining_line_that_says_no_error_was_confirmed_is_not_a_failure(self):
+        # A decision line that also says "오류 없음 확인" is a pending decision, not a failure.
+        self.report.write_text("## 검증\npython3 tools/check.py 통과\n\n## 남은 것\n"
+                               "- 오류 없음 확인 · 켤지는 사용자가 정해야 한다\n")
+        self.assertIn("결과: 결정할 일 남음", WI.completion_summary(self.route, self.report))
+        self.report.write_text("## 검증\npython3 tools/check.py 통과\n\n## 남은 것\n"
+                               "- 오류 없음 확인, 배포는 미실행 · 켤지는 사용자가 정해야 한다\n")
+        self.assertIn("실패·못 한 것 있음", WI.completion_summary(self.route, self.report))
+
+    def test_unextractable_remaining_work_is_said_to_be_unknown_not_none(self):
+        self.report.write_text("## 검증\npython3 tools/check.py 통과\n")
+        text = WI.completion_summary(self.route, self.report)
+        self.assertIn("미검증·남은 것: 미검증·남은 일을 확실히 추출하지 못함", text)
+
     def test_mixed_or_unknown_sections_never_claim_there_was_nothing_left(self):
         self.report.write_text('## 변경 개요\nknown change\n## 검증 및 한계\nPASS and unrun\n'
                                '## 다른 형식\nCI not observed\n')
         text = WI.completion_summary(self.route, self.report)
         self.assertNotIn('보고서에 따로 적힌 것 없음', text)
-        self.assertIn('미검증·남은 것: 기록 확인', text)
+        self.assertIn('미검증·남은 것: 미검증·남은 일을 확실히 추출하지 못함', text)
         self.assertIn('검증 내역을 확실히 추출하지 못함', text)
 
     def test_findings_and_past_failure_headings_are_not_current_verification_or_remaining_work(self):
@@ -509,7 +549,7 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.assertIn("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함", korean)
         self.report.write_text("## Changes\n- one\n")
         self.assertIn("Checks: Checks could not be extracted reliably; see the report", self.summary(None, route=research))
-        self.assertIn("Unverified / remaining: see the report", self.summary(None, route=research))
+        self.assertIn("Unverified / remaining: Unverified or remaining work could not be extracted reliably; see the report", self.summary(None, route=research))
         self.assertIn("검증: 검증 내역을 확실히 추출하지 못함 · 보고서 확인", self.summary("ko", route=research))
         self.assertIn("Artifact: none", self.summary(None, route=research, report=None))
         self.assertIn("산출물: 없음", self.summary("ko", route=research, report=None))

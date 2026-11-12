@@ -18,6 +18,10 @@
    "en": "{count} commands · {passed} passed · {failed} failed",
    "ko": "명령 {count}개 · 통과 {passed} · 실패 {failed}"
   },
+  "completion.command_checks_unmarked": {
+   "en": "{count} commands · no pass/fail shown",
+   "ko": "명령 {count}개 · 결과 표시 없음"
+  },
   "completion.corrections_undelivered": {
    "en": "Unapplied correct {count}: no delivery evidence; application is unverified.",
    "ko": "미반영 correct {count}건: 전달 증거 없음, 실제 반영 여부 미확인."
@@ -91,8 +95,8 @@
    "ko": "검증 내역을 확실히 추출하지 못함 · 보고서 확인"
   },
   "completion.no_remaining": {
-   "en": "see the report",
-   "ko": "기록 확인"
+   "en": "Unverified or remaining work could not be extracted reliably; see the report",
+   "ko": "미검증·남은 일을 확실히 추출하지 못함 · 보고서 확인"
   },
   "completion.remaining": {
    "en": "Unverified / remaining: {items}",

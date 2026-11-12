@@ -558,21 +558,45 @@ def _joined(lines, cap=MAX_FIELD_CHARS) -> str:
     return _line(" · ".join(dict.fromkeys(item for item in lines if item)), cap)
 
 
-_COMMAND_LINE = re.compile(r"^(?:[$>]\s*|`|(?:python(?:3)?|pytest|uv|git|make|npm|npx|cargo|go|./tools/|tools/)|[\w./-]+\.(?:test\.py|test\.sh|py|sh)\b)", re.I)
+_COMMAND_LINE = re.compile(
+    r"^(?:[$>]\s*|`|(?:python3?|pytest|uv|git|make|npm|npx|cargo|go)(?=\s|$)|\.?/?tools/"
+    r"|[\w./-]+\.(?:test\.py|test\.sh|py|sh)\b)", re.I)
 _COMMAND_RESULT = re.compile(r"\b(?:pass(?:ed)?|fail(?:ed)?|통과|실패)\b", re.I)
+# A failure signal that is not a pass/fail word: it must never read as "0 failures".
+_ERROR_WORD = re.compile(r"error|exception|traceback|오류|에러|예외", re.I)
+# "no error", "오류 없음", "실패 0" say nothing went wrong; strip them before looking for failure words.
+_NEGATED_FAILURE = re.compile(
+    r"\b(?:no|without|zero|0)\s+(?:errors?|failures?|failed|exceptions?)\b"
+    r"|(?:오류|에러|실패|예외|error|failure)s?\s*(?:없|0\s*(?:건|개)?(?![\w가-힣]))",
+    re.I)
+
+
+def _unnegated(text: str) -> str:
+    return _NEGATED_FAILURE.sub(" ", text)
 
 
 def _verified_summary(lines, t):
-    """Keep commands intact in the record; summarize bare command rows for people."""
+    """Keep commands intact in the record; summarize bare command rows for people.
+
+    Only lines that start like a command are folded; every other line stays as written.
+    A folded group with no pass/fail word says so instead of reading as zero failures.
+    """
     commands = [line for line in lines if _COMMAND_LINE.search(line.strip())]
     prose = [line for line in lines if line not in commands]
     if not commands:
         return _joined(lines) or t("completion.no_checks")
-    outcomes = [match.group(0).lower() for line in commands
-                for match in _COMMAND_RESULT.finditer(line)]
-    failures = sum(value in {"fail", "failed", "실패"} for value in outcomes)
-    passed = sum(value in {"pass", "passed", "통과"} for value in outcomes)
-    summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
+    passed = failures = 0
+    for line in commands:
+        words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(_unnegated(line))]
+        line_failed = sum(value in {"fail", "failed", "실패"} for value in words)
+        if not line_failed and _ERROR_WORD.search(_unnegated(line)):
+            line_failed = 1
+        failures += line_failed
+        passed += sum(value in {"pass", "passed", "통과"} for value in words)
+    if not passed and not failures:
+        summary = t("completion.command_checks_unmarked", count=len(commands))
+    else:
+        summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
     return _joined([*prose, summary])
 
 
@@ -597,7 +621,7 @@ def _result_line(route, t, remaining=()) -> str:
                      "미실행", "미확인", "미검증", "중단", "failed", "error", "not usable", "unrun",
                      "unverified", "unavailable", "blocked")
     decision_words = ("사용자가 정해야", "사용자 결정", "결정 후", "답을 기다", "must decide", "decision needed")
-    has_failure = any(word in item.casefold() for item in substantive for word in failure_words)
+    has_failure = any(word in _unnegated(item).casefold() for item in substantive for word in failure_words)
     has_decision = any(word in item.casefold() for item in substantive for word in decision_words)
     plan = route.get("route_plan")
     if isinstance(plan, dict):

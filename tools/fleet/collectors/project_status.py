@@ -6,7 +6,7 @@ directly in a campaign folder, with older cycle ``artifacts/`` documents as a
 fallback. Names match NFC-normalized and case-folded, as the common artifact reader
 matches them. Campaign documents take priority; within each group the newest wins.
 A file at the cycle root is never sealed and is not read; the legacy flat folder
-``research/<dir>/`` is read too.
+``research/<dir>/`` is no longer read (its chronological work log is a record, not the board).
 
 Cost: the artifact root comes from file reads only (no git process), and one scan per
 root runs at most every ``INTERVAL`` seconds within a time budget. Campaign status
