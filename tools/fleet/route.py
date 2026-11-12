@@ -545,6 +545,27 @@ def _load_outcome_uncached(path):
     }
 
 
+_ROUTE_HEADERS = {}
+_ROUTE_HEADER_LIMIT = 2048
+
+
+def _route_header(route_file):
+    """``(route_id, artifact_root, route_id or "")`` of a route document, re-read only when its
+    full file generation changes; the document itself is not retained."""
+    path = os.fspath(route_file)
+    info = os.stat(path)
+    generation = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    cached = _ROUTE_HEADERS.get(path)
+    if cached is not None and cached[0] == generation:
+        return cached[1]
+    route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    header = (route.get("route_id"), route.get("artifact_root", ""), route.get("route_id", ""))
+    if len(_ROUTE_HEADERS) >= _ROUTE_HEADER_LIMIT and path not in _ROUTE_HEADERS:
+        _ROUTE_HEADERS.pop(next(iter(_ROUTE_HEADERS)))
+    _ROUTE_HEADERS[path] = (generation, header)
+    return header
+
+
 def load_outcome(route_file, expect_id=None, expect_hash=None):
     """`{"present": False}` | `{"present": True, "terminal_gate_proven": True|False|None|"absent",
     "closed_at": str|None, "match": bool}` — read-only sidecar reader for the
@@ -569,12 +590,14 @@ def load_outcome(route_file, expect_id=None, expect_hash=None):
             _OUTCOME_CACHE[path] = (key[0], key[1], outcome)
     finish_pending = None
     try:
-        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
-        if route.get("route_id") == expect_id or expect_id is None:
+        route_id, artifact_root, pending_route_id = _route_header(route_file)
+        if route_id == expect_id or expect_id is None:
             import sys
-            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+            utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+            if utilities not in sys.path:
+                sys.path.insert(0, utilities)
             import inline_finish
-            pending = inline_finish.pending_state(Path(route.get("artifact_root", "")), route.get("route_id", ""))
+            pending = inline_finish.pending_state(Path(artifact_root), pending_route_id)
             if pending and pending.get("state") != "finished":
                 finish_pending = pending.get("state")
     except (OSError, ValueError, TypeError):

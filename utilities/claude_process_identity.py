@@ -582,6 +582,7 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
         return False, holders, {"proc-inventory-unavailable"}
     candidates = {}
     tap_indexes = {}
+    remote_homes = {}
     mounts_path = root / "mounts"
     if not mounts_path.exists():
         mounts_path = Path("/proc/mounts")
@@ -637,8 +638,12 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
             reasons.add("config-home-unresolved")
             continue
         home = Path(home_value)
+        if home_value not in remote_homes:
+            # One mount table per census: every process naming this home has
+            # the same answer, so read and match the table once per home.
+            remote_homes[home_value] = _remote_mount(home, mounts_path)
         if (not _owner_directory(home) or not _owner_directory(home / "sessions")
-                or _remote_mount(home, mounts_path)):
+                or remote_homes[home_value]):
             reasons.add("remote-config-home")
             continue
         candidates[pid] = (start, argv, home)

@@ -16,8 +16,35 @@ def _path():
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-fleet/tag-assignments.json"
 
 
+def _stamp(meta):
+    """File generation, including a metadata-only reaffirmation (``os.utime``)."""
+    return meta.st_dev, meta.st_ino, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns
+
+
+def _read_stamped(path):
+    """The snapshot rows and the generation of exactly the file they came from.
+
+    A generation that moved during the read never equals a later one, so a
+    racing reaffirmation is treated as unknown rather than as absent.
+    """
+    before = _stamp(os.stat(path))
+    rows = _read(path)
+    after = _stamp(os.stat(path))
+    return rows, (before if before == after else object())
+
+
 def _read(path):
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return _parse(path.read_text(encoding="utf-8"))
+
+
+def _content(rows):
+    """Row meaning without the reaffirmation counter."""
+    return {key: {name: value for name, value in row.items() if name != "observation_revision"}
+            for key, row in rows.items()}
+
+
+def _parse(text):
+    data = json.loads(text)
     if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("assignments"), list):
         raise ValueError("invalid tag assignments")
     rows = {}
@@ -166,11 +193,11 @@ def assign(sessions):
     """Collect normal inventory before attempting the nonblocking shared writer."""
     try:
         try:
-            baseline = _read(_path())
+            baseline, stamp = _read_stamped(_path())
         except FileNotFoundError:
-            baseline = {}
+            baseline, stamp = {}, None
         live, agents = _inventory(sessions)
-        return _assign(live, agents, baseline=baseline)
+        return _assign(live, agents, baseline=baseline, baseline_stamp=stamp)
     except (OSError, ValueError, TypeError, ImportError):
         return []
 
@@ -245,7 +272,7 @@ def _continuations(live, observed, lineage):
     return edges
 
 
-def _assign(live, agents, *, observed_only=False, baseline=None, lineage=None):
+def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None):
     """Reserve against the latest snapshot and persist atomically under one lock."""
     from .session_handle import minted_tag
     observed = set(live)
@@ -256,10 +283,16 @@ def _assign(live, agents, *, observed_only=False, baseline=None, lineage=None):
         with (path.parent / "tag-assignments.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
-                old = _read(path)
+                old, stamp = _read_stamped(path)
             except FileNotFoundError:
-                old = {}
+                old, stamp = {}, None
             baseline = baseline or {}
+            # An unchanged reaffirmation only advances the file's generation
+            # (no rewrite). A census that started before it cannot tell which
+            # rows were reaffirmed, so it treats every existing row as newer.
+            # A rewritten snapshot still carries its per-row revisions.
+            reaffirmed = (not observed_only and baseline_stamp is not None
+                          and stamp != baseline_stamp and old == baseline)
             if not observed_only:
                 # A newer full writer's deletion wins over this stale census.
                 for key in baseline.keys() - old.keys():
@@ -268,7 +301,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None, lineage=None):
             for key, row in old.items():
                 # Only unchanged rows can be retired/refreshed by this census.
                 # Newer pane/PID evidence wins even when live contains the SID.
-                if ((not observed_only and row != baseline.get(key))
+                if ((not observed_only and (reaffirmed or row != baseline.get(key)))
                         or (key not in live and (observed_only or _keep(row, agents)))):
                     live[key] = row.copy()
                     if not observed_only:
@@ -329,7 +362,20 @@ def _assign(live, agents, *, observed_only=False, baseline=None, lineage=None):
                     row["tag"] = tag
                     taken.add(tag)
             rows = [row for row in live.values() if row.get("tag")]
-            if not path.exists() or old != {(row["harness"], row["session_id"]): row for row in rows}:
+            current = {(row["harness"], row["session_id"]): row for row in rows}
+            reaffirmed = False
+            if (stamp is not None and _content(old) == _content(current)):
+                # Same assignments: keep the file and its readers untouched.
+                # A real reaffirmation still marks a newer generation so a
+                # concurrent stale census cannot retire the observed rows;
+                # when that mark fails, the normal rewrite below records it.
+                reaffirmed = True
+                if observed & current.keys():
+                    try:
+                        os.utime(path)
+                    except OSError:
+                        reaffirmed = False
+            if not reaffirmed and (not path.exists() or old != current):
                 fd, temp = tempfile.mkstemp(prefix=".tag-assignments-", dir=path.parent)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as output:

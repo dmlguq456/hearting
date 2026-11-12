@@ -9759,7 +9759,13 @@ class ExactFenceFailureModeTest(unittest.TestCase):
    if path_self==self.jobs:
     raise OSError("simulated registry read failure")
    return real_read_text(path_self,*a,**kw)
-  with mock.patch.object(Path,"read_text",flaky_read_text):
+  import capability_route_continuation as continuation
+  def flaky_registry_lines(jobs):
+   if Path(jobs)==self.jobs:
+    raise OSError("simulated registry read failure")
+   return None
+  with mock.patch.object(Path,"read_text",flaky_read_text), \
+       mock.patch.object(continuation,"_pass_registry_lines",flaky_registry_lines):
    result=R._marker_identity_row(route,node,node["id"],node.get("completion_gate"),
                                  jobs=self.jobs,exact_terminal=True)
   self.assertFalse(result["passed"])
