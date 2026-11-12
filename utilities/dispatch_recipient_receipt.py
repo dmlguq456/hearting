@@ -18,6 +18,8 @@ from typing import Any
 import dispatch_pending_delivery as pending
 
 MARKER_RE = re.compile(r"HEARTING_RECEIPT_V1\s+(delivery-[A-Za-z0-9._-]{1,128})\s+([0-9a-f]{64})")
+# One complete marker line, the form every carrier appends (Codex queue recovery's fullmatch).
+MARKER_LINE_RE = re.compile(r"HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]{1,128}) ([0-9a-f]{64})")
 OPENCODE_MARKER_LINE_RE = re.compile(
     r"(?m)^HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]{1,128}) ([0-9a-f]{64})$"
 )
@@ -80,25 +82,72 @@ def receipt_marker_for_identity(delivery_id: str, identity: dict) -> str:
     return f"HEARTING_RECEIPT_V1 {delivery_id} {identity_binding(identity)}"
 
 
-def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
-    """Delivery ids whose markers in ``text`` bind to a record stored for this recipient.
+def _delivery_heads() -> tuple[str, ...]:
+    """Opening lines only Hearting's own delivery bodies start with: every shipped
+    ``delivery_context`` block header, its overflow pointer, the completion envelope."""
+    import dispatch_session_sweep as sweep
+    return (sweep.GATE_DELIVERY_HEADER, sweep.NOTICE_DELIVERY_HEADER,
+            sweep.COMPLETION_DELIVERY_HEADER, sweep._PREVIOUS_GATE_DELIVERY_HEADER,
+            sweep._PREVIOUS_NOTICE_DELIVERY_HEADER, sweep._PREVIOUS_COMPLETION_DELIVERY_HEADER,
+            sweep._LEGACY_COMPLETION_DELIVERY_HEADER, sweep.OVERFLOW_HEADER,
+            "AGENT_HARNESS_COMPLETION_V1")
 
-    The same identity a receipt ACK proves (``settle_native_receipt``): a prompt that
-    carries it is that Hearting delivery arriving, not something the person typed.
+
+def _bound_record(delivery_id: str, digest: str, storage_recipient: str, roots) -> dict | None:
+    for root in roots:
+        try:
+            record = pending.read(Path(root), storage_recipient, delivery_id)
+            if record is not None and binding_digest(record, storage_recipient) == digest:
+                return record
+        except (OSError, ValueError, TypeError, pending.PendingDeliveryError):
+            continue
+    return None
+
+
+def _sent_notice_text(record: dict) -> str | None:
+    try:
+        import dispatch_notice_receipt as notice_receipt
+        receipt = record.get("receipt")
+        return notice_receipt.native_text(receipt) if notice_receipt.is_notice(receipt) else None
+    except Exception:  # noqa: BLE001 - an unrenderable notice proves nothing
+        return None
+
+
+def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
+    """Delivery ids when the whole of ``text`` is the Hearting delivery its markers name.
+
+    The marker is the identity a receipt ACK proves (``settle_native_receipt``), but a
+    person can paste it with words of their own, so the prompt as a whole must be what
+    Hearting sent: every marker line is complete (the Codex queue recovery's fullmatch),
+    one ends the prompt, each binds to a record stored for this recipient, and the text
+    above the last one is exactly that notice's native text or opens with a fixed
+    Hearting delivery heading. Anything else stays the person's prompt.
     """
-    found: list[str] = []
     if not isinstance(text, str) or "HEARTING_RECEIPT_V1" not in text or not storage_recipient:
-        return found
-    for delivery_id, digest in sorted({match.groups() for match in MARKER_RE.finditer(text)}):
-        for root in roots:
-            try:
-                record = pending.read(Path(root), storage_recipient, delivery_id)
-                if record is not None and binding_digest(record, storage_recipient) == digest:
-                    found.append(delivery_id)
-                    break
-            except (OSError, ValueError, TypeError, pending.PendingDeliveryError):
-                continue
-    return found
+        return []
+    body = text.strip()
+    above, _newline, last = body.rpartition("\n")
+    matches = [MARKER_LINE_RE.fullmatch(line) for line in body.split("\n")
+               if "HEARTING_RECEIPT_V1" in line]
+    if (not above or MARKER_LINE_RE.fullmatch(last) is None
+            or any(match is None for match in matches)):
+        return []
+    ids = [match.group(1) for match in matches]
+    if len(set(ids)) != len(ids):
+        return []
+    records = []
+    for match in matches:
+        record = _bound_record(match.group(1), match.group(2), storage_recipient, roots)
+        if record is None:
+            return []
+        records.append(record)
+    if len(records) == 1 and above == _sent_notice_text(records[0]):
+        return ids
+    try:
+        heads = _delivery_heads()
+    except Exception:  # noqa: BLE001 - no heading to compare is no proof
+        return []
+    return ids if any(body.startswith(head + "\n") for head in heads) else []
 
 
 def _text_content(value: Any) -> str:

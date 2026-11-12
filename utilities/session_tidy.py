@@ -3163,10 +3163,12 @@ def is_task_notification(prompt_text: str) -> bool:
 
 
 def _bound_delivery_source(prompt_text: str, sid: str) -> str:
-    """``runtime`` when the prompt is a Hearting delivery stored for this exact session.
+    """``runtime`` when the whole prompt is a Hearting delivery stored for this exact session.
 
-    A Codex native-queue item arrives as a user message carrying its receipt marker; the
-    marker must bind to that delivery's stored identity (the same proof its ACK uses).
+    A Codex native-queue item arrives as a user message ending in its receipt marker; the
+    marker must bind to that delivery's stored identity (the same proof its ACK uses) and
+    the rest must be the text Hearting sent, like ``runtime_turn_source``: a person who
+    pastes a notice with words of their own is still the person.
     """
     if not isinstance(prompt_text, str) or "HEARTING_RECEIPT_V1" not in prompt_text or not sid:
         return ""

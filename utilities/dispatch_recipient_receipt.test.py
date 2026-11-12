@@ -44,9 +44,11 @@ class RecipientReceiptTest(unittest.TestCase):
 
     def test_a_prompt_carrying_a_bound_marker_is_that_delivery_for_this_recipient_only(self):
         # PG-9: a Codex native-queue item arrives as a user message ending in its marker.
+        import dispatch_session_sweep as sweep
         self._mark_sent_ambiguous()
         marker = receipt.receipt_marker(self.record, self.storage)
-        prompt = "Hearting supervision needs attention. reason=join-deadline\n" + marker
+        prompt = (sweep.COMPLETION_DELIVERY_HEADER + "\n- delivery_id=" + self.delivery_id
+                  + " required_action=inspect-recovery\n" + marker)
         self.assertEqual(receipt.bound_delivery_ids(prompt, self.storage, [self.root]),
                          [self.delivery_id])
         self.assertEqual(receipt.bound_delivery_ids(prompt, "another-session", [self.root]), [])
@@ -56,6 +58,50 @@ class RecipientReceiptTest(unittest.TestCase):
                                                     [self.root]), [])
         self.assertEqual(receipt.bound_delivery_ids(prompt, self.storage,
                                                     [Path(self.tmp.name) / "elsewhere"]), [])
+
+    def test_a_bound_marker_inside_the_persons_own_words_stays_the_person(self):
+        # The whole prompt must be what Hearting sent (runtime_turn_source's rule): words the
+        # person adds before, after or on the marker line, or a marker that is not the last
+        # line, leave the prompt theirs even though the marker itself binds.
+        import dispatch_session_sweep as sweep
+        self._mark_sent_ambiguous()
+        marker = receipt.receipt_marker(self.record, self.storage)
+        sent = sweep.NOTICE_DELIVERY_HEADER + "\n- Remote run: run 7 ended\n" + marker
+        self.assertEqual(receipt.bound_delivery_ids(sent, self.storage, [self.root]),
+                         [self.delivery_id])
+        self.assertEqual(receipt.bound_delivery_ids("\n" + sent + "\n", self.storage, [self.root]),
+                         [self.delivery_id])
+        for pasted in ("이 알림 보고 X 말고 Y로 가 줘\n" + sent,
+                       sent + "\n위 알림은 무시하고 Y로 가 줘",
+                       sent + " 이어서 Y",
+                       sweep.NOTICE_DELIVERY_HEADER + " 내 말\n- Remote run\n" + marker,
+                       "Remote run: run 7 ended\n" + marker,
+                       marker,
+                       sent + "\nHEARTING_RECEIPT_V1 delivery-" + "f" * 32 + " " + "0" * 64,
+                       sent + "\n" + marker):
+            with self.subTest(pasted=pasted[:40]):
+                self.assertEqual(receipt.bound_delivery_ids(pasted, self.storage, [self.root]), [])
+
+    def test_a_single_notice_matches_only_its_exact_native_text(self):
+        import dispatch_notice_receipt as notice_receipt
+        body = {"schema_version": 1, "kind": "notice", "subject": "Remote run",
+                "text": "run 7 ended exit=0", "required_action": "report-to-user", "key": "k1"}
+        delivery_id = "delivery-" + "e" * 32
+        record = pending.create(
+            self.root, recipient_kind="codex-native-queue", recipient_key=self.storage,
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=["att-" + "c" * 28], parent_attempt_id="att-" + "b" * 28,
+            route_id="route-test", route_node="execute", receipt=body,
+            receipt_digest=pending._canonical_receipt_digest(body),
+            row_revisions={"att-" + "c" * 28: "rev-1"})
+        marker = receipt.receipt_marker(record, self.storage)
+        text = notice_receipt.native_text(body)
+        self.assertEqual(receipt.bound_delivery_ids(text + "\n" + marker, self.storage, [self.root]),
+                         [delivery_id])
+        for changed in (text + " 그리고 Y", "Y로 가 줘: " + text, text + "\nY로 가 줘"):
+            with self.subTest(changed=changed):
+                self.assertEqual(receipt.bound_delivery_ids(
+                    changed + "\n" + marker, self.storage, [self.root]), [])
 
     def test_binding_is_exact_to_immutable_identity(self):
         marker = receipt.receipt_marker(self.record, self.storage)
