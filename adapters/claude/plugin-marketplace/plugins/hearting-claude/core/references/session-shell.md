@@ -54,7 +54,9 @@ display host compares the installed link it was started from
 (`HEARTING_SHELL_HOST_PATH`, never resolved) with its own resolved file; it
 notices a change from a watch on the link's directory and at each idle
 transition, with no timer. While a newer host is installed and not yet taken,
-the notice slot shows one lowest-priority line (`session_shell.upgrade_pending`).
+the tidy-notice slot shows one lowest-priority line (`session_shell.upgrade_pending`),
+never over another notice; beside the native area the panel's thin rule that parts the
+session's content from the head goes with it, and nothing else on the screen changes.
 The host asks the PTY owner for a successor only at a safe moment: idle, an
 empty composer, no open form or answerable question, no route page, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or

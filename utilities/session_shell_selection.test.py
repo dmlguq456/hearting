@@ -265,7 +265,8 @@ const c={processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,same
  nativeFooter:null,paintedCommon:[],nativeContext:undefined,sid:'',nativeSelected:{},displayValues:{},panelModel:{},panelSections:undefined,panelLines:[],
  projectionKey:'',footer:'',footerSegments:[],routeDetail:false,routeScroll:0,selection:0,native:null,state:'unknown',nativeTurn:'',turnMark:0,
  seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,block:{leave:noop,update:noop},publishNativeDisplay:noop,
- queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,source:()=>Promise.resolve(),projection:noop};
+ queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,source:()=>Promise.resolve(),projection:noop,
+ unselected:null,nativeEpoch:0,routePage:0,upgradeNote:''};
 vm.createContext(c);vm.runInContext(body,c);
 const plain=v=>JSON.parse(JSON.stringify(v??null));
 let seq=0;

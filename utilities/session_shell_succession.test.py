@@ -424,12 +424,28 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.type('after\r'); window.until('DONE_after')
         self.assertIn(b'after\r', (window.root/'native-read').read_bytes())
 
+    @staticmethod
+    def notice_rows(before, after, pattern):
+        """True when the screen is the one it was, except for the panel's one notice line.
+
+        The panel (spec rule 34 (c)) draws its thin rule above the session's content block (a tidy
+        notice, which this line takes the slot of, is content), so the rule above the notice
+        turns up beside it: that rule is the panel's section divider, not a second line of notice.
+        Any other row changing, or a rule that is not directly above the notice, is a failure.
+        """
+        differing = [index for index, (a, b) in enumerate(zip(after, before)) if a != b]
+        if not differing or not re.search(pattern, after[differing[-1]]):
+            return False
+        if len(differing) == 1:
+            return True
+        divider = after[differing[0]].split('│')[1].strip() if '│' in after[differing[0]] else ''
+        return len(differing) == 2 and differing[1] == differing[0]+1 and bool(divider) and set(divider) == {'─'}
+
     def only_line_differs(self, window, before, pattern):
-        """The screen is the one it was, except for one panel notice line."""
+        """The screen is the one it was, except for one panel notice line (and the rule above it)."""
         after = window.screen()['lines']
-        differing = [index for index, (a, b) in enumerate(zip(after, before['lines'])) if a != b]
-        self.assertEqual(len(differing), 1, differing)
-        self.assertRegex(after[differing[0]], pattern)
+        self.assertTrue(self.notice_rows(before['lines'], after, pattern),
+                        [(i, before['lines'][i], after[i]) for i in range(len(after)) if after[i] != before['lines'][i]])
 
     def until_read(self, window, needle, timeout=5):
         end = time.monotonic()+timeout
@@ -524,6 +540,12 @@ class SessionShellSuccessionTest(unittest.TestCase):
         self.assertGreaterEqual(one['scrollback']['lines'], 60)
         # The second seed was captured from the VT the first one rebuilt.
         self.assertEqual(one['terminal'], two['terminal'])
+        # The host's own turn observation crosses with it: the second host starts from the marks the first
+        # one carried (they only grow), so a switch shows the state it showed and orders its readings after.
+        for seed in (one, two):
+            self.assertEqual(set(seed['turn']), {'nativeTurn', 'turnMark', 'eventMark', 'clock', 'seenTurn', 'turnRecord', 'formSeen'})
+        self.assertGreaterEqual(two['turn']['clock'], one['turn']['clock'])
+        self.assertGreaterEqual(two['turn']['eventMark'], one['turn']['eventMark'])
         env = dict(self.env, SUCC_XTERM=str(Path(self.env['NODE_PATH'])/'@xterm/headless'))
         out = subprocess.run([self.node, str(window.root/'unit.cjs'), str(window.link/'utilities/session-shell/succession.cjs'), str(seeds[0])],
                              env=env, capture_output=True, text=True, timeout=30, check=True)
@@ -806,11 +828,11 @@ class SessionShellSuccessionTest(unittest.TestCase):
         while True:
             window.pump(.1)
             after = window.screen()['lines']
-            differing = [index for index, (a, b) in enumerate(zip(after, before['lines'])) if a != b]
-            if len(differing) == 1 and re.search(notice, after[differing[0]]):
+            if self.notice_rows(before['lines'], after, notice):
                 break
             if time.monotonic() > end:
-                self.fail('hand-over notice never settled as the one differing row: %r' % (differing,))
+                differing = [index for index, (a, b) in enumerate(zip(after, before['lines'])) if a != b]
+                self.fail('hand-over notice never settled as the one notice line: %r' % (differing,))
         seed = json.loads(window.seeds()[0].read_text())
         self.assertEqual(seed['scrollback'], {'carried': False, 'reason': reason, 'lines': 0})
         # This is not a failure: the hand-over settled and nothing is started after it. (A first attempt that

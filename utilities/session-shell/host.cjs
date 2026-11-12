@@ -1184,6 +1184,9 @@ function buildSeed() {
     sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,cursorVisible,expanded,displayConfiguration,displaySequence,
     panelOpen:[...panelOpen],deliveries:[...deliveries].filter(([,value])=>value==='submitted'||value==='transport-submitted').slice(-128),
     displayValues,nativeSelected,nativeContext:nativeContext??null,nativeMcp:nativeMcp??null,
+    // The host's own turn observation (what the panel shows as the state), so the successor shows the same
+    // state at its first paint and goes on reading the native's turn record; its marks keep their order.
+    turn:{nativeTurn,turnMark,eventMark,clock,seenTurn,turnRecord,formSeen},
     panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{})},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
     terminal:captured.terminal,scrollback:captured.scrollback,
     outer:{cols,rows,last:Array.from(last,value=>value??null),nativeLast:Array.from(nativeLast,value=>value??null),footerLast}};
@@ -1295,6 +1298,13 @@ async function commitSuccessor(file) {
     displayValues=object(seed.displayValues);nativeSelected=object(seed.nativeSelected);
     nativeContext=seed.nativeContext&&typeof seed.nativeContext==='object'?seed.nativeContext:undefined;
     nativeMcp=seed.nativeMcp&&typeof seed.nativeMcp==='object'?seed.nativeMcp:undefined;
+    {
+      // Absent or malformed (an older seed): the first projection reads the native's record again.
+      const turn=object(seed.turn),count=value=>Number.isSafeInteger(value)&&value>=0?value:0,word=value=>['idle','working','blocked'].includes(value)?value:'';
+      nativeTurn=word(turn.nativeTurn);clock=count(turn.clock);turnMark=Math.min(count(turn.turnMark),clock);eventMark=Math.min(count(turn.eventMark),clock);
+      seenTurn=word(turn.seenTurn?.value)?{value:turn.seenTurn.value,mark:Math.min(count(turn.seenTurn.mark),clock)}:null;
+      turnRecord=typeof turn.turnRecord==='string'&&path.isAbsolute(turn.turnRecord)?turn.turnRecord:'';formSeen=turn.formSeen===true;
+    }
     const panel=object(seed.panel);
     panelModel=object(panel.model);panelLines=Array.isArray(panel.lines)?panel.lines:[];panelSections=panel.sections??undefined;
     footer=typeof panel.footer==='string'?panel.footer:'';footerSegments=Array.isArray(panel.segments)?panel.segments:[];
