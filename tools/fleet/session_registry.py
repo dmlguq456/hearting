@@ -207,12 +207,16 @@ def registry_path(harness, pid, *, home=None):
     return os.path.join(_dir_for(harness, home=home), "%d.json" % int(pid))
 
 
-def read(harness, pid, *, home=None, validation_cache=None, raise_unread=False):
+def read(harness, pid, *, home=None, validation_cache=None, raise_unread=False, extra=()):
     """dict with every FIELDS key present (absent → None), or None on any failure.
 
     With ``raise_unread`` an I/O failure that is not absence (``unread_error``)
     raises instead, so a caller can keep what it showed rather than read None.
+    ``extra`` names further keys one reader needs (Claude's ``waitingFor``); they are
+    read from the file itself and never kept in the shared cache.
     """
+    if extra:
+        validation_cache = None
     _check_harness(harness)
     path = registry_path(harness, pid, home=home)
     try:
@@ -235,7 +239,7 @@ def read(harness, pid, *, home=None, validation_cache=None, raise_unread=False):
         return None
     if not isinstance(payload, dict):
         return None
-    record = {field: payload.get(field) for field in FIELDS}
+    record = {field: payload.get(field) for field in (*FIELDS, *extra)}
     record["harness"] = harness   # directory-declared identity wins over file content
     if validation_cache is not None:
         try:

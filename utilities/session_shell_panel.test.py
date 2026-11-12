@@ -37,16 +37,20 @@ for(const [width,height] of [[37,21],[80,14]]){
 
     def test_values_left_unrefreshed_claim_no_route_state(self):
         # Spec rule 12: the host marks values it could not refresh for a while;
-        # the route rows stay readable but nothing spins and the frame takes no
-        # route color, so an old state never reads as the current one.
+        # the route rows stay readable but nothing spins and the route box takes no
+        # failure color, so an old state never reads as the current one. The frame
+        # never takes a route's state at all (spec rule 25).
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const route=state=>({id:'r',title:'Exact route',state,kind:state,stages:[{name:'inline',st:'active'}],paint:{glyph:{text:'⠏'}}});
-for(const [state,color] of [['working','g_work'],['done','lvl_g'],['dead','g_dead']]){
- const args=extra=>({width:40,height:24,side:true,model:{routes:[route(state)],route_count:1,...extra},questions:()=>[],configuration:{},frame:3});
+const styles={dim:{dim:true},g_dead:{foreground:217,bold:true}};
+for(const state of ['working','done','dead']){
+ const args=extra=>({width:40,height:24,side:true,model:{routes:[route(state)],route_count:1,styles,...extra},questions:()=>[],configuration:{},frame:3});
  const fresh=view.render(args({})),old=view.render(args({stale:true}));
- assert.equal(fresh.color,color);assert.equal(old.color,'dim');
- assert(old.rows.flat().some(p=>p.text.includes('Exact route')));
+ assert.equal(fresh.color,'dim');assert.equal(old.color,'dim');
+ const box=v=>v.rows.flat().find(p=>p.text==='╭');
+ assert.equal(box(fresh).foreground??undefined,state==='dead'?217:undefined,state);assert.equal(box(old).foreground??undefined,undefined,state);
+ assert(old.rows.some(r=>r.map(p=>p.text).join('').includes('Exact route')));
  assert(!old.rows.flat().some(p=>p.spin||p.beat&&String(p.text).startsWith('route')));
  if(state==='working')assert(fresh.animated);
 }
@@ -71,14 +75,15 @@ for(const width of [37,40,80]){
  assert(!text.some(s=>s.includes('→')));
  assert(text[0].startsWith('┌'));assert(text.at(-1).endsWith('┘'));
  assert(v.rows.every(r=>r.every(s=>s.background===undefined&&s.reverse!==true)));
- assert.equal(v.color,'lvl_y');assert(v.hits.some(h=>h.action==='settings'));
+ // The frame follows the session's own state (none given here), never the question (spec rule 25).
+ assert.equal(v.color,'dim');assert(v.hits.some(h=>h.action==='settings'));
  assert(v.hits.some(h=>h.action==='route:r'));assert(v.hits.some(h=>h.action==='route'));
  assert(text.every(s=>s.length<=width));
 }
 const direct=view.render({width:40,height:24,side:true,model:{routes:[{title:'One step',state:'idle',stages:[{name:'inline'}]}]},questions:()=>[],configuration:{}});
 const text=direct.rows.flat().map(s=>s.text).join('');assert(!text.includes('→'));assert.equal(direct.color,'dim');
-const unknown=view.render({width:80,height:12,model:{},state:'blocked',questions:()=>[],configuration:{}});
-assert.equal(unknown.color,'dim'); // Native permission state is not route failure.
+const waiting=view.render({width:80,height:12,model:{},state:'blocked',questions:()=>[],configuration:{}});
+assert.equal(waiting.color,'g_blocked'); // The frame is the state word's color: waiting, not a route failure.
 '''
         self.node(script, "panel-view.cjs")
 
@@ -155,7 +160,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['[e9] project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
@@ -166,11 +171,13 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
  const rows=paint(width,height,side,question,['route:r0']),text=rows.join('\n');
  assert(rows.length<=height,width+'x'+height);
  for(const row of question)assert(text.includes(row[0].text),'question row lost at '+width+'x'+height+'\n'+text);
- for(const want of ['[e9] project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
+ for(const want of ['project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // 11-11 night final layout: the route side gives way first (its opened detail
  // before its rows), and the messages fixed at the bottom go only last.
- if(text.includes('plan ✓ › execute ●'))assert(text.includes('MESSAGE_TWO'),text);
- if(text.includes('ROUTE_0'))assert(text.includes('MESSAGE_ONE'),text);
+  // Spec rules 23, 31: messages fold to one row and fewer (the newest stays) before the
+  // route box scrolls; the messages section goes only last.
+ if(text.includes('plan ✓ › execute ●'))assert(text.includes('MESSAGE_TWO')&&text.includes('MESSAGE_ONE'),text);
+ if(text.includes('ROUTE_0'))assert(text.includes('MESSAGE_TWO'),text);
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
 assert(!r.hits.some(h=>h.action==='details'));
@@ -186,7 +193,8 @@ const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const wide=c=>{const n=c.codePointAt(0);return n>=0x300&&n<=0x36f?0:n>0x2e7f?2:1;},cellWidth=s=>[...s].reduce((n,c)=>n+wide(c),0);
 const draw=(messages,width,height,extra={})=>{const r=view.render({width,height,side:width<80,fill:false,model:{messages},cellWidth,questions:()=>[],configuration:{},...extra});
  return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
-const keyOf=(messages,i)=>draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:'))[i].action;
+// Spec rule 31: a message takes a head row and a body row, both open the same message.
+const keyOf=(messages,i)=>[...new Set(draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action))][i];
 const read=(messages,key,width,height)=>{const first=draw(messages,width,height,{routeDetail:key}),out=[];
  for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/messages · |‹ \d+\/\d+ ›/.test(s)));return out;};
 // A row's text without its frame and indent: a body read across rows, end to end.
@@ -233,7 +241,7 @@ const one=(tag,at,way='→',who='peer')=>({way,who,at,text:tag+' '+'word '.repea
 const F=one('FIRST',7),S=one('SECOND',7),T=one('THIRD',8),U=one('FOURTH',9),X=one('INSERTED',7),A=one('SAME',7),A2=one('SAME',7);
 const draw=(messages,extra={})=>{const r=view.render({width:40,height:40,side:true,fill:false,model:{messages},questions:()=>[],configuration:{},...extra});
  return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
-const keys=messages=>draw(messages).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action);
+const keys=messages=>[...new Set(draw(messages).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action))];
 const ends=rows=>['FIRST','SECOND','THIRD','FOURTH','INSERTED','SAME'].filter(t=>rows.some(s=>s.includes(t+'_END')));
 const page=(messages,key)=>{const first=draw(messages,{routeDetail:key,height:10}),out=[];
  for(let p=0;p<first.routePages;p++)out.push(...draw(messages,{routeDetail:key,routePage:p,height:10}).plain);
@@ -320,6 +328,48 @@ for(let height=10;height<=22;height++){
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_the_projection_carries_the_natives_own_turn_record_and_its_path(self):
+        # Spec rule 26 and the 11-12 rule 6: Claude's REPL writes its own UI state into its
+        # session record (busy / waiting / idle); the projection reads it with the session
+        # (same exact process and session as the pane reader) and names the record, which
+        # the host reads itself the moment its watched file changes. Codex: its rollout's
+        # latest turn event. Display only.
+        from unittest import mock
+        import human_wait_state
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.collectors import codex
+        shell.registry_root()
+        sid = "00000000-0000-4000-8000-000000001112"
+        me = os.getpid()
+        start = open("/proc/self/stat").read().rsplit(") ", 1)[1].split()[19]
+        quiet = mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, ""))
+        with tempfile.TemporaryDirectory() as home, quiet, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+            record = Path(home) / "sessions" / f"{me}.json"
+            record.parent.mkdir()
+            project = lambda: shell.panel_projection("claude", sid, native_pid=me, native_start=start, columns=40, rows=30)
+            # Review R1: `waiting` is an answer wait only for the person's own reasons; a menu
+            # or settings dialog (`dialog open`) and an unlisted or missing reason say nothing.
+            for status, why, turn in (("busy", None, "working"), ("waiting", "permission prompt", "blocked"),
+                                      ("waiting", "input needed", "blocked"), ("waiting", "dialog open", None),
+                                      ("waiting", "a reason not listed", None), ("waiting", None, None),
+                                      ("idle", None, "idle"), ("shell", None, None)):
+                record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": status,
+                                              **({"waitingFor": why} if why else {})}))
+                result = project()
+                self.assertEqual(result.get("native_turn"), turn, (status, why))
+                self.assertEqual(result.get("turn_record"), str(record))
+                self.assertIn(str(record), result["watch"])
+            for other in ({"sessionId": "another"}, {"procStart": "1"}):
+                record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": "busy", **other}))
+                self.assertNotIn("native_turn", project(), other)
+        with quiet, mock.patch.object(codex, "exact_rollout_for_session_id", return_value=__file__), \
+                mock.patch.object(codex, "_tail_token_count", return_value=None):
+            for event, turn in (("task_started", "working"), ("task_complete", "idle"), ("turn_aborted", "idle")):
+                with mock.patch.object(codex, "_latest_task_lifecycle", return_value=(event, "turn")):
+                    result = shell.panel_projection("codex", sid, native_pid=me, native_start=start, columns=40, rows=30)
+                self.assertEqual(result.get("native_turn"), turn, event)
+                self.assertNotIn("turn_record", result)
+
     def test_presentation_keeps_the_producers_whole_route_count_and_mcp(self):
         sys.path.insert(0, str(ROOT / "tools"))
         from fleet import session_panel
@@ -350,46 +400,88 @@ const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const p=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 const route=i=>({id:'r'+i,title:'ROUTE_'+i,state:'working',kind:'working',elapsed:'42m',paint:{glyph:p('⠏'),harness:p('codex'),ctx:p('72%')}});
 const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],selected:[p('fixture high')],context:[p('context 42%')],
- quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true}},
- messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
+ quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:217},g_dead:{foreground:217,bold:true}},
+ session_title:'SESSION_TITLE',now:'NOW_LINE',messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
 const question=[[p('◑ Q_HEAD')],[p('Q_BODY')],[p('› A')],[p('2 B')],[p('↑↓ choose · Enter send · t text')]];
-const paint=(o={})=>view.render({width:40,height:30,side:true,sid:'s',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
+const paint=(o={})=>view.render({width:40,height:30,side:true,sid:'s',harness:'claude',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
  settings:o.settings,questions:q=>(o.q||[]).slice(0,q.budget)});
 const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
-// State on the left of the top border, the gear alone on the right; HEARTING only in settings.
-for(const [state,want] of [['idle','┌ ● idle ─'],['working','┌ ⠙ running ─'],['blocked','┌ ◑ waiting ─'],['unknown','┌──'],[undefined,'┌──']]){
- const rows=text(paint({state,frame:1}));assert(rows[0].startsWith(want),state+' '+rows[0]);
+// Spec rule 29 (a): Fleet's session-row head on the left of the top border (glyph,
+// number, harness), the gear alone on the right; no state word; HEARTING only in settings.
+for(const [state,want] of [['idle','┌ ● [e9] claude ─'],['working','┌ ⠙ [e9] claude ─'],['blocked','┌ ◑ [e9] claude ─'],['unknown','┌ [e9] claude ─'],[undefined,'┌ [e9] claude ─']]){
+ const rows=text(paint({state,frame:1,model:{tag:'[e9]'}}));assert(rows[0].startsWith(want),state+' '+rows[0]);
+ assert(!/running|idle|waiting/.test(rows[0]),rows[0]);
  assert(rows[0].endsWith(' ⚙ ┐')&&!rows.join('').includes('Settings')&&!rows.join('').includes('HEARTING'),rows[0]);
 }
-const settings=paint({settings:{index:0,value:view.defaults}});assert(text(settings)[0].startsWith('┌ HEARTING ─'),text(settings)[0]);
+// A steward's number and `⚑` blink in Fleet's steward pink, lit and dark on the shared beat.
+for(const [frame,key] of [[0,'tag_steward'],[10,'tag_steward_dim']]){
+ const v=paint({state:'idle',frame,model:{tag:'[e9]',steward:true,styles:{...model.styles,tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}}}});
+ const marks=v.rows[0].filter(x=>x.text==='⚑'||x.text==='e9');
+ assert(marks.length===2&&marks.every(x=>x.beat&&x.foreground===219&&(key==='tag_steward'?x.bold:x.dim)),frame+' '+JSON.stringify(marks));
+ assert(v.animated,'an idle steward still keeps the beat');
+}
+// Narrow: the steward mark goes first, then the harness, then the number; the glyph stays.
+for(const [width,want] of [[24,'┌ ● [e9] claude ⚑ ─'],[23,'┌ ● [e9] claude ─'],[21,'┌ ● [e9] ─'],[14,'┌ ● ─']]){
+ const row=text(view.render({width,height:12,side:true,sid:'s',harness:'claude',configuration:{},model:{tag:'[e9]',steward:true},state:'idle',questions:()=>[]}))[0];
+ assert(row.startsWith(want),width+' '+row);
+}
+const settings=paint({settings:{index:0,value:view.defaults}});
+assert(!paint({state:'idle',model:{routes:[],route_count:0}}).animated,'an idle panel with nothing to blink keeps no beat');assert(text(settings)[0].startsWith('┌ HEARTING ─'),text(settings)[0]);
 const gear=paint({state:'idle'}).hits.find(h=>h.action==='settings');assert(gear.row===0&&gear.left<=35&&gear.right>=39,JSON.stringify(gear));
-// The state word takes the same color as its glyph (Fleet's state key).
-const top=paint({state:'idle'}).rows[0];assert.equal(top[2].foreground,150);assert.equal(top[3].foreground,150);
+// The number takes the same color as its glyph (Fleet's state key); the harness its Fleet hue.
+const top=paint({state:'idle',model:{tag:'[e9]',styles:{...model.styles,hb_claude:{foreground:116}}}}).rows[0];
+assert.equal(top.find(x=>x.text==='●').foreground,150);
+assert.equal(top.find(x=>x.text==='e9').foreground,150);assert.equal(top.find(x=>x.text==='claude').foreground,116);
+// Spec rule 25: the whole frame takes that word's color, running and waiting their
+// session keys, idle and an unknown state the neutral line, in the same paint.
+for(const [state,want] of [['working',230],['submitting',230],['blocked',217],['idle',undefined],['unknown',undefined]]){
+ const v=paint({state}),frame=v.rows.flatMap(r=>[r[0],r.at(-1)]);
+ assert(frame.every(x=>(x.foreground??undefined)===want&&(want===undefined?x.dim===true:x.dim!==true)),state+' '+JSON.stringify(frame[0]));
+ assert(!v.rows.flat().some(x=>x.text==='╭'&&x.foreground===217),state+' no route failure here');
+}
+// A failed route turns only its own box line to the failure color; the frame stays the session's.
+const failed=paint({state:'idle',model:{routes:[route(0),{...route(1),state:'dead',kind:'dead'}]}});
+const box=failed.rows.flat().filter(x=>/^[╭╮╰╯]$/.test(x.text));
+assert(box.length===4&&box.every(x=>x.foreground===217&&x.bold===false),JSON.stringify(box));
+assert(failed.rows[0][0].foreground==null&&failed.rows[0][0].dim===true);
 // Repo row, then Git on its own row; the route box high; messages (no box: two rules) fixed at the bottom.
 let rows=text(paint({state:'idle'}));
-assert(rows[1].includes('[e9] project')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
+assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
+// Spec rule 29 (b), 30 (a): the metadata block is one block (no empty row inside), then a
+// thin rule, then the session's content with its labels; an empty row parts the head from the route box.
+assert(rows[3].includes('fixture high')&&rows[4].includes('context')&&/^│ ─+ │$/.test(rows[5]),rows.join('\n'));
+assert(rows[6].startsWith('│ TITLE  SESSION_TITLE')&&rows[7].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[8])&&rows[9].includes('╭─ route'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('── messages '));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
-// A folded route takes two rows beside the native area: glyph and title, then harness, context and time.
-const t0=rows.findIndex(s=>s.includes('ROUTE_0'));assert(rows[t0+1].includes('│   codex 72% · 42m'),rows.join('\n'));
-assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-7&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
+// Spec rule 24: a folded route takes two rows beside the native area: the glyph with
+// harness, context and time, then its title two cells in.
+const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
+assert(/│ │ \S codex +72% 42m │ │/.test(rows[t0-1])&&rows[t0].includes('│ │   ROUTE_0'),rows.join('\n'));
+// Spec rule 31: each message takes a head row and a body row (three messages: six rows).
+assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-10&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
+assert(rows[m+1].includes('← [e7]')&&rows[m+2].includes('│   MESSAGE_1'),rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
 const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
 const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── messages '));
-assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%'),rows.join('\n'));
+// Spec rule 34 (b): short of rows the messages fold to one row each before a route gives up its second row.
+assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%')&&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
-assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(r,'╭').dim,true);
+const ra=rows.findIndex(s=>s.includes('╭─ route 3 '));
+assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
 // before the route box scrolls in place; messages go last.
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:o=>q.slice(0,o.budget)}));
 for(const q of [[],question])for(let h=12;h<=30;h++){
- const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   codex'));
- if(!all.includes('MESSAGE_2')&&all.includes('MESSAGE_1'))assert(!two&&/ \+2 ─ │/.test(all),h+'\n'+all);
- if(all.includes('MESSAGE_3')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
- if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2'),h+'\n'+all);
- if(!all.includes('MESSAGE_1'))assert(!all.includes('╭─ route'),h+' messages go last\n'+all);
+ const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   ROUTE_'));
+ // Spec rules 23, 31: fewer messages show from the oldest (the lower rule counts them),
+ // before the route box scrolls; the newest message goes only with the section, last.
+ const hidden=['MESSAGE_1','MESSAGE_2'].filter(m=>!all.includes(m)).length;
+ if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp(' \\+'+hidden+' ─ │').test(all),h+'\n'+all);
+ if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
+ if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
+ if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ route'),h+' messages go last\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box.
 for(let h=10;h<=30;h++)for(const q of [[],question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',questions:o=>q.slice(0,o.budget)}));
@@ -425,14 +517,35 @@ const route={id:'r',title:'PR 맞추기',state:'working',kind:'working',elapsed:
  target:'python3 tools/run-tests.py',tool_age:'3m',after_tool:after,paint:{glyph:{text:'⠏'},harness:{text:'claude'}}};
 const paint=(r,width,side)=>view.render({width,height:30,side,model:{routes:[r],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:['route:r'],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
-for(const [width,side] of [[40,true],[80,false]]){
- const rows=paint(route,width,side),flat=rows.join('').replace(/[│ ]/g,'');
- assert(flat.includes('>_Bash·python3tools/run-tests.py3m'),rows.join('\n'));
+for(const [width,side,call] of [[40,true,'>_ Bash · run-tests.py 3m'],[80,false,'>_ Bash · python3 tools/run-tests.py 3m']]){
+ const rows=paint(route,width,side);
+ // Spec rule 34 (a): short of cells the path gives way to its file name before the call folds.
+ assert(rows.some(s=>s.includes(call)),rows.join('\n'));
  const line=rows.filter(x=>x.includes('after Edit'));
  assert.equal(line.length,1,rows.join('\n'));assert(line[0].includes('…'),line[0]);
 }
 const idle=paint({...route,tool:undefined,target:undefined,tool_age:undefined,idle_tool:true,after_tool:undefined},40,true);
 assert(idle.some(x=>x.includes('>_ no tool')),idle.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_a_folded_one_step_route_adds_its_tool_only_where_the_row_has_room(self):
+        # Supervisor 2026-11-12: the value row of a folded route may add Fleet's `>_ tool`
+        # for a one-step route, never pushing out harness, model, context or time (rules 19,
+        # 24: the values lead, the tool before the time).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const P=(c)=>({glyph:{text:'⠋'},harness:{text:'claude'},model_text:{text:'Opus 5.5'},ctx:{text:c}});
+const one={id:'a',title:'one step',state:'working',kind:'working',elapsed:'47m',tool:'python3',target:'tools/run-tests.py',paint:P('24%')};
+const staged={...one,id:'b',title:'staged',flow:'plan ✓ › execute ● › review',stages:[{name:'plan'},{name:'execute'},{name:'review'}]};
+const paint=(width)=>view.render({width,height:30,side:true,model:{routes:[one,staged],route_count:2,messages:[]},sid:'s',
+ configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
+const narrow=paint(40),wide=paint(52);
+assert(narrow.some(x=>/⠋ claude Opus 5\.5 +24% 47m/.test(x)),narrow.join('\n'));
+assert(!narrow.some(x=>x.includes('>_')),narrow.join('\n'));
+assert(wide.some(x=>/⠋ claude Opus 5\.5 · >_ python3 +24% 47m/.test(x)),wide.join('\n'));
+assert.equal(wide.filter(x=>x.includes('>_')).length,1,wide.join('\n'));
+assert(!wide.some(x=>x.includes('tools/run-tests.py')),wide.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -448,29 +561,43 @@ const model={route_count:2,routes:[
 const paint=(cfg,open=[],width=40)=>view.render({width,height:30,side:width<80,model,configuration:cfg,expandedKeys:open,questions:()=>[]}).rows.map(r=>r.map(s=>s.text).join(''));
 const time=paint({}),byModel=paint({route_line:'model'});
 const row=(rows,title)=>rows.find(s=>s.includes(title.slice(0,5)));
-// Spec rule 19: two rows beside the native area: glyph and title, then the values.
-const below=(rows,title)=>rows[rows.findIndex(s=>s.includes(title.slice(0,5)))+1];
-for(const rows of [time,byModel])assert(below(rows,'셸 표기').includes('codex gpt-6.1-sol 72% · 42m')&&!row(rows,'셸 표기').includes('codex'),rows.join('\n'));
+// Spec rule 24: two rows beside the native area: the glyph and the values, then the title.
+const above=(rows,title)=>rows[rows.findIndex(s=>s.includes(title.slice(0,5)))-1];
+// Spec rule 30 (b): context percent and elapsed time are right-aligned in their own columns.
+for(const rows of [time,byModel])assert(/⠋ codex gpt-6\.1-sol +72% +42m │/.test(above(rows,'셸 표기'))&&!row(rows,'셸 표기').includes('codex')
+ &&row(rows,'셸 표기').includes('│   셸 표기'),rows.join('\n'));
+// Effort goes first; with room it stays, in its place after the model.
+assert(paint({},[],48).some(s=>/⠋ codex gpt-6\.1-sol high +72% +42m │/.test(s)),paint({},[],48).join('\n'));
+const columns=time.filter(s=>/[⠋✕] /.test(s)).map(s=>s.indexOf(' │ │')),ends=time.filter(s=>/[⠋✕] /.test(s));
+assert(columns.length===2&&columns[0]===columns[1]&&ends[0].indexOf('72%')+3===ends[0].indexOf('    42m'),ends.join('\n'));
 // Short of cells the `route line` choice keeps its value and the other goes, whole.
 const narrowTime=paint({},[],32),narrowModel=paint({route_line:'model'},[],32);
-assert(below(narrowTime,'셸 표기').includes('codex 72% · 42m')&&!below(narrowTime,'셸 표기').includes('gpt'),narrowTime.join('\n'));
-assert(below(narrowModel,'셸 표기').includes('codex gpt-6.1-sol 72%')&&!below(narrowModel,'셸 표기').includes('42m'),narrowModel.join('\n'));
-// A long title is cut on its own row; harness and elapsed time keep theirs.
-assert(row(time,'제목만').includes('…')&&below(time,'제목만').includes('claude')&&below(time,'제목만').includes('1h 27m'));
+assert(/⠋ codex +72% +42m/.test(above(narrowTime,'셸 표기'))&&!above(narrowTime,'셸 표기').includes('gpt'),narrowTime.join('\n'));
+assert(/⠋ codex gpt-6\.1-sol +72% │/.test(above(narrowModel,'셸 표기'))&&!above(narrowModel,'셸 표기').includes('42m'),narrowModel.join('\n'));
+// Spec rule 29 (c): a long title goes on to the next rows (two cells in) instead of `…`;
+// harness and elapsed time keep their row.
+const long=time.findIndex(s=>s.includes('제목만'));
+assert(!time[long].includes('…')&&time[long+1].includes('│ │   ')&&time.slice(long,long+2).join('').includes('잘림')&&above(time,'제목만').includes('claude')&&above(time,'제목만').includes('1h 27m'),time.join('\n'));
 // Both rows open the route in place.
 const hitRows=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.filter(h=>h.action==='route:a').map(h=>h.row);
 assert.equal(hitRows.length,2);assert.equal(hitRows[1],hitRows[0]+1);
 // Unreported context is left out, never `?`.
 assert(!time.join('\n').includes('?'));
-const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.includes('셸 표기'))+2,opened.findIndex(s=>s.includes('제목만')));
-assert(detail.some(s=>s.includes('gpt-6.1-sol high')&&s.includes('72%')),detail.join('\n'));
+const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.includes('셸 표기'))+1,opened.findIndex(s=>s.includes('제목만')));
+// Spec rule 32: the doer's model and context are the folded first row's; the detail hangs behind its guide.
+assert(opened.some(s=>s.includes('gpt-6.1-sol')&&s.includes('72%'))&&detail.slice(0,-2).every(s=>/┆|│ │ +│ │/.test(s)),detail.join('\n'));
 assert(detail.some(s=>s.includes('plan ✓ › execute ● › review')));assert(detail.some(s=>s.includes('>_ apply_patch · +1 agent')));
-const openedModel=paint({route_line:'model'},['route:a']);
-assert(openedModel.some(s=>s.includes('high')&&s.includes('42m')),openedModel.join('\n'));
+const openedModel=paint({route_line:'model'},['route:a']),openedWide=paint({route_line:'model'},['route:a'],48);
+// Spec rule 34 (a): the doer row lets its effort, then its harness go before it would fold.
+assert(openedModel.some(s=>s.includes('┆ DOER   gpt-6.1-sol · 72%'))&&openedModel.some(s=>s.includes('42m')),openedModel.join('\n'));
+assert(openedWide.some(s=>s.includes('┆ DOER   codex gpt-6.1-sol high · 72%')),openedWide.join('\n'));
 // A message row opens to its whole retained text and closes again.
 const messageKey=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.find(h=>h.action.startsWith('message:')).action;
 const message=paint({},[messageKey]);assert(message.join('').includes('RV-PR1506-R2-1111.md'));
-assert(!paint({}).join('').includes('RV-PR1506-R2-1111.md'));
+// Folded, a message keeps its head and at most three body rows (spec rule 31), fewer when rows run short.
+const folded=paint({}),head=folded.findIndex(s=>s.includes('← [e7]'));
+assert(head>0&&folded.slice(head+1).filter(s=>/^│   \S/.test(s)).length<=3,folded.join('\n'));
+assert(!view.render({width:40,height:16,side:true,model,configuration:{},questions:()=>[]}).rows.map(r=>r.map(x=>x.text).join('')).join('').includes('RV-PR1506-R2-1111.md'));
 // Every row keeps the panel width with two-cell Hangul and emoji.
 for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(const s of rows)assert([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=80);
 '''
@@ -519,20 +646,30 @@ const routes=[{id:'a',title:'ROUTE_A',kind:'working',elapsed:'42m',tool:'apply_p
 const model={routes,route_count:2,styles};
 const paint=(extra={})=>view.render({width:40,height:60,side:true,model,configuration:{},expandedKeys:['route:a','route:b'],questions:()=>[],...extra});
 const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
-const all=rows(paint()).join('\n'),flat=all.replace(/[│ \n]+/g,' ');
-for(const word of ['kind autopilot-code(dev·std)','owner claude (Opus 5.5·high) balanced-deep 31%','✓ plan · PASS · codex gpt-fixture high · 12m · done 22:34 · plan/code · gate ✓',
- '● execute R2 · codex gpt-fixture high · 72% · 30m · dev/backend','autopilot-code(dev·std) · owner claude (Opus 5.5·high) balanced-deep 31% >_ apply_patch · +1 agent','NOTE_R2','└ execute · 2 claude Sonnet 5.5 12%',
- '· review · pending · review/code','42m · 2 legs · staged · test ✓','next resume · execute','✕ execute','worker claude · failed 3m','resume execute'])
+// Spec rule 32: label rows and one row per stage in columns, behind a guide; every value kept.
+const wide=rows(paint({width:70})),all=wide.join('\n'),flat=all.replace(/[│┆ \n]+/g,' ');
+for(const word of ['OWNER claude (Opus 5.5·high) · 31% · balanced-deep','KIND autopilot-code(dev·std)','✓ plan PASS gpt-fixture 12m',
+ '● execute R2 gpt-fixture 72% 30m','>_ apply_patch · +1 agent','NOTE NOTE_R2','└ 2 claude Sonnet 5.5 12%','· review INFO',
+ 'INFO 42m · 2 legs · staged · test ✓ · before this leg: frame ✓ — outside this snapshot · plan done 22:34 plan/code gate ✓ · execute dev/backend · review review/code',
+ 'NEXT resume · execute','✕ execute','WHY worker claude · failed 3m','RESUME execute'])
  assert(flat.includes(word),word+'\n'+all);
-for(const s of rows(paint()))assert.equal([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),40,s);
+// One stage, one row: its columns stand one above the other (the time right-aligned).
+const stageRows=wide.filter(s=>/┆ [✓●·] (plan|execute|review)/.test(s));
+assert.equal(stageRows.length,3,all);assert.equal(new Set(stageRows.map(s=>s.indexOf('┆'))).size,1);
+assert.equal(stageRows[0].indexOf('12m')+3,stageRows[1].indexOf('30m')+3,all);
+// Narrow: whole columns go (context, then model) and no stage row folds.
+const narrow=rows(paint());
+for(const s of narrow)assert.equal([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),40,s);
+assert(narrow.some(s=>/┆ ✓ plan +PASS +12m/.test(s))&&!narrow.join('').includes('gpt-fixture  '),narrow.join('\n'));
+// An opened route's detail is parted from the next route by one empty row.
+const gap=narrow.findIndex(s=>s.includes('┆ RESUME')||s.includes('┆ NEXT'));
+assert(narrow.slice(gap+1).some(s=>/^│ │ +│ │$/.test(s)),narrow.join('\n'));
 // Short of rows the detail keeps its first rows and a `+N lines ›` row that opens the route page.
 const short=view.render({width:40,height:22,side:true,model,configuration:{},expandedKeys:['route:a'],questions:()=>[]});
 assert(rows(short).some(s=>/\+\d+ lines ›/.test(s)),rows(short).join('\n'));
 const more=short.hits.find(h=>h.action==='route'&&rows(short)[h.row]&&/lines ›/.test(rows(short)[h.row]));assert(more,'a press opens the route page');
 const page=rows(view.render({width:40,height:80,side:true,model,configuration:{},routeDetail:true,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
 for(const word of ['owner claude (Opus 5.5·high)','dev/backend','NOTE_R2','resume execute'])assert(page.includes(word),word+'\n'+page);
-// The band's note (Fleet's `detail_after`) follows its head, on the next rows when narrow.
-assert(flat.includes('42m · 2 legs · staged · test ✓ · before this leg: frame ✓ — outside this snapshot'),all);
 // The page reads the owner's raw output (Fleet's attempts) only for its own route.
 const attempts=[{route:'a',att:'att-owner',lines:['RAW_FIRST','RAW_LAST']},{route:'other',att:'x',lines:['RAW_OTHER']}];
 const rawPage=rows(view.render({width:40,height:120,side:true,model,configuration:{},routeDetail:true,attempts,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
@@ -609,7 +746,8 @@ for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,tru
  const branch=rows.findIndex(s=>s.includes('(values-fixture*'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
  // The Git row sits right below the repo row and never shares it.
- if(branch>=0)assert(rows[branch-1].includes('[cb] project')&&!rows[branch].includes('[cb]'),rows.join('\n'));
+ // Spec rule 29: the number moves to the top border; the repo row keeps `project/`.
+ if(branch>=0)assert(rows[branch-1].includes('project/')&&!rows.slice(1).some(s=>s.includes('[cb]')),rows.join('\n'));
  assert(rows.length<=height);
 }
 // A long title is shortened with an ellipsis; the answer wait keeps its place.
@@ -654,11 +792,15 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             shard.parent.mkdir(parents=True)
             stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             rows = [{"ts": stamp, "from": {"session_id": sid}, "to": {"harness": "codex", "session_id": "x", "name": "n"},
-                     "kind": "note", "summary": "SENT_" + str(n)} for n in range(5)]
+                     "kind": "note", "summary": "SENT_" + str(n), "message_id": "m" + str(n),
+                     "delivery": {"status": "unknown"}} for n in range(10)]
             rows.append({"ts": stamp, "from": {"session_id": "other"}, "to": {}, "kind": "note", "summary": "FOREIGN"})
+            # A later record of the same message updates its delivery state (spec E9 rule 31).
+            rows.append({**rows[9], "delivery": {"status": "received"}})
             shard.write_text("\n".join(json.dumps(row) for row in rows) + "\nnot json\n")
             sent, watched = shell._sent_peer_messages(sid)
-            self.assertEqual([row["summary"] for row in sent], ["SENT_2", "SENT_3", "SENT_4"])
+            self.assertEqual([row["summary"] for row in sent], ["SENT_" + str(n) for n in range(2, 10)])
+            self.assertEqual((sent[-1]["kind"], sent[-1]["status"], sent[0]["status"]), ("note", "received", "unknown"))
             self.assertEqual(watched, [str(shard)])
             self.assertIs(shell._sent_peer_messages(sid)[0], sent)  # unchanged file: no reparse
             self.assertEqual(shell._sent_peer_messages("absent-session"), ([], []))
@@ -728,6 +870,137 @@ assert.deepEqual(unknown.slice(1,4).map(x=>x.foreground),[186,null,null]);
 assert(v.appearance(rows,{theme:'mono',shade:'none'},{colors:256,background:'dark'})[0].slice(1,4).every(x=>x.foreground===null));
 assert.equal(v.appearance(rows,{shade:'none'},{noColor:true,background:'dark'}),rows);
 """
+        self.node(script, "panel-view.cjs")
+
+    # Spec E9 rule 34: the narrow and short panel's finish. One fixture, the routes the
+    # supervisor's screens drew: a one-shot route on a tool, a staged route on its third of
+    # seven stages, a route waiting between stages and a failed one.
+    FIXTURE = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const P=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const seven=at=>['plan','plan-check','execute','impl-review','test','report','close'].map((name,i)=>i<at
+ ?{name,mark:'✓',verdict:'PASS',harness:'claude',model:'Opus 5.5',elapsed:['12m','4m'][i]}
+ :i===at?{name,mark:'●',current:true,harness:'claude',model:'Sonnet 5.5',elapsed:'1h',round:2}:{name,mark:''});
+const owner='owner · claude (Opus 5.5·xhigh)';
+const oneShot={id:'a',title:'셸 상태·표시 고치기',kind:'working',state:'working',elapsed:'41m',tool:'Edit',target:'utilities/session-shell/host.cjs',
+ tool_age:'3m',shape:'one-shot-owner',stages:[{name:'one-shot',current:true,mark:'●'}],owner,owner_ctx:'38%',kind_text:'autopilot-code(dev·q)',
+ owner_model:'Opus 5.5',visibility:{summary:'검증 ?'},paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh'),ctx:P('38%'),gauge5:[P('━━─── 38%')]}};
+const staged={id:'b',title:'세션 간 소통 도구 단계 1',kind:'working',state:'idle',elapsed:'1h 0m',tool:'Edit',target:'utilities/peer-message.py',step:'execute ● 3/7',
+ tool_age:'3m',shape:'staged',stages:seven(2),owner,owner_ctx:'22%',profile:'deep',kind_text:'autopilot-code(dev·std)',owner_model:'Opus 5.5',
+ doer_worker:true,workers:[{stage:'execute',harness:'claude',model:'Sonnet 5.5',ctx:'12%'}],visibility:{summary:'검증 ?'},
+ paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P('12%'),gauge5:[P('━──── 12%')]}};
+const waiting={id:'c',title:'새 판으로 자연스럽게 넘어가기',kind:'idle',state:'idle',elapsed:'7h 0m',shape:'staged',
+ stages:[...['plan','plan-check','execute'].map(name=>({name,mark:'✓'})),...['host-run','test','report','close'].map(name=>({name,mark:''}))],
+ paint:{glyph:P('●'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}};
+const failed={id:'e',title:'PG-50 휠 입력',kind:'dead',state:'dead',elapsed:'54m',shape:'staged',owner,resume:'execute',step:'execute ✕ 2/3',
+ reason:'worker claude (Sonnet 5.5·high) · failed 3m',visibility:{summary:'검증 ?'},
+ stages:[{name:'plan',mark:'✓',verdict:'PASS',model:'Opus 5.5',elapsed:'8m'},{name:'execute',mark:'✕',model:'Sonnet 5.5',elapsed:'46m',note:'checked by Sonnet 5.5'},{name:'test',mark:''}],
+ paint:{glyph:P('✕'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high')}};
+const TITLE='하팅 v4-open 감독 — 셸 상태·표시 고치기와 Fleet 세션 줄 다듬기',NOW='검토 결과 3건을 기다리는 중이며 CI 결과를 확인하고 있음';
+const message=(way,who,when,body,at,delivery)=>({way,who,harness:'claude',when,body,text:body,at,...(delivery?{delivery:[delivery,'dim']}:{})});
+const messages=[message('→','[e8]','02:59','fact-verify 설치됨, 재개 명령 안내',1,'전달 안 됨'),message('→','[73]','04:00','#1549·#1505 한 묶음으로 출판 요청',2,'전달됨'),
+ message('←','[52]','05:00','#1556 수정 후 병합, P2 한 건: 세션이 바뀐 뒤 DB 오류면 앞 값이 남음',3),message('←','[e7]','07:50','v4.23.0 설치 완료, 다음 판 준비',4),
+ message('→','[e9]','07:58','검토 요청 — 셸 패널 시안 C7',5,'보냄')];
+const head={repo:[P('hearting/')],git:[P('(fix/fleet-opencode-dup-sid 🚧 3)')],selected:[P('claude-fable-5-2 high')],context:[P('context ━━━━────── 41%')],
+ quota:[P('5h 12% │ 7d 66%')],session_title:TITLE,now:NOW,wait:'◑답 대기 1',messages};
+const draw=(routes,width,height,{side=true,open=[]}={})=>view.render({width,height,side,fill:side,model:{...head,routes,route_count:routes.length},state:'working',
+ configuration:{},expandedKeys:open,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+'''
+
+    def test_a_value_breaks_only_between_tokens_after_its_lesser_pieces_go(self):
+        # Spec E9 rule 34 (a), (e): an opened route at 40 cells lets effort, then the harness
+        # and brackets, then a kind's brackets go, the tool's path give way to its file name,
+        # and folds only between tokens (`Sonnet 5.5` is one); stages not reached yet share one row.
+        script = self.FIXTURE + r'''
+const rows=draw([oneShot,staged,failed],40,64,{open:['route:a','route:b','route:e']}),all=rows.join('\n');
+for(const s of rows)assert.equal(cells(s),40,s);
+for(const want of ['┆ OWNER  Opus 5.5 · 38%','┆ KIND   autopilot-code(dev·q)','┆   >_ Edit · host.cjs 3m','┆ OWNER  Opus 5.5 · 22% · deep',
+ '┆ DOER   Sonnet 5.5 · 12%','┆   >_ Edit · peer-message.py ','┆ OWNER  claude (Opus 5.5) ','┆ WHY    worker Sonnet 5.5 '])assert(all.includes(want),want+'\n'+all);
+assert(rows.some(s=>/┆ KIND   autopilot-code +│/.test(s))&&!all.includes('(dev·st'),all);
+// The reason's rest goes on at its own token, the `·` with the word after it.
+assert(rows[rows.findIndex(s=>s.includes('┆ WHY'))+1].includes('┆        · failed 3m'),all);
+// A model name keeps its version on its row (`checked by` / `Sonnet 5.5`).
+const note=rows.findIndex(s=>s.includes('NOTE   checked by'));
+assert(note>0&&rows[note+1].includes('┆          Sonnet 5.5'),all);
+// No model name, version or path is cut apart.
+for(const s of rows)assert(!/\((Opus|Sonnet) *│|┆ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
+// Stages not reached yet: one dim row, broken before a `›`; only stages with values are table rows.
+const at=rows.findIndex(s=>s.includes('┆ · impl-review › test'));
+assert(at>0&&rows[at+1].includes('┆   › report › close'),all);
+const own=rows.slice(rows.findIndex(s=>s.includes('세션 간 소통')),rows.findIndex(s=>s.includes('PG-50')));
+assert.equal(own.filter(s=>/┆ [✓●·] /.test(s)).length,4,own.join('\n'));
+assert(rows.some(s=>s.includes('┆ · test'))&&!all.includes('lines ›'),all);
+// The same function breaks TITLE and NOW at word boundaries, as before.
+const title=rows.findIndex(s=>s.includes('TITLE'));
+assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TITLE  하팅 v4-open 감독 — 셸','       상태·표시 고치기와 Fleet 세션',
+ '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음'],all);
+// With room the whole values stand on one row each.
+const wide=draw([oneShot,staged,failed],80,64,{open:['route:a','route:b','route:e']}).join('\n');
+for(const want of ['┆ OWNER  claude (Opus 5.5·xhigh) · 38%','┆ KIND   autopilot-code(dev·std)','>_ Edit · utilities/session-shell/host.cjs 3m',
+ '┆ WHY    worker claude (Sonnet 5.5·high) · failed 3m','┆ · impl-review › test › report › close'])assert(wide.includes(want),want+'\n'+wide);
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_route_rows_outlast_message_bodies_and_the_rule_outlasts_empty_rows(self):
+        # Spec E9 rule 34 (b), (c): empty rows, then the messages' extra rows, then details,
+        # then one-row messages go before the routes' third and second rows; the messages
+        # grow only into rows the routes leave in their three-row form; the rule under the
+        # metadata stays while TITLE or NOW takes more than one row.
+        script = self.FIXTURE + r'''
+const nine=[...Array(9)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'n'+i,title:r.title+' '+(i+1)};});
+const place=rows=>rows.filter(s=>/│ │   (one-shot|staged)/.test(s)).length,names=rows=>rows.filter(s=>/│ │   (셸|세션|새 판)/.test(s)).length;
+const section=rows=>{const m=rows.findIndex(s=>s.includes('── messages'));return m<0?[]:rows.slice(m+1,rows.findIndex((s,i)=>i>m&&/^│ ─+( \+\d+ ─)? │$/.test(s)));};
+// 40×44: every route keeps its three rows and the three messages fold to one row each.
+const r44=draw(nine,40,44),m44=section(r44);
+assert(place(r44)===9&&names(r44)===9&&m44.length===3&&m44.every(s=>/^│ [←→] \[/.test(s)),r44.join('\n'));
+// The messages fold to one row each before a route gives up its third row: from 40×44 on the routes keep three rows.
+for(let h=44;h<=60;h++)assert.equal(place(draw(nine,40,h)),9,h+'\n'+draw(nine,40,h).join('\n'));
+assert(place(draw(nine,40,43))<9);
+// 40×60: rows to spare after the routes' three-row form give the messages their two rows and more.
+const r60=draw(nine,40,60),m60=section(r60);
+assert(place(r60)===9&&m60.length>6&&m60.filter(s=>/^│   \S/.test(s)).length>3,r60.join('\n'));
+// 40×30: the routes fold to one row; the rows that frees go back to the messages' two-row form, none left empty.
+const r30=draw(nine,40,30);
+assert(place(r30)===0&&section(r30).length===6&&!r30.some(s=>/^│ +│$/.test(s)),r30.join('\n'));
+for(let h=16;h<=72;h++){
+ const rows=draw(nine,40,h),all=rows.join('\n'),body=section(rows);
+ // Extra message rows only while every route stands in its three-row form.
+ if(place(rows)<9)assert(body.filter(s=>/^│ [←→] /.test(s)).length<=3&&body.length<=6,h+'\n'+all);
+ // The rule under the metadata goes only once TITLE and NOW are one row each.
+ const title=rows.findIndex(s=>s.startsWith('│ TITLE'));
+ if(title>0&&/^│ {8}\S/.test(rows[title+1]))assert(/^│ ─+ │$/.test(rows[title-1]),h+'\n'+all);
+}
+const tall=draw(nine,40,60);
+assert(/^│ ─+ │$/.test(tall[tall.findIndex(s=>s.startsWith('│ TITLE'))-1]),tall.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_a_bottom_route_row_names_its_kind_before_its_tool(self):
+        # Spec E9 rule 34 (d): after model and context, before the tool, the side layout's
+        # and Fleet's words: `one-shot`, `staged 3/7 execute ●`, a failed `staged 2/3 execute ✕`;
+        # short of cells the tool goes, then `staged`, then the whole column.
+        script = self.FIXTURE + r'''
+const four=[oneShot,staged,waiting,failed];
+const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
+const r140=draw(four,140,20,{side:false});
+for(const [title,kind] of [['셸 상태','one-shot'],['세션 간','staged 3/7 execute ●'],['새 판으로','staged 4/7 host-run'],['PG-50','staged 2/3 execute ✕']]){
+ const s=row(r140,title);assert(s&&s.includes('│ '+kind),title+'\n'+r140.join('\n'));
+ assert(s.indexOf('claude')<s.indexOf(kind),s);
+ for(const s of r140)assert.equal(cells(s),140,s);
+}
+for(const title of ['셸 상태','세션 간']){const s=row(r140,title);assert(s.indexOf(s.includes('one-shot')?'one-shot':'staged')<s.indexOf('>_ Edit'),s);}
+assert(!r140.some(s=>/execute ✕ 2\/3/.test(s)),r140.join('\n'));
+// 80 cells: the tool goes first, then the `staged` word; the stage and its mark stay.
+const r80=draw(four,80,20,{side:false});
+assert(row(r80,'세션 간').includes('│ 3/7 execute ●')&&row(r80,'PG-50').includes('│ 2/3 execute ✕')&&row(r80,'셸 상태').includes('│ one-shot')
+ &&!r80.join('').includes('staged')&&!r80.join('').includes('>_'),r80.join('\n'));
+// Narrower still the whole column goes; the earlier columns stay.
+const r64=draw(four,64,20,{side:false});
+assert(!r64.join('').includes('one-shot')&&!r64.join('').includes('3/7')&&/claude Opus 5\.5 xhigh +│ ━━─── 38%/.test(row(r64,'셸')),r64.join('\n'));
+// At every width the tool shows whole or not at all, and a route that names its kind never reads the older `execute ✕ 2/3`.
+for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:false}).filter(s=>s.startsWith('│ │ ')))
+ assert(!/>_ ?\S*…|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
+'''
         self.node(script, "panel-view.cjs")
 
     def node(self, script, name):
@@ -865,7 +1138,8 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
  // Nothing is dimmed on top of a shade: secondary text, messages and lines take their own color.
  assert(!parts.some(p=>p.dim&&[f.body,f.secondary,f.frame,f.route,f.messages,f.title].includes(p.foreground)),label);
  const at=ch=>parts.find(p=>p.text.startsWith(ch));
- assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.secondary,label);
+ // Spec rule 31: a message's text is body text; its head's own values are secondary.
+ assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.body,label);
  assert(parts.some(p=>p.text.includes('messages')&&p.foreground===f.title),label);
  if(theme!=='mono'){
   // The question's border, `◑` and `›` are rose; its words are body text.
@@ -876,7 +1150,7 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
 }
 // The light theme without a shade: the reviewed deep hues, secondary text without a dim.
 const light=paint({theme:'light'}).rows.flat();
-assert(!light.some(p=>[253,186,150,217,28,124,91].includes(p.foreground)));assert.equal(light.find(p=>p.text==='note').foreground,241);
+assert(!light.some(p=>[253,186,150,217,28,124,91].includes(p.foreground)));assert.equal(light.find(p=>p.text==='note').foreground,237);
 // The question rose on the terminal's own background too; mono keeps it by weight.
 assert(base.rows.flat().some(p=>p.text==='◑'&&p.foreground===174));
 assert(paint({theme:'mono'}).rows.flat().find(p=>p.text==='◑').bold===true);

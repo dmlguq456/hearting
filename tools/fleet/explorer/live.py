@@ -16,7 +16,7 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import current_attempt_rank, exec_child_is_wait
+from ..model import current_attempt_rank
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -964,13 +964,16 @@ def _route_doer(worker, owner, dead, now=None):
     """Who does the route's work now, for its one-line row: harness, model, effort, context
     (percent, window, or the exact token count when no window is known), the open tool and
     the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
-    attempt (a one-shot route's owner is its worker). A dead route keeps the harness only."""
+    attempt (a one-shot route's owner is its worker). With nothing of a dead or unanswering
+    route running, the attempt's recorded harness, model and effort remain (spec rule 27);
+    its context, tool and sub-agents are no longer read."""
     job = worker if worker is not None else owner
     if job is None:
         return None
     harness = _text(_get(job, "harness"))
     if dead:
-        return {"harness": harness, "model": None, "effort": None, "context": None,
+        return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+                "effort": _effort(_get(job, "effort")), "context": None,
                 "window": None, "tokens": None, "tool": None, "agents": 0}
     pct, window = _context_gauge(job)
     tool = _get(job, "exec_tool")
@@ -980,6 +983,8 @@ def _route_doer(worker, owner, dead, now=None):
                  if _get(item, "active") is True)
     doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
+            # Spec E9 rule 24: a stage worker (not the owner) does the work now.
+            **({"worker": True} if worker is not None and worker is not owner else {}),
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
     doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
@@ -1116,11 +1121,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         worker = _worker_segments(worker_node, run_children, state_text,
                                   owner if _runs_node(owner, worker_node) else None)
         dead = state in ("dead", "stale")
-        owner_model = None if dead else (
-            _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+        # Spec rule 27: the owner's harness, model and effort are what its attempt
+        # recorded when the route started; they stay when nothing of it runs now.
+        owner_model = _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None
         owner_harness = _text(_get(owner, "harness")) if owner is not None else None
-        owner_effort = None if dead else (
-            _effort(_get(owner, "effort")) if owner is not None else None)
+        owner_effort = _effort(_get(owner, "effort")) if owner is not None else None
         worktree = None
         if cwd and ("-wt" in cwd or "/.worktrees/" in cwd):
             worktree = os.path.basename(cwd.rstrip("/")) or None
@@ -1208,14 +1213,6 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                        or owner_live in ("working", "idle", "blocked")
                        and total and done != total and (active is not None or not failed))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
-        # 3cffaf: while a live worker holds the stage, the route row shows the owner's own
-        # state. An owner that is idle, or whose running call is only a wait, has delegated
-        # and is waiting; one doing its own work still reads as running.
-        owner_self = owner_live if owner is not None else owner_state
-        owner_raw = owner if owner is not None else (session_index.get(owner_tag) or {}).get("session")
-        owner_waits = bool(running and (worker_contexts or run_children) and (
-            owner_self == "idle"
-            or owner_self == "working" and exec_child_is_wait(_get(owner_raw, "exec_child"))))
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
             "outcome": _text(_get(result, "result", "status")),
@@ -1234,7 +1231,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "owner_context": ([owner_tokens, None] if owner_tokens is not None else None),
             "owner_gauge": list(owner_gauge),
             "worker_contexts": worker_contexts, "subworker": None,
-            "current": current, "owner_waits": owner_waits,
+            "current": current,
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
@@ -3274,14 +3271,15 @@ def route_marker_state(route):
     """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
     ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
 
-    A route whose worker still runs reads as working; an owner that only waits on its
-    worker reads as waiting, the worker's own line being the one that spins."""
-    if route.get("owner_waits"):
-        return "idle"
+    Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
+    working. A route its reader found with nothing running reads as no response and never
+    spins, as the session tree's mark already reads it."""
+    state = str(route.get("state") or "")
+    if state == "stale":
+        return "stale"
     if route.get("activity") == "running":
         return "working"
-    state = str(route.get("state") or "")
-    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+    return state if state in ("working", "blocked", "dead", "done") else "idle"
 
 
 def route_state_counts(routes):
@@ -3445,6 +3443,9 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                 row["result_at"] = route["result_at"]
             row["worker"] = _worker_pieces(route.get("worker"))
             row["owner"] = _owner_text(route)
+            pair = route.get("model")
+            if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+                row["owner_model"] = pair[0][:64]
             visibility = route.get("visibility")
             if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
                 row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],

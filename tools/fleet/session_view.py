@@ -38,6 +38,8 @@ def weekly_quota(payload):
 _TAP_CELLS = ("model", "effort", "ctx_pct", "active_context_tokens", "context_window_tokens")
 _TAP_QUOTA = ("weekly_pct", "quota_windows", "model_quotas")
 _MODEL_CELLS = ("model", "effort")
+# Claude session record `waitingFor` reasons that wait for the person (its own words).
+_ANSWER_WAITS = frozenset(("permission prompt", "input needed", "worker request", "sandbox request", "goal proposal"))
 _TOKEN_CELLS = ("ctx_pct", "active_context_tokens", "context_window_tokens", "compaction_pressure")
 
 
@@ -69,12 +71,24 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
              context_policy.policy_path(harness, pid=pid, proc_start=proc_start)]
     transcript = None
     callback = None
+    # The runtime's own turn record (spec E9 rule 26, rule 6 of 11-12): Claude's REPL writes
+    # its UI state (`busy` while it shows progress, `waiting` with a dialog or question open,
+    # `idle`) into its session record; Codex appends each turn's start and end to its rollout.
+    # Display only: it never stands for input readiness.
+    turn = None
     if harness == "claude":
         home = claude._home()
         paths.append(Path(home) / "sessions" / f"{pid}.json")
-        record = claude.read_registry(pid, home)
+        record = claude.read_registry(pid, home, extra=("waitingFor",))
         if record and record.get("sessionId") == sid:
             claude._apply_registry(sess, record)
+            if str(record.get("procStart") or "") == str(proc_start):
+                # `waiting` is an answer wait only for these `waitingFor` reasons; a menu or
+                # settings dialog (`dialog open`) and an unlisted reason are left to the hooks.
+                if record.get("status") == "waiting":
+                    turn = "blocked" if record.get("waitingFor") in _ANSWER_WAITS else None
+                else:
+                    turn = {"busy": "working", "idle": "idle"}.get(record.get("status"))
         transcript = claude._newest_transcript_path(home, cwd, sid)
         if transcript:
             sess.model, sess.effort, _at = claude._subagent_budget(transcript)
@@ -101,6 +115,13 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
             except OSError:
                 count = None
                 unread.extend(_TOKEN_CELLS)
+            try:
+                lifecycle = codex._latest_task_lifecycle(transcript)
+            except OSError:
+                lifecycle = None
+            if lifecycle:
+                turn = {"task_started": "working", "task_complete": "idle",
+                        "turn_aborted": "idle"}.get(lifecycle[0])
             if count:
                 telemetry = parse_codex_token_count(count, session_id=sid)
                 sess.ctx_pct = telemetry.context_used_pct
@@ -158,6 +179,8 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
         paths.append(name_path)
     names = session_handle.resolve_display_inputs(harness, sid, pid=pid)
     title = session_handle.current_session_subject(names.get("runtime_name"), titles.last_title(sid, harness=harness))
+    # Fleet's NOW (`summary.now`): the same fresh one-line summary from the same sidecar.
+    now_line = titles.fresh_summary_with_ts(sid, harness=harness)[0]
     quota = dict(usage_cache.read(harness).get("payload") or {})
     if callback:
         native_quota = claude_quota(callback)
@@ -165,7 +188,7 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
             # This terminal mirrors its exact native callback; Fleet account
             # quota admission remains credential-bound and unchanged.
             quota = native_quota
-    values.update(harness=harness, title=title or None, git=observed_git,
+    values.update(harness=harness, title=title or None, now=now_line or None, native_turn=turn, git=observed_git,
                   branch=branch + "*" if branch and observed_git.get("dirty") == 1 else branch,
                   weekly_pct=weekly_quota(quota), quota_windows=quota_windows(quota),
                   model_quotas=quota.get("rl_ms") or [], jobs=observed_git.get("jobs"))

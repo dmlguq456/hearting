@@ -29,8 +29,9 @@ class SessionBlockTest(unittest.TestCase):
         for percentage,key in ((0,'lvl_g'),(49,'lvl_g'),(50,'lvl_y'),(79,'lvl_y'),(80,'lvl_r')):
             parts=session_line.line_segments({**self.values(),'ctx_pct':percentage},300)
             text=''.join(text for text,_ in parts)
-            # Spec 2026-11-11: `[number] project (git)`, no folder or branch glyph.
-            self.assertIn('[52] project (topic*)',text);self.assertNotIn('📁',text);self.assertNotIn('⎇',text)
+            # Spec 2026-11-11: `[number] project (git)`, no folder or branch glyph; E9 rule 29:
+            # the name ends in `/`.
+            self.assertIn('[52] project/ (topic*)',text);self.assertNotIn('📁',text);self.assertNotIn('⎇',text)
             self.assertTrue('━' in text or '─' in text)
             self.assertIn(key,[style for text,style in parts if '%' in text])
 
