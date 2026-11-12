@@ -54,6 +54,10 @@ HISTORY_PAIRS = (
     ("B (rows fixed x2 of A, row bytes 2,900)", (7722, 2900), (15444, 2900)),
 )
 CONTRAST_LIMIT = 0.20
+D1_LIMIT = 1.20            # d1: warm pass time with a doubled history stays under x1.20 (direction brief §4)
+_VIEW_SEGMENT = "dispatch_registry_cache.RegistryView.__init__"
+_REBUILD_SEGMENT = "dispatch_registry_cache._RegistrySegment.__init__"
+_PREFIX_SEGMENT = "dispatch_registry_cache._reusable_prefix"
 
 
 def _module(name: str):
@@ -128,6 +132,74 @@ def _full_parses(entry: dict) -> int:
     return int(metrics.get("full_metadata_parses", 0) or 0)
 
 
+def _segment_s(entry: dict, name: str):
+    segment = (((entry.get("after_row") or {}).get("segments")) or {}).get(name)
+    return segment.get("total_s") if isinstance(segment, dict) else None
+
+
+def _ratio(small, large):
+    return large / small if small and large is not None else None
+
+
+def d1_rows(scale: dict) -> list[dict]:
+    """One record per pair x role for the d1 criterion (history doubled, warm pass time).
+
+    The verdict column is the whole pass time: large/small of the unchanged pass and of the pass
+    right after a whole-registry replacement, each under ``D1_LIMIT``. The diagnostic columns
+    (never part of the verdict) split the replacement pass into the floor (the new generation's
+    read and digest: ``_reusable_prefix`` plus ``RegistryView.__init__`` minus segment
+    reconstruction) and the rest.
+    """
+    rows = []
+    for pair in scale.get("pairs", ()):
+        for role in ("producer", "fleet"):
+            small = pair["small"]["roles"].get(role, {})
+            large = pair["large"]["roles"].get(role, {})
+            if not small and not large:
+                continue
+            row = {"pair": pair["label"], "role": role,
+                   "unchanged_small_s": small.get("warm_median_s"), "unchanged_large_s": large.get("warm_median_s"),
+                   "after_small_s": small.get("after_replace_s"), "after_large_s": large.get("after_replace_s")}
+            row["unchanged_ratio"] = _ratio(row["unchanged_small_s"], row["unchanged_large_s"])
+            row["after_ratio"] = _ratio(row["after_small_s"], row["after_large_s"])
+            floors = []
+            for entry in (small, large):
+                view, rebuild = _segment_s(entry, _VIEW_SEGMENT), _segment_s(entry, _REBUILD_SEGMENT)
+                prefix = _segment_s(entry, _PREFIX_SEGMENT)
+                floors.append(None if view is None else round(view - (rebuild or 0.0) + (prefix or 0.0), 4))
+            row["floor_small_s"], row["floor_large_s"] = floors
+            if None not in floors and row["after_small_s"] and row["after_large_s"] is not None:
+                row["after_without_floor_ratio"] = _ratio(row["after_small_s"] - floors[0],
+                                                          row["after_large_s"] - floors[1])
+            else:
+                row["after_without_floor_ratio"] = None
+            ratios = (row["unchanged_ratio"], row["after_ratio"])
+            row["met"] = None if None in ratios else all(value < D1_LIMIT for value in ratios)
+            rows.append(row)
+    return rows
+
+
+def d1_lines(scale: dict) -> list[str]:
+    rows = d1_rows(scale)
+    if not rows:
+        return []
+    met = sum(1 for row in rows if row["met"])
+    lines = [f"**d1 (history 2배, 판정 = 전체 시간 large/small < {D1_LIMIT:.2f}, 무변화·교체 직후 둘 다): "
+             f"{met}/{len(rows)} 칸 충족**"]
+
+    def fmt(value, spec=".3f"):
+        return "-" if value is None else format(value, spec)
+
+    for row in rows:
+        verdict = {True: "충족", False: "미충족", None: "판정 불가"}[row["met"]]
+        lines.append(
+            f"- {row['pair']} {row['role']}: {verdict} — 무변화 {fmt(row['unchanged_small_s'])}s -> {fmt(row['unchanged_large_s'])}s "
+            f"(x{fmt(row['unchanged_ratio'], '.2f')}), 교체 직후 {fmt(row['after_small_s'])}s -> {fmt(row['after_large_s'])}s "
+            f"(x{fmt(row['after_ratio'], '.2f')}) | 진단: 바닥(읽기·digest) {fmt(row['floor_small_s'])}s -> {fmt(row['floor_large_s'])}s, "
+            f"바닥을 뺀 직후 pass x{fmt(row['after_without_floor_ratio'], '.2f')}")
+    return lines
+
+
 def history_verdicts(scale: dict) -> list[str]:
     """The falsifier sentences, from the numbers (never from the expectation).
 
@@ -161,6 +233,7 @@ def history_verdicts(scale: dict) -> list[str]:
     else:
         verdict = "history 비례 판정 불가 (양쪽이 registry를 다시 해석한 교체 직후 pass가 없음)"
     lines.insert(0, f"**history 2배 대조 (바뀐 직후 pass의 추가분): {verdict}**")
+    lines[1:1] = d1_lines(scale)
     fixed = []
     for pair in scale.get("pairs", ()):
         for role in ("producer", "fleet"):
@@ -318,6 +391,8 @@ def _md_info(report: dict) -> list[str]:
            f"- fixture: registry {report.get('fixture', {}).get('bytes')} bytes, "
            f"rows {report.get('fixture', {}).get('rows')}, baseline {report.get('fixture', {}).get('baseline')}",
            f"- fixture shape (넣은 것): {json.dumps(report.get('fixture', {}).get('shape'))}",
+           f"- fixture history shape (route·owner·BLOCKED·dead owner·stall): "
+           f"{json.dumps(report.get('fixture', {}).get('history_shape'))}",
            f"- cleanup: {json.dumps(report.get('cleanup'))}"]
     failures = (report.get("self_check") or {}).get("failures") or []
     if failures:
@@ -404,6 +479,8 @@ def cmd_run(args) -> int:
         report["fixture"] = {k: fixture[k] for k in ("bytes", "rows", "open_routes", "baseline", "marker")}
         shapes = _module("shapes")
         report["fixture"]["shape"] = shapes.describe(fixture) if shapes is not None else None
+        report["fixture"]["history_shape"] = {k: v for k, v in (fixture.get("history_shape") or {}).items()
+                                              if k != "blocked_attempts"}
         scratch = Path(fixture["root"]) / "scratch"
         scratch.mkdir(exist_ok=True)
         try:

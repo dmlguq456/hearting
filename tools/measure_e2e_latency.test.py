@@ -270,6 +270,79 @@ class InjectorTests(unittest.TestCase):
 class ShapeTests(unittest.TestCase):
     """The fixture shapes the registry alone does not give."""
 
+    def test_history_carries_the_live_route_owner_blocked_and_dead_owner_shapes(self):
+        """Live 2026-11-13: ~88% of the rows carry a route, ~20% are owners, ~1.7% end BLOCKED
+        (their routes stay open), ~9% are dead owners; one attempt per row."""
+        from workflow_state import WorkflowLedger
+        with small_state(freeze=False), tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            built = hpf.build(tmp + "/b", history_rows=1200, record_size=2900, open_routes=3, live_sessions=2,
+                              worker_streams=True, depth1_rows=6, depth1_open_every=0, min_jobs_bytes=0,
+                              prime=False)
+            shape = built["history_shape"]
+            rows = Path(built["jobs"]).read_text().splitlines()
+            self.assertEqual(len(rows), 1200)
+            history = shape["rows"] - hpf.HISTORY_RECENT_24H_ROWS    # the last day's rows stand alone
+            self.assertGreater(history, 900)
+            self.assertAlmostEqual(shape["routed"] / history, 0.88, delta=0.04)
+            self.assertAlmostEqual(shape["owner"] / history, 0.196, delta=0.04)
+            self.assertAlmostEqual(shape["blocked"] / history, 0.017, delta=0.008)
+            self.assertAlmostEqual(shape["dead_owner"] / history, 0.087, delta=0.035)
+            self.assertAlmostEqual(shape["routes"] / history, 0.17, delta=0.03)
+            self.assertTrue(shape["real_route_verified"], shape["real_route_reason"])
+            self.assertEqual(len(shape["answered_blocked"]), 2)
+            attempts = [item.split("attempt_id=")[1].split(",")[0] for item in rows if "attempt_id=att-hist-" in item]
+            self.assertEqual(len(attempts), len(set(attempts)))               # one row per attempt
+            blocked = [row for row in rows if "note=dead-worker-blocked" in row]
+            self.assertEqual(len(blocked), shape["blocked"])
+            self.assertEqual(len({len(row.encode()) + 1 for row in rows[2 + 6:]}), 1)  # one row size
+            row = blocked[0]
+            meta = dict(item.split("=", 1) for item in row.split("\t")[5].split(",") if "=" in item)
+            route_file = Path(meta["owner_route_file"])
+            self.assertTrue(route_file.is_file())
+            route = json.loads(route_file.read_text())
+            self.assertEqual(route["route_id"], meta["owner_route_id"])
+            ledger = WorkflowLedger(meta["owner_route_id"], meta["owner_route_hash"],
+                                    root=Path(built["dispatch_root"]) / "workflow")
+            self.assertTrue(ledger.journal_path.is_file())
+            self.assertFalse(route_file.with_name(route_file.stem + ".outcome.json").exists())  # a BLOCKED route stays open
+            closed = [path for path in (Path(built["base"]) / "routes" / "hist").glob("*.outcome.json")]
+            self.assertGreater(len(closed), shape["routes"] // 2)
+
+    def test_stall_notices_are_written_for_open_attempts(self):
+        with small_state(freeze=False), tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            built = hpf.build(tmp + "/b", history_rows=300, record_size=2900, open_routes=3, live_sessions=2,
+                              worker_streams=True, depth1_rows=6, depth1_open_every=0, min_jobs_bytes=0,
+                              prime=False)
+            stall = built["history_shape"]["stall"]
+            self.assertEqual(stall["written"], 3, stall["reason"])
+            state = Path(built["dispatch_root"])
+            for attempt in stall["attempts"]:
+                self.assertTrue((state / "watchdog" / f"{attempt}.json").is_file())
+
+    def test_d1_lines_judge_the_whole_pass_time_and_report_the_floor_separately(self):
+        def side(warm, after, view, rebuild):
+            return {"roles": {"producer": {
+                "warm_median_s": warm, "after_replace_s": after, "extra_s": after - warm,
+                "after_row": {"metrics": {"full_metadata_parses": 1}, "segments": {
+                    tool._VIEW_SEGMENT: {"n": 1, "total_s": view},
+                    tool._REBUILD_SEGMENT: {"n": 9, "total_s": rebuild}}}}}}
+        # the unchanged pass is flat; the pass after a replacement grows 30%, all of it in the floor
+        scale = {"pairs": [{"label": "A", "small": side(0.40, 0.60, 0.20, 0.02), "large": side(0.41, 0.78, 0.38, 0.02)}]}
+        rows = tool.d1_rows(scale)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertFalse(row["met"])                                         # 0.78 / 0.60 = x1.30 is over x1.20
+        self.assertAlmostEqual(row["after_ratio"], 1.3)
+        self.assertAlmostEqual(row["floor_small_s"], 0.18)
+        self.assertAlmostEqual(row["after_without_floor_ratio"], (0.78 - 0.36) / (0.60 - 0.18))
+        text = "\n".join(tool.d1_lines(scale))
+        self.assertIn("0/1 칸 충족", text)
+        self.assertIn("미충족", text)
+        self.assertIn("바닥(읽기·digest)", text)
+        flat = {"pairs": [{"label": "A", "small": side(0.40, 0.60, 0.20, 0.02), "large": side(0.41, 0.62, 0.21, 0.02)}]}
+        self.assertTrue(tool.d1_rows(flat)[0]["met"])
+        self.assertIn("1/1 칸 충족", "\n".join(tool.history_verdicts(flat)))
+
     def test_recent_history_rows_fall_in_the_fleet_windows(self):
         total = 400
         ages = [hpf._history_age_s(index, total) for index in range(total)]

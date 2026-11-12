@@ -40,6 +40,21 @@ TARGETS = (
     ("dispatch_replacement", "registry_rows"),
     ("session_line", "session_route_status"),
     ("render", "_explorer_compose"),
+    # The route judgments (speed-e2e leg C): what an answer-wait pass and a Fleet pass spend per
+    # route, and where a registry replacement's time goes.
+    ("human_gate_observation", "_generation_candidates"), ("human_gate_observation", "_route_outcome"),
+    ("human_gate_observation", "pending_human_waits"),
+    ("dispatch_owner_input", "blocked_owner_answers"),
+    ("owner_route_binding", "_verified_binding"),
+    ("dispatch_supervision", "notice_is_current"), ("dispatch_supervision", "update_attempt_stall_observation"),
+    ("dispatch_supervision", "_recorded_completion_result"),
+    ("dispatch_seat_handover", "effective_parent"), ("dispatch_seat_handover", "_lineage_signature"),
+    ("dispatch", "_registry_evidence_for_path"), ("dispatch", "_build_registry_derived_index"),
+    ("dispatch", "_job_selection"),
+    # The floor and the rebuild inside ``RegistryView`` after a replacement: reading and digesting
+    # the new generation against segment reconstruction.
+    ("dispatch_registry_cache", "_reusable_prefix"), ("dispatch_registry_cache", "_RegistrySegment.__init__"),
+    ("dispatch_registry_cache", "_iter_lf_chunks"),
 )
 PRODUCER_ROOTS = (("human_wait_state", "_refresh_cache"),)
 FLEET_ROOTS = (("__init__", "collect_all"), ("render", "_explorer_compose"))
