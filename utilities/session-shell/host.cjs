@@ -629,9 +629,10 @@ async function refreshReadiness() {
   // can be corroborated by the screen/native-idle observation.
   const inputSettled=nativeEpoch===0||(submitted>=0&&submitted===nativeEpoch);
   if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return;}
-  const before=epoch,selected=selection,revision=screenRevision;
+  // A lifecycle event that arrives meanwhile is newer than this observation.
+  const before=epoch,selected=selection,revision=screenRevision,observed=sequence;
   const result=await source('readiness',{screen:screenSnapshot(),state});
-  if(before!==epoch||selected!==selection||revision!==screenRevision||currentDelivery){empty=false;return;}
+  if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return;}
   empty=result.ok===true&&result.ready===true;
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
 }
