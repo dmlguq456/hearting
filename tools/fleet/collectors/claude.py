@@ -456,7 +456,7 @@ def _apply_statusline(sess, d):
         sess.cost = cv
 
 
-def read_registry(pid, home=None):
+def read_registry(pid, home=None, extra=()):
     """~/.claude/sessions/<pid>.json → dict, or None.
 
     F-26 promotes this file from an incidental status lookup to a first-class tier-1
@@ -469,7 +469,7 @@ def read_registry(pid, home=None):
     dict still answers every ``.get()`` call the same way, just normalized to the
     shared field set instead of raw file contents.
     """
-    return session_registry.read("claude", pid, home=home)
+    return session_registry.read("claude", pid, home=home, extra=extra)
 
 
 def _apply_registry(sess, sj):

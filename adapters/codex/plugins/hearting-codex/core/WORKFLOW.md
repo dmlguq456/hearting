@@ -987,14 +987,26 @@ approval; an absent answer stays absent.
 After a material-work attempt, the user-facing main agent's first close gives
 the result in one or two sentences, names any remaining failure, unfinished
 work, or user-impacting limit, asks for at most one decision the person must
-make, and ends with one pointer to the detailed record. Preserve unknowns and
-explicitly requested output or format. Render any labels in the
+make in the self-contained form of `roles/response-policy.md` Decision requests
+(a clear recommended follow-up is reported as proceeding, not asked), and gives
+one pointer to the detailed record. Preserve unknowns and explicitly requested
+output or format. Render any labels in the
 user's communication language. In Korean, one optional presentation is:
 
 ```text
 [완료 보고]
 <결과 한두 문장; 남은 사항과 필요한 결정이 있으면 포함>
 기록: <상세 내용>
+```
+
+An optional decision request has this shape:
+
+```text
+[결정 필요] <무엇을 정하는지 한 문장>
+- <안 1>: <고르면 달라지는 것>
+- <안 2>: <고르면 달라지는 것>
+추천: <안> — <이유 한 줄>
+답이 없으면: <기다리는 일>은 멈춰 있고, <다른 일>은 계속합니다.
 ```
 
 Preserve the honest outcome (completed, partial, failed, or blocked), what the

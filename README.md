@@ -24,7 +24,7 @@ lower-cost workers carry it out in small checked steps, and Fleet shows every se
 </p>
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and your last input; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and what it is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
 </p>
 <p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, each project's status on its own line, one session waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 <p align="center"><a href="https://dmlguq456.github.io/hearting/fleet.html"><strong>Take the Fleet tour →</strong></a> — every screen at full size, and why you can trust it.</p>
@@ -140,13 +140,13 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and the first lines of received peer/runtime messages, without notification wrappers. |
-| **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, what it is doing now and its age. Expand a session for your last input and the first lines of received peer/runtime messages, without notification wrappers. |
+| **ROUTES** | Each request: who does it now, its kind and where it stands — `one-shot`, or `staged 3/7 execute ●` for one worker per stage — with the workers running under it; open it for its stages. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
 | **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
 
-LAST INPUT uses `› 1m · …` for your last confirmed input. `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record. `› ·` means no human input was recorded. Expand the row for NOW and RECEIVED.
+NOW is what the session is doing now (`·` when nothing is observed). Expand the row for LAST INPUT and RECEIVED: LAST INPUT uses `› 1m · …` for your last confirmed input, `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record, and `› ·` means no human input was recorded.
 
 Select a project in SESSIONS for its campaign status, backlog and work in progress,
 open requests and stages, completed results, recent small work records, and sessions.
@@ -166,11 +166,15 @@ Claude shows the same status area inside the panel as Codex and OpenCode; while
 the panel shows it, Claude's own statusline row below becomes a notice row that
 stays empty unless you owe an answer, a warning applies or news just arrived.
 The full statusline returns whenever the panel is hidden.
-The panel's four colored edges separate Hearting's current work, actual route
-flow and questions from the native conversation. Its background stays neutral.
+The panel's top border names the session as Fleet's row does (state glyph,
+session number, harness, and `⚑` for a steward), and its frame takes that
+state's color the moment the native screen changes (running, waiting; idle stays
+neutral); a failed route colors only its own route box. Below the model and
+context, a thin rule parts this session's title and what it is doing now. Its
+background stays neutral.
 Below the route and any question, the panel always shows the rest of the
 statusline: folder, title, branch and Git state, usage and running jobs, then
-messages and your last input, as rows allow. Click a route for its stages and
+messages, as rows allow. Click a route for its stages and
 result. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until

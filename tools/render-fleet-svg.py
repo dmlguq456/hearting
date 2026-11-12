@@ -32,7 +32,7 @@ BAR, BORDER, DIM = "#151824", "#2B2E3C", "#8A8A9A"
 MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
 LABEL = ("Fleet's Explorer OVERVIEW, drawn from synthetic demo data: eight sessions in four projects "
          "across Claude Code, Codex and OpenCode, grouped by project with model, context gauge and "
-         "your last input, one session waiting for an answer, two open routes with their "
+         "what each is doing now, one session waiting for an answer, two open routes with their "
          "stage lines, and per-host CPU and GPU use at the bottom left.")
 
 

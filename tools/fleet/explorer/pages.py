@@ -180,6 +180,7 @@ def _repo_status_block(grid, x, right, y, status):
         decide = [("0" if has_doc else "·", "dim")]
     from .tables import answer_wait_word
     decide.append((f"      {answer_wait_word()} {asked}", "blocked" if asked else "dim"))
+    question_lines = [str(line) for line in status.get("question_lines") or ()][:3]
     following = status.get("next")
     changed = []
     if has_doc:
@@ -195,6 +196,9 @@ def _repo_status_block(grid, x, right, y, status):
     for label, parts in rows:
         grid.put(x + 3, y, label, "label", limit=right)
         _segs(grid, x + 16, y, _fit(parts, right - x - 17), right)
+        y += 1
+    for question in question_lines:
+        grid.put(x + 16, y, "? " + question, "soft", limit=right)
         y += 1
     return y
 

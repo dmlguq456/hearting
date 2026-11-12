@@ -114,7 +114,7 @@ const code=text.slice(text.indexOf('async function lifecycle(req)'),text.indexOf
   for(const harness of ['claude','codex','opencode'])for(const between of [true,false]){
     let resolve;const s={Promise,harness,token:'t',rootNative:{pid:10,start:'1'},sequence:1,sid:'A',state:'idle',
       empty:true,submitted:0,lastEnter:0,currentDelivery:null,epoch:5,selection:1,screenRevision:10,nativeEpoch:0,
-      relay:false,paste:false,keyTail:'',painted:[],source:()=>new Promise(r=>resolve=r),screenSnapshot:()=>[],
+      relay:false,paste:false,keyTail:'',clock:0,eventMark:0,formSeen:false,painted:[],source:()=>new Promise(r=>resolve=r),screenSnapshot:()=>[],
       processRow:pid=>({pid,start:'1'}),descends:()=>true,sameTerminal:()=>true,projection(){},
       queueProjection(){},status:()=>({})};
     s.queueDisplay=()=>s.painted.push(s.state);

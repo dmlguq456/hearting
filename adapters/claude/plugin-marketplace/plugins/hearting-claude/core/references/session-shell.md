@@ -151,25 +151,65 @@ The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
 The panel follows the 2026-11-11 unified layout (the C3 draft the person
 chose), placed by the C6 rule: what is always there sits at the top, what
-comes and goes at the bottom. The top border carries this session's state on
-the left, as Fleet's session row judges and draws it, with an English
-lower-case word (a spinner and `running` while it works, `●` `idle`, `◑`
-`waiting`; an unknown state is left blank), and only the gear `⚙` on the right,
-whose press reaches the rule cell beside it and the corner. `HEARTING` names
-the settings screen alone. What runs shares Fleet's one beat (its 100 ms
-spinner frame and one-second blink): this session's spinner, a working route's
-mark, the running stage and the open route count. The host keeps that beat only
-while the painted panel shows one of them; a spinner turn swaps only its own
-cells, the blink repaints the panel once a second, and an idle panel paints
-nothing between native frames.
-Then `[number] project`, with Git (branch and dirty mark, `🚧 N`,
+comes and goes at the bottom. The top border carries Fleet's row head for this
+session on the left: the state glyph (a spinner while it works or an answer is
+being typed in for the person, `●` idle, `◑` waiting on a dialog or question),
+the session number (`[e9]`), the harness name in its Fleet hue and, for a
+steward, Fleet's `⚑`; the state has no word, its glyph and number share the
+state's color, and the three glyph shapes still differ in `mono` and under
+`NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
+the number; the glyph stays. The gear `⚙` alone sits on the right, and its press
+reaches the rule cell beside it and the corner. The state shown is the host's
+own observation; hook events confirm and correct it, and input readiness and
+every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
+into its session record as it paints (`busy` while it shows progress, `waiting`
+with a dialog or question open, `idle`); the host reads that record the moment
+its watched file changes, only for this exact process and session. A `waiting`
+is an answer wait only for the person's own reasons (`waitingFor`: `permission
+prompt`, `input needed`, `worker request`, `sandbox request`, `goal proposal`);
+a menu, settings or side dialog (`dialog open`) says nothing about the turn and
+the previous reading stands, and an unlisted reason is left to the hooks. Codex
+appends each turn's start and end to its rollout, read with the projection;
+before any hook after a start or resume only its idle is taken (a last turn
+start may be a turn cut off mid-way), and a turn seen starting after that reads
+as running. After an approval the question screen leaving (the readiness
+judgment's own form test) means the turn goes on; it is asked about for as long
+as the hooks wait, and a question seen again turns the panel back to waiting.
+OpenCode's plugin reports its native events, an answered or approved request
+included (a rejected one resumes nothing); a turn stopped by the person (Esc) is
+idle, a failed one keeps its wait. An Enter alone never claims a turn. Before any reading or event after
+start, resume, `/clear` or a session switch the state is left blank. The whole
+outer frame takes the state's color in the same paint: running and waiting
+Fleet's session keys, idle and an unknown state the neutral frame gray (the
+terminal's dim on an unknown face), no hue in `mono`. A route's state stays in
+the route box: a failed current route turns that box's line to the failure
+color and a running one pulses `route N`; the question box keeps its rose.
+`HEARTING` names the settings screen alone. What runs shares Fleet's one beat
+(its 100 ms spinner frame and one-second blink): this session's spinner, a
+working route's mark, the running stage, the open route count and a steward's
+number and `⚑` (Fleet's steward pink, lit and receding; bold and plain without
+color), which blink even while the session is idle. The host keeps that beat
+only while the painted panel shows one of them; a spinner turn swaps only its own
+cells, the blink repaints the panel once a second (a panel with only a blink
+wakes once a second and changes only the blinking row), and an idle panel with
+nothing to blink paints nothing between native frames.
+Then the metadata, one block: the repository name ending in `/` (`hearting/`,
+the mark only on a whole name), with Git (branch and dirty mark, `🚧 N`,
 ahead/behind and the existing merge warnings) dim in parentheses on its own
 row below, cut with `…` within that row and absent without a Git reading; no
 folder or branch glyph;
 model and effort, then `context` with its gauge and percent (two rows beside
 the native area, one `│`-separated row with the repo row at the bottom);
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
-the jobs); `◑답 대기 N` and the session's title; the route box, high; free
+the jobs). Beside the native area one thin rule (the messages rules' color)
+then parts it from this session's content: `TITLE` and `NOW` (Fleet's words, dim,
+in one label column; the values start in one column and their next rows start
+there too; narrower than 30 cells the labels go first), Fleet's title and NOW
+(bright while the session works or waits), each on as many rows as it needs,
+then `◑답 대기 N` and a tidy notice; one empty row then parts the head from the
+route box. The bottom layout keeps the metadata row (or rows) first and one
+content row (`◑답 대기 N │ title │ NOW …`, title and NOW each keeping at least
+half of what is left); the row break parts them. Then the route box, high; free
 space; any question box; the messages section, fixed at the bottom; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
@@ -182,20 +222,55 @@ its mark, verdict and doer (harness, model, effort, live workers' context, the
 open tool and sub-agents on the running stage, time, round, unit, output), how
 it was run and checked (age, legs, the evidence summary, and the note Fleet
 writes right of the detail band), the next step, and
-why it stopped (the worker line and where it resumes). Values are whole: a long
-one goes on to the next rows, and a detail short of rows keeps its first rows
+why it stopped (the worker line and where it resumes). Values are whole: a value
+that does not fit one row first lets its lesser pieces go (effort, then the
+harness and its brackets: `OWNER Opus 5.5 · 38%`; then a kind's brackets), a
+tool's target gives way to its file name, then the tool stands alone (as on the
+third row); only then does it go on to the next rows, and only between tokens
+(a model name with its version, `Sonnet 5.5`, is one token; a lone `·` or `›`
+goes with the word after it); a token wider than a row runs on by character
+cells. The same break applies to TITLE, NOW, route titles and message bodies.
+A detail short of rows keeps its first rows
 and `+N lines ›`, which opens the route page where every value reads. Opening
 the route page reads the owner's raw output once, with the reader Fleet's route
 page uses, and shows its last rows under the route.
 An opened route detail is indented inside its box, never a box in a box,
 and nothing is drawn for an empty route list or message list. Box rows are
 laid out at the box's inner width. Beside the native area a folded route takes
-two rows: the glyph and its whole title (cut with `…` only past the row), then,
-indented and dim, harness, model, context percent and elapsed time
-(`claude Opus 5.5 25% · 1h 27m`); short of cells the `route line` choice keeps
-its value (`time`: elapsed, `model`: model) and the other goes, and a value is
-shown whole or not at all. A press on either row opens it. The bottom layout
-keeps its one folded row. Groups are divided by
+two rows: the glyph with harness, model, effort and a one-step route's open
+tool (only where it fits), then its context percent and elapsed time each
+right-aligned in its own column so they stand one above the other, in the
+colors of Fleet's ROUTES row (`⠏ claude Opus 5.5 high · >_ Bash   25% 1h 27m`),
+then, two cells in, its whole title on as many rows as it needs; short of cells
+effort goes first, then the `route line` choice keeps its value (`time`:
+elapsed, `model`: model) and the other goes, and a value is shown whole or not
+at all. A route with no value at all takes one row, glyph and title. A third
+row says which kind of route it is and where it stands, its kind word first
+and dim: `one-shot` (the owner works itself) and what it is on now (`Edit
+host.cjs 3m`, else the call it just finished); `staged 3/7` (a worker per
+stage) with the current stage and its mark, then `owner <model>` when a stage
+worker leads the first row, or with no stage running the next stage and what
+it waits for; a kind the record does not name draws no third row. Fleet's
+ROUTES progress cell reads the same words (`staged 3/7 execute ●`, short of
+cells `3/7 execute ●`; a one-shot route on a tool `one-shot ● Edit host.cjs 3m`). Short of rows a route keeps two rows, then one; every
+route in the box takes the same form, and no empty row parts two folded routes.
+A press on any of its rows opens it. An opened route reads like a table behind a
+thin dim guide two cells in: `OWNER` (and `DOER` when a stage worker leads, or
+no owner is known) and `KIND` as label rows, one row per stage in columns (mark,
+name, verdict, doer model, context, time right-aligned; a column that does not
+fit goes whole: context, then model, then verdict), the running stage's tool and
+further workers under it, a stage's `OUT` and `NOTE`; stages not reached yet,
+with nothing of their own, share one dim row (`· impl-review › test › report`,
+broken before a `›`); then `INFO` (age, legs,
+the evidence summary, the band note and each stage's time, unit and gate),
+`NEXT`, `WHY`, `RESUME` and `OUT`. One empty row parts an opened route from the
+next; a cut keeps whole items. The bottom layout
+keeps its one folded row: title, harness·model·effort, context, then the kind in
+the third row's and Fleet's words (`one-shot`, `staged 3/7 execute ●`, a failed
+one `staged 2/3 execute ✕`), then the open tool, and the elapsed time at the
+right edge. Short of cells the tool goes first, then the word `staged`
+(`3/7 execute ●`), the title keeping ten cells through both; narrower still the
+kind column goes whole, and the tool shows whole or not at all. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
 `messages`, stage names, `5h`/`7d`); only real content and
 language-dependent text follows the screen language: the answer wait reads
@@ -205,11 +280,18 @@ time and quota resets alike.
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run
 short, the question (its body and choices) and the top groups stay, and the
-others give way first: spacer rows, then two-row routes fold to one row, an
-opened route detail closes, then messages fold to one row (`+N` at the end of
-the lower rule); only then does the route box scroll in place, showing fewer
+others give way first, in this order: empty rows; the messages' extra rows
+(past three, and a body's rows after its first); an opened route detail (and an
+opened message) shortens and closes; a value on several rows (title, NOW, a
+route title) keeps one row ending in `…`; then the head's rule (it is not an
+empty row: it goes only once TITLE and NOW are one row each); the messages fold
+to one row each (three of them); the routes' third row goes, then their second;
+fewer messages show (three down to one, `+N` at the end of the lower rule); only
+then does the route box scroll in place, showing fewer
 routes (down to one) without dropping any; then the Git row, the route box and
-running jobs go; the messages section goes only last, then 5h/7d. A section is
+running jobs go; the messages section goes only last, then 5h/7d. Rows a later
+step frees beyond its need go back to the steps before it, the most important
+first, so no row stays empty that an earlier value could fill. A section is
 placed whole or not at all.
 Inside the box, an opened route's gauge bar gives way before its percent.
 Variable-width text (titles, message
@@ -240,8 +322,9 @@ process still clear them, and an unobserved value is never made up.
 The route box carries `route N` in its top border (the producer's own label
 alone, over a `Checking` row, while its rows are not read yet). Each current
 route (the ones the statusline counts) is one folded row: Fleet's route marker
-and judgment (`⠏` working, `●` waiting on a worker or a person, `✕` stopped,
-`✓` done, `◌` no response),
+and judgment (`⠏` while anything of it runs, its owner or a worker; `●`
+waiting, with nothing running or on a person; `✕` stopped; `✓` done; `◌` no
+response, nothing of it running),
 title, harness, context percent and elapsed time (`route line` = `time`, the
 default) or title, harness, model and context percent (`model`). The bottom
 layout fits model, effort, a five-cell gauge, the current tool or stage and the
@@ -260,21 +343,45 @@ rows shown plus the border counts always add up to N. These values come
 from the answer-wait producer's existing pass: the shared line helper reads
 Fleet's own route records from that pass and adds each row's marker and the
 values of who does the work now (the working worker of the shown stage, else
-the owner: harness, display model, effort, context, tool, active sub-agents)
+the owner: harness, display model, effort, context, tool, active sub-agents;
+with nothing of the route running, the owner attempt's harness, model and
+effort as it recorded them, without context, tool or sub-agents)
 plus an absolute start time, and counts running, waiting and stopped routes
 into the statusline label (`route 3 ⠏2 ✕1`) by Fleet's own rule, over every
 current route of that pass rather than the kept rows; a route
 its supervisor closed is in neither count. Context is Fleet's own gauge
 percent, else tokens over a known window, else the exact token count
-(`250K`); a stopped job shows none. The judgment lives in one place
+(`250K`); a stopped job shows none. Before an attempt's own result the window
+is its own evidence (usage above 200K is the 1M window), else the window its
+launch requested (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its launch env, 100K..1M)
+when its settings env sets no other one and the model running is the one the
+launch chose (this path is a dispatch worker's, the route rows'; a seat keeps the
+native statusline's own value); `CLAUDE_CODE_DISABLE_1M_CONTEXT` holds 200K. That
+variable is Claude's compaction threshold (the smaller of it and the model's own
+window): a model the launch requested a window for is assumed to run with it. A start,
+resume, `/clear` or switch keeps this seat's own values drawn (the folder, Git
+and usage); session values clear until read again. A `/clear` (the native start
+hook's own `source`) keeps the same process and model, so the model and effort
+row also stays as last observed while its context starts empty; a start, a
+resume or a switch reads the model anew (a configured value never stands in for
+an observed selection). The judgment lives in one place
 (`tools/fleet/session_line.py`) and uses Fleet's shared functions once they
 exist. The display is as fresh as that cache. Pressing the
 box's top border opens the existing read-only route evidence pages, which
 also carry each route's owner and evidence summary.
-The messages section (dim, two rules) shows the latest three peer messages, one row each (`←`
-received from the exact session's retained received inputs, `→` sent from this
-session's own ledger shard and its 200-character summary), cut with `…`;
-pressing a row shows its whole retained text in place. Two limits differ: the
+The messages section (two dim rules) shows the latest peer messages (`←` received
+from the exact session's retained received inputs, `→` sent from this session's
+own ledger shard and its 200-character summary), each on two rows: a head (the
+arrow in its direction's color, the other session's number, then dim harness,
+`HH:MM` today or `MM-DD`, the record's kind and a sent one's delivery state:
+`delivered`/`sent` dim, `not delivered` (the recipient was never resolved; no age) in the caution color,
+`failed` red) and, two cells in, the text in the body color from its first
+meaningful words (leading bracket frames and heading marks left out, nothing
+else changed). Three show; rows to spare once every route stands in its three-row
+form (and an opened detail whole) give bodies up to three rows and more messages
+(up to eight); short of rows a message folds to one row (arrow,
+number, bright text), then fewer show from the oldest and the lower rule counts
+them. Pressing a message shows its whole retained text in place. Two limits differ: the
 source keeps a received input's first 384 characters and a sent message's
 200-character summary, never the whole payload; once opened, the screen never
 cuts that retained text further: a word wider than a row, such as a long URL or
@@ -331,7 +438,7 @@ light for the `light` theme, else the terminal's background where it is
 already known (`COLORFGBG`; nothing is asked); on an unknown background `terminal` and
 `mono` keep the terminal's own and paint no shade. On a shade nothing is dimmed
 on top: secondary text and messages take 248/241, body text 253/237, the panel
-frame 244/243, route box 245/243, messages rules 242/245; the question's border,
+frame 244/243 while idle or unknown, route box 245/243, messages rules 242/245; the question's border,
 `◑` and `›` are 174/131 on every colored theme.
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
