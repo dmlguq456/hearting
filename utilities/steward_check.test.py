@@ -225,6 +225,25 @@ class StewardCheckLabTest(CheckBase):
                 self.step(now + 100)
         self.assertEqual(outcomes, [True, False, False, False, False, False])
 
+    def test_other_run_after_five_recoveries_wakes_once(self):
+        self.register()
+        outcomes = []
+        ages = [(1200, 300)] + [(300, 300)] * 5 + [(300, 1200)] * 2
+        for index, pair in enumerate(ages):
+            for rid, age in zip(("small", "large"), pair):
+                self.fixture.write_run(self.root, rid, at=self.now - age,
+                                       stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+            self.board.clear_cache()
+            now = T0 + (index + 1) * (INTERVAL + 200)
+            before = self.notify.call_count
+            self.step(now)
+            sent = self.notify.call_count > before
+            outcomes.append(sent)
+            if sent:
+                self.deliver_and_ack()
+                self.step(now + 100)
+        self.assertEqual(outcomes, [True, False, False, False, False, False, True, False])
+
     def test_only_new_values_even_new_best_name_do_not_change_signature(self):
         self.assertEqual(self.board.read(self.root)[0]["groups"][0]["headline"]["name"], "작은 모델")
         self.register()
@@ -254,7 +273,7 @@ class StewardCheckLabTest(CheckBase):
                 seen = REAL_OBSERVE(HARNESS, SID)
                 self.assertFalse(seen.get("lab"))
                 self.assertEqual(SC._classify(seen), "tidy-and-release")
-                old = {k: v for k, v in seen.items() if k != "lab"}
+                old = {k: v for k, v in seen.items() if k not in ("lab", "lab_roots")}
                 self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature("tidy-and-release", old))
 
     def test_counts_from_board_and_unlinked_changes_are_observed(self):
@@ -271,7 +290,7 @@ class StewardCheckLabTest(CheckBase):
         self.assertIn("지금 볼 것: 작은 모델", self.notice()["text"])
         self.write_run("unlinked-two", 11.0)
         after = REAL_OBSERVE(HARNESS, SID)
-        self.assertNotEqual(SC._signature("tidy-and-release", seen), SC._signature("tidy-and-release", after))
+        self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature("tidy-and-release", after))
 
     def test_multiple_roots_and_notice_budget(self):
         second = self.fixture.make_root("second")
@@ -1778,7 +1797,14 @@ class LabRegressionTest(CheckBase):
     def labs(self, unknown=0, failed=0, stagnant=0, unlinked=0, groups=None):
         groups = groups or [dict(name="AMI", headline_name="작은 모델", unknown=unknown,
                                  failed=failed, stagnant=stagnant)]
+        groups = [dict(g, rows=g.get("rows", [
+            dict(condition_id=g["name"] + str(i), run_id="run-" + str(i),
+                 unknown_flag=i < g["unknown"]) for i in range(12)])) for g in groups]
+        # Linked healthy rows keep these run identities present during 1→0→1.
+        groups[0]["rows"] += [dict(condition_id="linked-" + str(i), run_id="loose-" + str(i),
+                                  unknown_flag=False) for i in range(3)]
         return {"/synthetic": dict(groups=groups, unlinked=unlinked,
+            unlinked_run_ids=["loose-" + str(i) for i in range(unlinked)],
             **{key: sum(g[key] for g in groups) for key in ("unknown", "failed", "stagnant")})}
 
     def tick(self, lab):
@@ -1824,7 +1850,6 @@ class LabRegressionTest(CheckBase):
         self.assertIn("미확인 12", text)
         self.assertIn("missing-condition", text)
         self.assertRegex(text, r"외 [1-4]개")
-        self.assertRegex(text, r"\+[1-4] more")
         self.assertNotIn("…", text)
 
     def test_runtime_failure_and_stagnation_display_without_waking(self):
@@ -1836,7 +1861,7 @@ class LabRegressionTest(CheckBase):
                 self.assertIn("1", SC._lab_line({"lab": labs}))
 
     def test_lab_falls_back_to_ordinary_notice_and_does_not_poison_retry(self):
-        self.seen["lab"] = self.labs(groups=[dict(name="가" * 120, headline_name="나" * 80,
+        self.seen["lab"] = self.labs(groups=[dict(name="가" * 180, headline_name="나" * 80,
                                                 unknown=12, failed=0, stagnant=0)])
         self.seen["open_work"] = ["가" * 60 + str(i) for i in range(4)]
         with mock.patch.object(session_notice, "notify", return_value=None):
@@ -1848,6 +1873,139 @@ class LabRegressionTest(CheckBase):
         receipt = self.record()["receipt"]
         self.assertNotIn("LAB:", receipt["text"])
         self.assertIn("`peer-steward steward check`", receipt["text"])
+
+    def test_omitted_lab_is_not_remembered_or_repeated(self):
+        lab = self.labs(groups=[dict(name="가" * 180, headline_name="나" * 80,
+                                   unknown=1, failed=0, stagnant=0)])
+        self.assertEqual(self.tick(lab), 1)
+        self.assertNotIn("LAB:", self.notice()["text"])
+        self.assertFalse(self.obs().get("lab_notified"))
+        self.assertEqual(self.tick(lab), 0)
+        lab["/synthetic"]["groups"][0].update(name="짧은 묶음", headline_name="run A")
+        self.assertEqual(self.tick(lab), 1)
+        self.assertIn(" | LAB: 짧은 묶음", self.notice()["text"])
+        self.assertEqual(self.tick(lab), 0)
+
+    def test_korean_actions_without_lab_fit_receipt(self):
+        self.seen["open_work"] = ["한" * 69 + str(i) for i in range(4)]
+        self.assertEqual(self.tick({}), 1)
+        self.assertEqual(self.obs()["reason"], "notice-acked")
+        self.assertIn("more", self.notice()["text"])
+        session_notice.validate({"schema_version": 1, "kind": "notice",
+            **{k: self.notice()[k] for k in ("key", "subject", "text", "required_action")}})
+
+    def test_receipt_size_sweep_with_and_without_lab(self):
+        sizes = []
+        for ko in range(20, 71, 5):
+            self.seen["open_work"] = ["한" * ko + "a" * (69 - ko) + str(i) for i in range(4)]
+            for count in (0, 2, 3, 5):
+                groups = [dict(name="묶음" + str(i), headline_name="모델" + str(i),
+                               unknown=1, failed=0, stagnant=0) for i in range(count)]
+                self.seen["lab"] = self.labs(groups=groups) if groups else {}
+                sid = f"0199a1b2-c3d4-7e5f-8a9b-{ko:06d}{count:06d}"
+                duty = SC.register(HARNESS, sid, now=T0, store=self.store, ensure_runner=False)
+                SC.advance(self.store.get(duty["id"]), self.store, now=T0 + INTERVAL)
+                obs = self.store.get(duty["id"])["observation"]
+                self.assertEqual(obs["phase"], "notified", (ko, count, obs))
+                receipt = SC._notice_record(sid, obs["notice_delivery_id"])["receipt"]
+                session_notice.validate(receipt)
+                sizes.append((len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()),
+                              len(receipt["text"])))
+        print("receipt-size-sweep", len(sizes), "max-bytes", max(x[0] for x in sizes),
+              "max-chars", max(x[1] for x in sizes))
+
+    def test_departed_roots_are_pruned_but_unreadable_current_roots_remain(self):
+        lab = self.labs(unknown=1)
+        self.tick(lab)
+        before = self.obs()["lab_notified"]
+        self.seen["lab_roots"] = ["/synthetic"]
+        self.assertEqual(self.tick({}), 0)
+        self.assertEqual(self.obs()["lab_notified"], before)
+        self.seen["lab_roots"] = []
+        self.assertEqual(self.tick({}), 0)
+        self.assertFalse(self.obs()["lab_notified"])
+        self.seen["lab_roots"] = ["/synthetic"]
+        self.assertEqual(self.tick(lab), 1)
+
+    def test_new_unknown_group_precedes_runtime_failures(self):
+        failed = [dict(name="실패 묶음 " + "가" * 30 + str(i), headline_name="나" * 30,
+                       unknown=0, failed=1, stagnant=0) for i in range(4)]
+        self.tick(self.labs(groups=failed))
+        lab = self.labs(groups=failed + [dict(name="새 미확인", headline_name="new run",
+                                            unknown=1, failed=0, stagnant=0)])
+        self.assertEqual(self.tick(lab), 1)
+        self.assertIn(" | LAB: 새 미확인", self.notice()["text"])
+        self.assertEqual(self.tick(lab), 0)
+
+    def test_folded_groups_get_a_turn_and_only_visible_runs_are_remembered(self):
+        groups = [dict(name="group-" + str(i) + "가" * 30, headline_name="model" + "나" * 20,
+                       unknown=1, failed=0, stagnant=0) for i in range(4)]
+        lab = self.labs(groups=groups)
+        remembered = set()
+        for _ in range(4):
+            if len(remembered) == 4:
+                break
+            self.assertEqual(self.tick(lab), 1)
+            text = self.notice()["text"]
+            shown = [g for g in lab["/synthetic"]["groups"] if g["name"] in text]
+            for group in shown:
+                remembered.update(SC._lab_run_ids(group, unknown_only=True))
+            self.assertEqual(set(self.obs()["lab_notified"]["/synthetic"]), remembered)
+        self.assertEqual(len(remembered), 4)
+        for _ in range(3):
+            self.assertEqual(self.tick(lab), 0)
+
+    def test_oversized_group_does_not_hide_smaller_new_problem(self):
+        lab = self.labs(groups=[
+            dict(name="가" * 180, headline_name="나" * 80, unknown=1, failed=0, stagnant=0),
+            dict(name="small-group", headline_name="run B", unknown=1, failed=0, stagnant=0)])
+        self.assertEqual(self.tick(lab), 1)
+        self.assertIn(" | LAB: small-group", self.notice()["text"])
+        self.assertIn("외 1개", self.notice()["text"])
+        self.assertEqual(len(self.obs()["lab_notified"]["/synthetic"]), 1)
+        for _ in range(3):
+            self.assertEqual(self.tick(lab), 0)
+
+    def test_healthy_group_does_not_displace_actions(self):
+        self.seen["open_work"] = [str(i) + "x" * 69 for i in range(4)]
+        self.tick(self.labs(groups=[dict(name="healthy" + "가" * 30, headline_name="best" + "나" * 20,
+                                        unknown=0, failed=0, stagnant=0)]))
+        text = self.notice()["text"]
+        self.assertNotIn("more", text)
+        self.assertNotIn("LAB:", text)
+        for work in self.seen["open_work"]:
+            self.assertIn(work, text)
+
+    def test_new_run_same_condition_and_new_unlinked_run(self):
+        lab = self.labs(unknown=1, unlinked=1)
+        self.tick(lab)
+        lab["/synthetic"]["groups"][0]["rows"][0]["run_id"] = "replacement"
+        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
+        lab["/synthetic"]["unlinked_run_ids"] = ["different-loose"]
+        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
+
+    def test_pruning_missing_summary_and_role_reset(self):
+        lab = self.labs(unknown=1)
+        self.tick(lab)
+        before = self.obs()["lab_notified"]
+        self.assertEqual(self.tick({}), 0)  # failed read retains identity
+        self.assertEqual(self.obs()["lab_notified"], before)
+        empty = {"/synthetic": dict(groups=[], unlinked=0, unlinked_run_ids=[],
+                                   unknown=0, failed=0, stagnant=0)}
+        self.assertEqual(self.tick(empty), 0)
+        self.assertFalse(self.obs()["lab_notified"])
+        self.assertEqual(self.tick(lab), 1)  # absent then returned is a new observation
+        for i in range(20):
+            lab["/synthetic"]["groups"][0]["rows"][0]["run_id"] = str(i)
+            self.assertEqual(self.tick(lab), 1)
+            self.assertEqual(len(self.obs()["lab_notified"]["/synthetic"]), 1)
+        SC.settle_session(HARNESS, SID, reason="role-released", store=self.store)
+        self.register(now=self.clock)
+        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
+        self.assertNotIn("lab_seen", self.obs())
 
     def test_lab_language_and_existing_signature_scope(self):
         seen = {**self.seen, "lab": self.labs(unknown=12, failed=1, stagnant=2, unlinked=3)}
@@ -1861,15 +2019,15 @@ class LabRegressionTest(CheckBase):
             "tidy-and-release", {**seen, "lab": self.labs(unknown=12, failed=9, unlinked=3)}))
         changed = self.labs(unknown=12, unlinked=3)
         changed["/synthetic"]["groups"][0]["headline_name"] = "다른 조건"
-        self.assertNotEqual(SC._signature("tidy-and-release", seen), SC._signature(
+        self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature(
             "tidy-and-release", {**seen, "lab": changed}))
 
     def test_separate_groups_roots_and_ordinary_work_still_wake(self):
         self.tick(self.labs(unknown=1))
         self.assertEqual(self.tick(self.labs(unlinked=1)), 1)
         self.assertEqual(self.tick(self.labs(unlinked=0)), 0)
-        labs = self.labs(unlinked=1)
-        labs["/synthetic"]["groups"][0].update(name="new-group", unknown=1)
+        labs = self.labs(unlinked=1, groups=[dict(name="new-group", headline_name="new",
+                                                unknown=1, failed=0, stagnant=0)])
         self.assertEqual(self.tick(labs), 1)
         labs["/second"] = labs.pop("/synthetic")
         self.assertEqual(self.tick(labs), 1)

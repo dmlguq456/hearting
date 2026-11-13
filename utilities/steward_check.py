@@ -459,13 +459,17 @@ def _pending_count(module, harness: str, session_id) -> int:
                 and (row.get("from") or {}).get("harness") != "runtime"])
 
 
-def _observe_lab(cwds) -> dict:
+def _observe_lab(cwds, root_scope=None) -> dict:
     """One shared board read per target artifact root; optional, read-only evidence."""
     if not cwds:
+        if root_scope is not None:
+            root_scope["lab_roots"] = []
         return {}
     try:
         from fleet.collectors.project_status import artifact_root
         roots = {root for cwd in sorted(cwds) if (root := artifact_root(cwd))}
+        if root_scope is not None:
+            root_scope["lab_roots"] = sorted(roots)
         if not roots:
             return {}
         import experiment_board
@@ -478,16 +482,20 @@ def _observe_lab(cwds) -> dict:
             if not experiment_catalog.catalog_path(Path(root)).is_file():
                 continue
             board, _ = experiment_board.read(Path(root))
-            if not board["visible"] or board["catalog"]["status"] != "ok":
+            if board["catalog"]["status"] != "ok":
                 continue
             groups = []
             for group in board["groups"]:
                 headline = group["headline"]
                 groups.append({"name": group["name"],
                                **{key: group["counts"][key] for key in ("failed", "stagnant", "unknown")},
-                               "headline_name": headline["name"]})
+                               "headline_name": headline["name"],
+                               "rows": [{key: row[key] for key in
+                                         ("condition_id", "run_id", "unknown_flag")}
+                                        for row in group["rows"]]})
             lab[root] = {**{key: board["totals"][key] for key in ("failed", "stagnant", "unknown")},
-                         "unlinked": board["unlinked"]["count"], "groups": groups}
+                         "unlinked": board["unlinked"]["count"],
+                         "unlinked_run_ids": board["unlinked"]["run_ids"], "groups": groups}
         except Exception:  # noqa: BLE001 - missing/broken optional evidence changes no duty behavior
             continue
     return lab
@@ -503,13 +511,26 @@ def _lab_text():
     return _module("ui_text", load).translator()
 
 
-def _lab_parts(observation: dict) -> list[str]:
+def _lab_run_ids(group: dict, *, unknown_only=False) -> set[str]:
+    """Condition + current run, including healthy rows so recovery retains memory."""
+    return {json.dumps(["condition", row["condition_id"], row.get("run_id")], ensure_ascii=False)
+            for row in group.get("rows", [])
+            if not unknown_only or row["unknown_flag"]}
+
+
+def _lab_entries(observation: dict, notified=None) -> list[dict]:
     t = _lab_text()
-    parts = []
-    for lab in (observation.get("lab") or {}).values():
+    entries = []
+    notified = notified or {}
+    for root, lab in (observation.get("lab") or {}).items():
+        if not lab["groups"] and not lab["unlinked"]:
+            continue
         groups = lab["groups"] or [{"name": None, "headline_name": None, **lab}]
         for index, group in enumerate(groups):
             unlinked = lab["unlinked"] if index == 0 else 0
+            ids = _lab_run_ids(group, unknown_only=True)
+            if index == 0:
+                ids.update(json.dumps(["unlinked", rid]) for rid in lab.get("unlinked_run_ids", []))
             counts = "·".join(t("fleet.lab.n_" + key, n=group[key])
                               for key in ("failed", "stagnant", "unknown"))
             text = f"{group['name'] or '-'} — {counts}, " + t(
@@ -517,8 +538,14 @@ def _lab_parts(observation: dict) -> list[str]:
             if unlinked:
                 text += ", " + t("fleet.lab.n_unlinked", n=unlinked)
             attention = unlinked or any(group[key] for key in ("failed", "stagnant", "unknown"))
-            parts.append((bool(attention), text))
-    return [text for _, text in sorted(parts, key=lambda part: not part[0])]
+            entries.append({"root": root, "ids": ids, "text": text,
+                            "attention": bool(attention),
+                            "new": bool(ids - set(notified.get(root, [])))})
+    return sorted(entries, key=lambda entry: (not entry["new"], not entry["attention"]))
+
+
+def _lab_parts(observation: dict) -> list[str]:
+    return [entry["text"] for entry in _lab_entries(observation)]
 
 
 def _lab_line(observation: dict, *, parts=None, shown=None) -> str:
@@ -532,32 +559,22 @@ def _lab_line(observation: dict, *, parts=None, shown=None) -> str:
     return "LAB: " + "; ".join(kept)
 
 
-def _lab_attention(observation: dict) -> dict:
-    """Only evidence not already covered by runtime failure/stall notices."""
-    result = {}
-    for root, lab in (observation.get("lab") or {}).items():
-        groups = {g["name"]: {"unknown": g["unknown"], "headline_name": g["headline_name"]}
-                  for g in lab["groups"] if g["unknown"]}
-        if groups or lab["unlinked"]:
-            result[root] = {"groups": groups, "unlinked": lab["unlinked"]}
-    return result
+def _lab_retained(observation: dict, previous: dict) -> dict:
+    """Prune only successfully read roots; an unavailable board is not a recovery.
 
-
-def _lab_notified_level(current: dict, previous: dict) -> dict:
-    """Retain notified high counts through decreases and missing reads.
-
-    A headline follows a newly increased count; changing only the name must not
-    re-wake the holder at a count already reported. Kept inside the existing duty.
+    Old count-shaped state has no run identity and is intentionally forgotten.
+    A run removed from a readable summary can notify again when it returns.
+    Roots no longer in the holder's target scope are also forgotten.
     """
-    result = {root: {"unlinked": lab["unlinked"], "groups": dict(lab["groups"])}
-              for root, lab in previous.items()}
-    for root, lab in current.items():
-        kept = result.setdefault(root, {"unlinked": 0, "groups": {}})
-        kept["unlinked"] = max(kept["unlinked"], lab["unlinked"])
-        for name, group in lab["groups"].items():
-            if group["unknown"] > kept["groups"].get(name, {}).get("unknown", 0):
-                kept["groups"][name] = dict(group)
-    return result
+    kept = {root: set(ids) for root, ids in previous.items() if isinstance(ids, list)
+            and ("lab_roots" not in observation or root in observation["lab_roots"])}
+    for root, lab in (observation.get("lab") or {}).items():
+        present = set().union(*(_lab_run_ids(g) for g in lab["groups"]))
+        run_ids = {row.get("run_id") for g in lab["groups"] for row in g.get("rows", [])}
+        run_ids.update(lab.get("unlinked_run_ids", []))
+        present.update(json.dumps(["unlinked", rid]) for rid in run_ids if rid)
+        kept[root] = kept.get(root, set()) & present
+    return {root: sorted(ids) for root, ids in kept.items() if ids}
 
 
 def _observe_role(harness: str, session_id: str) -> dict:
@@ -611,8 +628,10 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 "owed": _pending_count(module, t_harness, t_sid)})
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
+    root_scope = {}
+    lab = _observe_lab(cwds, root_scope)
     return {"targets": targets, "pending_messages": pending,
-            "open_work": work, "user_decisions": decisions, "lab": _observe_lab(cwds)}
+            "open_work": work, "user_decisions": decisions, "lab": lab, **root_scope}
 
 
 def _queued_for(target: dict) -> int:
@@ -692,9 +711,6 @@ def _signature(action: str, observation: dict) -> str:
     raw = repr((action, rows, observation["pending_messages"],
                 tuple(observation.get("open_work") or ()),
                 tuple(observation.get("user_decisions") or ())))
-    lab = _lab_attention(observation)
-    if lab:
-        raw += json.dumps(lab, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -719,11 +735,11 @@ def _classify(observation: dict) -> str:
     return "run-steward-check"
 
 
-def _actions_text(actions: list[str], limit: int | None = None) -> str:
+def _actions_text(actions: list[str], limit: int | None = None, *, max_actions=_MAX_ACTIONS) -> str:
     """The assign-next notice within the carrier's text limit."""
     import session_notice
     limit = session_notice.MAX_TEXT if limit is None else limit
-    shown = list(actions[:_MAX_ACTIONS])
+    shown = list(actions[:max_actions])
     while True:
         more = len(actions) - len(shown)
         joined = "; ".join([*shown, *([f"+{more} more"] if more else [])])
@@ -733,30 +749,58 @@ def _actions_text(actions: list[str], limit: int | None = None) -> str:
         shown.pop()
 
 
-def _notice_text(base: str, seen: dict, action: str, key: str, waiting_since, now) -> str:
-    """Fit whole LAB groups and actions to both carrier limits before notifying."""
+def _notice_text(base: str, seen: dict, action: str, key: str, waiting_since, now,
+                 notified=None) -> tuple[str, dict]:
+    """Fit the actual receipt, returning only run identities whose group is shown.
+
+    New unknowns lead. Drop healthy groups before any action; drop actions whole.
+    An unrenderable group earns neither memory nor a repeated quiet wake.
+    """
     import session_notice
     try:
-        parts = _lab_parts(seen) if seen.get("lab") else []
-    except Exception:  # optional display must never disable the ordinary notice
-        return base
+        entries = _lab_entries(seen, notified)
+    except Exception:  # optional display still uses the ordinary byte fitting path
+        entries = []
     actions = next_actions(seen, waiting_since, now) if action == "assign-next" else None
-    for shown in range(len(parts), 0, -1):
-        line = _lab_line(seen, parts=parts, shown=shown)
-        if len(line) > 250:
-            continue
-        suffix = " | " + line
-        advice = (_actions_text(actions, session_notice.MAX_TEXT - len(suffix))
-                  if actions is not None else base)
-        text = " ".join((advice + suffix).split())
+
+    def fits(text):
         try:
-            # Same normalization and ASCII-escaped byte accounting as notify.
             session_notice.validate({"schema_version": 1, "kind": "notice",
                 "subject": "steward-check", "text": text, "required_action": action, "key": key})
+            return True
         except ValueError:
-            continue
-        return text
-    return base  # LAB cannot make an otherwise deliverable notice unavailable
+            return False
+
+    # An individually oversized first group must not hide smaller new problems.
+    minimum = _actions_text(actions, max_actions=0) if actions is not None else base
+    eligible, deferred = [], []
+    for entry in entries:
+        single = _lab_line(seen, parts=[entry["text"], *([""] * (len(entries) - 1))], shown=1)
+        if len(single) <= 250 and fits(" ".join((minimum + " | " + single).split())):
+            eligible.append(entry)
+        else:
+            deferred.append(entry)
+    entries = eligible
+    parts = [entry["text"] for entry in [*eligible, *deferred]]
+    attention = sum(entry["attention"] for entry in entries)
+    for kept_attention in range(attention, -1, -1):
+        maximum = len(entries) if kept_attention == attention else kept_attention
+        for count in range(min(len(actions), _MAX_ACTIONS) if actions is not None else 0, -1, -1):
+            for shown in range(maximum, kept_attention - 1, -1):
+                line = _lab_line(seen, parts=parts, shown=shown)
+                if len(line) > 250:
+                    continue
+                suffix = " | " + line if line else ""
+                advice = (_actions_text(actions, max_actions=count)
+                          if actions is not None else base)
+                text = " ".join((advice + suffix).split())
+                if not fits(text):
+                    continue
+                visible = {}
+                for entry in entries[:shown]:
+                    visible.setdefault(entry["root"], set()).update(entry["ids"])
+                return text, visible
+    return base, {}  # ordinary non-action text retains its existing fallback
 
 
 # ---------------------------------------------------------------- notices
@@ -1007,21 +1051,13 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
     waiting_since = _track_waiting(observation.get("waiting_since"), seen["targets"], now)
     observation = {**observation, "waiting_since": waiting_since}
     action = _classify(seen)
-    lab_seen = _lab_attention(seen)
-    lab_level = _lab_notified_level(lab_seen, observation.get("lab_notified") or {})
-    # Reuse the ordinary signature with the notified LAB level, not the latest
-    # fluctuating read. Display still uses the current shared board unchanged.
-    signature_lab = {root: {"unlinked": lab["unlinked"], "groups": [
-        {"name": name, **group} for name, group in lab["groups"].items()]}
-        for root, lab in lab_level.items()}
-    signature = _signature(action, {**seen, "lab": signature_lab})
-    observation = {**observation, "lab_seen": lab_seen}
+    retained = _lab_retained(seen, observation.get("lab_notified") or {})
+    # Ordinary work changes independently; LAB wakes only for new, renderable runs.
+    signature = _signature(action, seen)
+    observation.pop("lab_seen", None)  # retire obsolete state from earlier duties
+    if "lab_notified" in observation:
+        observation["lab_notified"] = retained
     quiet = _quiet(seen)
-    if quiet and signature == observation.get("quiet_signature"):
-        store.update(duty["id"], observation={
-            **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
-            "reason": "quiet-no-change"})
-        return
     if action == "release-if-idle":
         text = TEXT_RELEASE_IF_IDLE
     elif action == "tidy-and-release":
@@ -1032,13 +1068,23 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         text = TEXT_RUN_CHECK
     cycle = int(observation.get("cycle") or 0)
     key = _notice_key(harness, session_id, observation["epoch"], cycle)
-    text = _notice_text(text, seen, action, key, waiting_since, now)
+    text, visible = _notice_text(text, seen, action, key, waiting_since, now, retained)
+    new_visible = any(ids - set(retained.get(root, [])) for root, ids in visible.items())
+    if quiet and signature == observation.get("quiet_signature") and not new_visible:
+        store.update(duty["id"], observation={
+            **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
+            "reason": "quiet-no-change"})
+        return
+    lab_notified = {root: set(ids) for root, ids in retained.items()}
+    for root, ids in visible.items():
+        lab_notified.setdefault(root, set()).update(ids)
+    lab_notified = {root: sorted(ids) for root, ids in lab_notified.items() if ids}
     delivery_id = _delivery_id(key)
     # Record the intent first so a carrier claiming right away already finds the
     # duty vouching for this exact notice.
     sent = {**observation, "phase": "notified", "cycle": cycle + 1, "notified_at": now,
             "notice_delivery_id": delivery_id, "reason": action,
-            "quiet_signature": signature if quiet else None, "lab_notified": lab_level}
+            "quiet_signature": signature if quiet else None, "lab_notified": lab_notified}
     store.update(duty["id"], observation=sent)
     _THROTTLE[(duty["id"], "notified")] = now
     try:
