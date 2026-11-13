@@ -5,6 +5,9 @@ silently on a PIPE-truncated substring match. Every branch spawns the real
 binary placed first on PATH; no `WH.probe_claude_session_resume`/
 `claude_session_resume_available` mock is used anywhere in this file.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse
 import ast
 import importlib.util

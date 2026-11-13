@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-headless.sd15.test.sh — SD-15 (OPERATIONS §5.10 ⑨) limit-사망 즉시 감지 회귀.
 #   증명: (1) scan_death 패턴/ reset 추출 (2) launch 직후 조기 limit-death → row done,
 #   note=dead-<reason>,reset=<x> 로 즉시 마감 + reset 캐시 기록 (3) clean 조기 exit(비-limit)

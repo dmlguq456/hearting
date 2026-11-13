@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import os
 from pathlib import Path
@@ -41,6 +44,20 @@ class FixtureEnvironmentTest(unittest.TestCase):
             self.assertIn("unset HEARTING_MODEL_CONFIG_HOME", fixture_env.shell_exports(env))
             self.assertEqual(env["ZDOTDIR"], env["HOME"])
             self.assertEqual(env["AGENT_HOME"], str(source))
+
+    def test_an_empty_or_relative_root_is_refused_instead_of_becoming_the_checkout(self) -> None:
+        # A failed `mktemp -d` hands an empty root to `fixture_env.py shell "$TMP"`; resolving it
+        # made the current checkout the fixture root and the caller's EXIT trap deleted it.
+        for root in ("", "relative/root"):
+            with self.assertRaises(ValueError):
+                fixture_env.build_environment(root, Path(__file__).resolve().parents[2])
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = fixture_env.main(["shell", "", str(Path(__file__).resolve().parents[2])])
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("nothing was exported", err.getvalue())
 
     def test_safe_fs_rejects_outside_target_before_lock_creation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -6,6 +6,9 @@ registered wrapper's launch metadata, Codex's rollout/stream facts and model cat
 cache) and ends at the Fleet JSON payload and the rendered context row. The native
 formulas under test are the verified consumers recorded in ``context_policy.py``.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 from datetime import datetime, timezone
 import json
