@@ -326,7 +326,10 @@ def owed_items(records: list[dict]) -> list[dict]:
 # reported, as a ``read-notice`` receipt does (PG-46). The same first-line
 # reading as the ledger's ``[steer]``/``[handoff]``/``[gate]`` kinds; a body
 # without one keeps the pass.
-READ_ONLY_PEER_PREFIXES = ("[report]", "[notice]")
+try:  # the one message-kind table (also the ledger's and the Claude record hook's)
+    from peer_request import READ_ONLY_PEER_PREFIXES
+except ImportError:  # a partial tree without it keeps the two original prefixes
+    READ_ONLY_PEER_PREFIXES = ("[report]", "[notice]")
 
 
 def _peer_body(text: str) -> str:
@@ -377,7 +380,23 @@ def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict
 def peer_body_item(text: str, origin: dict | None = None) -> dict | None:
     """The owed item for a verified peer body this turn was shown, or ``None``
     when it only needs reading. Claude shows sealed peer bodies as hook context
-    (``peer-message.emit_peer_context``) where Codex gets them as the prompt."""
+    (``peer-message.emit_peer_context``) where Codex gets them as the prompt.
+
+    A sealed request role (``peer_request``) decides first: a request is owed a
+    follow-through, a report or cancel notice only needs reading. Otherwise the
+    first line decides, through the same table."""
+    ref = (origin or {}).get("transfer_ref")
+    transfer = _sealed_transfer(ref) if isinstance(ref, str) and ref else None
+    if transfer is not None:
+        try:
+            import peer_request
+            if peer_request.valid_seal(transfer.get("request")):
+                if transfer["request"]["role"] in ("request", "followup"):
+                    return {"kind": "peer-report", "required_action": "follow-through",
+                            "request": transfer["request"]["id"]}
+                return None
+        except Exception:  # noqa: BLE001 - an unreadable seal falls back to the first line
+            pass
     try:
         line = _peer_body_first_line(text or "", origin)
     except Exception:  # noqa: BLE001 - an unreadable body keeps the pass
@@ -385,6 +404,26 @@ def peer_body_item(text: str, origin: dict | None = None) -> dict | None:
     if line.startswith(READ_ONLY_PEER_PREFIXES):
         return None
     return {"kind": "peer-report", "required_action": "follow-through"}
+
+
+_PEER_MESSAGE = None  # loaded once, only when a transfer ref must be read
+
+
+def _sealed_transfer(ref: str) -> dict | None:
+    """The transfer record for ``ref`` (its sealed request role), or None."""
+    global _PEER_MESSAGE
+    try:
+        if _PEER_MESSAGE is None:
+            import importlib.util
+            path = Path(__file__).resolve().with_name("peer-message.py")
+            spec = importlib.util.spec_from_file_location("_carrier_peer_message", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PEER_MESSAGE = module
+        record = _PEER_MESSAGE._read_transfer_record(ref)
+    except Exception:  # noqa: BLE001 - no readable seal: the first line decides
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def follow_through(sid: str, tid: str, root: Path | None = None) -> str:

@@ -3517,7 +3517,7 @@ class ObligationStore:
                 if evidence.get("server") != (identity.get("server") or "default"):
                     return record
                 if evidence.get("kind") not in {"recipient-session-absent", "recipient-session-ended",
-                                                   "first-input-process-dead"}:
+                                                   "first-input-process-dead", "request-withdrawn"}:
                     return record
                 endpoint = identity.get("server") or "default"
                 recipient_binding = evidence.get("recipient_binding")
@@ -3563,6 +3563,11 @@ class ObligationStore:
                             return record
                     except Exception:
                         return record
+                elif evidence.get("kind") == "request-withdrawn":
+                    # The sender superseded or cancelled this revision before it was
+                    # delivered (peer-message re-read the request under the row lock).
+                    # This ends the delivery attempt; it proves no receipt.
+                    pass
                 else:
                     proof = (message or {}).get("first_input_process")
                     if (evidence.get("process_disposition") != "dead"

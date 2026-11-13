@@ -5405,6 +5405,18 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
                     return
         checkpoint(state="unknown", observation={"ref": ref, "reason": "pending-row-missing"})
         return
+    if peer_message._request_withdrawn(row):
+        # The sender superseded or cancelled this request revision before it was
+        # delivered. Close the delivery attempt; no sender notice is owed for it.
+        status = peer_message.cancel_message_obligation(
+            ref, duty_id=duty_id, expected_revision=duty.get("revision"),
+            identity=intent.get("identity") or {}, message=row,
+            evidence={"kind": "request-withdrawn",
+                      "server": (intent.get("identity") or {}).get("server") or "default"})
+        if status == "cancelled":
+            checkpoint(state="cancelled", delivery="failed", cleanup="complete",
+                       observation={"ref": ref, "reason": "request-withdrawn"})
+            return
     if peer_message._unresolved_target(row.get("to")) and not row.get("bound_to"):
         if row.get("receipt") == "target-identity-changed" or "ambiguous" in row.get("receipt", ""):
             # Delivery stays refused; the sender's one-hour notice is still owed.
@@ -7830,7 +7842,7 @@ def _codex_shell_start_gate(binding):
 
 def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
                        expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
-                       binding=None, pane=None, native_owner=None, sender_row=None):
+                       binding=None, pane=None, native_owner=None, sender_row=None, request=None):
     """Native-session address using the existing sealed message and carrier.
 
     Delivery never types into a window: a shell attachment takes it through its host
@@ -7856,7 +7868,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE)
+            namespace=_PEER_NAMESPACE, request=request)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -7920,7 +7932,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
         _schedule_message_obligation(current, f"{harness}:{sid}")
     surface = "codex-queue" if harness == "codex" else harness + "-native"
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body),
+    _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body, request),
             summary_text=text, to_session_id=sid, to_pane=None, ref=args.ref,
             status=_PROMPT_LEDGER_STATUS[outcome],
             receipt=(("native-process:" if native_owner is not None else
@@ -7929,7 +7941,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             from_identity=from_identity, from_name=from_name, transfer_ref=ref,
             surface=surface, producer_binding=producer_binding)
     print(f"prompted={outcome} target={args.target} to_harness={harness} "
-          f"to_alias={peer_message.peer_alias(harness, sid)} kind={_prompt_message_kind(body)} "
+          f"to_alias={peer_message.peer_alias(harness, sid)} kind={_prompt_message_kind(body, request)} "
           f"ref={ref} via={'session-shell' if binding is not None else surface} "
           f"ms={elapsed_ms} reason={reason}")
     _prompt_carrier_note(ref, args.target, outcome)
@@ -7983,7 +7995,7 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None, sender=None):
+               handoff=None, resolved_recipient=None, sender=None, request=None):
     """Seal a peer message and route it through the recipient's native carrier.
 
     ``sender`` is the observed predecessor identity for a supervisor-issued
@@ -8037,6 +8049,13 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     unresolved = dict(from_identity=from_identity, from_name=from_name, from_harness=from_harness,
                       from_sid=from_sid, on_prepared=on_prepared,
                       producer_binding=producer_binding, handoff=handoff)
+    unresolved_reply = _prompt_unresolved
+    if request is not None:
+        # A request is bound to one exact session; an unresolved address is
+        # refused here and nothing is sealed or kept pending for it.
+        def unresolved_reply(_args, _body, why, **_unused):
+            print(f"prompted=false reason={why}")
+            return 5
 
     if resolved_recipient is not None:
         identity = {"harness": resolved_recipient.get("harness"),
@@ -8046,7 +8065,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     else:
         identity, reason = peer_address.resolve(args.target, server=_HERDR_SESSION)
     if identity is None or reason:
-        return _prompt_unresolved(args, body, reason or "target-observation-unavailable",
+        return unresolved_reply(args, body, reason or "target-observation-unavailable",
                                   **unresolved)
     t_harness, t_sid = identity["harness"], identity["session_id"]
     if expected_recipient is not None and (t_harness, t_sid) != expected_recipient:
@@ -8057,16 +8076,32 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         return 5
     binding, binding_reason = _current_shell_binding(t_harness, t_sid)
     if binding_reason in {"attachment-ambiguous", "target-identity-changed"}:
-        return _prompt_unresolved(args, body, binding_reason, **unresolved)
+        return unresolved_reply(args, body, binding_reason, **unresolved)
     native_owner = None
     if binding is None and t_harness == "codex":
         native_owner = _prompt_codex_native_owner(t_sid)
         if native_owner is None and _prompt_codex_owner_conflict(t_sid):
-            return _prompt_unresolved(args, body, "target-identity-changed", **unresolved)
+            return unresolved_reply(args, body, "target-identity-changed", **unresolved)
     return _cmd_prompt_native(args, body, t_harness, t_sid, binding=binding,
         native_owner=native_owner, from_identity=from_identity, from_name=from_name,
         expected_recipient=expected_recipient, on_prepared=on_prepared,
-        producer_binding=producer_binding, handoff=handoff, sender_row=sender_row)
+        producer_binding=producer_binding, handoff=handoff, sender_row=sender_row,
+        request=request)
+
+
+def cmd_request(args):
+    import peer_request_cmd
+    return peer_request_cmd.request(args, sys.modules[__name__])
+
+
+def cmd_report(args):
+    import peer_request_cmd
+    return peer_request_cmd.report(args, sys.modules[__name__])
+
+
+def cmd_show(args):
+    import peer_request_cmd
+    return peer_request_cmd.show(args, sys.modules[__name__])
 
 
 def _shell_seat(target, harness=None, info=None):
@@ -8907,6 +8942,37 @@ def build_parser():
     p_prompt.add_argument("--no-trailer", action="store_true")
     p_prompt.add_argument("--ref", action="append", default=[])
     p_prompt.set_defaults(func=cmd_prompt)
+
+    p_request = sub.add_parser("request", help="ask another session for work (a peer request)")
+    p_request.add_argument("target", help="a session address, or an existing request id (rq-xxxxxx)")
+    p_request.add_argument("text", nargs="?", default=None)
+    p_request.add_argument("--body-file", default=None)
+    p_request.add_argument("--body-stdin", action="store_true")
+    p_request.add_argument("--title", default=None)
+    p_request.add_argument("--rev", default=None, help="label of this revision; a new label supersedes")
+    p_request.add_argument("--cancel", action="store_true")
+    p_request.add_argument("--reason", default=None)
+    p_request.set_defaults(func=cmd_request)
+
+    p_report = sub.add_parser("report", help="report on a request you received (final unless --partial)")
+    p_report.add_argument("rq", nargs="?", default=None)
+    p_report.add_argument("--partial", action="store_true")
+    p_report.add_argument("--reject", default=None, metavar="REASON")
+    p_report.add_argument("--result", default=None)
+    p_report.add_argument("--remaining", default=None)
+    p_report.add_argument("--artifact", default=None)
+    p_report.add_argument("--file", default=None)
+    p_report.add_argument("--body-file", default=None)
+    p_report.add_argument("--body-stdin", action="store_true")
+    p_report.add_argument("--rev", type=int, default=None)
+    p_report.set_defaults(func=cmd_report)
+
+    p_show = sub.add_parser("show", help="open a request's sealed body; no id lists open requests")
+    p_show.add_argument("rq", nargs="?", default=None)
+    p_show.add_argument("--rev", type=int, default=None)
+    p_show.add_argument("--report", type=int, default=None)
+    p_show.add_argument("--all", action="store_true")
+    p_show.set_defaults(func=cmd_show)
 
     p_clear = sub.add_parser("clear")
     p_clear.add_argument("target")
