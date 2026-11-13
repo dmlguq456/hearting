@@ -458,6 +458,58 @@
    "en": "latest value @{epoch} is not a finite number",
    "ko": "최근 값@{epoch}이 유한한 숫자가 아님"
   },
+  "experiment.leaderboard.col.baseline": {
+   "en": "Baseline",
+   "ko": "기준"
+  },
+  "experiment.leaderboard.col.best": {
+   "en": "Best",
+   "ko": "최고"
+  },
+  "experiment.leaderboard.col.delta": {
+   "en": "Diff",
+   "ko": "차이"
+  },
+  "experiment.leaderboard.col.group": {
+   "en": "Group",
+   "ko": "묶음"
+  },
+  "experiment.leaderboard.col.latest": {
+   "en": "Latest",
+   "ko": "최근"
+  },
+  "experiment.leaderboard.col.name": {
+   "en": "Condition",
+   "ko": "조건"
+  },
+  "experiment.leaderboard.col.relative": {
+   "en": "Relative %",
+   "ko": "상대 %"
+  },
+  "experiment.leaderboard.col.run": {
+   "en": "Run",
+   "ko": "실행"
+  },
+  "experiment.leaderboard.col.state": {
+   "en": "State / reason",
+   "ko": "상태·사유"
+  },
+  "experiment.leaderboard.comparable": {
+   "en": "comparable",
+   "ko": "비교 가능"
+  },
+  "experiment.leaderboard.empty": {
+   "en": "no conditions to rank",
+   "ko": "순위표에 올릴 조건이 없음"
+  },
+  "experiment.leaderboard.note": {
+   "en": "Order within one group by the latest value against the target; not a final winner or a pass/fail call.",
+   "ko": "묶음 안에서 최근 값을 목표와 견준 순서이며 최종 승자나 합격 판정이 아님."
+  },
+  "experiment.leaderboard.unreadable": {
+   "en": "no leaderboard: the catalog is missing or cannot be read ({code})",
+   "ko": "순위표 없음: 정본이 없거나 읽을 수 없음 ({code})"
+  },
   "experiment.metric": {
    "en": "({key}, {unit}, {direction})",
    "ko": "({key}, {unit}, {direction})"

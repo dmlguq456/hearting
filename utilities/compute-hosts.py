@@ -3504,9 +3504,9 @@ def _report_run_end(run_dir, code, last_observation, now):
     if not notice_targets:
         return 0
     stop = _read_stop_reason(run_dir)
-    # The catalog name leads the notice.  A named notice no longer has the literal form
-    # `dispatch_session_sweep` folds into an anonymous "compute run summary" (three exit-0 runs of one
-    # label), which is intended: a run with a name is told one by one.  An unnamed run's text is unchanged.
+    # The catalog name leads the notice (`{name}: run …`).  `dispatch_session_sweep` accepts that optional
+    # prefix (`_COMPUTE_RUN_NOTICE_RE`), so a named notice is recognized and folded like an unnamed one and
+    # the folded summary carries the name.  An unnamed run's text is unchanged.
     experiment = _catalog_identity(_meta_artifact_root(meta), run_id, _meta_row_id(meta))
     text = ((f"{experiment['name']}: " if experiment else "")
             + f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"

@@ -1447,6 +1447,88 @@ def render_status(doc: Mapping[str, Any], lang: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+def _leader_point(point: Optional[Mapping[str, Any]], unit: Optional[str]) -> str:
+    if not point or point.get("value") is None:
+        return "-"
+    return _unit_text(point["value"], unit) + (f"@{point['epoch']}" if point.get("epoch") is not None else "")
+
+
+def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., str]) -> List[str]:
+    comparison = row.get("comparison") or {}
+    state, reason = comparison.get("state"), comparison.get("reason")
+    baseline = comparison.get("baseline") if state == "ok" else None
+    delta = relative = "-"
+    if state == "ok":
+        delta = _signed(comparison["delta"]) + ("%p" if comparison.get("delta_unit") == "pp"
+                                                else f" {comparison['delta_unit']}" if comparison.get("delta_unit") else "")
+        if comparison.get("relative_percent") is not None:
+            relative = _signed(round(comparison["relative_percent"], 1)) + "%"
+    words = [t(f"experiment.anomaly.{a}") for a in row.get("anomalies") or ()]
+    if state == "ok":
+        words.append(t("experiment.leaderboard.comparable"))
+    elif state == "not-comparable":
+        words.append(t("experiment.not_comparable", reason=t(f"experiment.reason.{reason}")))
+    elif state == "no-target":
+        words.append(t(f"experiment.reason.{reason}"))
+    else:
+        words.append(t("experiment.latest_none"))
+    base = "-"
+    if baseline:
+        base = ((baseline.get("label") + " ") if baseline.get("label") else "") + _leader_point(baseline, unit)
+    return [row.get("display_name") or t("experiment.unnamed"), (row.get("current_run") or {}).get("run_id") or "-",
+            _leader_point(row.get("latest"), unit), _leader_point(row.get("best"), unit), base, delta, relative,
+            ", ".join(words)]
+
+
+def _leader_order(rows: Sequence[Mapping[str, Any]], direction: Optional[str]) -> List[Mapping[str, Any]]:
+    """Comparable rows first, the better latest value on top; the rest below in catalog order."""
+    ok = [r for r in rows if (r.get("comparison") or {}).get("state") == "ok" and (r.get("latest") or {}).get("value") is not None]
+    rest = [r for r in rows if r not in ok]
+    ok.sort(key=lambda r: r["latest"]["value"], reverse=direction != "min")  # stable: ties keep catalog order
+    return ok + rest
+
+
+def render_leaderboard(doc: Mapping[str, Any], group: Optional[str] = None, fmt: str = "md",
+                       lang: Optional[str] = None) -> str:
+    """One table per group from a `status()` document; every number is the one `compare()` made.
+
+    Groups are never mixed, and a row compared to nothing sits below the ranked ones with its reason.
+    `fmt` is `md` (a markdown table per group) or `tsv` (group name first, one header line)."""
+    t = _translator(lang)
+    catalog = doc.get("catalog") or {}
+    if catalog.get("status") == "invalid":
+        return t("experiment.leaderboard.unreadable", code=catalog.get("code") or "?")
+    groups = list(doc.get("groups") or ())
+    if group:
+        wanted = _fold(group)
+        groups = [g for g in groups if wanted in (_fold(g.get("id") or ""), _fold(g.get("display_name") or ""))]
+    groups = [g for g in groups if g.get("conditions")]
+    if not groups:
+        return t("experiment.leaderboard.empty")
+    heads = [t(f"experiment.leaderboard.col.{k}") for k in ("name", "run", "latest", "best", "baseline", "delta", "relative", "state")]
+    out: List[str] = []
+    for g in groups:
+        metric = g.get("metric") or {}
+        unit = metric.get("unit") or None
+        rows = [_leader_row(r, unit, t) for r in _leader_order(g["conditions"], metric.get("direction"))]
+        name = g.get("display_name") or t("experiment.no_group")
+        if fmt == "tsv":
+            if not out:
+                out.append("\t".join([t("experiment.leaderboard.col.group")] + heads))
+            out.extend("\t".join([name] + [c.replace("\t", " ") for c in row]) for row in rows)
+            continue
+        head = f"### {name}"
+        if g.get("goal"):
+            head += " " + t("experiment.goal", goal=g["goal"])
+            if metric.get("key"):
+                head += " " + t("experiment.metric", key=metric["key"], unit=unit or "?",
+                                direction=t(f"experiment.direction.{metric.get('direction') or 'min'}"))
+        out += [head, "", "| " + " | ".join(heads) + " |", "|" + "|".join("---" for _ in heads) + "|"]
+        out += ["| " + " | ".join(c.replace("|", "\\|") for c in row) + " |" for row in rows]
+        out += ["", t("experiment.leaderboard.note"), ""]
+    return "\n".join(out).rstrip("\n")
+
+
 def render_show(read: CatalogRead, lang: Optional[str] = None) -> str:
     t = _translator(lang)
     if read.status != "ok":
@@ -1503,6 +1585,9 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("show", parents=[where], help="the catalog as written")
     st = sub.add_parser("status", parents=[where], help="catalog + public run records, read together")
     st.add_argument("--expect", action="append", default=[], metavar="NAME")
+    lb = sub.add_parser("leaderboard", parents=[where], help="a table per group, ordered against the target; never blocks")
+    lb.add_argument("--group", help="one group, by id or name")
+    lb.add_argument("--format", choices=("md", "tsv"), default="md")
     li = sub.add_parser("lint", parents=[where], help="warnings with their place; never blocks")
     li.add_argument("--expect", action="append", default=[], metavar="NAME")
     reg = sub.add_parser("register", parents=[where, write], help="add or update groups, conditions, and terms")
@@ -1593,7 +1678,9 @@ def _read_command(args: argparse.Namespace) -> int:
                               "updated_at": None},
                   "terms": [], "groups": [], "waiting": [], "unlinked_runs": {"run_ids": [], "truncated": 0},
                   "warnings": [_warn("catalog-invalid", CATALOG_REL, code)]}
-    if args.command == "lint":
+    if args.command == "leaderboard":
+        print(render_leaderboard(report, args.group, args.format, args.lang))
+    elif args.command == "lint":
         _print({"catalog": report["catalog"], "warnings": report["warnings"]}) if args.json else \
             print(render_status({**report, "groups": [], "unlinked_runs": {"run_ids": [], "truncated": 0}}, args.lang))
     elif args.json:
@@ -1608,7 +1695,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args = _parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
-    if args.command in ("show", "status", "lint"):
+    if args.command in ("show", "status", "lint", "leaderboard"):
         return _read_command(args)
     try:
         root = _root_from(args)

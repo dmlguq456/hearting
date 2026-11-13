@@ -3367,12 +3367,31 @@ class CatalogNameTest(unittest.TestCase):
         def record(name, text):
             return {"receipt": {"kind": "notice", "key": f"compute-run:{name}", "subject": "compute run", "text": text}}
         # `dispatch_session_sweep` matches the no-observation words of this notice literally and folds three
-        # exit-0 notices of one label into a summary; those words are untouched, and a named notice, which
-        # no longer has that literal form, is told one by one instead of being folded into an anonymous summary.
+        # exit-0 notices of one label into a summary.  The words are untouched, and the catalog name in front
+        # is an optional prefix of that pattern: a named notice is recognized the same way and keeps its name.
         literal = (f"run {self.RUN} on here ended with exit 0; 지표 없음; 계획 시간 미상; run 기록 경로 없음; "
                    f"read it with: compute-hosts tail {self.RUN}")
-        self.assertIsNotNone(sweep._compute_run_notice(record(self.RUN, literal)))
-        self.assertIsNone(sweep._compute_run_notice(record(self.RUN, "잔향 줄임: " + literal)))
+        plain = sweep._compute_run_notice(record(self.RUN, literal))
+        self.assertIsNotNone(plain)
+        self.assertEqual(plain["name"], "")
+        prefixed = sweep._compute_run_notice(record(self.RUN, "잔향 줄임: " + literal))
+        self.assertIsNotNone(prefixed)
+        self.assertEqual((prefixed["name"], prefixed["run_id"], prefixed["exit"]), ("잔향 줄임", self.RUN, 0))
+
+    def test_named_ended_notices_fold_by_name_in_the_render_order(self):
+        import dispatch_session_sweep as sweep
+        runs = [f"here-20261110-10101{i}-sweep" for i in (1, 2, 3)]
+
+        def record(run_id, name):
+            text = f"{name}: run {run_id} on here ended with exit 0; read it with: compute-hosts tail {run_id}"
+            return {"receipt": {"kind": "notice", "key": f"compute-run:{run_id}", "subject": "compute run",
+                                "text": text, "required_action": "report-to-user"}}
+        same = [record(run_id, "잔향 줄임") for run_id in runs]
+        keys = sweep._render_keys([("/r", same)])
+        self.assertEqual({keys[id(item)][:2] for item in same}, {(1, 1)})   # three of one name: one folded summary
+        mixed = [record(runs[0], "잔향 줄임"), record(runs[1], "잡음 줄임"), record(runs[2], "잔향 줄임")]
+        keys = sweep._render_keys([("/r", mixed)])
+        self.assertEqual({keys[id(item)][:2] for item in mixed}, {(1, 0)})  # two and one: nobody folds
 
 
 class ProbeCommandHashTest(unittest.TestCase):
