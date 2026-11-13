@@ -318,10 +318,12 @@ class ExplorerRuntime:
         continuation = envelope.get("detail_continuation")
         if continuation is not None and not self._valid_continuation(continuation):
             return None
-        self._cached_continuation = continuation
+        # Reading the file is not a hand-off. Only ``load_last_complete`` (a viewer starting up)
+        # takes the payload; the writer thread also reads the file back to compare ``observed_at``
+        # and must never arm the running viewer's detail worker with a resume payload.
         return {"model": model, "observed_at": float(stamp), "generation": generation,
                 "generation_identity": generation_identity,
-                "source_freshness": freshness}
+                "source_freshness": freshness, "continuation": continuation}
 
     @staticmethod
     def _valid_freshness(value):
@@ -383,6 +385,7 @@ class ExplorerRuntime:
         envelope = self._read_cache()
         if envelope is None:
             return None
+        self._cached_continuation = envelope["continuation"]
         return self.prepare_replay(envelope["model"])
 
     def prepare_replay(self, vm):
