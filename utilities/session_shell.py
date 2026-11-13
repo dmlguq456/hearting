@@ -836,7 +836,7 @@ _LAST_OBSERVED: dict = {}
 
 def _observe_session(observe, harness, sid, pid, start):
     key = (harness, sid, pid, start)
-    values, watched = observe(harness, pid, start, sid, previous=_LAST_OBSERVED.get(key, {}))
+    values, watched = observe(harness, pid, start, sid, previous=_LAST_OBSERVED.get(key, {}), wake_quota=True)
     _LAST_OBSERVED.clear()
     if values:
         _LAST_OBSERVED[key] = dict(values)

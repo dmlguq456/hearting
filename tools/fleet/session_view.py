@@ -43,7 +43,7 @@ _ANSWER_WAITS = frozenset(("permission prompt", "input needed", "worker request"
 _TOKEN_CELLS = ("ctx_pct", "active_context_tokens", "context_window_tokens", "compaction_pressure")
 
 
-def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False):
+def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False, wake_quota=False):
     """Read the selected session through Fleet's parsers and report watch inputs.
 
     ``previous`` is the caller's last observation of this exact live session
@@ -54,6 +54,8 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
     was never observed stays empty. Without it the result is unchanged.
     ``raise_unread`` lets an unread OpenCode database raise ``OSError`` for a
     caller that keeps its own last display (Fleet's native reader).
+    ``wake_quota`` lets a caller without a collection pass of its own (the shell
+    panel) wake the existing Claude account-usage refresh once its reading is due.
     """
     from .collectors.procscan import read_proc_start
     keep = previous if isinstance(previous, dict) else None
@@ -182,6 +184,10 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
     # Fleet's NOW (`summary.now`): the same fresh one-line summary from the same sidecar.
     now_line = titles.fresh_summary_with_ts(sid, harness=harness)[0]
     cached = usage_cache.read(harness)
+    if wake_quota and harness == "claude":
+        # Fleet's collection is not the only refresher: without it this reading would stop
+        # being fresh and stay so. The refresh's own lease and retry spacing decide (review 1597-r2).
+        usage_cache.wake_claude_refresh(cached)
     quota = dict(cached.get("payload") or {})
     if callback:
         native_quota = claude_quota(callback)

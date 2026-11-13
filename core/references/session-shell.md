@@ -206,7 +206,10 @@ short rows run; short of cells it gives way whole value by whole value: the
 reset times, then 5h, then the model values, then 7d. Claude's statusline
 callback carries only its 5h and 7d windows: the same credential-bound account
 cache's model windows stay beside them while that cache is fresh, never an older
-reading shown as now (a callback that carries its own wins). The state shown is the host's
+reading shown as now (a callback that carries its own wins). That cache's existing
+refresh is asked for two thirds into its fresh window, and the panel's own
+projection wakes it once when due, so the value stays without Fleet; a refresh
+that keeps failing still leaves the value out once the window ends. The state shown is the host's
 own observation; hook events confirm and correct it, and input readiness and
 every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
 into its session record as it paints (`busy` while it shows progress, `waiting`
