@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/hearting-mark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/hearting-mark-light.svg">
+    <img alt="Hearting" src="docs/brand/hearting-mark-light.svg" width="48" height="48">
+  </picture>
+</p>
+
 <h1 align="center">Hearting</h1>
 
 <p align="center"><strong>One way of working for your coding agents — on Claude Code, Codex, and OpenCode.</strong></p>
