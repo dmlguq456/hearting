@@ -1701,13 +1701,17 @@ def _recorded_interview(route, jobs):
     return FI.load_json_file(artifact), answers
 
 
-def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None):
+def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None, *, actor_kind=None):
     """The work request of every leg of an approved route: the original request, the agreed intent,
     the brief paths with their digests (the one whose route the person chose marked), and the
     approvals actually given."""
-    lines = [route["work_request"]["text"].rstrip(), "", "## Agreed intent", "",
-             (output / "shards/frame/intent.md").read_text(encoding="utf-8").rstrip(), "",
-             "## Frame briefs (read-only input)", ""]
+    agreed = (output / "shards/frame/intent.md").read_text(encoding="utf-8").rstrip()
+    request = route["work_request"]["text"].rstrip()
+    if actor_kind == "user":
+        lines = ["## Agreed intent", "", agreed, "", "## Original work request", "", request, ""]
+    else:
+        lines = [request, "", "## Agreed intent", "", agreed, ""]
+    lines += ["## Frame briefs (read-only input)", ""]
     lines += [f"- {root / row['path']} (sha256 {row['sha256']})"
               + (" — adopted direction: the person chose this brief's route" if row["path"] == adopted else "")
               for row in briefs]
@@ -1774,7 +1778,8 @@ def _decide(route, jobs, root, record, output, briefs, intent):
     approvals = {"given": given, "execution_scope": execution_scope}
     prompt = _decision_home(root) / f"{route['route_id']}.leg-task.md"
     task = _keep_first(prompt, _leg_task_text(route, root, output, briefs, intent, approvals,
-                                              adopted=match.get("brief_path")).encode("utf-8"))
+                                              adopted=match.get("brief_path"),
+                                              actor_kind=FI.answer_actor_kind(answers)).encode("utf-8"))
     leg = match["proposal"]["legs"][0]
     projected_leg = module.project_entry_execution_scope(leg, execution_scope)
     execution_graph = list(projected_leg.get("graph") or [])
@@ -1955,13 +1960,13 @@ def _manual_frame_closure(route, jobs):
         record_path = Path(binding["decision"])
         if not record_path.is_absolute():
             record_path = Path(route["artifact_root"]) / record_path
-        command = [sys.executable, str(ROOT / "utilities/capability-route.py")]
+        command = [sys.executable, entrypoint(ROOT, "utilities/capability-route.py")]
         commands = [shlex.join([*command, "complete", "--route", str(frame_path), "--jobs", str(jobs),
                                "--node", RP.TERMINAL_NODE, "--evidence", str(record_path)]),
                     shlex.join(["env", f"AGENT_DISPATCH_JOBS={Path(jobs).resolve()}",
                                *command, "close", "--route", str(frame_path),
                                "--summary", "manually recovered first leg " + route["route_id"]]),
-                    shlex.join([sys.executable, str(ROOT / "utilities/artifact_producer.py"), "finalize",
+                    shlex.join([sys.executable, entrypoint(ROOT, "utilities/artifact_producer.py"), "finalize",
                                 "--artifact-root", str(root), "--cycle", decision["frame_route"]["cycle_id"]])]
         return {"frame_route_id": frame_id, "leg_route_id": route["route_id"], "commands": commands,
                 "next_step": "If this manually recovered leg implements the approved decision, close only its "

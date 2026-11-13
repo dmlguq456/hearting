@@ -100,6 +100,37 @@ class BoardTest(unittest.TestCase):
         demand.start()
         self.addCleanup(demand.stop)
 
+    def test_closed_native_questions_are_distinct_from_unknown_ids(self):
+        from fleet import interaction
+        for harness, source in (("claude", "claude-asktool"), ("codex", "codex-appserver"),
+                                ("opencode", "opencode-question")):
+            with self.subTest(harness=harness):
+                interaction.set_wait("fixture-session", harness, "decision", source, now=1000)
+                interaction.clear_wait("fixture-session", harness)
+                with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                    code, _, err = _run("answer", f"S1:{harness}:fixture-session:1000000", "--text", "yes")
+                    self.assertEqual(code, 2)
+                    self.assertIn("closed", err)
+                    self.assertIn("reason unavailable", err)
+                    self.assertIn("UTC", err)
+                    unknown = _run("answer", f"S1:{harness}:fixture-session:999", "--text", "yes")
+                    self.assertIn("no recorded question", unknown[2])
+
+    def test_native_closure_reasons_and_reopened_id_do_not_change_publication(self):
+        from fleet import interaction
+        for status in ("answered", "cancelled", "expired"):
+            interaction.set_wait("known", "codex", "decision", "codex-appserver", now=1000)
+            interaction.clear_wait("known", "codex", reason=status)
+            item_id = "S1:codex:known:1000000"
+            state.publish_cache({"complete": True, "items": []})
+            with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                self.assertIn(status, _run("answer", item_id, "--text", "yes")[2])
+            interaction.set_wait("known", "codex", "decision", "codex-appserver", now=1000)
+            self.assertIsNone(state.closed_question(item_id))
+            self.assertIsNotNone(interaction.read_wait("known", "codex"))
+            interaction.set_wait("known", "codex", "decision", "codex-appserver", now=1001)
+            self.assertEqual(state.closed_question(item_id)["status"], "replaced")
+
     def test_missing_observation_is_unknown_not_an_empty_board(self):
         with mock.patch.object(questions, "_CACHE_WAIT_SECONDS", 0.0):
             code, out, err = _run()
@@ -180,6 +211,24 @@ class MessageQuestionTest(unittest.TestCase):
         self.fixture = MessageQuestionFixture()
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
+
+    def test_closed_registered_question_names_answer_or_replacement_without_exposing_text(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness=harness)
+            self.assertTrue(state.close_signal(signal["seat_key"], harness=harness,
+                session_id=signal["session_id"], sequence=signal["sequence"] + 1, answer="PRIVATE ANSWER"))
+            with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                code, _, err = _run("answer", signal["id"], "--text", "second answer")
+            self.assertEqual(code, 2)
+            self.assertIn("answered", err)
+            self.assertIn("UTC", err)
+            self.assertNotIn("PRIVATE", err)
+            old, _ = self.f.ask(harness=harness, text="old question")
+            self.f.ask(harness=harness, text="new question")
+            with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                code, _, err = _run("answer", old["id"], "--text", "second answer")
+            self.assertEqual(code, 2)
+            self.assertIn("replaced", err)
 
     def test_ask_cli_uses_caller_seat_sequence_and_preserves_private_detail(self):
         import session_tidy as tidy
