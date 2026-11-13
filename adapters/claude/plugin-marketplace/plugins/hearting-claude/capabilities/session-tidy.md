@@ -42,10 +42,12 @@ Claude Code, Codex, and OpenCode give the interactive main session a non-blockin
 
 When the work folder has an experiment catalog (`utilities/experiment_catalog.py`), the writer
 is given its group names, goals and condition names with the writing guide and calls each
-condition by that catalog name; the saved card then adds the catalog name next to a run id, a
-`run:row`, a former name or an alias of 3+ characters that the writer left bare. Quoted text, code,
-paths and URLs are not touched, and an ambiguous token stays as written. Native compaction does
-none of this (below).
+condition by that catalog name. The card is saved exactly as written. When the saved card says a
+run id, a `run:row`, an identifier-like alias or a former name without its catalog name, `card`,
+`tidy` and `handoff` print one `names=` advice line after their own line (at most eight names).
+Dated quotes and PRD locations are not judged; ordinary words, numbers, code, quotes, paths and
+commands stay quiet. The advice changes neither the save, the exit code nor the `say=` line.
+Native compaction does none of this (below).
 
 Native runtime compaction is not a session-tidy invocation. PreCompact adds no
 card instructions; PostCompact records the exact native session's compaction

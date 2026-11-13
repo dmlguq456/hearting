@@ -505,57 +505,111 @@ class CardWriteTest(TidyCase):
         self.assertIn("파일 본문", next((self.state / "cards").glob("*.md")).read_text(encoding="utf-8"))
 
 
+def make_lab_catalog(case, cwd, conditions, *, rename=None):
+    """A synthetic experiment catalog in `cwd/.agent_reports` (group `소리 분리 개선`); `rename=(old, new)` after."""
+    import artifact_admission as admission
+    import experiment_catalog as E
+    root = Path(cwd) / ".agent_reports"
+    root.mkdir(parents=True, exist_ok=True)
+    with case.library():
+        admission.ensure_root_identity(root)
+        E.run_write(root, lambda ctx: E.op_register(ctx, {
+            "groups": [{"display_name": "소리 분리 개선", "goal": "잔향에서 기준보다 높은가"}],
+            "conditions": [{"group": "소리 분리 개선", **c} for c in conditions]}), now=1_790_000_000.0)
+        if rename:
+            E.run_write(root, lambda ctx: E.op_rename(ctx, *rename), now=1_790_000_001.0)
+    return root
+
+
 class ExperimentNamesTest(TidyCase):
-    """The experiment catalog's names reach the card, the writing guide, and the start context."""
+    """A card is saved exactly as written; the catalog's names reach the writing guide, the start
+    context, and a `names=` advice line after the save (review RV-PR1609-1113)."""
     RUN = "run-rev-1"
 
-    def lab_project(self, extra_conditions=0):
-        import artifact_admission as admission
-        import experiment_catalog as E
-        root = self.cwd / ".agent_reports"
-        root.mkdir()
-        conditions = [{"display_name": "잔향 줄임", "group": "소리 분리 개선", "aliases": ["rev-a", "E"],
+    def lab_project(self, extra_conditions=0, aliases=("rev-a", "E")):
+        conditions = [{"display_name": "잔향 줄임", "aliases": list(aliases),
                        "refs": {"runs": [{"run_id": self.RUN, "row_id": "arm-1"}]}}]
-        conditions += [{"display_name": f"추가 조건 {i:02d}", "group": "소리 분리 개선"} for i in range(extra_conditions)]
-        with self.library():
-            admission.ensure_root_identity(root)
-            E.run_write(root, lambda ctx: E.op_register(ctx, {
-                "groups": [{"display_name": "소리 분리 개선", "goal": "잔향에서 기준보다 높은가"}],
-                "conditions": conditions}), now=1_790_000_000.0)
-        return root
+        conditions += [{"display_name": f"추가 조건 {i:02d}"} for i in range(extra_conditions)]
+        return make_lab_catalog(self, self.cwd, conditions)
 
     def body_of_card(self):
         return json.loads(next((self.state / "cards").glob("*.json")).read_text(encoding="utf-8"))["body"]
 
-    def test_the_saved_card_names_a_bare_run_id_alias_and_arm_and_leaves_code_quotes_paths_and_short_aliases(self):
-        self.lab_project()
-        text = (f"{self.RUN} 결과가 좋았다. rev-a 와 arm-1 도 본다.\n"
-                "단독 E 는 한 글자라 그대로.\n"
+    def test_quotes_prd_locations_code_and_paths_are_saved_byte_for_byte(self):
+        self.lab_project(aliases=("rev-a", "E", "base", "0.3"))
+        text = ("## 사용자 요구 원문 발췌\n"
+                f'2026-11-13 "{self.RUN}은 그대로 둬"\n'
+                f"2026-11-13 {self.RUN} 결과는 건드리지 마\n"
+                "## 요구사항·PRD 위치\n"
+                "base.md 현재 요구사항\n"
+                "## 진행 중\n"
+                "git rebase base 를 했고 오차는 0.3\n"
+                "    base = 1\n"
+                r"C:\work\base\out 아래에 rev-a 와 arm-1 결과" "\n"
                 f"```\n{self.RUN}\n```\n"
-                f"> 사용자: {self.RUN} 로 가자\n"
-                f"경로 /tmp/{self.RUN}/log 와 `{self.RUN}` 코드\n"
-                f"잔향 줄임 은 이미 이름이 있는 줄: {self.RUN}")
-        self.card("sid-A", text)
-        lines = self.body_of_card().splitlines()
-        self.assertEqual(lines[0], f"잔향 줄임({self.RUN}) 결과가 좋았다. 잔향 줄임(rev-a) 와 잔향 줄임(arm-1) 도 본다.")
-        self.assertEqual(lines[1], "단독 E 는 한 글자라 그대로.")
-        self.assertEqual(lines[2:5], ["```", self.RUN, "```"])
-        self.assertEqual(lines[5], f"> 사용자: {self.RUN} 로 가자")
-        self.assertEqual(lines[6], f"경로 /tmp/{self.RUN}/log 와 `{self.RUN}` 코드")
-        self.assertEqual(lines[7], f"잔향 줄임 은 이미 이름이 있는 줄: {self.RUN}")
+                f"> 사용자: {self.RUN} 로 가자")
+        printed = self.card("sid-A", text).splitlines()
+        self.assertEqual(self.body_of_card(), text)                     # nothing is rewritten
+        self.assertTrue(printed[0].startswith("card="), printed)
+        self.assertEqual(printed[1:], ["names=The saved card uses internal names without their catalog names: "
+                                       "rev-a (= 잔향 줄임). It was saved as written; write the catalog name beside "
+                                       "each next time (advice, not a gate)."])   # not the quotes, the PRD place, `E`, `base`, `0.3`, or bare `arm-1`
+
+    def test_saving_again_keeps_the_same_bytes_and_a_row_shared_by_two_runs_is_left_alone(self):
+        make_lab_catalog(self, self.cwd, [
+            {"display_name": "base 개선", "refs": {"runs": [{"run_id": "run-a", "row_id": "row-1"}]}},
+            {"display_name": "별도 기준", "aliases": ["base"], "refs": {"runs": [{"run_id": "run-b", "row_id": "row-1"}]}},
+            {"display_name": "잔향 감소", "refs": {"runs": [{"run_id": self.RUN}]}}],
+            rename=("잔향 감소", "잔향 더 감소"))
+        text = f"run-a 확인, row-1 실행, base 기준, 잔향 감소({self.RUN})"
+        outputs = []
+        for _ in range(3):
+            outputs.append(self.card("sid-A", text).splitlines()[1:])
+            self.assertEqual(self.body_of_card().encode("utf-8"), text.encode("utf-8"))
+        self.assertEqual(outputs[0], outputs[2])
+        self.assertEqual(outputs[0], ["names=The saved card uses internal names without their catalog names: "
+                                      f"run-a (= base 개선), 잔향 감소 (= 잔향 더 감소), {self.RUN} (= 잔향 더 감소). It was "
+                                      "saved as written; write the catalog name beside each next time (advice, not a gate)."])
+        # `row-1` (two runs share it) and `base` (a plain word) are not judged
+
+    def test_the_advice_is_short_and_absent_when_every_name_is_given(self):
+        make_lab_catalog(self, self.cwd, [{"display_name": f"조건 {i:02d}", "refs": {"runs": [{"run_id": f"run-x{i:02d}"}]}}
+                                          for i in range(10)])
+        many = self.card("sid-A", " ".join(f"run-x{i:02d}" for i in range(10))).splitlines()
+        self.assertEqual(len(many), 2)
+        self.assertEqual(many[1].count("(= 조건"), 8)
+        self.assertIn(", +2 more.", many[1])
+        named = self.card("sid-A", "조건 03(run-x03) 과 조건 04(run-x04)").splitlines()
+        self.assertEqual(len(named), 1, named)
 
     def test_a_folder_without_a_catalog_keeps_the_body_as_written(self):
-        self.card("sid-A", f"{self.RUN} 그대로")
+        printed = self.card("sid-A", f"{self.RUN} 그대로")
         self.assertEqual(self.body_of_card(), f"{self.RUN} 그대로")
+        self.assertEqual(len(printed.splitlines()), 1)                 # `card=` only, no advice
 
     def test_a_broken_catalog_changes_nothing_and_the_card_is_still_written(self):
         import experiment_catalog as E
         root = self.lab_project()
         E.catalog_path(root).write_text("{no", encoding="utf-8")
-        self.assertTrue(self.card("sid-A", f"{self.RUN} 그대로").startswith("card="))
+        printed = self.card("sid-A", f"{self.RUN} 그대로")
+        self.assertTrue(printed.startswith("card="))
+        self.assertEqual(len(printed.splitlines()), 1)
         self.assertEqual(self.body_of_card(), f"{self.RUN} 그대로")
 
-    def test_a_native_compact_summary_is_not_expanded(self):
+    def test_handoff_reports_its_line_then_the_same_advice_for_the_card_it_hands_off(self):
+        self.lab_project()
+        self.card("sid-A", f"{self.RUN} 결과")
+        out = io.StringIO()
+        with self.library(), contextlib.redirect_stdout(out), \
+                mock.patch.object(runner, "handoff", return_value=("prompted=true target=peer-x", 0)):
+            code = st.main(["handoff", "peer-x", "--harness", "claude", "--session-id", "sid-A", "--cwd", str(self.cwd)])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().splitlines(), [
+            "prompted=true target=peer-x",
+            f"names=The saved card uses internal names without their catalog names: {self.RUN} (= 잔향 줄임). "
+            "It was saved as written; write the catalog name beside each next time (advice, not a gate)."])
+
+    def test_a_native_compact_summary_is_kept_as_written(self):
         self.lab_project()
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             seat = st.resolve_seat("claude", str(self.cwd))
@@ -3837,6 +3891,21 @@ class TidyOneCallTest(TidyCase):
         self.assertEqual(lines[2], "prompted=failed target=peer-x")
         self.assertEqual(lines[-1], "say=이 차례가 끝나고 입력창이 비어 있고 질문 창이 없으면 이 창에 /compact를 한 번 입력합니다. 그 전에 입력하시면 압축하지 않습니다.")
         self.assertEqual(self.reservation(seat)["status"], "reserved")     # a failed handoff keeps the clear
+
+    def test_the_name_advice_follows_the_card_line_and_say_stays_last_with_the_same_exit_code(self):
+        make_lab_catalog(self, self.cwd, [{"display_name": "잔향 줄임", "refs": {"runs": [{"run_id": "run-rev-1"}]}}])
+        self.hook("claude", "prompt", "sid-A")
+        code, lines, seat = self.tidy("진행 중: run-rev-1 확인\n다음 할 일: 기다림")
+        self.assertEqual(code, 0)
+        self.assertTrue(lines[0].startswith("card="), lines)
+        self.assertEqual(lines[1], "names=The saved card uses internal names without their catalog names: "
+                                   "run-rev-1 (= 잔향 줄임). It was saved as written; write the catalog name beside "
+                                   "each next time (advice, not a gate).")
+        self.assertRegex(lines[2], r"^enqueue=\S+ seat=\S+ status=queued clear=scheduled$")
+        self.assertTrue(lines[-1].startswith("say=이 차례가 끝나고"), lines)
+        with self.iso.patched_environ():
+            body = st.read_latest_card(self.logical_seat(seat, "claude", "sid-A"))["body"]
+        self.assertEqual(body, "진행 중: run-rev-1 확인\n다음 할 일: 기다림")
 
     def test_an_older_card_and_prompt_do_not_block_the_new_one_call_card(self):
         self.hook("claude", "prompt", "sid-A")

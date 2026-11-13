@@ -702,7 +702,7 @@ class Text(Base):
 
 
 class CardNames(Base):
-    """`expand_refs`, `catalog_brief`, `card_context`: the catalog's names for cards and the start context."""
+    """`catalog_brief`, `card_context`: the catalog's names for the card writing guide and the start context."""
 
     def setup_root(self, extra=0):
         root = self.make_root()
@@ -714,28 +714,6 @@ class CardNames(Base):
             {"display_name": f"추가 조건 {i:02d}", "group": "AMI 가변 화자 개선"} for i in range(extra)]})
         E.run_write(root, lambda ctx: E.op_rename(ctx, "잡음 줄임", "잡음 섞기"), now=NOW + 1)   # `잡음 줄임` is now a former name
         return root, E.load(root).doc
-
-    def test_a_bare_token_gets_the_catalog_name_beside_it_and_the_original_stays_in_parentheses(self):
-        _root, doc = self.setup_root()
-        text, changes = E.expand_refs("run-1 과 arm-1 그리고 run-1:arm-1, 예전의 잡음 줄임 과 noise-b 를 본다", doc)
-        self.assertEqual(text, "잔향 줄임(run-1) 과 잔향 줄임(arm-1) 그리고 잔향 줄임(run-1:arm-1), "
-                               "예전의 잡음 섞기(잡음 줄임) 과 잡음 섞기(noise-b) 를 본다")
-        self.assertEqual([c["name"] for c in changes], ["잔향 줄임", "잔향 줄임", "잔향 줄임", "잡음 섞기", "잡음 섞기"])
-        self.assertEqual(E.expand_refs(text, doc)[0], text)               # a second pass changes nothing
-
-    def test_code_quotes_paths_urls_short_aliases_and_a_line_with_the_name_are_left_alone(self):
-        _root, doc = self.setup_root()
-        lines = ["```", "run-1", "```", "> run-1 인용", "`run-1` 코드", "/tmp/run-1/log", "https://x.example/run-1",
-                 "E 는 한 글자", "rev-ab 는 다른 토큰", "잔향 줄임 과 run-1", "E1 과 base-run-1"]
-        text = "\n".join(lines)
-        self.assertEqual(E.expand_refs(text, doc), (text, []))
-
-    def test_a_token_two_conditions_answer_to_is_not_expanded_and_failures_return_the_text(self):
-        _root, doc = self.setup_root()
-        doc["conditions"][1]["aliases"].append("rev-a")                   # ambiguous now
-        self.assertEqual(E.expand_refs("rev-a", doc), ("rev-a", []))
-        self.assertEqual(E.expand_refs("run-1", None), ("run-1", []))
-        self.assertEqual(E.expand_refs("run-1", {"conditions": "broken"}), ("run-1", []))
 
     def test_the_brief_shrinks_in_steps_and_ends_at_the_location_line(self):
         root, doc = self.setup_root(extra=40)
