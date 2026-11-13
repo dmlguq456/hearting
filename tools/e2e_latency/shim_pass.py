@@ -39,12 +39,28 @@ TARGETS = (
     ("dispatch_registry_cache", "RegistryView.__init__"),
     ("dispatch_replacement", "registry_rows"),
     ("session_line", "session_route_status"),
-    ("render", "_explorer_compose"),
+    ("render", "_explorer_compose"), ("render", "_draw"),
+    # The route judgments (speed-e2e leg C): what an answer-wait pass and a Fleet pass spend per
+    # route, and where a registry replacement's time goes.
+    ("human_gate_observation", "_generation_candidates"), ("human_gate_observation", "_route_outcome"),
+    ("human_gate_observation", "pending_human_waits"),
+    ("dispatch_owner_input", "blocked_owner_answers"),
+    ("owner_route_binding", "_verified_binding"),
+    ("dispatch_supervision", "notice_is_current"), ("dispatch_supervision", "update_attempt_stall_observation"),
+    ("dispatch_supervision", "_recorded_completion_result"),
+    ("dispatch_seat_handover", "effective_parent"), ("dispatch_seat_handover", "_lineage_signature"),
+    ("dispatch", "_registry_evidence_for_path"), ("dispatch", "_build_registry_derived_index"),
+    ("dispatch", "_job_selection"), ("dispatch", "_prime_route_display_rows"),
+    ("dispatch_seat_handover", "job_holders"),
+    # The floor and the rebuild inside ``RegistryView`` after a replacement: reading and digesting
+    # the new generation against segment reconstruction.
+    ("dispatch_registry_cache", "_reusable_prefix"), ("dispatch_registry_cache", "_RegistrySegment.__init__"),
+    ("dispatch_registry_cache", "_iter_lf_chunks"),
 )
 PRODUCER_ROOTS = (("human_wait_state", "_refresh_cache"),)
-FLEET_ROOTS = (("__init__", "collect_all"), ("render", "_explorer_compose"))
+FLEET_ROOTS = (("__init__", "collect_all"), ("render", "_explorer_compose"), ("render", "_draw"))
 REQUIRED = {"producer": ("human_wait_state._refresh_cache",),
-            "fleet": ("__init__.collect_all", "render._explorer_compose")}
+            "fleet": ("__init__.collect_all", "render._explorer_compose", "render._draw")}
 
 SHIM_SOURCE = r'''
 import importlib.util, json, os, sys, threading, time
@@ -161,8 +177,9 @@ if _OUT:
                        metrics={k: after[k] - before.get(k, 0) for k in after
                                 if isinstance(after[k], (int, float)) and after[k] != before.get(k, 0)},
                        pid=os.getpid())
-            if name == "render._explorer_compose":
-                # After t1 is taken, so it is not part of the pass: what the screen model now shows.
+            if name == "render._draw":
+                # After t1 is taken, so it is not part of the pass: the model this frame was drawn
+                # from (``_draw`` has decided between the published, replayed and loading frame by now).
                 digest = _model_digest()
                 if digest is not None and digest != _last_model[0]:
                     acc["model"] = _last_model[0] = digest
@@ -246,9 +263,11 @@ if _OUT:
                     rows.append(session)
                 return rows
             module.scan = scan
-            starts = {int(i["pid"]): i.get("pid_start") for i in json.load(open(_SESSIONS))}
-            _orig = module.read_proc_start
-            module.read_proc_start = lambda pid: starts.get(int(pid)) or _orig(pid)
+            # ``read_proc_start`` is left as it is: the fixture's sessions are real sleeper
+            # processes whose start time /proc gives, and the Fleet judges its registry rows by a
+            # compiled selection only while that reader is the native one (``_job_selection``).
+            # Replacing it sent every Fleet pass down the slow path that visits every finished
+            # row, a path an operating Fleet does not take.
         elif name.endswith(".collectors.dispatch"):
             module._scan_processes = lambda *a, **k: []
 

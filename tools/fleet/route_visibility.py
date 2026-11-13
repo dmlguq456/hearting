@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 SCHEMA = "route_visibility_v1"
-_OUTCOME_CACHE = {}  # {path: (mtime, size, data|None)}
+_OUTCOME_CACHE = {}  # {path: (identity, data|None)}; identity = (dev, ino, size, mtime_ns, ctime_ns)
 
 _SHAPE_BY_TOPOLOGY = {"inline": "direct", "one-shot-owner": "solo", "staged": "staged",
                       "transactional-owner": "staged"}
@@ -76,7 +76,8 @@ def _route_file(record):
 
 
 def read_outcome(record):
-    """The full outcome sidecar of this exact route, or None. Cached by mtime/size."""
+    """The full outcome sidecar of this exact route, or None. Cached by the file's exact identity
+    (device, inode, size, mtime and ctime in ns): a rewrite that keeps size and mtime is a new file."""
     if not isinstance(record, dict):
         return None
     route_file = _route_file(record)
@@ -87,9 +88,10 @@ def read_outcome(record):
         st = os.stat(path)
     except OSError:
         return None
+    identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     cached = _OUTCOME_CACHE.get(path)
-    if cached is not None and cached[:2] == (st.st_mtime, st.st_size):
-        data = cached[2]
+    if cached is not None and cached[0] == identity:
+        data = cached[1]
     else:
         try:
             with open(path, encoding="utf-8") as handle:
@@ -98,7 +100,7 @@ def read_outcome(record):
             data = None
         if not isinstance(data, dict):
             data = None
-        _OUTCOME_CACHE[path] = (st.st_mtime, st.st_size, data)
+        _OUTCOME_CACHE[path] = (identity, data)
     if data is None or data.get("route_id") != record.get("route_id"):
         return None
     if record.get("route_hash") and data.get("route_hash") not in (None, record.get("route_hash")):
