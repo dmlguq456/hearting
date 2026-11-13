@@ -313,11 +313,11 @@ space (beside the native area at least one empty row under the route box, above
 any question box or the messages rule); any question box; the messages section, fixed at the bottom; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
-no box, only a titled upper rule (`── messages ──`, beside the native area
-`── MESSAGES ──`) and a lower rule. Beside the native area `MEM` follows the
-messages under its own titled rule (`── MEM ──`, in place of their lower rule;
-the one closing rule ends both, and the messages' `+N` then ends their title
-rule): this repository's newest saved memory records, two at most, from the
+no box, only its label alone (`messages`, beside the native area `MESSAGES`,
+dim, with no long rule beside it; the count of messages not shown follows it,
+`MESSAGES +2`) and a lower rule. Beside the native area `MEM` follows the
+messages under its own label (`MEM`, likewise alone; the one closing rule ends
+both): this repository's newest saved memory records, two at most, from the
 journal Fleet reads (the newest `add`/`supersede` rows of its project, a
 supersede and its replacement's add counted once), each on two rows like a
 message: `◆ decision · 3m` (dim: the type as a short word, `correction` for

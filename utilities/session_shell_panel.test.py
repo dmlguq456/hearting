@@ -163,7 +163,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE',side?'╭─ 6 ROUTE':'╭─ route 6','ROUTE_0',side?'── MESSAGES':'── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE',side?'╭─ 6 ROUTE':'╭─ route 6','ROUTE_0',side?'│ MESSAGES':'│ messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
@@ -505,7 +505,7 @@ assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes
 // its labels; an empty row parts the head from the route box.
 assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].startsWith('│ CTX    42%')&&/^│ ─+ │$/.test(rows[6]),rows.join('\n'));
 assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ 3 ROUTE'),rows.join('\n'));
-const r=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),m=rows.findIndex(s=>s.includes('── MESSAGES '));
+const r=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
 // Spec rules 24, 38: beside the native area a folded route reads who (the glyph with its
 // harness), then its context and time two cells in, then its title two cells in.
@@ -517,7 +517,7 @@ assert(rows[m+1].includes('← [e7]')&&rows[m+2].includes('│   MESSAGE_1'),row
 for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
 const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
-const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── MESSAGES '));
+const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 // Spec rule 34 (b): short of rows the messages fold to one row each before a route gives up its second row.
 assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%')&&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
@@ -529,10 +529,10 @@ for(const s of rows)assert.equal(cells(s),40,s);
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:o=>q.slice(0,o.budget)}));
 for(const q of [[],question])for(let h=12;h<=30;h++){
  const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   ROUTE_'));
- // Spec rules 23, 31: fewer messages show from the oldest (the lower rule counts them),
- // before the route box scrolls; the newest message goes only with the section, last.
+ // Spec rules 23, 31: fewer messages show from the oldest (their label counts them, spec rule
+ // 58), before the route box scrolls; the newest message goes only with the section, last.
  const hidden=['MESSAGE_1','MESSAGE_2'].filter(m=>!all.includes(m)).length;
- if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp(' \\+'+hidden+' ─ │').test(all),h+'\n'+all);
+ if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp('│ MESSAGES \\+'+hidden+' ').test(all),h+'\n'+all);
  if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
  if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
  if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ 3 ROUTE'),h+' messages go last\n'+all);
@@ -1035,7 +1035,7 @@ for(const want of ['┆ OWNER  claude (Opus 5.5·xhigh) · 38%','┆ KIND   auto
         script = self.FIXTURE + r'''
 const nine=[...Array(9)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'n'+i,title:r.title+' '+(i+1)};});
 const place=rows=>rows.filter(s=>/│ │   (one-shot|staged)/.test(s)).length,names=rows=>rows.filter(s=>/│ │   (셸|세션|새 판)/.test(s)).length;
-const section=rows=>{const m=rows.findIndex(s=>s.includes('── MESSAGES'));return m<0?[]:rows.slice(m+1,rows.findIndex((s,i)=>i>m&&/^│ ─+( \+\d+ ─)? │$/.test(s)));};
+const section=rows=>{const m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));return m<0?[]:rows.slice(m+1,rows.findIndex((s,i)=>i>m&&/^│ ─+ │$/.test(s)));};
 // 40×44: every route keeps its three rows and the three messages fold to one row each.
 const r44=draw(nine,40,44),m44=section(r44);
 assert(place(r44)===9&&names(r44)===9&&m44.length===3&&m44.every(s=>/^│ [←→] \[/.test(s)),r44.join('\n'));
@@ -1097,7 +1097,7 @@ const six=[...Array(6)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return
 const QUESTION=[[P('◑ Q_HEAD')],[P('Q_BODY')],[P('› A')],[P('2 B')],[P('↑↓ choose · Enter send · t text')]];
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
  state:'idle',configuration:{},questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-const rule=rows=>rows.findIndex(s=>s.includes('── MESSAGES'));
+const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 const full=paint(six,58),m=rule(full);
 assert(full[m-2].includes('╰')&&blank(full[m-1])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3,full.join('\n'));
 // With a question the row stands between the route box and the question box.
@@ -1219,7 +1219,7 @@ const bare=paint([oneShot],40,50,{model:{git_side:[]}});
 assert(text(bare)[1].includes('wt 12')&&!text(bare).join('').includes('GIT')&&bare.groups.includes('git'),text(bare).join('\n'));
 // Spec E9 rule 46 (e): an older backend's one MEM row (painted pieces only) stands in the MEM
 // section under the messages, its age kept and its type left out; the head has no MEM row.
-const title=r50.findIndex(s=>s.startsWith('│ TITLE')),mem=r50.findIndex(s=>s.includes('── MEM ')),msg=r50.findIndex(s=>s.includes('── MESSAGES '));
+const title=r50.findIndex(s=>s.startsWith('│ TITLE')),mem=r50.findIndex(s=>/^│ MEM +│$/.test(s)),msg=r50.findIndex(s=>s.startsWith('│ MESSAGES'));
 assert(title>0&&!r50.slice(0,msg).some(s=>s.includes('MEM'))&&mem>msg&&r50[mem+1].startsWith('│ ◆ 3m ')&&!r50[mem+1].includes('decision')
  &&r50[mem+2].startsWith('│   셸 패널')&&r50[mem+3].includes('…')&&!r50.join('').includes('지어낸 기억'),r50.join('\n'));
 // No row, no MEM.
@@ -1468,7 +1468,7 @@ const owned={...oneShot,role:'owner',kind_word:'code'};
 const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[owned,staged],route_count:2,...(o.model||{})},
  state:'working',configuration:{},questions:()=>[],...(o.extra||{})});
 const v=at(),rows=plain(v),all=rows.join('\n');
-assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>s.startsWith('│ ── MESSAGES ─'))&&!/\broute \d|── messages/.test(all),all);
+assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES +│$/.test(s))&&!/\broute \d|messages|── MESSAGES/.test(all),all);
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
 assert(all.includes('⠋ owner')&&all.includes('code · one-shot'),all);
 // The producer's label alone (no rows yet): its count first too.
@@ -1480,15 +1480,15 @@ const key=v.hits.find(h=>h.action.startsWith('message:')).action;
 assert(plain(at({extra:{routeDetail:key}}))[1].startsWith('│ MESSAGES · Back'));
 // The bottom layout: `route N`, `messages`, its pages too (spec rule 45 (d)).
 const bottom=plain(at({width:120,side:false})).join('\n');
-assert(bottom.includes('╭─ route 2 ')&&bottom.includes('── messages ')&&!/ROUTE|MESSAGES/.test(bottom),bottom);
+assert(bottom.includes('╭─ route 2 ')&&bottom.includes('│ messages ')&&!bottom.includes('── messages')&&!/ROUTE|MESSAGES/.test(bottom),bottom);
 assert(plain(at({width:120,side:false,extra:{routeDetail:true}}))[1].startsWith('│ route · Back'));
 assert(plain(at({width:120,side:false,model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}})).join('').includes('╭─ route 3 ⠏2 ─'));
 """
         self.node(script, "panel-view.cjs")
 
     def test_mem_stands_under_the_messages_with_its_kind_and_gives_way_first(self):
-        # Spec E9 rule 46: MEM leaves the head for its own section under the messages (`── MEM ──`,
-        # the messages' rule form), each record `◆ kind · age` (dim) over its headline (body
+        # Spec E9 rule 46: MEM leaves the head for its own section under the messages (spec rule 58:
+        # its label alone, as the messages' `MESSAGES`; one closing rule ends both), each record `◆ kind · age` (dim) over its headline (body
         # color, two rows at most); two records at most; short of rows MEM goes before any of the
         # messages: two records, one, its headline on one row, none.
         script = self.FIXTURE + r"""
@@ -1498,10 +1498,10 @@ const items=[{kind:'decision',age:'3m',text:'panel labels in dark grey, and the 
 const routes=[oneShot,staged,{...oneShot,id:'c'}];
 const at=(o={})=>view.render({width:o.width||40,height:o.height||70,side:true,fill:true,model:{...head,routes,route_count:routes.length,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},questions:()=>[]});
-const section=(rows,word)=>{const i=rows.findIndex(s=>s.startsWith('│ ── '+word+' '));if(i<0)return null;let end=i+1;
- while(end<rows.length&&!/^│ ── |^│ ─+( \+\d+ ─)? │$/.test(rows[end]))end++;return rows.slice(i+1,end);};
+const section=(rows,word)=>{const i=rows.findIndex(s=>new RegExp('^│ '+word+'( \\+\\d+)? +│$').test(s));if(i<0)return null;let end=i+1;
+ while(end<rows.length&&!/^│ (MESSAGES|MEM)( \+\d+)? +│$|^│ ─+ │$/.test(rows[end]))end++;return rows.slice(i+1,end);};
 let v=at(),rows=plain(v);
-const msg=rows.findIndex(s=>s.startsWith('│ ── MESSAGES ')),mem=rows.findIndex(s=>s.startsWith('│ ── MEM '));
+const msg=rows.findIndex(s=>s.startsWith('│ MESSAGES')),mem=rows.findIndex(s=>/^│ MEM +│$/.test(s));
 assert(msg>0&&mem>msg&&!rows.slice(0,msg).some(s=>s.includes('MEM')),rows.join('\n'));
 assert(rows[mem+1].startsWith('│ ◆ decision · 3m ')&&rows[mem+2].startsWith('│   panel labels in dark grey')&&rows[mem+3].startsWith('│   ')&&rows[mem+3].includes('…')
  &&rows[mem+4].startsWith('│ ◆ lesson · 2h ')&&rows[mem+5].startsWith('│   one fix per review finding')&&/^│ ─+ │$/.test(rows[mem+6]),rows.join('\n'));
@@ -1529,11 +1529,18 @@ for(let h=70;h>=12;h--){
  // (Rows a later step frees beyond its need may bring a MEM record back, as every step's.)
  if(!seen.includes(state))seen.push(state);
  if(state)assert(messagesWhole(rows),h+' MEM goes before the messages fold or go\n'+rows.join('\n'));
- // With MEM shown, messages not shown are counted at the end of their own title rule.
+ // Spec rule 58: the messages not shown are counted right after their label (`MESSAGES +N`), with or without MEM.
  const msgRows=section(rows,'MESSAGES'),hidden=msgRows?head.messages.length-msgRows.filter(s=>/^│ [←→] /.test(s)).length:0;
- if(state&&hidden)assert(new RegExp('^│ ── MESSAGES ─+ \\+'+hidden+' ─ │$').test(rows.find(s=>s.startsWith('│ ── MESSAGES'))),h+'\n'+rows.join('\n'));
+ if(hidden)assert(new RegExp('^│ MESSAGES \\+'+hidden+' +│$').test(rows.find(s=>s.startsWith('│ MESSAGES'))),h+'\n'+rows.join('\n'));
 }
 assert.deepEqual(seen,[23,12,11,0],JSON.stringify(seen));
+// Spec rule 58: no long rule beside the labels: `MESSAGES` and `MEM` stand alone (dim, the title
+// role), one closing rule under both; no titled rule anywhere.
+rows=plain(at());
+assert(rows.some(s=>/^│ MESSAGES +│$/.test(s))&&rows.some(s=>/^│ MEM +│$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)|(MESSAGES|MEM) ─/.test(s)),rows.join('\n'));
+assert.equal(rows.filter(s=>/^│ ─+ │$/.test(s)).length-rows.slice(0,rows.findIndex(s=>s.startsWith('│ MESSAGES'))).filter(s=>/^│ ─+ │$/.test(s)).length,1,rows.join('\n'));
+const cellsOf=s=>[...s].reduce((n,c)=>n+(/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
+for(const w of [32,40,48]){const r=plain(at({width:w}));assert(r.every(s=>cellsOf(s)===w),w+'\n'+r.join('\n'));}
 """
         self.node(script, "panel-view.cjs")
 

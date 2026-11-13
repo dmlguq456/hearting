@@ -1371,26 +1371,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       });
       routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
-    // Messages have no box: a titled upper rule and a lower rule, fixed at the
-    // bottom right above 5h/7d (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside
-    // the native area the title is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their
-    // own titled rule (`── MEM ──`) in place of the messages' lower rule, and the one closing
-    // rule ends both; the count of messages not shown (`+N`) then stays with the messages, at
-    // the end of their title rule.
+    // Messages have no box: a label row and a lower rule, fixed at the bottom right above 5h/7d
+    // (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside the native area the
+    // label is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their own label, and the
+    // one closing rule ends both. Spec rule 58: the labels stand alone (no long rule beside
+    // them), and the count of messages not shown (`+N`) follows the messages' label.
     const keepMessageRows=keepMessages&&messages.length>0;
     if(keepMessageRows||memShown()){
       const key=tone.messages,hidden=keepMessageRows?hiddenMessages():0;
-      const note=hidden?[text(' +'+hidden+' ','loc_repo'),text('─',key)]:[];
-      const noted=parts=>parts.map(x=>x.text==='─'?{...x,role:'messages'}:x);
-      const titleRule=(word,tail=[])=>{const head=fitted([{...text(word,key),role:'title'}]);
-        return [...[...head,text('─'.repeat(Math.max(0,inner-size(head)-size(tail))))].map(x=>({...x,...(styles[key]||{dim:true}),role:x.role||'messages'})),...noted(tail)];};
+      const label=(word,tail=[])=>clip([{...text(word,key),...(styles[key]||{dim:true}),role:'title'},...tail],inner).parts;
       if(keepMessageRows){
-        messageBlock.push({parts:titleRule(side?'MESSAGES':'messages',memShown()?note:[])});
+        messageBlock.push({parts:label(side?'MESSAGES':'messages',hidden?[text(' +'+hidden,'loc_repo')]:[])});
         messageBlock.push(...visibleMessages());
       }
-      if(memShown()){messageBlock.push({parts:titleRule('MEM')});messageBlock.push(...memRowsOf());}
-      const closing=memShown()?[]:note;
-      messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(closing))),key),role:'messages'},...noted(closing)]});
+      if(memShown()){messageBlock.push({parts:label('MEM')});messageBlock.push(...memRowsOf());}
+      messageBlock.push({parts:[{...text('─'.repeat(inner),key),role:'messages'}]});
     }
     // Each section is placed whole or not at all; the empty row under the route box goes first.
     const tail=ask.length+messageBlock.length+1;
