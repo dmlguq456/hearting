@@ -82,6 +82,14 @@ def main() -> int:
             launch_trigger("codex", event_session_id, "final")
         except Exception:
             pass
+        try:
+            from fleet.collectors import codex
+            from peer_steward_base import peer_message
+            # A delayed daemon unload must not close a newly resumed TUI.
+            if codex.process_for_thread(event_session_id, fresh=True) is None:
+                peer_message.observe_steward_end("codex", event_session_id, reason="thread-unloaded")
+        except Exception:
+            pass
     return 0
 
 

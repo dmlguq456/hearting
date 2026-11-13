@@ -783,20 +783,47 @@ def prepare_exchange(item: dict, batch: str, bundle: Bundle) -> Path:
     return current
 
 
-def remove_exchange(path, only_conversation: bool = False) -> None:
-    """Delete a batch's worker folder (or just the conversation copy and the prompt) if it is the real one."""
+def _gone(path: Path) -> bool:
+    """True only when ``path`` is known to be absent; a path that cannot be looked at may still be there."""
+    try:
+        path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _remove_file(path: Path) -> bool:
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+    return _gone(path)
+
+
+def remove_exchange(path, only_conversation: bool = False) -> bool:
+    """Delete a batch's worker folder (or just the conversation copy and the prompt) if it is the real one.
+
+    Returns whether what was to go is gone.  An error, a folder that cannot even be looked at
+    included, never escapes: the caller still writes its status and says the removal did not finish.
+    """
     if not path:
-        return
+        return True
     folder = Path(path)
-    if folder.parent.name != EXCHANGE_PARTS[1] or folder.parent.parent.name != EXCHANGE_PARTS[0] \
-            or folder.is_symlink() or not folder.is_dir():
-        return
+    if folder.parent.name != EXCHANGE_PARTS[1] or folder.parent.parent.name != EXCHANGE_PARTS[0]:
+        return True
+    # lstat, not is_symlink()/is_dir(): those turn an unreachable folder into "absent" on newer Pythons.
+    try:
+        mode = folder.lstat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISDIR(mode):                 # a link or a file is not the worker's folder
+        return True
     if only_conversation:
-        for name in ("input_v1.json", "prompt.md"):
-            with contextlib.suppress(OSError):
-                os.unlink(folder / name)
-    else:
-        shutil.rmtree(folder, ignore_errors=True)
+        return all([_remove_file(folder / name) for name in ("input_v1.json", "prompt.md")])
+    shutil.rmtree(folder, ignore_errors=True)
+    return _gone(folder)
 
 
 def launch_command(item: dict, prompt: Path, slug: str) -> list:
@@ -1110,6 +1137,21 @@ def _with_coverage(line: str, note: str) -> str:
     return f"{head} · {note}{undo}"
 
 
+def end_batch_files(item: dict, run_dir: Path, clean: bool) -> None:
+    """The conversation copy and the prompt go in every case; the rest of the worker's folder goes
+    with a clean finish (a failed batch keeps its actions.json until the entry is pruned).
+
+    A file that could not be removed never stops the status written next: the entry then carries
+    ``cleanup="incomplete"`` (and runner.log says so), and pruning the entry takes what is left."""
+    gone = all([_remove_file(run_dir / name) for name in ("input_v1.json", "prompt.md")])
+    gone = remove_exchange(item.get("exchange"), only_conversation=not clean) and gone
+    if gone:
+        item.pop("cleanup", None)
+    elif item.get("cleanup") != "incomplete":
+        item["cleanup"] = "incomplete"
+        _log(run_dir, "cleanup incomplete: a conversation copy could not be removed or reached")
+
+
 def process_item(item: dict) -> None:
     attempts = int(item.get("attempts", 0))
     # An interrupted operation keeps the same tidy-apply batch. The apply journal and
@@ -1132,6 +1174,7 @@ def process_item(item: dict) -> None:
             # Unread ranges left means the read part had nothing to tidy, never "nothing new".
             notify(item, st._ui_translator()("tidy.runner.nothing_in_range", note=note) if note
                    else st._ui_translator()("tidy.runner.nothing_new"))
+            end_batch_files(item, run_dir, True)
             set_status(item, "notified", result="nothing-in-range" if note else "nothing-new")
             finished = True
             return
@@ -1163,6 +1206,8 @@ def process_item(item: dict) -> None:
         publish_memory(item, batch, run_dir, bundle, "applied" if not over else "partial",
                        "상한 초과 제안 폐기" if over else "")
         notify(item, line)
+        # A terminal status is written last: whoever reads it sees the folder as it stays.
+        end_batch_files(item, run_dir, True)
         set_status(item, "notified", result="applied")
         finished = True
     except RunnerFailure as exc:
@@ -1170,22 +1215,18 @@ def process_item(item: dict) -> None:
         applied = applied_writes(run_dir)
         publish_memory(item, batch, run_dir, bundle, "failed", str(exc)[:80])
         notify(item, failure_line(str(exc), batch, applied))
+        end_batch_files(item, run_dir, False)
         set_status(item, "failed", error=str(exc), applied=list(applied))
     except BaseException as exc:  # noqa: BLE001 - nothing may leave an entry half-done
         _log(run_dir, f"failed: internal {type(exc).__name__}: {exc}")
         applied = applied_writes(run_dir)
         publish_memory(item, batch, run_dir, bundle, "failed", f"internal {type(exc).__name__}")
         notify(item, failure_line(f"internal {type(exc).__name__}", batch, applied))
+        end_batch_files(item, run_dir, False)
         set_status(item, "failed", error=f"internal {type(exc).__name__}", applied=list(applied))
     finally:
-        for name in ("input_v1.json", "prompt.md"):
-            with contextlib.suppress(OSError):
-                os.unlink(run_dir / name)
-        # The conversation copy and the prompt go in every case; the rest of the worker's folder goes
-        # with a clean finish (a failed batch keeps its actions.json until the entry is pruned).
-        remove_exchange(item.get("exchange"), only_conversation=not finished)
-        if finished:
-            remove_exchange(item.get("exchange"))
+        # Each end above removes the files before its status; this covers an end that did not get there.
+        end_batch_files(item, run_dir, finished)
 
 
 def prune_finished() -> None:

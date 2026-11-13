@@ -322,6 +322,71 @@ class StewardCheckIdleTest(CheckBase):
         self.assertIn("peer-steward steward off", text)
 
 
+class StewardCheckUnresolvedTest(CheckBase):
+    """RV-PR1593: retain unresolved targets without paying for unchanged dead work."""
+
+    def observe(self, liveness, sid="target-unresolved"):
+        collector = SimpleNamespace(
+            _peer_message_module=lambda: None, _registry_sessions=lambda: [],
+            role_targets=lambda *a, **k: [],
+            unresolved_role_targets=lambda *a, **k: [{
+                "harness": "claude", "session_id": sid, "name": "helper",
+                "source": "watch", "unresolved": True}],
+            session_liveness=lambda *a, **k: liveness)
+        with mock.patch.object(SC, "_collector", return_value=collector), \
+                mock.patch.object(SC, "_end_observation", return_value=None), \
+                mock.patch.object(SC, "_session_liveness", REAL_SESSION_LIVENESS), \
+                mock.patch.object(SC, "_open_work", return_value=([], [])), \
+                mock.patch("peer_steward_native.native_agent", return_value=None):
+            self.seen = REAL_OBSERVE(HARNESS, SID)
+        return self.seen["targets"][0]
+
+    def test_ended_unjoined_target_lets_the_role_go_quiet(self):
+        row = self.observe("ended")
+        self.assertTrue(SC._quiet(self.seen), self.seen)  # reviewer's original probe
+        self.assertEqual(row["liveness"], "ended")
+        self.assertTrue(row["unresolved"])
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.deliver_and_ack()
+        checked = T0 + INTERVAL + 100
+        self.assertIn("target name=helper harness=claude state=unknown liveness=ended",
+                      self.check(checked))
+        for cycle in (1, 2, 3):
+            self.step(checked + cycle * INTERVAL)
+        self.assertEqual(self.notify.call_count, 1)
+
+    def test_live_unjoined_target_repeats_each_interval(self):
+        row = self.observe("live")
+        self.assertEqual(row["liveness"], "live")
+        self.assertFalse(SC._quiet(self.seen))
+        self.register()
+        for cycle in (1, 2, 3):
+            now = T0 + cycle * (INTERVAL + 100)
+            self.step(now)
+            self.assertEqual(self.notify.call_count, cycle)
+            self.assertEqual(self.notice()["required_action"], "run-steward-check")
+            self.deliver_and_ack()
+            self.step(now + 100)
+
+    def test_unknown_unjoined_target_notifies_once_per_changed_state(self):
+        self.observe("unknown", sid=None)
+        self.assertTrue(SC._quiet(self.seen))
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.deliver_and_ack()
+        self.step(T0 + INTERVAL + 100)
+        self.step(T0 + 2 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 1)
+        self.observe("ended")
+        self.step(T0 + 3 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 2)
+        self.deliver_and_ack()
+        self.step(T0 + 3 * INTERVAL + 200)
+        self.step(T0 + 4 * INTERVAL + 200)
+        self.assertEqual(self.notify.call_count, 2)
+
+
 class StewardCheckRemainingWorkTest(CheckBase):
     """Remaining work turns a quiet check into concrete next actions, never a release."""
 
@@ -1153,8 +1218,8 @@ class StewardCheckHerdrReachTest(_NativeStewardWorld):
         self.assertEqual(absent_calls, [])
         self.assertEqual(answered, absent)
         names = re.findall(r"^target name=(\S+) .*liveness=(\S+)", absent["check"], re.M)
-        self.assertEqual(names, [("worker", "live")], absent["check"])
-        self.assertIn("targets=1 ", absent["check"])
+        self.assertEqual(names, [("worker", "live"), ("helper", "unknown")], absent["check"])
+        self.assertIn("targets=2 ", absent["check"])
         self.assertEqual((absent["due_phase"], absent["notice_state"]), ("notified", "pending"))
         self.assertEqual(absent["after"], ("pending", "notified"))
 
@@ -1198,7 +1263,7 @@ class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
         starter = {**env, "CLAUDE_CONFIG_DIR": str(worker), "HEARTING_WORKER_HOME": str(worker),
                    "HEARTING_MODEL_CONFIG_HOME": env["CLAUDE_CONFIG_DIR"]}
         runner = self.runner_environment(starter, ledger)
-        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+        self.assertEqual(self.observed_in(runner), (True, ["helper", "worker"]))
         self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
         for name in ("HEARTING_WORKER_HOME", "HEARTING_MODEL_CONFIG_HOME"):
             self.assertNotIn(name, runner)
@@ -1214,7 +1279,7 @@ class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
                    "HEARTING_MODEL_CONFIG_HOME": str(default)}
         runner = self.runner_environment(starter, ledger)
         self.assertNotIn("CLAUDE_CONFIG_DIR", runner)
-        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+        self.assertEqual(self.observed_in(runner), (True, ["helper", "worker"]))
 
     def test_a_runner_a_codex_worker_starts_reads_the_users_codex_threads(self):
         import sqlite3
@@ -1237,7 +1302,7 @@ class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
         starter = {**env, "CODEX_HOME": str(worker), "HEARTING_WORKER_HOME": str(worker),
                    "HEARTING_MODEL_CONFIG_HOME": str(user_codex)}
         runner = self.runner_environment(starter, ledger)
-        self.assertEqual(self.observed_in(runner), (True, ["codex-worker", "worker"]))
+        self.assertEqual(self.observed_in(runner), (True, ["codex-worker", "helper", "worker"]))
         self.assertEqual(runner.get("CODEX_HOME"), str(user_codex))
         self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
 
