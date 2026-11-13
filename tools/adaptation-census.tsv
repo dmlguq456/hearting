@@ -338,6 +338,7 @@ utility-deferred	resource_runner.test.py
 utility-deferred	runtime_observation.py
 utility-deferred	shared_readiness.py
 utility-deferred	review_batch_revision_fixture.py
+utility-deferred	smoke_recovery_regression.test.py
 utility-deferred	split_module_fixture.py
 utility-deferred	review_round_cap.py
 utility-deferred	review_round_cap.test.py
