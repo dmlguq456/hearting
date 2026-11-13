@@ -673,6 +673,12 @@ class ReviewFindings(Base):
         self.assertNotIn("끝난 행", [w["display_name"] for w in report["waiting"]])
         line = next(line for line in E.render_status(report, "ko").splitlines() if line.startswith("- 끝난 행"))
         self.assertNotIn("예상", line)
+        # RV-PR1596-R2: the text says in words what state each row is in
+        self.assertIn("행 종료, 결과 기록 없음", line)
+        live_line = next(line for line in E.render_status(report, "ko").splitlines() if line.startswith("- 진행 중 행"))
+        self.assertIn("실행 중", live_line)
+        self.assertNotIn("실행 중", next(line for line in E.render_status(report, "ko").splitlines()
+                                       if line.startswith("- 함께 끝난 행")))
 
 
 class Text(Base):
@@ -699,6 +705,20 @@ class Text(Base):
         unverified = E.render_status(E.status(bad, now=NOW), "ko")
         self.assertIn("비교 불가: 비교 기준의 평가 조건이 확인되지 않음", unverified)
         self.assertNotIn("%p", unverified)
+
+
+class BaselineUnit(Base):
+    def test_unit_mismatch_gives_a_raw_baseline_and_no_delta(self):
+        """RV-PR1596-R2: a baseline measured in another unit is a number, not a value in this group's unit."""
+        group = {"metric": {"key": "si_sdr", "unit": "dB", "direction": "max", "split": "validation", "scoring": "s"},
+                 "target": {"kind": "condition", "condition": "cnd_x"}}
+        control = {"key": "si_sdr", "unit": "%", "direction": "max", "split": "validation", "scoring": "s"}
+        point = {"key": "si_sdr", "epoch": 3, "value": 9.0}
+        result = E.compare(group, point, {"key": "si_sdr", "epoch": 3, "value": 3.0}, control)
+        self.assertEqual((result["state"], result["reason"]), ("not-comparable", "unit-mismatch"))
+        self.assertIsNone(result["delta"])
+        self.assertEqual(result["baseline"]["value"], 3.0)
+        self.assertNotIn("unit", result["baseline"])
 
 
 class NoLeftovers(Base):
