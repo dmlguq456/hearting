@@ -7185,6 +7185,74 @@ class SettlingReceiptNoticeTest(unittest.TestCase):
         # The recorded notice is carried too: later pieces do not record it again.
         self.assertEqual(told.call_count, 1)
 
+    def _cut_wait(self, gap, pieces=24):
+        """30s join pieces with `gap` seconds between them, each a fresh join process."""
+        self.jobs.write_text(self.owner + self.awaiting_line, encoding="utf-8")
+        rows = JOIN.current_children(self.jobs, self.parent)
+        clock = [0.0]
+        receipts = []
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(JOIN.time, "time", side_effect=lambda: 10000.0 + clock[0]), \
+             mock.patch.object(JOIN.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch("dispatch_supervision.materialize",
+                        wraps=__import__("dispatch_supervision").materialize) as told:
+            for index in range(pieces):
+                receipts.append(JOIN._join_snapshot(
+                    jobs=self.jobs, initial=rows, refresh=lambda _: rows,
+                    identity={"parent_attempt_id": self.parent}, interval=2.0, timeout=30.0,
+                    liveness_command=None, liveness_probe_timeout=1.0, env=None,
+                    observation_jobs=self.jobs))
+                if index + 1 < pieces:
+                    clock[0] += gap
+        notices = [record for record in (
+                       json.loads(path.read_text(encoding="utf-8"))
+                       for path in (self.root / "pending-delivery").glob("*/*.json"))
+                   if record.get("receipt", {}).get("reason") == "process-unverifiable"]
+        return receipts, notices, told.call_count, clock[0]
+
+    def test_a_wait_cut_into_short_joins_far_apart_keeps_the_settling_clock(self):
+        """RV-PR1602-R2 finding 2: a display record older than 120s is stale for display, but the
+        same parent still waiting on the same unsettled child keeps that child's settling clock
+        and its recorded notice: exactly one notice whether pieces are 121s or 300s apart."""
+        for gap in (121.0, 300.0):
+            with self.subTest(gap=gap):
+                self.setUp()
+                receipts, notices, told, elapsed = self._cut_wait(gap)
+                self.assertGreater(elapsed, JOIN.SETTLING_NOTICE_SECONDS)
+                self.assertEqual({receipt["state"] for receipt in receipts}, {"timeout"})
+                self.assertEqual(len(notices), 1, (gap, notices))
+                self.assertEqual(notices[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+                self.assertEqual(told, 1)
+
+    def test_a_far_older_record_carries_only_the_same_parents_same_unsettled_child(self):
+        identity = {"parent_attempt_id": self.parent}
+        JOIN.write_join_observation(
+            self.jobs, identity,
+            [{"attempt_id": self.attempt, "readiness": "pending", "reason": "process-unverifiable"},
+             {"attempt_id": "att-alive-child", "readiness": "pending", "reason": "process-alive"}],
+            elapsed=700, recovery_results={}, eligible_attempt_ids={self.attempt},
+            unverifiable_seconds={self.attempt: 700.0}, notified_attempt_ids={self.attempt})
+        path = JOIN.join_observation_path(self.jobs, identity)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["observed_at"] -= 3600
+        path.write_text(json.dumps(value), encoding="utf-8")
+        # Stale for any display reader...
+        self.assertEqual(JOIN.read_join_observation(self.jobs, identity), {})
+        # ...but the same parent's same unsettled child keeps its clock (gap included) and notice.
+        since, notified = JOIN.joined_observation_history(
+            self.jobs, identity, {self.attempt, "att-alive-child", "att-new-child"})
+        self.assertEqual(set(since), {self.attempt})
+        self.assertGreaterEqual(time.monotonic() - since[self.attempt], 700 + 3600 - 1)
+        self.assertEqual(notified, {self.attempt})
+        # Another parent, or the next wait's new attempt, does not inherit it.
+        self.assertEqual(JOIN.joined_observation_history(
+            self.jobs, {"parent_attempt_id": "att-other-parent"}, {self.attempt}), ({}, set()))
+        self.assertEqual(JOIN.joined_observation_history(
+            self.jobs, identity, {"att-new-child"}), ({}, set()))
+
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
     def _completed_delivery(self, root, attempt, pid, start):

@@ -3984,21 +3984,32 @@ def join_observation_path(jobs: Path, identity: dict[str, str]) -> Path:
     return jobs.resolve().parent / "join-observations" / f"{key}.json"
 
 
-def read_join_observation(jobs: Path, identity: dict[str, str], *, now: float | None = None) -> dict:
-    """Read a fresh exact-parent diagnostic; it never grants completion."""
+def _join_observation_record(jobs: Path, identity: dict[str, str]) -> dict:
+    """The exact parent's last observation record, however old; {} when unreadable."""
     path = join_observation_path(jobs, identity)
     try:
         if path.is_symlink() or path.stat().st_size > MAX_STATE_BYTES:
             return {}
         value = json.loads(path.read_text(encoding="utf-8"))
-        age = (time.time() if now is None else now) - value["observed_at"]
         if (value.get("schema_version") != 1 or value.get("identity") != identity
-                or not 0 <= age <= 120 or value.get("state") not in {"waiting", "attention", "ready"}
+                or not isinstance(value.get("observed_at"), (int, float))
+                or isinstance(value.get("observed_at"), bool)
+                or not math.isfinite(value["observed_at"])
+                or value.get("state") not in {"waiting", "attention", "ready"}
                 or not isinstance(value.get("children"), list)):
             return {}
         return value
     except (OSError, ValueError, TypeError, KeyError):
         return {}
+
+
+def read_join_observation(jobs: Path, identity: dict[str, str], *, now: float | None = None) -> dict:
+    """Read a fresh exact-parent diagnostic; it never grants completion."""
+    value = _join_observation_record(jobs, identity)
+    if not value:
+        return {}
+    age = (time.time() if now is None else now) - value["observed_at"]
+    return value if 0 <= age <= 120 else {}
 
 
 def write_join_observation(jobs: Path, identity: dict[str, str], children: list[dict],
@@ -4051,12 +4062,16 @@ def joined_observation_history(jobs: Path, identity: dict[str, str],
     """What the previous join of this parent saw, for a join that starts fresh.
 
     A supervisor that looks at its resources between join pieces starts a new join
-    process every piece; reading the last fresh observation record (the same 120s
-    freshness as any reader) keeps each child's continuous-unverifiable clock and its
-    recorded notice instead of starting them over. Returns `(since, notified)` with
-    `since` on this process's monotonic clock; anything unreadable is simply absent.
+    process every piece; reading the last observation record keeps each child's
+    continuous-unverifiable clock and its recorded notice instead of starting them
+    over. The 120s freshness is for display only: the same parent still waiting on the
+    same unsettled child continues that child's clock however long the gap was (the
+    gap counts as waiting). Another parent's record, a child no longer listed as
+    unverifiable (settled or otherwise), and the next wait's new attempts carry
+    nothing. Returns `(since, notified)` with `since` on this process's monotonic
+    clock; anything unreadable is simply absent.
     """
-    value = read_join_observation(jobs, identity)
+    value = _join_observation_record(jobs, identity)
     since: dict[str, float] = {}
     notified: set[str] = set()
     if not value:

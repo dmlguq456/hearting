@@ -38,6 +38,13 @@ MAX_SOURCE_BINDING_ASSERTIONS = 8
 MAX_ARMS = 32
 OBSERVATION_VERSION = 2
 CHECKPOINT_INTERVAL = 12 * 60 * 60
+# The time rule: a predicted (or, unmeasured, elapsed) total of 1.5x the plan, or past
+# six hours without a plan, is an attention.
+ETA_ATTENTION_RATIO = 1.5
+ETA_ATTENTION_UNPLANNED_SECONDS = 6 * 3600
+ETA_ATTENTION_KINDS = frozenset({"eta-over-plan", "eta-over-six-hours"})
+ATTENTION_IDENTITY_KEYS = ("kind", "metric", "epoch", "op", "threshold", "episode_id",
+                           "generation", "since", "source_value_hash")
 _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
 
 
@@ -279,13 +286,15 @@ def evaluate_observation(*, now, started_at, planned_seconds=None, progress=None
             attention.append({"kind": "metric-divergence", "metric": summary["metric"],
                               "epoch": summary["latest"]["epoch"]})
     if rate is not None and predicted_total is not None:
-        if planned_seconds and predicted_total is not None and predicted_total >= 1.5 * float(planned_seconds):
+        if planned_seconds and predicted_total is not None \
+                and predicted_total >= ETA_ATTENTION_RATIO * float(planned_seconds):
             attention.append({"kind": "eta-over-plan", "predicted_total_seconds": predicted_total})
-        elif not planned_seconds and predicted_total is not None and predicted_total > 6 * 3600:
+        elif not planned_seconds and predicted_total is not None \
+                and predicted_total > ETA_ATTENTION_UNPLANNED_SECONDS:
             attention.append({"kind": "eta-over-six-hours", "predicted_total_seconds": predicted_total})
-    elif planned_seconds and elapsed >= 1.5 * float(planned_seconds):
+    elif planned_seconds and elapsed >= ETA_ATTENTION_RATIO * float(planned_seconds):
         attention.append({"kind": "elapsed-over-plan", "elapsed_seconds": elapsed})
-    elif not planned_seconds and elapsed > 6 * 3600:
+    elif not planned_seconds and elapsed > ETA_ATTENTION_UNPLANNED_SECONDS:
         attention.append({"kind": "elapsed-over-six-hours", "elapsed_seconds": elapsed})
     if isinstance(optional_rules, list):
         for rule in optional_rules[:16]:
@@ -323,6 +332,54 @@ def evaluate_observation(*, now, started_at, planned_seconds=None, progress=None
             "due_checkpoint_at": schedule["due_checkpoint_at"],
             "next_checkpoint_at": now if final else schedule["next_checkpoint_at"],
             "final": bool(final)}
+
+
+def eta_attention_episode(observation, previous, now):
+    """The episode and size step of an ETA attention, for telling it apart.
+
+    The same ETA attention stands while its prediction stays over the rule's boundary,
+    wobbles around it, or goes unmeasured. It ends only when a measured prediction is
+    back within the plan (the boundary divided by the rule's own 1.5x; four hours without
+    a plan), so a later breach is a new episode (`since`). Within an episode, a
+    prediction grown by that same 1.5x over the size it was last marked at is a new
+    `step`; smaller changes are the same attention. Returns the tracker to keep (None
+    when no episode stands).
+    """
+    tracker = previous if isinstance(previous, dict) else None
+    attention = observation.get("attention") if isinstance(observation.get("attention"), list) else []
+    item = next((row for row in attention if isinstance(row, dict)
+                 and row.get("kind") in ETA_ATTENTION_KINDS), None)
+    if item is None:
+        planned = observation.get("planned_seconds")
+        predicted = observation.get("predicted_total_seconds")
+        boundary = (ETA_ATTENTION_RATIO * float(planned) if planned
+                    else ETA_ATTENTION_UNPLANNED_SECONDS)
+        if (observation.get("rate_per_second") is not None
+                and isinstance(predicted, (int, float)) and not isinstance(predicted, bool)
+                and predicted <= boundary / ETA_ATTENTION_RATIO):
+            return None
+        return tracker
+    predicted = float(item["predicted_total_seconds"])
+    size = tracker.get("size_seconds") if tracker else None
+    if (tracker and tracker.get("kind") == item["kind"]
+            and isinstance(tracker.get("since"), (int, float))
+            and type(tracker.get("step")) is int
+            and isinstance(size, (int, float)) and not isinstance(size, bool) and size > 0):
+        since, step, size = float(tracker["since"]), tracker["step"], float(size)
+        if predicted >= ETA_ATTENTION_RATIO * size:
+            step, size = step + 1, predicted
+    else:
+        since, step, size = float(now), 0, predicted
+    return {"kind": item["kind"], "since": since, "step": step, "size_seconds": size}
+
+
+def attention_identity(item, eta_episode=None):
+    """What makes one attention the same as another (the notice digest's input)."""
+    identity = {key: item.get(key) for key in ATTENTION_IDENTITY_KEYS}
+    if item.get("kind") in ETA_ATTENTION_KINDS and isinstance(eta_episode, dict):
+        identity["since"] = eta_episode.get("since")
+        identity["step"] = eta_episode.get("step")
+    return identity
 
 
 def public_run_record(run, *, status=None, observation=None, metrics=None,
@@ -1807,6 +1864,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             baseline=run.get("baseline_value", declared.get("baseline_value")), final=final,
             optional_rules=run.get("rules", declared.get("rules")),
             last_checkpoint_at=previous.get("last_checkpoint_at"))
+        eta_episode = eta_attention_episode(observation, previous.get("eta_attention"), now)
         stagnation = tracker_result.get("stagnation")
         if stagnation is None and isinstance(progress_tracker, dict):
             stagnation = {"state": "observing", "signal": "counter",
@@ -1853,11 +1911,12 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             event_specs.append(("final", f"final:{identity}"))
         if (notify_events and observation["attention"]
                 and (not final or source_signal_changed and source_observations)):
-            attention_identity = [{key: item.get(key) for key in
-                ("kind", "metric", "epoch", "op", "threshold", "episode_id",
-                 "generation", "since", "source_value_hash")}
-                for item in observation["attention"]]
-            attention_digest = hashlib.sha256(json.dumps(attention_identity, sort_keys=True,
+            # The same attention is the same digest; one that cleared and came back, or
+            # whose size grew by the rule's own step, is a different one (an ETA attention
+            # carries its episode and size step; the others carry their epoch or episode).
+            identities = [attention_identity(item, eta_episode)
+                          for item in observation["attention"]]
+            attention_digest = hashlib.sha256(json.dumps(identities, sort_keys=True,
                 separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
             # A new or changed attention is `attention:` whenever it appears; the same
             # attention again at a periodic checkpoint is `attention-checkpoint:`, which
@@ -1902,6 +1961,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                       "last_admission_observed_at": (float(now) if should_read_admission
                           else last_admission_observed_at),
                       "progress_tracker": progress_tracker,
+                      "eta_attention": eta_episode,
                       "progress_sample": next_progress,
                       "progress_at": (progress_tracker.get("last_sample_at")
                                       if isinstance(progress_tracker, dict) else None),
@@ -1961,6 +2021,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                          and (cursor != previous.get("cursor") or bool(new_samples)
                               or sources != previous.get("sources", []))
                          or next_progress != previous.get("progress_sample")
+                         or eta_episode != previous.get("eta_attention")
                          or admission_changed or stagnation_changed
                          or source_observations_changed
                          or should_read_admission

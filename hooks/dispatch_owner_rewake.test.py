@@ -4202,6 +4202,77 @@ class ResourceNoticeWakeTest(unittest.TestCase):
         self.assertEqual([n["wake"] for n in notices], [True, False, True], notices)
         self.assertTrue(notices[2]["key"].startswith("experiment:run-1:attention:"))
 
+    def _eta_notices(self, planned, total, sequence):
+        """The real producer over step progress only (an ETA attention, no metric); one
+        hook look per notice it sends, acknowledged as the next prompt's sweep would."""
+        import resource_progress as progress
+        import session_notice
+        original_notify = session_notice.notify
+        output = self.root / "training"
+        output.mkdir()
+        artifact = self.root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        run = {"run_id": "run-1", "status": "running", "started_at": 1, "artifact_root": str(artifact),
+               "route_id": "rt-gate", "node": "full-run", "jobs": str(self.jobs)}
+        notices, predicted = [], []
+
+        def notify(harness, session_id, **kw):
+            with mock.patch.object(session_notice, "notify", original_notify):
+                record = self.notice(kw["key"], subject=kw["subject"])
+            woke, announced = self._wake_and_ack(record)
+            notices.append({"key": kw["key"], "wake": woke, "announced": announced})
+            return {"state": "acked"}
+
+        with mock.patch.object(progress, "_observation_state_path", return_value=self.root / "observation.json"), \
+             mock.patch.object(progress, "_notice_targets", return_value=[("claude", "session-gate")]), \
+             mock.patch("session_notice.notify", side_effect=notify):
+            for now, completed in sequence:
+                result = progress.observe_experiment(
+                    run, self.root / "runs.json", now, root=str(output), row_key="ident", started_at=1,
+                    planned_seconds=planned,
+                    progress={"completed": completed, "total": total, "unit": "step", "updated_at": now})
+                predicted.append(result["observation"]["predicted_total_seconds"])
+        return notices, predicted
+
+    def test_an_eta_attention_that_grew_several_fold_wakes_again_at_a_checkpoint(self):
+        """RV-PR1602-R2 finding 1: the predicted total grew from ~1.0M to ~4.0M seconds; that
+        is a changed attention even at the 7201s checkpoint, so it wakes instead of reposting."""
+        notices, predicted = self._eta_notices(100000, 10000, [(6700, 0), (6800, 1), (7201, 2)])
+        self.assertEqual([round(value) if value else value for value in predicted], [None, 1006699, 4016398])
+        self.assertEqual([n["wake"] for n in notices], [True, True], notices)
+        self.assertTrue(all(n["key"].startswith("experiment:run-1:attention:") for n in notices), notices)
+
+    def test_an_eta_attention_that_cleared_and_came_back_wakes_again(self):
+        """RV-PR1602-R2 finding 1: ETA over plan, then back within plan, then over plan again
+        is a new episode of the attention, not the first one still standing."""
+        notices, predicted = self._eta_notices(1000, 1000, [(100, 0), (200, 1), (300, 900), (400, 901)])
+        self.assertLess(predicted[2], 1000)
+        attention = [n for n in notices if n["key"].startswith("experiment:run-1:attention:")]
+        self.assertEqual([n["wake"] for n in attention], [True, True], notices)
+        # The plain 250s checkpoint in between (no attention then) does not wake.
+        self.assertEqual(sum(n["wake"] for n in notices), 2, notices)
+
+    def test_the_same_eta_attention_wobbling_does_not_wake_again(self):
+        """The same attention whose prediction only wobbles (under the rule's own 1.5x step,
+        or around its 1.5x-plan boundary without coming back within plan) does not wake again;
+        at a checkpoint it is reposted for the next input."""
+        notices, predicted = self._eta_notices(
+            100000, 10000, [(6700, 0), (6800, 1), (6940, 2), (7201, 4)])
+        self.assertLess(max(predicted[1:]), 1.5 * predicted[1])
+        self.assertEqual([n["wake"] for n in notices], [True, False], notices)
+        self.assertTrue(notices[1]["key"].startswith("experiment:run-1:attention-checkpoint:"), notices)
+
+    def test_an_eta_attention_wobbling_at_its_boundary_does_not_wake_again(self):
+        notices, predicted = self._eta_notices(
+            1000, 1000, [(901, 450), (1001, 500), (1101, 600), (1201, 702), (1301, 800)])
+        # Over 1.5x plan, just under it (not back within plan), and over it again.
+        self.assertGreaterEqual(predicted[1], 1500)
+        self.assertTrue(1000 < predicted[3] < 1500, predicted)
+        self.assertGreaterEqual(predicted[4], 1500)
+        # The plain 100s checkpoint (no attention yet) does not wake; the attention wakes once.
+        self.assertEqual([n["wake"] for n in notices], [False, True], notices)
+        self.assertTrue(notices[0]["key"].startswith("experiment:run-1:checkpoint:"), notices)
+
 
 class SupervisionWakeRearmTest(unittest.TestCase):
     """An attention wake must hand its notice to the immediate prompt sweep,
