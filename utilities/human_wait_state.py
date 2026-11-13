@@ -48,6 +48,10 @@ _ROUTE_DEMAND_MAX_BYTES = 32 * 1024
 _ROUTE_DEMAND_TTL = 600.0
 _SELECTED_DRAFT_MAX = 4096
 _SELECTED_RESPONSE_MAX = 256
+# Exact waits whose completion already took them out of the published views. A row leaves
+# once a collection that started after it is published; the bound only guards a clock
+# that went back.
+_SETTLED_WAITS_MAX = 256
 _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
@@ -576,6 +580,57 @@ def message_answer_submission_current(binding):
                 and _answer_attachment_current(entry.get("answer_attachment"), envelope))
 
 
+def _settled_waits(value):
+    """The waits a completion settled, as the shared cache records them (``id`` and ``at``)."""
+    rows = value.get("settled_waits") if isinstance(value, dict) else None
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+            and isinstance(row.get("at"), (int, float)) and not isinstance(row.get("at"), bool)
+            and math.isfinite(row["at"])] if isinstance(rows, list) else []
+
+
+def _settle_published_wait(wait_id):
+    """Drop one answered wait from the published views at once (correction 3, 11-13).
+
+    The collection leaves an answered message question out (``read_signals``); until it runs
+    again the cache kept the wait, so the panel and Fleet still counted and showed it. Only
+    that exact id goes; every other row and count stays as published. The id and the time
+    are kept in the shared cache, so a collection read before this completion never
+    publishes it again, even when its source cannot be read then (review 1597-r3). Best
+    effort: a later collection writes the same result.
+    """
+    try:
+        with _cache_write_lock():
+            value = _read_cache_file()
+            if value:
+                settled = [row for row in _settled_waits(value) if row["id"] != wait_id]
+                value["settled_waits"] = [*settled, {"id": wait_id, "at": time.time()}][-_SETTLED_WAITS_MAX:]
+            if value and any(row.get("id") == wait_id for row in value.get("items", ()) if isinstance(row, dict)):
+                value["items"] = [row for row in value["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
+                by_session = value.get("by_session") if isinstance(value.get("by_session"), dict) else {}
+                value["by_session"] = {key: [ref for ref in refs if ref != wait_id]
+                                       for key, refs in by_session.items()
+                                       if isinstance(refs, list) and any(ref != wait_id for ref in refs)}
+                counts = wait_counts(value["items"])
+                value.update(total=counts["total"], older=counts["older"], stale_total=counts["older"],
+                             ownerless=counts["ownerless"],
+                             unattributed=[ref for ref in value.get("unattributed", ()) if ref != wait_id])
+            if value:
+                _write_cache_value(value)
+            path = _fleet_cache_path()
+            meta = os.lstat(path) if path.exists() else None
+            fleet = (json.loads(path.read_text(encoding="utf-8"))
+                     if meta and stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
+                     and not stat.S_IMODE(meta.st_mode) & 0o077 and meta.st_size <= _CACHE_MAX_BYTES else None)
+            if isinstance(fleet, dict) and fleet.get("schema_version") == 1 and any(row.get("id") == wait_id for row in fleet.get("items", ()) if isinstance(row, dict)):
+                fleet["items"] = [row for row in fleet["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
+                counts = wait_counts(fleet["items"])
+                fleet.update(total=counts["total"], older=counts["older"], ownerless=counts["ownerless"],
+                             unattributed=[ref for ref in fleet.get("unattributed", ()) if ref != wait_id])
+                _write(_fleet_cache_path(), fleet)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
     """Source seat lock held; completion is independent of the transport claim."""
     if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
@@ -594,6 +649,7 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
         completion["answer"] = text
     signal.update(lifecycle="answered", completion=completion)
     _write_signal_source(signal)
+    _settle_published_wait(signal["id"])
     envelope = _message_envelope(signal)
     entry = _selected_entry(envelope) or {"draft": "", "state": "open"}
     entry["source_terminal"] = True
@@ -938,6 +994,37 @@ def _owner_projection(item: dict) -> dict:
     return row
 
 
+def _message_source_state(item: dict) -> str:
+    """What the exact S4 source a collection read says now: ``open`` (still that open
+    question), ``ended`` (removed, replaced by its session's next one, or no longer open),
+    ``unread`` (not read just now — not the same as ended; the collection's reading stands)
+    or ``unchecked`` (no exact source to re-read; the next collection decides)."""
+    owner = item.get("owner") or {}
+    if not owner.get("seat_key"):
+        return "unchecked"
+    try:
+        path = _signal_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
+                             "seat_key": owner["seat_key"], "id": item.get("id")})
+    except (OSError, ValueError, TypeError):
+        return "unread"
+    if path is None:
+        return "unread"  # No single exact source to re-read; the next collection decides.
+    signal = _read(path)
+    if signal is None:
+        # `_read` folds a failed read into None; only a source that is gone has ended.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return "ended"
+        except OSError:
+            pass
+        return "unread"
+    if signal.get("id") != item.get("id") or (
+            signal.get("mode") == "message" and signal.get("lifecycle") != "open"):
+        return "ended"
+    return "open"
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -1034,6 +1121,7 @@ def publish_cache(result: dict) -> bool:
             selected = previous.get("selected_responses", {}) if previous else {}
             if not _valid_selected_overlay(selected):
                 return False
+            removed = set()
             if selected:
                 value["selected_responses"] = selected
                 # A producer may briefly see an old native sidecar after its
@@ -1054,19 +1142,52 @@ def publish_cache(result: dict) -> bool:
                             and all(identity.get(key) == row.get(key)
                                     for key in ("turn_id", "item_id")))
                 removed = {row["id"] for row in items if answered(row)}
-                if removed:
-                    value["items"] = [row for row in items if row["id"] not in removed]
-                    value["by_session"] = {key: [ref for ref in refs if ref not in removed]
-                                           for key, refs in by_session.items()
-                                           if any(ref not in removed for ref in refs)}
-                    fleet_value["items"] = [row for row in fleet_value["items"]
-                                            if row["id"] not in removed]
-                    counts = wait_counts(value["items"])
-                    for projection in (value, fleet_value):
-                        projection.update(counts)
-                        projection["unattributed"] = [ref for ref in projection["unattributed"]
-                                                       if ref not in removed]
-                    value["stale_total"] = value["older"]
+            # A registered question read by this pass may have been answered (or replaced by its
+            # session's next one) before this write. Its exact source, read under this same lock
+            # that its completion takes, decides (review 1597-1): open stays, even with its id in
+            # the completions (the same id registered again, review 1597-r4), ended leaves. Only
+            # a source that could not be read falls back on the completions (review 1597-r3): a
+            # settled id stays out; any other keeps what the collection read, and the publication
+            # says it is incomplete (review 1597-r2). A completion row leaves once a pass that
+            # started after it is published: that pass read the source after it.
+            settled_waits = _settled_waits(previous)
+            settled_ids = {row["id"] for row in settled_waits}
+            read_open = set()
+            unread = False
+            for item in result["items"]:
+                if isinstance(item, dict) and item.get("source") == "S4" and item.get("id"):
+                    source_state = _message_source_state(item)
+                    if source_state == "ended":
+                        removed.add(item["id"])
+                    elif source_state == "open":
+                        read_open.add(item["id"])
+                    elif item["id"] in settled_ids:
+                        removed.add(item["id"])
+                    elif source_state == "unread":
+                        unread = True
+            removed |= {row["id"] for row in items
+                        if row["id"] in settled_ids and row["id"] not in read_open}
+            kept_settled = [row for row in settled_waits
+                            if row["at"] >= observed_at and row["id"] not in read_open]
+            if kept_settled:
+                value["settled_waits"] = kept_settled[-_SETTLED_WAITS_MAX:]
+            if unread:
+                for projection in (value, fleet_value):
+                    projection["complete"] = False
+                    projection["health"] = [*projection["health"], {"source": "S4", "state": "unknown"}]
+            if removed:
+                value["items"] = [row for row in items if row["id"] not in removed]
+                value["by_session"] = {key: [ref for ref in refs if ref not in removed]
+                                       for key, refs in by_session.items()
+                                       if any(ref not in removed for ref in refs)}
+                fleet_value["items"] = [row for row in fleet_value["items"]
+                                        if row["id"] not in removed]
+                counts = wait_counts(value["items"])
+                for projection in (value, fleet_value):
+                    projection.update(counts)
+                    projection["unattributed"] = [ref for ref in projection["unattributed"]
+                                                   if ref not in removed]
+                value["stale_total"] = value["older"]
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)

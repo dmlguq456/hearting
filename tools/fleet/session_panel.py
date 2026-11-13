@@ -589,7 +589,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     labels = {name: ui_text("fleet.session_panel." + name) for name in (
         "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
-        "narrow", "auxiliary", "height", "threshold", "side", "bottom", "compact", "summary",
+        "narrow", "auxiliary", "height", "side", "bottom", "compact", "summary",
         "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
