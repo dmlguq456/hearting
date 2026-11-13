@@ -37,6 +37,16 @@ _AUTH_RE = re.compile(
     r"authentication_error|invalid api key|not logged in|unauthorized|forbidden",
     re.I,
 )
+# A 401/403 whose body is the edge network's block or challenge page: the
+# provider's API never saw the request, so no key or account was judged. Seen
+# 2026-11-13 on eight Claude owners within two minutes, the whole envelope being
+# "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare".
+# Only these page titles count; any other 401/403 body stays an auth stop.
+_EDGE_BLOCK_RE = re.compile(
+    r"Attention Required! \| Cloudflare|<title>\s*Just a moment\.\.\.\s*</title>",
+    re.I,
+)
+EDGE_BLOCK_REASON = "runtime-edge-block-envelope"
 _PROTOCOL_REASON_RE = re.compile(
     r"missing|protocol|schema|shape|json|eof|request-failed|result-invalid|"
     r"thread-start|turn-start-response|join-receipt|contract",
@@ -201,7 +211,19 @@ def classify_runtime_failure(
             str(process_exit),
             status,
         )
-    if status in {"401", "403"} or structured_code == _CODEX_AUTH_STRUCTURED_CODE:
+    auth_status = status in {"401", "403"} or structured_code == _CODEX_AUTH_STRUCTURED_CODE
+    if auth_status and _EDGE_BLOCK_RE.search(text):
+        # A runtime end, so the supervisors' bounded transient retry and the
+        # existing runtime-death continuation (`correct`, `start --route`) apply.
+        return SupervisorTerminal(
+            "dead-runtime-error",
+            "runtime",
+            event,
+            EDGE_BLOCK_REASON,
+            str(process_exit),
+            status,
+        )
+    if auth_status:
         return SupervisorTerminal(
             "dead-auth",
             "auth",
@@ -443,10 +465,13 @@ def classify_escaped_terminal_commit_error(exc, *, route_file, route_id, owner_a
 # result": the supervisor itself recorded the end. Harness-specific reason
 # names (`terminal-event-missing`, `opencode-final-stop-missing`, ...) stay in
 # `reconcile_reason` and are not judged. `tools/install/distribution.py` keeps
-# a standalone copy of the same two columns.
+# a standalone copy of the same two columns. A provider's 401/403 refusal
+# (`dead-auth`) is the runtime ending the attempt too: the model produced no
+# result, so `correct` and `start --route` continue its work in the same
+# lineage once the cause is cleared, instead of leaving a route with no way on.
 SUPERVISOR_ERROR_EVENT = "dispatch.supervisor.error"
 RUNTIME_END_FAILURE_CLASSES = frozenset({"runtime", "protocol"})
-RUNTIME_END_NOTES = frozenset({"dead-runtime-exit", "dead-runtime-error"})
+RUNTIME_END_NOTES = frozenset({"dead-runtime-exit", "dead-runtime-error", "dead-auth"})
 
 
 def runtime_ended_without_result(meta) -> bool:
