@@ -160,7 +160,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE',side?'╭─ 6 ROUTE':'╭─ route 6','ROUTE_0',side?'── MESSAGES':'── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
@@ -196,7 +196,7 @@ const draw=(messages,width,height,extra={})=>{const r=view.render({width,height,
 // Spec rule 31: a message takes a head row and a body row, both open the same message.
 const keyOf=(messages,i)=>[...new Set(draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action))][i];
 const read=(messages,key,width,height)=>{const first=draw(messages,width,height,{routeDetail:key}),out=[];
- for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/messages · |‹ \d+\/\d+ ›/.test(s)));return out;};
+ for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/(?:messages|MESSAGES) · |‹ \d+\/\d+ ›/.test(s)));return out;};
 // A row's text without its frame and indent: a body read across rows, end to end.
 const flat=rows=>rows.map(s=>s.slice(1,-1)).join('').replace(/\s/g,'');
 const bodies=[['url','https://example.invalid/'+'a'.repeat(290)+'END_1517','END_1517'],['cjk','한글'.repeat(150)+'끝1517','끝1517'],
@@ -245,7 +245,7 @@ const keys=messages=>[...new Set(draw(messages).hits.filter(h=>h.action.startsWi
 const ends=rows=>['FIRST','SECOND','THIRD','FOURTH','INSERTED','SAME'].filter(t=>rows.some(s=>s.includes(t+'_END')));
 const page=(messages,key)=>{const first=draw(messages,{routeDetail:key,height:10}),out=[];
  for(let p=0;p<first.routePages;p++)out.push(...draw(messages,{routeDetail:key,routePage:p,height:10}).plain);
- return {opened:first.plain.some(s=>s.includes('messages · ')),shown:ends(out),detail:first.routeDetail};};
+ return {opened:first.plain.some(s=>s.includes('MESSAGES · ')),shown:ends(out),detail:first.routeDetail};};
 for(const [name,before,after] of [['front-out',[F,S,T],[S,T,U]],['insert',[F,T,U],[X,F,T]],['identical',[A,A2,T],[A2,T,U]],['none',[F,S,T],[F,S,T]]]){
  const k=keys(before);
  before.forEach((m,i)=>{
@@ -256,10 +256,15 @@ for(const [name,before,after] of [['front-out',[F,S,T],[S,T,U]],['insert',[F,T,U
   if(stays)assert.equal(keys(after)[after.indexOf(m)],k[i],name+' '+i);
  });
 }
-// The panel head's `route N` is whole or left out at any width, never `route 1` for 12.
-for(const n of [1,12,123])for(let width=12;width<=40;width++){
- const rows=view.render({width,height:12,side:true,model:{routes:[{id:'a',title:'ROW',state:'working',kind:'working',paint:{}}],route_total:n},questions:()=>[],configuration:{}}).rows.map(r=>r.map(p=>p.text).join(''));
- for(const row of rows)for(const hit of row.matchAll(/\br(?:o|ou|out|oute)?\b( \d+)?/g))assert.equal(hit[0],'route '+n,width+' '+row);
+// The panel head's `route N` is whole or left out at any width, never `route 1` for 12;
+// beside the native area (spec rule 45 (a)) `N ROUTE`, never the count without its word.
+for(const n of [1,12,123])for(let width=12;width<=40;width++)for(const side of [true,false]){
+ const rows=view.render({width,height:12,side,model:{routes:[{id:'a',title:'ROW',state:'working',kind:'working',paint:{}}],route_total:n},questions:()=>[],configuration:{}}).rows.map(r=>r.map(p=>p.text).join(''));
+ if(side)for(const row of rows){
+  assert(!/\broute\b/.test(row),width+' '+row);
+  for(const hit of row.matchAll(/─ (\d*) ?(R(?:O|OU|OUT|OUTE)?)?\b/g))if(hit[1]||hit[2])assert.equal(hit[1]+' '+hit[2],n+' ROUTE',width+' '+row);
+ }
+ else for(const row of rows)for(const hit of row.matchAll(/\br(?:o|ou|out|oute)?\b( \d+)?/g))assert.equal(hit[0],'route '+n,width+' '+row);
 }
 '''
         self.node(script, "panel-view.cjs")
@@ -277,7 +282,7 @@ const paint=(model,width,height,extra={})=>{const r=view.render({width,height,si
 // Spec rule 23: twelve current routes all have rows; the head counts all twelve
 // and nothing folds into `+N more` or opens Fleet.
 const twelve={...base,routes:Array.from({length:12},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:12,route_total:12};
-let r=paint(twelve,40,40);assert(r.plain.some(s=>s.includes('route 12')),r.plain.join('\n'));
+let r=paint(twelve,40,40);assert(r.plain.some(s=>s.includes('12 ROUTE')),r.plain.join('\n'));
 assert(r.plain.some(s=>s.includes('ROUTE_11'))&&!r.plain.join('').includes('more'),r.plain.join('\n'));
 // Fewer rows: the rows shown plus the border counts (`↑N` above, `↓N` below) are always the whole count.
 const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
@@ -311,9 +316,9 @@ assert(r.hits.some(h=>h.action==='read:'+key));
 let pages=paint(msg,40,9,{routeDetail:key}),seen=[];
 for(let page=0;page<pages.routePages;page++)seen.push(...paint(msg,40,9,{routeDetail:key,routePage:page}).plain);
 assert(pages.routePages>1);assert(seen.join('\n').includes('START'));assert(seen.join('\n').includes('END_1517'));
-assert(pages.plain.some(s=>s.includes('messages · ')));
+assert(pages.plain.some(s=>s.includes('MESSAGES · ')));
 // A message no longer kept falls back to the ordinary panel.
-assert(!paint(msg,40,14,{routeDetail:'message:9:→'}).plain.some(s=>s.includes('messages · ')));
+assert(!paint(msg,40,14,{routeDetail:'message:9:→'}).plain.some(s=>/messages · /i.test(s)));
 // The repo's open work row and, on the evidence pages, the route owner and summary stay readable.
 const work={...six,work:[{text:'◌ '},{text:'3 open · WORK_HEADLINE'}]};
 for(const width of [40,80])assert(paint(work,width,30).plain.some(s=>s.includes('3 open · WORK_HEADLINE')),String(width));
@@ -454,8 +459,8 @@ assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes
 // ([repository, Git] / [model, context]), then a thin rule, then the session's content with
 // its labels; an empty row parts the head from the route box.
 assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].startsWith('│ CTX    42%')&&/^│ ─+ │$/.test(rows[6]),rows.join('\n'));
-assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ route'),rows.join('\n'));
-const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('── messages '));
+assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ 3 ROUTE'),rows.join('\n'));
+const r=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),m=rows.findIndex(s=>s.includes('── MESSAGES '));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
 // Spec rules 24, 38: beside the native area a folded route reads who (the glyph with its
 // harness), then its context and time two cells in, then its title two cells in.
@@ -467,12 +472,12 @@ assert(rows[m+1].includes('← [e7]')&&rows[m+2].includes('│   MESSAGE_1'),row
 for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
 const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
-const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── messages '));
+const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── MESSAGES '));
 // Spec rule 34 (b): short of rows the messages fold to one row each before a route gives up its second row.
 assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%')&&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
-const ra=rows.findIndex(s=>s.includes('╭─ route 3 '));
-assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
+const ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE '));
+assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
 // before the route box scrolls in place; messages go last.
@@ -485,7 +490,7 @@ for(const q of [[],question])for(let h=12;h<=30;h++){
  if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp(' \\+'+hidden+' ─ │').test(all),h+'\n'+all);
  if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
  if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
- if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ route'),h+' messages go last\n'+all);
+ if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ 3 ROUTE'),h+' messages go last\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box.
 for(let h=10;h<=30;h++)for(const q of [[],question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',questions:o=>q.slice(0,o.budget)}));
@@ -697,13 +702,13 @@ const at=frame=>paint({frame,state:'working'});
 const a=at(0),b=at(3),c=at(13);
 const mark=v=>v.rows.flat().find(x=>x.text.length===1&&'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'.includes(x.text)&&x.role==='state:working'&&v.rows[0].indexOf(x)<0);
 assert.notEqual(mark(a).text,mark(b).text);assert.equal(mark(a).text,view.SPIN[0]);assert.equal(mark(b).text,view.SPIN[3]);
-const count=v=>v.rows.flat().find(x=>x.text==='route 2'),dot=v=>v.rows.flat().find(x=>x.text==='●'&&x.foreground===150);
+const count=v=>v.rows.flat().find(x=>x.text==='2 ROUTE'),dot=v=>v.rows.flat().find(x=>x.text==='●'&&x.foreground===150);
 assert.equal(count(a).bold,true);assert.equal(count(c).dim,true);assert.equal(dot(a).bold,true);assert.equal(dot(c).dim,true);
 assert(a.animated&&a.spins.includes(0)&&a.spins.length>1,JSON.stringify(a.spins));
 // Nothing runs: no beat, nothing to turn between native frames.
 const idle=view.render({width:40,height:30,side:true,model:{routes:[{...routes[1]}],route_count:1,styles},state:'idle',configuration:{},questions:()=>[]});
 assert.equal(idle.animated,false);assert.deepEqual(idle.spins,[]);
-assert.equal(idle.rows.flat().find(x=>x.text==='route 1').foreground,186);
+assert.equal(idle.rows.flat().find(x=>x.text==='1 ROUTE').foreground,186);
 '''
         self.node(script, "panel-view.cjs")
 
@@ -799,6 +804,26 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_rule_motion_setting_saves_through_the_existing_path_and_falls_back_alone(self):
+        # Spec E9 rule 47 (e): `rule motion` (on by default, or off), saved like `route line`; an
+        # unknown value falls back to `on` alone and never disables the shell.
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"XDG_CONFIG_HOME": directory}
+            path = shell.policy_path(env)
+            path.parent.mkdir()
+            path.write_text(json.dumps({"enabled": True, "rule_motion": "sometimes", "route_line": "model"}))
+            path.chmod(0o600)
+            self.assertTrue(shell.policy(env)[0])
+            self.assertEqual((shell.display_policy(env)["rule_motion"], shell.display_policy(env)["route_line"]), ("on", "model"))
+            path.write_text(json.dumps({"enabled": True}))
+            self.assertEqual(shell.DISPLAY_DEFAULTS["rule_motion"], "on")
+            desired = {**shell.DISPLAY_DEFAULTS, "rule_motion": "off"}
+            self.assertEqual(shell.save_display_policy(desired, env)["rule_motion"], "off")
+            self.assertEqual(shell.display_policy(env)["rule_motion"], "off")
+            self.assertIs(json.loads(path.read_text())["enabled"], True)
+            with self.assertRaises(ValueError):
+                shell.save_display_policy({**desired, "rule_motion": "fast"}, env)
+
     def test_sent_messages_come_from_this_sessions_own_ledger_shard(self):
         import time
         from unittest import mock
@@ -858,12 +883,12 @@ assert.equal(all.filter(s=>s.includes('>_ apply_patch · +1 agent')).length,1,al
 const q=[[p('Q_HEAD')],[p('BODY')],[p('1 YES')],[p('2 NO')],[p('choose')],[p('back')]];
 for(const [width,height,side] of [[40,12,true],[80,12,false]]){
  const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},questions:o=>q.slice(0,o.budget)});
- assert(!rows(r).join('\n').includes('route 1'),rows(r).join('\n'));
+ assert(!rows(r).join('\n').includes(side?'1 ROUTE':'route 1'),rows(r).join('\n'));
  assert.deepEqual(r.spins,[]);assert.equal(r.animated,false,width+'x'+height);
 }
 // The same route with room to show it: its mark spins and the beat runs.
 const shown=view.render({width:40,height:30,side:true,state:'idle',model:{routes:[route],route_count:1},questions:o=>q.slice(0,o.budget)});
-assert(rows(shown).join('\n').includes('route 1'));assert.equal(shown.animated,true);assert(shown.spins.length>0);
+assert(rows(shown).join('\n').includes('1 ROUTE'));assert.equal(shown.animated,true);assert(shown.spins.length>0);
 """
         self.node(script, "panel-view.cjs")
 
@@ -965,7 +990,7 @@ for(const want of ['┆ OWNER  claude (Opus 5.5·xhigh) · 38%','┆ KIND   auto
         script = self.FIXTURE + r'''
 const nine=[...Array(9)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'n'+i,title:r.title+' '+(i+1)};});
 const place=rows=>rows.filter(s=>/│ │   (one-shot|staged)/.test(s)).length,names=rows=>rows.filter(s=>/│ │   (셸|세션|새 판)/.test(s)).length;
-const section=rows=>{const m=rows.findIndex(s=>s.includes('── messages'));return m<0?[]:rows.slice(m+1,rows.findIndex((s,i)=>i>m&&/^│ ─+( \+\d+ ─)? │$/.test(s)));};
+const section=rows=>{const m=rows.findIndex(s=>s.includes('── MESSAGES'));return m<0?[]:rows.slice(m+1,rows.findIndex((s,i)=>i>m&&/^│ ─+( \+\d+ ─)? │$/.test(s)));};
 // 40×44: every route keeps its three rows and the three messages fold to one row each.
 const r44=draw(nine,40,44),m44=section(r44);
 assert(place(r44)===9&&names(r44)===9&&m44.length===3&&m44.every(s=>/^│ [←→] \[/.test(s)),r44.join('\n'));
@@ -986,10 +1011,10 @@ for(let h=16;h<=72;h++){
  if(place(rows)<9)assert(body.filter(s=>/^│ [←→] /.test(s)).length<=3&&body.length<=6,h+'\n'+all);
  // The rule under the metadata goes only once TITLE and NOW are one row each.
  const title=rows.findIndex(s=>s.startsWith('│ TITLE'));
- if(title>0&&/^│ {8}\S/.test(rows[title+1]))assert(/^│ ─+ │$/.test(rows[title-1]),h+'\n'+all);
+ if(title>0&&/^│ {8}\S/.test(rows[title+1]))assert(/^│ [─━]+ │$/.test(rows[title-1]),h+'\n'+all);
 }
 const tall=draw(nine,40,60);
-assert(/^│ ─+ │$/.test(tall[tall.findIndex(s=>s.startsWith('│ TITLE'))-1]),tall.join('\n'));
+assert(/^│ [─━]+ │$/.test(tall[tall.findIndex(s=>s.startsWith('│ TITLE'))-1]),tall.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -1027,7 +1052,7 @@ const six=[...Array(6)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return
 const QUESTION=[[P('◑ Q_HEAD')],[P('Q_BODY')],[P('› A')],[P('2 B')],[P('↑↓ choose · Enter send · t text')]];
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
  state:'idle',configuration:{},questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-const rule=rows=>rows.findIndex(s=>s.includes('── messages'));
+const rule=rows=>rows.findIndex(s=>s.includes('── MESSAGES'));
 const full=paint(six,58),m=rule(full);
 assert(full[m-2].includes('╰')&&blank(full[m-1])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3,full.join('\n'));
 // With a question the row stands between the route box and the question box.
@@ -1123,9 +1148,8 @@ for(let h=16;h<=80;h++){
 
     def test_the_repository_row_counts_worktrees_and_mem_reads_the_latest_saved_memory(self):
         # Spec E9 rules 37, 41: beside the native area `REPO   hearting · wt 12` and `GIT` without the
-        # count; under NOW the newest saved memory (`MEM`, two rows at most), which goes to one
-        # row with TITLE and NOW and goes whole before the structural empty rows. The bottom
-        # layout keeps its rows as they were.
+        # count. (MEM moved under the messages, spec rule 46; an older backend's row goes there.)
+        # The bottom layout keeps its rows as they were.
         script = self.FIXTURE + r'''
 const D=t=>({text:t,dim:true}),MEM=[D('3m '),D('decision '),P('셸 패널 route 줄 순서는 누가 / context·시간 / 무엇 / 종류로 정함, 지어낸 기억')];
 const side={...head,repo_side:[P('hearting')],worktrees:[D('wt 12')],git_side:[D('fix/fleet-opencode-… ✓')],memory:MEM};
@@ -1148,30 +1172,17 @@ assert(v50.groups.includes('head')&&v50.groups.includes('git'),v50.groups);
 // Only the count was left in the parentheses: the repository row carries the Git group.
 const bare=paint([oneShot],40,50,{model:{git_side:[]}});
 assert(text(bare)[1].includes('wt 12')&&!text(bare).join('').includes('GIT')&&bare.groups.includes('git'),text(bare).join('\n'));
-// MEM: under NOW, the value column of TITLE and NOW, two rows, the second ending in `…`.
-const m=r50.findIndex(s=>s.startsWith('│ MEM    3m decision 셸'));
-assert(m>0&&r50[m-1].startsWith('│        ')&&r50[m+1].startsWith('│        ')&&r50[m+1].includes('…')&&!r50.join('').includes('지어낸 기억'),r50.join('\n'));
-const ages=v50.rows[m].filter(p=>p.text==='3m'||p.text==='decision');assert(ages.length===2&&ages.every(p=>p.dim),JSON.stringify(v50.rows[m]));
+// Spec E9 rule 46 (e): an older backend's one MEM row (painted pieces only) stands in the MEM
+// section under the messages, its age kept and its type left out; the head has no MEM row.
+const title=r50.findIndex(s=>s.startsWith('│ TITLE')),mem=r50.findIndex(s=>s.includes('── MEM ')),msg=r50.findIndex(s=>s.includes('── MESSAGES '));
+assert(title>0&&!r50.slice(0,msg).some(s=>s.includes('MEM'))&&mem>msg&&r50[mem+1].startsWith('│ ◆ 3m ')&&!r50[mem+1].includes('decision')
+ &&r50[mem+2].startsWith('│   셸 패널')&&r50[mem+3].includes('…')&&!r50.join('').includes('지어낸 기억'),r50.join('\n'));
 // No row, no MEM.
 assert(!text(paint([oneShot],40,50,{model:{memory:[]}})).join('').includes('MEM'));
 // The bottom layout: its rows as before (the count stays in the Git parentheses, no MEM).
 const bottom=text(paint([oneShot,staged],140,16,{side:false}));
 assert(bottom.some(s=>s.includes('hearting/ │'))&&bottom.some(s=>s.includes('(fix/fleet-opencode-dup-sid 🚧 3)'))&&!bottom.join('').includes('wt 12')
  &&!/REPO|GIT |MEM/.test(bottom.join('')),bottom.join('\n'));
-// Short of rows: MEM keeps two rows only with TITLE's and NOW's, and goes whole before the
-// empty row under the route box.
-const six=[...Array(6)].map((_,i)=>({...[oneShot,staged,waiting][i%3],id:'s'+i}));
-for(let h=18;h<=72;h++){
- const rows=text(paint(six,40,h)),all=rows.join('\n'),mem=rows.findIndex(s=>s.startsWith('│ MEM')),title=rows.findIndex(s=>s.startsWith('│ TITLE'));
- const memTwo=mem>0&&/^│ {8}\S/.test(rows[mem+1]),multi=title>0&&/^│ {8}\S/.test(rows[title+1]);
- const at=rows.findIndex(s=>s.includes('── messages')),gap=at>1&&/^│ +│$/.test(rows[at-1])&&rows.slice(0,at).some(s=>s.includes('╰'));
- assert.equal(memTwo,multi,h+'\n'+all);
- if(mem>0)assert(gap,h+' MEM goes before the empty row under the route box\n'+all);
- if(mem>0&&!memTwo)assert(rows[mem].includes('…'),h+'\n'+all);
-}
-// The step itself: a height where MEM has gone and the empty row under the route box stays.
-assert([...Array(55).keys()].map(i=>i+18).some(h=>{const rows=text(paint(six,40,h)),at=rows.findIndex(s=>s.includes('── messages'));
- return !rows.some(s=>s.startsWith('│ MEM'))&&/^│ +│$/.test(rows[at-1])&&rows[at-2].includes('╰');}));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -1239,7 +1250,7 @@ const one={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:
  workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'utilities/panel.py'})]};
 const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:false,owner_paint:undefined,paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','61%','━━━━')},
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m'})]};
-const box=rows=>rows.slice(rows.findIndex(s=>s.includes('╭─ route')),rows.findIndex(s=>s.includes('╰'))+1);
+const box=rows=>rows.slice(rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s)),rows.findIndex(s=>s.includes('╰'))+1);
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: owner / CTX / title with the route's time at its end / kind; no branch, no `│`.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
@@ -1298,7 +1309,8 @@ assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers
 
     def test_the_title_value_is_bold_in_the_sessions_harness_color(self):
         # Spec E9 rule 44: the TITLE row's value bold, in the session's harness color (Fleet's
-        # `hb_*`), on every row it takes; the label stays dim; without color no weight either.
+        # `hb_*`), on every row it takes; the label stays dim. Without color (NO_COLOR) the weight
+        # stays, as the steward's `⚑` (spec rule 35 (a); #1579 review follow-up (마)).
         script = self.FIXTURE + r'''
 const styles={dim:{dim:true},loc_repo:{foreground:7},hb_claude:{foreground:116},hb_codex:{foreground:182},hb_opencode:{foreground:110},hb_other:{foreground:-1}};
 const paint=(harness,o={})=>view.render({width:40,height:50,side:true,harness,model:{...head,routes:[],route_count:0,styles,...o},state:'working',configuration:{},questions:()=>[]}).rows;
@@ -1313,7 +1325,9 @@ for(const harness of ['claude','codex','opencode']){
  assert(rows.find(r=>r.some(p=>p.text==='NOW    ')).every(p=>p.bold!==true),harness);
 }
 assert.equal(seen.size,3);
-assert(paint('codex',{no_color:true}).flat().every(p=>p.bold!==true));
+const plain=paint('codex',{no_color:true}),title=plain.findIndex(r=>r.some(p=>p.text==='TITLE  ')),now=plain.findIndex(r=>r.some(p=>p.text==='NOW    '));
+for(const [i,row] of plain.entries())for(const p of row)if(p.text.trim()&&p.text!=='TITLE  '&&!p.role)
+ assert.equal(p.bold===true,i>=title&&i<now,i+' '+JSON.stringify(p));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -1343,6 +1357,189 @@ assert(!r64.join('').includes('one-shot')&&!r64.join('').includes('3/7')&&/claud
 for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:false}).filter(s=>s.startsWith('│ │ ')))
  assert(!/>_ ?\S*…|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
 '''
+        self.node(script, "panel-view.cjs")
+
+    def test_section_heads_are_upper_case_with_the_count_first(self):
+        # Spec E9 rule 45: beside the native area `2 ROUTE` (the count first, its word upper case,
+        # the running pulse kept), `MESSAGES`, the producer's own label and the read pages' heads
+        # too; role words and kind rows stay as they are; the bottom layout keeps `route N`.
+        script = self.FIXTURE + r"""
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const owned={...oneShot,role:'owner',kind_word:'code'};
+const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[owned,staged],route_count:2,...(o.model||{})},
+ state:'working',configuration:{},questions:()=>[],...(o.extra||{})});
+const v=at(),rows=plain(v),all=rows.join('\n');
+assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>s.startsWith('│ ── MESSAGES ─'))&&!/\broute \d|── messages/.test(all),all);
+const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
+assert(all.includes('⠋ owner')&&all.includes('code · one-shot'),all);
+// The producer's label alone (no rows yet): its count first too.
+const label=plain(at({model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}}));
+assert(label.some(s=>s.includes('╭─ 3 ROUTE ⠏2 ─')),label.join('\n'));
+// The read pages' heads.
+assert(plain(at({extra:{routeDetail:true}}))[1].startsWith('│ ROUTE · Back'));
+const key=v.hits.find(h=>h.action.startsWith('message:')).action;
+assert(plain(at({extra:{routeDetail:key}}))[1].startsWith('│ MESSAGES · Back'));
+// The bottom layout: `route N`, `messages`, its pages too (spec rule 45 (d)).
+const bottom=plain(at({width:120,side:false})).join('\n');
+assert(bottom.includes('╭─ route 2 ')&&bottom.includes('── messages ')&&!/ROUTE|MESSAGES/.test(bottom),bottom);
+assert(plain(at({width:120,side:false,extra:{routeDetail:true}}))[1].startsWith('│ route · Back'));
+assert(plain(at({width:120,side:false,model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}})).join('').includes('╭─ route 3 ⠏2 ─'));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_mem_stands_under_the_messages_with_its_kind_and_gives_way_first(self):
+        # Spec E9 rule 46: MEM leaves the head for its own section under the messages (`── MEM ──`,
+        # the messages' rule form), each record `◆ kind · age` (dim) over its headline (body
+        # color, two rows at most); two records at most; short of rows MEM goes before any of the
+        # messages: two records, one, its headline on one row, none.
+        script = self.FIXTURE + r"""
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const items=[{kind:'decision',age:'3m',text:'panel labels in dark grey, and the count leads its word so it reads as a count'},
+ {kind:'lesson',age:'2h',text:'one fix per review finding'}];
+const routes=[oneShot,staged,{...oneShot,id:'c'}];
+const at=(o={})=>view.render({width:o.width||40,height:o.height||70,side:true,fill:true,model:{...head,routes,route_count:routes.length,memory_items:items,...(o.model||{})},
+ state:'idle',configuration:{},questions:()=>[]});
+const section=(rows,word)=>{const i=rows.findIndex(s=>s.startsWith('│ ── '+word+' '));if(i<0)return null;let end=i+1;
+ while(end<rows.length&&!/^│ ── |^│ ─+( \+\d+ ─)? │$/.test(rows[end]))end++;return rows.slice(i+1,end);};
+let v=at(),rows=plain(v);
+const msg=rows.findIndex(s=>s.startsWith('│ ── MESSAGES ')),mem=rows.findIndex(s=>s.startsWith('│ ── MEM '));
+assert(msg>0&&mem>msg&&!rows.slice(0,msg).some(s=>s.includes('MEM')),rows.join('\n'));
+assert(rows[mem+1].startsWith('│ ◆ decision · 3m ')&&rows[mem+2].startsWith('│   panel labels in dark grey')&&rows[mem+3].startsWith('│   ')&&rows[mem+3].includes('…')
+ &&rows[mem+4].startsWith('│ ◆ lesson · 2h ')&&rows[mem+5].startsWith('│   one fix per review finding')&&/^│ ─+ │$/.test(rows[mem+6]),rows.join('\n'));
+// The head row dim, the headline in the body color; the title rule as the messages' (dim, its word the title role).
+assert(v.rows[mem+1].filter(p=>p.text.trim()&&!p.role).every(p=>p.dim===true)&&v.rows[mem+2].filter(p=>p.text.trim()&&!p.role).every(p=>p.dim!==true),JSON.stringify(v.rows[mem+2]));
+const title=v.rows[mem].find(p=>p.text==='MEM'),mtitle=v.rows[msg].find(p=>p.text==='MESSAGES');
+assert(title.role==='title'&&title.dim===true&&mtitle.role==='title'&&mtitle.dim===true);
+// One record, none.
+rows=plain(at({model:{memory_items:items.slice(1)}}));
+const one=section(rows,'MEM');assert(one&&one.length===2&&one[0].startsWith('│ ◆ lesson · 2h'),rows.join('\n'));
+assert(!plain(at({model:{memory_items:[]}})).join('').includes('MEM'));
+// A type or an age missing: the head keeps what is known.
+assert(plain(at({model:{memory_items:[{kind:'',age:'5m',text:'only an age'}]}})).some(s=>s.startsWith('│ ◆ 5m ')));
+// No messages: MEM alone under its rule, then the closing rule.
+rows=plain(at({model:{messages:[]}}));assert(!rows.join('').includes('MESSAGES')&&section(rows,'MEM').length===5,rows.join('\n'));
+// Narrower than 30 cells inside: the same section.
+rows=plain(at({width:32}));assert(section(rows,'MEM')?.[0].startsWith('│ ◆ decision · 3m'),rows.join('\n'));
+// Short of rows: MEM steps down before any of the messages does, in its own order.
+const memState=rows=>{const m=section(rows,'MEM');if(!m)return 0;return m.filter(s=>s.startsWith('│ ◆')).length*10+m.filter(s=>s.startsWith('│   ')).length;};
+const messagesWhole=rows=>{const m=section(rows,'MESSAGES')||[],heads=m.map((s,i)=>/^│ [←→] /.test(s)?i:-1).filter(i=>i>=0);
+ return heads.length>=3&&heads.every(i=>/^│   \S/.test(m[i+1]||''));};
+const seen=[];
+for(let h=70;h>=12;h--){
+ rows=plain(at({height:h}));const state=memState(rows);
+ // (Rows a later step frees beyond its need may bring a MEM record back, as every step's.)
+ if(!seen.includes(state))seen.push(state);
+ if(state)assert(messagesWhole(rows),h+' MEM goes before the messages fold or go\n'+rows.join('\n'));
+ // With MEM shown, messages not shown are counted at the end of their own title rule.
+ const msgRows=section(rows,'MESSAGES'),hidden=msgRows?head.messages.length-msgRows.filter(s=>/^│ [←→] /.test(s)).length:0;
+ if(state&&hidden)assert(new RegExp('^│ ── MESSAGES ─+ \\+'+hidden+' ─ │$').test(rows.find(s=>s.startsWith('│ ── MESSAGES'))),h+'\n'+rows.join('\n'));
+}
+assert.deepEqual(seen,[23,12,11,0],JSON.stringify(seen));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_the_head_rule_follows_the_sessions_own_state(self):
+        # Spec E9 rule 47: running, a six-cell heavy bar moves between the rule's ends and back in
+        # 50 spinner frames (5 s), easing at the ends, its end cells one step lower; waiting, the
+        # whole rule heavy and red, lit and receding on the one-second beat (the steward `⚑`'s);
+        # otherwise the plain rule. Only that row changes between beats, and the host gets the row
+        # at any frame. Rule motion off, mono and NO_COLOR move nothing; a panel short of rows
+        # that drops the rule adds nothing.
+        script = self.FIXTURE + r"""
+const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},
+ tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}};
+const run=(o={})=>view.render({width:40,height:o.height||40,side:true,fill:true,harness:'claude',model:{...head,routes:[],route_count:0,messages:[],styles,...(o.model||{})},
+ state:o.state,frame:o.frame||0,configuration:o.cfg||{},background:o.background||'',questions:()=>[]});
+const text=r=>r.map(p=>p.text).join('');
+const ruleAt=v=>{const c=v.rows.findIndex(r=>text(r).startsWith('│ CTX'));return c>0&&/^│ [─━]+ │$/.test(text(v.rows[c+1]))?c+1:-1;};
+const cellsOf=(v,i)=>v.rows[i].slice(2,-2).flatMap(p=>[...p.text].map(ch=>({ch,p})));
+const bar=frame=>{const v=run({state:'working',frame}),i=ruleAt(v),cs=cellsOf(v,i);return {v,i,cs,start:cs.findIndex(c=>c.ch==='━'),n:cs.filter(c=>c.ch==='━').length};};
+for(const f of [0,7,13,25,31,49]){
+ const b=bar(f),seg=b.cs.slice(b.start,b.start+6);
+ assert.equal(b.cs.length,36);assert.equal(b.n,6,f+' '+text(b.v.rows[b.i]));
+ assert(seg.every(c=>c.ch==='━'&&c.p.foreground===230&&c.p.scan===true&&c.p.role==='rule'),f);
+ assert(seg[0].p.dim===true&&seg[5].p.dim===true&&seg.slice(1,5).every(c=>c.p.dim!==true),f);
+ assert(b.cs.every((c,i)=>i>=b.start&&i<b.start+6||c.ch==='─'&&c.p.dim===true&&c.p.role==='messages'),f);
+}
+assert.deepEqual([0,25,50,75].map(f=>bar(f).start),[0,30,0,30]);
+const step=f=>Math.abs(bar(f+1).start-bar(f).start);
+assert(step(0)<step(12)&&step(24)<step(12)&&step(26)<step(37),'it eases at the ends');
+// The host's row: its index, and the row at any frame is that frame's painted row.
+const v3=run({state:'working',frame:3});
+assert(v3.animated&&v3.motion&&v3.motion.row===ruleAt(v3));
+for(const f of [3,17,40])assert.deepEqual(v3.motion.at(f),run({state:'working',frame:f}).rows[v3.motion.row]);
+// Between two beats of one second only the spinner's row and the rule's row change.
+const a=run({state:'working',frame:3}),b=run({state:'working',frame:4});
+assert.deepEqual(a.rows.map((r,i)=>JSON.stringify(r)===JSON.stringify(b.rows[i])?-1:i).filter(i=>i>=0),[0,ruleAt(a)]);
+// Claude, Codex and OpenCode draw the same rule on the same frame (one renderer and beat).
+for(const f of [5,10]){const rows=['claude','codex','opencode'].map(harness=>view.render({width:40,height:40,side:true,fill:true,harness,
+ model:{...head,routes:[],route_count:0,messages:[],styles},state:f===5?'working':'blocked',frame:f,configuration:{},questions:()=>[]}));
+ assert(rows[0].motion?.row===rows[1].motion?.row&&rows[1].motion?.row===rows[2].motion?.row);
+ for(const v of rows.slice(1))assert.deepEqual(v.rows.slice(1),rows[0].rows.slice(1),String(f));}
+// Waiting: the whole rule heavy and red, lit, then receding, with the steward's `⚑`.
+for(const [f,lit] of [[0,true],[10,false],[20,true]]){
+ const v=run({state:'blocked',frame:f,model:{tag:'[e9]',steward:true}}),i=ruleAt(v),parts=v.rows[i].slice(2,-2),flag=v.rows[0].find(p=>p.text==='⚑');
+ assert.equal(text(parts),'━'.repeat(36));
+ assert(parts.every(p=>p.foreground===217&&p.beat===true&&(p.dim===true)===!lit),f+JSON.stringify(parts));
+ assert.equal(flag.bold===true,lit);assert.equal(v.motion,null);assert(v.animated);
+}
+// Idle and an unknown state: the plain rule as before, nothing kept turning.
+for(const state of ['idle','unknown',undefined]){
+ const v=run({state,frame:7}),i=ruleAt(v);
+ const parts=v.rows[i].slice(2,-2);
+ assert(parts.length===1&&parts[0].text==='─'.repeat(36)&&parts[0].dim===true&&parts[0].role==='messages'&&!parts[0].scan&&!parts[0].beat,JSON.stringify(parts));assert.equal(v.motion,null);assert.equal(v.animated,false,String(state));
+}
+// Rule motion off, mono, NO_COLOR: nothing moves; a wait stays a still heavy rule.
+for(const [cfg,model] of [[{rule_motion:'off'},{}],[{theme:'mono'},{}],[{},{no_color:true}]]){
+ const w=run({state:'working',frame:7,cfg,model}),k=[0,10].map(frame=>run({state:'blocked',frame,cfg,model}));
+ assert.equal(text(w.rows[ruleAt(w)]),'│ '+'─'.repeat(36)+' │');assert.equal(w.motion,null);assert(!w.rows.flat().some(p=>p.scan));
+ assert.equal(text(k[0].rows[ruleAt(k[0])]),'│ '+'━'.repeat(36)+' │');
+ assert.deepEqual(k[0].rows[ruleAt(k[0])],k[1].rows[ruleAt(k[1])],JSON.stringify(cfg));
+ assert(!k[0].rows[ruleAt(k[0])].some(p=>p.beat||p.dim&&p.text.includes('━')),JSON.stringify(cfg));
+}
+// A known face takes its tones: the dark face's vanilla and one step lower, the light face's deep ones.
+for(const [o,lit,edge,wait,off] of [[{background:'dark'},230,187,217,131],[{cfg:{theme:'light'}},22,65,88,174]]){
+ const cs=cellsOf(run({...o,state:'working',frame:13}),ruleAt(run({...o,state:'working',frame:13}))).filter(c=>c.ch==='━');
+ assert.deepEqual([cs[0].p.foreground,cs[1].p.foreground,cs[0].p.dim===true],[edge,lit,false],JSON.stringify(o));
+ const w=[0,10].map(frame=>{const v=run({...o,state:'blocked',frame});return v.rows[ruleAt(v)][2].foreground;});
+ assert.deepEqual(w,[wait,off],JSON.stringify(o));
+}
+// Short of rows the rule goes and adds nothing (spec rule 34 (c)).
+let dropped=0;
+for(let h=30;h>=8;h--){const v=run({state:'working',frame:7,height:h});
+ if(ruleAt(v)<0){dropped++;assert.equal(v.motion,null,String(h));assert(!v.rows.flat().some(p=>p.scan),String(h));}}
+assert(dropped>0);
+// The setting: on by default, `rule_motion` beside `route_line`, `on`/`off`.
+assert.equal(view.defaults.rule_motion,'on');assert.deepEqual(view.options.rule_motion,['on','off']);
+assert.equal(view.change(view.defaults,'rule_motion',1).rule_motion,'off');
+const i=view.fields.indexOf('rule_motion');assert(i>view.fields.indexOf('route_line'));
+const settings=view.render({width:40,height:24,side:true,model:{labels:{rule_motion:'rule motion'}},settings:{index:i,value:{...view.defaults}},questions:()=>[]});
+assert(text(settings.rows.flat()).includes('rule motion  ‹ on ›')&&settings.hits.some(h=>h.action==='setting:'+i+':up'));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_a_worker_never_outlasts_its_owners_context_and_kind_rows(self):
+        # Spec E9 rule 43 (g), #1579 review follow-up (가): short of rows the workers' rows go
+        # before the owner's context row folds and before its kind row goes; rows a later step
+        # frees never bring a worker back without them (38 cells, heights 23-29: one staged
+        # route with a worker and three without).
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
+const solo={id:'s',title:'셸 상태·표시 고치기',kind:'working',state:'working',elapsed:'41m',shape:'one-shot-owner',kind_word:'code',role:'owner',tool:'Edit',
+ stages:[{name:'one-shot',current:true,mark:'●'}],paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','38%','━━━')},workers_live:[]};
+const one={id:'w',title:'속도 3단계 — 남은 재계산',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'worker',doer_worker:true,
+ paint:{glyph:P('⠋'),...doer('claude','Sonnet 5.5','high','22%','━━')},owner_paint:doer('claude','Opus 5.5','xhigh','52%','━━━━'),
+ workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',tool:'Edit',paint:{glyph:P('⠋'),...doer('claude','Sonnet 5.5','high','22%','━━')}}]};
+const routes=[one,...[1,2,3].map(i=>({...solo,id:'s'+i}))];
+let checked=0;
+for(const width of [38,40])for(const model of [{},{messages:[],wait:'',now:''}])for(let h=60;h>=12;h--){
+ const rows=view.render({width,height:h,side:true,fill:true,model:{...head,...model,routes,route_count:routes.length},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+ if(!rows.some(s=>/[└├]─[⠋●]/.test(s)))continue;checked++;
+ assert(rows.some(s=>/^│ │ │ CTX /.test(s))&&rows.some(s=>/^│ │ │ code · staged/.test(s)),width+'x'+h+'\n'+rows.join('\n'));
+}
+assert(checked>0);
+"""
         self.node(script, "panel-view.cjs")
 
     def node(self, script, name):
@@ -1482,7 +1679,7 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
  const at=ch=>parts.find(p=>p.text.startsWith(ch));
  // Spec rule 31: a message's text is body text; its head's own values are secondary.
  assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.body,label);
- assert(parts.some(p=>p.text.includes('messages')&&p.foreground===f.title),label);
+ assert(parts.some(p=>p.text.includes('MESSAGES')&&p.foreground===f.title),label);
  if(theme!=='mono'){
   // The question's border, `◑` and `›` are rose; its words are body text.
   assert(parts.some(p=>p.text==='◑'&&p.foreground===f.accent)&&parts.some(p=>p.text==='›'&&p.foreground===f.accent),label);

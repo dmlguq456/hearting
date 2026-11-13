@@ -1,7 +1,7 @@
 'use strict';
 // Geometry and paint only. The existing question controller owns drafts/effects.
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
-  position:'right',theme:'terminal',shade:'none',route_line:'time'};
+  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'on'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
 // step deeper). `terminal` is the terminal's own background with the shared
 // palette; `light` declares a light terminal; `mono` drops hue and keeps weight,
@@ -11,9 +11,13 @@ const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom'
 // (COLORFGBG or the terminal's own reply to a native's query; nothing is asked).
 const FACES={
   dark:{light:234,medium:235,body:253,secondary:248,title:246,frame:244,route:245,messages:242,accent:174,
-    working:150,idle:186,blocked:174,dead:210,done:150,steward:[219,132]},
+    working:150,idle:186,blocked:174,dead:210,done:150,steward:[219,132],
+    // Spec rule 47: the moving rule's tones (running: the session spinner's vanilla and one
+    // step lower; waiting: a lit and a receding red).
+    rule:{lit:230,edge:187,wait:217,'wait-off':131}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
-    working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175]},
+    working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
+    rule:{lit:22,edge:65,wait:88,'wait-off':174}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -62,6 +66,9 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // The steward's number does not blink (spec rule 35 (a)): it keeps the lit pink.
     else if(role==='steward'&&theme!=='mono'&&known){foreground=F.steward[part.beat===true&&!bold?1:0];dim=false;}
     else if(role==='steward'&&theme==='mono')dim=false;
+    // Spec rule 47: the moving rule's cells take their face's tone at full strength (an unknown
+    // face keeps the session keys, the lower tone dimmed); mono never moves (no tone).
+    else if(role==='rule'&&theme!=='mono'&&known&&F.rule[part.tone]){foreground=F.rule[part.tone];dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -94,10 +101,10 @@ function messageKeys(list){
     return n?key+'.'+n:key;
   }).reverse();
 }
-const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','side_min_columns'];
-const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','threshold'];
+const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion','side_min_columns'];
+const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion','threshold'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
-  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model']};
+  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['on','off']};
 const APPEARANCE_KEYS=['position','theme','shade'];
 // The session's own state, as Fleet's session row judges and draws it
 // (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
@@ -106,6 +113,23 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
+// Spec rule 47: the one place that decides the moving rule's shape (draft "가 · 스캐너"; the
+// drafts "나"/"다" would replace this function alone). One cell `i` of an `n`-cell rule at
+// spinner frame `tick` (100 ms): `scan` (this session running) moves a six-cell heavy bar
+// between the ends and back in 50 frames (5 s), easing at the ends (smoothstep), its two end
+// cells one step lower; `wait` (an answer or a confirmation waits) is the whole heavy rule,
+// lit or receding on the panel's one-second beat (`lit`); `still` moves nothing (rule
+// motion off, mono, NO_COLOR): a running rule stays the plain one, a waiting one stays heavy.
+// Anything else is the plain thin rule. Returns the glyph and its tone.
+function ruleCell(kind,tick,i,n,{still=false,lit=true}={}){
+  if(kind==='wait')return ['━',still||lit?'wait':'wait-off'];
+  if(kind==='scan'&&!still){
+    const L=Math.min(6,n),period=50,t=((Math.trunc(tick)%period)+period)%period;
+    const x=t<period/2?t/(period/2):2-t/(period/2),head=Math.round(x*x*(3-2*x)*(n-L)),d=i-head;
+    if(d>=0&&d<L)return ['━',d===0||d===L-1?'edge':'lit'];
+  }
+  return ['─','line'];
+}
 function change(value,key,step){
   const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
@@ -114,6 +138,7 @@ function change(value,key,step){
 }
 function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
   width=Math.max(12,width);height=Math.max(4,height);
+  const cfg={...defaults,...configuration};
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const line=(value,key)=>[text(value,key)];
@@ -182,6 +207,24 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // read from the rows this paint finally shows, so a route the height dropped
   // keeps nothing turning.
   const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
+  // Spec rule 47: the thin rule under the metadata follows this session's own state, the
+  // frame's source (not a route's): running moves a bar along it, an answer or confirmation
+  // wait blinks it red on the one-second beat, anything else is the plain rule. Rule motion
+  // off, mono and NO_COLOR move nothing (a wait stays a still heavy rule). A moving rule's
+  // parts carry `scan` (the host repaints that one row on its spinner beat), a blinking one `beat`.
+  const ruleKind=settings?'':state==='blocked'?'wait':LIVE[state]?.[0]==='spin'?'scan':'';
+  const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono';
+  const ruleWidth=inner;
+  function ruleParts(tick){
+    const lit=Math.floor(Math.trunc(tick)/10)%2===0,flag=ruleStill?{}:ruleKind==='scan'?{scan:true}:ruleKind==='wait'?{beat:true}:{},out=[];
+    let run='',tone='';
+    const flush=()=>{if(!run)return;
+      out.push(tone==='line'?{...text(run,'dim'),role:'messages',...flag}:
+        {...text(run,tone==='wait'||tone==='wait-off'?'g_blocked':'g_spin'),...(tone==='edge'||tone==='wait-off'?{dim:true}:{}),role:'rule',tone,...flag});};
+    for(let i=0;i<ruleWidth;i++){const [glyph,kind]=ruleCell(ruleKind,tick,i,ruleWidth,{still:ruleStill,lit});if(kind!==tone){flush();run='';tone=kind;}run+=glyph;}
+    flush();
+    return out;
+  }
   // Values the host could not refresh for a while are shown, not claimed:
   // nothing spins and the frame takes no route state (spec rule 12).
   const stale=model.stale===true;
@@ -258,7 +301,6 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     return out;
   }
   const asking=!!model.answerable;
-  const cfg={...defaults,...configuration};
   let routePages=1,routeArea=null,routeOffset=0,routeMax=0,routeStep=1;
   // A message too long to open in place is read here, on the route detail's pages.
   const kept=Array.isArray(model.messages)?model.messages:[],keys=messageKeys(kept);
@@ -285,7 +327,9 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     if(settings.error)add(line(t('save_failed','Could not save'),'lvl_r'));
     else add(line('Tab ↑↓ · ←/→ · Enter · Esc'));
   }else if(routeDetail){
-    add(line((reading?'messages':t('routes','route'))+' · '+t('back','Back'),'loc_repo'),'route');
+    // Spec rule 45 (c): beside the native area the page's word is upper case, as its section's head.
+    const word=reading?'messages':t('routes','route');
+    add(line((side?word.toUpperCase():word)+' · '+t('back','Back'),'loc_repo'),'route');
     const start=content.length;
     if(reading)wrap(messageParts(reading),Infinity);
     else for(const route of routes){
@@ -322,11 +366,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const cut=(parts,limit)=>{const all=size(parts);if(all<=limit)return parts;const fit=clip(parts,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
     const joined=(groups,sep=' │ ')=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
     // A narrow panel gives up the lead rule, then whole words from the end of the label:
-    // `route N` shows whole or not at all, never as a shorter number.
+    // `route N` (beside the native area `N ROUTE`, spec rule 45 (a)) shows whole or not at
+    // all, never as a shorter number.
+    const counted=words=>{if(words.length>1&&(words[0]==='route'||/^\d+$/.test(words[0])&&words[1]==='ROUTE'))words.splice(0,2,words[0]+' '+words[1]);return words;};
     const fitted=label=>{
       if(size([text('── '),...label,text(' ')])<=inner)return [text('── '),...label,text(' ')];
-      const all=label.map(p=>clean(p.text)).join(''),words=all.split(' ');
-      if(words[0]==='route'&&words.length>1)words.splice(0,2,words[0]+' '+words[1]);
+      const all=label.map(p=>clean(p.text)).join(''),words=counted(all.split(' '));
       let keep='';
       for(const word of words){const next=keep?keep+' '+word:word;if(measure(next)>inner)break;keep=next;}
       const out=[];let left=keep.length;
@@ -355,8 +400,6 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
     const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
-    // Spec rule 37 (b): the MEM rows (the first, and a second that goes with the values on several rows).
-    const memRows=new Set();let memFirst=-1;
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
     // first when rows run short, and the first row then ends in `…`.
     const extra=new Set(),oneRow=new Map();
@@ -374,11 +417,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // A row that ends a value cut short: its last cell becomes `…` (spec rule 36 (c), 37 (b)).
     const ellipsis=(row,limit)=>{const all=size(row);if(all+1<=limit)return [...row,{...(row.at(-1)||text('')),text:'…'}];
       const fit=clip(row,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
-    const field=(label,parts,max=Infinity,into)=>{
+    const field=(label,parts,max=Infinity)=>{
       const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth);
       let rows=wrapAll(parts,inner-labelWidth);const from=top.length;
       if(rows.length>max){rows=rows.slice(0,max);rows[max-1]=ellipsis(rows[max-1],inner-labelWidth);}
-      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...row]);if(into)into.add(top.length-1);else if(i)extra.add(top.length-1);});
+      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...row]);if(i)extra.add(top.length-1);});
       if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...cut(parts,inner-labelWidth)]);
     };
     // Spec rules 37 (a), 41: beside the native area the worktree count stands beside the
@@ -387,11 +430,21 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
-    const memory=painted(model.memory);
+    // Spec rule 46: this repository's newest saved memory records (two at most) stand in their
+    // own section under the messages, each `◆ kind · age` over its headline. An older backend
+    // sends the newest one as painted pieces only (`3m decision headline`): that one record,
+    // without its kind (rule 46 (e)); the head carries no MEM row either way.
+    const memItems=(()=>{
+      if(!side)return [];
+      if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,2)
+        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim()}));
+      const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
+      return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
+    })();
     if(side){
       // Spec rule 29 (b), 30 (a): the metadata first, one block (the repository, Git,
       // model and effort, context, jobs, the repo's open work), then one thin rule, then
-      // this session's content (title, NOW, MEM, the answer wait and a tidy notice). Spec rule
+      // this session's content (title, NOW, the answer wait and a tidy notice). Spec rule
       // 35 (b): inside the metadata one empty row parts [repository, Git] from [model and
       // effort, context]; without Git it parts the repository from the model.
       if(sideRepo.length){
@@ -426,16 +479,15 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       if(jobs.length){const from=top.length;put(top,jobs,2);mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
       if(model.warning)top.push(line(model.warning,'lvl_r'));
-      const content=title||now||memory.length||waitParts.length||(tidy&&!asking);
+      const content=title||now||waitParts.length||(tidy&&!asking);
       // Spec rule 34 (c): the rule is not an empty row; it goes only once TITLE and NOW are down to one row each.
-      if(content){rules.add(top.length);top.push([{...text('─'.repeat(inner),'dim'),role:'messages'}]);}
+      // Spec rule 47: it follows this session's state (above).
+      if(content){rules.add(top.length);top.push(ruleParts(frame));}
       // Spec rule 44: the title's value bold, in this session's harness color (Fleet's `hb_*`;
-      // the label stays dim). No color, no weight either.
+      // the label stays dim). No color keeps the weight, as the steward's `⚑` (rule 35 (a)).
       const own='hb_'+(['claude','codex','opencode'].includes(harness)?harness:'other');
-      if(title)field('TITLE',[{...text(title,own),...(model.no_color===true?{}:{bold:true})}]);
+      if(title)field('TITLE',[{...text(title,own),bold:true}]);
       if(now)field('NOW',line(now,nowKey));
-      // Spec rule 37 (b): this repo's newest saved memory row under NOW, at most two rows.
-      if(memory.length){memFirst=top.length;field('MEM',memory,2,memRows);}
       if(waitParts.length){top.push(waitParts);mark(top.length-1,'wait');}
       if(tidy&&!asking){
         const rows=[];wrap(line('⚠ '+tidy,'lvl_y'),4,undefined,rows);
@@ -691,12 +743,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const box=4;
     // Box content is laid out at the box's inner width, so nothing is cut by the frame.
     const within=fn=>{inner-=box;try{return fn();}finally{inner+=box;}};
-    // A title in the top border: whole words only, so `route N` shows whole or not at all.
+    // A title in the top border: whole words only, so `route N` (`N ROUTE`) shows whole or not at all.
     const titled=(label,limit,ellipsis)=>{
       if(size(label)<=limit)return label;
       if(ellipsis)return cut(label,limit);
-      const all=label.map(p=>clean(p.text)).join(''),words=all.split(' ');
-      if(words[0]==='route'&&words.length>1)words.splice(0,2,words[0]+' '+words[1]);
+      const all=label.map(p=>clean(p.text)).join(''),words=counted(all.split(' '));
       let keep='';
       for(const word of words){const next=keep?keep+' '+word:word;if(measure(next)>limit)break;keep=next;}
       const out=[];let left=keep.length;
@@ -949,14 +1000,32 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     };
     const visibleMessages=messageRowsOf;
     const hiddenMessages=()=>Math.max(0,messages.length-messageCount);
+    // Spec rule 46 (b): a memory record takes two rows like a message: `◆ kind · age` (dim) and,
+    // two cells in, its headline in the body color on at most two rows (the second ending in
+    // `…`). Short of rows (rule 46 (d)): two records, one, its headline on one row, none.
+    let memCount=Math.min(2,memItems.length),memBody=2;
+    const memRowsOf=()=>{
+      const rows=[];
+      for(const m of memItems.slice(0,memCount)){
+        const head=[m.kind,m.age].filter(Boolean);
+        rows.push({parts:cut([text('◆','dim'),...(head.length?[text(' '+head.join(' · '),'dim')]:[])],inner)});
+        let body=wrapAll([text(m.text,'loc_repo')],inner-2);
+        if(body.length>memBody)body=[...body.slice(0,memBody-1),ellipsis(body[memBody-1],inner-2)];
+        for(const row of body)rows.push({parts:[text('  '),...row]});
+      }
+      return rows;
+    };
     // No rows yet: the producer's own label stands alone; a known empty list draws no box.
-    const label=clean(model.route_label||'').trim();
+    // Spec rule 45 (a): beside the native area the count leads its upper-case word (`2 ROUTE`),
+    // the producer's label too (`route 3 ⠏2` → `3 ROUTE ⠏2`); the bottom layout keeps `route N`.
+    const upper=value=>side?value.replace(/^route (\d+)/,'$1 ROUTE').replace(/^route\b/,'ROUTE'):value;
+    const label=upper(clean(model.route_label||'').trim());
     // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
     const running=shown.some(live);
-    const routeTitle=shown.length?[running?pulse('route '+total):text('route '+total,'g_idle')]:label?[text(label,'g_idle')]:null;
+    const routeTitle=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:null;
     const routeChecking=!shown.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
-    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size-memRows.size;
+    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
     // Running jobs keep their row beside a question: its editor pages its own content.
     const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-(quota.length?1:0)),columns:inner-box});
     const ask=[];
@@ -975,15 +1044,17 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // empty rows; the messages' extra rows (past three, and a body's rows after its first:
     // they only ever take rows the routes leave in their full form); opened details
     // shorten, then close (an opened message shortens with them); a value on several rows
-    // keeps one (ending in `…`; a route title, spec rule 36 (c), and MEM, rule 37 (b), too);
-    // the MEM row; spec rule 35 (d): the empty row under the route box, then the one inside
+    // keeps one (ending in `…`; a route title, spec rule 36 (c), too); spec rule 35 (d): the
+    // empty row under the route box, then the one inside
     // the metadata (structural rows, not spare ones); then the rule under the metadata; the
     // messages fold to one row each (three of them); spec rule 38: the routes' context row
     // folds into their first row; the routes' third row, then their second (one-row
     // form); fewer messages (three down to one); only then the route box scrolls in place
     // (fewer rows shown, down to one, none dropped); the Git row; the route box; running
     // jobs; the messages section only last; 5h/7d. Every route in the box takes the same form.
-    let keepGit=true,keepSpacers=true,keepRouteGap=true,keepMetaGap=true,keepRules=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0,keepMulti=true,keepPlace=true,keepCtx=true,keepMem=memRows.size>0;
+    // Spec rule 46 (d): the MEM section under the messages gives way before them, right after
+    // the opened details: two records, one, its headline on one row, none.
+    let keepGit=true,keepSpacers=true,keepRouteGap=true,keepMetaGap=true,keepRules=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0,keepMulti=true,keepPlace=true,keepCtx=true,keepMem=memItems.length>0;
     // Spec rule 43 (g): the workers' rows (2 their full rows, 1 one row each, 0 none).
     let workerForm=2;
     const anyWorkers=side&&routeRows.some(x=>x.tree&&x.workers.length);
@@ -1027,11 +1098,13 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const gapAfter=(x,i,list)=>keepDetails&&i<list.length-1&&detailsOf(x.action.slice(6)).length>0;
     const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,routeLimit).reduce((n,x,i,list)=>n+routeSize(x)
       +(keepDetails?detailsOf(x.action.slice(6)).length:0)+(gapAfter(x,i,list)?1:0),0):routeChecking.length):0;
-    const messageSection=()=>keepMessages&&messages.length?2+visibleMessages().length:0;
+    // The lower section: the messages' titled rule and rows, then MEM's, then one closing rule.
+    const memShown=()=>keepMem&&memItems.length>0;
+    const messageSection=()=>{const m=keepMessages&&messages.length>0,k=memShown();return (m?1+visibleMessages().length:0)+(k?1+memRowsOf().length:0)+(m||k?1:0);};
     // Spec rule 35 (c): beside the native area one empty row parts the route box from what
     // follows it (the question box, else the messages rule); the messages' extra rows leave it.
-    const routeGap=()=>side&&keepRouteGap&&keepRoutes&&(ask.length>0||keepMessages&&messages.length>0)?1:0;
-    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepMem?(keepMulti?memRows.size:1):0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+messageSection()+(keepQuota?1:0);
+    const routeGap=()=>side&&keepRouteGap&&keepRoutes&&(ask.length>0||keepMessages&&messages.length>0||memShown())?1:0;
+    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+messageSection()+(keepQuota?1:0);
     const budget=rows;
     const baseCount=messageCount;
     // Each step is taken only while rows are short; a later step that frees more rows than
@@ -1042,18 +1115,21 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     give(()=>detailCap>2,()=>{detailCap--;},()=>{detailCap++;});
     give(()=>keepDetails,()=>{keepDetails=false;},()=>{keepDetails=true;});
+    give(()=>keepMem&&memCount>1,()=>{memCount--;},()=>{memCount++;});
+    give(()=>keepMem&&memBody>1,()=>{memBody--;},()=>{memBody++;});
+    give(()=>keepMem,()=>{keepMem=false;},()=>{keepMem=true;});
     if(need()>budget&&messageLimit===Infinity){
       const opened=Math.max(2,...visibleMessages().map(x=>x.body?visibleMessages().filter(y=>y.body===x.body).length:0));
       give(()=>messageLimit===Infinity,()=>{messageLimit=opened;},()=>{messageLimit=Infinity;});
     }
     give(()=>messageLimit>2&&messageLimit!==Infinity,()=>{messageLimit--;},()=>{messageLimit++;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
-    give(()=>keepMem,()=>{keepMem=false;},()=>{keepMem=true;});
     give(()=>keepRouteGap,()=>{keepRouteGap=false;},()=>{keepRouteGap=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
     give(()=>messages.length>0&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
-    give(()=>anyWorkers&&workerForm>0,()=>{workerForm--;},()=>{workerForm++;});
+    // (A worker's rows come back only with the owner's context and kind rows: rule 43 (g)'s order.)
+    give(()=>anyWorkers&&workerForm>0,()=>{workerForm--;},()=>{if(keepCtx&&keepPlace)workerForm++;});
     give(()=>keepCtx,()=>{keepCtx=false;},()=>{keepCtx=true;});
     give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;});
     give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;});
@@ -1064,16 +1140,17 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     give(()=>keepMessages,()=>{keepMessages=false;},()=>{keepMessages=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const kept=()=>[keepSpacers,detailCap,keepDetails,messageLimit,keepMulti,keepMem,keepRouteGap,keepMetaGap,keepRules,messageOne,workerForm,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota];
+    const kept=()=>[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,workerForm,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota];
     for(const undo of gave.reverse()){
       const was=kept();undo();
-      if(need()>budget)[keepSpacers,detailCap,keepDetails,messageLimit,keepMulti,keepMem,keepRouteGap,keepMetaGap,keepRules,messageOne,workerForm,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota]=was;
+      if(need()>budget)[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,workerForm,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota]=was;
     }
     // Rows to spare beside the native area once everything above the messages' extra rows
     // stands whole (the routes in their three-row form, details, values on all their rows,
     // both structural empty rows): bodies take up to three rows and more messages show,
     // never past the rows the panel has.
-    const whole=detailCap===detailFull&&keepDetails&&keepMulti&&keepMem===memRows.size>0&&keepRouteGap&&keepMetaGap&&keepRules&&workerForm===2&&keepCtx&&keepPlace&&twoRows===twoFull&&routeLimit===routeRows.length&&keepRoutes===!!routeTitle&&keepGit&&keepOptional;
+    const memWhole=keepMem===memItems.length>0&&memCount===Math.min(2,memItems.length)&&memBody===2;
+    const whole=detailCap===detailFull&&keepDetails&&keepMulti&&memWhole&&keepRouteGap&&keepMetaGap&&keepRules&&workerForm===2&&keepCtx&&keepPlace&&twoRows===twoFull&&routeLimit===routeRows.length&&keepRoutes===!!routeTitle&&keepGit&&keepOptional;
     if(side&&keepMessages&&whole&&!messageOne&&messageLimit===Infinity&&messageCount===baseCount){
       const grow=()=>{
         let changed=false;
@@ -1084,8 +1161,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       while(grow());
     }
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))
-      &&(!memRows.has(i)||keepMem&&(keepMulti||i===memFirst)))
+    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
       order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i)});});
     let routeBlock=[],messageBlock=[];
     if(keepRoutes){
@@ -1113,13 +1189,25 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
     // Messages have no box: a titled upper rule and a lower rule, fixed at the
-    // bottom right above 5h/7d (spec rule 14, 11-11 night final layout).
-    if(keepMessages&&messages.length){
-      const key=tone.messages,hidden=hiddenMessages();
-      messageBlock=[{parts:rule([{...text('messages',key),role:'title'}]).map(x=>({...x,...(styles[key]||{dim:true}),role:x.role||'messages'}))}];
-      messageBlock.push(...visibleMessages());
+    // bottom right above 5h/7d (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside
+    // the native area the title is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their
+    // own titled rule (`── MEM ──`) in place of the messages' lower rule, and the one closing
+    // rule ends both; the count of messages not shown (`+N`) then stays with the messages, at
+    // the end of their title rule.
+    const keepMessageRows=keepMessages&&messages.length>0;
+    if(keepMessageRows||memShown()){
+      const key=tone.messages,hidden=keepMessageRows?hiddenMessages():0;
       const note=hidden?[text(' +'+hidden+' ','loc_repo'),text('─',key)]:[];
-      messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(note))),key),role:'messages'},...note.map(x=>x.text==='─'?{...x,role:'messages'}:x)]});
+      const noted=parts=>parts.map(x=>x.text==='─'?{...x,role:'messages'}:x);
+      const titleRule=(word,tail=[])=>{const head=fitted([{...text(word,key),role:'title'}]);
+        return [...[...head,text('─'.repeat(Math.max(0,inner-size(head)-size(tail))))].map(x=>({...x,...(styles[key]||{dim:true}),role:x.role||'messages'})),...noted(tail)];};
+      if(keepMessageRows){
+        messageBlock.push({parts:titleRule(side?'MESSAGES':'messages',memShown()?note:[])});
+        messageBlock.push(...visibleMessages());
+      }
+      if(memShown()){messageBlock.push({parts:titleRule('MEM')});messageBlock.push(...memRowsOf());}
+      const closing=memShown()?[]:note;
+      messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(closing))),key),role:'messages'},...noted(closing)]});
     }
     // Each section is placed whole or not at all; the empty row under the route box goes first.
     const tail=ask.length+messageBlock.length+(keepQuota?1:0);
@@ -1179,19 +1267,21 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   rows.push([frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used-right.used))),...right.parts,frameText('┐')]);
   // The gear's press reaches past its own cell to the rule beside it and the corner.
   hits.push({row:0,left:Math.max(1,width-right.used-2),right:width-1,action:'settings'});
-  for(let i=0;i<count-2;i++){
-    const fitted=clip(content[i]||[],inner);
-    rows.push([frameText('│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),frameText('│')]);
-  }
+  const frameRow=parts=>{const fitted=clip(parts,inner);return [frameText('│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),frameText('│')];};
+  for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[]));
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   rows.push([frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
   const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
   // The rows whose spinner cells turn between paints (the host swaps only those cells).
   const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
-  const animated=rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
+  const animated=rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat||part.scan));
+  // Spec rule 47 (d): the moving rule's row and that row painted at any spinner frame: the host
+  // repaints this one row on the beat it already keeps for the spinner (only its changed cells).
+  const scanAt=settings?-1:rows.slice(0,count).findIndex(row=>row.some(part=>part.scan));
+  const motion=scanAt>=0?{row:scanAt,at:tick=>appearance([frameRow(ruleParts(tick))],cfg,{colors:model.colors??256,noColor:model.no_color===true,background})[0]}:null;
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;
-  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,spins};
+  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,spins,motion};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,ruleCell};

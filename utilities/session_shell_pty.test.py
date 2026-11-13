@@ -148,7 +148,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','rule-motion'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -458,9 +458,27 @@ function existing(file){return new Promise((resolve,reject)=>{
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }
+ const ruleMotion={};
+ if(cfg.scenario==='rule-motion'){
+   // Spec E9 rule 47 (d): while the session runs, the head's rule moves on the spinner's beat
+   // and only its changed cells go out; the native half of that row is never written again.
+   const now=Date.now()/1000;
+   fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
+   await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
+   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
+   const rule=()=>{for(let y=0;y<sideTerm.rows;y++){const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'';
+     const m=line.slice(140).match(/^│ ([─━]{36}) │$/);if(m&&m[1].includes('━'))return {y,native:line.slice(0,138),cells:m[1]};}return null;};
+   let first=null;const began=Date.now();
+   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,50));}
+   let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
+   await new Promise(r=>setTimeout(r,2600));sub.dispose();await flush();
+   const second=rule();
+   Object.assign(ruleMotion,{first,second,bytes,writes});
+   await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
+ }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
+ console.log(JSON.stringify({rule_motion:ruleMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -578,7 +596,7 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion'}:
             config.update(columns=180,rows=40)
         if scenario=='route-pages':config.update(columns=80,rows=24)
         if scenario=='fleet-modal':
@@ -594,7 +612,7 @@ class SessionShellPTYTest(unittest.TestCase):
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state'} else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -704,6 +722,21 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertEqual([word for word,_ in result['state_colors']],['idle','running','idle'])
         self.assertNotEqual(colors['idle'],colors['running'])
         self.assertEqual(result['state_colors'][2][1],colors['idle'])
+
+    def test_the_head_rule_moves_on_the_spinner_beat_sending_only_its_changed_cells(self):
+        # Spec E9 rule 47 (d): a running session's head rule moves (six heavy cells) on the beat the
+        # spinner already keeps; each beat sends only the rule's changed cells beside the spinner's
+        # row, so a beat stays small (measured 2026-11-13: 236 bytes a beat before the rule moved,
+        # 319 after; the whole row each beat would be about 500), and the native half stays put.
+        result=self.run_loop('rule-motion')['rule_motion']
+        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes']}))
+        first,second=result['first'],result['second']
+        self.assertIsNotNone(first);self.assertIsNotNone(second)
+        for value in (first,second):self.assertEqual(value['cells'].count('━'),6,value)
+        self.assertNotEqual(first['cells'],second['cells'])
+        self.assertEqual(first['native'],second['native'])
+        self.assertGreaterEqual(result['writes'],15)
+        self.assertLess(result['bytes']/result['writes'],400,result)
 
     def test_the_border_names_the_state_right_after_start_without_a_key(self):
         # Spec rule 26: a start event leaves the host's own state unknown; until the

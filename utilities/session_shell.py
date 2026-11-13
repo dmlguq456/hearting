@@ -44,14 +44,16 @@ def _private_json(path: Path, limit: int):
 
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
-                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time"}
+                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time",
+                    "rule_motion": "on"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
               "shade": ("none", "light", "medium")}
 # What a folded route row carries besides its title, harness and context:
-# its elapsed time or its model (spec rule 7). Same per-key fallback.
-CHOICES = {**APPEARANCE, "route_line": ("time", "model")}
+# its elapsed time or its model (spec rule 7). Whether the rule under the head's metadata
+# moves with the session's state (spec E9 rule 47 (e)). Same per-key fallback.
+CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("on", "off")}
 
 
 def _appearance(value):
@@ -863,7 +865,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count, latest_memory
+    from fleet.session_work import observe as observe_work, open_count, recent_memory
     from fleet.session_panel import presentation
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
@@ -902,13 +904,16 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     def styled(parts):
         return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    # Spec E9 rule 37 (b): the repo's newest saved memory row (the journal Fleet reads, read
-    # again only when it changed); its headline rides the open-work query below.
-    memory_row, memory_paths = latest_memory(values.get("cwd"))
+    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, two at most (the
+    # journal Fleet reads, read again only when it changed); their headlines ride the open-work
+    # query below.
+    memory_rows, memory_paths = recent_memory(values.get("cwd"))
     work, work_paths = observe_work(values.get("cwd"),
-                                    (memory_row["headline_id"],) if memory_row and memory_row.get("headline_id") else ())
-    if memory_row:
-        values["memory_latest"] = {**memory_row, "headline": work.headlines.get(str(memory_row.get("headline_id")), "")}
+                                    tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
+    if memory_rows:
+        values["memory_recent"] = [{**row, "headline": work.headlines.get(str(row.get("headline_id")), "")}
+                                   for row in memory_rows]
+        values["memory_latest"] = values["memory_recent"][0]
     watched.extend(work_paths)
     watched.extend(memory_paths)
     human_line = last_input(display, time.time())

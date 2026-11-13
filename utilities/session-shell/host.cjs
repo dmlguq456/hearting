@@ -339,7 +339,44 @@ function panelViewNow(){
 // the cached rows; the blink, a color change, repaints the panel once a second.
 function spinFrame(){return Math.floor(Date.now()/100);}
 let viewGroups=[],paintedGroups=new Set(),viewSpins=[],paintedSpins=new Set(),viewAnimated=false,panelAnimated=false;
+// Spec rule 47 (d): the moving rule beside the native area turns on the same beat as the
+// spinner. Its row, painted at the current spinner frame, is written as the scratch VT would
+// write it (`serialize`'s per-cell attributes; every cell of that row is one cell wide), so a
+// native frame and the beat write the same line, and the beat sends only the cells that changed.
+let viewMotion=null,paintedMotion=null;
+function motionCells(parts){
+  const cells=[];
+  for(const part of parts){
+    const a=[0,Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255?'38;5;'+part.foreground:'39',
+      Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
+    if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
+    const attr=a.join(';');
+    for(const ch of String(part.text).replace(/[\x00-\x1f\x7f]/g,' '))cells.push([attr,ch]);
+  }
+  return cells;
+}
+function sgrRun(cells,from=0,to=cells.length){
+  let s='',previous='';
+  for(let i=from;i<to;i++){const [attr,ch]=cells[i];if(attr!==previous){s+=`\x1b[${attr}m`;previous=attr;}s+=ch;}
+  return s+'\x1b[0m';
+}
+function motionNow(){
+  const m=paintedMotion,frame=spinFrame();
+  if(m.frame!==frame){m.frame=frame;m.cells=motionCells(m.at(frame));m.line=sgrRun(m.cells);}
+  m.offered=m.cells;return m.line;
+}
+// The cells of the moving rule's row that differ from what the terminal shows, at their place.
+function motionSpan(y){
+  const m=paintedMotion,now=m.offered,was=m.shown,column=geometry().left?1:terminal.cols+3;
+  if(!was||was.length!==now.length)return `\x1b[${y+1};${column}H\x1b[0m`+sgrRun(now);
+  const same=i=>was[i][0]===now[i][0]&&was[i][1]===now[i][1];
+  let from=0,to=now.length;
+  while(from<to&&same(from))from++;
+  while(to>from&&same(to-1))to--;
+  return from<to?`\x1b[${y+1};${column+from}H`+sgrRun(now,from,to):'';
+}
 function spun(y,row){
+  if(paintedMotion&&y===paintedMotion.row&&typeof row==='string')return motionNow();
   if(typeof row!=='string'||!paintedSpins.has(y))return row;
   const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);
 }
@@ -347,7 +384,7 @@ let beatTimer,beatPhase=-1;
 function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&expanded&&panelRows.length>0;}
 // With no spinner painted (only a blink, such as an idle steward's mark) the beat wakes
 // once a second, at the blink's own phase change, not every spinner frame.
-function armBeat(){if(!beatTimer&&beating()){const step=paintedSpins.size?100:1000;beatTimer=setTimeout(beatTick,step-Date.now()%step);}}
+function armBeat(){if(!beatTimer&&beating()){const step=paintedSpins.size||paintedMotion?100:1000;beatTimer=setTimeout(beatTick,step-Date.now()%step);}}
 function beatTick(){
   beatTimer=undefined;if(!beating())return;
   const phase=Math.floor(Date.now()/1000)%2;
@@ -358,16 +395,17 @@ function beatTick(){
 // Only the spinner cells of the panel rows, with the cursor kept where the native left it.
 // A native frame already on its way paints them itself.
 function spinPaint(){
-  if(frameTimer||!paintedSpins.size||succeeding)return;
+  if(frameTimer||!paintedSpins.size&&!paintedMotion||succeeding)return;
   let text='';const side=geometry().side;
-  for(const y of paintedSpins){
+  for(const y of paintedMotion?new Set([...paintedSpins,paintedMotion.row]):paintedSpins){
     if(y>=panelRows.length)continue;
-    const panel=spun(y,panelRows[y]);
+    const panel=spun(y,panelRows[y]),motion=!!paintedMotion&&y===paintedMotion.row;
     if(side){
       if(nativeLast[y]===undefined)continue;
       const line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+nativeLast[y]:nativeLast[y]+`\x1b[${terminal.cols+1}G\x1b[0m  `+panel;
-      if(last[y]===line)continue;last[y]=line;
-      text+=`\x1b[${y+1};${geometry().left?1:terminal.cols+3}H\x1b[0m`+panel;
+      if(last[y]===line)continue;
+      text+=motion&&last[y]!==undefined?motionSpan(y):`\x1b[${y+1};${geometry().left?1:terminal.cols+3}H\x1b[0m`+panel;
+      last[y]=line;if(motion)paintedMotion.shown=paintedMotion.offered;
     }else{
       const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
       if(last[row]===panel)continue;last[row]=panel;text+=`\x1b[${row+1};1H`+panel;
@@ -380,7 +418,7 @@ function spinPaint(){
 // unknown background keeps the terminal's own and paints no shade.
 const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=Number(value.split(';').pop());
   return value.includes(';')&&Number.isInteger(bg)?([7,15].includes(bg)?'light':bg>=0&&bg<16?'dark':''):'';})();
-function panelContent(){const view=panelViewNow();panelHits=view.hits;routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewAnimated=!!view.animated;return view.rows;}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewAnimated=!!view.animated;return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
 // only while it is on screen. Collapsed, under Fleet or the settings editor,
 // relayed, or no longer kept, it leaves them to the native like any other key;
@@ -445,12 +483,17 @@ function render() {
       let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
         serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      let motion=false;
       if(!fleetView&&geometry().side){
-        nativeLast[y]=line;
+        const same=nativeLast[y]===line;nativeLast[y]=line;
         const panel=y<panelRows.length?spun(y,panelRows[y]):' '.repeat(panelColumns());
         line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
+        // The moving rule's row whose native part is unchanged: only its changed cells.
+        motion=!!paintedMotion&&y===paintedMotion.row&&y<panelRows.length;
+        if(motion&&same&&last[y]!==undefined&&last[y]!==line){text+=motionSpan(y);last[y]=line;}
       }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
+      if(motion)paintedMotion.shown=paintedMotion.offered;
     }
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
@@ -513,12 +556,12 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();paintedMotion=null;panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
-  let lines,edit=-1,groups=[],spins=[],animated=false;
+  let lines,edit=-1,groups=[],spins=[],animated=false,motion=null;
   if(expanded){
-    const base=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
+    const base=panelContent();groups=viewGroups;spins=viewSpins;motion=viewMotion;animated=viewAnimated;
     const detail=[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
@@ -535,6 +578,8 @@ function rebuildDisplay() {
   displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
     blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
     panelRows=painted;paintedGroups=new Set(groups);paintedSpins=new Set(spins);panelAnimated=animated;
+    // What the terminal shows of the moving rule stays known while its row stays the same.
+    paintedMotion=motion?{row:motion.row,at:motion.at,shown:paintedMotion&&paintedMotion.row===motion.row?paintedMotion.shown:null}:null;
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
     displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();

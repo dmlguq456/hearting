@@ -53,8 +53,10 @@ def route_extension(key, value):
                     for row in value["lines"])))
     if key == "worker_contexts":
         return isinstance(value, (list, tuple)) and all(
-            isinstance(row, dict) and set(row) == {"stage", "harness", "model", "context", "window"}
+            isinstance(row, dict) and set(row) - {"attempt"} == {"stage", "harness", "model", "context", "window"}
             and isinstance(row["stage"], str)
+            # The attempt Fleet chose for the stage (a recorded id, or none).
+            and (row.get("attempt") is None or isinstance(row["attempt"], str))
             and (row["harness"] is None or isinstance(row["harness"], str))
             and (row["model"] is None or pair(row["model"]) and all(
                 isinstance(item, str) for item in row["model"]))

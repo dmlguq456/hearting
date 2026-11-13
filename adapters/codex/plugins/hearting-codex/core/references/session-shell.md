@@ -237,18 +237,23 @@ cells the model name is cut with `…` and the effort stays whole, and narrower
 than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
-then parts it from this session's content: `TITLE` and `NOW` (Fleet's words, dim,
+then parts it from this session's content. The rule follows this session's own
+state, from the frame's source (not a route's): while the session runs a
+six-cell heavy bar (`━`, the session spinner's color, its two end cells one
+step lower) moves between its ends and back every five seconds, easing at the
+ends; while an answer or a confirmation waits the whole rule is heavy and red,
+lit and receding on the panel's one-second beat (the steward `⚑`'s); otherwise
+it is the plain thin rule. It moves on the beat the spinner already keeps and
+the host sends only that row's changed cells; idle, nothing repaints. `rule
+motion` off, `mono` and `NO_COLOR` move nothing (a wait stays a still heavy
+rule), and a panel short of rows that drops the rule adds nothing. The
+content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,
 in the session's harness color, Fleet's `hb_*`, on every row; plain without
-color) and NOW (bright while the session works or waits), each on as many rows
-as it needs,
-then `MEM`: this repository's newest saved memory record from the journal
-Fleet reads (the newest `add`/`supersede` row of its project: age and type dim,
-the stored headline, else the start of its snippet, in the body color; no
-body), on at most two rows ending in `…`, absent without a journal row; the
-journal is read again only when it changed and the headline comes with the open
-work's query; then `◑답 대기 N` and a tidy notice; one empty row then parts the head from the
+color, the weight kept without color as the steward's `⚑`) and NOW (bright
+while the session works or waits), each on as many rows as it needs, then
+`◑답 대기 N` and a tidy notice; one empty row then parts the head from the
 route box. The bottom layout keeps the metadata row (or rows) first and one
 content row (`◑답 대기 N │ title │ NOW …`, title and NOW each keeping at least
 half of what is left); the row break parts them. Then the route box, high; free
@@ -256,7 +261,21 @@ space (beside the native area at least one empty row under the route box, above
 any question box or the messages rule); any question box; the messages section, fixed at the bottom; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
-no box, only a titled upper rule (`── messages ──`) and a lower rule. They
+no box, only a titled upper rule (`── messages ──`, beside the native area
+`── MESSAGES ──`) and a lower rule. Beside the native area `MEM` follows the
+messages under its own titled rule (`── MEM ──`, in place of their lower rule;
+the one closing rule ends both, and the messages' `+N` then ends their title
+rule): this repository's newest saved memory records, two at most, from the
+journal Fleet reads (the newest `add`/`supersede` rows of its project, a
+supersede and its replacement's add counted once), each on two rows like a
+message: `◆ decision · 3m` (dim: the type as a short word, `correction` for
+`user-correction`, `done` for `completion`, another type as recorded cut to
+twelve cells, then its age) and, two cells in, the stored headline (else the
+start of its snippet) in the body color on at most two rows ending in `…`; no
+body, and no section without a journal row. The journal is read again only
+when it changed, the two records come from that one read, and their headlines
+come with the open work's query. A backend that sends only the earlier one-row
+pieces gives that one record, without its type; the head carries no `MEM` row. They
 differ by place and color only, all from the panel's theme and shade: the
 question's border, `◑` and `›` rose (its words are body text), route plain,
 messages dim. An opened route carries what Fleet's ROUTES row unfolds, from the
@@ -294,7 +313,9 @@ out. What: two cells in, its title on at most two rows, the second ending in
 role and the model stay, and a value is shown whole or not at all. A route
 with no value at all takes one row, glyph and title. When the producer names
 the owner and the stage workers running now apart (`workers_live`), the first
-row is always the owner's (or a frame leg's with no owner), the context row
+row is always the owner's (or a frame leg's with no owner; a worker leading a
+route whose owner is not one known attempt sends no `workers_live`, so the row
+keeps its one doer), the context row
 starts with a dim `CTX` in the role column with the gauge under the harness
 (`CTX    ━━━━──── 52%`; no row for an unknown context), the route's time ends
 the title's last row (the title folds and ends in `…` within the cells left
@@ -306,7 +327,10 @@ row, then its stage, open tool and target (the path, the file name, the tool,
 then none) with its own time at the right; a finished stage's worker is not
 drawn. Short of rows a worker first takes one row (model, percent, time), then
 the workers go and the kind row ends with `· worker N`, before the steps
-below; a producer that sends no `workers_live` keeps the one-doer rows. A fourth row says which
+below, and come back only with the owner's context and kind rows; a producer
+that sends no `workers_live` keeps the one-doer rows. Each worker is Fleet's
+own live worker of its stage, found again by the attempt id Fleet records with
+it (an earlier producer's row, without one, by its values). A fourth row says which
 kind of route it is and where it stands, dim: Fleet's kind word (`code`, `lab`,
 `frame`: the capability without `autopilot-`, Fleet's own function; mode and
 intensity only in the opened `KIND`), then `one-shot` (the owner works itself)
@@ -338,7 +362,10 @@ Short of cells the kind word goes first, then the tool, then the word `staged`
 (`3/7 execute ●`), the title keeping ten cells through both; narrower still the
 kind column goes whole, and the tool shows whole or not at all. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
-`messages`, stage names, `5h`/`7d`); only real content and
+`messages`, stage names, `5h`/`7d`; beside the native area the section heads
+are upper case with the count first, `2 ROUTE`, `MESSAGES`, `MEM`, and so are
+the read pages' heads, `ROUTE · Back`, `MESSAGES · Back`, while role words,
+kind rows and setting names stay as they are); only real content and
 language-dependent text follows the screen language: the answer wait reads
 `◑답 대기 N` on a Korean screen and `◑ to answer N` otherwise, Fleet's same
 strings. Times use Fleet's spaced form (`45m`, `3h 20m`, `3d 0h`) for elapsed
@@ -348,9 +375,10 @@ observed is left out, never painted as `?` or an estimate. When rows run
 short, the question (its body and choices) and the top groups stay, and the
 others give way first, in this order: empty rows; the messages' extra rows
 (past three, and a body's rows after its first); an opened route detail (and an
-opened message) shortens and closes; a value on several rows (title, NOW, a
-route title) keeps one row ending in `…` (and `MEM` one row); the `MEM` row; the
-empty row under the route box,
+opened message) shortens and closes; the MEM section (two records, one, its
+headline on one row, none: before any of the messages); a value on several rows
+(title, NOW, a route title) keeps one row ending in `…`; the empty row under the
+route box,
 then the one inside the metadata (structural rows, not spare ones: the messages'
 extra rows leave them); then the head's rule (it is not an empty row: it goes
 only once TITLE and NOW are one row each); the messages fold
@@ -389,8 +417,9 @@ during the read, or a failed read of a readable OpenCode database) keeps the pan
 session, as Fleet's native reader does; the next projection reads it again.
 Another session, a new process, an absent or refused source and an ended
 process still clear them, and an unobserved value is never made up.
-The route box carries `route N` in its top border (the producer's own label
-alone, over a `Checking` row, while its rows are not read yet). Each current
+The route box carries `route N` in its top border (beside the native area
+`N ROUTE`, the count first; the producer's own label alone, over a `Checking`
+row, while its rows are not read yet). Each current
 route (the ones the statusline counts) is one folded row: Fleet's route marker
 and judgment (`⠏` while anything of it runs, its owner or a worker; `●`
 waiting, with nothing running or on a person; `✕` stopped; `✓` done; `◌` no
@@ -497,8 +526,9 @@ the only place Hearting reads it.
 
 The header's settings change only Hearting's existing session-shell policy:
 side/bottom layout, panel position (right, the default, or left), side width,
-narrow-window behavior, auxiliary detail, theme, shade and `route line`
-(`time`, the default, or `model`). One placement rule
+narrow-window behavior, auxiliary detail, theme, shade, `route line`
+(`time`, the default, or `model`) and `rule motion` (`on`, the default, or
+`off`: the head's rule stays still). One placement rule
 serves every harness. Themes are `terminal` (the default: the shared palette),
 `light` (a light terminal: the reviewed deep hues) and `mono` (no hue; weight,
 glyphs and words remain). Shade is `none` (the default), `light` or `medium`:
@@ -512,7 +542,8 @@ frame 244/243 while idle or unknown, route box 245/243, messages rules 242/245; 
 `◑` and `›` are 174/131 on every colored theme.
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
-default without disabling the shell, and so does an unknown `route line`.
+default without disabling the shell, and so does an unknown `route line` or
+`rule motion`.
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.

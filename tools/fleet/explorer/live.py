@@ -1186,7 +1186,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             context_jobs.append(job)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
                                     "model": _model_pair(_get(job, "resolved_model", "model")),
-                                    "context": pct, "window": window})
+                                    "context": pct, "window": window, "attempt": attempt})
         resume = None
         if state == "dead":
             resume = next((n.get("id") for n in view_nodes if _stage_state(n) == "failed"), None) or \
@@ -3456,7 +3456,9 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                 {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
                  **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
                     and item["model"] and item["model"][0] else {}),
-                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {})}
+                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
+                 # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
+                 **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
                 for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
             if type(route.get("result_at")) in (int, float):

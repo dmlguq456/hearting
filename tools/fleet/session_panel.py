@@ -451,35 +451,68 @@ def session_worktrees(values):
     return [("wt " + str(count), "dim")] if git and git.get("repo") != 0 and type(count) is int and count > 0 else []
 
 
-def session_memory(values, now=None):
-    """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
-    its age and type dim and its headline (else the start of its snippet) in the body color.
-    Nothing for no row; a body is never carried."""
+def _memory_values(row, now=None):
+    """``(text, age, type)`` of one saved memory row: its headline (else the start of its
+    snippet), its age and its recorded type; no text for a row without either."""
     import datetime
     from .session_line import elapsed_text
-    row = values.get("memory_latest")
-    if not isinstance(row, dict):
-        return []
     headline = sanitize_title(str(row.get("headline") or "")).strip()
     snippet = sanitize_title(str(row.get("snippet") or "")).strip()
     if not headline and snippet.startswith("superseded_by="):
         snippet = ""
     text = (headline or snippet)[:160]
-    if not text:
-        return []
-    parts = []
     try:
         saved = datetime.datetime.fromisoformat(str(row.get("ts") or ""))
         clock = now or (datetime.datetime.now(saved.tzinfo) if saved.tzinfo else datetime.datetime.now())
         age = elapsed_text(max(0.0, (clock - saved).total_seconds() / 60))
     except (TypeError, ValueError):
         age = ""
+    return text, age, sanitize_title(str(row.get("type") or "")).strip()[:32]
+
+
+def session_memory(values, now=None):
+    """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
+    its age and type dim and its headline (else the start of its snippet) in the body color.
+    Nothing for no row; a body is never carried. (An earlier panel's MEM row reads this.)"""
+    row = values.get("memory_latest")
+    if not isinstance(row, dict):
+        return []
+    text, age, kind = _memory_values(row, now)
+    if not text:
+        return []
+    parts = []
     if age:
         parts.append((age + " ", "dim"))
-    kind = sanitize_title(str(row.get("type") or "")).strip()[:32]
     if kind:
         parts.append((kind + " ", "dim"))
     return parts + [(text, "loc_repo")]
+
+
+# Spec E9 rule 46 (b): a memory type as its short word; another type stays as recorded.
+MEMORY_KIND_WORDS = {"user-correction": "correction", "completion": "done"}
+
+
+def memory_kind(kind):
+    """``decision``, ``lesson``, ``correction`` (``user-correction``), ``done`` (``completion``);
+    any other type as recorded, cut to twelve cells with ``…``."""
+    word = MEMORY_KIND_WORDS.get(kind, kind)
+    return word if len(word) <= 12 else word[:11] + "…"
+
+
+def session_memory_items(values, now=None):
+    """Spec E9 rule 46: the MEM section's records, two at most, newest first: each its short type
+    word, its age and its headline (else the start of its snippet). Nothing without a record or a
+    text; a body is never carried."""
+    items = []
+    for row in values.get("memory_recent") or ():
+        if not isinstance(row, dict):
+            continue
+        text, age, kind = _memory_values(row, now)
+        if text:
+            items.append({"kind": memory_kind(kind), "age": age, "text": text})
+        if len(items) >= 2:
+            break
+    return items
 
 
 def quota_row(values):
@@ -552,7 +585,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
     # Fixed words are English in every language (spec rule 3).
-    labels.update(settings="Settings", routes="route", context="context", route_line="route line")
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line",
+                  rule_motion="rule motion")
     from .session_line import effort_label, gauge_parts, answer_wait_word
     selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
     if effort_label(values.get("effort")):
@@ -582,7 +616,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "now": sanitize_title(str(values.get("now") or ""))[:320],
             "git": session_git(values), "git_side": session_git_side(values, columns), "worktrees": session_worktrees(values),
             "repo_side": session_repo_side(values),
-            "memory": session_memory(values), "selected": selected,
+            "memory": session_memory(values), "memory_items": session_memory_items(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             # Spec E9 rule 42 (b): beside the native area the `CTX` label stands for the word.
             "context_side": gauge,
