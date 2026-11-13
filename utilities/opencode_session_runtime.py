@@ -149,6 +149,17 @@ def _add_step_tokens(usage: dict, tokens) -> None:
             usage[key] = usage.get(key, 0) + value
 
 
+def _native_step_counts(tokens) -> bool:
+    """Whether a native row's tokens hold every counter a turn's usage adds."""
+    if not isinstance(tokens, dict) or not isinstance(tokens.get("cache"), dict):
+        return False
+    values = [tokens.get("input"), tokens.get("output"),
+              tokens["cache"].get("read"), tokens["cache"].get("write")]
+    if "reasoning" in tokens:
+        values.append(tokens["reasoning"])
+    return all(_count(value) is not None for value in values)
+
+
 def _step_token_record(tokens) -> dict | None:
     """One finished step's native token counters for the attempt log; None without any.
 
@@ -206,6 +217,8 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
     terminal_stop = False
     runtime_error = None
     usage = {}
+    # Native message ids this turn's events named, and those a `step_finish` counted.
+    seen_messages, counted_messages = {}, set()
     binary_parts = shlex.split(getattr(args, "opencode_command", None) or "opencode")
     runtime_binary = binary_parts[-1] if binary_parts else "opencode"
     native_opencode = Path(runtime_binary).name == "opencode"
@@ -247,6 +260,11 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
                   "session_id": session, "cwd": args.worktree})
             publish_permission_projection()
         part = value.get("part") or {}
+        message = part.get("messageID") if isinstance(part, dict) else None
+        if isinstance(message, str) and message:
+            seen_messages[message] = None
+            if kind == "step_finish":
+                counted_messages.add(message)
         if kind == "text":
             final_text = part.get("text", "")
             terminal_stop = False
@@ -352,6 +370,28 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
         terminal_stop = True
     if session and not runtime_error and (not terminal_stop or not isinstance(final_text, str)):
         raise OpenCodeTransportError("opencode-final-stop-missing")
+    if modern and session:
+        # V2 streams no `step_finish` for a turn's last model request, so the turn's
+        # usage and the context gauge missed it. Take each uncounted step from the
+        # exact finished native row its own events named. A step left unread (no
+        # row, unfinished, or counters missing) makes the sum a part of the turn, so
+        # the turn reports no usage: the session total then reads it as unknown, or a
+        # lower bound over the other turns, never as complete. Nothing is estimated.
+        missing = [message for message in seen_messages if message not in counted_messages]
+        found = opencode_runtime.read_message_tokens(session, missing) if missing else {}
+        unread = False
+        for message in missing:
+            tokens = found.get(message)
+            if not _native_step_counts(tokens):
+                unread = True
+                continue
+            _add_step_tokens(usage, tokens)
+            counts = _step_token_record(tokens)
+            if counts:
+                emit({"type": "dispatch.supervisor.step_tokens", "runtime": "opencode",
+                      "sessionID": session, "tokens": counts})
+        if unread:
+            usage = {}
     result = {"type": "result", "runtime": "opencode", "session_id": session or "",
               "subtype": "error_during_execution" if runtime_error or code else "success",
               "is_error": bool(runtime_error or code), "result": final_text}
