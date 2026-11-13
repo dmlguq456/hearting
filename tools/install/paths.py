@@ -176,10 +176,31 @@ def primary_checkout(root=None):
              "--is-inside-work-tree", "--git-common-dir"],
             capture_output=True, text=True, timeout=5,
         )
-        lines = (inside.stdout or "").splitlines()
-        if inside.returncode != 0 or not lines or lines[0].strip() != "true":
+        if inside.returncode != 0:
             return root
-        primary = _checkout_of_common_dir(lines[1].strip()) if len(lines) > 1 else None
+        lines = [line.strip() for line in (inside.stdout or "").splitlines()]
+        # The one call is trusted only when its output has exactly the shape a git that knows
+        # `--path-format` (>= 2.31) prints: line 1 is `true` or `false` (the answer to
+        # `--is-inside-work-tree`) and line 2 is an ABSOLUTE common directory. An older git does
+        # not know the option and echoes it back as the first line (and its common directory may be
+        # relative), so line 1 is then neither `true` nor `false`: the answer is not trustworthy and
+        # the old two-step path (`--is-inside-work-tree`, then `git worktree list`) decides, as it
+        # did before this one-call path existed. The repository supports such a git
+        # (`utilities/artifact-root.sh` and its test).
+        sure = (len(lines) == 2 and lines[0] in ("true", "false")
+                and Path(lines[1]).is_absolute())
+        if sure:
+            if lines[0] != "true":
+                return root
+            primary = _checkout_of_common_dir(lines[1])
+        else:
+            plain = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if plain.returncode != 0 or (plain.stdout or "").strip() != "true":
+                return root
+            primary = None
         if primary is None:
             primary = _primary_from_worktree_list(root)
             if primary is None:

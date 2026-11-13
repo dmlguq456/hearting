@@ -163,6 +163,45 @@ class PrimaryCheckoutEquivalenceTest(unittest.TestCase):
             paths.primary_checkout(linked)
         self.assertEqual(len(spy_calls), 1)
 
+    def old_git_shim(self):
+        """A PATH directory whose `git` behaves like git < 2.31: `--path-format=absolute` is not an
+        option, so it is echoed back as the first output line (exit 0) and the rest runs without it
+        (`utilities/artifact-root.test.sh` emulates the same way). Calls are logged to `calls.log`."""
+        shim = self.root / "old-git"
+        shim.mkdir()
+        real = subprocess.run(["sh", "-c", "command -v git"], capture_output=True, text=True).stdout.strip()
+        (shim / "git").write_text(
+            "#!/bin/sh\n"
+            'echo "$*" >> "$OLD_GIT_LOG"\n'
+            "strip=0\n"
+            'for arg in "$@"; do [ "$arg" = "--path-format=absolute" ] && strip=1; done\n'
+            'if [ "$strip" = 1 ]; then\n'
+            '  echo "--path-format=absolute"\n'
+            "  n=$#\n"
+            '  while [ "$n" -gt 0 ]; do arg=$1; shift; '
+            '[ "$arg" = "--path-format=absolute" ] || set -- "$@" "$arg"; n=$((n - 1)); done\n'
+            "fi\n"
+            'exec "%s" "$@"\n' % real, encoding="utf-8")
+        (shim / "git").chmod(0o755)
+        return shim, self.root / "calls.log"
+
+    def test_a_git_without_path_format_still_resolves_the_primary_through_the_old_path(self):
+        main = self.repo("main")
+        linked = self.root / "wt" / "task"
+        _git("worktree", "add", "-q", "-b", "task", str(linked), cwd=main)
+        nested = linked / "sub"
+        nested.mkdir()
+        shim, log = self.old_git_shim()
+        env = {"PATH": "%s%s%s" % (shim, os.pathsep, os.environ["PATH"]), "OLD_GIT_LOG": str(log)}
+        with mock.patch.dict(os.environ, env):
+            for where in (linked, nested, main):
+                self.assertEqual(paths.primary_checkout(where), main, str(where))
+            # not a work tree / not git at all: still `root` untouched
+            plain = self.root / "plain"
+            plain.mkdir()
+            self.assertEqual(paths.primary_checkout(plain), plain)
+        self.assertIn("worktree list --porcelain", log.read_text(encoding="utf-8"))
+
     def test_non_git_and_missing_directories_are_unchanged(self):
         plain = self.root / "plain"
         plain.mkdir()

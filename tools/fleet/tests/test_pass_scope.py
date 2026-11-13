@@ -2,6 +2,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import ast
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,22 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from fleet import pass_scope, session_tags
 from fleet.collectors import procscan
 from fleet.model import Session
+
+
+def _opens_a_pass(source):
+    """True when the source CALLS `collection_pass(...)` (bare or as an attribute); a mention in a
+    comment, docstring or string is not an opener."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if (isinstance(func, ast.Name) and func.id == "collection_pass") or \
+                    (isinstance(func, ast.Attribute) and func.attr == "collection_pass"):
+                return True
+    return False
 
 
 class PassScopeTest(unittest.TestCase):
@@ -176,12 +193,17 @@ class UnchangedTagSnapshotTest(unittest.TestCase):
                     path = Path(base) / name
                     if path.name == "pass_scope.py":
                         continue
-                    if "collection_pass(" in path.read_text(encoding="utf-8", errors="replace"):
+                    if _opens_a_pass(path.read_text(encoding="utf-8", errors="replace")):
                         parts = path.relative_to(ROOT).parts
                         if parts[0] == "adapters" and parts[2:3] == ("tools",):
                             parts = parts[2:]          # an adapter's copy of the same file
                         openers.add("/".join(parts))
         self.assertEqual(openers, {"tools/fleet/collectors/__init__.py", "tools/fleet/details.py"})
+
+    def test_a_mention_in_a_comment_or_docstring_is_not_an_opener(self):
+        self.assertFalse(_opens_a_pass('"""see collection_pass(x)"""\n# with collection_pass():\nx = "collection_pass("\n'))
+        self.assertTrue(_opens_a_pass("with pass_scope.collection_pass():\n    pass\n"))
+        self.assertTrue(_opens_a_pass("from m import collection_pass\nwith collection_pass():\n    pass\n"))
 
     def test_a_failed_generation_mark_falls_back_to_the_rewrite(self):
         session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
