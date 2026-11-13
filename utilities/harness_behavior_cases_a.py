@@ -119,6 +119,18 @@ def register(flags):
     stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with jobs.open("a", encoding="utf-8") as handle:
         handle.write("\t".join([stamp, "open", str(HERE), str(HERE), "hbfx-child", ",".join(meta)]) + "\n")
+    children = [{"attempt": attempt, "pid": child.pid}]
+    if "pair" in flags:
+        # The second frame leg of the same route (`frame-alternative`), registered with the first.
+        other = subprocess.Popen(["sleep", "900"], start_new_session=True, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        other_start = Path(f"/proc/{other.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        swap = {"pid=": f"pid={other.pid}", "pgid=": f"pgid={other.pid}", "pid_start=": f"pid_start={other_start}",
+                "attempt_id=": f"attempt_id={attempt}-alt", "route_node=": "route_node=frame-alternative"}
+        second = [next((v for k, v in swap.items() if m.startswith(k)), m) for m in meta]
+        with jobs.open("a", encoding="utf-8") as handle:
+            handle.write("\t".join([stamp, "open", str(HERE), str(HERE), "hbfx-child", ",".join(second)]) + "\n")
+        children.append({"attempt": attempt + "-alt", "pid": other.pid})
     sidecar = None
     if harness == "codex" and "nocarrier" not in flags:
         # The codex launch path starts this exact sidecar for a codex parent
@@ -127,14 +139,14 @@ def register(flags):
             from codex_queue_dispatch import launch_codex_queue_completion_sidecar, resolve_queue_socket
             socket = resolve_queue_socket(os.environ)
             car = launch_codex_queue_completion_sidecar(jobs=jobs, parent_session_id=sid,
-                                                        attempt_ids={attempt})
+                                                        attempt_ids={c["attempt"] for c in children})
             sidecar = {"pid": car.pid, "log": str(car.log_file), "socket": str(socket),
                        "socket_exists": socket.exists()}
         except Exception as exc:
             sidecar = {"error": f"{type(exc).__name__}: {exc}"}
     state = {"harness": harness, "session_id": sid, "session_source": source, "carrier": carrier,
              "runtime_binding": list(binding) if binding else None, "child_pid": child.pid,
-             "jobs": str(jobs), "sidecar": sidecar}
+             "children": children, "jobs": str(jobs), "sidecar": sidecar}
     state_file.write_text(json.dumps(state))
     print(f"HB-REGISTERED harness={harness} carrier={carrier} session_source={source} "
           f"binding={'yes' if binding else 'no'} sidecar={'yes' if sidecar and 'pid' in sidecar else 'no'}")
@@ -143,25 +155,43 @@ def register(flags):
 def complete(flags=()):
     import dispatch_contract, dispatch_completion_join
     state = json.loads(state_file.read_text())
-    pid = int(state["child_pid"])
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except OSError:
-        pass
-    for _ in range(100):
+    legs = state.get("children") or [{"attempt": attempt, "pid": state["child_pid"]}]
+    closed = path = None
+    for index, leg in enumerate(legs):
+        if index and "pair" in flags:
+            time.sleep(8)  # the two frame legs of one route end seconds apart
+        pid = int(leg["pid"])
         try:
-            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
-                break
+            os.killpg(pid, signal.SIGTERM)
         except OSError:
-            break
-        time.sleep(0.05)
-    # `complete fail`: the child died, so its receipt owes inspect-done-failure.
-    note, failure = (("dead-exit-nonzero", "fail") if "fail" in flags
-                     else ("completed-marker", "pass"))
-    closed = dispatch_contract.close_attempt_row(jobs, attempt, note,
-                                                 evidence={"failure_class": failure})
-    path = dispatch_completion_join.materialize_after_terminal_close(jobs, attempt) if closed else None
+            pass
+        for _ in range(100):
+            try:
+                if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                    break
+            except OSError:
+                break
+            time.sleep(0.05)
+        # `complete fail`: the child died, so its receipt owes inspect-done-failure.
+        note, failure = (("dead-exit-nonzero", "fail") if "fail" in flags
+                         else ("completed-marker", "pass"))
+        closed = dispatch_contract.close_attempt_row(jobs, leg["attempt"], note,
+                                                     evidence={"failure_class": failure})
+        path = dispatch_completion_join.materialize_after_terminal_close(jobs, leg["attempt"]) if closed else None
     print(json.dumps({"closed": closed, "record": str(path) if path else None, **state}))
+
+
+def attention_notice():
+    """What `resource_progress` stores for the supervising session when a run needs attention."""
+    import session_notice
+    state = json.loads(state_file.read_text())
+    harness, sid = state["harness"], state["session_id"]
+    record = session_notice.notify(
+        harness, sid, key=f"experiment:hbfx-run:attention:{attempt}:0000:1:{harness}:{sid}",
+        subject="experiment attention (1/1)", text="HB-ATTENTION run=hbfx-run loss is NaN",
+        jobs=jobs, lineage={"kind": "attempt-parent", "harness": harness,
+                            "session_id": sid, "attempt_id": attempt})
+    print(json.dumps({"notice": record.get("delivery_id") if record else None, "at": time.time()}))
 
 
 def steward_due():
@@ -225,6 +255,8 @@ elif action == "complete":
     complete(sys.argv[2:])
 elif action == "steward-due":
     steward_due()
+elif action == "attention-notice":
+    attention_notice()
 else:
     probe()
 '''

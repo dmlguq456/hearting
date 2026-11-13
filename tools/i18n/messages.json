@@ -1090,6 +1090,26 @@
    "en": "no seat · {error}",
    "ko": "seat 없음 · {error}"
   },
+  "fleet.session_block.answer_below": {
+   "en": "answer below",
+   "ko": "아래 입력창에 답"
+  },
+  "fleet.session_block.answer_closed": {
+   "en": "closed",
+   "ko": "닫힘"
+  },
+  "fleet.session_block.answer_parent": {
+   "en": "answer in the parent",
+   "ko": "부모 창에서 답"
+  },
+  "fleet.session_block.answer_sending": {
+   "en": "sending",
+   "ko": "보내는 중"
+  },
+  "fleet.session_block.answer_there": {
+   "en": "answer in its window",
+   "ko": "그 창에서 답"
+  },
   "fleet.session_block.applied": {
    "en": "✓ consumed",
    "ko": "✓ 소비 확인"
@@ -1109,6 +1129,26 @@
   "fleet.session_block.choose": {
    "en": "↑↓ choose · Enter send · t text",
    "ko": "↑↓ choose · Enter send · t text"
+  },
+  "fleet.session_block.compact_answer_below": {
+   "en": "answer below",
+   "ko": "입력창에 답"
+  },
+  "fleet.session_block.compact_answer_closed": {
+   "en": "closed",
+   "ko": "닫힘"
+  },
+  "fleet.session_block.compact_answer_parent": {
+   "en": "in the parent",
+   "ko": "부모 창에서"
+  },
+  "fleet.session_block.compact_answer_sending": {
+   "en": "sending",
+   "ko": "보내는 중"
+  },
+  "fleet.session_block.compact_answer_there": {
+   "en": "in its window",
+   "ko": "그 창에서 답"
   },
   "fleet.session_block.compact_applied": {
    "en": "✓ consumed",
@@ -1133,10 +1173,6 @@
   "fleet.session_block.compact_submitted": {
    "en": "sending",
    "ko": "전송 중"
-  },
-  "fleet.session_block.compact_unavailable": {
-   "en": "unavailable",
-   "ko": "답변 불가"
   },
   "fleet.session_block.compact_unknown": {
    "en": "unknown",
@@ -1209,10 +1245,6 @@
   "fleet.session_block.this_session": {
    "en": "this session",
    "ko": "이 세션"
-  },
-  "fleet.session_block.unavailable": {
-   "en": "answer unavailable",
-   "ko": "답변 불가"
   },
   "fleet.session_block.unknown": {
    "en": "unknown · check receipt",
@@ -1665,10 +1697,6 @@
   "fleet.session_panel.theme_terminal": {
    "en": "Terminal",
    "ko": "터미널"
-  },
-  "fleet.session_panel.threshold": {
-   "en": "Side minimum columns",
-   "ko": "옆 배치 최소 폭"
   },
   "fleet.session_panel.title": {
    "en": "SESSION {tag} · {harness} · Ctrl+] {collapse}",

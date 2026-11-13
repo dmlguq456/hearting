@@ -355,5 +355,141 @@ class SessionShellTest(unittest.TestCase):
             report.assert_called_once_with("codex", "stop", sid)
 
 
+class FableQuotaTimelineTest(unittest.TestCase):
+    """Review 1597-r2 (11-13): Fable's model quota beside Claude's callback is shown only while
+    the account cache is fresh (180 s). Fleet refreshed that cache only once it was stale, so
+    the value went missing until the reply landed, and without Fleet nothing refreshed it at
+    all. The panel's own projection (what the backend computes, `_observe_session`) is followed
+    for 600 s on a fake clock with a fake fetcher; no account and no network."""
+
+    BASE = 1_800_000_000.0
+
+    def setUp(self):
+        import queue
+        shell.registry_root()  # the backend's own import path for Fleet's readers
+        from fleet import session_view, gitinfo
+        from fleet.collectors import procscan, usage_api
+        self.view, self.queue = session_view, queue
+        self.cache = session_view.usage_cache
+        tmp = tempfile.TemporaryDirectory(prefix="fable-timeline-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        env = mock.patch.dict(os.environ, {"HOME": str(root), "CLAUDE_CONFIG_DIR": str(root / "claude"),
+            "XDG_STATE_HOME": str(root / "state"), "XDG_CACHE_HOME": str(root / "cache"),
+            "FLEET_USAGE_STATE_DIR": str(root / "usage"), "FLEET_TITLE_STATE_DIR": str(root / "titles")})
+        env.start(); self.addCleanup(env.stop)
+        git = mock.patch.object(gitinfo, "cached_display", return_value=None)
+        git.start(); self.addCleanup(git.stop)
+        (root / "claude").mkdir()
+        (root / "claude/.credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "synthetic-timeline"}}))
+        self.sid, self.pid = "00000000-0000-4000-8000-000000001597", os.getpid()
+        self.start = procscan.read_proc_start(self.pid)
+        tap = root / "claude/.statusline" / (self.sid + ".json")
+        tap.parent.mkdir(parents=True)
+        tap.write_text(json.dumps({"session_id": self.sid, "pid": self.pid, "proc_start": self.start,
+            "rate_limits": {"five_hour": {"used_percentage": 11}, "seven_day": {"used_percentage": 22}}}))
+        self.generation = usage_api._credential().generation
+        self.assertTrue(self.generation)
+        shell._LAST_OBSERVED.clear(); self.addCleanup(shell._LAST_OBSERVED.clear)
+
+    def timeline(self, *, fleet, cadence, phase=0, fail=False, latency=1, horizon=600):
+        """Each projection's last row and freshness, and each fetch's start, in seconds."""
+        from fleet import session_panel
+        clock, fetches, entered, active = [self.BASE], [], self.queue.Queue(), []
+        for path in Path(self.cache.state_dir()).iterdir() if Path(self.cache.state_dir()).is_dir() else ():
+            path.unlink()
+        def fetch(_credential):
+            fetches.append(clock[0] - self.BASE)
+            active.append(1); self.peak = max(getattr(self, "peak", 0), len(active))
+            done = threading.Event(); entered.put(done)
+            done.wait(10); active.pop()
+            if fail:
+                return {"error": "timeout", "reason": "usage-timeout"}
+            return {"rl_5h": 99, "rl_7d": 99, "rl_ms": [["fable", 70 + len(fetches)]]}
+        self.cache._write("claude", {"rl_5h": 99, "rl_7d": 99, "rl_ms": [["fable", 70]]},
+                          self.BASE, self.BASE, credential_generation=self.generation)
+        rows, flight = [], None
+        def started(t):
+            thread = self.cache._THREADS.get("claude")
+            if thread is not None and flight is None:
+                return (t, thread, entered.get(timeout=10))
+            return flight
+        with mock.patch("time.time", lambda: clock[0]), \
+             mock.patch.dict(self.cache.FETCHERS, {"claude": fetch}):
+            try:
+                for t in range(horizon + 1):
+                    clock[0] = self.BASE + t
+                    landed = False
+                    if flight is not None and t >= flight[0] + latency:
+                        flight[2].set(); flight[1].join(10)
+                        self.assertFalse(flight[1].is_alive())
+                        flight, landed = None, True
+                    if fleet and t % 2 == 0:
+                        # Fleet's collection, every two seconds.
+                        self.cache.account_usage("claude", usage="refresh")
+                        flight = started(t)
+                    # The panel projects on its cadence and when the watched cache is rewritten.
+                    if t % cadence == phase or landed:
+                        values, _ = shell._observe_session(self.view.observe, "claude", self.sid, self.pid, self.start)
+                        flight = started(t)
+                        text = "".join(part for part, _key in session_panel.quota_row(values))
+                        rows.append((t, text, self.cache.read("claude")["freshness"]))
+            finally:
+                while not entered.empty():
+                    entered.get().set()
+                if flight is not None:
+                    flight[2].set()
+                for thread in list(self.cache._THREADS.values()):
+                    thread.join(10)
+        self.assertLessEqual(getattr(self, "peak", 0), 1, "a second fetch ran beside the first")
+        return rows, fetches
+
+    def assert_shown_only_fresh(self, rows):
+        for t, text, freshness in rows:
+            if "fable" in text:
+                self.assertEqual(freshness, "fresh", (t, text))
+
+    def assert_spacing(self, fetches, least):
+        self.assertEqual(fetches, sorted(fetches))
+        for earlier, later in zip(fetches, fetches[1:]):
+            self.assertGreaterEqual(later - earlier, least, fetches)
+
+    def test_with_fleet_running_fable_never_leaves_the_last_row_in_600_seconds(self):
+        rows, fetches = self.timeline(fleet=True, cadence=2)
+        missing = [(t, text) for t, text, _ in rows if "fable" not in text]
+        self.assertEqual(missing, [])
+        self.assert_shown_only_fresh(rows)
+        # The existing single flight and spacing: one fetch at a time, never more often than
+        # two thirds of the fresh window, so at most 600 / 120 = 5 in 600 s.
+        self.assert_spacing(fetches, self.cache.FRESH_WINDOWS["claude"] * 2 / 3)
+        self.assertLessEqual(len(fetches), 5)
+
+    def test_with_only_the_shell_its_projection_wakes_the_refresh_and_fable_stays(self):
+        # Without Fleet nothing else refreshes this cache. The statusline callback repaints the
+        # panel at least every 60 s; the projection between repaints also follows cache writes.
+        for cadence, phase in ((60, 0), (60, 30), (60, 59), (2, 0)):
+            with self.subTest(cadence=cadence, phase=phase):
+                rows, fetches = self.timeline(fleet=False, cadence=cadence, phase=phase)
+                self.assertEqual([(t, text) for t, text, _ in rows if "fable" not in text], [])
+                self.assertGreater(rows[-1][0], 540)
+                self.assert_shown_only_fresh(rows)
+                self.assert_spacing(fetches, self.cache.FRESH_WINDOWS["claude"] * 2 / 3)
+                self.assertLessEqual(len(fetches), 5)
+
+    def test_a_refresh_that_keeps_failing_hides_fable_once_the_window_ends(self):
+        # The old value is never shown as now: past 180 s it leaves, with or without Fleet, and
+        # the failed attempts keep the existing retry spacing (60 s, at most 10 in 600 s).
+        for fleet, cadence in ((True, 2), (False, 60), (False, 2)):
+            with self.subTest(fleet=fleet, cadence=cadence):
+                rows, fetches = self.timeline(fleet=fleet, cadence=cadence, fail=True)
+                self.assert_shown_only_fresh(rows)
+                self.assertTrue(all("fable" in text for t, text, _ in rows if t <= 180), rows)
+                self.assertTrue(all("fable" not in text and text.startswith("5h 11% │ 7d 22%")
+                                    for t, text, _ in rows if t > 180), rows)
+                self.assert_spacing(fetches, self.cache.RETRY_AFTER)
+                self.assertLessEqual(len(fetches), 600 // self.cache.RETRY_AFTER)
+                self.assertTrue(fetches)
+
+
 if __name__ == "__main__":
     unittest.main()
