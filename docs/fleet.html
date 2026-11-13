@@ -35,7 +35,6 @@
     --ok: #34D399; --warn: #FBBF24; --danger: #FB7185; --info: #60A5FA;
 
     --term-bg: #0B0E17;
-    --grid-line: rgba(233,215,199,.035);
     --wire: rgba(201,174,143,.65);
     --shadow: 0 1px 2px rgba(0,0,0,.5), 0 12px 34px rgba(0,0,0,.42);
     --shot-shadow: 0 2px 4px rgba(0,0,0,.5), 0 24px 70px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04);
@@ -57,7 +56,6 @@
       --button-text: #FFFFFF; --stone: #543E30; --chip: #855234;
       --accent: #765339;
       --accent-soft: rgba(118,83,57,.06);
-      --grid-line: rgba(84,62,48,.035);
       --wire: rgba(118,83,57,.65);
       --shadow: 0 1px 2px rgba(84,62,48,.05), 0 10px 28px rgba(84,62,48,.07);
       --shot-shadow: 0 2px 4px rgba(84,62,48,.10), 0 22px 60px rgba(84,62,48,.22), 0 0 0 1px rgba(84,62,48,.10);
@@ -83,8 +81,7 @@
   /* ── top bar ─────────────────────────────────────────── */
   .top {
     position: sticky; top: 0; z-index: 40; border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg) 84%, transparent);
-    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    background: var(--bg);
   }
   .top .in { display: flex; align-items: center; gap: 18px; height: 60px; }
   .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -.025em; font-size: 18px; }
@@ -359,10 +356,7 @@
   .foldhint b { color: var(--text-2); font-weight: 650; white-space: nowrap; }
   .diagram {
     position: relative; padding: 30px; border: 1px solid var(--border); border-radius: 24px;
-    background:
-      linear-gradient(var(--grid-line) 1px, transparent 1px) 0 0 / 100% 34px,
-      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px) 0 0 / 34px 100%,
-      var(--bg-2);
+    background: var(--bg-2);
   }
   #wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
   .rows { position: relative; z-index: 1; display: grid; grid-template-columns: 236px minmax(0,1fr) 236px; gap: 22px; align-items: start; }
@@ -508,7 +502,6 @@
   .pcard.bal .pn { color: var(--accent); }
   .pcard.light .pn { color: var(--accent); }
   .pcard.mini .pn { color: var(--text-3); }
-  .pcard.mini { opacity: .75; }
 
   /* artifacts */
   .flowline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 13px; }
