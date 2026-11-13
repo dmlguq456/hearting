@@ -14,6 +14,9 @@ The shape is the compiler's own: legs share one `depends_on` set, and every non-
 `<anchor-id>-<suffix>`. Checked against every tagged group on the live board, this reproduced
 the tag exactly with no group it disagreed with.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import importlib.util
 import os

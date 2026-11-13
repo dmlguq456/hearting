@@ -2,6 +2,9 @@
 """Durable registered-batch observer ownership and restart projection tests."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import fcntl
@@ -13,6 +16,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from unittest import mock
@@ -2341,12 +2345,23 @@ class OwnerCandidateFloorProofTest(unittest.TestCase):
             stream.write(data)
 
     def _rewrite_in_place(self, data):
-        """Same inode, new bytes, and the old mtime restored."""
+        """Same inode, new bytes, and the old mtime restored.
+
+        Only the ctime then tells the next read that the bytes changed. A kernel
+        with a coarse timestamp clock can leave it equal to the stat that read
+        saw, so this returns once the ctime has really moved.
+        """
         info = os.stat(self.jobs)
         with self.jobs.open("r+b") as stream:
             stream.truncate(0)
             stream.write(data)
-        os.utime(self.jobs, ns=(info.st_atime_ns, info.st_mtime_ns))
+        deadline = time.monotonic() + 5.0
+        while True:
+            os.utime(self.jobs, ns=(info.st_atime_ns, info.st_mtime_ns))
+            if os.stat(self.jobs).st_ctime_ns != info.st_ctime_ns:
+                return
+            self.assertLess(time.monotonic(), deadline, "the registry ctime never moved")
+            time.sleep(0.001)
 
     def _read(self, how):
         if how == "cold":
@@ -2625,6 +2640,283 @@ class OwnerCandidateFloorProofTest(unittest.TestCase):
         self.assertGreaterEqual(metrics["segment_compactions"], 1)
         self.assertEqual(metrics["full_metadata_parses"], 0, "every read stayed incremental")
 
+
+
+class OwnerScanResumeOrderProofTest(unittest.TestCase):
+    """An unfinished budgeted scan resumes only over rows whose bytes it proved.
+
+    2026-11-13 review of #1580, scenario B (head 0/5, base 0/5): the resume
+    order was keyed by the registry path alone. A registration
+    (``launch_started=0``) behind it that launched and finished between two
+    passes, or a finished owner not yet proved that an archive pulled behind
+    it, was skipped as already proved; the pass finishing the scan then moved
+    the candidate cursor over it, and its settlement was never made. Every pass
+    here is the runner's real entry, ``_resume_owner_settlements``.
+    """
+
+    setUp = BatchObligationTest.setUp
+
+    def _case(self, name):
+        registry_cache.clear_cache()
+        self.base = Path(self.temp.name) / name
+        self.base.mkdir()
+        self.jobs = self.base / "jobs.log"
+
+    @staticmethod
+    def _owner(attempt, *, status="done", launched="1", note="completed-supervisor"):
+        metadata = ",".join((
+            "attempt_schema_version=2", "dispatch_depth=1", "worker_type=owner",
+            f"launch_started={launched}", "supervisor_lease=flock-v1",
+            "supervisor_lease_file=/fixture/owner.lease", "log_file=/fixture/owner.log",
+            f"attempt_id={attempt}", "workflow_completion=runtime-v1", f"note={note}"))
+        return f"2026-11-13T00:00:00Z\t{status}\t/repo\t/wt\towner\t{metadata}"
+
+    @staticmethod
+    def _child(number):
+        return (f"2026-11-13T00:00:00Z\tdone\t/repo\t/wt\tchild\t"
+                f"attempt_id=att-child-{number},parent_attempt_id=att-elsewhere")
+
+    def _replace(self, lines):
+        """Replace the registry by rename, as every registry rewriter does."""
+        fd, staged = tempfile.mkstemp(prefix=".jobs.log.claim-", dir=str(self.base))
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("".join(line + "\n" for line in lines))
+        os.replace(staged, self.jobs)
+
+    def _append(self, lines):
+        with self.jobs.open("a", encoding="utf-8") as stream:
+            stream.write("".join(line + "\n" for line in lines))
+
+    def _runner(self, *, cacheable=True, cost=10.0, uncached=()):
+        """A runner context whose 5 s budget admits one owner proof per pass.
+
+        An owner whose row says ``note=needs-settlement`` owes settlement until
+        its settlement write (recorded, not run) is made. ``cacheable=False``
+        (or an attempt in ``uncached``) keeps no settled proof, so only the
+        resume order spares a re-proof. ``cost=0.6`` admits nine proofs a pass.
+        """
+        dependency = self.base / "terminal-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        run = Namespace(now=[0.0], proofs=[], settled=[], resumes=[], classifying=[False])
+
+        def state(_jobs, _status, metadata):
+            if run.classifying[0]:
+                run.proofs.append(metadata["attempt_id"])
+                run.now[0] += cost  # the default costs more than the pass budget
+            owes = (metadata.get("note") == "needs-settlement"
+                    and metadata["attempt_id"] not in run.settled)
+            return PENDING if owes else COMPLETE
+
+        classify = obligations._classify_owner_candidates
+
+        def observed_classify(*args, **kwargs):
+            run.resumes.append(kwargs.get("resume_after"))
+            run.classifying[0] = True
+            try:
+                return classify(*args, **kwargs)
+            finally:
+                run.classifying[0] = False
+
+        context = obligations.OwnerSettlementReadContext()
+        context._dependency_watcher_fallback = True
+        context._clock = lambda: run.now[0]
+        self.addCleanup(context.close)
+        patches = contextlib.ExitStack()
+        self.addCleanup(patches.close)
+        patches.enter_context(mock.patch.object(
+            obligations, "_owner_settlement_dependency_paths",
+            side_effect=lambda _jobs, _status, metadata: (
+                (dependency,) if cacheable and metadata.get("attempt_id") not in uncached
+                else None)))
+        patches.enter_context(mock.patch.object(
+            obligations, "_classify_owner_candidates", side_effect=observed_classify))
+        patches.enter_context(mock.patch(
+            "dispatch_terminal_commit.owner_completion_state", side_effect=state))
+        patches.enter_context(mock.patch(
+            "dispatch_completion_join.materialize_after_terminal_close",
+            side_effect=lambda _jobs, attempt, *a, **k: run.settled.append(attempt)))
+        patches.enter_context(split_patch(
+            "dispatch_contract.supervisor_lease_is_held", return_value=False))
+
+        def one_pass(how="window"):
+            """One runner pass; whether its historical scan is still unfinished."""
+            if how == "gap":
+                # A pass later than the retained-descriptor window.
+                with mock.patch.object(registry_cache, "_APPEND_OBSERVATION_GAP_SECONDS", -1.0):
+                    obligations._resume_owner_settlements(self.jobs, context=context)
+            else:
+                if how == "plain-first":
+                    registry_cache.registry_view(self.jobs)
+                obligations._resume_owner_settlements(self.jobs, context=context)
+            return context.owner_scan_unfinished(self.jobs)
+
+        run.context, run.one_pass = context, one_pass
+        return run
+
+    def _until_settled(self, run, attempt, passes=30):
+        """Passes until ``attempt`` is settled and the scan finished; the count."""
+        for count in range(1, passes + 1):
+            unfinished = run.one_pass()
+            if attempt in run.settled and not unfinished:
+                return count
+        self.fail(f"{attempt} settled={attempt in run.settled}, scan finished={not unfinished}"
+                  f" after {passes} passes; proofs {run.proofs}")
+
+    def test_a_registration_finished_behind_the_resume_order_is_settled(self):
+        # The review probe e2e_settlement.py, scenario B, through the runner
+        # entry: the registration finishes while several rows remain, or just
+        # before the pass that finishes the scan.
+        for remaining in ("several rows left", "one row left"):
+            with self.subTest(remaining=remaining):
+                self._case(remaining.replace(" ", "-"))
+                lines = [self._owner(f"att-{number}") for number in range(20)]
+                lines[5] = self._owner("att-5", status="open", launched="0")
+                self._replace(lines)
+                run = self._runner()
+                run.one_pass()  # an unbudgeted full pass leaves the cursor here
+                self.assertEqual(run.context.owner_scan_unfinished(), ())
+                run.context.limit_owner_scan(5.0)
+                for number in range(12, 20):  # later owners finished again: re-proved
+                    lines[number] = self._owner(f"att-{number}", note="completed-again")
+                self._replace(lines)
+                for _ in range(1 if remaining == "several rows left" else 7):
+                    self.assertTrue(run.one_pass())
+                order = dict(run.context.owner_scan_unfinished())[str(self.jobs.resolve())]
+                self.assertGreater(order, 5, "the resume order has passed the registration")
+                lines[5] = self._owner("att-5", note="needs-settlement")  # launched, finished
+                self._replace(lines)
+                self._until_settled(run, "att-5")
+                self.assertEqual(run.settled.count("att-5"), 1)
+
+    def test_an_unproved_owner_an_archive_pulls_behind_the_resume_order_is_settled(self):
+        # A just-started runner proves cold history a row per pass; an archive
+        # pass moves the oldest group out by rename, which pulls the finished,
+        # never-proved att-14 from row 14 to row 8, behind the resume order 10.
+        lines = [self._owner(f"att-{number}") for number in range(20)]
+        lines[14] = self._owner("att-14", note="needs-settlement")
+        self._replace(lines)
+        run = self._runner()
+        run.context.limit_owner_scan(5.0)
+        for _ in range(11):
+            self.assertTrue(run.one_pass())
+        self.assertEqual(run.proofs, [f"att-{number}" for number in range(11)])
+        self.assertEqual(run.context.owner_scan_unfinished(), ((str(self.jobs.resolve()), 10),))
+        del lines[:6]
+        self._replace(lines)
+        self._until_settled(run, "att-14")
+        # The moved rows wait on the reselection path behind the rows the scan
+        # had not reached, so only the count and the set are fixed here.
+        self.assertEqual(sorted(run.proofs), sorted(f"att-{number}" for number in range(20)),
+                         "every owner is proved once: the moved rows again, none twice")
+
+    def test_appends_keep_the_resume_order_of_an_unfinished_scan(self):
+        # Appends in place change no proved row: each pass resumes after the
+        # last proved owner, and the scan takes one pass per owner as before.
+        # No proof is cached here, so a pass starting over would re-prove the
+        # first owner every time and never finish.
+        for how in ("window", "gap", "plain-first"):
+            for filler in (0, 600):
+                with self.subTest(read=how, rows_before_the_owners=filler):
+                    self._case(f"append-{how}-{filler}")
+                    lines = [self._child(number) for number in range(filler)]
+                    lines += [self._owner(f"att-{number}") for number in range(8)]
+                    self._replace(lines)
+                    run = self._runner(cacheable=False)
+                    run.context.limit_owner_scan(5.0)
+                    attempts = [f"att-{number}" for number in range(8)]
+                    passes = 0
+                    while run.one_pass(how):
+                        passes += 1
+                        self.assertLess(passes, 30, f"the scan never finished: {run.proofs}")
+                        appended = [self._child(f"{passes}-{number}") for number in range(3)]
+                        if passes in (2, 5):
+                            appended.append(self._owner(f"att-appended-{passes}"))
+                            attempts.append(f"att-appended-{passes}")
+                        self._append(appended)
+                    passes += 1
+                    self.assertEqual(run.proofs, attempts, "each owner once, in registry order")
+                    self.assertEqual(passes, len(attempts), "one pass per owner")
+                    self.assertNotIn(None, run.resumes[1:], "no pass started over")
+
+    def _scan_until_settled(self, run, attempt, passes, before_pass=lambda _count: None):
+        for count in range(1, passes + 1):
+            before_pass(count)
+            unfinished = run.one_pass()
+            if attempt in run.settled and not unfinished:
+                return count
+        self.fail(f"{attempt} settled={attempt in run.settled}, scan finished={not unfinished}"
+                  f" after {passes} passes; {len(run.proofs)} proofs, resume orders"
+                  f" {run.resumes[-3:]}")
+
+    # 2026-11-13 review of #1582 (required 1): a lowered resume order re-walked
+    # every unproved-for-now owner before the rows it had not reached. With more
+    # such owners than a pass proves, a scan never finished while rows kept
+    # changing, or at all without any prefix proof; base finishes in 20 / 3.
+
+    def test_a_rewrite_after_the_resume_order_lets_the_scan_finish(self):
+        # The review probe minimal_pin.py: a running owner after the resume
+        # order is rewritten by rename before every pass (a stage note).
+        for cost, bound in ((10.0, 20), (0.6, 3)):
+            with self.subTest(proofs_per_pass=1 if cost > 5 else 9):
+                self._case(f"rewrite-after-{cost}")
+                lines = [self._owner(f"att-{number}") for number in range(20)]
+                lines[18] = self._owner("att-18", note="needs-settlement")
+                lines.append(self._owner("att-live", status="running", note="stage-0"))
+                self._replace(lines)
+                run = self._runner(cacheable=False, cost=cost)
+                run.context.limit_owner_scan(5.0)
+
+                def rewrite(count):
+                    if count > 1:
+                        lines[-1] = self._owner("att-live", status="running",
+                                                note=f"stage-{count}")
+                        self._replace(lines)
+
+                passes = self._scan_until_settled(run, "att-18", bound, rewrite)
+                self.assertEqual(passes, bound)
+                self.assertEqual(sorted(run.proofs), sorted(f"att-{n}" for n in range(20)),
+                                 "a rewrite after the resume order proves no owner again")
+                self.assertEqual(run.settled.count("att-18"), 1)
+
+    def test_a_registry_without_prefix_proofs_lets_the_scan_finish(self):
+        # One CR inside a row: the LF segmentation does not describe the file,
+        # so no boundary proves its leading bytes on any pass.
+        for cost, bound in ((10.0, 20), (0.6, 3)):
+            with self.subTest(proofs_per_pass=1 if cost > 5 else 9):
+                self._case(f"carriage-return-{cost}")
+                lines = [self._child("cr").replace("att-elsewhere", "att-else\rwhere")]
+                lines += [self._owner(f"att-{number}") for number in range(20)]
+                lines[19] = self._owner("att-18", note="needs-settlement")
+                self._replace(lines)
+                run = self._runner(cacheable=False, cost=cost)
+                run.context.limit_owner_scan(5.0)
+                self.assertEqual(registry_cache.registry_view(
+                    self.jobs, append_only=True).prefix_proofs(), ())
+                passes = self._scan_until_settled(run, "att-18", bound)
+                self.assertEqual(passes, bound)
+                self.assertEqual(sorted(run.proofs), sorted(f"att-{n}" for n in range(20)),
+                                 "no owner is proved again without a prefix proof")
+                self.assertEqual(run.settled.count("att-18"), 1)
+
+    def test_an_owner_due_again_after_the_resume_order_holds_no_gap(self):
+        # Review follow-up 1 (base too): with one proof a pass, owners due again
+        # (their rows changed) waited at the resume gap, so the pass's one proof
+        # went to the same uncached att-4 every pass and att-0 was never proved.
+        self._case("due-again")
+        lines = [self._owner(f"att-{number}") for number in range(6)]
+        self._replace(lines)
+        run = self._runner(uncached={"att-4"})
+        run.one_pass()  # an unbudgeted full pass: every owner but att-4 cached
+        self.assertEqual(run.context.owner_scan_unfinished(), ())
+        run.context.limit_owner_scan(5.0)
+        lines[0] = self._owner("att-0", note="needs-settlement")
+        lines[2] = self._owner("att-2", note="completed-again")
+        self._replace(lines)
+        proofs = len(run.proofs)
+        passes = self._scan_until_settled(run, "att-0", 10)
+        self.assertEqual(passes, 3)
+        self.assertEqual(sorted(run.proofs[proofs:]), ["att-0", "att-2", "att-4"])
+        self.assertEqual(run.settled.count("att-0"), 1)
 
 if __name__ == "__main__":
     unittest.main()

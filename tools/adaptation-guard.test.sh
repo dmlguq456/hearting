@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/run-tests.py" --direct-run bash "$0" "$@"
 # adaptation-guard.test.sh — harness-layer-sync Phase 2 음성(negative) 테스트.
 #   증명 대상 (spec §10 항목 6~8 + 옵션):
 #     1) delta 예외가 canonical baseline 밖으로 어긋나면(HLS-3) 가드 red.

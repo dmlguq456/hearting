@@ -196,6 +196,9 @@ def main():
     parser.add_argument("--pty-width", type=int)
     parser.add_argument("--pty-term", default="xterm-256color")
     args = parser.parse_args()
+    # The renderer's parse cache and session readers default to the caller's HOME.
+    from tools.fleet.tests import readme_captures
+    readme_captures.isolate()
     widths = [int(value) for value in args.widths.split(",")]
     capture = _capture(widths, args.head)
     if args.pty_width:

@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../run-tests.py" --direct-run bash "$0" "$@"
 # Runtime projection completeness E2E against the real generated source.
 #
 # Product profiles were removed: activation always projects the full

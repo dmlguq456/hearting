@@ -45,11 +45,13 @@ def _watch_readiness_identity(arm, native_state):
     endpoint = _watch_selected_readiness_endpoint(arm, server)
     if not endpoint:
         return None
+    native = int(arm.get("observer_protocol", 0) or 0) >= 3
+    pid = agent.get("pid") if native else pane_identity.get("shell_pid")
+    start = agent.get("pid_start") if native else pane_identity.get("shell_start")
     identity = shared_readiness.target_identity(
         server=server, endpoint=str(endpoint), pane=agent.get("pane"),
         harness=agent.get("harness"), session_id="" if session_id == "-" else session_id,
-        shell_pid=pane_identity.get("shell_pid"),
-        shell_start=pane_identity.get("shell_start"), native_state=native_state,
+        shell_pid=pid, shell_start=start, native_state=native_state,
         purpose="completion")
     if identity is not None:
         return identity

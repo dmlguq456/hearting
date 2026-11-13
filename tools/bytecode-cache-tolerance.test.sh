@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/run-tests.py" --direct-run bash "$0" "$@"
 # Every checker must tolerate the `__pycache__` a local Python run leaves in
 # any source directory: git ignores it and a release is `git archive`, so it
 # is never part of a projection or a release (2026-09-10, after five false

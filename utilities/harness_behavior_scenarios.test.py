@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Offline checks for the real-TUI scenario harness (no TUI is launched)."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 from pathlib import Path
@@ -109,6 +112,27 @@ class EnvironmentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 unittest.mock.patch.object(hb, "SOURCE", Path(tmp)):
             self.assertIsNone(hb.declared_carrier("claude", receipt))
+
+
+class PrivateTuiPaneEnvTest(unittest.TestCase):
+    def test_the_tui_gets_the_tmux_and_pane_values_its_pane_provides(self):
+        """A pane address (`%0@socket`) resolves only against the TUI's own TMUX/TMUX_PANE."""
+        import shutil
+        if not shutil.which("tmux"):
+            self.skipTest("tmux is unavailable")
+        with tempfile.TemporaryDirectory(prefix="hb-pane-env-") as raw:
+            tui = hb.PrivateTui(Path(raw), {"PATH": "/usr/bin:/bin", "HOME": raw},
+                                ["sh", "-c", 'echo "PANE=$TMUX_PANE SOCK=${TMUX%%,*} HOME=$HOME"'],
+                                Path(raw))
+            try:
+                tui.start()
+                self.assertTrue(hb.wait_for(lambda: "HOME=" in tui.screen(), 10), tui.screen())
+                screen = tui.screen()
+            finally:
+                tui.stop()
+        self.assertIn("PANE=%0", screen)
+        self.assertIn("SOCK=" + str(tui.socket), screen)
+        self.assertIn("HOME=" + raw, screen)  # the fixture env is still the only other input
 
 
 class TidyContinueCaseTest(unittest.TestCase):

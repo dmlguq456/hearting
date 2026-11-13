@@ -156,8 +156,25 @@ prepared assets, without an auxiliary Node version probe. Native execution
 retains the existing display-ready boundary, exact binding and same-child
 input/relay ownership.
 
-The approved v3.3 shell opens as a right Hearting work panel when space permits
-(left by choice), with bottom placement at narrow widths. All four edges belong
+The approved v3.3 shell opens as a right Hearting work panel (left by choice,
+or under the native area by choice). Spec E9 rule 49 folds and unfolds it: the
+fold button `»` (`«` for a left panel, `▾` in the bottom layout) on the panel's
+last row inside folds it into an eight-cell strip at its edge (two borders, a
+blank cell inside each and four content cells: the state glyph with the session
+number, the route count `2 RT`, the answer waits `◑ 1` and `«`; its border in
+the session's state color, only the glyph turning), and
+the native area takes the freed columns through the same PTY resize a window
+resize uses; folded under the native area it is one row (the status line and
+`▴`). A press anywhere on the strip or that row opens it. Where the open panel
+would leave the native area under 80 columns it folds by itself, and opens again
+with room; that one constant replaces the earlier minimum terminal width and
+bottom fallback. The person's last choice wins at its width: folded by hand it
+stays folded however wide the window grows, opened by hand it stays open until
+the width changes. An open settings editor, a question being answered or a drag
+of the panel's edge keeps it open. The fold choice lasts while the window is up
+(it rides a host hand-over) and is not saved. A panel opened by hand where it
+cannot stand beside the native area (under 48 native columns or 8 rows) opens
+under it. All four edges belong
 to Hearting and share its representative state color; never frame the native
 terminal itself. By default the panel uses the terminal's neutral background,
 without tinted fills; a chosen theme or shade recolors only the panel itself.
@@ -175,8 +192,10 @@ steward, Fleet's `⚑` (a steward's number takes Fleet's steward color, fixed,
 as on Fleet's session row); the state has no word, its glyph and number share the
 state's color, and the three glyph shapes still differ in `mono` and under
 `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
-the number; the glyph stays. The gear `⚙` alone sits on the right, and its press
-reaches the rule cell beside it and the corner. The state shown is the host's
+the number; the glyph stays. Right of that head the border is the line alone:
+the gear `⚙` stands at the right end of the panel's last row inside, three cells
+right of the fold button, beside 5h/7d (which give up their reset times first),
+and that row stays however short rows run. The state shown is the host's
 own observation; hook events confirm and correct it, and input readiness and
 every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
 into its session record as it paints (`busy` while it shows progress, `waiting`
@@ -220,7 +239,10 @@ parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
 warnings and `💀merged`; no Git row when nothing is left; no folder or branch
-glyph. The bottom layout and Claude's statusline keep the repository name
+glyph. Only `↑N` and `↓N` take a color, Fleet's own (`lvl_g` green, `lvl_r`
+red), on the Git row, the bottom layout's head and Claude's statusline alike;
+mono and eight colors paint them dim as the other Git words, and `NO_COLOR`
+keeps the words with no color. The bottom layout and Claude's statusline keep the repository name
 ending in `/` (`hearting/`, the mark only on a whole name) with Git dim in
 parentheses (`(main ✓ 🚧 3)`, the same branch cut and `✓`; Claude's statusline
 cuts at the width its lines are shown at, its bash fallback by `COLUMNS`),

@@ -4,6 +4,9 @@ Covers `_codex_table_keys` (one key at a time) / `_codex_table_keys_remove` and 
 use in `_merge_codex_managed_keys`, the sub-agent default's model-list rule, and the
 design server's per-run approval; every case stays in text or a temporary directory.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 import json
 import sys
