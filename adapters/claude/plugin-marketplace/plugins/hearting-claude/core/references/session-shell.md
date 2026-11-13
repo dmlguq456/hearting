@@ -355,8 +355,10 @@ name is an unconfirmed warning, never "no experiments". An experiment's failure
 never colors the frame, the glyph or the strip's border. Its catalog and its
 run-record folders join the panel's file watch last (no poller): a folder is
 watched whole (a path ending in the separator), so any record written, replaced,
-added or removed in it redraws; past four folders the rest are an unconfirmed
-note. A board that cannot be read or worded is LAB's own unconfirmed state and
+added or removed in it redraws, at most once a second with the last change
+always drawn (a watched file keeps its 25 ms batch); a folder deleted or moved
+and made again at the same path is watched again. Past four folders the rest are
+an unconfirmed note. A board that cannot be read or worded is LAB's own unconfirmed state and
 keeps its watch; the rest of the panel draws on. Ages count from the
 projection's clock. They
 differ by place and color only, all from the panel's theme and shade: the

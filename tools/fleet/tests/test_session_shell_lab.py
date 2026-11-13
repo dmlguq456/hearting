@@ -195,20 +195,27 @@ for(const width of [40,32])for(const open of [false,true])for(const folded of [f
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
-# The host's own `observeFiles` and `queueProjection` (real `fs.watch`, the real 25 ms debounce);
-# `projection` only counts the redraws they schedule.
-HOST_WATCH = r"""
+# The host's own `queueProjection` and `observeFiles` (real `fs.watch`, its real batches: 25 ms for a
+# watched file, at most one redraw a second for a watched folder); `projection` counts the redraws
+# they schedule and, given the paths, observes them again as the host's projection does.
+HOST = r"""
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8');
-const body=source.slice(source.indexOf('function queueProjection()'),source.indexOf('async function projection()'));
+const body=source.slice(source.indexOf('function queueProjection('),source.indexOf('async function projection()'));
 const input=JSON.parse(process.argv[2]);
-const host=()=>{const c={fs,path,setTimeout,watchers:new Map(),turnRecord:'',readTurnRecord(){},ended:false,relay:false,
- projectionTimer:undefined,succeeding:false,nativeSelectionRevision:0,sourceError:undefined,redraws:0,projection(){c.redraws++;}};
+const host=observed=>{const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),turnRecord:'',readTurnRecord(){},
+ ended:false,relay:false,projectionTimer:undefined,succeeding:false,nativeSelectionRevision:0,sourceError:undefined,
+ redraws:0,projection(){c.redraws++;if(c.drawn)c.drawn();if(observed)c.observeFiles(observed);}};
  vm.createContext(c);vm.runInContext(body,c);return c;};
 const shape=c=>JSON.stringify([...c.watchers].map(([directory,row])=>[directory,row.targets]));
 const close=c=>{for(const row of c.watchers.values())row.watch.close();c.watchers.clear();};
-const settle=()=>new Promise(done=>setTimeout(done,250));
-(async()=>{
+const wait=ms=>new Promise(done=>setTimeout(done,ms));
+const settle=()=>wait(1100);   // past the second a folder's change may wait for
+const run=main=>main().catch(error=>{console.error(error);process.exit(1);});  // open watches would keep it alive
+"""
+
+HOST_WATCH = HOST + r"""
+run(async()=>{
  const c=host();
  c.observeFiles(input.existing.concat(input.lab));await settle();c.redraws=0;
  const counted=async(what,act,want)=>{act();await settle();assert.equal(c.redraws,want,what);c.redraws=0;};
@@ -231,12 +238,94 @@ const settle=()=>new Promise(done=>setTimeout(done,250));
  for(const [directory,targets] of before)assert.deepEqual(kept.find(([d])=>d===directory)[1].slice(0,targets.length),targets,directory);
  assert(kept.some(([,targets])=>targets.includes(input.lab[1])),shape(few));
  close(few);close(above);
-})().catch(error=>{console.error(error);process.exit(1);});  // open watches would keep it alive
+});
+"""
+
+# Review RV-PR1612 R2: a folder made again at the same path before the redraw is another folder; the
+# old one's watch sees nothing more, so what is written after it must still redraw.
+HOST_REMADE = HOST + r"""
+run(async()=>{
+ const runs=input.runs,watched=[input.catalog,runs+path.sep],c=host(watched);
+ c.observeFiles(watched);await settle();c.redraws=0;
+ const counted=async(c,what,act,want,pause=settle)=>{act();await pause();assert.equal(c.redraws,want,what);c.redraws=0;};
+ const record=path.join(runs,'run-00.json'),tmp=path.join(runs,'.run-00.json.tmp');
+ const then=async(what,act)=>{
+  act();await settle();c.redraws=0;
+  await counted(c,what+', then a record written in place',()=>fs.writeFileSync(record,'{"n":1}'),1);
+  await counted(c,what+', then the record replaced',()=>{fs.writeFileSync(tmp,'{"n":2}');fs.renameSync(tmp,record);},1);
+ };
+ await then('deleted and made again at once',()=>{fs.rmSync(runs,{recursive:true});fs.mkdirSync(runs);});
+ await then('renamed away and back at once',()=>{fs.renameSync(runs,runs+'.away');fs.renameSync(runs+'.away',runs);});
+ await then('renamed away and another folder made in its place',()=>{fs.renameSync(runs,runs+'.old');fs.mkdirSync(runs);});
+ await then('its parent deleted and made again with it',()=>{fs.rmSync(input.root,{recursive:true});fs.mkdirSync(runs,{recursive:true});});
+ close(c);
+ // A watched file keeps its 25 ms batch: written 1, replaced 1, a file beside it 0.
+ const quick=()=>wait(250),q=input.question,f=host([q]);
+ f.observeFiles([q]);await quick();f.redraws=0;
+ await counted(f,'a watched file written',()=>fs.writeFileSync(q,'{"n":1}'),1,quick);
+ await counted(f,'a watched file replaced',()=>{fs.writeFileSync(q+'.tmp','{}');fs.renameSync(q+'.tmp',q);},1,quick);
+ await counted(f,'a file beside it',()=>fs.writeFileSync(path.join(path.dirname(q),'other.json'),'{}'),0,quick);
+ // Its folder deleted and made again at once: the file written after it still redraws.
+ fs.rmSync(path.dirname(q),{recursive:true});fs.mkdirSync(path.dirname(q));await quick();f.redraws=0;
+ await counted(f,'a watched file written in its folder made again',()=>fs.writeFileSync(q,'{"n":2}'),1,quick);
+ close(f);
+ // A file whose folder is missing: the folder made 1, then the file written 1.
+ const later=input.later,g=host([later]);
+ g.observeFiles([later]);await quick();g.redraws=0;
+ await counted(g,'the missing folder made',()=>fs.mkdirSync(path.dirname(later),{recursive:true}),1,quick);
+ await counted(g,'then the file written',()=>fs.writeFileSync(later,'{}'),1,quick);
+ close(g);
+});
+"""
+
+# The supervisor's cap (RV-PR1612 R2): run records changing many times a second redraw at most once
+# a second, the last change always drawn; a question file keeps its 25 ms batch meanwhile.
+HOST_BUSY = HOST + r"""
+run(async()=>{
+ const runs=input.runs,q=input.question,watched=[q,runs+path.sep],c=host(watched);
+ const records=Array.from({length:8},(_,n)=>path.join(runs,'run-'+(32+n)+'.json'));
+ const read=file=>{try{return fs.readFileSync(file,'utf8');}catch{return '';}};
+ const drawn=[];c.drawn=()=>drawn.push({at:Date.now(),records:records.map(read),question:read(q)});
+ c.observeFiles(watched);await settle();drawn.length=0;
+ // One change after a quiet second is drawn at once.
+ let at=Date.now();fs.writeFileSync(records[0],'first');await wait(400);
+ assert.equal(drawn.length,1,'one change, one redraw');
+ assert(drawn[0].at-at<300,'one change drawn after '+(drawn[0].at-at)+' ms');
+ assert.equal(drawn[0].records[0],'first');
+ await settle();drawn.length=0;
+ // Eight records each written about five times a second, in place or replaced, for `seconds`.
+ let n=0;
+ const busy=async(seconds,during)=>{
+  const start=Date.now();
+  while(Date.now()-start<seconds*1000){
+   const file=records[n%8],text=String(n++);
+   if(n%2)fs.writeFileSync(file,text);else{fs.writeFileSync(file+'.tmp',text);fs.renameSync(file+'.tmp',file);}
+   if(during)during(Date.now()-start);
+   await wait(25);
+  }
+ };
+ await busy(3);
+ const final=records.map(read);await settle();
+ assert(drawn.length>=3&&drawn.length<=5,'redraws in three busy seconds: '+drawn.length);
+ for(let i=1;i<drawn.length;i++)assert(drawn[i].at-drawn[i-1].at>=950,'redraws '+(drawn[i].at-drawn[i-1].at)+' ms apart');
+ assert.deepEqual(drawn.at(-1).records,final,'the last change is drawn');
+ drawn.length=0;
+ // A question written while the records are busy is drawn in its 25 ms batch.
+ let asked=0;
+ await busy(2,elapsed=>{if(!asked&&elapsed>=700){asked=Date.now();fs.writeFileSync(q,'asked');}});
+ await settle();
+ const shown=drawn.find(row=>row.question==='asked');
+ assert(shown,'the question is drawn');
+ assert(shown.at-asked<300,'the question drawn after '+(shown.at-asked)+' ms');
+ assert.deepEqual(drawn.at(-1).records,records.map(read),'the last change is drawn');
+ close(c);
+});
 """
 
 
 class ShellLabWatch(LabBase):
-    """Review RV-PR1612 R1: a record past the first few is watched like the first one."""
+    """Review RV-PR1612 R1: a record past the first few is watched like the first one. R2: a folder
+    made again is watched again, and a busy one redraws at most once a second."""
 
     def test_the_run_folder_is_watched_whole_so_any_record_in_it_redraws(self):
         root = self.make_root()
@@ -262,9 +351,27 @@ class ShellLabWatch(LabBase):
                         "last": str(runs / "run-39.json"), "fresh": str(runs / "run-40.json"),
                         "unrelated": [str(other / "resource-runs" / "run-39.json"),
                                       str(E.catalog_path(root).parent / "notes.json")]}
-        result = subprocess.run(["node", "-e", HOST_WATCH, str(ROOT / "utilities/session-shell/host.cjs"),
-                                 json.dumps(script_input)], capture_output=True, text=True, timeout=60)
+        self.host(HOST_WATCH, script_input)
+
+    def host(self, script, script_input):
+        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/host.cjs"),
+                                 json.dumps(script_input)], capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_run_folder_made_again_at_the_same_path_is_watched_again(self):
+        """Review RV-PR1612 R2: deleted and made again before the redraw, it kept the old folder's watch."""
+        root = self.project()
+        question = self.base / "questions" / "q.json"
+        question.parent.mkdir()
+        self.host(HOST_REMADE, {"root": str(root), "runs": str(root / "resource-runs"),
+                                "catalog": str(E.catalog_path(root)), "question": str(question),
+                                "later": str(self.base / "missing" / "sub" / "q.json")})
+
+    def test_a_busy_run_folder_redraws_at_most_once_a_second_and_draws_its_last_change(self):
+        root = self.project()
+        question = self.base / "questions" / "q.json"
+        question.parent.mkdir()
+        self.host(HOST_BUSY, {"runs": str(root / "resource-runs"), "question": str(question)})
 
     def test_more_record_folders_than_the_cap_are_unconfirmed_never_left_out_silently(self):
         root = self.project()
