@@ -811,11 +811,15 @@ def remove_exchange(path, only_conversation: bool = False) -> bool:
     folder = Path(path)
     if folder.parent.name != EXCHANGE_PARTS[1] or folder.parent.parent.name != EXCHANGE_PARTS[0]:
         return True
+    # lstat, not is_symlink()/is_dir(): those turn an unreachable folder into "absent" on newer Pythons.
     try:
-        if folder.is_symlink() or not folder.is_dir():
-            return True
+        mode = folder.lstat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return True
     except OSError:
         return False
+    if not stat.S_ISDIR(mode):                 # a link or a file is not the worker's folder
+        return True
     if only_conversation:
         return all([_remove_file(folder / name) for name in ("input_v1.json", "prompt.md")])
     shutil.rmtree(folder, ignore_errors=True)
