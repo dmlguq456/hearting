@@ -78,6 +78,18 @@ class ScriptedModelTest(unittest.TestCase):
         self.assertIn(f"report {self.rq} --result", final.shell)
         self.assertIn("FINAL-" + self.nonce, final.shell)
 
+    def test_a_refused_report_is_repeated_with_the_revision_b_read(self):
+        # N5: when no revision is recorded as received, the refusal says `--rev N`; B names the
+        # sealed revision it read.
+        out = (f"request={self.rq} state=open\n--- revision 2 (sealed body) ---\nBODY-1-{self.nonce}\n--- end ---")
+        report = f'python3 "$AGENT_HOME/utilities/peer-steward.py" report {self.rq} --partial --result "PARTIAL-{self.nonce}"'
+        refused = f"report={self.rq} delivery=refused reason=report-revision-unreceived revisions=1,2 next=report {self.rq} --rev N"
+        earlier = [record("SCENARIO-WATCH-TARGET " + out, out, "tool", reply={"shell": report})]
+        again = self.ask("SCENARIO-WATCH-TARGET " + out + refused, refused, kind="tool", earlier=earlier)
+        self.assertEqual(again.shell, report + " --rev 2")
+        earlier = [record("SCENARIO-WATCH-TARGET " + out, out, "tool", reply={"shell": report + " --rev 2"})]
+        self.assertFalse(self.ask("SCENARIO-WATCH-TARGET " + out + refused, refused, kind="tool", earlier=earlier).shell)
+
     def test_a_is_woken_by_a_report_line_without_acting(self):
         wake = f"[요청 답 {self.rq}] [e7] │ 검토 │ 일부 │ PARTIAL-{self.nonce} │ 3s │ 본문: show"
         reply = self.ask("SCENARIO-REQ-A send\n" + wake, wake)
@@ -99,6 +111,10 @@ class ScriptedModelTest(unittest.TestCase):
         out2 = f"request={self.rq} state=open\n--- revision 2 (sealed body) ---\nBODY-REV2-{nonce}\n--- end ---"
         final = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + out2, out2, "tool"), earlier)
         self.assertIn(f"report {self.rq} --result", final.shell)
+        # Revision 2's line reaches the idle B: it opens the body and reports the final answer.
+        line2 = f"[요청 {self.rq} 판2-{nonce}] [e9] │ 판 검토 │ 열기: show {self.rq}"
+        shown2 = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + line2, line2), earlier)
+        self.assertIn(f"show {self.rq}", shown2.shell)
         keep = f"request=rq-ffffff state=open\n(sealed body)\nBODY-KEEP-{nonce}"
         held = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + keep, keep, "tool"), earlier)
         self.assertFalse(held.shell)
@@ -202,10 +218,36 @@ class HostRunR2Test(ScriptedModelTest):
             f"                                                              │ │ ◂ [df] 다른 제목 · open │ │",
             f"                                                              │ │ ✓ [67] 검토 제목 {n} · final │ │",
         ])
-        self.assertEqual(cases.panel_request_lines(screen, n, "→✓✕"),
+        title = f"검토 제목 {n}"
+        self.assertEqual(cases.panel_request_lines(screen, title, "→✓✕"),
                          [f"→ [67] 검토 제목 {n} · open", f"✓ [67] 검토 제목 {n} · final"])
-        self.assertEqual(cases.panel_request_lines(screen, n, "◂"), [])
+        self.assertEqual(cases.panel_request_lines(screen, title, "◂"), [])
         self.assertEqual(cases.panel_request_lines(screen, "zzzzzz", "→✓✕"), [])
+
+    def test_s8_a_title_cut_on_a_narrow_panel_is_still_found_by_its_front_part(self):
+        # The real r3 screens' request line (host-run r3, request-flow, panel width 38): the nonce is
+        # cut off with the title's end, so the line is found by the recorded title's front part.
+        closed = "│ │ ✓ 검토 제목 1c09… · final answer │ │"
+        other = "│ │ ✓ 다른 제목 1c09… · final answer │ │"
+        screen = "  ▐▛███▛█   Claude Code   ┌ ● [b6] claude ───┐\n" + closed + "\n" + other
+        self.assertEqual(cases.panel_request_lines(screen, ["검토 제목 1c09d3"], "→✓✕"),
+                         ["✓ 검토 제목 1c09… · final answer"])
+        self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "◂"), [])
+        pad = " " * 160  # row 9 of the r3 screens, whole (the left pane is blank there)
+        real_closed = pad + "│ │ ✓ 검토 제목 1c09… · final answer │ │"
+        real_receiver = pad + "│ │ ◂ 검토 제목 1c… · partial answer │ │"
+        self.assertEqual(cases.panel_request_lines(real_closed, ["검토 제목 1c0908"], "→✓✕"),
+                         ["✓ 검토 제목 1c09… · final answer"])
+        self.assertEqual(cases.panel_request_lines(real_receiver, ["검토 제목 1c0908"], "◂"),
+                         ["◂ 검토 제목 1c… · partial answer"])
+        # With the other session's tag and a cut title: `◂ [b1] 검토 제목 9036… · open`.
+        opened = "│ │ ◂ [b1] 검토 제목 9036… · open │ │"
+        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "◂"),
+                         ["◂ [b1] 검토 제목 9036… · open"])
+        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "◂"), [])
+        # A whole title and a state with a long word.
+        whole = "│ │ → [6e] 짧은 일 · partial answer │ │"
+        self.assertEqual(cases.panel_request_lines(whole, ["짧은 일"], "→"), ["→ [6e] 짧은 일 · partial answer"])
 
     def test_s7_the_handoff_steward_runs_under_the_environment_the_shared_resolver_reads(self):
         import dispatch_parent_completion as parent
@@ -289,6 +331,79 @@ class FlowVerdictTest(unittest.TestCase):
 
     def test_a_flow_without_the_route_box_lines_is_a_gap(self):
         self.assertEqual(self.run_flow("codex", shell=True, panels=False)[0], "gap")
+
+
+class RevisionCancelVerdictTest(unittest.TestCase):
+    """The cancel-before-delivery verdict (S9) and revision 2's body consumption (P5): Claude and
+    OpenCode keep the strict form; Codex's native queue takes a line at once (PG-59), so its cancel
+    is judged as a cancel after delivery."""
+
+    def run_it(self, harness, notice, *, reached=False, cancel_line=True, stop_word=False, rev2=True,
+               closed=True, other_state="cancelled"):
+        scenario = cases.RequestRevisionCancelScenario()
+        scenario.target_tui = SimpleNamespace(screen=lambda: "")
+        scenario.target_address = "%1@/tmp/socket"
+        first, other, third = "rq-111111", "rq-222222", "rq-333333"
+        nonce = scenario.nonce
+        index = iter(range(1, 100))
+
+        def b(text, kind="user"):
+            return {"text": "", "last_text": "", "turn_text": text, "main_index": next(index),
+                    "last_kind": kind, "reply": {"shell": "time.sleep"} if "sleep" in text else {}}
+
+        b_turns = [b("python3 time.sleep"), b(f"(sealed body)\nBODY-KEEP-{nonce}", "tool")]
+        if rev2:
+            b_turns.append(b(f"(sealed body)\nBODY-REV2-{nonce}", "tool"))
+        if reached:
+            b_turns.append(b(f"[요청 {other} 판1] x"))
+        if reached and cancel_line:
+            b_turns.append(b(f"[요청 취소 {other}] x" + (" 멈춰" if stop_word else "")))
+        b_turns.append(b(f"[요청 취소 {third}] x"))
+        records = {
+            first: {"state": "open", "revisions": [{}, {}], "reports": [{"late": True, "revision": 1, "kind": "final"}]},
+            other: {"state": other_state, "revisions": [{"transfer_ref": "r" * 32}]},
+            third: {"state": "cancelled", "revisions": [{}]}}
+        a_turns = [{"text": "", "last_text": "", "turn_text":
+                    f"request={other} state=cancelled notice={notice}", "main_index": 90,
+                    "last_kind": "tool", "reply": {}}]
+        scenario.records = lambda run: records
+        scenario.b_requests = lambda run: b_turns
+        scenario.a_requests = lambda run: a_turns
+        scenario.start_a = lambda run, text: None
+        scenario.wait_state = lambda run, request_id, state, timeout=90: True
+        scenario.panels = lambda run, tag: {}
+        scenario.duty = lambda run, ref: {"observation": {"reason": "request-withdrawn" if closed else ""}}
+        run = SimpleNamespace(harness=harness, evidence={}, notes=[], main_requests=lambda: [],
+                              note=lambda text: run.notes.append(text))
+        saved = cases.wait_for, cases.time.sleep
+        cases.wait_for, cases.time.sleep = (lambda predicate, timeout, step=0.5: predicate()), (lambda _s: None)
+        try:
+            return scenario.drive(run), run.notes, run.evidence
+        finally:
+            cases.wait_for, cases.time.sleep = saved
+
+    def test_claude_and_opencode_judge_a_cancel_before_delivery_strictly(self):
+        for harness in ("claude", "opencode"):
+            self.assertEqual(self.run_it(harness, "not-needed")[0], "pass", harness)
+            self.assertEqual(self.run_it(harness, "queued-not-delivered", reached=True)[0], "fail", harness)
+            self.assertEqual(self.run_it(harness, "not-needed", reached=True)[0], "fail", harness)
+
+    def test_s9_codex_native_queue_makes_it_a_cancel_after_delivery(self):
+        verdict, notes, ev = self.run_it("codex", "queued-not-delivered", reached=True)
+        self.assertEqual(verdict, "pass", ev)
+        self.assertIn("codex native queue accepted it at once (PG-59)", " ".join(notes))
+        self.assertEqual(self.run_it("codex", "delivered", reached=True)[0], "pass")
+        # The three assertions: the cancel line after the request line, `cancelled`, no "멈".
+        self.assertEqual(self.run_it("codex", "queued-not-delivered", reached=True, cancel_line=False)[0], "fail")
+        self.assertEqual(self.run_it("codex", "queued-not-delivered", reached=True, stop_word=True)[0], "fail")
+        self.assertEqual(self.run_it("codex", "queued-not-delivered", reached=True, other_state="open")[0], "fail")
+        # Codex that did withdraw it before delivery keeps the strict form too.
+        self.assertEqual(self.run_it("codex", "not-needed")[0], "pass")
+
+    def test_revision_2_body_must_be_consumed_after_the_late_report(self):
+        verdict, _notes, ev = self.run_it("claude", "not-needed", rev2=False)
+        self.assertEqual(verdict, "fail")
+        self.assertFalse(ev["rev2_body_consumed"])
 
 
 class RunExecuteOrderTest(unittest.TestCase):

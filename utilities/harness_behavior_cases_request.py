@@ -16,14 +16,16 @@ what the request record says, never a helper's success line:
     Revision 2 supersedes revision 1 while B works; B's late report on revision 1 is kept on
     revision 1 (``late``) and leaves the request open; revision 2's final report closes it;
     a revision cancelled before delivery never reaches B; a cancel after delivery reaches B
-    as one read-only line that does not say "stop".
+    as one read-only line that does not say "stop". Codex's native queue counts a line as delivered
+    at once (PG-59), so its cancel is judged as a cancel after delivery. Revision 2's body is read by B
+    (`show`) once the line reaches it, and its final report closes the request.
 ``request-handoff``
     B is replaced by B' through a private session-tidy lineage row. Pass: the open request
     is B' 's and B' 's report is accepted. Counter-case: a session with no lineage row
     cannot report (``reporter-not-recipient``) and the request stays with B.
 
 The panel request lines (the requester's ``→`` and the receiver's ``◂``, in the route box's own
-form: mark, other session, title with the run's nonce, `` · ``, state) are read from both whole
+form: mark, other session, the request's title (cut with `…` on a narrow panel), `` · ``, state) are read from both whole
 terminal screens, which are written to the output folder; a panel that does not show them is a
 ``gap``. Outside the session shell, the declared limits (PG-59: a Claude receiver at rest takes no
 request; PG-4/33: an OpenCode requester is not woken by every report) are ``gap``, not ``fail``.
@@ -62,8 +64,9 @@ def busy_step(seconds):
     return 'python3 -c "import time; time.sleep(%d); print(\'B-WORK-DONE\')"' % seconds
 
 
-# The route box's request line: mark, the other session, a title carrying the nonce, ` · `, the state.
-PANEL_REQUEST_LINE = re.compile(r"│\s*([→◂✓✕]) (\S+) ([^│]*?) · ([^│]*?)\s*│")
+# The route box's request line: mark, the other session's `[tag]` (kept when the line is cut), the
+# title (cut with `…` on a narrow panel), ` · `, the state.
+PANEL_REQUEST_LINE = re.compile(r"│\s*([→◂✓✕])(?: (\[[^\]│]+\]))?(?: ([^│]*?))? · ([^│]*?)\s*│")
 
 
 def turn(record):
@@ -72,11 +75,28 @@ def turn(record):
     return record.get("turn_text") or record["last_text"]
 
 
-def panel_request_lines(screen, nonce, marks):
+def _title_matches(shown, titles):
+    """The line's title is a recorded title, or its front part cut with ``…`` (the nonce at the end
+    of a title does not survive a narrow panel)."""
+    shown = " ".join((shown or "").split())
+    if not shown:
+        return False
+    cut = shown.endswith("…")
+    front = shown[:-1].rstrip() if cut else shown
+    for title in ([titles] if isinstance(titles, str) else titles):
+        title = " ".join((title or "").split())
+        if title and (title == shown or (cut and front and title.startswith(front))):
+            return True
+    return False
+
+
+def panel_request_lines(screen, titles, marks):
+    """The route box's request lines of the given marks whose title is a recorded request title
+    (whole, or cut with ``…``). ``titles`` is one title or several."""
     found = []
     for row in screen.splitlines():
         for match in PANEL_REQUEST_LINE.finditer(row):
-            if match.group(1) in marks and nonce in match.group(3):
+            if match.group(1) in marks and _title_matches(match.group(3), titles):
                 found.append(match.group(0).strip("│ ").strip())
     return found
 
@@ -97,6 +117,12 @@ def answer(ctx, record, earlier):
 def _answer_b(ctx, text, last, kind, shells, nonce):
     sent = lambda needle: any(needle in shell for shell in shells)  # noqa: E731
     if kind == "tool":
+        if "report-revision-unreceived" in last and shells:
+            # N5: a report names the revision its session received; when none is recorded yet the
+            # refusal says `--rev N`. B knows which sealed revision it just read: say it.
+            read = re.findall(r"revision (\d+) \(sealed body\)", text)
+            if read and "--rev" not in shells[-1]:
+                return Reply(shell=f"{shells[-1]} --rev {read[-1]}")
         done = re.search(r"report=(rq-[0-9a-f]{6}) kind=(\w+)", last)
         if "(sealed body)" in last and f"BODY-KEEP-{nonce}" in last:
             return Reply("B holds this request open.")  # stays open for the cancel-after-delivery case
@@ -202,8 +228,9 @@ class _RequestScenario(WatchWakeScenario):
             path = folder / f"panel-{tag}-{who}.txt"
             path.write_text(screen, encoding="utf-8")
             files[who + "_screen_file"] = str(path)
-        return {"requester": panel_request_lines(a, self.nonce, "→✓✕"),
-                "receiver": panel_request_lines(b, self.nonce, "◂"), **files}
+        titles = [rec.get("title") or "" for rec in self.records(run).values()]
+        return {"requester": panel_request_lines(a, titles, "→✓✕"),
+                "receiver": panel_request_lines(b, titles, "◂"), **files}
 
     def start_a(self, run, text):
         return run.prompt(f"{A_MARK} {text}")
@@ -400,6 +427,10 @@ class RequestRevisionCancelScenario(_RequestScenario):
         ev["late_on_revision"] = [report.get("revision") for report in record.get("reports", []) if report.get("late")]
         final = self.wait_state(run, first, "final", 150)
         ev["final_state"] = self.records(run).get(first, {}).get("state")
+        # Revision 2 reaches B once it is idle: B reads its sealed body and answers it.
+        rev2_body = f"BODY-REV2-{self.nonce}"
+        ev["rev2_body_consumed"] = bool(wait_for(lambda: any(
+            rev2_body in turn(r) and "(sealed body)" in turn(r) for r in self.b_requests(run)), 90))
         # The cancelled request never reached B: not its line, not its body, in any model turn.
         other_body = f"BODY-OTHER-{self.nonce}"
         ev["cancelled_request_reached_b"] = bool(other and any(
@@ -407,7 +438,7 @@ class RequestRevisionCancelScenario(_RequestScenario):
             or other_body in r["text"] for r in self.b_requests(run)))
         other_ref = (self.records(run).get(other, {}).get("revisions") or [{}])[0].get("transfer_ref") if other else None
         closed = wait_for(lambda: bool(other_ref) and (self.duty(run, other_ref).get("observation") or {})
-                          .get("reason") == "request-withdrawn", 90) if other_ref else False
+                          .get("reason") == "request-withdrawn", 90) if other_ref and not self.queue_took_it(run, ev) else False
         ev["cancelled_delivery_closed_as_withdrawn"] = bool(closed)
         # A cancel after delivery: B received and showed a third request and holds it open.
         self.start_a(run, "send3")
@@ -423,13 +454,44 @@ class RequestRevisionCancelScenario(_RequestScenario):
         ev["stop_word_in_notice"] = bool(notice and "멈" in turn(notice))
         ev["third_state"] = self.records(run).get(third, {}).get("state") if third else None
         ev["panels"] = self.panels(run, "end")
+        # A cancel before delivery needs no notice and the request never reaches B. Codex's native
+        # queue counts a line as delivered the moment it takes it (PG-59), so there the cancel
+        # follows as its own line: B gets the request line, then one `[요청 취소 <id>]` line without
+        # "멈", and the request is `cancelled`. Claude and OpenCode keep the strict form.
+        if self.queue_took_it(run, ev):
+            ev["cancel_after_delivery"] = self.cancel_after_delivery(run, other)
+            before = (ev["other_state"] == "cancelled" and ev["cancel_after_delivery"]["notice_after_request"]
+                      and not ev["cancel_after_delivery"]["stop_word"])
+            if before:
+                run.note("codex native queue accepted it at once (PG-59): the cancel went as its own line")
+        else:
+            before = (ev["other_state"] == "cancelled" and ev["other_cancel_notice"] == "not-needed"
+                      and not ev["cancelled_request_reached_b"] and ev["cancelled_delivery_closed_as_withdrawn"])
         ok = (ev["late_report_kept"] and ev["state_after_late"] in ("open", "partial")
-              and ev["late_on_revision"] == [1] and final and ev["other_state"] == "cancelled"
-              and ev["other_cancel_notice"] == "not-needed"
-              and not ev["cancelled_request_reached_b"] and ev["cancelled_delivery_closed_as_withdrawn"]
+              and ev["late_on_revision"] == [1] and final and ev["rev2_body_consumed"] and before
               and ev["cancel_notice_line"]
               and not ev["stop_word_in_notice"] and ev["third_state"] == "cancelled")
         return "pass" if ok else "fail"
+
+    def queue_took_it(self, run, ev):
+        """Codex's cancel output names the delivery (`queued-not-delivered`/`delivered`) instead of
+        `not-needed`: the native queue had already taken the line (PG-59)."""
+        return (run.harness == "codex"
+                and ev.get("other_cancel_notice") in ("queued-not-delivered", "delivered"))
+
+    def cancel_after_delivery(self, run, other):
+        """B got the request line, then one cancel line (no "멈") for ``other``."""
+        got = {"request_index": None, "cancel_index": None, "stop_word": False}
+        wait_for(lambda: any(f"[요청 취소 {other}]" in turn(r) for r in self.b_requests(run)), 90)
+        for r in self.b_requests(run):
+            if got["request_index"] is None and f"[요청 {other}" in turn(r):
+                got["request_index"] = r["main_index"]
+            if f"[요청 취소 {other}]" in turn(r):
+                got["cancel_index"] = r["main_index"]
+                got["stop_word"] = "멈" in turn(r)
+        got["notice_after_request"] = (got["request_index"] is not None and got["cancel_index"] is not None
+                                       and got["request_index"] <= got["cancel_index"])
+        return got
 
 
 class RequestHandoffScenario(_RequestScenario):
@@ -491,7 +553,16 @@ class RequestHandoffScenario(_RequestScenario):
         self.lineage_row(run, old_sid, successor)
         listing = self.run_steward(run, "show", sid=successor)
         ev["successor_lists_request"] = first in (listing.stdout or "")
-        accepted = self.run_steward(run, "report", first, "--partial", "--result", "HANDOFF-" + self.nonce, sid=successor)
+        # A report answers a revision the receiver (or its confirmed predecessor) actually received
+        # (N5): wait for B to take the line in, then report as the successor.
+        wait_for(lambda: any(f"[요청 {first}" in turn(r) for r in self.b_requests(run)), 90)
+        accepted = None
+        for _attempt in range(10):
+            accepted = self.run_steward(run, "report", first, "--partial", "--result", "HANDOFF-" + self.nonce,
+                                        sid=successor)
+            if "kind=partial" in (accepted.stdout or "") or "report-revision-unreceived" not in (accepted.stdout or ""):
+                break
+            time.sleep(3)
         ev["successor_report"] = (accepted.stdout or "")[:300]
         ev["successor_accepted"] = "kind=partial" in (accepted.stdout or "")
         after = self.records(run).get(first, {})
