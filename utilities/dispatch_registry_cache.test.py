@@ -124,7 +124,8 @@ class RegistryLinesCacheTest(unittest.TestCase):
             stream.write("now\tdone\t/repo\t/wt\tchild\tattempt_id=att-child,"
                          "parent_attempt_id=att-owner-1,route_id=rt-delta\n")
         appended = CACHE.registry_view(self.jobs, append_only=True)
-        self.assertTrue(appended.append_only_generation)
+        self.assertEqual(appended.prefix_proofs()[:len(first.prefix_proofs())],
+                         first.prefix_proofs())
         self.assertEqual([row.order for row in appended.records_since(cursor)], [2])
         self.assertEqual(appended.settlement_owner_candidates_since(cursor), ())
         self.assertEqual(appended.settlement_owner_candidate("att-owner-1").order, 0)
@@ -1539,38 +1540,48 @@ class PrefixReuseAfterReplacementTest(unittest.TestCase):
         self._assert_digests(second)
         self._assert_same_as_fresh_read(second)
 
-    def test_unchanged_prefix_of_a_pure_append_stays_an_append_generation(self):
+    def test_unchanged_prefix_of_a_pure_append_keeps_its_prefix_proofs(self):
         rows = self._rows(8)
         self._write(rows)
         first = self._read(True)
         with self.jobs.open("ab") as stream:
             stream.write(self._row(8).encode())
         second = self._read(True)
-        self.assertTrue(second.append_only_generation)
+        self.assertEqual(second.prefix_proofs()[:len(first.prefix_proofs())],
+                         first.prefix_proofs())
         self.assertIs(second._segments[0], first._segments[0])
         self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
         self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
         self._assert_same_as_fresh_read(second)
 
-    def test_only_the_same_file_keeping_a_segment_is_an_append_generation(self):
-        # The parse is still reused in every case; only the append marker, which
-        # owner_candidate_floor pairs with an older cursor's (dev, ino), narrows.
+    def test_prefix_proofs_follow_the_bytes_not_the_file(self):
+        # owner_candidate_floor keeps a cursor's floor only where these digests
+        # still match: whether the file was renamed, kept, or got an old inode
+        # number back is not asked. The parse is reused in every case.
         def appended_in_place(rows):
             with self.jobs.open("ab") as stream:
                 stream.write(self._row(len(rows)).encode())
             return rows + [self._row(len(rows))]
 
+        def changed_row(rows):
+            changed = list(rows)
+            changed[6] = self._row(6, "killed")
+            self._replace(changed)
+
         cases = {
-            "append by rename": (self._rows(8), lambda rows: self._replace(rows + [self._row(8)]), False),
-            "identical rewrite": (self._rows(8), lambda rows: self._replace(rows), False),
-            "replacement of an empty generation": ([], lambda rows: self._replace(self._rows(3)), False),
+            "append by rename": (self._rows(8), lambda rows: self._replace(rows + [self._row(8)]),
+                                 False, True),
+            "identical rewrite": (self._rows(8), lambda rows: self._replace(rows), False, True),
+            "changed row": (self._rows(8), changed_row, False, False),
+            "replacement of an empty generation": ([], lambda rows: self._replace(self._rows(3)),
+                                                   False, True),
             "replacement of a tail-only generation": (
                 ["t\topen\t/repo\t/wt\ts\tattempt_id=att-tail"],
-                lambda rows: self._replace(self._rows(3)), False),
-            "append in place": (self._rows(8), appended_in_place, True),
+                lambda rows: self._replace(self._rows(3)), False, True),
+            "append in place": (self._rows(8), appended_in_place, True, True),
         }
         for scoped in (False, True):
-            for name, (rows, change, expected) in cases.items():
+            for name, (rows, change, same_file, kept) in cases.items():
                 with self.subTest(case=name, scoped=scoped):
                     CACHE.clear_cache()
                     CACHE.reset_metrics()
@@ -1579,12 +1590,40 @@ class PrefixReuseAfterReplacementTest(unittest.TestCase):
                     change(rows)
                     second = self._read(scoped)
                     self.assertIsNot(second, first)
-                    self.assertEqual(second.signature[:2] == first.signature[:2], expected)
-                    self.assertIs(second.append_only_generation, expected)
-                    if first._segments:
+                    self.assertEqual(second.signature[:2] == first.signature[:2], same_file)
+                    # A generation without a complete row proves nothing to keep.
+                    self.assertEqual(set(first.prefix_proofs()) <= set(second.prefix_proofs()),
+                                     kept)
+                    if first._segments and kept:
                         self.assertIs(second._segments[0], first._segments[0])
                         self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
                     self._assert_same_as_fresh_read(second)
+
+    def test_compaction_keeps_the_proofs_it_merges_within_a_bound(self):
+        # A cursor taken a few appends ago keeps its proof after compaction
+        # merges its boundary into one segment; the list itself stays bounded.
+        for name, value in (("_MAX_SEGMENTS", 8), ("_COMPACT_SEGMENTS", 4)):
+            patcher = mock.patch.object(CACHE, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        rows = self._rows(4)
+        self._write(rows)
+        previous = [CACHE.registry_view(self.jobs, append_only=True)]
+        for number in range(4, 40):
+            with self.jobs.open("ab") as stream:
+                stream.write(self._row(number).encode())
+            view = CACHE.registry_view(self.jobs, append_only=True)
+            raw = self.jobs.read_bytes()
+            proofs = view.prefix_proofs()
+            self.assertEqual([proof[0] for proof in proofs], sorted({proof[0] for proof in proofs}))
+            for byte_end, digest, rows_inside in proofs:
+                self.assertEqual(digest, __import__("hashlib").sha256(raw[:byte_end]).digest())
+                self.assertEqual(raw[:byte_end].count(b"\n"), rows_inside)
+            for earlier in previous[-3:]:
+                self.assertIn(earlier.prefix_proofs()[-1], proofs)
+            self.assertLessEqual(len(proofs), 8 + 4 + 1)
+            previous.append(view)
+        self.assertGreaterEqual(CACHE.metrics_snapshot()["segment_compactions"], 2)
 
     def test_chunking_does_not_change_the_answers(self):
         rows = self._rows(30)
