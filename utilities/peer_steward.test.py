@@ -2721,6 +2721,72 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
                 self.assertIn("delay = min(15.0, delay * 1.7)", source)
 
 
+class WorkerStartedRunnerWatchTest(_WatchMixin, unittest.TestCase):
+    """The shared runner is one service of this user. A registered Claude worker's hook may
+    start it while that worker reads its own private home (``CLAUDE_CONFIG_DIR`` = its
+    worker home); the steward's watch on a user session must still get its idle receipt."""
+
+    def _worker_env(self):
+        env = self._env("held", session_id="worker-owner")
+        home = self.tmp_root / "dispatch" / "homes" / "workers" / "claude-owner"
+        (home / "sessions").mkdir(parents=True, exist_ok=True)
+        (home / "worker-home.json").write_text("{}", encoding="utf-8")
+        env.update(CLAUDE_CONFIG_DIR=str(home), HEARTING_WORKER_HOME=str(home),
+                   HEARTING_MODEL_CONFIG_HOME=str(Path(os.environ["HOME"]) / ".claude"))
+        return env, home
+
+    def _fixture_runners(self):
+        """``{pid: environ}`` of this fixture's shared runners (its state root is in argv)."""
+        found = {}
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                argv = Path(f"/proc/{entry}/cmdline").read_bytes().split(b"\0")
+                if b"__obligation-runner" not in argv or not any(
+                        str(self.tmp_root).encode() in item for item in argv):
+                    continue
+                raw = Path(f"/proc/{entry}/environ").read_bytes()
+            except OSError:
+                continue
+            found[int(entry)] = dict(item.decode("utf-8", "replace").split("=", 1)
+                                     for item in raw.split(b"\0") if b"=" in item)
+        return found
+
+    def _wait_for_runner(self, seconds=20):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            runners = self._fixture_runners()
+            if runners:
+                return runners
+            time.sleep(0.05)
+        self.fail("the worker never started the shared runner")
+
+    def test_a_runner_a_claude_worker_starts_still_delivers_the_users_claude_watch(self):
+        worker_env, worker_home = self._worker_env()
+        # The worker's steward-check upkeep is what starts the shared runner here.
+        started = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path[:0] = sys.argv[1:3]; import steward_check; "
+             "steward_check.register('claude', 'worker-owner')",
+             str(_HERE), str(_HERE.parent / "tools")],
+            env=worker_env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        runner_pid, = self._wait_for_runner()
+        armed = self._run("watch", self.target, "--wake", "none", env=self._env("held"))
+        self.assertEqual(armed.returncode, 0, armed.stderr)
+        watch_id = self._fields(armed.stdout)["watch_id"]
+        self._wait_for_lock(watch_id)
+        self._release()
+        receipt = self._wait_for_receipt(watch_id, seconds=20)
+        self.assertEqual((receipt["state"], receipt["agent"]["session_id"]), ("idle", "sid-peer"))
+        runners = self._fixture_runners()
+        # The runner the worker started is the one that served the watch.
+        self.assertIn(runner_pid, runners)
+        self.assertNotEqual(runners[runner_pid].get("CLAUDE_CONFIG_DIR"), str(worker_home))
+        self.assertNotIn("HEARTING_WORKER_HOME", runners[runner_pid])
+
+
 class WatcherReceiptTest(_WatchMixin, unittest.TestCase):
     """A56-2."""
 

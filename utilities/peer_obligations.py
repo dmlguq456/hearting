@@ -319,6 +319,59 @@ def _service_exec_environment(source_root: Path, target_root: Path, environ=None
     return child_env
 
 
+def _worker_built_home(path) -> bool:
+    """Whether ``path`` is a home the worker home builder made (it leaves its manifest)."""
+    try:
+        return (Path(path).expanduser() / "worker-home.json").is_file()
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+
+
+def _same_directory(left, right) -> bool:
+    try:
+        return (Path(left).expanduser().resolve(strict=False)
+                == Path(right).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+
+
+def _user_service_environment(environ):
+    """The shared runner's environment: the user's own harness homes, whoever started it.
+
+    The runner is one service of this user, so it reads the same native records
+    no matter which session's hook starts it. A registered worker masks its own
+    harness home (Claude ``CLAUDE_CONFIG_DIR``, Codex ``CODEX_HOME``) with a
+    private home, marks it with ``HEARTING_WORKER_HOME`` and pins the home it
+    replaced in ``HEARTING_MODEL_CONFIG_HOME``. A runner inheriting that mask
+    would look for the user's sessions in the worker's private home and find
+    none. Here a masked value goes back to the pinned home, or to the native
+    default when the pinned home is the default or another worker's own; the
+    two worker markers stay with the worker. Any other environment, including
+    a session that chose its own ``CLAUDE_CONFIG_DIR``, is returned unchanged
+    (``None`` keeps meaning "inherit this process's environment").
+    """
+    source = os.environ if environ is None else environ
+    worker_home = source.get("HEARTING_WORKER_HOME")
+    if not worker_home:
+        return environ
+    child_env = dict(source)
+    child_env.pop("HEARTING_WORKER_HOME", None)
+    pinned = child_env.pop("HEARTING_MODEL_CONFIG_HOME", None)
+    home = Path(child_env.get("HOME") or Path.home()).expanduser()
+    for name, default in (("CLAUDE_CONFIG_DIR", home / ".claude"),
+                          ("CODEX_HOME", home / ".codex")):
+        value = child_env.get(name)
+        own_mask = bool(value) and _same_directory(value, worker_home)
+        if not value or not (own_mask or _worker_built_home(value)):
+            continue
+        restored = pinned if own_mask and pinned and not _worker_built_home(pinned) else None
+        if restored and not _same_directory(restored, default):
+            child_env[name] = restored
+        else:
+            child_env.pop(name, None)
+    return child_env
+
+
 def service_script(relative_script: str | Path, service_current: str | Path | None = None,
                    *, root=None, environ=None):
     """Resolve a service script only through an explicitly validated binding.
@@ -3715,7 +3768,8 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
         runner_root = active_root or code_root
         runner = runner_root / "utilities" / "peer-steward.py"
         state_root = Path(root).resolve() if root else store.state_root
-        child_env = (_service_exec_environment(code_root, runner_root) if binding else None)
+        child_env = _user_service_environment(
+            _service_exec_environment(code_root, runner_root) if binding else None)
         argv = [sys.executable, str(runner), "__obligation-runner", "--lock-fd", str(fd),
                 "--state-root", str(state_root)]
         if binding:

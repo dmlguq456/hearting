@@ -32,6 +32,7 @@ REAL_ROLE_HELD = SC._role_held
 REAL_HUMAN_WAIT = SC._human_wait_open
 REAL_ROLE_FLAGGED = SC._role_flagged
 REAL_SESSION_LIVENESS = SC._session_liveness
+REAL_ENSURE_NORMAL_RUNNER = peer_obligations.ensure_normal_runner
 T0 = 1_000_000.0
 INTERVAL = 7200
 HARNESS = "claude"
@@ -1045,13 +1046,8 @@ exit 1
 """
 
 
-class StewardCheckHerdrReachTest(CheckBase):
-    """`steward check` and the runner's steward-check duty never ask Herdr.
-
-    The same native world (a steward marker, registry records in one repository) is built
-    twice: once with a logging `herdr` first on PATH that answers `agent list` with an extra
-    same-repository agent, once with no `herdr` at all. Each case ends by asserting that the
-    logger saw no call and that both worlds give the same check output and duty steps."""
+class _NativeStewardWorld(CheckBase):
+    """A steward marker and native registry records in one repository, read for real."""
 
     HOLDER = "aaaaaaaa-1111-4111-8111-000000000001"
     WORKER = "bbbbbbbb-1111-4111-8111-000000000002"
@@ -1117,6 +1113,15 @@ class StewardCheckHerdrReachTest(CheckBase):
                    FAKE_HERDR_CALLLOG=str(log), FAKE_HERDR_AGENTS=str(root / "agents.json"))
         return env, ledger, log
 
+
+class StewardCheckHerdrReachTest(_NativeStewardWorld):
+    """`steward check` and the runner's steward-check duty never ask Herdr.
+
+    The same native world is built twice: once with a logging `herdr` first on PATH that
+    answers `agent list` with an extra same-repository agent, once with no `herdr` at all.
+    Each case ends by asserting that the logger saw no call and that both worlds give the
+    same check output and duty steps."""
+
     def run_world(self, name, *, herdr_answers):
         env, ledger, log = self.world(name, herdr_answers=herdr_answers)
         SC._THROTTLE.clear()
@@ -1149,6 +1154,96 @@ class StewardCheckHerdrReachTest(CheckBase):
         self.assertIn("targets=1 ", absent["check"])
         self.assertEqual((absent["due_phase"], absent["notice_state"]), ("notified", "pending"))
         self.assertEqual(absent["after"], ("pending", "notified"))
+
+
+class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
+    """The shared runner is one service of this user: a registered worker's hook may start
+    it, and the steward-check duty it runs still reads the user's own native records.
+
+    A worker masks its own harness home (Claude ``CLAUDE_CONFIG_DIR``, Codex
+    ``CODEX_HOME``) with a private home and pins the user's in
+    ``HEARTING_MODEL_CONFIG_HOME``. The runner's environment is taken from the real
+    launch, then the duty's own seams run in it."""
+
+    CODEX_TARGET = "019a0000-0000-7000-8000-0000000000dd"
+
+    def runner_environment(self, starter, ledger):
+        with mock.patch.dict(os.environ, starter, clear=True):
+            store = peer_obligations.ObligationStore(ledger)
+            SC.register(HARNESS, self.HOLDER, now=T0, store=store, ensure_runner=False)
+            with mock.patch.object(peer_obligations.subprocess, "Popen") as launch:
+                self.assertTrue(REAL_ENSURE_NORMAL_RUNNER(ledger))
+            env = launch.call_args.kwargs["env"]
+            return dict(os.environ) if env is None else dict(env)
+
+    def worker_home(self, root, name):
+        home = root / "dispatch" / "homes" / "workers" / name
+        (home / "sessions").mkdir(parents=True)
+        (home / "worker-home.json").write_text("{}", encoding="utf-8")
+        return home
+
+    def observed_in(self, env):
+        SC._THROTTLE.clear()
+        with mock.patch.dict(os.environ, env, clear=True):
+            flagged = REAL_ROLE_FLAGGED(HARNESS, self.HOLDER)
+            names = sorted(target["name"] for target in SC._observe_role(HARNESS, self.HOLDER)["targets"])
+        return flagged, names
+
+    def test_a_runner_a_claude_worker_starts_reads_the_users_claude_home(self):
+        env, ledger, log = self.world("claude-worker", herdr_answers=False)
+        worker = self.worker_home(self.tmp / "claude-worker", "claude-owner")
+        starter = {**env, "CLAUDE_CONFIG_DIR": str(worker), "HEARTING_WORKER_HOME": str(worker),
+                   "HEARTING_MODEL_CONFIG_HOME": env["CLAUDE_CONFIG_DIR"]}
+        runner = self.runner_environment(starter, ledger)
+        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+        self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
+        for name in ("HEARTING_WORKER_HOME", "HEARTING_MODEL_CONFIG_HOME"):
+            self.assertNotIn(name, runner)
+        self.assertFalse(log.exists())
+
+    def test_a_default_claude_home_stays_the_native_default(self):
+        env, ledger, _log = self.world("claude-default", herdr_answers=False)
+        default = Path(env["HOME"]) / ".claude"
+        default.parent.mkdir(parents=True)
+        Path(env["CLAUDE_CONFIG_DIR"]).rename(default)
+        worker = self.worker_home(self.tmp / "claude-default", "claude-owner")
+        starter = {**env, "CLAUDE_CONFIG_DIR": str(worker), "HEARTING_WORKER_HOME": str(worker),
+                   "HEARTING_MODEL_CONFIG_HOME": str(default)}
+        runner = self.runner_environment(starter, ledger)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", runner)
+        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+
+    def test_a_runner_a_codex_worker_starts_reads_the_users_codex_threads(self):
+        import sqlite3
+        env, ledger, _log = self.world("codex-worker", herdr_answers=False)
+        marker = ledger / "peer-steward" / "claude" / f"{self.HOLDER}.json"
+        record = json.loads(marker.read_text())
+        record["targets"]["codex"] = {"harness": "codex", "session_id": self.CODEX_TARGET,
+                                      "name": "codex-worker", "kind": "watch", "source": "watch",
+                                      "ts": record["updated"]}
+        marker.write_text(json.dumps(record))
+        repo = self.tmp / "codex-worker" / "repo"
+        user_codex = Path(env["CODEX_HOME"])
+        worker = self.worker_home(self.tmp / "codex-worker", "codex-owner")
+        for home, rows in ((user_codex, [(self.CODEX_TARGET, str(repo))]), (worker, [])):
+            home.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(home / "state_5.sqlite") as con:
+                con.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT)")
+                con.executemany("INSERT INTO threads VALUES (?, ?)", rows)
+            con.close()
+        starter = {**env, "CODEX_HOME": str(worker), "HEARTING_WORKER_HOME": str(worker),
+                   "HEARTING_MODEL_CONFIG_HOME": str(user_codex)}
+        runner = self.runner_environment(starter, ledger)
+        self.assertEqual(self.observed_in(runner), (True, ["codex-worker", "worker"]))
+        self.assertEqual(runner.get("CODEX_HOME"), str(user_codex))
+        self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
+
+    def test_an_ordinary_session_keeps_its_own_claude_home(self):
+        env, ledger, _log = self.world("ordinary", herdr_answers=False)
+        other = self.tmp / "ordinary" / "chosen-claude"
+        (other / "sessions").mkdir(parents=True)
+        runner = self.runner_environment({**env, "CLAUDE_CONFIG_DIR": str(other)}, ledger)
+        self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), str(other))
 
 
 class StewardCheckWindowClosedTest(CheckBase):
