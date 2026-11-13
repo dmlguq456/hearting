@@ -1046,20 +1046,22 @@ def _carried_segment_rows(old_rows, old_segments, new_segments):
     tuple at the same physical orders. So the rows already converted for that range are the rows of
     that segment now, whatever else the new generation changed. A segment of other records, or the
     same records at other orders, is not carried; ``by_fields`` of ``_parse_registry_view`` proves
-    those row by row.
+    those row by row. Returns ``(carried, used)``: the rows by new segment, and the index ranges of
+    ``old_rows`` that were handed over (a row at an order a carried segment owns cannot be the
+    answer for a segment that was not carried).
 
     The key is ``id(records)``, which names one object only while the old segments are held (and
     the tuple itself is compared): ``_PARSED_REGISTRY_SEGMENTS`` keeps them for as long as
     ``old_rows`` is kept.
     """
     if not old_rows or not old_segments:
-        return {}
+        return {}, []
     spans = {}
     start = 0
     for segment in old_segments:
         spans[id(segment.records)] = (start, segment.order_end, segment.records)
         start = segment.order_end
-    carried = {}
+    carried, used = {}, []
     for segment in new_segments:
         span = spans.get(id(segment.records))
         if (span is not None and span[2] is segment.records
@@ -1067,7 +1069,8 @@ def _carried_segment_rows(old_rows, old_segments, new_segments):
             low = bisect.bisect_left(old_rows, span[0], key=_row_order)
             high = bisect.bisect_left(old_rows, span[1], key=_row_order)
             carried[id(segment)] = old_rows[low:high]
-    return carried
+            used.append((low, high))
+    return carried, used
 
 
 def _parse_registry_view(path, view, generation):
@@ -1078,7 +1081,7 @@ def _parse_registry_view(path, view, generation):
         current_sources = _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources()
         old_rows = _PARSED_REGISTRY_ROWS.get(previous, ()) if current_sources else ()
         old_segments = _PARSED_REGISTRY_SEGMENTS.get(previous) if current_sources else None
-    carried = _carried_segment_rows(old_rows, old_segments, view._segments)
+    carried, carried_ranges = _carried_segment_rows(old_rows, old_segments, view._segments)
     # A replacement carries a new file generation; exact fields still prove
     # an unchanged row conversion, independently of its new physical order.
     by_fields = None
@@ -1090,7 +1093,16 @@ def _parse_registry_view(path, view, generation):
             _REGISTRY_FOLD_STATS["rows_carried_by_segment"] += len(held)
             continue
         if by_fields is None:
-            by_fields = {row[1]: row for row in old_rows}
+            # Only the old rows nobody carried over can answer for a segment that was not carried
+            # (the others stand at the orders of the carried segments).
+            by_fields, start = {}, 0
+            for low, high in sorted(carried_ranges):
+                for row in old_rows[start:low]:
+                    by_fields[row[1]] = row
+                start = high
+            for row in old_rows[start:]:
+                by_fields[row[1]] = row
+            _REGISTRY_FOLD_STATS["by_fields_rows"] += len(by_fields)
         _REGISTRY_FOLD_STATS["rows_proved_by_fields"] += len(segment.records)
         for record in segment.records:
             old = (by_fields.get(record.fields)
@@ -4366,7 +4378,8 @@ _REGISTRY_FOLD_PARTS = {}
 _REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0,
                         "index_segment_builds": 0, "index_segment_reuses": 0,
                         "selection_fact_builds": 0, "selection_fact_reuses": 0,
-                        "rows_carried_by_segment": 0, "rows_proved_by_fields": 0}
+                        "rows_carried_by_segment": 0, "rows_proved_by_fields": 0,
+                        "by_fields_rows": 0}
 _REGISTRY_INDEX_PARTS = {}
 
 

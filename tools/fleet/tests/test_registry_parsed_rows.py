@@ -982,6 +982,8 @@ class SegmentedEvidenceTest(unittest.TestCase):
             carried = after["rows_carried_by_segment"] - before["rows_carried_by_segment"]
             proved = after["rows_proved_by_fields"] - before["rows_proved_by_fields"]
             self.assertEqual(carried + proved, len(rows))
+            # the by-fields lookup holds only what no carried segment stands for, not every old row
+            self.assertLessEqual(after["by_fields_rows"] - before["by_fields_rows"], 6)
             self.assertGreaterEqual(carried, 18)         # the segment before the edit and every one after it
             self.assertLessEqual(proved, 6)              # only the segment the edited row is in
             self.assertEqual([row[:2] for row in second], [row[:2] for row in first[:4]]
