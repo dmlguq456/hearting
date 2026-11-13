@@ -733,6 +733,32 @@ class UnpublishedEventTests(unittest.TestCase):
         self.assertNotIn("not_visible", reasons[0])
 
 
+class DemandWriteTests(unittest.TestCase):
+    """The fixture's display demand must not wake the idle producer (a chmod does, even to the same mode)."""
+
+    def children(self, tmp):
+        c = t12.Children.__new__(t12.Children)
+        c.root, c.fixture = Path(tmp) / "waits", {"sessions": [{"session_id": "s1"}]}
+        return c
+
+    def test_a_demand_refresh_leaves_the_directory_mode_alone_when_it_is_right(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            c = self.children(tmp)
+            c.write_demand()
+            with mock.patch.object(t12.os, "chmod", wraps=os.chmod) as chmod:
+                c.write_demand()
+            self.assertNotIn(str(c.root), [str(call.args[0]) for call in chmod.call_args_list])
+            self.assertTrue((c.root / ".demand").exists())
+
+    def test_a_wrong_directory_mode_is_corrected(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            c = self.children(tmp)
+            c.write_demand()
+            os.chmod(c.root, 0o755)
+            c.write_demand()
+            self.assertEqual(os.stat(c.root).st_mode & 0o7777, 0o700)
+
+
 class PublisherPassTests(unittest.TestCase):
     """The publish is followed by the producer's wake-source bookkeeping inside the same pass."""
 

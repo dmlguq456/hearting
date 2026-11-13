@@ -130,7 +130,11 @@ class Children:
     # -- demand marker keeps the producer alive and gives the panels something to show
     def write_demand(self) -> None:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.root, 0o700)
+        # Like the product's ``_request_producer``: a chmod raises a directory attribute event
+        # even when the mode is right, and the producer watches this directory, so a demand
+        # refresh every 20 s would wake an idle producer each time.
+        if (os.stat(self.root).st_mode & 0o7777) != 0o700:
+            os.chmod(self.root, 0o700)
         value = {f"claude\0{s['session_id']}": time.time() for s in self.fixture["sessions"]}
         tmp = self.root / ".demand.tmp"
         tmp.write_text(json.dumps(value), encoding="utf-8")
