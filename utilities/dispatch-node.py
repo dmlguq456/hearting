@@ -1015,6 +1015,11 @@ def main():
   print("check=failed"); print("reason="+getattr(exc,"reason",str(exc))); print("child_spawned=0")
   raise SystemExit(65)
  round_budget=admission.budget
+ if not a.subsession_id and original_task is None:
+  reused=REVIEW_ROUND_CAP.reuse_deterministic_pass(route,node,registry.path,round_budget)
+  if reused:
+   for key,value in reused.items(): print(f"{key}={value}")
+   return 0
  if REVIEW_ROUND_CAP.is_round_capped_node(node) and not a.subsession_id and original_task is None:
   choice=ROUTE_AUTHORITY.decide_continuation(route, action="round", node=node, facts={"budget": round_budget})
   if not choice.allowed:
