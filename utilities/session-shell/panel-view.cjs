@@ -1166,7 +1166,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const requestDetails=q=>{
       const out=[];let item=0;
       const guide=[text('  '),{...text('┆','dim'),role:'messages'},text(' ')],W=Math.max(8,inner-4);
-      const labels=W>=24,L=labels?7:0;
+      const names=(Array.isArray(q.details)?q.details:[]).map(d=>measure(String(d[0]||'')));
+      // The label column is as wide as its longest label (a catalog word may be longer than 7 cells).
+      const labels=W>=24,L=labels?Math.min(10,Math.max(7,...names.map(n=>n+1))):0;
       for(const [label,value,tone] of Array.isArray(q.details)?q.details:[]){
         const parts=[text(String(value||''),({lvl_r:'lvl_r',lvl_g:'lvl_g',dim:'dim'})[tone]||'loc_repo')];
         wrapAll(parts,W-L).forEach((row,i)=>{const name=i?'':String(label||'');out.push({parts:[...guide,...(L?[text(name+' '.repeat(Math.max(0,L-measure(name))),'dim')]:[]),...row],item});});
