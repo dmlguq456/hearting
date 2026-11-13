@@ -3627,6 +3627,9 @@ def cmd_watch(args):
                 existing_arm = _read_json(existing_paths.arm) or existing_arm
             _write_watch_claim(logical_fd, existing_id)
             _write_watch_claim(claim_fd, existing_id)
+            _mark_observed(agent["harness"], agent["session_id"], agent.get("name") or target,
+                           from_identity=(steward_sid, steward_harness), pane=agent.get("pane"),
+                           target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat)
             print(_already_armed_line(existing_id, existing_arm, existing_paths))
             return 0
 
@@ -4672,6 +4675,7 @@ def cmd_rearm(args):
     if paths.receipt.exists():
         print(f"watch_id={watch_id} state=already-done receipt={paths.receipt}")
         return 0
+    _restore_watch_role(watch_id, arm)
     if _watcher_present(arm):
         print(_already_armed_line(watch_id, arm, paths).replace("state=already-armed", "state=alive"))
         return 0
@@ -4690,11 +4694,7 @@ def cmd_rearm(args):
                 and observation.get("reason") == "steward-exited"):
             print(f"watch_id={watch_id} state=pending reason=steward-exited receipt={paths.receipt}")
             return 0
-        print(f"watch_id={watch_id} state=rearmed receipt={paths.receipt}")
-        print(steward_fields(
-            arm.get("wake"), watch_id, agent_home=Path(__file__).resolve().parents[1],
-            arms_hook=False, timeout_ms=arm.get("timeout"),
-        ))
+        print(_already_armed_line(watch_id, arm, paths).replace("state=already-armed", "state=rearmed"))
         return 0
     print(f"watch_id={watch_id} state=pending reason=observer-restart-unavailable receipt={paths.receipt}")
     return 0
@@ -8740,6 +8740,29 @@ def _herdr_error_reason(payload, rc):
     return f"herdr-exit-{rc}"
 
 
+def _restore_watch_role(watch_id, arm, *, identity=None):
+    """Repair relation evidence only for the current exact watch recipient."""
+    if not isinstance(arm, dict):
+        return
+    sid, harness = identity or _current_session_identity()
+    recipient = arm.get("steward") or {}
+    if (recipient.get("harness"), recipient.get("session_id")) != (harness, sid):
+        return
+    agent = arm.get("agent") or {}
+    if not agent.get("harness") or not (agent.get("session_id") or agent.get("name")):
+        return
+    _mark_observed(agent["harness"], agent.get("session_id"), agent.get("name"),
+                   from_identity=(sid, harness), pane=agent.get("pane"),
+                   target_cwd=agent.get("cwd"), steward_seat=arm.get("steward_seat"))
+
+
+def _restore_own_watch_roles(harness, sid):
+    root = _watch_root()
+    for watch_id, arm in _watch_entries(root):
+        if not _watch_paths(watch_id, root).receipt.exists():
+            _restore_watch_role(watch_id, arm, identity=(sid, harness))
+
+
 def cmd_steward(args):
     """F-100c-2 — explicit steward mode switch. The flag is a role, not a side effect of
     sending: only `steward on` (source=explicit), a `wait`/`watch` that observed a real
@@ -8757,8 +8780,20 @@ def cmd_steward(args):
             print(peer_message.format_steward_limited(result))
             return 1
         ok = result["written"]
+        if ok:
+            _restore_own_watch_roles(harness, sid)
         _ensure_steward_runner(result)
         print(f"steward={'on' if ok else 'unchanged'} harness={harness} session_id={sid}")
+        if ok:
+            try:
+                fleet = peer_message._fleet_steward()
+                rows = fleet._registry_sessions()
+                repository = fleet.repository_for_session(harness, sid, sessions=rows)
+                if repository:
+                    print(peer_message.format_steward_census(fleet.repo_supervision(
+                        repository_key=repository, sessions=rows, agents=())))
+            except Exception:
+                print("steward-count=unknown reason=census-unavailable policy=advisory")
         return 0 if ok else 1
     if args.state == "check":
         try:

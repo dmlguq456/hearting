@@ -130,6 +130,23 @@ class _HookMixin:
 
 
 class ArmingTest(_HookMixin, unittest.TestCase):
+    def test_repeated_watch_and_rearm_reconnect_the_same_exact_recipient(self):
+        armed = self._arm(mode="held")
+        watch_id = self._fields(armed)["watch_id"]
+        spec = importlib.util.spec_from_file_location("rewake_repeat", _HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        with mock.patch.dict(os.environ, self._env()):
+            for command, state in (("watch peer-a --wake hook", "already-armed"),
+                                   (f"rearm {watch_id}", "alive"),
+                                   (f"rearm {watch_id}", "rearmed")):
+                line = armed.replace("state=armed", "state=" + state)
+                payload = self._payload(line, command=f"python3 {_PEER_STEWARD} {command}")
+                self.assertEqual(hook.parse_arm(payload), (watch_id, "peer-a"))
+                payload["session_id"] = "foreign"
+                self.assertIsNone(hook.parse_arm(payload))
+        self._release()
+
     def test_non_watch_bash_call_is_silent_exit_zero(self):
         payload = self._payload("", command="ls -la")
         proc = self._run_hook(payload)

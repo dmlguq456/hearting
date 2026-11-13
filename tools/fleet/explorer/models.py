@@ -431,20 +431,29 @@ def _draw_supervisors(grid, census, limit, x, y, right):
         grid.put(x + 20, y, f"· / {limit} per repo (not counted yet)", "dim", limit=right)
         return y + 1
     if not census:
-        grid.put(x + 20, y, f"none · {limit} per repo allowed", "soft", limit=right)
+        grid.put(x + 20, y, f"none · {limit} per repo reference", "soft", limit=right)
         return y + 1
     for repo in census[:4]:
         repo = _dict(repo)
         shown = repo.get("limit") if repo.get("limit") is not None else limit
         holders = [str(holder.get("name") or str(holder.get("session_id") or "?")[:8])
-                   + ("" if holder.get("counted", True) else " (ended)")
+                   + ("" if holder.get("counted", True) else " (" + str(holder.get("count_reason") or holder.get("liveness") or "unknown") + ")")
                    for holder in repo.get("holders") or () if isinstance(holder, Mapping)]
         text = (f"{repo.get('repository') or '?'} · {repo.get('counted', 0)} / {shown} supervising"
                 + (" · " + ", ".join(holders) if holders else ""))
         over = bool(repo.get("over_limit"))
-        grid.put(x + 20, y, text + (" · over limit" if over else ""), "g_blocked" if over else "soft",
+        grid.put(x + 20, y, text + (" · above reference (advisory)" if over else ""), "soft",
                  limit=right)
         y += 1
+        for holder in repo.get("holders") or ():
+            if not isinstance(holder, Mapping):
+                continue
+            name = holder.get("name") or str(holder.get("session_id") or "?")[:8]
+            detail = (f"{name}: {holder.get('liveness', 'unknown')} · {holder.get('count_reason', 'unknown')} "
+                      f"· activity {holder.get('last_activity') or '?'} (role marker) "
+                      f"· seat {holder.get('seat_key') or '?'}")
+            grid.put(x + 22, y, detail, "dim", limit=right)
+            y += 1
     if len(census) > 4:
         grid.put(x + 20, y, f"+{len(census) - 4} more repositories", "dim", limit=right)
         y += 1
@@ -456,7 +465,7 @@ def _draw_steward_editor(grid, steward, state, x, y, right):
     folds = state.fold_map()
     values = _dict(steward.get("values"))
     notes = {"check_interval_seconds": "a supervising session checks its targets this often without a notice",
-             "max_supervisors_per_repo": "sessions that may hold the supervisor flag in one repo"}
+             "max_supervisors_per_repo": "advisory count; never blocks the supervisor flag"}
     for name, choices in _STEWARD_CHOICES.items():
         current = values.get(name)
         if current is None:

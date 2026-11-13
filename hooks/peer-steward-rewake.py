@@ -69,7 +69,7 @@ def _is_watch_command(command: str) -> bool:
         if Path(token).name not in {"peer-steward", "peer-steward.py"}:
             continue
         rest = [p for p in parts[index + 1:] if not p.startswith("-")]
-        return bool(rest) and rest[0] == "watch"
+        return bool(rest) and rest[0] in {"watch", "rearm"}
     return False
 
 
@@ -107,7 +107,7 @@ def parse_arm(payload: dict[str, Any]) -> tuple[str, str] | None:
         return None
 
     fields = _fields(stdout)
-    if _single(fields, "state") != "armed":
+    if _single(fields, "state") not in {"armed", "already-armed", "alive", "rearmed"}:
         return None
     if _single(fields, "wake") != "hook":
         return None

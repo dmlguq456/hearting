@@ -514,6 +514,34 @@ def role_targets(harness, session_id, *, aliases=(), markers=None, cwd=None, ses
     return _owner_targets(winners, harness, session_id)
 
 
+def unresolved_role_targets(harness, session_id, *, sessions=None):
+    """Keep the holder's unjoined evidence visible as uncertainty, never a winning edge."""
+    rows = _registry_sessions() if sessions is None else list(sessions)
+    keys = {key for row in rows for key in _session_keys(row)}
+    names = {(row.harness, getattr(row, "runtime_name", None)) for row in rows}
+    targets = []
+    seen = set()
+    for relation in read_relations():
+        holder = relation.get("holder") or {}
+        if relation.get("released") or (holder.get("harness"), holder.get("sid")) != (harness, session_id):
+            continue
+        for target in relation.get("targets") or ():
+            h, sid, name = target.get("harness"), target.get("session_id"), target.get("name")
+            if target.get("source") not in {"start", "watch"}:
+                continue
+            if (sid and (h, sid) in keys) or (name and (h, name) in names):
+                continue
+            # Known native metadata may put it in a foreign repository: exclude
+            # that communication edge rather than labelling it unresolved.
+            if sid and _native_role_sessions({(h, sid): {}}, rows):
+                continue
+            key = (h, sid, name, target.get("pane"))
+            if key not in seen:
+                seen.add(key)
+                targets.append(dict(target, unresolved=True))
+    return targets
+
+
 def role_flag(harness, session_id, *, aliases=(), markers=None, cwd=None, sessions=None,
               _targets=None, _relations=None):
     """One display decision: exact self-role evidence or same-repository targets.
@@ -858,9 +886,27 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
             continue
         seen.add((harness, sid))
         liveness = session_liveness(harness, sid, agents=agents, observation=observation)
+        origin = relation.get("origin") or {}
+        marker = (markers.get((harness, sid)) or
+                  markers.get((str(origin.get("harness") or "").lower(), origin.get("sid"))) or {})
         out.append({"harness": harness, "session_id": sid,
                     "name": _holder_name(harness, sid, rows), "liveness": liveness,
-                    "basis": basis, "counted": liveness != "ended"})
+                    "basis": basis, "counted": liveness != "ended",
+                    "seat_key": relation.get("seat_key") or marker.get("seat_key"),
+                    "last_activity": marker.get("updated") or marker.get("since"),
+                    "activity_basis": "role-marker",
+                    "count_reason": "end-unproven" if liveness == "unknown" else liveness})
+    # A new holder at the same physical seat does not consume two places.
+    # Keep uncertainty and history; this is counting, never authority to end work.
+    for holder in out:
+        seat_key = holder["seat_key"]
+        if not seat_key or holder["liveness"] == "live":
+            continue
+        if any(other is not holder and other["seat_key"] == seat_key
+               and other["liveness"] != "ended"
+               and other["last_activity"] and holder["last_activity"]
+               and other["last_activity"] > holder["last_activity"] for other in out):
+            holder.update(counted=False, count_reason="same-seat-successor")
     return out
 
 
@@ -877,7 +923,7 @@ def repo_supervision(cwd=None, *, repository_key=None, limit=None, markers=None,
     counted = sum(1 for holder in holders if holder["counted"])
     return {"repository": Path(key).parent.name if key else None, "repository_key": key,
             "holders": holders, "counted": counted, "limit": limit,
-            "over_limit": counted > limit}
+            "over_limit": counted > limit, "advisory": True}
 
 
 def supervision_by_repository(sessions=None, *, limit=None, markers=None, relations=None,

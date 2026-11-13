@@ -1150,8 +1150,8 @@ class StewardCheckHerdrReachTest(_NativeStewardWorld):
         self.assertEqual(absent_calls, [])
         self.assertEqual(answered, absent)
         names = re.findall(r"^target name=(\S+) .*liveness=(\S+)", absent["check"], re.M)
-        self.assertEqual(names, [("worker", "live")], absent["check"])
-        self.assertIn("targets=1 ", absent["check"])
+        self.assertEqual(names, [("worker", "live"), ("helper", "unknown")], absent["check"])
+        self.assertIn("targets=2 ", absent["check"])
         self.assertEqual((absent["due_phase"], absent["notice_state"]), ("notified", "pending"))
         self.assertEqual(absent["after"], ("pending", "notified"))
 
@@ -1195,7 +1195,7 @@ class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
         starter = {**env, "CLAUDE_CONFIG_DIR": str(worker), "HEARTING_WORKER_HOME": str(worker),
                    "HEARTING_MODEL_CONFIG_HOME": env["CLAUDE_CONFIG_DIR"]}
         runner = self.runner_environment(starter, ledger)
-        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+        self.assertEqual(self.observed_in(runner), (True, ["helper", "worker"]))
         self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
         for name in ("HEARTING_WORKER_HOME", "HEARTING_MODEL_CONFIG_HOME"):
             self.assertNotIn(name, runner)
@@ -1211,7 +1211,7 @@ class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
                    "HEARTING_MODEL_CONFIG_HOME": str(default)}
         runner = self.runner_environment(starter, ledger)
         self.assertNotIn("CLAUDE_CONFIG_DIR", runner)
-        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+        self.assertEqual(self.observed_in(runner), (True, ["helper", "worker"]))
 
     def test_a_runner_a_codex_worker_starts_reads_the_users_codex_threads(self):
         import sqlite3
@@ -1234,7 +1234,7 @@ class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
         starter = {**env, "CODEX_HOME": str(worker), "HEARTING_WORKER_HOME": str(worker),
                    "HEARTING_MODEL_CONFIG_HOME": str(user_codex)}
         runner = self.runner_environment(starter, ledger)
-        self.assertEqual(self.observed_in(runner), (True, ["codex-worker", "worker"]))
+        self.assertEqual(self.observed_in(runner), (True, ["codex-worker", "helper", "worker"]))
         self.assertEqual(runner.get("CODEX_HOME"), str(user_codex))
         self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
 

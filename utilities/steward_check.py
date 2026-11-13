@@ -474,8 +474,10 @@ def _observe_role(harness: str, session_id: str) -> dict:
     if collector is not None:
         # Native registry rows only (as `_holder_cwd` and `grant_steward`): no Herdr agent list.
         rows = collector._registry_sessions()
-        for target in collector.role_targets(harness, session_id, sessions=rows,
-                                             include_native=True) or ():
+        resolved = collector.role_targets(harness, session_id, sessions=rows, include_native=True) or []
+        unresolved_reader = getattr(collector, "unresolved_role_targets", None)
+        unresolved = unresolved_reader(harness, session_id, sessions=rows) if callable(unresolved_reader) else []
+        for target in [*resolved, *unresolved]:
             t_harness = str(target.get("harness") or "").lower()
             t_sid = target.get("session_id")
             try:
@@ -484,13 +486,15 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 agent = (payload or {}).get("result", {}).get("agent")
             except Exception:
                 agent = None
+            if target.get("unresolved"):
+                agent = None
             state = (agent or {}).get("agent_status") or "unknown"
             targets.append({
                 "name": str(target.get("name") or (t_sid or "-")[:8]),
                 "harness": t_harness or "-", "session_id": t_sid,
                 "state": state,
                 "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
-                             if t_sid else "unknown"),
+                             if t_sid and not target.get("unresolved") else "unknown"),
                 "owed": _pending_count(module, t_harness, t_sid)})
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)

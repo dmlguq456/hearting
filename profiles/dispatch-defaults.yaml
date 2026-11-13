@@ -35,7 +35,7 @@
 #   steward:                           # SD-122 (9): peer-session steward
 #     child_permission_mode: bypass    # bypass | inherit
 #     check_interval_seconds: 7200     # periodic steward check, 600..86400
-#     max_supervisors_per_repo: 2      # new steward grants per repository, 1..8
+#     max_supervisors_per_repo: 2      # advisory supervisor count per repository, 1..8
 #   capabilities:
 #     <capability-name>:
 #       <canonical-topology-node-id>: <claude|codex|opencode|diverse>

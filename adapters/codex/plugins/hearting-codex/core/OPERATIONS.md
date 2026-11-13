@@ -2790,22 +2790,19 @@ session end completes the duty and retires its undelivered notice through the ex
 retried; a later grant or a revived session reactivates the same duty as a new
 generation. This check is not a completion watch (S3).
 
-Per-repository steward limit. A new holder is admitted only inside the shared grant
-function `grant_steward`, so `steward on`, `watch`/`wait` and `start` meet the same
-limit (`steward.max_supervisors_per_repo`, default 2, range 1..8). The decision is made
-under one grant lock held inside the seat lock, so concurrent grants cannot pass the
-limit. The repository is the git common dir (a linked worktree folds into its primary),
-the same key as the Fleet ⚑, and `tools/fleet/collectors/steward.py` `repo_supervision`
-is the single count both the grant and the Fleet display read. A watch or start whose
-target sits in another repository is communication (F-100c-2) and is neither counted nor
-limited. A grant whose own session row is not yet visible is admitted without a
-repository and counts once its row appears; the process cwd is not used to guess it. A session counts once
-however many generations it holds. A same-session re-grant, restart, resume or a
-confirmed successor takes no further slot; a session that closed through the paths above
-also lets go of its mark, while any other session whose end Hearting proved leaves its
-slot with its mark remaining and reclaims the role when it revives (a resulting
-overshoot is only displayed); an unknown session keeps counting. A watch whose
-supervisor ended or whose target was replaced ends with its receipt before it is re-armed,
+Per-repository steward count. `grant_steward` records explicit/watch/start role
+evidence under the existing seat and grant locks. `steward.max_supervisors_per_repo`
+(default 2, range 1..8) is an advisory display reference, not admission capacity.
+Role grants proceed independently of this count, including stale and unobservable
+holders. The existing policy reader and setting remain compatible.
+`tools/fleet/collectors/steward.py::repo_supervision` owns the common count for
+Fleet and the shell. It exposes each holder's liveness, observation reason,
+marker activity timestamp and seat. Unknown remains an uncertainty. Historical
+markers remain readable; a newer holder at the same proven seat supersedes a
+non-live predecessor in the count without retiring its outstanding duties.
+An ended holder leaves the count; revival is observed normally. Repository identity
+still uses the git common directory, and foreign targets remain communication.
+A watch whose supervisor ended or whose target was replaced ends with its receipt before it is re-armed,
 without the herdr socket: the supervisor's end comes from the same session proof or from
 its seat pane missing in a complete CLI pane census, the target's from that census or the
 confirmed lineage. Proof of end follows
@@ -2813,13 +2810,14 @@ each harness's declared session-ownership proof: no live Claude process in any c
 no live Codex process holds the session's stored rollout open, and no live OpenCode
 client shows the session while no running OpenCode runtime can be running it; an
 incomplete observation (another PID namespace, an unreadable process or connection
-table) proves nothing. At the limit the
-grant skips only the role-evidence write and reports
-`steward=limited repo=<name> holders=<current> limit=<n>`; watch, start and ordinary
-work proceed. Lowering the limit, or an install already above it, revokes no role, job
-or session and limits only new grants. Settings are read through the one
-`load_steward_policy` reader; an unreadable or invalid value falls back to the shipped
-default with a warning and does not bypass the limit.
+table) proves nothing.
+A repeated watch and rearm restore the existing target relation without creating
+another watch. Taking the role also fills in this session's pending watches.
+Their next-action directive uses the same supported wake carrier as the first
+arm. An unresolved target remains visible as unknown in the steward check.
+Workflow status joins the route's registered owner and its exact liveness,
+including the first running stage before any stage completion journal entry.
+This is a read-only projection and does not turn process liveness into completion.
 
 Fleet and herdr may join pane-session IDs for display through the shared read-only
 session-tidy reader. Its bounded compatibility join uses the exact pane, harness,

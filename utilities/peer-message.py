@@ -4725,6 +4725,17 @@ def _has_explicit_self_entry(marker):
         return False
 
 
+def format_steward_census(result):
+    lines = [f"steward-count={result.get('counted', 0)} reference={result.get('limit')} policy=advisory"]
+    for holder in result.get("holders") or ():
+        lines.append(f"holder={holder.get('harness')}:{holder.get('session_id')} "
+                     f"liveness={holder.get('liveness', 'unknown')} "
+                     f"reason={holder.get('count_reason', 'unknown')} "
+                     f"last_activity={holder.get('last_activity') or '-'} activity_basis=role-marker "
+                     f"seat={holder.get('seat_key') or '-'}")
+    return "\n".join(lines)
+
+
 def format_steward_limited(result):
     """One line for a refused grant: ``steward=limited repo=<name> holders=<a,b> limit=<n>``."""
     names = []
@@ -4752,13 +4763,11 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
     nothing, so no send path can raise the flag by accident again. Every entry carries
     its ``source`` so the reader can show the grounds.
 
-    A session that is not yet a supervisor of its repository is granted only while the
-    repository has fewer than ``steward.max_supervisors_per_repo`` counted supervisors;
-    the census and the write run under one grant lock so concurrent grants cannot pass
-    the limit together. ``steward_seat`` is the caller's already-proven seat (a dict with
+    The repository census is advisory: stale or live holders never withhold a role.
+    The existing grant lock serializes marker updates. ``steward_seat`` is the caller's already-proven seat (a dict with
     its ``key``, or None for none) when the caller proved it itself, as `watch` and `wait`
     do without asking Herdr about other panes; left out, the shared resolver proves it.
-    Returns ``{"status": granted|extended|limited|refused|
+    Returns ``{"status": granted|extended|refused|
     unavailable, "written", "repository", "holders", "limit", "reason"}``."""
     result = {"status": "refused", "written": False, "repository": None, "holders": [],
               "limit": None, "reason": None}
@@ -4779,7 +4788,7 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     "since": ts, "generation": os.urandom(16).hex(), "targets": {}}
         data.setdefault("generation", os.urandom(16).hex())
         if seat is not None:
-            data["seat_key"] = seat.key
+            data["seat_key"] = seat.get("key") if isinstance(seat, dict) else seat.key
         if repository:
             data["repository"] = repository
         targets = data.get("targets")
@@ -4871,16 +4880,13 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     result.update(status="unavailable", reason=f"census-failed:{type(exc).__name__}")
                     return
                 result["limit"] = supervision["limit"]
+                result["holders"] = supervision["holders"]
+                result["counted"] = supervision["counted"]
+                result["advisory"] = True
                 held = [h for h in supervision["holders"]
                         if (h["harness"], h["session_id"]) == (str(harness).lower(), session_id)]
                 if held:
                     result["status"] = "extended"
-                elif supervision["counted"] >= supervision["limit"]:
-                    result["status"] = "limited"
-                    result["holders"] = [{"harness": h["harness"], "session_id": h["session_id"],
-                                          "name": h.get("name")}
-                                         for h in supervision["holders"] if h["counted"]]
-                    return
                 else:
                     result["status"] = "granted"
                 result["written"] = write_locked(repository)
@@ -4894,6 +4900,8 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
         proof = (handover.pane_seat(os.environ, harness, session_id)
                  if steward_seat is _SEAT_UNRESOLVED else steward_seat)
         seat_key = proof.get("key") if isinstance(proof, dict) else getattr(proof, "key", None)
+        if seat_key:
+            seat = proof
         if not seat_key:
             decide_and_write()
         else:
