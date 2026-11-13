@@ -352,8 +352,13 @@ why it is not plain) and a press closes it. A value is whole or its column (its
 piece) leaves; only a name ends in `…`, read whole under it. No experiments and
 no problem: no section and no strip token; a broken catalog or a run with no
 name is an unconfirmed warning, never "no experiments". An experiment's failure
-never colors the frame, the glyph or the strip's border. Its files join the
-panel's file watch last (no poller); ages count from the projection's clock. They
+never colors the frame, the glyph or the strip's border. Its catalog and its
+run-record folders join the panel's file watch last (no poller): a folder is
+watched whole (a path ending in the separator), so any record written, replaced,
+added or removed in it redraws; past four folders the rest are an unconfirmed
+note. A board that cannot be read or worded is LAB's own unconfirmed state and
+keeps its watch; the rest of the panel draws on. Ages count from the
+projection's clock. They
 differ by place and color only, all from the panel's theme and shade: the
 question's border, `◑` and `›` rose (its words are body text), route plain,
 messages dim. An opened route carries what Fleet's ROUTES row unfolds, from the

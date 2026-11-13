@@ -1019,7 +1019,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet import session_lab
     lab_now = time.time()
     lab_board, lab_paths = session_lab.read(values.get("cwd"), now=lab_now)
-    panel["lab"] = session_lab.view(lab_board, lab_now, paint=styled)
+    try:
+        panel["lab"] = session_lab.view(lab_board, lab_now, paint=styled)
+    except Exception as exc:  # noqa: BLE001 -- LAB's own failure is LAB's unconfirmed state; the panel draws on
+        panel["lab"] = session_lab.unconfirmed(lab_now, type(exc).__name__, paint=styled)
     # The model name the host reads off the native's own screen, painted by the rule route rows
     # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
     # panel keeps no family table of its own. Display only.

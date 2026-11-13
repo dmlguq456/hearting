@@ -732,11 +732,13 @@ function queueProjection() {
   nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
   projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
 }
+// A target that ends in the path separator is a folder watched whole: any entry written,
+// replaced, added or removed in it redraws, however many files it holds (LAB's run records).
 function observeFiles(paths) {
   const wanted=new Map();let changed=false;
   for(const target of (Array.isArray(paths)?paths:[]).slice(0,64)){
     if(typeof target!=='string'||!path.isAbsolute(target)||target.length>4096)continue;
-    let directory=path.dirname(target);
+    let directory=target.endsWith(path.sep)?target.slice(0,-1)||path.sep:path.dirname(target);
     while(!fs.existsSync(directory)&&path.dirname(directory)!==directory)directory=path.dirname(directory);
     if(!wanted.has(directory))wanted.set(directory,[]);wanted.get(directory).push(target);
   }
@@ -748,7 +750,8 @@ function observeFiles(paths) {
       const row={targets};
       row.watch=fs.watch(directory,(_event,name)=>{
         const changed=name?path.join(directory,String(name)):directory;
-        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep))){
+        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep)
+          ||target.endsWith(path.sep)&&changed.startsWith(target))){
           // The native's own turn record is read at once; the rest waits for the projection.
           if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
           queueProjection();

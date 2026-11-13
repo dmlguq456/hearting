@@ -9,11 +9,15 @@ panel's few rows carry; it decides no name, no state and no difference.
 
 ``read`` finds the session folder's artifact root the way Fleet does (file reads only) and asks the
 board's own cache, so a redraw with nothing changed costs a few ``stat`` calls; the paths it returns
-are for the panel's existing file watch (no poller).  ``view`` returns ``None`` when the board says
-there is nothing to show (no experiments and no problem): then the panel has no LAB row at all.
-Read-only; nothing here writes, gates, asks, or starts a process.
+are for the panel's existing file watch (no poller): the catalog, and each folder holding run records
+as one folder target (a trailing separator), so a record redraws however many there are.  ``view``
+returns ``None`` when the board says there is nothing to show (no experiments and no problem): then
+the panel has no LAB row at all.  A root or board that cannot be read, or a board that cannot be
+worded, is LAB's own unconfirmed state (``unconfirmed``), never "no experiments" and never the panel's
+failure.  Read-only; nothing here writes, gates, asks, or starts a process.
 """
 from collections.abc import Mapping
+import os
 import re
 import sys
 import time
@@ -28,39 +32,83 @@ if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 
 INTERVAL = 60.0     # seconds a session folder keeps its resolved root (Fleet's project interval)
-WATCH_CAP = 16      # LAB's share of the panel's watched paths (the host watches 64 at most)
+FOLDER_CAP = 4      # run-record folders LAB watches whole (records share one); more are said, not cut
 MAX_ROWS = 8        # condition rows the opened table shows before "and N more" (Fleet's table)
 # The opened table's extra pieces, in order; the panel leaves out those its row already shows.
 PIECES = ("latest", "best", "base", "delta", "state", "expected", "since", "observed")
 _ROOTS = {}         # session folder -> (resolved at, root or None)
+_WATCH = {}         # session folder -> its last read's watch; a read that fails keeps it
 
 
 def clear_cache():
     _ROOTS.clear()
+    _WATCH.clear()
 
 
 def _g(value, key, default=None):
     return value.get(key, default) if isinstance(value, Mapping) else default
 
 
+def _targets(paths):
+    """The panel's watch for the board's paths (the catalog, the run folder, then each linked record):
+    the catalog file, then every folder holding records as one folder target (a trailing separator:
+    the host redraws on any change inside it), never one path per record.  ``(targets, folders over
+    FOLDER_CAP)``; those are said as unconfirmed by ``view``, never left out silently."""
+    paths = [str(path) for path in paths]
+    folders = []
+    for index, path in enumerate(paths[1:]):
+        folder = path if index == 0 else os.path.dirname(path)
+        if folder not in folders:
+            folders.append(folder)
+    kept = folders[:FOLDER_CAP]
+    return paths[:1] + [folder.rstrip(os.sep) + os.sep for folder in kept], len(folders) - len(kept)
+
+
+def _base(root):
+    """The root's catalog and run folder: what a first read that failed still watches."""
+    try:
+        import experiment_catalog
+        return _targets([experiment_catalog.catalog_path(Path(root)), Path(root) / "resource-runs"])[0] if root else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _unreadable(now, why):
+    try:
+        import experiment_board
+        return experiment_board.unreadable(Path("."), now, why)
+    except Exception:  # noqa: BLE001 -- ``view`` cannot word it either; the panel's guard says it
+        return {"visible": True, "catalog": {"status": "unreadable", "code": why}, "strip": "?1LB"}
+
+
 def read(cwd, now=None):
-    """``(board or None, watch paths)`` for a session folder; never raises."""
+    """``(board or None, watch targets)`` for a session folder; never raises.
+
+    ``None`` only when there is nothing to show: no folder, or no artifact root.  A root or board
+    that cannot be read is the board's unconfirmed ("could not read") board, never ``None``, and keeps
+    the last read's watch (else the root's catalog and run folder), so the next change reads again."""
     if not cwd:
         return None, []
     now = time.time() if now is None else now
+    key, root = str(cwd), None
     try:
-        resolved = _ROOTS.get(str(cwd))
+        resolved = _ROOTS.get(key)
         if resolved is None or not 0 <= now - resolved[0] < INTERVAL:
-            resolved = (now, project_status.artifact_root(str(cwd)))
-            _ROOTS[str(cwd)] = resolved
+            resolved = (now, project_status.artifact_root(key))
+            _ROOTS[key] = resolved
         root = resolved[1]
         if not root:
+            _WATCH.pop(key, None)
             return None, []
         import experiment_board
         board, watch = experiment_board.read(Path(root), now=now)
-        return board, list(watch)[:WATCH_CAP]
-    except Exception:  # noqa: BLE001 -- the panel draws on without its LAB section
-        return None, []
+        targets, unwatched = _targets(watch)
+        if unwatched:
+            board = {**board, "unwatched": unwatched}
+        _WATCH[key] = targets
+        return board, list(targets)
+    except Exception as exc:  # noqa: BLE001 -- LAB says it could not read; the panel draws on
+        return _unreadable(now, type(exc).__name__), list(_WATCH.get(key) or _base(root))
 
 
 def _parts(text, key):
@@ -155,6 +203,10 @@ def _metric_pieces(group):
     return out
 
 
+def _plain_paint(parts):
+    return [{"text": text, "key": key} for text, key in parts]
+
+
 def view(board, now=None, paint=None):
     """The panel's ``lab`` value, or ``None`` when the board has nothing to show.
 
@@ -163,8 +215,22 @@ def view(board, now=None, paint=None):
     value either fits whole or leaves."""
     if not isinstance(board, Mapping) or not board.get("visible"):
         return None
-    paint = paint or (lambda parts: [{"text": text, "key": key} for text, key in parts])
+    return _draw(board, time.time() if now is None else now, paint or _plain_paint)
+
+
+def unconfirmed(now=None, why="", paint=None):
+    """The ``lab`` value when the board could not be worded: the unconfirmed board's, so LAB's own
+    failure stays in LAB and the rest of the panel draws on.  Never raises."""
     now = time.time() if now is None else now
+    paint = paint or _plain_paint
+    try:
+        return _draw(_unreadable(now, why), now, paint)
+    except Exception:  # noqa: BLE001 -- the words themselves failed: the unconfirmed mark alone
+        return {"key": "lab:", "count": "", "goal": paint([("? " + str(why or "LAB"), "lvl_y")]),
+                "strip": paint([("?1", "lvl_y"), ("LB", "dim")]), "strip_attention": True}
+
+
+def _draw(board, now, paint):
     import experiment_board
     group = _selected(board)
     rows = [r for r in (_g(group, "rows") or ()) if isinstance(r, Mapping)]
@@ -183,6 +249,10 @@ def view(board, now=None, paint=None):
         counts = [ui_text("fleet.lab.n_" + k, n=item[k]) for k in ("failed", "stagnant", "unknown") if _g(item, k)]
         notes.append(_parts(ui_text("fleet.lab.other_group", name=_g(item, "name") or ui_text("experiment.no_group"),
                                     counts=" · ".join(counts)), "lvl_y"))
+    # Record folders over the watch's cap: their changes may not redraw, so their values are unconfirmed.
+    unwatched = int(_g(board, "unwatched") or 0)
+    if unwatched:
+        notes.append(_parts(ui_text("fleet.lab.unwatched", n=unwatched), "lvl_y"))
     target = _g(group, "target") or {}
     out_rows = []
     for row, cells in table[:MAX_ROWS]:
@@ -216,6 +286,9 @@ def view(board, now=None, paint=None):
                                           where=w.get("where"), detail=w.get("detail") or "-"), "dim")) for w in warnings]
     headline = _headline(board, group, table, unlinked)
     strip = str(board.get("strip") or "")
+    if unwatched and not strip.startswith(("!", "?")):
+        cap = experiment_board.STRIP_CAP
+        strip = "?" + (str(unwatched) if unwatched <= cap else f"{cap}+") + "LB"
     match = re.fullmatch(r"([!?]?)(\d+\+?)( ?LB)", strip)
     if match:
         mark, number, word = match.groups()

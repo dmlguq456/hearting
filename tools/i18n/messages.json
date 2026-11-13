@@ -906,6 +906,10 @@
    "en": "experiment catalog could not be read ({code}); not the same as no experiments",
    "ko": "실험 정본을 읽지 못함 ({code}); 실험이 없다는 뜻이 아님"
   },
+  "fleet.lab.unwatched": {
+   "en": "{n} run-record folders not watched; their values are unconfirmed",
+   "ko": "실행 기록 폴더 {n}개는 감시하지 못함; 그 값은 미확인"
+  },
   "fleet.loading": {
    "en": "loading",
    "ko": "불러오는 중"
