@@ -35,6 +35,38 @@ class FixtureProtocolTest(unittest.TestCase):
     def tearDown(self):
         self.fixture.close()
 
+    def test_the_turn_text_is_every_input_since_the_models_own_last_output(self):
+        # Codex puts its developer guidance after the user line: the newest item alone
+        # misses the peer request line (host-run r2).
+        line = "[요청 rq-0a1b2c] [e9] → [e7] │ 제목 │ 열기: show rq-0a1b2c"
+        body = _post(self.fixture.base, "/v1/responses", {
+            "tools": [{"type": "function", "name": "exec_command"}],
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "OLD-PROMPT"}]},
+                      {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "B initialized."}]},
+                      {"role": "user", "content": [{"type": "input_text", "text": line}]},
+                      {"type": "message", "role": "developer",
+                       "content": [{"type": "input_text", "text": "Peer request rq-0a1b2c: open it"}]}]})
+        record = self.fixture.main_requests()[-1]
+        self.assertEqual(record["last_kind"], "developer")
+        self.assertNotIn("[요청 rq-0a1b2c]", record["last_text"])
+        self.assertIn("[요청 rq-0a1b2c]", record["turn_text"])
+        self.assertIn("Peer request rq-0a1b2c", record["turn_text"])
+        self.assertNotIn("OLD-PROMPT", record["turn_text"])
+        self.assertNotIn("B initialized.", record["turn_text"])
+        _post(self.fixture.base, "/v1/messages", {
+            "stream": True, "tools": [{"name": "Bash"}],
+            "messages": [{"role": "user", "content": "FIRST"},
+                         {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                         {"role": "user", "content": [{"type": "tool_result", "content": "RESULT-TEXT"}]}]})
+        self.assertIn("RESULT-TEXT", self.fixture.main_requests()[-1]["turn_text"])
+        self.assertNotIn("FIRST", self.fixture.main_requests()[-1]["turn_text"])
+        _post(self.fixture.base, "/v1/chat/completions", {
+            "stream": True, "tools": [{"type": "function", "function": {"name": "shell"}}],
+            "messages": [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "ONE"},
+                         {"role": "assistant", "content": "ok"}, {"role": "user", "content": "TWO"},
+                         {"role": "developer", "content": "THREE"}]})
+        self.assertEqual(self.fixture.main_requests()[-1]["turn_text"], "TWO\nTHREE")
+
     def test_anthropic_tool_call_skips_trailing_system_turn(self):
         body = _post(self.fixture.base, "/v1/messages", {
             "stream": True, "tools": [{"name": "Bash"}],

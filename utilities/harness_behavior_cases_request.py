@@ -22,8 +22,11 @@ what the request record says, never a helper's success line:
     is B' 's and B' 's report is accepted. Counter-case: a session with no lineage row
     cannot report (``reporter-not-recipient``) and the request stays with B.
 
-The panel lines (the requester's ``→`` and the receiver's ``◂``) are captured from both
-terminals into the evidence; a panel that does not show them is a ``gap``.
+The panel request lines (the requester's ``→`` and the receiver's ``◂``, in the route box's own
+form: mark, other session, title with the run's nonce, `` · ``, state) are read from both whole
+terminal screens, which are written to the output folder; a panel that does not show them is a
+``gap``. Outside the session shell, the declared limits (PG-59: a Claude receiver at rest takes no
+request; PG-4/33: an OpenCode requester is not woken by every report) are ``gap``, not ``fail``.
 """
 from __future__ import annotations
 
@@ -50,13 +53,41 @@ A_MARK = "SCENARIO-REQ-A"
 B_MARK = "SCENARIO-WATCH-TARGET"  # the second TUI keeps the watch scenarios' receiver marker
 
 
+# A busy step every harness runs (Claude refuses a bare ``sleep N`` followed by another command).
+def pause(seconds):
+    return 'python3 -c "import time; time.sleep(%d)"' % seconds
+
+
+def busy_step(seconds):
+    return 'python3 -c "import time; time.sleep(%d); print(\'B-WORK-DONE\')"' % seconds
+
+
+# The route box's request line: mark, the other session, a title carrying the nonce, ` · `, the state.
+PANEL_REQUEST_LINE = re.compile(r"│\s*([→◂✓✕]) (\S+) ([^│]*?) · ([^│]*?)\s*│")
+
+
+def turn(record):
+    """Every input of this model turn (user, developer and tool items after the model's last
+    output), else the newest item: Codex puts its guidance after the user line."""
+    return record.get("turn_text") or record["last_text"]
+
+
+def panel_request_lines(screen, nonce, marks):
+    found = []
+    for row in screen.splitlines():
+        for match in PANEL_REQUEST_LINE.finditer(row):
+            if match.group(1) in marks and nonce in match.group(3):
+                found.append(match.group(0).strip("│ ").strip())
+    return found
+
+
 def _shells(records, mark):
     return [(r["reply"].get("shell") or "") for r in records if mark in r["text"]]
 
 
 def answer(ctx, record, earlier):
     """The scripted model for both sessions. ``ctx`` carries nonce, target and file names."""
-    text, last, kind = record["text"], record["last_text"], record["last_kind"]
+    text, last, kind = record["text"], turn(record), record["last_kind"]
     nonce = ctx["nonce"]
     if B_MARK in text and A_MARK not in text:
         return _answer_b(ctx, text, last, kind, _shells(earlier, B_MARK), nonce)
@@ -71,8 +102,8 @@ def _answer_b(ctx, text, last, kind, shells, nonce):
             return Reply("B holds this request open.")  # stays open for the cancel-after-delivery case
         if "(sealed body)" in last:
             request_id = re.findall(r"request=(rq-[0-9a-f]{6})", last)[-1]
-            if ctx.get("hold") and not sent("sleep"):
-                return Reply(shell="sleep %d; echo B-WORK-DONE" % ctx["hold"])
+            if ctx.get("hold") and not sent("time.sleep"):
+                return Reply(shell=busy_step(ctx["hold"]))
             if ctx.get("partial", True) and not sent("--partial"):
                 return Reply(shell=f'{STEWARD} report {request_id} --partial --result "PARTIAL-{nonce}"')
             return Reply(shell=f'{STEWARD} report {request_id} --result "FINAL-{nonce}"')
@@ -81,7 +112,7 @@ def _answer_b(ctx, text, last, kind, shells, nonce):
             request_id = ctx.get("report_id") or re.findall(r"rq-[0-9a-f]{6}", text)[0]
             return Reply(shell=f'{STEWARD} report {request_id} --result "LATE-{nonce}"')
         if done and done.group(2) == "partial" and not sent('--result "FINAL'):
-            return Reply(shell=f'sleep 3; {STEWARD} report {done.group(1)} --result "FINAL-{nonce}"')
+            return Reply(shell=f'{pause(3)}; {STEWARD} report {done.group(1)} --result "FINAL-{nonce}"')
         return Reply("B step done.")
     cancelled = CANCEL_LINE.search(last)
     if cancelled:
@@ -100,8 +131,10 @@ def _answer_a(ctx, text, last, kind, shells, nonce):
     if reported:
         return Reply("A saw the report.")
     for marker, command in ctx["a_steps"]:
-        if marker in last and not sent(command(ctx, text)):
-            return Reply(shell=command(ctx, text))
+        if marker in last:  # the first (longest) marker is this prompt's step; never the next one's
+            if not sent(command(ctx, text)):
+                return Reply(shell=command(ctx, text))
+            break
     return Reply("A idle.")
 
 
@@ -158,12 +191,19 @@ class _RequestScenario(WatchWakeScenario):
     def a_requests(self, run):
         return [r for r in run.main_requests() if A_MARK in r["text"]]
 
-    def panels(self, run):
-        """Both terminals' panel lines for the request (the requester's ``→``, the receiver's ``◂``)."""
+    def panels(self, run, tag):
+        """Both terminals' whole screens (written to the output folder) and the request lines the
+        route box shows: the requester's ``→`` (open) or ``✓`` (closed), the receiver's ``◂``."""
         a, b = run.tui.screen(), self.target_tui.screen()
-        return {"requester": [l for l in a.splitlines() if "→" in l and self.nonce in l][:3],
-                "receiver": [l for l in b.splitlines() if "◂" in l and self.nonce in l][:3],
-                "requester_screen": a[-1500:], "receiver_screen": b[-1500:]}
+        folder = Path(run.output) / f"{run.harness}-{self.name}"
+        folder.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for who, screen in (("requester", a), ("receiver", b)):
+            path = folder / f"panel-{tag}-{who}.txt"
+            path.write_text(screen, encoding="utf-8")
+            files[who + "_screen_file"] = str(path)
+        return {"requester": panel_request_lines(a, self.nonce, "→✓✕"),
+                "receiver": panel_request_lines(b, self.nonce, "◂"), **files}
 
     def start_a(self, run, text):
         return run.prompt(f"{A_MARK} {text}")
@@ -189,6 +229,10 @@ class RequestFlowScenario(_RequestScenario):
         return {"nonce": self.nonce, "partial": True,
                 "a_steps": [(f"{A_MARK} send", send)]}
 
+    def outside_shell_limit(self, run):
+        """The declared limits of a surface without the session shell (PG-59, PG-4/33)."""
+        return run.harness in ("claude", "opencode") and "session_shell" not in run.evidence
+
     def drive(self, run):
         ev = run.evidence
         if self.target_tui is None or not self.target_address:
@@ -204,39 +248,62 @@ class RequestFlowScenario(_RequestScenario):
         ev["request_id"] = request_id
         body_nonce = f"BODY-1-{self.nonce}"
         line_seen = wait_for(lambda: next((r for r in self.b_requests(run)
-                                           if f"[요청 {request_id}" in r["last_text"]), None), 90)
+                                           if f"[요청 {request_id}" in turn(r)), None), 90)
         ev["receiver_line_request"] = bool(line_seen)
         ev["body_in_line_request"] = bool(line_seen and body_nonce in line_seen["text"])
         consumed = wait_for(lambda: next((r for r in self.b_requests(run)
-                                          if body_nonce in r["last_text"] and "(sealed body)" in r["last_text"]),
+                                          if body_nonce in turn(r) and "(sealed body)" in turn(r)),
                                          None), 90)
         ev["body_consumed_by_model"] = bool(consumed)
-        ev["panels_open"] = self.panels(run)
+        ev["panels_open"] = self.panels(run, "open")
         partial_wake = wait_for(lambda: next((r for r in self.a_requests(run)
-                                              if f"[요청 답 {request_id}" in r["last_text"]
-                                              and "일부" in r["last_text"]), None), 120)
+                                              if f"[요청 답 {request_id}" in turn(r)
+                                              and "일부" in turn(r)), None), 120)
         ev["partial_wake"] = bool(partial_wake)
         ev["state_after_partial"] = self.records(run).get(request_id, {}).get("state")
         final_state = self.wait_state(run, request_id, "final", 150)
         time.sleep(4)
         record = self.records(run).get(request_id, {})
-        wakes = [r for r in self.a_requests(run) if f"[요청 답 {request_id}" in r["last_text"]
+        wakes = [r for r in self.a_requests(run) if f"[요청 답 {request_id}" in turn(r)
                  and r["main_index"] >= before]
-        ev["wake_counts"] = {"partial": sum("일부" in r["last_text"] for r in wakes),
-                             "final": sum("최종" in r["last_text"] for r in wakes)}
+        ev["wake_counts"] = {"partial": sum("일부" in turn(r) for r in wakes),
+                             "final": sum("최종" in turn(r) for r in wakes)}
+        recipient = (record.get("recipient") or {}).get("session_id")
         ev["reporter"] = [(report.get("reporter") or {}).get("session_id") for report in record.get("reports", [])]
+        ev["report_kinds"] = [report.get("kind") for report in record.get("reports", [])]
         ev["final_state"] = record.get("state")
-        ev["panels_closed"] = self.panels(run)
-        required = (ev["receiver_line_request"] and not ev["body_in_line_request"]
-                    and ev["body_consumed_by_model"] and ev["partial_wake"]
-                    and ev["state_after_partial"] == "partial" and final_state
-                    and ev["wake_counts"] == {"partial": 1, "final": 1})
-        if not required:
-            run.note("the request did not complete as one sealed, attributed, once-woken line")
+        ev["panels_closed"] = self.panels(run, "closed")
+        # What is wrong whatever the surface: the body in the line, a body never consumed after
+        # the line arrived, a report not attributed to B, a double wake. A request B never
+        # received, or a wake that did not come, is a declared limit outside the session shell.
+        wrong, limited = [], []
+        if ev["body_in_line_request"]:
+            wrong.append("the body was in the one-line request")
+        if not ev["receiver_line_request"]:
+            (limited if self.outside_shell_limit(run) else wrong).append("B never received the request line")
+        else:
+            if not ev["body_consumed_by_model"]:
+                wrong.append("B received the line but its model never consumed the sealed body")
+            if ev["report_kinds"] != ["partial", "final"] or not final_state:
+                wrong.append("the record does not hold B's partial then final report")
+            if not recipient or ev["reporter"] != [recipient, recipient]:
+                wrong.append("a report is not attributed to B")
+            if max(ev["wake_counts"].values()) > 1:
+                wrong.append("a report woke A more than once")
+            elif min(ev["wake_counts"].values()) < 1:
+                (limited if self.outside_shell_limit(run) else wrong).append("a report did not wake A")
+        if wrong:
+            run.note("the request did not complete as one sealed, attributed, once-woken line: "
+                     + "; ".join(wrong))
             return "fail"
-        panels_shown = bool(ev["panels_open"]["requester"] and ev["panels_open"]["receiver"])
-        if not panels_shown:
-            run.note("the request flow passed; the panel did not show the open request on both sides")
+        if limited:
+            run.note("PG-59 outside the session shell: " + "; ".join(limited))
+            return "gap"
+        shown = (ev["panels_open"]["requester"] and ev["panels_open"]["receiver"]
+                 and any(line.startswith("✓") for line in ev["panels_closed"]["requester"]))
+        if not shown:
+            run.note("the request flow passed; the route box did not show the request on both sides "
+                     "(open → and ◂, then the requester's ✓)")
             return "gap"
         return "pass"
 
@@ -249,30 +316,28 @@ class RequestRevisionCancelScenario(_RequestScenario):
     HOLD = 25
 
     def make_context(self, run):
-        first = self.body_file(run, "rev-1.txt", f"BODY-REV1-{self.nonce}\n")
-        second = self.body_file(run, "rev-2.txt", f"BODY-REV2-{self.nonce}\n")
+        rev1_body = self.body_file(run, "rev-1.txt", f"BODY-REV1-{self.nonce}\n")
+        rev2_body = self.body_file(run, "rev-2.txt", f"BODY-REV2-{self.nonce}\n")
+        other_body = self.body_file(run, "rev-other.txt", f"BODY-OTHER-{self.nonce}\n")
+        keep_body = self.body_file(run, "rev-keep.txt", f"BODY-KEEP-{self.nonce}\n")
         target = self.target_address
         title = f"판 검토 {self.nonce}"
 
         def new(ctx, text):
             return (f"{STEWARD} request {shlex.quote(target)} --title {shlex.quote(title)} "
-                    f"--rev {shlex.quote('판1-' + self.nonce)} --body-file {first}")
+                    f"--rev {shlex.quote('판1-' + self.nonce)} --body-file {rev1_body}")
 
         def revise(ctx, text):
             return (f"{STEWARD} request {_ids(text)[0]} --rev {shlex.quote('판2-' + self.nonce)} "
-                    f"--body-file {second}")
+                    f"--body-file {rev2_body}")
 
-        def cancel(ctx, text):
-            return f"{STEWARD} request {_ids(text)[0]} --cancel --reason {shlex.quote('필요 없음 ' + self.nonce)}"
-
-        def second(ctx, text):
-            return (f"{STEWARD} request {shlex.quote(target)} --title {shlex.quote('두번째 ' + self.nonce)} "
-                    f"--body-file {second_body}")
-
-        def cancel_second(ctx, text):
-            return f"{STEWARD} request {_ids(text)[-1]} --cancel"
-
-        keep_body = self.body_file(run, "rev-keep.txt", f"BODY-KEEP-{self.nonce}\n")
+        def make_and_cancel(ctx, text):
+            # One shell line: the request is created and cancelled before B can take it up. The
+            # id comes from the first command's own output; only the cancel's output is shown.
+            make = (f"{STEWARD} request {shlex.quote(target)} --title {shlex.quote('두번째 ' + self.nonce)} "
+                    f"--body-file {other_body}")
+            ident = "sed -n 's/^request=\\(rq-[0-9a-f]\\{6\\}\\) .*/\\1/p' | head -1"
+            return f'rid=$({make} | {ident}) && test -n "$rid" && {STEWARD} request "$rid" --cancel'
 
         def third(ctx, text):
             return (f"{STEWARD} request {shlex.quote(target)} --title {shlex.quote('세번째 ' + self.nonce)} "
@@ -281,12 +346,25 @@ class RequestRevisionCancelScenario(_RequestScenario):
         def cancel_third(ctx, text):
             return f"{STEWARD} request {_ids(text)[-1]} --cancel --reason {shlex.quote('취소 ' + self.nonce)}"
 
-        second_body = self.body_file(run, "rev-other.txt", f"BODY-OTHER-{self.nonce}\n")
-        # Longer markers first: "send2" and "cancel2" contain "send" and "cancel".
+        # Longer markers first: "send3" and "send2" contain "send".
         return {"nonce": self.nonce, "hold": self.HOLD, "partial": False,
                 "a_steps": [(f"{A_MARK} send3", third), (f"{A_MARK} cancel3", cancel_third),
-                            (f"{A_MARK} send2", second), (f"{A_MARK} cancel2", cancel_second),
+                            (f"{A_MARK} send2", make_and_cancel),
                             (f"{A_MARK} send", new), (f"{A_MARK} revise", revise)]}
+
+    def duty(self, run, ref):
+        """The message obligation of ``ref`` in the run's own state root (read-only)."""
+        import peer_obligations
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(run.home.env)
+        try:
+            return peer_obligations.ObligationStore().get("message-" + ref) or {}
+        except Exception:  # noqa: BLE001 - an unreadable duty is "not closed"
+            return {}
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
 
     def drive(self, run):
         ev = run.evidence
@@ -297,21 +375,23 @@ class RequestRevisionCancelScenario(_RequestScenario):
         if not first:
             return "inconclusive"
         ev["request_id"] = first
-        busy = wait_for(lambda: any("sleep" in (r["reply"].get("shell") or "") for r in self.b_requests(run)), 90)
+        busy = wait_for(lambda: any("time.sleep" in (r["reply"].get("shell") or "")
+                                    for r in self.b_requests(run)), 90)
         if not busy:
             run.note("B never started its long step")
             return "inconclusive"
-        # While B works: revision 2 supersedes revision 1, and a second request is cancelled
-        # before B can receive it.
+        # While B works: revision 2 supersedes revision 1, and a second request is created and
+        # cancelled by one shell line, so it is cancelled before B can take it up.
         self.start_a(run, f"revise {first}")
         wait_for(lambda: len(self.records(run).get(first, {}).get("revisions", [])) >= 2, 60)
         self.start_a(run, "send2")
         other = wait_for(lambda: next((i for i in self.records(run) if i != first), None), 60)
-        if other:
-            self.start_a(run, f"cancel2 {other}")
-            self.wait_state(run, other, "cancelled", 60)
+        cancel_output = wait_for(lambda: next((m for m in (
+            re.search(r"request=%s state=cancelled notice=(\S+)" % other, turn(r))
+            for r in self.a_requests(run) if other and r["last_kind"] == "tool") if m), None), 60) if other else None
         ev["other_request"] = other
         ev["other_state"] = self.records(run).get(other, {}).get("state") if other else None
+        ev["other_cancel_notice"] = cancel_output.group(1) if cancel_output else None
         late = wait_for(lambda: any(report.get("late") for report in
                                     self.records(run).get(first, {}).get("reports", [])), 150)
         record = self.records(run).get(first, {})
@@ -320,24 +400,34 @@ class RequestRevisionCancelScenario(_RequestScenario):
         ev["late_on_revision"] = [report.get("revision") for report in record.get("reports", []) if report.get("late")]
         final = self.wait_state(run, first, "final", 150)
         ev["final_state"] = self.records(run).get(first, {}).get("state")
-        ev["cancelled_request_reached_b"] = bool(other and any(other in r["text"] for r in self.b_requests(run)))
+        # The cancelled request never reached B: not its line, not its body, in any model turn.
+        other_body = f"BODY-OTHER-{self.nonce}"
+        ev["cancelled_request_reached_b"] = bool(other and any(
+            f"[요청 {other}" in turn(r) or other_body in turn(r) or f"[요청 {other}" in r["text"]
+            or other_body in r["text"] for r in self.b_requests(run)))
+        other_ref = (self.records(run).get(other, {}).get("revisions") or [{}])[0].get("transfer_ref") if other else None
+        closed = wait_for(lambda: bool(other_ref) and (self.duty(run, other_ref).get("observation") or {})
+                          .get("reason") == "request-withdrawn", 90) if other_ref else False
+        ev["cancelled_delivery_closed_as_withdrawn"] = bool(closed)
         # A cancel after delivery: B received and showed a third request and holds it open.
         self.start_a(run, "send3")
         third = wait_for(lambda: next((i for i in self.records(run) if i not in (first, other)), None), 60)
         shown = wait_for(lambda: next((r for r in self.b_requests(run)
-                                       if f"BODY-KEEP-{self.nonce}" in r["last_text"]), None), 90)
+                                       if f"BODY-KEEP-{self.nonce}" in turn(r)), None), 90)
         ev["third_shown_to_model"] = bool(shown)
         if third and shown:
             self.start_a(run, f"cancel3 {third}")
         notice = wait_for(lambda: next((r for r in self.b_requests(run)
-                                        if third and f"[요청 취소 {third}]" in r["last_text"]), None), 90)
+                                        if third and f"[요청 취소 {third}]" in turn(r)), None), 90)
         ev["cancel_notice_line"] = bool(notice)
-        ev["stop_word_in_notice"] = bool(notice and "멈" in notice["last_text"])
+        ev["stop_word_in_notice"] = bool(notice and "멈" in turn(notice))
         ev["third_state"] = self.records(run).get(third, {}).get("state") if third else None
-        ev["panels"] = self.panels(run)
+        ev["panels"] = self.panels(run, "end")
         ok = (ev["late_report_kept"] and ev["state_after_late"] in ("open", "partial")
               and ev["late_on_revision"] == [1] and final and ev["other_state"] == "cancelled"
-              and not ev["cancelled_request_reached_b"] and ev["cancel_notice_line"]
+              and ev["other_cancel_notice"] == "not-needed"
+              and not ev["cancelled_request_reached_b"] and ev["cancelled_delivery_closed_as_withdrawn"]
+              and ev["cancel_notice_line"]
               and not ev["stop_word_in_notice"] and ev["third_state"] == "cancelled")
         return "pass" if ok else "fail"
 
@@ -368,11 +458,20 @@ class RequestHandoffScenario(_RequestScenario):
         with open(directory / f"scenario-{self.nonce}.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
 
+    def caller_env(self, run, sid):
+        """The environment a session of this harness gives its commands: the one native id variable
+        the shared resolver (``interactive_parent_identity``) reads, and the harness it names."""
+        from harness_capabilities import session_env
+        names = session_env().get(run.harness) or ()
+        env = {key: value for key, value in run.home.env.items()
+               if not any(key in variables for variables in session_env().values())}
+        env.update({names[0]: sid, "AGENT_DISPATCH_CALLER_HARNESS": run.harness})
+        return env
+
     def run_steward(self, run, *argv, sid):
         import subprocess
-        env = {**run.home.env, "AGENT_SESSION_ID": sid}
         return subprocess.run([sys.executable, str(Path(__file__).with_name("peer-steward.py")), *argv],
-                              env=env, capture_output=True, text=True, timeout=60)
+                              env=self.caller_env(run, sid), capture_output=True, text=True, timeout=60)
 
     def drive(self, run):
         ev = run.evidence
