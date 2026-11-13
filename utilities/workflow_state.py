@@ -339,7 +339,7 @@ class WorkflowLedger:
             _atomic_write(self.state_path, json.dumps(rebuilt, indent=2, sort_keys=True) + "\n")
         return rebuilt
 
-    def read_only_state(self) -> dict:
+    def read_only_state(self, entries=None) -> dict:
         """Derive workflow state from the journal alone, mutating nothing on disk.
 
         Unlike `state()`, this never repairs `state.json`, never creates the ledger root
@@ -355,12 +355,16 @@ class WorkflowLedger:
         - `journal_unreadable`: the journal file exists but every line failed to parse
           (as opposed to a legitimately empty/absent journal), so a caller can tell
           "no history yet" from "history is corrupt" instead of treating both as CREATED.
+
+        ``entries`` is a `journal()` result the caller already holds; the state is
+        derived from that same read. The raw text is read again only when no entry
+        parsed, the one case where it tells a corrupt journal from an empty one.
         """
         journal_exists = self.journal_path.is_file()
-        entries = self.journal()
+        entries = self.journal() if entries is None else entries
         rebuilt = self._rebuild(entries)
         raw_nonblank = False
-        if journal_exists:
+        if journal_exists and not entries:
             try:
                 raw = self.journal_path.read_text(encoding="utf-8", errors="replace")
                 raw_nonblank = any(line.strip() for line in raw.splitlines())

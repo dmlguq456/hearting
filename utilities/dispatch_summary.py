@@ -866,6 +866,22 @@ def _encoded_cwd(cwd: str) -> str:
     return encode_project_dir(cwd)
 
 
+def _plain_runtime_warning(raw: bytes) -> bool:
+    """A runtime's plain stderr text line, never damaged protocol data.
+
+    JSON-like bytes (a brace, a leading quote or bracket), a supervisor or session
+    marker, control bytes, or undecodable bytes stay malformed data: a damaged
+    announcement must not leave another session's announcement as the source.
+    """
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return False
+    return bool(text) and text[0] not in "[\"" and not any(
+        mark in text for mark in ("{", "}", "dispatch.supervisor", "session_id")) and not any(
+        ord(char) < 32 and char != "\t" for char in text)
+
+
 def announced_session(
     path: Path, scan: int = SESSION_ANNOUNCE_SCAN,
 ) -> tuple[bool, dict[str, str] | None]:
@@ -908,6 +924,10 @@ def announced_session(
         try:
             row = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
+            if found is not None and _plain_runtime_warning(raw):
+                # A runtime's plain stderr line (for example a CLI settings warning) after
+                # the exact announcement does not revoke it; the transcript stays the source.
+                continue
             # Malformed complete data is not converted into a successful source.
             return (True, {"invalid": "malformed-supervisor-log"}) if saw_supervisor else (False, None)
         if isinstance(row, dict) and str(row.get("type") or "").startswith("dispatch.supervisor."):
