@@ -626,21 +626,22 @@ class SessionShellSuccessionTest(unittest.TestCase):
     def hold_projection(self, window):
         """Hold the panel cache producer's lock for the rest of the test, so the seeded projection stays.
 
-        The producer (one detached `--refresh-cache` run, which earlier windows' demands start) holds this
-        lock while it collects and writes; its rewrite has none of the seeded rows. One already running
-        finishes first; while the test holds the lock no new one starts.
+        The producer (a detached `--refresh-cache` refresher, which earlier windows' demands start and
+        which stays while demand lasts) holds this lock and rewrites the cache from this fixture's real
+        state, which has none of the seeded rows. The fixture's own refresher is ended (as the class
+        cleanup ends it) and the lock taken, so no new one starts while the test reads the seeded page.
         """
         lock = Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits/.projection.lock'
         fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         self.addCleanup(os.close, fd)
-        end = time.monotonic()+60
+        end = time.monotonic()+30
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return
             except BlockingIOError:
-                self.assertLess(time.monotonic(), end, 'the cache producer never finished')
-                window.pump(.05)
+                self.assertLess(time.monotonic(), end, 'the fixture cache refresher kept the lock')
+                self.reap_refreshers(); window.pump(.05)
 
     def open_read_page(self, window):
         self.hold_projection(window)
