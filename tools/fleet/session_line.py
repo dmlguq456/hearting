@@ -784,9 +784,10 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
             percent = job_context(job, get)[0]
             shown[id(job)] = ((pair[0][:64] if pair else None), (None if percent is None else round(percent, 1)))
         return shown[id(job)]
-    for item in (row.get("worker_contexts") or ())[:8]:
-        if not isinstance(item, dict) or not item.get("stage"):
-            continue
+    items = [item for item in (row.get("worker_contexts") or ())[:8] if isinstance(item, dict) and item.get("stage")]
+    # The jobs the row's own attempts name stay theirs: a value match never takes one (#1583 (나)).
+    named = {item["attempt"] for item in items if item.get("attempt")}
+    for item in items:
 
         def fits(job, exact):
             if (any(job is seen for seen in used) or get(job, "route_node") != item["stage"]
@@ -795,6 +796,8 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
                 return False
             if item.get("attempt"):
                 return get(job, "attempt_id") == item["attempt"]
+            if get(job, "attempt_id") in named:
+                return False
             return not exact or values_of(job) == (item.get("model"), item.get("ctx_pct"))
         job = next((job for job in jobs if fits(job, True)), None) or (
             None if item.get("attempt") else next((job for job in jobs if fits(job, False)), None))

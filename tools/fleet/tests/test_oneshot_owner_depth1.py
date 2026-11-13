@@ -146,11 +146,14 @@ console.log(JSON.stringify(out));'''
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # Beside the native area a folded route reads who / context / what and time (spec
-            # rules 24, 36, 38, 43): its glyph, role and harness, then its title ending in its time.
+            # Beside the native area a folded route reads who / context and time / what (spec
+            # rules 24, 36, 38, 43, 57): its glyph, role and harness, then its context row carrying
+            # its time (here, the context unknown, the time alone), then its title.
             lines = side.splitlines()
-            rows = [(lines[i - 1], line) for i, line in enumerate(lines) if i > 0 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("owner" in who and "codex" in who and "5m" in title for who, title in rows), side)
+            rows = [(lines[i - 2], lines[i - 1], line) for i, line in enumerate(lines)
+                    if i > 1 and "│ │ " in line and "Fixture solo route" in line]
+            self.assertTrue(any("owner" in who and "codex" in who and "5m" in ctx and "5m" not in title
+                                for who, ctx, title in rows), side)
             # The staged route: its owner first, its live worker under it.
             self.assertIn("owner  claude Opus 5.5 high", side)
             self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)

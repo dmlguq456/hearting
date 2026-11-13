@@ -491,6 +491,25 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 self.assert_keeps_native(window, native)
                 self.assertEqual(len(window.spawns()), 1)
 
+    def test_a_hand_fold_carries_over_to_the_new_host(self):
+        # #1586 review follow-up 7: the person's fold choice rides the hand-over seed. Folded by
+        # hand in a window wide enough to stand open, the new host keeps the strip, and a press on
+        # the strip still opens it there.
+        window = self.window('claude')
+        first = window.wait_binding()
+        self.settle(window)
+        self.assertTrue(window.status(first)['expanded'])
+        self.assertTrue(rpc(first['socket'], {**first, 'op': 'panel', 'expanded': False})['ok'])
+        window.pump(.4)
+        self.assertFalse(window.status(first)['expanded'])
+        window.point('rel-b')
+        second = self.switched(window, first['host_pid'])
+        window.pump(.6)
+        self.assertNotEqual(second['host_pid'], first['host_pid'])
+        self.assertFalse(window.status(second)['expanded'])
+        window.type('\x1b[<0;127;10M\x1b[<0;127;10m'); window.pump(.4)
+        self.assertTrue(window.status(second)['expanded'])
+
     def wait_empty_then_switch(self, window, first):
         window.wait_empty()     # a silent native gives the host no repaint to re-read the composer on
         self.switched(window, first['host_pid'])

@@ -249,13 +249,47 @@ class F51UsageCacheTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(usage_cache.read("claude")["payload"]["rl_5h"], 12)
 
-    def test_fresh_cache_suppresses_refresh_until_harness_window_expires(self):
+    def test_fresh_cache_suppresses_refresh_until_two_thirds_of_its_window(self):
+        # Review 1597-r2 (11-13): Claude's refresh is asked for before its 180 s fresh window
+        # ends (at 120 s), so the new reading lands while the old one still counts as fresh.
         calls = []
-        usage_cache.FETCHERS["claude"] = lambda _credential: calls.append(1)
+        usage_cache.FETCHERS["claude"] = lambda _credential: (calls.append(1) or {"rl_5h": 7})
         self._write_cache("claude", 1000)
-        self.assertFalse(usage_cache.request_refresh("claude", now=1179))
+        self.assertFalse(usage_cache.request_refresh("claude", now=1119))
         self.assertEqual(calls, [])
         self.assertNotIn("claude", usage_cache._THREADS)
+        self.assertEqual(usage_cache.read("claude", now=1120)["freshness"], "fresh")
+        self.assertTrue(usage_cache.request_refresh("claude", now=1120))
+        for thread in list(usage_cache._THREADS.values()):
+            thread.join(timeout=5)
+        self.assertEqual(calls, [1])
+        # The others keep their window as it was.
+        self._write_cache("codex", 1000)
+        self.assertFalse(usage_cache.request_refresh("codex", now=1059))
+        self.assertNotIn("codex", usage_cache._THREADS)
+
+    def test_the_shell_wakes_the_claude_refresh_only_when_its_reading_is_due(self):
+        calls, release = [], threading.Event()
+        def fetch(_credential):
+            calls.append(1)
+            release.wait(5)
+            return {"rl_5h": 7}
+        usage_cache.FETCHERS["claude"] = fetch
+        self._write_cache("claude", 1000)
+        snapshot = usage_cache.read("claude", now=1119)
+        self.assertFalse(usage_cache.wake_claude_refresh(snapshot, now=1119))
+        self.assertEqual(calls, [])
+        self.assertTrue(usage_cache.wake_claude_refresh(usage_cache.read("claude", now=1120), now=1120))
+        # A second wake while that one is in flight starts nothing (the existing lease).
+        self.assertFalse(usage_cache.wake_claude_refresh(usage_cache.read("claude", now=1121), now=1121))
+        thread = usage_cache._THREADS["claude"]
+        release.set()
+        thread.join(timeout=5)
+        self.assertEqual(calls, [1])
+        # No credential: nothing to refresh with, and nothing raises.
+        with mock.patch.object(usage_api, "_credential", return_value=usage_api._Credential(reason="credential-not-found")):
+            self.assertFalse(usage_cache.wake_claude_refresh(usage_cache._unknown(), now=1300))
+        self.assertEqual(calls, [1])
 
     def _write_cache(self, harness, fetched_at, payload=None, **extra):
         item = {"schema_version": usage_cache.SCHEMA_VERSION, "harness": harness,

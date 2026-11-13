@@ -738,7 +738,10 @@ def session_questions(harness, sid, *, view=None, retained=()):
                 "owner": {"harness": harness, "session_id": sid}}
         described = questions.describe(item, now=time.time())
         if described.get("revision") == old.get("revision"):
-            # No active input comes from a retained display reference.
+            # No active input comes from a retained display reference; it has left this
+            # session's waits, so an open one reads as closed (spec E9 rule 54 (e)).
+            if described.get("answerable"):
+                described["reason"] = "retained-display-no-longer-current"
             described["answerable"] = False
             result.append(described)
             known.add(described["id"])
@@ -833,7 +836,7 @@ _LAST_OBSERVED: dict = {}
 
 def _observe_session(observe, harness, sid, pid, start):
     key = (harness, sid, pid, start)
-    values, watched = observe(harness, pid, start, sid, previous=_LAST_OBSERVED.get(key, {}))
+    values, watched = observe(harness, pid, start, sid, previous=_LAST_OBSERVED.get(key, {}), wake_quota=True)
     _LAST_OBSERVED.clear()
     if values:
         _LAST_OBSERVED[key] = dict(values)
@@ -935,11 +938,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         for question in item.get("questions") or ():
             question["display"] = {key: ([styled(line) for line in value] if key != "head" else styled(value))
                                    for key, value in question["display"].items()}
+    # Spec E9 rule 54: the five `answer_*` words say where a wait not answerable here is answered.
+    states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
+              "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
     labels = {key: ui_text("fleet.session_block." + key) for key in (
-        "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
-        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose")}
+        *states, "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose")}
     if columns < 64:
-        for key in ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable"):
+        for key in states:
             labels[key] = ui_text("fleet.session_block.compact_" + key)
     if pane_binding:
         try:
@@ -1038,8 +1043,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
-                      "labels": labels, "styles": {key: style_components(key, colors=colors, no_color=no_color)
-                      for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")}},
+                      "labels": labels, "styles": {**{key: style_components(key, colors=colors, no_color=no_color)
+                      for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")},
+                      # The chosen choice's `▸` takes this session's harness color (spec E9 rule 53).
+                      "harness": style_components("hb_" + str(harness), colors=colors, no_color=no_color)}},
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
             "panel": panel, "help": ui_text("fleet.session_block.editor_help")}
