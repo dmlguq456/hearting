@@ -65,7 +65,7 @@ else:  # Existing file-path consumers load this module without a package.
     from fleet.model import current_attempt_rank
     from fleet.work_titles import readable
 
-_CACHE = {}          # {abspath: (mtime, size, record|None)}
+_CACHE = {}          # {abspath: (identity, record|None)}; identity = (dev, ino, size, mtime_ns, ctime_ns)
 _OUTCOME_CACHE = {}  # {abspath: (identity, outcome|None)} — F-<next> sidecar reader;
                      # identity = (dev, ino, size, mtime_ns, ctime_ns), so a rewrite that
                      # restores size and mtime still reads again
@@ -776,15 +776,15 @@ def load(path, expect_hash=None, expect_id=None):
     try:
         abspath = os.path.abspath(path)
         st = os.stat(abspath)
-        key = (st.st_mtime, st.st_size)
+        key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     except (OSError, TypeError, ValueError):
         return None
     cached = _CACHE.get(abspath)
-    if cached is not None and (cached[0], cached[1]) == key:
-        record = cached[2]
+    if cached is not None and cached[0] == key:
+        record = cached[1]
     else:
         record = _load_uncached(abspath)
-        _CACHE[abspath] = (key[0], key[1], record)
+        _CACHE[abspath] = (key, record)
     if record is None:
         return None
     if expect_hash is not None and record.get("route_hash") != expect_hash:

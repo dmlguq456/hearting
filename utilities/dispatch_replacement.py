@@ -1351,10 +1351,43 @@ def stage_completed_since(jobs, fields, meta):
         return False
 
 
+# One slot: the rows object the successor sets below were built from (held, so its identity is not
+# reused) and the sets. ``registry_rows`` hands out the same rows object for as long as one registry
+# generation lasts, so the scan of every row happens once per generation, not once per question.
+_SUCCESSOR_SETS = [None, None, 0]
+
+
+def _successor_sets(rows):
+    """``(attempts a plain retry continues, attempts a live replacement row names as its original)``."""
+    held = _SUCCESSOR_SETS
+    if held[0] is rows and held[2] == len(rows):
+        return held[1]
+    plain, replaced = set(), set()
+    for fields, meta in rows.values():
+        if not meta.get('replacement_family_id'):
+            for key in ('automatic_retry_of', 'prior_attempt_id'):
+                if meta.get(key) is not None:
+                    plain.add(meta[key])
+        original = meta.get('replacement_original_attempt_id')
+        if original is not None:
+            try:
+                live = fields[1] in {'open', 'running', 'done'}
+            except (TypeError, IndexError, KeyError):
+                live = False
+            if live:
+                replaced.add(original)
+    held[:] = [rows, (plain, replaced), len(rows)]
+    return held[1]
+
+
 def _plain_retry_successor(rows, aid):
     """Does an ordinary same-node retry, not a replacement claim, already continue this attempt?"""
-    return any((meta.get('automatic_retry_of') == aid or meta.get('prior_attempt_id') == aid)
-               and not meta.get('replacement_family_id') for _, meta in rows.values())
+    return aid in _successor_sets(rows)[0]
+
+
+def _replacement_row_of(rows, aid):
+    """Does a replacement row that is open, running or done name this attempt as its original?"""
+    return aid in _successor_sets(rows)[1]
 
 
 def _no_competing_successor(rows, aid, replacement=None):

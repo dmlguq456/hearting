@@ -17,8 +17,8 @@ owner-dead              the route's row is no longer ``working``, or is gone aft
 ======================  ===========================================================
 
 T1 reads ``projection.json`` (``route_panels[<harness>\\0<session>]`` rows, ``items``);
-T2 reads the digest the pass shim takes of the Fleet explorer model after each compose
-(``render._EXPLORER_MODEL.routes`` / ``.questions``). A row that was never shown before
+T2 reads the digest the pass shim takes of the Fleet explorer model after each ``_draw``
+returns: the model that frame was drawn from (``render._EXPLORER_MODEL.routes`` / ``.questions``). A row that was never shown before
 an "is gone" event proves nothing, so those need ``expect["was_present"]`` (T1) and
 ``expect["was_present_fleet"]`` (T2), taken from the readers just before the write.
 """

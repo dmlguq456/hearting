@@ -273,6 +273,79 @@ class InjectorTests(unittest.TestCase):
 class ShapeTests(unittest.TestCase):
     """The fixture shapes the registry alone does not give."""
 
+    def test_history_carries_the_live_route_owner_blocked_and_dead_owner_shapes(self):
+        """Live 2026-11-13: ~88% of the rows carry a route, ~20% are owners, ~1.7% end BLOCKED
+        (their routes stay open), ~9% are dead owners; one attempt per row."""
+        from workflow_state import WorkflowLedger
+        with small_state(freeze=False), tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            built = hpf.build(tmp + "/b", history_rows=1200, record_size=2900, open_routes=3, live_sessions=2,
+                              worker_streams=True, depth1_rows=6, depth1_open_every=0, min_jobs_bytes=0,
+                              prime=False)
+            shape = built["history_shape"]
+            rows = Path(built["jobs"]).read_text().splitlines()
+            self.assertEqual(len(rows), 1200)
+            history = shape["rows"] - hpf.HISTORY_RECENT_24H_ROWS    # the last day's rows stand alone
+            self.assertGreater(history, 900)
+            self.assertAlmostEqual(shape["routed"] / history, 0.88, delta=0.04)
+            self.assertAlmostEqual(shape["owner"] / history, 0.196, delta=0.04)
+            self.assertAlmostEqual(shape["blocked"] / history, 0.017, delta=0.008)
+            self.assertAlmostEqual(shape["dead_owner"] / history, 0.087, delta=0.035)
+            self.assertAlmostEqual(shape["routes"] / history, 0.17, delta=0.03)
+            self.assertTrue(shape["real_route_verified"], shape["real_route_reason"])
+            self.assertEqual(len(shape["answered_blocked"]), 2)
+            attempts = [item.split("attempt_id=")[1].split(",")[0] for item in rows if "attempt_id=att-hist-" in item]
+            self.assertEqual(len(attempts), len(set(attempts)))               # one row per attempt
+            blocked = [row for row in rows if "note=dead-worker-blocked" in row]
+            self.assertEqual(len(blocked), shape["blocked"])
+            self.assertEqual(len({len(row.encode()) + 1 for row in rows[2 + 6:]}), 1)  # one row size
+            row = blocked[0]
+            meta = dict(item.split("=", 1) for item in row.split("\t")[5].split(",") if "=" in item)
+            route_file = Path(meta["owner_route_file"])
+            self.assertTrue(route_file.is_file())
+            route = json.loads(route_file.read_text())
+            self.assertEqual(route["route_id"], meta["owner_route_id"])
+            ledger = WorkflowLedger(meta["owner_route_id"], meta["owner_route_hash"],
+                                    root=Path(built["dispatch_root"]) / "workflow")
+            self.assertTrue(ledger.journal_path.is_file())
+            self.assertFalse(route_file.with_name(route_file.stem + ".outcome.json").exists())  # a BLOCKED route stays open
+            closed = [path for path in (Path(built["base"]) / "routes" / "hist").glob("*.outcome.json")]
+            self.assertGreater(len(closed), shape["routes"] // 2)
+
+    def test_stall_notices_are_written_for_open_attempts(self):
+        with small_state(freeze=False), tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            built = hpf.build(tmp + "/b", history_rows=300, record_size=2900, open_routes=3, live_sessions=2,
+                              worker_streams=True, depth1_rows=6, depth1_open_every=0, min_jobs_bytes=0,
+                              prime=False)
+            stall = built["history_shape"]["stall"]
+            self.assertEqual(stall["written"], 3, stall["reason"])
+            state = Path(built["dispatch_root"])
+            for attempt in stall["attempts"]:
+                self.assertTrue((state / "watchdog" / f"{attempt}.json").is_file())
+
+    def test_d1_lines_judge_the_whole_pass_time_and_report_the_floor_separately(self):
+        def side(warm, after, view, rebuild):
+            return {"roles": {"producer": {
+                "warm_median_s": warm, "after_replace_s": after, "extra_s": after - warm,
+                "after_row": {"metrics": {"full_metadata_parses": 1}, "segments": {
+                    tool._VIEW_SEGMENT: {"n": 1, "total_s": view},
+                    tool._REBUILD_SEGMENT: {"n": 9, "total_s": rebuild}}}}}}
+        # the unchanged pass is flat; the pass after a replacement grows 30%, all of it in the floor
+        scale = {"pairs": [{"label": "A", "small": side(0.40, 0.60, 0.20, 0.02), "large": side(0.41, 0.78, 0.38, 0.02)}]}
+        rows = tool.d1_rows(scale)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertFalse(row["met"])                                         # 0.78 / 0.60 = x1.30 is over x1.20
+        self.assertAlmostEqual(row["after_ratio"], 1.3)
+        self.assertAlmostEqual(row["floor_small_s"], 0.18)
+        self.assertAlmostEqual(row["after_without_floor_ratio"], (0.78 - 0.36) / (0.60 - 0.18))
+        text = "\n".join(tool.d1_lines(scale))
+        self.assertIn("0/1 칸 충족", text)
+        self.assertIn("미충족", text)
+        self.assertIn("바닥(읽기·digest)", text)
+        flat = {"pairs": [{"label": "A", "small": side(0.40, 0.60, 0.20, 0.02), "large": side(0.41, 0.62, 0.21, 0.02)}]}
+        self.assertTrue(tool.d1_rows(flat)[0]["met"])
+        self.assertIn("1/1 칸 충족", "\n".join(tool.history_verdicts(flat)))
+
     def test_recent_history_rows_fall_in_the_fleet_windows(self):
         total = 400
         ages = [hpf._history_age_s(index, total) for index in range(total)]
@@ -318,7 +391,13 @@ class ShimTests(unittest.TestCase):
 
     def test_shim_source_compiles(self):
         compile(shim_pass.render(), "sitecustomize.py", "exec")
+        # The Fleet keeps its compiled row selection only while procscan.read_proc_start is the
+        # native reader; a shim that wrapped it measured a path an operating Fleet never takes.
+        self.assertNotIn("module.read_proc_start =", shim_pass.render())
         self.assertIn(("human_wait_state", "_refresh_cache"), shim_pass.TARGETS)
+        # the segments the holder memo (speed-e2e leg C) is judged by
+        self.assertIn(("dispatch", "_prime_route_display_rows"), shim_pass.TARGETS)
+        self.assertIn(("dispatch_seat_handover", "job_holders"), shim_pass.TARGETS)
 
     def test_script_run_as_main_is_recorded_by_code_object(self):
         # The producer's case: the file is ``__main__`` and a nested function in it is a target.
@@ -353,7 +432,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(check["failures"], ["human_wait_state._refresh_cache"])
         self.assertFalse(check["ok"])
         fleet = shim_pass.self_check([{"root": "__init__.collect_all", "seg": {}}], "fleet")
-        self.assertEqual(fleet["failures"], ["render._explorer_compose"])
+        self.assertEqual(fleet["failures"], ["render._explorer_compose", "render._draw"])
 
     def test_orchestrator_exits_one_and_publishes_nothing_when_blind(self):
         fake_fixture = types_namespace(build=lambda **kw: {
@@ -469,6 +548,40 @@ class ReportTests(unittest.TestCase):
         self.assertIn("판정 불가 (full parses 1/0", text)
         self.assertNotIn("주원인 후보", text)
 
+    def test_history_verdict_says_to_read_the_extra_numbers_when_every_cell_is_unjudgeable(self):
+        # follow-up 4b: an incremental registry path re-parses nothing, so every cell reads "판정 불가"
+        def side(after):
+            return {"roles": {"producer": {
+                "warm_median_s": 0.4, "after_replace_s": after, "extra_s": after - 0.4,
+                "after_row": {"metrics": {"full_metadata_parses": 0}}}}}
+        text = "\n".join(tool.history_verdicts({"pairs": [{"label": "A", "small": side(0.5), "large": side(0.55)}]}))
+        self.assertIn("history 비례 판정 불가", text)
+        self.assertIn("추가분 숫자", text)
+        self.assertIn("d1의 전체 시간", text)
+
+    def test_report_names_the_git_head_of_the_measured_code(self):
+        # follow-up 6: a tree that is a repository gives its head; one that is not says so
+        head = tool.code_head(ROOT)
+        self.assertTrue(head["git"])
+        self.assertRegex(head["head"], r"^[0-9a-f]{40}$")
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            outside = tool.code_head(Path(tmp))
+        self.assertFalse(outside["git"])
+        self.assertIn("git 저장소가 아니다", outside["note"])
+        report = self.sample()
+        report["code"] = head
+        self.assertIn(head["head"], tool.render_markdown(report))
+        report["code"] = outside
+        self.assertIn("git 아님", tool.render_markdown(report))
+
+    def test_report_prints_the_empty_frames_of_the_drawn_model(self):
+        report = self.sample()
+        report["drawn_detail"] = {"frames": 10, "with_detail": 6, "empty": 4, "empty_runs": 2,
+                                  "empty_s": 2.5, "longest_empty_s": 1.5, "span_s": 12.0}
+        text = tool.render_markdown(report)
+        self.assertIn("그려진 화면 모델의 route 세부", text)
+        self.assertIn("빈 것 **4개**", text)
+
     def test_table_says_how_many_events_were_seen(self):
         report = self.sample()
         report["results"][0]["events"]["route-start"].update(n=2, n_total=3)
@@ -526,6 +639,144 @@ class VisibleTests(unittest.TestCase):
         digest["routes"]["rt-1"].update(state="idle")
         self.assertTrue(visible.t2(self.ev("owner-dead"), digest))
         self.assertFalse(visible.t2(self.ev("owner-dead"), None))
+
+
+class DrawnModelTests(unittest.TestCase):
+    """Follow-up 2 and the flicker check: T2 follows the model ``_draw`` drew, not the one composed."""
+
+    ROUTE_WITH = {"a": {"state": "working", "attempt": "att-1", "active": ["execute"]}}
+    ROUTE_EMPTY = {"a": {"state": "working", "attempt": None, "active": []}}
+
+    def draws(self, models, step=1_000_000_000):
+        return [{"root": "render._draw", "t0": i * step, "t1": i * step + 10, "seg": {},
+                 **({"model": {"routes": m, "questions": []}} if m is not None else {})}
+                for i, m in enumerate(models)]
+
+    def test_shim_takes_the_digest_after_draw_not_after_compose(self):
+        source = shim_pass.render()
+        self.assertIn('if name == "render._draw":', source)
+        self.assertNotIn('if name == "render._explorer_compose":\n                # After t1', source)
+        self.assertIn(("render", "_draw"), shim_pass.FLEET_ROOTS)
+
+    def test_arrival_is_a_draw_whose_model_shows_the_value(self):
+        ev = {"kind": "route-start", "t_ns": 5, "expect": {"route_id": "a", "attempt_id": "att-1"}}
+        rows = shim_pass.with_models(self.draws([self.ROUTE_EMPTY, self.ROUTE_EMPTY, self.ROUTE_WITH]))
+        arrival = t12._fleet_arrival(rows, ev)
+        self.assertIs(arrival, rows[2])
+        self.assertIsNone(t12._fleet_arrival(rows[:2], ev))
+
+    def test_empty_frames_count_only_after_detail_was_shown(self):
+        # before the first frame with detail nothing is "gone"; afterwards an empty one is a blank
+        models = [self.ROUTE_EMPTY, self.ROUTE_EMPTY, self.ROUTE_WITH, self.ROUTE_WITH, self.ROUTE_EMPTY,
+                  self.ROUTE_EMPTY, self.ROUTE_WITH, None, self.ROUTE_EMPTY, self.ROUTE_WITH]
+        rows = self.draws(models)
+        for index in (1, 3, 5, 7):          # the digest is written only when it changed
+            rows[index].pop("model", None)
+        out = t12.drawn_detail(rows)
+        self.assertEqual(out["frames"], 8)        # from the first detail frame on, frames that have routes
+        self.assertEqual(out["with_detail"], 5)
+        self.assertEqual(out["empty"], 3)
+        self.assertEqual(out["empty_runs"], 2)
+        self.assertEqual(out["longest_empty_s"], 2.0)
+
+    def test_a_steady_screen_has_no_empty_frame(self):
+        out = t12.drawn_detail(self.draws([self.ROUTE_WITH, None, None, self.ROUTE_WITH]))
+        self.assertEqual((out["empty"], out["empty_runs"], out["longest_empty_s"]), (0, 0, 0.0))
+        self.assertEqual(t12.drawn_detail([]), {**t12.drawn_detail([])})
+        self.assertEqual(t12.drawn_detail([])["frames"], 0)
+
+
+class SourceShapeTests(unittest.TestCase):
+    """Follow-up 5: a source line that changed shape must not silently restore the default."""
+
+    def setUp(self):
+        t12.SOURCE_SHAPE_WARNINGS.clear()
+        self.addCleanup(t12.SOURCE_SHAPE_WARNINGS.clear)
+
+    def test_current_source_is_read_without_a_warning(self):
+        self.assertGreater(t12.registry_min_gap(), 0)
+        self.assertGreater(t12.producer_cadence_s(), 0)
+        self.assertEqual(t12.SOURCE_SHAPE_WARNINGS, [])
+
+    def test_unreadable_shape_returns_the_default_and_leaves_a_warning(self):
+        with mock.patch.object(Path, "read_text", return_value="_REGISTRY_MIN_GAP_RENAMED = 5\n"):
+            self.assertEqual(t12.registry_min_gap(), 2.0)
+            self.assertEqual(t12.producer_cadence_s(), 30.0)
+        text = "\n".join(t12.SOURCE_SHAPE_WARNINGS)
+        self.assertIn("registry_min_gap", text)
+        self.assertIn("producer_cadence_s", text)
+        self.assertIn("WARNING", text)
+        with mock.patch.object(Path, "read_text", return_value="_REGISTRY_MIN_GAP_RENAMED = 5\n"):
+            t12.registry_min_gap()
+        self.assertEqual(len(t12.SOURCE_SHAPE_WARNINGS), 2)             # the same warning is not repeated
+
+    def test_the_warning_reaches_the_report_notes(self):
+        with mock.patch.object(Path, "read_text", return_value=""):
+            t12.registry_min_gap()
+        report = t12._assemble({"sessions": []}, [], [], [], [], 2.0, 0.025, [], [], {}, "/nonexistent/producer.jsonl")
+        self.assertTrue(any("registry_min_gap" in note for note in report["notes"]))
+        self.assertIn("drawn_detail", report)
+
+
+class UnpublishedEventTests(unittest.TestCase):
+    """Follow-up 8: an event that was detected but whose publishing pass cannot be found says why."""
+
+    def test_detect_without_a_publisher_pass_is_listed_with_its_reason(self):
+        ev = {"kind": "route-start", "seq": 1, "t_ns": 1_000, "t_start_ns": 900, "detect_ns": 5_000,
+              "projection_s": 0.01, "expect": {"route_id": "a", "attempt_id": "att-1"}}
+        late_pass = {"root": "human_wait_state._refresh_cache", "index": 1, "t0": 9_000_000_000,
+                     "t1": 9_100_000_000, "seg": {}}
+        report = t12._assemble({"sessions": []}, ["route-start"], [ev], [late_pass], [], 2.0, 0.025, [], [], {}, "/nonexistent/producer.jsonl")
+        reasons = [item["reason"] for item in report["not_measured"] if "route-start#1 T1" in item["what"]]
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(reasons[0].startswith("no_publisher_pass"))
+        self.assertNotIn("not_visible", reasons[0])
+
+
+class ReplaceSamplesTests(unittest.TestCase):
+    """The pass right after a whole-registry replacement is a median of several, not one noisy pass."""
+
+    def write_log(self, path, root, spans):
+        with open(path, "w", encoding="utf-8") as handle:
+            for index, (t0, t1) in enumerate(spans, 1):
+                handle.write(json.dumps({"root": root, "index": index, "t0": int(t0 * 1e9), "t1": int(t1 * 1e9),
+                                         "seg": {}, "metrics": {}}) + "\n")
+
+    def test_each_replacement_is_sampled_and_the_median_is_reported(self):
+        warm = [(2, 3), (4, 5), (6, 7), (7.5, 8.5)]
+        after = [(9, 10), (11, 11.5), (15, 17), (18, 19), (21, 24), (25, 26)]    # 1 s, settle, 2 s, settle, 3 s, settle
+        times = iter([int(8.8e9), int(14e9), int(20e9)])
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            producer, fleet = Path(tmp) / "producer.jsonl", Path(tmp) / "fleet.jsonl"
+            self.write_log(producer, "human_wait_state._refresh_cache", [(0, 1)] + warm + after)
+            self.write_log(fleet, "__init__.collect_all", [(0, 1)] + warm + after)
+
+            class FakeChildren:
+                def __init__(self, *args, **kwargs):
+                    self.producer_log, self.fleet_log = producer, fleet
+
+                def start_producer(self):
+                    pass
+
+                def start_fleet(self):
+                    pass
+
+                def close(self):
+                    pass
+
+            with mock.patch.object(t12, "Children", FakeChildren), \
+                    mock.patch.object(t12.events, "registry_replace",
+                                      side_effect=lambda fixture, n: {"t_ns": next(times)}), \
+                    mock.patch.object(t12.time, "sleep", lambda _s: None):
+                out = t12.measure_replace({"rows": 1, "bytes": 2}, scratch=Path(tmp), warm_passes=3)
+        self.assertEqual(out["replacements"], 3)
+        for role in ("producer", "fleet"):
+            entry = out["roles"][role]
+            self.assertEqual(entry["after_samples_s"], [1.0, 2.0, 3.0])
+            self.assertEqual(entry["after_replace_s"], 2.0)
+            self.assertEqual(entry["warm_median_s"], 1.0)
+            self.assertEqual(entry["extra_s"], 1.0)
+            self.assertEqual(entry["after_row"]["dur_s"], 2.0)       # the row shown is the median pass itself
 
 
 class PhasePlanTests(unittest.TestCase):
