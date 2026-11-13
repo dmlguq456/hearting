@@ -133,21 +133,40 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
-// Spec rule 47 (the user's final values, 11-13): every value of the moving rule in one place.
-// Running, a light passes over the heavy rule: RULE_PEAK cells at its middle are brightest and
-// RULE_FADE cells on each side step down one shade each (RULE_PEAK + 2 RULE_FADE cells, five
-// shades); its middle runs at one speed from fully outside one end to fully outside the other
-// and back in RULE_SCAN spinner frames (100 ms each: 32 = 3.2 s). Waiting, the whole heavy red
-// rule breathes once every RULE_BREATHE frames (36 = 3.6 s) through RULE_WAIT_STEPS shades on a
-// cosine (24-bit color; the 256-color palette has six reds for it), each shade an equal time.
-const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=32,RULE_BREATHE=36,RULE_WAIT_STEPS=8,RULE_WAIT_STEPS_256=6;
+// Spec rule 47 (the user's final values, 11-13), as rules 51 and 52 retune it: every value of the
+// moving rule in one place. The rule is the thin `─` in every state (no heavy cell anywhere on it).
+// Running, a light passes over it: RULE_PEAK cells at its middle are brightest and RULE_FADE cells
+// on each side step down one shade each (RULE_PEAK + 2 RULE_FADE cells, five shades); its middle
+// runs at one speed from fully outside one end to fully outside the other and back in RULE_SCAN
+// spinner frames (100 ms each: 26 = 2.6 s). Having left on the side it came in from, the dark rule
+// rests RULE_REST frames (10 = 1 s, the light's own turn beat included) and the light comes in
+// again on that side; at the far end it turns after one dark beat. Waiting, the whole red rule
+// breathes once every RULE_BREATHE frames (36 = 3.6 s) through RULE_WAIT_STEPS shades on a cosine
+// (24-bit color; the 256-color palette has six reds for it), each shade an equal time.
+const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,RULE_BREATHE=36,RULE_WAIT_STEPS=8,RULE_WAIT_STEPS_256=6;
+const RULE_CYCLE=RULE_SCAN+RULE_REST-1;
 const mod=(t,n)=>((Math.trunc(t)%n)+n)%n;
+// Where the light's middle stands at a frame on an `n`-cell rule, or null while the dark rule rests.
+function scanAt(tick,n){
+  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_CYCLE);
+  if(q>=RULE_SCAN)return null;
+  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
+  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2);
+  return Math.round(lo+y*(hi-lo));
+}
 // The light's shade at cell `i` of an `n`-cell rule (5 brightest, 0 none).
 function scanLevel(tick,i,n){
-  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_SCAN);
-  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
-  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2),c=Math.round(lo+y*(hi-lo));
-  return Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+  const plateau=(RULE_PEAK-1)/2,c=scanAt(tick,n);
+  return c===null?0:Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+}
+// The next frame after `tick` at which an `n`-cell running rule looks different: the next frame
+// while the light is inside, the light's return at the end of the rest (nothing to wake for or
+// write before it).
+function scanNext(tick,n){
+  const t=Math.trunc(tick),lit=f=>{const c=scanAt(f,n),plateau=(RULE_PEAK-1)/2,reach=RULE_FADE+plateau;return c!==null&&c+reach>=0&&c-reach<n;};
+  if(lit(t))return t+1;
+  for(let f=t+1;f<=t+RULE_CYCLE;f++)if(lit(f))return f;
+  return t+1;
 }
 // A breath's shade at a frame: 0 brightest .. steps-1 darkest, down and back up, each shade for an
 // equal stretch of the breath (2 (steps-1) stretches).
@@ -155,13 +174,13 @@ function breathStep(tick,steps){
   const slots=2*(steps-1),s=Math.floor(mod(tick,RULE_BREATHE)*slots/RULE_BREATHE);
   return s<steps?s:slots-s;
 }
-// One cell `i` of an `n`-cell rule at spinner frame `tick`: running (`scan`), every cell heavy,
-// the light's shade (0: the dark rule); waiting (`wait`), heavy red at the breath's shade; `still`
-// moves nothing (rule motion off, mono, NO_COLOR, eight colors): a running rule stays the plain
-// thin one, a waiting one stays heavy. Anything else is the plain thin rule.
+// One cell `i` of an `n`-cell rule at spinner frame `tick`, always the thin `─` (spec rule 52):
+// running (`scan`), the light's shade (0: the dark rule); waiting (`wait`), red at the breath's
+// shade; `still` moves nothing (rule motion off, mono, NO_COLOR, eight colors): a running rule
+// stays the plain one, a waiting one stays red. Anything else is the plain rule.
 function ruleCell(kind,tick,i,n,{still=false,steps=RULE_WAIT_STEPS}={}){
-  if(kind==='wait')return still?['━','wait',0]:['━','wait',breathStep(tick,steps)];
-  if(kind==='scan'&&!still){const level=scanLevel(tick,i,n);return ['━',level?'scan':'base',level];}
+  if(kind==='wait')return still?['─','wait',0]:['─','wait',breathStep(tick,steps)];
+  if(kind==='scan'&&!still){const level=scanLevel(tick,i,n);return ['─',level?'scan':'base',level];}
   return ['─','line',0];
 }
 function change(value,key,step){
@@ -331,10 +350,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     add(footRow(left),undefined,groups);
   }
   // Spec rule 47: the thin rule under the metadata follows this session's own state, the
-  // frame's source (not a route's): running moves a bar along it, an answer or confirmation
-  // wait breathes it red, anything else is the plain rule. Rule motion off, mono and NO_COLOR
-  // move nothing (a wait stays a still heavy rule). A moving rule's parts carry `motion`: the
-  // host repaints that one row, its changed cells only, at the frames it changes.
+  // frame's source (not a route's): running moves a light along it, an answer or confirmation
+  // wait breathes it red, anything else is the plain rule; it stays the thin rule throughout
+  // (spec rule 52). Rule motion off, mono and NO_COLOR move nothing (a wait stays a still red
+  // rule). A moving rule's parts carry `motion`: the host repaints that one row, its changed
+  // cells only, at the frames it changes.
   const ruleKind=settings?'':state==='blocked'?'wait':LIVE[state]?.[0]==='spin'?'scan':'';
   const ruleColors=model.colors??256;
   const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||ruleColors<256;
@@ -1438,15 +1458,16 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // Only a blinking part needs the one-second repaint (a spinner and the rule turn on their own).
   const blinks=rows.slice(0,count).some(row=>row.some(part=>part.beat));
   // Spec rule 47 (d): the moving rule's row, that row painted at any spinner frame, and the next
-  // frame it changes at (the bar: every frame; a breath: its next step, four a breath): the host
-  // repaints this one row then, on the beat it already keeps, its changed cells only.
+  // frame it changes at (the light: every frame while it is inside, then the end of its rest,
+  // spec rule 51 (c); a breath: its next step): the host repaints this one row then, on the
+  // beat it already keeps, its changed cells only.
   const motionAt=settings?-1:rows.slice(0,count).findIndex(row=>row.some(part=>part.motion));
   const motion=motionAt>=0?{row:motionAt,at:tick=>appearance([frameRow(ruleParts(tick))],cfg,{colors:model.colors??256,noColor:model.no_color===true,background})[0],
-    next:tick=>{if(ruleKind!=='wait')return Math.trunc(tick)+1;const now=breathStep(tick,ruleSteps);for(let t=Math.trunc(tick)+1;t<=Math.trunc(tick)+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t;return Math.trunc(tick)+RULE_BREATHE;}}:null;
+    next:tick=>{if(ruleKind!=='wait')return scanNext(tick,ruleWidth);const now=breathStep(tick,ruleSteps);for(let t=Math.trunc(tick)+1;t<=Math.trunc(tick)+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t;return Math.trunc(tick)+RULE_BREATHE;}}:null;
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,blinks:blinks&&!settings,spins,motion};
 }
 module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,ruleCell,scanLevel,breathStep,
-  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,BREATHE:RULE_BREATHE,WAIT_STEPS:RULE_WAIT_STEPS,WAIT_STEPS_256:RULE_WAIT_STEPS_256}};
+  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,BREATHE:RULE_BREATHE,WAIT_STEPS:RULE_WAIT_STEPS,WAIT_STEPS_256:RULE_WAIT_STEPS_256}};

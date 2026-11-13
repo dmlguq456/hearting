@@ -486,16 +486,29 @@ function existing(file){return new Promise((resolve,reject)=>{
    fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
    await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
-   const rule=()=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
+   // The rule's row: the thin rule (spec rule 52) whose cells are not all the plain dim line.
+   // (`at`: that row however it stands, lit or dark.)
+   const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
      const m=line.slice(140).match(/^│ ([─━]{36}) │$/);
-     if(m&&m[1].includes('━'))return {y,native:line.slice(0,138),cells:m[1],colors:Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',')};}return null;};
+     const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
+     if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),cells:m[1],colors};}return null;};
    let first=null;const began=Date.now();
    while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,50));}
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
-   // (1.95 s: not a whole number of the light's 3.2 s round trips, so the two readings differ.)
+   // (1.95 s: not a whole number of the light's 3.5 s period, so the two readings differ.)
    await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
    const second=rule();
-   Object.assign(ruleMotion,{first,second,bytes,writes});
+   // Spec rule 51 (c): the next rest (frames 26-34 of the 35-frame period and the frame after,
+   // 100 ms each on the wall clock the host beats by). Inside it the host writes nothing for the
+   // rule's row: what goes out is the spinner's own glyph only, the beat it already kept.
+   const period=3500,restAt=26*100,clock=Date.now(),start=clock-clock%period+restAt+(clock%period>=restAt-400?period:0);
+   await new Promise(r=>setTimeout(r,start+300-Date.now()));
+   const rest=[];const restSub=child.onData(t=>rest.push(t));
+   await new Promise(r=>setTimeout(r,start+900-Date.now()));restSub.dispose();await flush();
+   const resting=first&&rule(first.y);
+   await new Promise(r=>setTimeout(r,start+1300-Date.now()));await flush();
+   const back=first&&rule(first.y);
+   Object.assign(ruleMotion,{first,second,bytes,writes,rest,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
    await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
  }
  const nativeBg={};
@@ -765,14 +778,27 @@ class SessionShellPTYTest(unittest.TestCase):
         # row, so a beat stays small (the whole row each beat would be about 500 bytes), and the
         # native half stays put.
         result=self.run_loop('rule-motion')['rule_motion']
-        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes']}))
+        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes'],
+                          'rest_writes':len(result['rest']),'rest_bytes':[len(c.encode()) for c in result['rest']]}))
         first,second=result['first'],result['second']
         self.assertIsNotNone(first);self.assertIsNotNone(second)
-        for value in (first,second):self.assertEqual(value['cells'],'━'*36,value)
+        # Spec E9 rule 52: the moving rule is the thin rule; no heavy cell anywhere on it.
+        for value in (first,second):self.assertEqual(value['cells'],'─'*36,value)
         self.assertNotEqual(first['colors'],second['colors'])
         self.assertEqual(first['native'],second['native'])
         self.assertGreaterEqual(result['writes'],15)
         self.assertLess(result['bytes']/result['writes'],400,result)
+        # Spec E9 rule 51 (c): through the rest the rule's row stands dark and nothing is written
+        # to it; the host's writes there are the spinner's glyph alone (one cell each). Then the
+        # light comes back in.
+        y=result['rest_row'];self.assertIsNotNone(y,result)
+        self.assertTrue(all(c.endswith('d') for c in result['resting'].split(',')),result['resting'])
+        self.assertTrue(result['rest'],result)
+        for chunk in result['rest']:
+            self.assertNotIn('\x1b[%d;'%(y+1),chunk,result['rest'])
+            self.assertLess(len(chunk.encode()),96,chunk)
+        self.assertIsNotNone(result['back'],result)
+        self.assertTrue(any(not c.endswith('d') for c in result['back'].split(',')),result['back'])
 
     def test_the_gap_beside_the_panel_takes_the_natives_own_background(self):
         # A native that paints its whole area (OpenCode) reaches the panel's frame: the two cells
