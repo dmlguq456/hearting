@@ -192,7 +192,10 @@ def _role_flagged(harness: str, session_id: str) -> bool:
     if function is None:
         return True  # no collector: keep the existing check rather than go silent
     try:
-        return bool(function(harness, session_id))
+        # Native registry rows, as in `_observe_role`: the flag never asks Herdr.
+        rows = collector._registry_sessions()
+        targets = collector.role_targets(harness, session_id, sessions=rows, include_native=True)
+        return bool(function(harness, session_id, sessions=rows, _targets=targets))
     except Exception:  # noqa: BLE001
         return True
 
@@ -217,8 +220,10 @@ def _session_liveness(harness: str, session_id: str, agents=None, observation=No
     function = getattr(collector, "session_liveness", None)
     if function is None or not session_id:
         return "unknown"
-    options = {key: value for key, value in (("agents", agents), ("observation", observation))
-               if value is not None}
+    # No Herdr inventory: a missing ``agents`` means none, never a Herdr agent list.
+    options = {"agents": () if agents is None else agents}
+    if observation is not None:
+        options["observation"] = observation
     try:
         result = function(harness, session_id, **options)
     except Exception:  # noqa: BLE001
@@ -467,7 +472,10 @@ def _observe_role(harness: str, session_id: str) -> dict:
     agents = ()
     observation = _end_observation()
     if collector is not None:
-        for target in collector.role_targets(harness, session_id) or ():
+        # Native registry rows only (as `_holder_cwd` and `grant_steward`): no Herdr agent list.
+        rows = collector._registry_sessions()
+        for target in collector.role_targets(harness, session_id, sessions=rows,
+                                             include_native=True) or ():
             t_harness = str(target.get("harness") or "").lower()
             t_sid = target.get("session_id")
             try:
