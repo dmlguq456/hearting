@@ -243,7 +243,10 @@ def main(argv=None):
     command=x.command[1:] if x.command[:1]==["--"] else x.command
     if not command: raise ValueError("smoke command required")
     data=payload(x.input,command,x.cwd,x.config_manifest); result=subprocess.run(command,cwd=data["cwd"])
-    data.update(exit_code=result.returncode,status="passed" if result.returncode==0 else "failed")
+    # Distinguish a fresh execution from replaying an old A attestation after
+    # A -> B -> A. The input hashes stay identical; the execution evidence does not.
+    data.update(exit_code=result.returncode,status="passed" if result.returncode==0 else "failed",
+                executed_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
     data["attestation_hash"]="sha256:"+hashlib.sha256(json.dumps(data,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     Path(x.output).parent.mkdir(parents=True,exist_ok=True); Path(x.output).write_text(json.dumps(data,indent=2)+"\n")
     _record_release_input_refs(x.output, data["inputs"], os.environ)

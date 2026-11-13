@@ -217,6 +217,12 @@ and time budgets are optional. Missing sources or ETA stay explicit and do not
 interrupt a run or change exit, sentinel, verification, or approval state. Notices
 carry the run id and stable public run-record path when available.
 
+Call an experiment condition by the name in the project catalog
+(`python3 utilities/experiment_catalog.py status` or `show`), not by a run id, a config name,
+or a private label. A condition the catalog does not list is registered first
+(`experiment_catalog.py register`); a missing goal or baseline there is a warning and does not
+stop the run. Run ids stay as references next to the name.
+
 Admission is another optional observation axis, independent of metric progress.
 The shared observer can use bounded records tied to exact run provenance when
 the output root is absent; evidence must also match an exact row when it is
@@ -426,6 +432,12 @@ by `tools/lab-config-provenance.py`. Same-input retries are idempotent; a
 hash-named snapshot with mismatched content fails closed.
 
 ### Smoke binding
+
+A current, verified smoke PASS is reused without launching another reviewer or
+spending another verdict round. If a deterministic recheck is needed after the
+reviewer budget is spent, replay the recorded smoke command on the current
+inputs through the existing verification runner; keep owner-run independence
+degraded and require fresh passing evidence before proceeding.
 
 The hash-bound smoke attestation binds *both* the config snapshot and its
 source: `config_sha256`/`config_source_sha256`/`config_source_path` are
