@@ -133,6 +133,23 @@ class _HookMixin:
 
 
 class ArmingTest(_HookMixin, unittest.TestCase):
+    def test_repeated_watch_and_rearm_reconnect_the_same_exact_recipient(self):
+        armed = self._arm(mode="held")
+        watch_id = self._fields(armed)["watch_id"]
+        spec = importlib.util.spec_from_file_location("rewake_repeat", _HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        with mock.patch.dict(os.environ, self._env()):
+            for command, state in (("watch peer-a --wake hook", "already-armed"),
+                                   (f"rearm {watch_id}", "alive"),
+                                   (f"rearm {watch_id}", "rearmed")):
+                line = armed.replace("state=armed", "state=" + state)
+                payload = self._payload(line, command=f"python3 {_PEER_STEWARD} {command}")
+                self.assertEqual(hook.parse_arm(payload), (watch_id, "peer-a", self._watch_root()))
+                payload["session_id"] = "foreign"
+                self.assertIsNone(hook.parse_arm(payload))
+        self._release()
+
     def test_non_watch_bash_call_is_silent_exit_zero(self):
         payload = self._payload("", command="ls -la")
         proc = self._run_hook(payload)
@@ -217,6 +234,64 @@ class ArmingTest(_HookMixin, unittest.TestCase):
             resolved = handover.resolve_watch(fields["watch_id"], seat_key=seat.key)
         self.assertEqual((resolved["holder"]["harness"], resolved["holder"]["sid"]),
                          ("claude", "successor-session"))
+
+
+class DuplicateWakeTest(_HookMixin, unittest.TestCase):
+    def test_rearm_is_silent_until_lock_holder_exits(self):
+        armed = self._arm(mode="held")
+        watch_id = self._fields(armed)["watch_id"]
+        lock_path = self._watch_root() / f"{watch_id}.hook.lock"
+        # A private process owns exactly the carrier lock; killing it models a
+        # lost hook without leaving a join subprocess or touching a real session.
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl,sys; f=open(sys.argv[1], 'a'); "
+             "fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); sys.stdin.read()",
+             str(lock_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=self._env())
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            payload = self._payload(armed.replace("state=armed", "state=alive"),
+                                    command=f"python3 {_PEER_STEWARD} rearm {watch_id}")
+            blocked = self._run_hook(payload, timeout=10)
+            self.assertEqual((blocked.returncode, blocked.stdout, blocked.stderr), (0, "", ""))
+            holder.kill()
+            holder.wait(timeout=10)
+            self._release()
+            replacement = self._run_hook(payload)
+            self.assertEqual(replacement.returncode, 2, replacement.stderr)
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+            holder.wait()
+            for stream in (holder.stdin, holder.stdout, holder.stderr):
+                stream.close()
+
+    def test_repeated_watch_then_one_completion_wakes_once(self):
+        # RV-PR1593 reviewer probe, with cleanup even on a timeout/assertion.
+        armed = self._arm(mode="held")
+        repeat = self._arm(mode="held")
+        procs = []
+        try:
+            for line in (armed, repeat):
+                proc = subprocess.Popen(
+                    [sys.executable, str(_HOOK)], stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self._env())
+                procs.append(proc)
+                proc.stdin.write(json.dumps(self._payload(line)))
+                proc.stdin.close()
+            time.sleep(3)
+            self._release()
+            rcs = [proc.wait(timeout=90) for proc in procs]
+            self.assertEqual(rcs.count(2), 1, rcs)
+            self.assertEqual(sorted(rcs), [0, 2])
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    stream.close()
 
 
 class DeliveryTest(_HookMixin, unittest.TestCase):

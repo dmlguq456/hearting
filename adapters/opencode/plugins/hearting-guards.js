@@ -3580,14 +3580,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       touchHeartbeat(dispatchSlug())
     }
     if (event && event.type === "session.deleted") {
-      const sid = (event.properties && event.properties.sessionID) || ""
+      const sid = event.properties?.sessionID || event.properties?.info?.id || ""
       if (sid) {
         if (!isWorkerSession()) {
-          const child = spawn("python3", [fleetInteractionState, "clear", "--harness", "opencode"], {
-            stdio: ["pipe", "ignore", "ignore"], detached: true })
-          child.on("error", () => {})
-          child.unref()
-          child.stdin?.end(JSON.stringify({ session_id: sid }))
+          await publishInteraction("clear", sid, { scope: "session", hook_event_name: "SessionEnd",
+            reason: "session.deleted" })
         }
         spawnSummary(sid, "final")
         completionCarrier.forget(sid)
