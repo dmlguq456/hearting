@@ -594,6 +594,125 @@ def _session_shell_role(argv: list[str]) -> str | None:
     return None
 
 
+def _background_role(argv: list[str]) -> str | None:
+    """``supervisor``/``pty-host``/``spare`` for Claude Code's own background argv.
+
+    ``claude daemon run`` is the background-session supervisor; it starts each
+    session under ``claude --bg-pty-host <pty.sock> <cols> <rows> -- <exe>
+    <args>``, and keeps a waiting ``--bg-spare <claim.sock>`` process that takes
+    the next session over without changing its argv. The shape alone excludes
+    nothing: see ``claude_session_census``.
+    """
+    if argv[1:3] == ["daemon", "run"]:
+        return "supervisor"
+    if argv[1:2] == ["--bg-pty-host"] and "--" in argv[2:]:
+        return "pty-host"
+    if len(argv) == 3 and argv[1] == "--bg-spare":
+        return "spare"
+    return None
+
+
+def _bounded_json(path: Path, limit: int):
+    """One same-user regular file's JSON value, or None when absent or unusable."""
+    fd = None
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > limit:
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        chunks, size = [], 0
+        while size <= limit:
+            chunk = os.read(fd, limit + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
+            return None
+        return json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+_SUPERVISOR_JOB_LIMIT = 4096
+
+
+def _supervisor_lock_names(home: Path, pid: str, start: str) -> bool:
+    lock = _bounded_json(home / "daemon.lock", 65536)
+    return (isinstance(lock, dict) and str(lock.get("pid")) == pid
+            and str(lock.get("procStart") or "") == start)
+
+
+def _supervisor_sessions(home: Path, pid: str, start: str) -> set[str] | None:
+    """Every session id this exact supervisor may carry, or None when not exact.
+
+    The supervisor runs no conversation itself; each background session is its
+    own process. Between processes it does carry one: a respawn stops the old
+    worker and hands the session to a spare about 0.1 s later, while the job's
+    state reads ``stopped`` and no process or roster entry names it. Every
+    session it starts or carries has ``jobs/<id>/state.json`` naming it before
+    dispatch and through respawn, so all of those ids count as held while
+    ``daemon.lock`` names this pid and start. An unreadable, symlinked or
+    still-empty job record makes the result None.
+    """
+    if not _supervisor_lock_names(home, pid, start):
+        return None
+    jobs = home / "jobs"
+    try:
+        entries = list(os.scandir(jobs))
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+    if len(entries) > _SUPERVISOR_JOB_LIMIT or not _owner_directory(jobs):
+        return None
+    sessions = set()
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                return None
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            return None
+        row = _bounded_json(Path(entry.path) / "state.json", 1 << 20)
+        sid = row.get("sessionId") if isinstance(row, dict) else None
+        if not isinstance(sid, str) or not sid:
+            return None
+        sessions.add(sid)
+    return sessions
+
+
+def _spare_waiting(proc: Path, home: Path, pid: str, start: str, claim: str) -> bool:
+    """A spare that has not taken a session: it still listens in its spare directory.
+
+    Taking a session, a spare first removes its claim socket, then moves to the
+    session's directory and only then writes ``sessions/<pid>.json``. A session
+    still in flight to it (about a millisecond) is already held through the
+    supervisor's job records.
+    """
+    own = _process_parent(proc)
+    try:
+        socket_info = os.lstat(claim)
+        cwd = os.readlink(proc / "cwd")
+    except OSError:
+        return False
+    try:
+        (home / "sessions" / (pid + ".json")).lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    else:
+        return False
+    return (own is not None and own[1] == start and stat.S_ISSOCK(socket_info.st_mode)
+            and socket_info.st_uid == os.getuid() and cwd == os.path.dirname(claim))
+
+
 def _process_parent(proc: Path) -> tuple[str, str] | None:
     """``(ppid, start ticks)`` from one stat read, or None when unreadable."""
     try:
@@ -622,6 +741,15 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
     direct child, in the same PID namespace with the identical argv, is confirmed
     by its own native session record and the wrapper holds no claim of its own.
     Otherwise it is judged like any other Claude-shaped process.
+
+    Claude Code's own background processes follow the same rule. The supervisor
+    (``claude daemon run``) whose ``daemon.lock`` names its pid and start holds
+    every session its ``jobs/`` records name, and nothing else. A ``--bg-spare``
+    under a ``--bg-pty-host`` of that supervisor holds nothing while its claim
+    socket and spare directory show it waiting, rechecked when the census closes.
+    A ``--bg-pty-host`` adds no unresolved reason only while its direct child
+    runs its exact command and is confirmed or such a waiting spare. Anything
+    less exact stays incomplete; these rules only add holders, never remove one.
     """
     root = Path(proc_root)
     started = time.monotonic()
@@ -744,6 +872,8 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
 
     confirmed = {}
     wrappers = []
+    deferred = {}
+    rechecks = []
     for pid in pids:
         if time.monotonic() - started > budget_seconds:
             reasons.add("census-budget-exhausted")
@@ -779,9 +909,83 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
             # Judged after every child is seen: a child may sort before or after.
             wrappers.append((role, pid, proc, start, argv, seen))
             continue
+        background = _background_role(argv) if native_exe else None
+        if background is not None and not seen["native_sid"]:
+            # Judged after every process is seen, like the session-shell wrapper.
+            deferred[pid] = (background, proc, start, argv, seen)
+            continue
         commit(pid, seen)
         if native_exe and seen["native_sid"]:
             confirmed[pid] = (seen["namespace"], start, argv)
+
+    def quiet(seen):
+        """No claim, argv id, or reason other than the missing session identity."""
+        return (claims_nothing_itself(seen) and not seen["holders"]
+                and seen["reasons"] <= {"session-identity-unresolved"}
+                and seen["namespace"] == host_namespace)
+
+    supervisors = {}
+    for pid, (background, proc, start, argv, seen) in deferred.items():
+        if background != "supervisor":
+            continue
+        home = seen["candidate"][2] if seen["candidate"] is not None else None
+        carried = _supervisor_sessions(home, pid, start) if quiet(seen) else None
+        if carried is not None:
+            supervisors[pid] = (start, home)
+            seen["holders"].update(carried)
+            seen["claim"] = (None, frozenset(carried)) if carried else None
+            seen["reasons"].discard("session-identity-unresolved")
+            rechecks.append(lambda home=home, pid=pid, start=start:
+                            _supervisor_lock_names(home, pid, start))
+        commit(pid, seen)
+
+    def pty_tail(argv):
+        tail = argv[argv.index("--", 2) + 1:]
+        return tail if tail and _native_claude_executable(tail[0]) else None
+
+    waiting = {}
+    for pid, (background, proc, start, argv, seen) in deferred.items():
+        if background != "spare":
+            continue
+        claim = argv[2]
+        parent = _process_parent(proc)
+        host = deferred.get(parent[0]) if parent is not None and parent[1] == start else None
+        verified = False
+        if (quiet(seen) and os.path.isabs(claim) and claim.endswith(".claim.sock")
+                and os.path.basename(os.path.dirname(claim)) == "spare"
+                and host is not None and host[0] == "pty-host"
+                and host[4]["namespace"] == seen["namespace"]
+                and (pty_tail(host[3]) or [None])[1:] == ["--bg-spare", claim]):
+            grandparent = _process_parent(host[1])
+            supervisor = supervisors.get(grandparent[0]) if grandparent is not None else None
+            home = seen["candidate"][2]
+            verified = (supervisor is not None and grandparent[1] == host[2]
+                        and supervisor[1] == home
+                        and _spare_waiting(proc, home, pid, start, claim))
+            if verified:
+                waiting[pid] = (seen["namespace"], start, argv)
+                rechecks.append(lambda proc=proc, home=home, pid=pid, start=start, claim=claim:
+                                _spare_waiting(proc, home, pid, start, claim))
+        commit(pid, seen, repeats_child=verified)
+
+    def explained_pty_host(pid, proc, start, argv, seen):
+        """A direct child running this host's exact command, confirmed or waiting."""
+        own = _process_parent(proc)
+        tail = pty_tail(argv)
+        if (not claims_nothing_itself(seen) or seen["namespace"] != host_namespace
+                or own is None or own[1] != start or tail is None):
+            return False
+        for child, (namespace, child_start, child_argv) in (*confirmed.items(), *waiting.items()):
+            if (namespace == seen["namespace"] and child_argv[1:] == tail[1:]
+                    and (child_argv[0] == tail[0]
+                         or (child_argv[0] == "claude bg-spare" and tail[1:2] == ["--bg-spare"]))
+                    and _process_parent(root / child) == (pid, child_start)):
+                return True
+        return False
+
+    for pid, (background, proc, start, argv, seen) in deferred.items():
+        if background == "pty-host":
+            commit(pid, seen, repeats_child=explained_pty_host(pid, proc, start, argv, seen))
 
     def confirmed_shell_child(pid, start, argv, seen):
         """A direct native child with this wrapper's exact argv tail and namespace."""
@@ -823,6 +1027,9 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                             and (native_exe or _claude_shaped_argv(argv))):
                         final_candidates[pid] = start
             if final_candidates != {pid: item[0] for pid, item in candidates.items()}:
+                reasons.add("process-inventory-changed")
+            elif not all(check() for check in rechecks):
+                # A supervisor lost its lock or a spare took a session meanwhile.
                 reasons.add("process-inventory-changed")
         except OSError:
             reasons.add("closing-inventory-unavailable")

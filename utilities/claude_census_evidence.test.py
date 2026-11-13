@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Claude host census: Hearting's own session-shell wrapper and ``--fork-session``.
+"""Claude host census: session-shell wrapper, ``--fork-session`` and Claude Code's daemon.
 
 The wrapper repeats its native Claude child's argv, so it stops blocking the
 census only while that child is confirmed by its own native session record.
 ``--fork-session`` with ``--session-id`` runs the named id, not the resumed one.
+Claude Code's background supervisor holds every session its jobs name; its
+waiting spare and pty host stop blocking only on exact evidence.
 Every case that could read a live session as ended stays incomplete or alive.
 """
 import os, sys  # noqa: E401
@@ -13,6 +15,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import json
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -255,6 +258,242 @@ class ForkSessionTest(CensusFixture):
         self.assertTrue(complete, reasons)
         self.assertEqual(holders, {FORK})
         self.assertEqual(self.state(OLD), "ended")
+
+
+BG, BG2 = ("44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555")
+SPARE_TITLE, PTY_TITLE = "claude bg-spare", "claude bg-pty-host"
+
+
+class BackgroundSupervisorTest(CensusFixture):
+    """Claude Code's ``daemon run`` supervisor, its ``--bg-pty-host`` and ``--bg-spare``."""
+
+    def setUp(self):
+        super().setUp()
+        self.sockets = self.home.parent / "cc-daemon" / "spare"
+        self.sockets.mkdir(parents=True)
+
+    def supervisor(self, pid=10, *, lock_pid=None, lock_start=None):
+        self.claude(pid, ["daemon", "run", "--json-path", str(self.home / "daemon.json")])
+        if lock_pid is not False:
+            (self.home / "daemon.lock").write_text(json.dumps(
+                {"pid": lock_pid or pid, "procStart": str(lock_start or pid), "version": "2.1.323"}))
+
+    def job(self, short, sid, state="working"):
+        (self.home / "jobs" / short).mkdir(parents=True)
+        (self.home / "jobs" / short / "state.json").write_text(
+            json.dumps({"state": state, "sessionId": sid}))
+
+    def spare(self, host_pid, spare_pid, *, parent=10, waiting=True, short="aaaa1111"):
+        claim = str(self.sockets / f"{short}.claim.sock")
+        self.process(host_pid, [PTY_TITLE, "--bg-pty-host", str(self.sockets / f"{short}.pty.sock"),
+                                "200", "50", "--", NATIVE_EXE, "--bg-spare", claim],
+                     exe=NATIVE_EXE, ppid=parent)
+        proc = self.process(spare_pid, [SPARE_TITLE, "--bg-spare", claim], exe=NATIVE_EXE, ppid=host_pid)
+        if waiting:
+            os.mknod(claim, stat.S_IFSOCK | 0o600)
+            os.symlink(str(self.sockets), proc / "cwd")
+        else:  # taking a session: the claim socket is gone and it moved to the work tree
+            os.symlink(str(self.home.parent), proc / "cwd")
+        return claim
+
+    def idle_supervisor(self):
+        self.supervisor()
+        self.spare(20, 21)
+        self.job("bbbb2222", BG, state="stopped")
+        self.history(OLD, BG)
+
+    def test_idle_supervisor_and_waiting_spare_no_longer_block_ended_sessions(self):
+        self.idle_supervisor()
+        complete, holders, reasons = self.census()
+        self.assertTrue(complete, reasons)
+        self.assertEqual(holders, {BG}, "every job the supervisor may carry stays held")
+        self.assertEqual(holders.process_claims, ((None, frozenset({BG})),))
+        self.assertEqual(self.state(OLD), "ended")
+        self.assertEqual(self.state(BG), "alive")
+
+    def test_session_between_workers_stays_alive_through_the_job_record(self):
+        # A respawn stops the old worker, its job reads "stopped" and no process or
+        # roster entry names the session until a spare takes it about 0.1 s later.
+        self.idle_supervisor()
+        self.job("cccc3333", BG2, state="stopped")
+        self.history(OLD, BG, BG2)
+        complete, holders, reasons = self.census()
+        self.assertTrue(complete, reasons)
+        self.assertEqual(holders, {BG, BG2})
+        self.assertEqual(self.state(BG2), "alive")
+        self.assertEqual(self.state(OLD), "ended")
+
+    def test_supervisor_restart_and_unproven_supervisor_stay_incomplete(self):
+        cases = {
+            "lock not written yet": dict(lock_pid=False),
+            "lock names the next supervisor": dict(lock_pid=11),
+            "lock names an earlier process with this pid": dict(lock_start=999),
+        }
+        for name, case in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.supervisor(**case)
+                self.spare(20, 21)
+                self.history(OLD)
+                complete, _holders, reasons = self.census()
+                self.assertFalse(complete)
+                self.assertIn("session-identity-unresolved", reasons)
+                self.assertEqual(self.state(OLD), "unknown")
+
+    def test_unreadable_job_record_keeps_the_supervisor_unresolved(self):
+        def empty_job():
+            (self.home / "jobs" / "dddd4444").mkdir(parents=True)
+
+        def malformed_job():
+            empty_job()
+            (self.home / "jobs" / "dddd4444" / "state.json").write_text("{")
+
+        def linked_job():
+            (self.home / "jobs").mkdir(parents=True, exist_ok=True)
+            os.symlink(str(self.home), self.home / "jobs" / "dddd4444")
+
+        for make in (empty_job, malformed_job, linked_job):
+            with self.subTest(make.__name__):
+                self.setUp()
+                self.idle_supervisor()
+                make()
+                complete, _holders, reasons = self.census()
+                self.assertFalse(complete)
+                self.assertIn("session-identity-unresolved", reasons)
+                self.assertEqual(self.state(OLD), "unknown")
+
+    def test_spare_that_took_a_session_stays_incomplete_until_its_native_record(self):
+        self.supervisor()
+        self.spare(20, 21, waiting=False)
+        self.job("bbbb2222", BG)
+        self.history(OLD, BG)
+        complete, holders, reasons = self.census()
+        self.assertFalse(complete)
+        self.assertIn("session-identity-unresolved", reasons)
+        self.assertEqual(self.state(BG), "alive")
+        self.assertEqual(self.state(OLD), "unknown")
+
+        self.native_record(21, BG)  # the spare now runs the session itself
+        complete, holders, reasons = self.census()
+        self.assertTrue(complete, reasons)
+        self.assertEqual(holders, {BG})
+        self.assertEqual(self.state(BG), "alive")
+        self.assertEqual(self.state(OLD), "ended")
+
+    def test_spare_without_its_exact_host_and_supervisor_stays_incomplete(self):
+        def orphan_host():  # the supervisor stopped; its pty host now belongs to init
+            self.supervisor()
+            self.spare(20, 21, parent=1)
+
+        def no_supervisor():
+            self.process(10, ["/bin/sh"], exe="/bin/sh")
+            self.spare(20, 21)
+
+        def other_claim_socket():
+            self.supervisor()
+            claim = self.spare(20, 21)
+            other = self.sockets / "eeee5555.claim.sock"
+            os.mknod(other, stat.S_IFSOCK | 0o600)
+            (self.root / "21" / "cmdline").write_bytes(
+                b"\0".join(a.encode() for a in [SPARE_TITLE, "--bg-spare", str(other)]) + b"\0")
+            self.assertNotEqual(claim, str(other))
+
+        def socket_not_bound_yet():
+            self.supervisor()
+            claim = self.spare(20, 21)
+            os.unlink(claim)
+
+        def outside_its_spare_directory():
+            self.supervisor()
+            self.spare(20, 21)
+            os.unlink(self.root / "21" / "cwd")
+            os.symlink(str(self.home.parent), self.root / "21" / "cwd")
+
+        for make in (orphan_host, no_supervisor, other_claim_socket, socket_not_bound_yet,
+                     outside_its_spare_directory):
+            with self.subTest(make.__name__):
+                self.setUp()
+                make()
+                self.history(OLD)
+                complete, _holders, reasons = self.census()
+                self.assertFalse(complete)
+                self.assertIn("session-identity-unresolved", reasons)
+                self.assertEqual(self.state(OLD), "unknown")
+
+    def test_spare_taking_a_session_during_the_census_is_caught_when_it_closes(self):
+        self.idle_supervisor()
+        claim = str(self.sockets / "aaaa1111.claim.sock")
+        real = claude_process_identity._runtime_identity
+        calls = []
+
+        def identity(proc):
+            if Path(proc).name == "21":
+                calls.append(proc)
+                if len(calls) == 2 and os.path.exists(claim):  # the closing inventory
+                    os.unlink(claim)
+            return real(proc)
+
+        with mock.patch.object(claude_process_identity, "_runtime_identity", side_effect=identity):
+            complete, holders, reasons = self.census()
+        self.assertFalse(complete)
+        self.assertEqual(reasons, {"process-inventory-changed"})
+        self.assertIn(BG, holders)
+
+    def test_old_pty_host_over_a_confirmed_session_is_explained_by_its_child(self):
+        tail = [NATIVE_EXE, "--session-id", LIVE, "--fork-session", "--resume",
+                str(self.home / "projects" / "p" / (OLD + ".jsonl")), "--permission-mode", "default"]
+        self.process(30, [PTY_TITLE, "--bg-pty-host", "/tmp/cc-daemon-1/x/pty/b8.sock", "200", "50",
+                          "--", *tail], exe=NATIVE_EXE + " (deleted)", ppid=1)
+        self.process(31, tail, exe=NATIVE_EXE + " (deleted)", ppid=30)
+        self.native_record(31, LIVE)
+        self.history(OLD, LIVE)
+        complete, holders, reasons = self.census()
+        self.assertTrue(complete, reasons)
+        self.assertEqual(holders, {LIVE})
+        self.assertEqual(self.state(LIVE), "alive")
+        self.assertEqual(self.state(OLD), "ended")
+
+    def test_old_pty_host_without_a_confirmed_child_stays_incomplete_and_alive(self):
+        tail = [NATIVE_EXE, "--session-id", LIVE, "--fork-session", "--resume", OLD]
+        cases = {"no child": False, "child without its native record": True,
+                 "child running other arguments": "other"}
+        for name, child in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.process(30, [PTY_TITLE, "--bg-pty-host", "/tmp/s.sock", "200", "50", "--", *tail],
+                             exe=NATIVE_EXE, ppid=1)
+                if child:
+                    self.process(31, tail if child is True else [NATIVE_EXE], exe=NATIVE_EXE, ppid=30)
+                if child == "other":
+                    self.native_record(31, BG)
+                self.history(OLD, LIVE)
+                complete, holders, reasons = self.census()
+                self.assertFalse(complete)
+                self.assertIn("session-identity-unresolved", reasons)
+                self.assertIn(LIVE, holders)
+                self.assertEqual(self.state(LIVE), "alive")
+                self.assertEqual(self.state(OLD), "unknown")
+
+    def test_same_session_in_a_job_and_two_processes_stays_alive_when_one_worker_goes(self):
+        self.supervisor()
+        self.spare(20, 21, waiting=False)
+        self.native_record(21, BG)
+        self.job("bbbb2222", BG)
+        self.claude(40, ["--resume", BG])
+        self.native_record(40, BG)
+        self.history(OLD, BG)
+        complete, holders, reasons = self.census()
+        self.assertTrue(complete, reasons)
+        self.assertEqual(holders, {BG})
+        self.assertEqual(self.state(BG), "alive")
+
+        shutil.rmtree(self.root / "21")  # the worker exits; its pty host is left alone
+        complete, holders, reasons = self.census()
+        self.assertFalse(complete)
+        self.assertIn("session-identity-unresolved", reasons)
+        self.assertIn(BG, holders)
+        self.assertEqual(self.state(BG), "alive")
+        self.assertEqual(self.state(OLD), "unknown")
 
 
 if __name__ == "__main__":
