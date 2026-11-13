@@ -1187,6 +1187,79 @@ class WorkerFolderTest(RunnerCase):
         self.assertFalse(mine.exists())
         self.assertTrue(other.exists())
 
+    def run_two_with_the_first_folder_unreachable(self, fail_first):
+        """The first batch's worker folder cannot be reached once its notice is left (its parent
+        loses every permission bit): that entry still ends, says the copy may be left, and the next
+        entry in the queue is still processed by the same runner."""
+        if os.geteuid() == 0:
+            self.skipTest("root is not stopped by directory permissions")
+        other = self.iso.root / "proj-b"
+        other.mkdir()
+        with self.iso.patched_environ(self.env()):
+            seat = st.resolve_seat("claude", str(self.cwd), os.environ)
+            folders, qids = {}, []
+            for n, cwd in enumerate((self.cwd, other)):
+                qid = f"tidy-2026111300000{n}-00000{n}"
+                folder = cwd / ".agent_reports" / ".runtime" / "session-tidy" / qid
+                folder.mkdir(parents=True)
+                for name in ("input_v1.json", "prompt.md", "actions.json"):
+                    (folder / name).write_text("synthetic", encoding="utf-8")
+                folders[qid] = folder
+                qids.append(qid)
+                runner.write_item({"schema": runner.SCHEMA, "id": qid, "created": runner._now() + n,
+                                   "status": "queued", "updated": runner._now(), "seat": seat.as_dict(),
+                                   "harness": "claude", "sid": f"sid-{n}", "cwd": str(cwd),
+                                   "transcript": "", "attempts": 0})
+            first, second = qids
+            blocked = folders[first].parent
+
+            def assemble(row, _batch, run_dir):
+                for name in ("input_v1.json", "prompt.md"):
+                    (run_dir / name).write_text("synthetic", encoding="utf-8")
+                return SimpleNamespace(empty=False, unreadable=[], exchange=folders[row["id"]])
+
+            def apply(row, _run_dir, _bundle):
+                if fail_first and row["id"] == first:
+                    raise runner.RunnerFailure("synthetic failure")
+                return "applied"
+
+            def notify(row, _text):
+                if row["id"] == first:
+                    blocked.chmod(0)
+
+            try:
+                with mock.patch.object(runner, "assemble", side_effect=assemble), \
+                        mock.patch.object(runner, "prepare_exchange", side_effect=lambda r, _b, bundle: bundle.exchange), \
+                        mock.patch.object(runner, "dispatch_worker", return_value={"attempt_id": "attempt"}), \
+                        mock.patch.object(runner, "wait_worker"), \
+                        mock.patch.object(runner, "validate_actions"), \
+                        mock.patch.object(runner, "apply_actions", side_effect=apply), \
+                        mock.patch.object(runner, "advance_watermarks"), \
+                        mock.patch.object(runner, "publish_memory"), \
+                        mock.patch.object(runner, "coverage_note", return_value=""), \
+                        mock.patch.object(runner, "notify", side_effect=notify):
+                    self.assertEqual(runner.run(first), 0)
+            finally:
+                blocked.chmod(0o700)
+                (self.state / "queue" / f"{first}.pid").unlink(missing_ok=True)   # this test's own pid
+            ended, after = runner.read_item(first), runner.read_item(second)
+        self.assertEqual(ended["status"], "failed" if fail_first else "notified", ended)
+        self.assertEqual(ended["cleanup"], "incomplete", ended)
+        self.assertIn("cleanup incomplete", (self.state / "runs" / first / "runner.log").read_text(encoding="utf-8"))
+        for name in ("input_v1.json", "prompt.md"):
+            self.assertFalse((self.state / "runs" / first / name).exists(), name)   # what could go, went
+        self.assertTrue((folders[first] / "input_v1.json").is_file())             # the record is honest
+        self.assertTrue((folders[first] / "actions.json").is_file())
+        self.assertEqual(after["status"], "notified", after)                        # the queue was not stuck
+        self.assertNotIn("cleanup", after)
+        self.assertFalse(folders[second].exists())
+
+    def test_an_unreachable_folder_after_a_clean_finish_still_ends_the_entry_and_the_queue_goes_on(self):
+        self.run_two_with_the_first_folder_unreachable(fail_first=False)
+
+    def test_an_unreachable_folder_after_a_failure_still_ends_the_entry_and_the_queue_goes_on(self):
+        self.run_two_with_the_first_folder_unreachable(fail_first=True)
+
 
 class TailFirstRunTest(RunnerCase):
     """A long record: the recent decision is in the first input, later tidies work backwards."""
