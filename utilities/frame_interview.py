@@ -923,10 +923,50 @@ def _inline(text: str) -> str:
     return " ".join(_text(text).split())
 
 
+USER_ANSWER_PRECEDENCE = (
+    "The user's answers take precedence over the proposed outcome, completion conditions, "
+    "decomposition and frame briefs below. Keep the chosen scope; conflicting proposal text "
+    "does not authorize additional work."
+)
+
+
+def _explicit_fields(text):
+    """Only whole key: value/key=value clauses; never guess conflicts from prose."""
+    fields = {}
+    for clause in re.split(r"[;\n]", str(text or "")):
+        match = re.fullmatch(r"\s*([\w.-]+)\s*[:=]\s*(\S.*?)\s*", clause)
+        if match:
+            fields[match[1]] = match[2]
+    return fields
+
+
+def _answer_fields(interview, answers):
+    if answer_actor_kind(answers) != "user":
+        return {}
+    fields = {}
+    given = answers.get("answers") or {}
+    for question in interview.get("questions") or []:
+        entry = given.get(question.get("id")) or {}
+        choice = entry.get("choice")
+        options = question.get("options") or []
+        if type(choice) is int and 0 <= choice < len(options):
+            fields.update(_explicit_fields(options[choice].get("means")))
+        fields.update(_explicit_fields(entry.get("note")))
+    fields.update(_explicit_fields(answers.get("correction")))
+    return fields
+
+
+def _proposal_conflicts(text, fields):
+    return [f"Conflict for `{_inline(key)}`: proposal `{_inline(value)}`; "
+            f"user `{_inline(fields[key])}`. The user's answer takes precedence."
+            for key, value in _explicit_fields(text).items()
+            if key in fields and fields[key] != value]
+
+
 def render_intent(interview: dict, answers: dict, *, now: str | None = None, approval_scope=None) -> str:
     """The agreed intent document `plan` reads first. Plain sections in the
-    order intent.md uses (Problem, Proposed Outcome, Affected, Constraints,
-    Decisions, Open Questions), every decision traceable to its question."""
+    order intent.md uses (Decisions before proposal context), every decision
+    traceable to its question."""
 
     stamp = now or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     brief = interview.get("brief") if isinstance(interview.get("brief"), dict) else {}
@@ -950,6 +990,7 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
         "",
         "# Intent",
         "",
+        *([USER_ANSWER_PRECEDENCE, ""] if human else []),
         "## Confirmed understanding" if human else
         "## Confirmed understanding (on the person's behalf)" if on_behalf else "## Recorded understanding",
         "",
@@ -957,12 +998,6 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
     ]
     if not confirmed:
         lines += ["", f"**{speaker}'s correction:** " + (_inline(answers.get("correction")) or "-")]
-    section = {
-        "problem": "Problem", "outcome": "Proposed Outcome",
-        "affected": "Affected Users / Systems", "constraints": "Constraints",
-    }
-    for field, title in section.items():
-        lines += ["", f"## {title}", "", _inline(brief.get(field)) or "-"]
     lines += ["", "## Decisions", ""]
     questions = [q for q in interview.get("questions", []) if isinstance(q, dict)]
     if not questions:
@@ -992,6 +1027,13 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
         note = _inline(entry.get("note"))
         if note:
             lines.append(f"  - {speaker}'s note: {note}")
+    section = {
+        "problem": "Problem", "outcome": "Proposed Outcome",
+        "affected": "Affected Users / Systems", "constraints": "Constraints",
+    }
+    for field, title in section.items():
+        lines += ["", f"## {title}", "", _inline(brief.get(field)) or "-"]
+        lines += _proposal_conflicts(brief.get(field), _answer_fields(interview, answers))
     if "route_proposals" in interview:
         lines += _route_lines(interview, answers, approval_scope or {})
     lines += ["", "## Open Questions", "", _inline(brief.get("open")) or "None recorded."]
@@ -1011,12 +1053,17 @@ def _route_lines(interview: dict, answers: dict, scope: dict) -> list[str]:
                   "unanswered": "the route question was not answered"}.get(choice["state"], "no route was proposed")
         return lines + [f"No route was selected ({reason}); no step starts automatically and the next route is chosen separately."]
     lines.append(f"Selected route: {_inline(proposal.get('summary')) or '-'}")
+    fields = _answer_fields(interview, answers)
+    lines += _proposal_conflicts(proposal.get("summary"), fields)
     lines.append(f"Execution scope: {proposal.get('execution_scope', 'complete')}")
     for index, leg in enumerate(proposal.get("legs") or []):
         graph = ",".join(leg.get("graph") or []) or "whole recipe"
         size = f" (size {leg['size']})" if leg.get("size") else ""
         lines.append(f"- Leg {index}: {leg.get('capability')} / {leg.get('mode') or 'default mode'} / "
                      f"{leg.get('shape')}{size} / {graph}" + ("  (starts now)" if index == 0 else "  (next step, decided separately)"))
+        for condition in leg.get("done_when") or []:
+            text = condition.get("text") if isinstance(condition, dict) else condition
+            lines += _proposal_conflicts(text, fields)
     given = approvals_given(interview, answers, proposal)
     if given:
         lines += ["", "Start approvals:"]

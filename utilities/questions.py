@@ -30,6 +30,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -250,7 +251,23 @@ def _find(board, wanted):
              if isinstance(item, dict) and item.get("id") == wanted]
     if exact:
         return exact[0], None
-    return None, "no open question has exactly this id; copy the full id from the list"
+    closed = HWS.closed_question(wanted)
+    if closed:
+        return None, _closed_text(wanted, closed)
+    return None, "no recorded question has exactly this id; history may be unavailable; copy the full id from the list"
+
+
+def _closed_text(item_id, closed):
+    status = closed.get("status", "closed")
+    detail = " (reason unavailable)" if status == "closed" else ""
+    stamp = closed.get("at")
+    if isinstance(stamp, (int, float)):
+        try:
+            when = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            detail += ("; observed at " if closed.get("observed") else "; at ") + when
+        except (ValueError, OverflowError, OSError):
+            pass
+    return f"{item_id} is closed: {status}{detail}"
 
 
 def _answer_values(value):
@@ -294,6 +311,9 @@ def build_response(envelope, *, choices=(), text=None, decision=None, answers=No
 
 def _answer(args):
     board = load_board()
+    if board is None and (closed := HWS.closed_question(args.id)):
+        print("questions: " + _closed_text(args.id, closed), file=sys.stderr)
+        return 2
     if board is None:
         print("questions: unknown · the shared answer-wait observation is not available yet",
               file=sys.stderr)
@@ -316,6 +336,10 @@ def _answer(args):
         return 2
     support = envelope.get("support") if isinstance(envelope.get("support"), dict) else {}
     if envelope.get("state") != "open" or support.get("supported") is not True:
+        closed = HWS.closed_question(args.id)
+        if closed and envelope.get("state") in {"applied", "cancelled", "expired"}:
+            print("questions: " + _closed_text(args.id, closed), file=sys.stderr)
+            return 2
         reason = support.get("reason") or envelope.get("reason") or envelope.get("state")
         print("questions: %s cannot be answered here (%s)" % (item["id"], reason), file=sys.stderr)
         return 2

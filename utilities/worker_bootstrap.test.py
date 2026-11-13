@@ -34,6 +34,19 @@ _OPA_SPEC.loader.exec_module(OPA)
 
 
 class WorkerBootstrapTest(unittest.TestCase):
+    def test_printed_stage_commands_follow_current_after_release_retirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "current/core").mkdir(parents=True)
+            (root / "current/core/CORE.md").touch()
+            old = root / "releases/old"
+            with mock.patch.object(W, "_REPO_ROOT", old):
+                commands = [W.route_start_command("/route with spaces", "execute"),
+                            W.inline_complete_command("execute", "/evidence with spaces")]
+            for command in commands:
+                self.assertNotIn(str(old), command)
+                self.assertTrue(shlex.split(command)[1].startswith(str(root / "current/utilities")))
+
     def test_review_followup_uses_bound_result_and_quoted_same_start(self):
         import review_input
         import review_source_subject

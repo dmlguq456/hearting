@@ -255,6 +255,59 @@ def _write_cache_value(value):
         return False
 
 
+def record_closed_question(item_id, status="closed", *, at=None):
+    """Body-free diagnostic history, never used by wait publication or answer authority."""
+    if (not isinstance(item_id, str) or len(item_id) > 512
+            or status not in {"answered", "cancelled", "expired", "replaced", "closed"}):
+        return False
+    try:
+        with _cache_write_lock():
+            value = _read_cache_file()
+            if value is None and _cache_path().exists():
+                return False
+            value = value or {"schema_version": 3, "observed_at": 0, "items": [],
+                              "by_session": {}, "complete": False}
+            history = value.get("closed_questions") or {}
+            history[item_id] = {"status": status, "at": time.time() if at is None else at}
+            value["closed_questions"] = dict(sorted(history.items(),
+                key=lambda row: row[1].get("at", 0))[-_SELECTED_RESPONSE_MAX:])
+            return _write_cache_value(value)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def closed_question(item_id):
+    """Read exact retained evidence only. Absence is not proof a question never existed."""
+    if not isinstance(item_id, str):
+        return None
+    projection = _read_cache_file() or {}
+    if item_id.startswith("S4:"):
+        for path in state_root().glob("*.json"):
+            if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
+                continue
+            signal = _read(path)
+            if (signal or {}).get("id") == item_id and signal.get("lifecycle") == "answered":
+                return {"status": "answered", "at": (signal.get("completion") or {}).get("at")}
+    overlay = projection.get("selected_responses", {})
+    if _valid_selected_overlay(overlay):
+        entries = [entry for entry in overlay.values() if entry.get("selected_id") == item_id]
+        for entry in sorted(entries, key=lambda row: row["updated_at"], reverse=True):
+            result = entry.get("result") or {}
+            status = {"applied": "answered", "cancelled": "cancelled", "expired": "expired"}.get(entry["state"])
+            if result.get("status") == "replaced":
+                status = "replaced"
+            if status:
+                return {"status": status, "at": entry["updated_at"], "observed": True}
+    if item_id.startswith("S1:"):
+        from tools.fleet import interaction
+        parts = item_id.split(":")
+        if len(parts) == 4:
+            current = interaction.read_wait(parts[2], parts[1])
+            if current and str(int(current["waiting_since"] * 1000)) == parts[3]:
+                return None  # the same display id can be open again; diagnostics grant no authority
+    return (projection.get("closed_questions") or {}).get(item_id)
+
+
 def _clean(value: str) -> str:
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(value))
     value = " ".join("".join(ch for ch in value if ch >= " " and ch != "\x7f").split())
@@ -1118,6 +1171,8 @@ def publish_cache(result: dict) -> bool:
                                   for row in result.get("health", ()) if isinstance(row, dict)]}
         with _cache_write_lock():
             previous = _read_cache_file()
+            if previous and previous.get("closed_questions"):
+                value["closed_questions"] = previous["closed_questions"]
             selected = previous.get("selected_responses", {}) if previous else {}
             if not _valid_selected_overlay(selected):
                 return False
