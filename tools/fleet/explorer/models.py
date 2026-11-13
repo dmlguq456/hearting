@@ -450,8 +450,7 @@ def _draw_supervisors(grid, census, limit, x, y, right):
                 continue
             name = holder.get("name") or str(holder.get("session_id") or "?")[:8]
             detail = (f"{name}: {holder.get('liveness', 'unknown')} · {holder.get('count_reason', 'unknown')} "
-                      f"· activity {holder.get('last_activity') or '?'} (role marker) "
-                      f"· seat {holder.get('seat_key') or '?'}")
+                      f"· activity {holder.get('last_activity') or '?'} (role marker)")
             grid.put(x + 22, y, detail, "dim", limit=right)
             y += 1
     if len(census) > 4:

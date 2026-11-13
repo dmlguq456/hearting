@@ -543,7 +543,7 @@ def unresolved_role_targets(harness, session_id, *, sessions=None):
 
 
 def role_flag(harness, session_id, *, aliases=(), markers=None, cwd=None, sessions=None,
-              _targets=None, _relations=None):
+              _targets=None, _relations=None, observation=None):
     """One display decision: exact self-role evidence or same-repository targets.
 
     The CLI's unknown/- sentinel is a flag on the current session, never a
@@ -561,7 +561,7 @@ def role_flag(harness, session_id, *, aliases=(), markers=None, cwd=None, sessio
         return False
     harness = str(harness or "").lower()
     end_proof = getattr(mod, "steward_session_end_proof", None)
-    if end_proof is not None and end_proof(harness, session_id) == "ended":
+    if end_proof is not None and end_proof(harness, session_id, observation=observation) == "ended":
         return False
     for sid in (session_id, *aliases):
         marker = markers.get((harness, sid))
@@ -1067,7 +1067,7 @@ def last_supervision():
     return _last_supervision
 
 
-def _record_supervision(context, markers, relations):
+def _record_supervision(context, markers, relations, *, observation=None):
     global _last_supervision
     if not relations:
         _last_supervision = {}
@@ -1080,7 +1080,7 @@ def _record_supervision(context, markers, relations):
     try:
         _last_supervision = supervision_by_repository(
             context, limit=_steward_limit(), markers=markers, relations=relations, agents=agents,
-            observation=end_observation())
+            observation=end_observation() if observation is None else observation)
     except Exception:
         _last_supervision = None
 
@@ -1100,7 +1100,8 @@ def enrich(sessions, markers=None):
     context = list(sessions) + [s for s in _registry_sessions()
                                 if not current_keys.intersection(_session_keys(s))]
     context += _native_role_sessions(markers, context, relations)
-    _record_supervision(context, markers, relations)
+    observation = end_observation()
+    _record_supervision(context, markers, relations, observation=observation)
     mod = _peer_message_module()
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     if evidence is None:
@@ -1118,7 +1119,7 @@ def enrich(sessions, markers=None):
                                _relations=relations)
         s.steward = role_flag(s.harness, s.session_id, markers=markers,
                               aliases=[sid for _harness, sid in keys[1:]], _targets=targets,
-                              _relations=relations)
+                              _relations=relations, observation=observation)
         if not targets:
             continue
         # `steward_evidence_targets` returns oldest-first — the stable order the

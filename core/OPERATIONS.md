@@ -2797,7 +2797,7 @@ holders leave the count. Existing roles, resumed sessions and confirmed successo
 roles even when that makes the count exceed the limit. A proven same-seat successor
 uses the non-live predecessor's place. `repo_supervision` owns this count for both
 Fleet and the shell. A limited grant shows each holder's liveness, reason, role
-marker activity and seat, and `steward off` in that holder's session or the
+marker activity, and `steward off` in that holder's session or the
 next normal check for proven-ended holders. Watch/start work still proceeds.
 Repository identity uses the git common directory; foreign targets remain communication.
 

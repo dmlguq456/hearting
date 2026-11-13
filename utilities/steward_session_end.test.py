@@ -34,6 +34,58 @@ class SessionEndTest(f.GrantFixture):
                 self.assertTrue(f.fleet_steward.role_flag(harness, sid, sessions=self.rows))
                 f.peer_message.observe_steward_end(harness, sid, reason='logout')
 
+    def test_live_role_without_receipt_never_scans_processes(self):
+        from fleet.collectors import procscan
+        for harness in ('claude', 'codex', 'opencode'):
+            with self.subTest(harness=harness):
+                sid = harness + '-live'
+                self.session(sid, self.primary, harness)
+                f.peer_message.grant_steward(harness, sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                             source='explicit', steward_seat=None)
+                path = f.peer_message.steward_marker_path(harness, sid)
+                marker = json.loads(path.read_text())
+                marker['session_process'] = dict(f.peer_message._steward_process_context(),
+                    pid=os.getpid(), pid_start=procscan.read_proc_start(os.getpid()))
+                self.assertNotIn('session_end', marker)
+                path.write_text(json.dumps(marker))
+                with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+                     mock.patch.object(f.peer_message, '_fleet_steward', return_value=f.fleet_steward), \
+                     mock.patch.object(f.fleet_steward, 'other_session_process_live') as other, \
+                     mock.patch.object(f.fleet_steward, '_process_proof') as census, \
+                     mock.patch.object(procscan, '_visible_pids') as scan:
+                    self.assertTrue(f.fleet_steward.role_flag(harness, sid, sessions=self.rows))
+                self.assertEqual((other.call_count, census.call_count, scan.call_count), (0, 0, 0))
+                f.peer_message.observe_steward_end(harness, sid, reason='logout')
+
+    def test_exit_evidence_still_checks_other_holder_with_shared_observation(self):
+        from fleet.collectors import procscan
+        import dispatch_contract
+        self.session('owner', self.primary)
+        self.grant('owner')
+        path = f.peer_message.steward_marker_path('claude', 'owner')
+        marker = json.loads(path.read_text())
+        process = dict(f.peer_message._steward_process_context(), pid=os.getpid(),
+                       pid_start=procscan.read_proc_start(os.getpid()))
+        observation = f.fleet_steward.end_observation()
+        for kind in ('receipt', 'dead', 'boot'):
+            for has_other in (False, True):
+                with self.subTest(kind=kind, has_other=has_other):
+                    marker.pop('session_end', None)
+                    marker['session_process'] = dict(process)
+                    if kind == 'receipt':
+                        marker['session_end'] = {'process': process}
+                    elif kind == 'boot':
+                        marker['session_process']['boot_id'] = 'previous-boot'
+                    path.write_text(json.dumps(marker))
+                    with mock.patch.object(f.peer_message, '_fleet_steward', return_value=f.fleet_steward), \
+                         mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+                         mock.patch.object(dispatch_contract, 'process_identity_disposition', return_value='dead'), \
+                         mock.patch.object(f.fleet_steward, 'other_session_process_live', return_value=has_other) as other:
+                        self.assertEqual(f.fleet_steward.role_flag('claude', 'owner',
+                            sessions=self.rows, observation=observation), has_other)
+                    other.assert_called_once_with('claude', 'owner',
+                        process if kind == 'receipt' else marker['session_process'], observation=observation)
+
     def test_other_registry_process_keeps_watch_for_three_harnesses(self):
         import subprocess
         from types import SimpleNamespace

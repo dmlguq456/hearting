@@ -5446,13 +5446,18 @@ def steward_session_end_proof(harness, session_id, *, observation=None):
     marker = _steward_marker(harness, session_id) or {}
     receipt = marker.get("session_end")
     process = receipt.get("process") if isinstance(receipt, dict) else marker.get("session_process")
-    if harness != "codex" and (receipt or process):
-        fleet = _fleet_steward()
-        if fleet and fleet.other_session_process_live(harness, session_id, process,
-                                                      observation=observation):
-            return "live"
-    if receipt:
+
+    def ended_unless_other_holder():
+        # A census can refute exit; it adds nothing when this birth is still live.
+        if harness != "codex":
+            fleet = _fleet_steward()
+            if fleet and fleet.other_session_process_live(harness, session_id, process,
+                                                          observation=observation):
+                return "live"
         return "ended"
+
+    if receipt:
+        return ended_unless_other_holder()
     if (not isinstance(process, dict) or not all(process.get(key) for key in
             ("host", "boot_id", "pid_namespace", "pid", "pid_start"))
             or type(process.get("pid")) is not int or process["pid"] <= 1):
@@ -5462,12 +5467,12 @@ def steward_session_end_proof(harness, session_id, *, observation=None):
         if process.get("host") != context["host"]:
             return "unknown"
         if process.get("boot_id") != context["boot_id"]:
-            return "ended"
+            return ended_unless_other_holder()
         if process.get("pid_namespace") != context["pid_namespace"]:
             return "unknown"
         from dispatch_contract import process_identity_disposition
         verdict = process_identity_disposition(int(process["pid"]), str(process["pid_start"]))
-        return "ended" if verdict == "dead" else "unknown"
+        return ended_unless_other_holder() if verdict == "dead" else "unknown"
     except (OSError, KeyError, TypeError, ValueError):
         return "unknown"
 
