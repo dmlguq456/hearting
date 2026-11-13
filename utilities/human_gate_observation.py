@@ -1,6 +1,8 @@
 """Read-only projection of unanswered human-gate decisions for Fleet."""
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import math
@@ -39,9 +41,9 @@ _S1_LOG_CHUNK_BYTES = 64 * 1024
 def _stamp(path):
     """Stable identity for an existing or missing input; never follows symlinks."""
     try:
-        meta = Path(path).lstat()
+        meta = os.lstat(path)
         return (meta.st_dev, meta.st_ino, meta.st_mtime_ns, meta.st_ctime_ns, meta.st_size)
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return None
 
 
@@ -57,17 +59,38 @@ def _cached(cache, key, loader):
     return value
 
 
-def _generation_candidates(view):
-    """Compile only indexed route/owner candidates once per registry generation."""
-    generation_key = (view.path_identity, view.signature)
-    cached = _GENERATION_CACHE.get(generation_key)
-    if cached is not None:
-        _GENERATION_CACHE.move_to_end(generation_key)
-        return cached
+# Partial results of ``_generation_candidates``, one per registry segment, keyed by the identity of
+# the segment's ``records`` tuple. A segment's owner and route-alias rows are a pure function of
+# its records (their fields, their orders), and a segment that a rewrite recognised again shares
+# its predecessor's ``records`` object (``_RegistrySegment.resynced``), so the same object means the
+# same bytes at the same orders. Each held entry keeps its ``records`` alive, so the id cannot be
+# reused for another tuple. Per path only the current generation's segments are held.
+_SEGMENT_PARTS = {}
+_METRICS = {"generation_segment_builds": 0, "generation_segment_reuses": 0}
+
+
+def metrics_snapshot():
+    return dict(_METRICS)
+
+
+def _route_key_of(meta):
+    return (meta.get("owner_route_id") or meta.get("route_id"),
+            meta.get("owner_route_hash") or meta.get("route_hash"),
+            meta.get("owner_route_file") or meta.get("route_file"))
+
+
+def _merged_activity(old, new):
+    """The later of two activity times, ignoring a time that is not finite (nan when neither is)."""
+    return (old if not math.isfinite(new) else new
+            if not math.isfinite(old) else max(new, old))
+
+
+def _segment_candidates(segment):
+    """Owner and route-alias candidates of one registry segment: ``(owners, first_order, successors, routes)``."""
     owners = {}
     first_order = {}
     successors = set()
-    for row in view.answer_wait_owner_candidates():
+    for row in segment.observation_owners:
         parsed = row.completion_metadata()
         meta = {key: parsed[key] for key in _OBSERVATION_META_KEYS if key in parsed}
         attempt = meta.get("attempt_id")
@@ -81,7 +104,12 @@ def _generation_candidates(view):
                           ("automatic_retry_of", "replacement_original_attempt_id", "prior_attempt_id")
                           if meta.get(name))
     routes = {}
-    for row in view.route_alias_candidates():
+    selected = {}
+    for rows in segment.completion_by_route_alias.values():
+        for row in rows:
+            selected[row.order] = row
+    for order in sorted(selected):
+        row = selected[order]
         parsed = row.completion_metadata()
         meta = {key: parsed[key] for key in _OBSERVATION_META_KEYS if key in parsed}
         route_file = meta.get("owner_route_file") or meta.get("route_file")
@@ -102,11 +130,59 @@ def _generation_candidates(view):
         route_key = (route_id, digest, route_file)
         previous = routes.get(route_key)
         if previous:
-            old_activity = previous[2]
-            activity = (old_activity if not math.isfinite(activity) else activity
-                        if not math.isfinite(old_activity) else max(activity, old_activity))
+            activity = _merged_activity(previous[2], activity)
         routes[route_key] = (row, meta, activity)
-    result = (owners, first_order, successors, routes)
+    return owners, first_order, successors, routes
+
+
+def _generation_candidates(view):
+    """Compile only indexed route/owner candidates once per registry generation.
+
+    A new generation merges its segments' partial results in file order, and builds only the
+    segments it has not seen: the later segment wins for an attempt or a route, an attempt's first
+    order is its earliest, a route's activity is the latest finite one (``_merged_activity`` is
+    associative, so folding segment by segment equals folding row by row). The fifth item answers
+    the S3 "no later owner on the same route" question in one lookup: per route triple, the
+    greatest first order of any owner attempt on it. Order is the line number of a registry row,
+    unique within one generation, so "another owner began after this one" is "the greatest first
+    order on the route exceeds this owner's own".
+    """
+    generation_key = (view.path_identity, view.signature)
+    cached = _GENERATION_CACHE.get(generation_key)
+    if cached is not None:
+        _GENERATION_CACHE.move_to_end(generation_key)
+        return cached
+    held = _SEGMENT_PARTS.get(view.path_identity) or {}
+    current = {}
+    owners = {}
+    first_order = {}
+    successors = set()
+    routes = {}
+    for segment in view._segments:
+        key = id(segment.records)
+        entry = held.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _segment_candidates(segment))
+            _METRICS["generation_segment_builds"] += 1
+        else:
+            _METRICS["generation_segment_reuses"] += 1
+        current[key] = entry
+        part_owners, part_first, part_successors, part_routes = entry[1]
+        owners.update(part_owners)
+        for attempt, order in part_first.items():
+            first_order.setdefault(attempt, order)
+        successors.update(part_successors)
+        for route_key, (row, meta, activity) in part_routes.items():
+            previous = routes.get(route_key)
+            routes[route_key] = (row, meta, _merged_activity(previous[2], activity) if previous else activity)
+    _SEGMENT_PARTS[view.path_identity] = current
+    latest_start = {}
+    for attempt, (_status, meta, _fields, _order, _row) in owners.items():
+        route_key = _route_key_of(meta)
+        started = first_order[attempt]
+        if started > latest_start.get(route_key, -1):
+            latest_start[route_key] = started
+    result = (owners, first_order, successors, routes, latest_start)
     _GENERATION_CACHE[generation_key] = result
     _GENERATION_CACHE.move_to_end(generation_key)
     while len(_GENERATION_CACHE) > _GENERATION_LIMIT:
@@ -361,12 +437,31 @@ def _frame_question_detail(route, jobs, gate_id):
     return None, [], None
 
 
+def _note_gate_reads(sink, question_path, artifact_root=None):
+    """Add a frame-review artifact, its two answer files and (when given) the root it must lie
+    in to ``sink`` with their identities, each once; a missing one is kept as missing."""
+    if sink is None:
+        return
+    known = {read for read, _identity in sink}
+    paths = [question_path, question_path.parent / "answers.native.json",
+             question_path.parent / "answers.json"]
+    if artifact_root is not None:
+        paths.append(Path(artifact_root))
+    for read in paths:
+        if read not in known:
+            known.add(read)
+            sink.append((read, _stamp(read)))
+
+
 def pending_human_waits(route, *, jobs, outcome=None):
     """Return unresolved raised gates as private route/gate ids and public-safe fields.
 
     This reads only the exact route's registry-selected workflow journal and, for
     frame-review, answer files beside the artifact named by the latest raise.
-    It never repairs ledger state or changes gate state.
+    It never repairs ledger state or changes gate state. A caller that keeps the result can
+    name what it depends on: ``_WAIT_READS`` collects ``(path, identity)`` of every file besides
+    the journal this call looked at (a frame-review artifact and its two answer files, as named
+    and as resolved, and the artifact root), including one that was missing or refused.
     """
     if not isinstance(route, dict) or not route.get("route_id") or not route.get("route_hash"):
         return []
@@ -412,9 +507,16 @@ def pending_human_waits(route, *, jobs, outcome=None):
         if gate == "frame-review":
             artifact = resolution.get("artifact")
             artifact_root = route.get("artifact_root")
+            sink = _WAIT_READS.get()
+            if artifact and artifact_root:
+                # Identified before the path check, so a gate file that is missing or refused now
+                # is an input too: its appearance (an archived interview restored) is seen next time.
+                _note_gate_reads(sink, Path(artifact), artifact_root)
             if artifact and artifact_root and _inside(artifact, artifact_root):
                 try:
                     question_path = Path(artifact).resolve(strict=True)
+                    # Identified before they are read, so a change after the read is seen next time.
+                    _note_gate_reads(sink, question_path)
                     digest = resolution.get("artifact_sha256")
                     current = not digest or hashlib.sha256(question_path.read_bytes()).hexdigest() == digest
                     if current and FI.is_interview(_json_file(question_path)):
@@ -427,6 +529,87 @@ def pending_human_waits(route, *, jobs, outcome=None):
         gates.append({"gate_id": gate, "kind": "decision", "source": "hearting-ledger",
                       "waiting_since": waiting_since, "route_id": route["route_id"]})
     return gates
+
+
+# The S2 judgment of one route (``pending_human_waits``) is a pure function of its sealed record, the
+# route's outcome sidecars, its workflow journal and, for a raised frame-review gate, the artifact and
+# the two answer files. Every one of those is a file read through its exact identity (``_stamp``: device,
+# inode, mtime, ctime, size), so a result is kept together with those identities and reused while all of
+# them are found again, and computed anew as soon as one differs. The record itself is not kept (it is
+# covered by its file's identity, and ``_ROUTE_OUTCOME_CACHE`` holds it for the few routes that need it),
+# so the number of routes a pass can answer from memory does not depend on that cache's size.
+# Time, process liveness and lineage are not inputs; the caller still computes them every pass.
+# One entry per route triple; entries the latest full pass did not see are dropped.
+_WAIT_MEMO = {}
+_WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
+_METRICS["route_wait_recomputes"] = 0
+_METRICS["route_wait_reuses"] = 0
+
+
+def _route_file_paths(route_file, record, route_id):
+    """The files ``_route_outcome`` keys on, as plain strings: record, outcome sidecar, inline-finish file."""
+    route_path = Path(route_file)
+    artifact_root = record.get("artifact_root") if record else None
+    finish = (str(Path(artifact_root) / ".runtime" / "inline-finish" / "v1" / str(route_id) / "finish.json")
+              if artifact_root else None)
+    return (str(route_path), str(route_path.with_name(route_path.stem + ".outcome.json")), finish)
+
+
+def _journal_file(route_key, ledger_root):
+    """The workflow journal this pass's registry selects for the route (None without a ledger root)."""
+    return str(Path(ledger_root) / str(route_key[0]) / "journal.jsonl") if ledger_root is not None else None
+
+
+def _kept_waits(route_key, path, ledger_root):
+    """The kept judgment of this route when every input is the file it was made from, else None."""
+    entry = _WAIT_MEMO.get(route_key)
+    if entry is None or ledger_root is None or entry[0] != str(path):
+        return None
+    _jobs_key, files, stamps, journal, journal_stamp, reads, waits = entry
+    # The same registry path can select another ledger (its directory now links elsewhere): the
+    # journal the judgment was made from must still be the one this pass selects.
+    if journal != _journal_file(route_key, ledger_root):
+        return None
+    if (_stamp(files[0]) != stamps[0] or _stamp(files[1]) != stamps[1]
+            or (files[2] is not None and _stamp(files[2]) != stamps[2])
+            or _stamp(journal) != journal_stamp
+            or any(_stamp(read) != stamp for read, stamp in reads)):
+        return None
+    _METRICS["route_wait_reuses"] += 1
+    return [dict(wait) for wait in waits]
+
+
+def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_root):
+    """``pending_human_waits`` for one route, kept with the identity of every file it read."""
+    _METRICS["route_wait_recomputes"] += 1
+    journal = _journal_file(route_key, ledger_root)
+    files = _route_file_paths(route_key[2], raw_record, route_key[0])
+    # The identities the record and outcome were loaded under (taken before they were read), so a
+    # change after that load is seen on the next pass; stamped now only when they are not at hand.
+    held = _ROUTE_OUTCOME_CACHE.get((str(Path(route_key[2]).absolute()), route_key[0], route_key[1]))
+    if held is not None and held[1] is raw_record and held[2] is outcome and len(held[0]) == 3:
+        stamps = tuple(held[0])
+    else:
+        stamps = (_stamp(files[0]), _stamp(files[1]), _stamp(files[2]) if files[2] is not None else None)
+    journal_stamp = _stamp(journal) if journal is not None else None
+    reads = []
+    token = _WAIT_READS.set(reads)
+    try:
+        waits = pending_human_waits(route_record, jobs=path, outcome=outcome)
+    finally:
+        _WAIT_READS.reset(token)
+    if journal is not None:
+        _WAIT_MEMO[route_key] = (str(path), files, stamps, journal, journal_stamp, tuple(reads),
+                                 tuple(dict(wait) for wait in waits))
+    return waits
+
+
+def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
+    """The judgment of one route: the kept one while its inputs hold, else computed (and kept)."""
+    kept = _kept_waits(route_key, path, ledger_root)
+    if kept is not None:
+        return kept
+    return _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_root)
 
 
 def _session_liveness_probe():
@@ -675,7 +858,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
     for jobs in jobs_paths:
         path = Path(jobs)
         try:
-            with registry_read_scope():
+            with registry_read_scope(), contextlib.ExitStack() as lineage_pin:
                 snapshot = registry_snapshot(path)
                 if not snapshot.complete:
                     health.append({"source": "registry", "path": str(path),
@@ -686,10 +869,14 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                     from dispatch_seat_handover import effective_parent, effective_parent_harness
                     from peer_read_context import PeerReadContext
                     read_context = PeerReadContext()
+                    # One observation of the lineage per pass: every wait below resolves its
+                    # owner against the same one (a writer that lands meanwhile is seen by the
+                    # next pass), instead of listing and stating every ledger once per wait.
+                    lineage_pin.enter_context(read_context.pinned_lineage())
                 except ImportError:
                     effective_parent = effective_parent_harness = None
                     read_context = None
-                latest, first_order, successor_sources, route_candidates = _generation_candidates(view)
+                latest, first_order, successor_sources, route_candidates, latest_start = _generation_candidates(view)
                 import route_authority
                 for attempt, (status, meta, fields, row_order, row) in latest.items():
                     if meta.get("worker_type") != "owner" or attempt in successor_sources:
@@ -706,12 +893,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                     # The same jobs identity and exact route binding must have no
                     # later owner attempt. Children and different route/hash rows do not close it.
                     registered_order = first_order.get(attempt, row_order)
-                    later = any(other_id != attempt and first_order.get(other_id, other_order) > registered_order
-                                and (other_meta.get("owner_route_id") or other_meta.get("route_id")) == route_id
-                                and (other_meta.get("owner_route_hash") or other_meta.get("route_hash")) == route_digest
-                                and (other_meta.get("owner_route_file") or other_meta.get("route_file")) == route_file
-                                for other_id, (_s, other_meta, _f, other_order, _row) in latest.items())
-                    if later:
+                    if latest_start.get((route_id, route_digest, route_file), -1) > registered_order:
                         continue
                     try:
                         project_root = str(Path(__file__).resolve().parents[1])
@@ -782,6 +964,11 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 if project_root not in sys.path:
                     sys.path.insert(0, project_root)
                 from tools.fleet import route as route_module
+                try:
+                    ledger_root = WS.ledger_root_for(path)[0]
+                except (OSError, ValueError, TypeError, KeyError):
+                    ledger_root = None
+                seen_routes = set()
                 for (route_id, route_digest, route_file), (row, _candidate_meta, route_activity) in route_candidates.items():
                     if only_id is not None and not only_id.startswith("S2:" + str(route_id) + ":"):
                         continue
@@ -795,15 +982,26 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                         # The route row is already a narrow candidate; full lineage
                         # metadata is needed only when it actually has a pending wait.
                         meta = None
-                        route_record, outcome = _route_outcome(route_module, route_file,
-                                                               route_id, route_digest)
-                        if route_record is None:
-                            continue
-                        # The loader's private schema tag is not covered by the
-                        # sealed route hash; pending_human_waits must see sealed bytes.
-                        route_record = {name: value for name, value in route_record.items()
-                                        if name != "_fleet_schema_status"}
-                        for wait in pending_human_waits(route_record, jobs=path, outcome=outcome):
+                        route_key = (route_id, route_digest, route_file)
+                        # A route none of whose input files changed keeps its judgment, and
+                        # its record is not even loaded unless a wait has to be shown.
+                        waits = _kept_waits(route_key, path, ledger_root)
+                        route_record = None
+                        if waits is None or waits:
+                            route_record, outcome = _route_outcome(route_module, route_file,
+                                                                   route_id, route_digest)
+                            if route_record is None:
+                                continue
+                            # The loader's private schema tag is not covered by the
+                            # sealed route hash; pending_human_waits must see sealed bytes.
+                            raw_record = route_record
+                            route_record = {name: value for name, value in route_record.items()
+                                            if name != "_fleet_schema_status"}
+                            if waits is None:
+                                waits = _compute_waits(route_key, raw_record, route_record, outcome,
+                                                       path, ledger_root)
+                        seen_routes.add(route_key)
+                        for wait in waits:
                             if meta is None:
                                 meta = row.completion_metadata()
                             parent_sid = meta.get("parent_sid")
@@ -837,6 +1035,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                         health.append({"source": "S2", "route_id": route_id,
                                        "state": "unknown", "reason": type(exc).__name__})
+                if only_id is None:
+                    for stale in [key for key in _WAIT_MEMO if key not in seen_routes]:
+                        del _WAIT_MEMO[stale]
         except (OSError, ValueError, UnicodeError) as exc:
             health.append({"source": "registry", "path": str(path),
                            "state": "unknown", "reason": type(exc).__name__})

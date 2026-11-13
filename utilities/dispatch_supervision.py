@@ -190,8 +190,16 @@ def _tool_event_source(metadata, log_path):
 
 
 def runtime_tool_progress(metadata, previous=None):
-    """Read only the latest bounded native tool identity, never transcript prose."""
+    """Read only the latest bounded native tool identity, never transcript prose.
+
+    A call still in flight outranks a later sibling's result: parallel calls
+    (two subagents, or a subagent beside a quick command) write the quick
+    result last while the long call is still running. A Claude call belongs to
+    one model message; the next message starts only after every call of the
+    previous one returned, so a new message settles them.
+    """
     latest = previous or None
+    in_flight = {}
     raw_path = metadata.get("log_file", "")
     if not raw_path or not Path(raw_path).is_absolute():
         return latest
@@ -213,10 +221,20 @@ def runtime_tool_progress(metadata, previous=None):
         if not isinstance(event, dict):
             continue
         kind, item = event.get("type"), event.get("item")
+        if kind in {"turn.completed", "turn.failed"}:
+            in_flight = {key: value for key, value in in_flight.items() if key[0] != "codex"}
         if kind in {"item.started", "item.completed"} and isinstance(item, dict):
             if item.get("type") in {"command_execution", "file_change", "mcp_tool_call", "web_search"} and item.get("id"):
                 latest = ["codex", str(item["id"])[:256], kind]
+                if kind == "item.started":
+                    in_flight[("codex", latest[1])] = (latest, "")
+                else:
+                    in_flight.pop(("codex", latest[1]), None)
         if kind in {"assistant", "user"} and isinstance(event.get("message"), dict):
+            message_id = str(event["message"].get("id") or "")
+            if kind == "assistant" and not event.get("isSidechain"):
+                in_flight = {key: value for key, value in in_flight.items()
+                             if key[0] != "claude" or value[1] == message_id}
             content = event["message"].get("content")
             for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict):
@@ -225,6 +243,10 @@ def runtime_tool_progress(metadata, previous=None):
                 identity = block.get("id") if block_type == "tool_use" else block.get("tool_use_id")
                 if block_type in {"tool_use", "tool_result"} and identity:
                     latest = ["claude", str(identity)[:256], block_type]
+                    if block_type == "tool_use":
+                        in_flight[("claude", latest[1])] = (latest, message_id)
+                    else:
+                        in_flight.pop(("claude", latest[1]), None)
         part = event.get("part")
         if kind == "tool_use" and isinstance(part, dict) and part.get("type") == "tool":
             state = part.get("state")
@@ -232,6 +254,12 @@ def runtime_tool_progress(metadata, previous=None):
             identity = part.get("callID") or part.get("id")
             if identity and status in {"pending", "running", "completed", "error"}:
                 latest = ["opencode", str(identity)[:256], status]
+                if status in {"pending", "running"}:
+                    in_flight[("opencode", latest[1])] = (latest, "")
+                else:
+                    in_flight.pop(("opencode", latest[1]), None)
+    if in_flight:
+        return next(reversed(in_flight.values()))[0]
     return latest
 
 
@@ -539,6 +567,12 @@ def _running_tool_text(metadata):
             f"is still running: {program}")
 
 
+def _call_command_running(metadata, since):
+    """The attempt's live tool command started at or after ``since`` (epoch seconds)."""
+    running = _running_tool_command(metadata)
+    return bool(running) and running[0] >= since
+
+
 def _runtime_tool_active(event):
     if not isinstance(event, list) or len(event) != 3:
         return False
@@ -563,6 +597,94 @@ def _owned_child_executing(jobs, attempt_id, metadata, now) -> bool:
                 and _execution_confirmed(jobs, child, row[0], row[1], now=now)):
             return True
     return False
+
+
+def _resource_handed_to(jobs, attempt_id, metadata, run) -> bool:
+    """The run's launching owner was replaced and this owner is its verified consumer.
+
+    A normal handoff leaves the run and owner records naming the predecessor; the
+    resource wait's own reader answers it from the lineage: a proven pin handoff to
+    this owner's route, or the replacement claim on the same route. A run of an
+    unrelated owner, or a holder that cannot be read, is not this owner's.
+    """
+    try:
+        from dispatch_resource_wait import current_responsibility
+        route = {"route_id": metadata.get("owner_route_id") or "",
+                 "route_hash": metadata.get("owner_route_hash") or ""}
+        return current_responsibility(run, route=route, owner_attempt_id=attempt_id,
+                                      session_id=None, jobs=str(jobs)) is not None
+    except Exception:  # an unread lineage is unconfirmed, never a crash of the pass
+        return False
+
+
+def _owner_resource_working(jobs, attempt_id, metadata) -> bool:
+    """True while a resource run armed for this owner runs under its exact process identity.
+
+    The owner route's armed watches name the exact runs it waits on (the records the
+    resource wait and parent close read); the run registry's exact identity says whether
+    one still runs. The run is this owner's when it launched it or a verified handoff
+    moved it here. A missing, finished, foreign, or unreadable run is not running.
+    """
+    route_id = metadata.get("owner_route_id") or ""
+    if not route_id:
+        return False
+    try:
+        from workflow_state import WorkflowLedger
+        from resource_run_registry import classify_identity
+        armed = WorkflowLedger(route_id, metadata.get("owner_route_hash") or "", jobs=jobs).root / "armed"
+        registries = {}
+        for watch_file in sorted([*armed.glob("*.json"), *armed.glob("resource-runs/**/*.json")])[:64]:
+            watch = json.loads(watch_file.read_text(encoding="utf-8"))
+            if not isinstance(watch, dict) or watch.get("predecessor_kind") != "resource":
+                continue
+            registry = Path(str(watch.get("resource_registry") or ""))
+            if not registry.is_absolute() or registry.is_symlink():
+                continue
+            if registry not in registries:
+                registries[registry] = json.loads(registry.read_text(encoding="utf-8")).get("runs")
+            runs = registries[registry]
+            run = runs.get(str(watch.get("predecessor_id") or "")) if isinstance(runs, dict) else None
+            if not isinstance(run, dict):
+                continue
+            owner = run.get("owner_wait") if isinstance(run.get("owner_wait"), dict) else {}
+            if (run.get("resource_policy") == "supervised-owner" and run.get("status") == "running"
+                    and not run.get("cancel_requested") and run.get("jobs") in {None, "", str(jobs)}
+                    and classify_identity(run)[0] == "working"
+                    and (attempt_id in {run.get("parent_attempt_id"), owner.get("parent_attempt_id")}
+                         or _resource_handed_to(jobs, attempt_id, metadata, run))):
+                return True
+    except (ImportError, OSError, ValueError, TypeError, AttributeError):
+        return False
+    return False
+
+
+def _supervised_owner_wait(jobs, attempt_id, metadata, now) -> str:
+    """How the owner's own runtime holds it between turns; "" when it does not.
+
+    ``supervisor-live``: a parked, deliverable, or recovery phase under the held outer
+    supervisor lease (the verdict the orphan watch uses). The lease shows only that the
+    supervisor lives, not that anything progresses. ``target-running``: parked, and the
+    exact work it waits on runs now -- a direct child whose own observation reads
+    active, or a resource run armed for it (launched by it or handed to it) whose
+    exact process is live. A wait on nothing, a pending settlement, or unconfirmed
+    work keeps the owner's quiet windows.
+    """
+    if metadata.get("worker_type") != "owner":
+        return ""
+    try:
+        from dispatch_completion_join import read_supervisor_phase_state
+        from dispatch_contract import dispatch_state_root, supervisor_lease_is_held
+        state = read_supervisor_phase_state(
+            dispatch_state_root(jobs) / "supervisor-state" / f"{attempt_id}.json", attempt_id)
+        if (state is None or state.phase not in {"parked", "deliverable", "recovery"}
+                or not supervisor_lease_is_held(jobs, metadata)):
+            return ""
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        return ""
+    if state.phase == "parked" and (_owned_child_executing(jobs, attempt_id, metadata, now)
+                                    or _owner_resource_working(jobs, attempt_id, metadata)):
+        return "target-running"
+    return "supervisor-live"
 
 
 def _execution_confirmed(jobs, aid, status, metadata, *, now=None, decision=None) -> bool:
@@ -680,6 +802,15 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             if elapsed_windows:
                 quiet += elapsed_windows
                 last_window += elapsed_windows * max(1.0, progress_window_seconds)
+        # When this exact tool event was first seen: an unfinished call is backed only by
+        # a command that started for it, never by an older resident shell.
+        try:
+            tool_since = (float(state.get("runtime_tool_since", last_progress))
+                          if same_binding and state.get("runtime_tool_event") == tool_event else now)
+            if not math.isfinite(tool_since):
+                tool_since = now
+        except (TypeError, ValueError, OverflowError):
+            tool_since = now
         if lease:
             last_progress = last_window = now
             quiet = 0
@@ -691,6 +822,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                          or metadata.get("resource_run_id")
                          or metadata.get("resource_id"))
         tool_active = _runtime_tool_active(tool_event)
+        supervised = _supervised_owner_wait(jobs, attempt_id, metadata, now)
         if human_wait is None:
             observation_state, reason = "unknown", "human-gate-observation-unverifiable"
         elif human_wait:
@@ -701,7 +833,13 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "waiting", "resource-watch-owns-progress"
         elif lease:
             observation_state, reason = "active", "exact-verification-lease"
-        elif execution.state == "absent":
+        elif supervised == "target-running":
+            # Parked by its own runtime on a child or resource run that runs now: that
+            # work owns the progress. A dead owner holds no lease and keeps the branches below.
+            observation_state, reason = "active", "supervised-owner-parked"
+        elif execution.state == "absent" and supervised != "supervisor-live":
+            # A held supervisor lease is a live supervisor between turns, not an absent
+            # owner; its unconfirmed wait falls to the quiet windows below.
             if tool_active:
                 observation_state, reason = "unknown", "runtime-tool-active-process-absent"
             else:
@@ -710,7 +848,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                     observation_state, reason = "stalled", "settlement-unresolved"
                 else:
                     observation_state, reason = "stalled", "execution-absent"
-        elif (execution.state == "unknown" and tool_active
+        elif (execution.state == "unknown" and tool_active and quiet < max_quiet_windows
               and any(len(identity) >= 3 and str(identity[2]).startswith("unclassified:")
                       for identity in execution.identities)):
             observation_state, reason = "active", "native-tool-process-live"
@@ -723,12 +861,20 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
         elif execution.state == "present" and _transient_retry_wait_active(metadata, attempt_id):
             observation_state, reason = "waiting", "registered-transient-capacity-backoff"
-        elif tool_active:
+        elif tool_active and (quiet < max_quiet_windows or _call_command_running(
+                metadata, tool_since - max(1.0, progress_window_seconds))):
+            # An unfinished call record is not progress by itself: it counts inside the
+            # quiet windows, or while the exact tool command started for it still runs.
             observation_state, reason = "active", "native-tool-active"
         elif quiet >= max_quiet_windows:
             observation_state, reason = "stalled", "no-comparable-progress"
         else:
             observation_state, reason = "active", "within-progress-window"
+        if reason in {"supervised-owner-parked", "owned-child-executing"}:
+            # A wait on its own work is not quiet: the owner resumes with a fresh window
+            # instead of the windows its children or resource run spent working.
+            last_progress = last_window = now
+            quiet = 0
 
         prior = state.get("stall_observation") if isinstance(state.get("stall_observation"), dict) else {}
         unknown_since = (prior.get("unknown_since") if prior.get("state") in {"observing", "unknown"}
@@ -773,6 +919,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                       "route_id": route_id, "route_node": route_node,
                       "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
                       "fingerprint": fingerprint, "runtime_tool_event": tool_event,
+                      "runtime_tool_since": tool_since,
                       "last_progress_at": last_progress, "last_window_at": last_window,
                       "quiet_windows": quiet, "warning": int(quiet >= 1),
                       "observed_at": now, "stall_observation": observation})
@@ -1006,7 +1153,7 @@ def _awaiting_answers(jobs: Path, aid: str) -> list[str]:
 def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
     """A claimed replacement or linked retry owns the route's live attempt now."""
     from dispatch_replacement import (
-        _plain_retry_successor, _replacement_in_flight, registry_rows,
+        _plain_retry_successor, _replacement_in_flight, _replacement_row_of, registry_rows,
     )
     try:
         rows = registry_rows(jobs)
@@ -1016,9 +1163,7 @@ def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
         return True
     if _replacement_in_flight(jobs, rows, metadata) or _plain_retry_successor(rows, aid):
         return True
-    if any(candidate.get("replacement_original_attempt_id") == aid
-           and fields[1] in {"open", "running", "done"}
-           for fields, candidate in rows.values()):
+    if _replacement_row_of(rows, aid):
         return True
     marker_path = metadata.get("completion_marker", "")
     route_file = metadata.get("owner_route_file") or metadata.get("route_file") or ""
@@ -1067,8 +1212,7 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
             metadata = (rows.get(aid) or (None, {}))[1]
             if _attempt_stall_superseded(jobs, aid, metadata):
                 continue
-            status = update_attempt_stall_observation(jobs, aid, persist=False,
-                                                       row=rows.get(aid))
+            status = _stall_observation_for_notice(jobs, aid, rows.get(aid))
             if status and status.get("state") in {"stalled", "unknown"}:
                 return True
         return False
@@ -1115,6 +1259,24 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
     return False
 
 
+def _stall_observation_for_notice(jobs, aid, row):
+    """One read-only stall observation of ``aid`` for the two questions a notice asks about it.
+
+    ``notice_is_current`` asks twice (its obligation revision, then whether it is still pending). Inside
+    one Fleet collection pass the first observation is that pass's observation and the second reads
+    it (the observation depends on the clock and on the attempt's processes, so the next pass
+    observes again). Outside a pass (a carrier, a hook) every call observes afresh."""
+    # Fleet is imported as ``fleet`` or as ``tools.fleet``; the pass that is open is in whichever
+    # copy of the module its collectors use, so look for an open one instead of importing a new copy.
+    pass_scope = next((module for module in (sys.modules.get("fleet.pass_scope"),
+                                             sys.modules.get("tools.fleet.pass_scope"))
+                       if module is not None and module.active()), None)
+    if pass_scope is None:
+        return update_attempt_stall_observation(jobs, aid, persist=False, row=row)
+    return pass_scope.cached(("stall-observation", str(jobs), aid, id(row)),
+                             lambda: update_attempt_stall_observation(jobs, aid, persist=False, row=row))
+
+
 def _obligation_revision(rows: dict, attempts: list[str], reason: str, jobs=None) -> str:
     if reason == "owner-input-undelivered":
         from dispatch_owner_input import unresolved_revision
@@ -1126,8 +1288,7 @@ def _obligation_revision(rows: dict, attempts: list[str], reason: str, jobs=None
     if reason == "attempt-stalled":
         values = []
         for aid in attempts:
-            observation = update_attempt_stall_observation(
-                jobs, aid, persist=False, row=rows.get(aid))
+            observation = _stall_observation_for_notice(jobs, aid, rows.get(aid))
             if observation is None:
                 values.append((aid, "missing", "", ""))
             else:

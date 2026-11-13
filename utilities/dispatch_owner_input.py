@@ -640,15 +640,37 @@ def retained(jobs, attempt):
             if isinstance(item, dict) and item.get("state") in UNCONSUMED_STATES]
 
 
+# How often the owner-input decision ran for an owner that held a kept answer (``owner_decisions``)
+# against how often there was nothing kept, so the decision could not change the result
+# (``owner_decision_skips``).
+_METRICS = {"owner_decisions": 0, "owner_decision_skips": 0}
+
+
+def metrics_snapshot() -> dict:
+    return dict(_METRICS)
+
+
 def blocked_owner_answers(jobs, attempt):
-    """The unconsumed answers of an owner that ended waiting for a person, read now; [] otherwise."""
+    """The unconsumed answers of an owner that ended waiting for a person, read now; [] otherwise.
+
+    The answer is ``retained()`` when the decision lets the kept answers through and ``[]`` when it
+    does not, so with nothing kept it is ``[]`` whatever the decision says. The kept answers (this
+    attempt's own ``.input.json``, read on every call) are therefore read first, and the decision
+    (the supervisor lease probe and ``decide_continuation`` -> route verification) only runs for an
+    owner that holds one.
+    """
     try:
         row, _ = _target(jobs, attempt)
     except (InputError, JoinContractError, OSError, ValueError, KeyError):
         return []
+    kept = retained(jobs, attempt)
+    if not kept:
+        _METRICS["owner_decision_skips"] += 1
+        return []
+    _METRICS["owner_decisions"] += 1
     if not _answers_blocked_owner(row, supervisor_lease_is_held(jobs, row.metadata), jobs):
         return []
-    return retained(jobs, attempt)
+    return kept
 
 
 def initialize_owner_input(jobs, attempt, transport):

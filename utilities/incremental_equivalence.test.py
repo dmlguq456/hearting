@@ -164,6 +164,7 @@ CLAUDE_PID, CODEX_PID = 910_001, 910_002
 CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
 CODEX_SID = "22222222-2222-4222-8222-222222222222"
 OTHER_SID = "33333333-3333-4333-8333-333333333333"
+SUCCESSOR_SID = "44444444-4444-4444-8444-444444444444"
 SECOND_CODEX_SID = "44444444-4444-4444-8444-444444444444"
 
 
@@ -224,6 +225,10 @@ class Fixture:
         self.work = self.root / "work"
         self.logs = self.jobs.parent / "logs"      # the registry's own log directory
         self.liveness = self.root / "liveness.json"
+        # The seat ledgers (lineage) of every computing process: warm and fresh must read the same
+        # ones, so each process's own ``session-tidy`` state is a link to this directory.
+        self.seat_state = self.root / "seat-state"
+        self.seat_tidy = self.seat_state / "hearting" / "session-tidy"
         self.revision = {0: 0, 1: 0, 2: 0}
 
     # -- paths ------------------------------------------------------------
@@ -424,7 +429,7 @@ class Fixture:
     # -- build ------------------------------------------------------------
     def build(self) -> "Fixture":
         for directory in (self.work, self.routes, self.claude / "sessions", self.jobs.parent,
-                          self.codex / "sessions", self.logs, self.root / "artifacts"):
+                          self.codex / "sessions", self.logs, self.root / "artifacts", self.seat_tidy):
             directory.mkdir(parents=True, exist_ok=True)
         for index in range(3):
             record = route_record(self.root, index, revision=self.revision[index])
@@ -517,6 +522,10 @@ def hermetic(fixture_root, scratch, clock: FixtureClock, cache_home=None):
     state_home = scratch / "state"
     for directory in ("home", "state", "data", "cache", "tmp"):
         (scratch / directory).mkdir(parents=True, exist_ok=True)
+    seat_link = state_home / "hearting" / "session-tidy"
+    seat_link.parent.mkdir(parents=True, exist_ok=True)
+    if not seat_link.is_symlink() and not seat_link.exists():
+        seat_link.symlink_to(fx.seat_tidy)
 
     def census():
         return _expand(json.loads(fx.liveness.read_text(encoding="utf-8")), str(fx.work))
@@ -681,8 +690,14 @@ def _codex_disk_resumes() -> int:
 
 REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuses",
                      "full_metadata_parses", "invalidations", "prefix_reuses",
-                     "prefix_segments_reused", "line_parse_reuses")
+                     "prefix_segments_reused", "line_parse_reuses",
+                     "segment_resyncs", "segment_rebuilds")
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
+OWNER_INPUT_COUNTERS = ("owner_decisions", "owner_decision_skips")
+FOLD_COUNTERS = ("segment_folds", "segment_fold_reuses")
+HOLDER_COUNTERS = ("holder_resolves", "holder_memo_hits")
+GATE_COUNTERS = ("generation_segment_builds", "generation_segment_reuses",
+                 "route_wait_recomputes", "route_wait_reuses")
 
 
 def counters() -> dict:
@@ -700,6 +715,29 @@ def counters() -> dict:
         stats = getattr(module, "_LIFECYCLE_STATS", None) or {}
         for name in CODEX_COUNTERS:
             out["codex_" + name] += int(stats.get(name, 0))
+    owner_input = sys.modules.get("dispatch_owner_input")
+    owner_stats = owner_input.metrics_snapshot() if hasattr(owner_input, "metrics_snapshot") else {}
+    for name in OWNER_INPUT_COUNTERS:
+        out[name] = int(owner_stats.get(name, 0))
+    for name in FOLD_COUNTERS:
+        out[name] = 0
+    for pkg in FLEET_PACKAGES:
+        module = sys.modules.get(pkg + ".collectors.dispatch")
+        stats = module.registry_fold_metrics() if hasattr(module, "registry_fold_metrics") else {}
+        for name in FOLD_COUNTERS:
+            out[name] += int(stats.get(name, 0))
+    for name in HOLDER_COUNTERS:
+        out[name] = 0
+    handover = sys.modules.get("dispatch_seat_handover")
+    for name, value in (handover.holder_metrics() if hasattr(handover, "holder_metrics") else {}).items():
+        out[name] = int(value)
+    for name in GATE_COUNTERS:
+        out[name] = 0
+    for module_name in ("human_gate_observation", "utilities.human_gate_observation"):
+        module = sys.modules.get(module_name)
+        stats = module.metrics_snapshot() if hasattr(module, "metrics_snapshot") else {}
+        for name in GATE_COUNTERS:
+            out[name] += int(stats.get(name, 0))
     return out
 
 
@@ -745,6 +783,7 @@ def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict 
                     "o2_streams": observe_streams(fx),
                     "o3_fleet": observe_fleet(Path(scratch)),
                     "o4_producer": observe_producer(),
+                    "o5_holders": observe_holders(fx),
                 }
             observed["_meta"] = {"lifecycle_disk_resumes": _codex_disk_resumes() - resumed_before}
             return observed
@@ -834,6 +873,12 @@ def observe_fleet(scratch: Path) -> dict:
     from fleet.collectors import collect_all
     isolated = scratch / "state-fleet"
     isolated.mkdir(exist_ok=True)
+    # The same seat ledgers as every other observation of this process (one lineage location, as
+    # in a real Fleet: two locations alternating would only show a cache built for one of them).
+    seat_link = isolated / "hearting" / "session-tidy"
+    seat_link.parent.mkdir(parents=True, exist_ok=True)
+    if not seat_link.is_symlink() and not seat_link.exists():
+        seat_link.symlink_to(os.readlink(scratch / "state" / "hearting" / "session-tidy"))
     out = {}
     with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(isolated)}):
         for label, fast in (("fast_first", True), ("full", False)):
@@ -846,6 +891,25 @@ def observe_fleet(scratch: Path) -> dict:
                 observations=snapshot.observations, show_all=True)
             out[label] = json.loads(text)
     return out
+
+
+def observe_holders(fx: Fixture) -> dict:
+    """Which owner rows the Fleet's route display selects for one session, by who holds their job.
+
+    Exactly the selection ``_prime_route_display_rows`` makes (the session holds a job when the
+    lineage says so), with no alias or family rule mixed in, so a change of holder shows here.
+    """
+    import dispatch_registry_cache as cache
+    import dispatch_supervision
+    from fleet.collectors import dispatch as fleet_dispatch
+    scope = {"aliases": set(), "routes": set(), "rows": {}, "sources": {},
+             "holders": {("claude", CLAUDE_SID)}}
+    with cache.registry_read_scope(), dispatch_supervision.route_attention_read_scope():
+        fleet_dispatch._prime_route_display_rows([str(fx.jobs)], scope)
+    view, chosen = scope["sources"][os.path.abspath(str(fx.jobs))]
+    return {"selected": [{"order": record.order, "attempt": record.completion_metadata().get("attempt_id")}
+                         for _order, record in sorted(chosen.items())],
+            "routes": sorted(scope["routes"])}
 
 
 def observe_producer() -> dict:
@@ -1032,18 +1096,21 @@ class Step:
     """One mutation. ``resume`` (E24..E27): also start a new process that finds the
     Codex cursor the warm process left on disk; ``"used"`` means it must have
     continued from it, ``"rejected"`` that it must have read the file from the start.
-    ``expect``: which counters of the warm process must grow (``"+"``) or stay
-    still (``"0"``) during the step's warm pass, so an event cannot pass without
+    ``expect``: which counters of the warm process must grow (``"+"``), stay
+    still (``"0"``) or move by an exact amount (an int) during the step's warm pass, so an event cannot pass without
     taking the incremental path it is about; see ``counters`` and ``UNCHANGED_PASS``."""
 
-    def __init__(self, label, mutate, *, clock_only=False, resume=None, expect=None):
+    def __init__(self, label, mutate, *, clock_only=False, resume=None, expect=None, unchanged=False):
         self.label, self.mutate, self.clock_only = label, mutate, clock_only
         self.resume, self.expect = resume, dict(expect or {})
+        # ``unchanged``: the step is an input that, by design, must not move any observed value
+        # (the opposite of self-check B): the fresh output after it must equal the one before.
+        self.unchanged = unchanged
 
 
 # An unchanged pass after any step: every reader answers from what it kept.
 UNCHANGED_PASS = {
-    "full_metadata_parses": "0", "prefix_reuses": "0", "append_reuses": "0",
+    "holder_resolves": "0", "full_metadata_parses": "0", "prefix_reuses": "0", "append_reuses": "0",
     "line_parse_reuses": "0", "invalidations": "0", "content_reads": "0",
     "codex_append_reads": "0", "codex_full_reads": "0", "codex_hits": "+",
 }
@@ -1353,6 +1420,331 @@ def e29(run):  # the claude transcript's agent type changes, size and mtime_ns r
     assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
 
 
+def _append_batches(run, names=("batch-a", "batch-b", "batch-c")) -> None:
+    """Rows arrive by append, one batch each: the registry then holds segments of unequal sizes."""
+    sizes = (2, 3, 1)
+    for number, name in enumerate(names):
+        run.fx.append_rows([_new_open_row(run.fx, "%s-%d" % (name, row)) for row in range(sizes[number])])
+
+
+# ---------------------------------------------------------------------------
+# BLOCKED owners (answer-wait S3): a route the compiler really emitted, so the owner-input
+# decision runs ``verify_route`` to its end when it runs at all.
+# ---------------------------------------------------------------------------
+
+_REAL_ROUTE: list = []
+
+
+def real_route_record(slug: str) -> dict:
+    """The compiled route of this tree, ``slug`` changed and hash and id derived again."""
+    if not _REAL_ROUTE:
+        import hook_perf_fixture
+        record, reason = hook_perf_fixture.compile_real_route(ROOT)
+        assert record is not None, "no verifiable route for the BLOCKED owners: %s" % reason
+        _REAL_ROUTE.append(record)
+    from route_identity import route_hash, route_id_from_hash
+    record = dict(_REAL_ROUTE[0])
+    record["slug"], record["slug_truncated"] = slug, False
+    digest = route_hash(record)
+    record["route_hash"], record["route_id"] = digest, route_id_from_hash(digest)
+    return record
+
+
+def blocked_owner(run, name: str, ended: float | None = None) -> dict:
+    """One owner that ended BLOCKED with no successor, on its own open route; returns its identity."""
+    record = real_route_record("blocked-" + name)
+    route_file = run.fx.routes / ("blocked-%s.json" % name)
+    write_json(route_file, record, CLOCK_BASE - 3600)
+    attempt = "att-blocked-" + name
+    journal = run.fx.jobs.parent / "workflow" / record["route_id"] / "journal.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps({"route_id": record["route_id"], "route_hash": record["route_hash"],
+                                   "workflow_state": "RUNNING", "at": iso(CLOCK_BASE - 3600)}) + "\n",
+                       encoding="utf-8")
+    row = attempt_row(CLOCK_BASE - 3000, "done", "blocked-" + name, {
+        "attempt_schema_version": "2", "capability": "autopilot-code", "harness": "claude",
+        "dispatch_depth": "1", "worker_type": "owner", "attempt_id": attempt,
+        "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+        "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": str(route_file),
+        "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
+        "owner_route_file": str(route_file), "launch_claimed": "1", "launch_started": "1",
+        "note": "dead-worker-blocked",
+        "ended_at": "%.3f" % (CLOCK_BASE - 2900 if ended is None else ended)}, str(run.fx.work))
+    return {"attempt": attempt, "row": row, "route_id": record["route_id"], "journal": journal,
+            "route_file": route_file}
+
+
+def keep_answer(run, attempt: str, state: str = "retained") -> Path:
+    """The owner's own ``.input.json`` with one request in ``state`` (an unconsumed one is a kept answer)."""
+    from dispatch_contract import supervisor_lease_path
+    path = supervisor_lease_path(run.fx.jobs, attempt).with_suffix(".input.json")
+    write_json(path, {"schema_version": 1, "attempt_id": attempt, "requests": [
+        {"id": "req-1", "digest": "sha256:fixture", "state": state, "text": "kept answer"}]},
+        run.clock.now - 1)
+    return path
+
+
+def blocked_setup(run):  # two BLOCKED owners, neither holds an answer
+    owners = [blocked_owner(run, name) for name in ("a", "b")]
+    run.blocked = {owner["attempt"]: owner for owner in owners}
+    run.fx.append_rows([owner["row"] for owner in owners])
+
+
+def blocked_near_fold_setup(run):  # BLOCKED owners that end 100 s short of the 72 h fold window
+    owners = [blocked_owner(run, name, ended=CLOCK_BASE - 72 * 3600 + 100) for name in ("a", "b")]
+    run.blocked = {owner["attempt"]: owner for owner in owners}
+    run.fx.append_rows([owner["row"] for owner in owners])
+
+
+def e40a(run):  # an answer is kept for owner a: the owner-input decision runs for it (and only it)
+    keep_answer(run, "att-blocked-a")
+
+
+def e40b(run):  # the answer is consumed: nothing kept again
+    keep_answer(run, "att-blocked-a", state="consumed")
+
+
+def _unreadable_journal(run, attempt: str) -> None:
+    journal = run.blocked[attempt]["journal"]
+    journal.unlink()
+    journal.mkdir()         # reading it raises IsADirectoryError, as an unreadable file would
+
+
+def e40c(run):  # owner b holds no answer and its journal cannot be read: the decision is not asked
+    _unreadable_journal(run, "att-blocked-b")
+
+
+def e40d(run):  # owner a holds an answer and its journal cannot be read: the decision raises
+    keep_answer(run, "att-blocked-a")
+    _unreadable_journal(run, "att-blocked-a")
+
+
+def route0_pairs(run, name: str) -> dict:
+    """Metadata of a row on route 0's exact route triple (its owner's), as an owner of that route writes it."""
+    record = route_record(run.fx.root, 0, revision=run.fx.revision[0])
+    route_file = str(run.fx.route_path(0))
+    return {"attempt_schema_version": "2", "capability": "autopilot-code", "harness": "claude",
+            "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-" + name,
+            "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+            "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": route_file,
+            "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
+            "owner_route_file": route_file}
+
+
+def e34a(run):  # an attempt row of route 0 is appended
+    run.fx.append_rows([attempt_row(run.clock.now - 20, "running", "slug-0", {
+        **route0_pairs(run, "route0-more"), "launch_claimed": "1"}, str(run.fx.work))])
+
+
+def e34b(run):  # the same attempt is appended several times, one writer call each
+    for status in ("running", "running", "done"):
+        run.fx.append_rows([attempt_row(run.clock.now - 10, status, "slug-0", {
+            **route0_pairs(run, "route0-again"),
+            **({"ended_at": "%.3f" % (run.clock.now - 5)} if status == "done" else {})}, str(run.fx.work))])
+
+
+def e34c(run):  # in place: an early history row and a BLOCKED owner row change; the segments between keep theirs
+    rows = run.fx.current_rows()
+    rows[9] = rows[9].replace("fixture-history", "fixture-history-edited-early", 1)
+    at = next(index for index, row in enumerate(rows) if "att-blocked-a" in row)
+    rows[at] = rows[at].replace("ended_at=%.3f" % (CLOCK_BASE - 2900),
+                                "ended_at=%.3f" % (CLOCK_BASE - 2800), 1)
+    assert rows[at] != run.fx.current_rows()[at] and rows[9] != run.fx.current_rows()[9]
+    run.fx.replace_registry(rows)
+
+
+def e34d(run):  # an owner that began later on the same route: the BLOCKED owner is no longer the last
+    owner = run.blocked["att-blocked-a"]
+    record = json.loads(owner["route_file"].read_text(encoding="utf-8"))
+    run.fx.append_rows([attempt_row(run.clock.now - 15, "open", "blocked-a-next", {
+        "attempt_schema_version": "2", "capability": "autopilot-code", "harness": "claude",
+        "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-blocked-a-next",
+        "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+        "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": str(owner["route_file"]),
+        "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
+        "owner_route_file": str(owner["route_file"]), "launch_claimed": "1", "launch_started": "1"},
+        str(run.fx.work))])
+
+
+def _alias_row(run, name: str, stamp, route: dict) -> str:
+    return attempt_row(stamp, "done", "alias-" + name, {
+        "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child", "harness": "codex",
+        "attempt_id": "att-alias-" + name, "parent_sid": OTHER_SID, "parent_harness": "claude",
+        "route_id": route["route_id"], "route_hash": route["route_hash"], "route_file": route["route_file"]},
+        str(run.fx.work))
+
+
+def _alias_route(run) -> dict:
+    record = route_record(run.fx.root, 2, revision=0)
+    return {"route_id": record["route_id"], "route_hash": record["route_hash"],
+            "route_file": str(run.fx.root / "routes" / "alias-route.json")}
+
+
+def e34e1(run):  # the first row of a route has no usable time (its activity is nan)
+    run.fx.append_rows([_alias_row(run, "x1", "not-a-time", _alias_route(run))])
+
+
+def e34e2(run):  # a later row of the same route has one: the route's activity is now that time
+    run.fx.append_rows([_alias_row(run, "x2", iso(CLOCK_BASE - 500), _alias_route(run))])
+
+
+def e34e3(run):  # an even later row has none again: it does not take the time away
+    run.fx.append_rows([_alias_row(run, "x3", "still-not-a-time", _alias_route(run))])
+
+
+def raise_gate(run, index: int, gate: str = "approval", at: float | None = None) -> None:
+    """The route's workflow journal gains a raised human gate, as the supervisor writes it."""
+    record = route_record(run.fx.root, index, revision=run.fx.revision[index])
+    journal = run.fx.jobs.parent / "workflow" / record["route_id"] / "journal.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "route_id": record["route_id"], "route_hash": record["route_hash"],
+            "workflow_state": "BLOCKED_HUMAN_GATE", "at": iso(CLOCK_BASE - 900 if at is None else at),
+            "evidence": {"gate": gate}}, sort_keys=True) + "\n")
+
+
+def e32a(run):  # route 2's journal gains a raised gate: its wait appears
+    raise_gate(run, 2)
+
+
+def e33_gate(run):  # route 1 has a raised gate, so deleting its record visibly removes the wait
+    raise_gate(run, 1)
+
+
+def e33a(run):  # route 1's record file is replaced by identical content (a new inode)
+    path = run.fx.route_path(1)
+    body = path.read_bytes()
+    tmp = path.with_name(path.name + ".new")
+    tmp.write_bytes(body)
+    os.replace(tmp, path)
+
+
+def e33b(run):  # route 1's record file is deleted
+    run.fx.route_path(1).unlink()
+
+
+def e33c(run):  # and written again with the same content
+    write_json(run.fx.route_path(1), route_record(run.fx.root, 1, revision=run.fx.revision[1]),
+               run.clock.now - 1)
+
+
+def e37a(run):  # the clock crosses the 72 h window a wait folds at; no input of any route changed
+    run.clock.advance(150)
+
+
+def e30(run):  # both files route 1 is read from change, size and mtime restored (new inodes)
+    for path in (run.fx.route_path(1), run.fx.node_route_path(1)):
+        before = path.stat()
+        raw = path.read_bytes()
+        marker = b'"fixture_revision": 0'
+        assert marker in raw, "the route record no longer carries its revision marker"
+        path.write_bytes(raw.replace(marker, b'"fixture_revision": 7', 1))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
+def _visibility_sidecar(run) -> Path:
+    record = route_record(run.fx.root, 0)
+    return run.fx.root / "artifacts" / ".runtime" / "routes" / (record["route_id"] + ".outcome.json")
+
+
+def e31a(run):  # a closed-route sidecar where the route-visibility reader looks for it
+    record = route_record(run.fx.root, 0)
+    write_json(_visibility_sidecar(run), {
+        "route_id": record["route_id"], "route_hash": record["route_hash"],
+        "terminal_gate_proven": True, "closed_at": iso(CLOCK_BASE - 2000)}, CLOCK_BASE - 1)
+
+
+def e31b(run):  # the same sidecar, one digit of closed_at changed, size and mtime_ns restored
+    path = _visibility_sidecar(run)
+    before = path.stat()
+    raw = path.read_bytes()
+    stamp = iso(CLOCK_BASE - 2000).encode()
+    other = iso(CLOCK_BASE - 2000 + 600).encode()
+    assert stamp in raw and len(stamp) == len(other) and stamp != other
+    path.write_bytes(raw.replace(stamp, other, 1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
+def e42_batches(run):
+    _append_batches(run)
+
+
+def e42a(run):  # a middle row is replaced in place by a longer one: later segments keep their bytes
+    rows = run.fx.current_rows()
+    rows[9] = rows[9].replace("fixture-history", "fixture-history-edited-in-place", 1)
+    run.fx.replace_registry(rows)
+
+
+def e42b(run):  # two rows, one in the middle and one near the end, change with their length kept
+    rows = run.fx.current_rows()
+    rows[7] = rows[7].replace("fixture-history", "fixture-histor!", 1)
+    assert "batch-b-2" in rows[-2]
+    rows[-2] = rows[-2].replace("batch-b-2", "batch-b-9", 1)
+    run.fx.replace_registry(rows)
+
+
+def e42c(run):  # an early row is deleted: every later row moves up, no old segment can be kept
+    rows = run.fx.current_rows()
+    del rows[1]
+    run.fx.replace_registry(rows)
+
+
+def e43_edit(run):  # an owner row of the claude session is edited in place (its own bytes change)
+    rows = run.fx.current_rows()
+    at = next(index for index, row in enumerate(rows) if "att-owner-1" in row)
+    rows[at] = rows[at].replace("launch_started=1", "launch_started=1,fixture_note=edited", 1)
+    assert rows[at] != run.fx.current_rows()[at]
+    run.fx.replace_registry(rows)
+
+
+def e43_handover(run):  # the claude session hands its unfinished jobs to a successor, by the real writer
+    import dispatch_seat_handover as handover
+    import session_tidy as tidy
+    seat = tidy.Seat("pane", "fixture-seat", "fixture:pane")
+    with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(run.fx.seat_state)}):
+        row = handover.record_retire_handover(CLAUDE_SID, "claude", SUCCESSOR_SID, "claude",
+                                              jobs=run.fx.jobs, now=run.clock.now - 5, successor_seat=seat)
+    assert row is not None and row["bindings"], "the writer bound nothing: the event tested nothing"
+
+
+def e38_lease(run):  # a BLOCKED owner's supervisor lease is taken and released (flock): no file content moves
+    import fcntl
+    from dispatch_contract import supervisor_lease_path
+    path = supervisor_lease_path(run.fx.jobs, "att-blocked-a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def e38_gone(run):  # the processes of the sessions end: liveness only, no registry or route file moves
+    value = run.fx.read_liveness()
+    value["alive"] = False
+    run.fx.write_liveness(value, run.clock.now - 1)
+
+
+def e39_other_session(run):  # the registry is replaced (new inode) with one more owner row, of another session
+    rows = run.fx.current_rows()
+    rows.append(attempt_row(CLOCK_BASE - 90, "open", "other-session-owner", {
+        "attempt_schema_version": "2", "capability": "autopilot-code", "harness": "codex",
+        "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-owner-other",
+        "parent_sid": OTHER_SID, "parent_harness": "claude", "launch_claimed": "1",
+        "launch_started": "1"}, str(run.fx.work)))
+    run.fx.replace_registry(rows)
+
+
+def e39_same(run):  # the same rows, written again as another inode
+    run.fx.replace_registry(run.fx.current_rows())
+
+
 EVENTS = [
     ("E01", "registry append: a new attempt row",
      [Step("append", e01, expect={**REG_APPEND, **CODEX_STILL})]),
@@ -1431,6 +1823,108 @@ EVENTS = [
       Step("same size and mtime, other content", e28b, expect={**REG_STILL, **CODEX_STILL})]),
     ("E29", "a claude transcript rewritten with the same size and mtime",
      [Step("same stat", e29, expect={**REG_STILL, **CODEX_STILL})]),
+    # E34: the answer-wait candidates are built per registry segment and merged in file order.
+    ("E34a", "an attempt row of route 0 appended",
+     [Step("append", e34a, expect={**REG_APPEND, "generation_segment_builds": "+",
+                                   "generation_segment_reuses": "+", **CODEX_STILL})]),
+    ("E34b", "the same attempt appended several times",
+     [Step("append x3", e34b, expect={**REG_APPEND, "generation_segment_builds": "+",
+                                      "generation_segment_reuses": "+", **CODEX_STILL})]),
+    ("E34c", "in place: an early row and a BLOCKED owner row change",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("replace its row", e34c, expect={**REG_KEEP_PREFIX, "generation_segment_builds": "+",
+                                            "generation_segment_reuses": "+", "segment_folds": "+",
+                                            "segment_fold_reuses": "+", **CODEX_STILL})]),
+    ("E34d", "an owner that began later on the BLOCKED owner's route",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("later owner appended", e34d, expect={**REG_APPEND, "generation_segment_reuses": "+",
+                                                 **CODEX_STILL})]),
+    # E34e: a route whose rows sit in several segments, some with no usable time (activity nan).
+    ("E34e", "one route over several segments, some rows without a usable time",
+     [Step("first row without a time", e34e1, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("later row with a time", e34e2, expect={**REG_APPEND, "generation_segment_reuses": "+",
+                                                   **CODEX_STILL}),
+      Step("later row without a time", e34e3, expect={**REG_APPEND, "generation_segment_reuses": "+",
+                                                      **CODEX_STILL})]),
+    # E30/E31: caches keyed by (mtime, size) only that a route judgment reads through.
+    ("E30", "a route record rewritten with the same size and mtime",
+     [Step("same stat, other content", e30, expect={**REG_STILL, "route_wait_reuses": "+", **CODEX_STILL})]),
+    ("E31", "a route-visibility outcome sidecar rewritten with the same size and mtime",
+     [Step("sidecar written", e31a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("same size and mtime, other content", e31b, expect={**REG_STILL, **CODEX_STILL})]),
+    # E32/E33/E35/E37: the S2 judgment of a route is computed again only when one of its inputs changed.
+    ("E32a", "a raised gate appears in one route's journal",
+     [Step("gate raised", e32a, expect={**REG_STILL, "route_wait_recomputes": 1,
+                                        "route_wait_reuses": 2, **CODEX_STILL})]),
+    ("E33", "one route's record file: replaced by the same bytes, deleted, written again",
+     [Step("gate raised", e33_gate, expect={**REG_STILL, "route_wait_recomputes": 1, **CODEX_STILL}),
+      Step("replaced by identical bytes", e33a, unchanged=True,
+           expect={**REG_STILL, "route_wait_recomputes": "+", "route_wait_reuses": "+", **CODEX_STILL}),
+      Step("deleted", e33b, expect={**REG_STILL, "route_wait_reuses": "+", **CODEX_STILL}),
+      Step("written again", e33c, expect={**REG_STILL, "route_wait_recomputes": "+",
+                                          "route_wait_reuses": "+", **CODEX_STILL})]),
+    ("E37a", "the clock crosses the fold window, no route input changed",
+     [Step("two BLOCKED owners near the window", blocked_near_fold_setup,
+           expect={**REG_APPEND, **CODEX_STILL}),
+      Step("+150 s", e37a, clock_only=True, expect={**REG_STILL, "route_wait_recomputes": "0",
+                                                   "route_wait_reuses": "+", **CODEX_STILL})]),
+    # E40: the owner-input decision (route verification) runs only for an owner that holds a kept
+    # answer; with nothing kept the answer is [] whatever the decision says.
+    ("E40", "a kept answer appears for a BLOCKED owner, then is consumed",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("answer kept", e40a, expect={**REG_STILL, "owner_decisions": 1, "owner_decision_skips": "+",
+                                        **CODEX_STILL}),
+      Step("answer consumed", e40b, expect={**REG_STILL, "owner_decisions": "0", "owner_decision_skips": "+",
+                                            **CODEX_STILL})]),
+    # E40b: an unreadable journal only matters to an owner whose decision runs. Owner b holds nothing,
+    # so it stays visible and unflagged; owner a holds an answer, so its decision raises as before.
+    ("E40b", "an unreadable route journal: an owner without an answer is unaffected",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("journal of an owner without an answer", e40c, unchanged=True,
+           expect={**REG_STILL, "owner_decisions": "0", "owner_decision_skips": "+", **CODEX_STILL}),
+      Step("journal of an owner holding an answer", e40d,
+           expect={**REG_STILL, "owner_decisions": 1, **CODEX_STILL})]),
+    # E42: a rewrite after the registry grew by appended batches (segments of unequal size). Only
+    # the segments whose own bytes or first order changed are built again; the others keep their rows.
+    # E43: who holds an owner row's job is remembered per row object and lineage graph. Rows that
+    # did not change keep their answer, a changed row is asked again, a changed lineage asks every
+    # row again, and the answers are the ones a process starting from nothing gives.
+    ("E43", "owner holders: rows appended, a row edited in place, the lineage handed over",
+     [Step("two BLOCKED owners", blocked_setup,
+           expect={**REG_APPEND, "holder_resolves": 2, "holder_memo_hits": "+", **CODEX_STILL}),
+      Step("owner row edited in place", e43_edit,
+           expect={"full_metadata_parses": "+", "holder_resolves": "+", "holder_memo_hits": "+", **CODEX_STILL}),
+      Step("holder handed over by the writer", e43_handover,
+           expect={**REG_STILL, "holder_resolves": "+", "holder_memo_hits": "0", **CODEX_STILL})]),
+    # E38: nothing a wait or an owner state is judged from lives in a kept value that a lease flock
+    # or a session ending would leave stale: the lease change moves nothing, the ending moves the
+    # owner states (liveness), and neither re-judges a route (inputs of every route are unchanged).
+    ("E38", "a BLOCKED owner's supervisor lease is flocked and released, then the sessions end",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("lease flocked and released", e38_lease, unchanged=True,
+           expect={**REG_STILL, "route_wait_recomputes": "0", "route_wait_reuses": "+", **CODEX_STILL}),
+      Step("sessions end", e38_gone,
+           expect={**REG_STILL, "route_wait_recomputes": "0", "route_wait_reuses": "+", **CODEX_STILL})]),
+    # E39: a registry replaced with one more owner row of another session reads the bytes as they are
+    # and asks only the new row who holds its job; writing the same rows again as another inode
+    # changes no answer and asks nobody.
+    ("E39", "registry replaced: another session's owner row appears, then the same rows again",
+     [Step("another session's owner row", e39_other_session,
+           expect={"holder_resolves": 1, "holder_memo_hits": "+", **CODEX_STILL}),
+      Step("same rows, another inode", e39_same, unchanged=True,
+           expect={"holder_resolves": "0", "holder_memo_hits": "+", **CODEX_STILL})]),
+    ("E42a", "in-place replacement of a middle row with a longer one, after appended batches",
+     [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("replace middle row", e42a, expect={**REG_KEEP_PREFIX, "segment_rebuilds": 1,
+                                              "segment_resyncs": "+", **CODEX_STILL})]),
+    ("E42b", "in-place replacement of two rows with the same lengths",
+     [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("replace two rows", e42b, expect={**REG_KEEP_PREFIX, "segment_rebuilds": 2,
+                                            "segment_resyncs": "+", **CODEX_STILL})]),
+    ("E42c", "an early row deleted: the order of every later row shifts",
+     [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("delete early row", e42c, expect={**REG_REPARSE, "segment_resyncs": "0",
+                                             "segment_rebuilds": "+", **CODEX_STILL})]),
 ]
 
 
@@ -1527,10 +2021,16 @@ class IncrementalEquivalenceTests(unittest.TestCase):
         self.assertIsNone(problem, problem)
         self.check_counters(run, step.label, counted, step.expect)
         # Self-check B: an event that cannot move the answer tests nothing.
-        self.assertTrue(
-            changed(before, fresh),
-            "%s step '%s' did not change the fresh output: the event tested nothing" % (
-                run.eid, step.label))
+        if step.unchanged:
+            self.assertFalse(
+                changed(before, fresh),
+                "%s step '%s' moved the fresh output, which this step says it must not" % (
+                    run.eid, step.label))
+        else:
+            self.assertTrue(
+                changed(before, fresh),
+                "%s step '%s' did not change the fresh output: the event tested nothing" % (
+                    run.eid, step.label))
         counted = counters()
         again = run.warm()
         problem = run.mismatch(step.label + " (unchanged pass)", again, fresh)
@@ -1556,6 +2056,8 @@ class IncrementalEquivalenceTests(unittest.TestCase):
             got = delta[name]
             if want == "+":
                 ok, text = got > 0, "grow"
+            elif isinstance(want, int):
+                ok, text = got == want, "move by exactly %d" % want
             else:
                 ok, text = got == 0, "stay still"
             self.assertTrue(
@@ -1571,7 +2073,10 @@ class IncrementalEquivalenceTests(unittest.TestCase):
 
     # -- the events -------------------------------------------------------
     def test_events(self):
+        only = {item for item in os.environ.get("EQUIV_EVENTS", "").split(",") if item}
         for eid, _description, steps in EVENTS:
+            if only and eid not in only:      # a falsifier run names the events it is about
+                continue
             with self.subTest(event=eid):
                 self.run_event(eid, steps)
 
