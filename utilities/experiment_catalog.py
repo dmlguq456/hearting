@@ -595,6 +595,43 @@ def compare(group: Optional[Mapping[str, Any]], cond_point: Optional[Mapping[str
                   relative_percent=relative, better=better)
 
 
+def describe_observation(root: Path, run_id: str, row_id: Optional[str], summary: Mapping[str, Any], *,
+                         doc: Optional[Mapping[str, Any]] = None, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """What a notice about a live observation calls this run, and how its latest value stands against the
+    target: `{name, condition_id, group_name, goal, metric_key, decision_point, comparison}`.
+
+    `summary` is the observation's metric summary (`latest_metrics`, `metric`, `latest`), read before the
+    public record is written, so the first notice already has the name.  The comparison is the same
+    `compare()` a status makes; a control's value is read from its own public record.  None when the run
+    is not linked, or two conditions claim it (`describe_run` decides)."""
+    root = Path(root)
+    if doc is None:
+        read = load(root)
+        doc = read.doc if read.status == "ok" else None
+    info = describe_run(doc, run_id, row_id)
+    if info is None or doc is None:
+        return None
+    by_id, groups_by_id = _conditions_by_id(doc), _groups_by_id(doc)
+    cond, group = by_id[info["condition_id"]], groups_by_id.get(by_id[info["condition_id"]].get("group"))
+    metric = (group or {}).get("metric") if isinstance((group or {}).get("metric"), dict) else None
+    key = (metric or {}).get("key")
+    latest, _best = _observed(summary if isinstance(summary, Mapping) else {}, key)
+    target = (group or {}).get("target") if isinstance((group or {}).get("target"), dict) else None
+    control_id = target.get("condition") if target and target.get("kind") == "condition" else None
+    control_cond = by_id.get(control_id) if control_id else None
+    control_latest = control_metric = None
+    if control_cond is not None and control_id != cond["id"]:
+        control_group = groups_by_id.get(control_cond.get("group"))
+        control_metric = (control_group or {}).get("metric")
+        control_latest = _condition_status(root, control_group, control_cond, doc, by_id,
+                                           time.time() if now is None else now, {}).get("latest")
+    comparison = _condition_comparison(group, cond, latest, control_id, control_cond, control_latest, control_metric)
+    point = {"metric": key, "epoch": latest.get("epoch"), "value": latest.get("value")} \
+        if latest and key and latest.get("key") == key and latest.get("value") is not None else None
+    return {**info, "metric_key": key, "metric_unit": (metric or {}).get("unit"), "latest": latest,
+            "decision_point": point, "comparison": comparison}
+
+
 # ---------------------------------------------------------------------------
 # lint (warnings only; never blocks)
 # ---------------------------------------------------------------------------
@@ -1022,18 +1059,22 @@ def _public_point(raw: Any) -> Optional[Dict[str, Any]]:
     return {"epoch": raw.get("epoch"), "value": _num(raw.get("value")), "nonfinite": bool(raw.get("nonfinite"))}
 
 
+def _keyed_point(key: str, raw: Any) -> Optional[Dict[str, Any]]:
+    point = _public_point(raw)
+    return None if point is None else {"key": key, **point}
+
+
 def _observed(summary: Mapping[str, Any], key: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """(latest, best) for the declared metric; falls back to the run's own decision metric so a
-    different metric shows up as a mismatch rather than as no value."""
+    different metric shows up as a mismatch rather than as no value.  Both points carry the key
+    they were measured in, so another metric's best never reads as the declared metric's value."""
     latest_metrics = summary.get("latest_metrics") if isinstance(summary.get("latest_metrics"), dict) else {}
     best_metrics = summary.get("best_metrics") if isinstance(summary.get("best_metrics"), dict) else {}
     if key and isinstance(latest_metrics.get(key), dict):
-        latest = {"key": key, **_public_point(latest_metrics[key])}
-        return latest, _public_point(best_metrics.get(key))
+        return _keyed_point(key, latest_metrics[key]), _keyed_point(key, best_metrics.get(key))
     own = summary.get("metric") if isinstance(summary.get("metric"), str) else None
-    latest = _public_point(summary.get("latest"))
-    if latest is not None and own:
-        return {"key": own, **latest}, _public_point(summary.get("best"))
+    if own and isinstance(summary.get("latest"), dict):
+        return _keyed_point(own, summary.get("latest")), _keyed_point(own, summary.get("best"))
     return None, None
 
 
@@ -1173,6 +1214,20 @@ def _condition_status(root: Path, group: Optional[Mapping[str, Any]], cond: Mapp
     return out
 
 
+def _condition_comparison(group: Optional[Mapping[str, Any]], cond: Mapping[str, Any], latest: Optional[Mapping[str, Any]],
+                          control_id: Optional[str], control_cond: Optional[Mapping[str, Any]],
+                          control_latest: Optional[Mapping[str, Any]], control_metric: Any) -> Dict[str, Any]:
+    """One condition's `comparison`, the same for `status()` and for a notice written from a live
+    observation: the control itself has no target, any other condition goes through `compare()`."""
+    if control_id == cond["id"]:
+        return {"state": "no-target", "reason": "is-control", "value": None, "baseline": None,
+                "delta": None, "delta_unit": None, "relative_percent": None, "better": None}
+    comparison = compare(group, latest, control_latest, control_metric if isinstance(control_metric, dict) else None)
+    if comparison["baseline"] and control_id and control_cond:
+        comparison["baseline"]["label"] = control_cond.get("display_name") or None
+    return comparison
+
+
 def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) -> Dict[str, Any]:
     """`experiment-status/v1`: the catalog and the public run records, read together, read only."""
     root = Path(root)
@@ -1214,16 +1269,9 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
             control_metric = (control_group or {}).get("metric")
             for cond in conds:
                 row = statuses[cond["id"]]
-                if control_id == cond["id"]:
-                    row["comparison"] = {"state": "no-target", "reason": "is-control", "value": None, "baseline": None,
-                                         "delta": None, "delta_unit": None, "relative_percent": None, "better": None}
-                else:
-                    control_point = control.get("latest") if control else None
-                    comparison = compare(group, row.get("latest"), control_point,
-                                         control_metric if isinstance(control_metric, dict) else None)
-                    if comparison["baseline"] and control_id and by_id.get(control_id):
-                        comparison["baseline"]["label"] = by_id[control_id].get("display_name") or None
-                    row["comparison"] = comparison
+                row["comparison"] = _condition_comparison(
+                    group, cond, row.get("latest"), control_id, by_id.get(control_id),
+                    control.get("latest") if control else None, control_metric)
                 if row["run_status"] == "running" and row["latest"] is None:
                     out["waiting"].append({"condition_id": cond["id"], "display_name": cond.get("display_name") or None,
                                            "expected_at": row["expected_at"]})
@@ -1241,6 +1289,79 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
     return out
 
 
+# ---------------------------------------------------------------------------
+# cards: the catalog's names for the card writing guide and the start context (a card is never rewritten)
+# ---------------------------------------------------------------------------
+
+_PROJECT_STATUS: Any = None
+
+
+def root_for_cwd(cwd: Any) -> Optional[Path]:
+    """The artifact root for a work folder, from file reads only (Fleet's `project_status.artifact_root`)."""
+    global _PROJECT_STATUS
+    try:
+        if not cwd:
+            return None
+        if _PROJECT_STATUS is None:
+            import importlib.util
+            path = Path(__file__).resolve().parents[1] / "tools" / "fleet" / "collectors" / "project_status.py"
+            spec = importlib.util.spec_from_file_location("experiment_catalog_project_status", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PROJECT_STATUS = module
+        root = _PROJECT_STATUS.artifact_root(str(cwd))
+        return Path(root) if root else None
+    except Exception:  # noqa: BLE001 -- a card or a start never waits on this
+        return None
+
+
+def card_context(cwd: Any) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    """`(root, catalog doc)` for a folder whose catalog reads ok and names at least one condition, else None."""
+    root = root_for_cwd(cwd)
+    if root is None:
+        return None
+    try:
+        read = load(root)
+        if read.status != "ok" or not read.doc or not any(c.get("display_name") for c in read.doc.get("conditions", [])):
+            return None
+        return root, read.doc
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def catalog_brief(doc: Mapping[str, Any], path: str, limit: int, lang: Optional[str] = None) -> str:
+    """The catalog's location, each group's goal and its condition names, in at most `limit` bytes.
+
+    Tries the whole thing, then without goals, then fewer names with "… and N more", and at the end only
+    the location line; "" when no group has a named condition."""
+    t = _translator(lang)
+    groups = []
+    for group in doc.get("groups", []):
+        names = [c["display_name"] for c in doc.get("conditions", []) if c.get("group") == group.get("id") and c.get("display_name")]
+        if names:
+            groups.append((group, names))
+    if not groups:
+        return ""
+
+    def build(goals: bool, keep: int) -> str:
+        lines = [t("experiment.card.catalog", path=path)]
+        for group, names in groups:
+            head = f"[{group.get('display_name') or t('experiment.no_group')}]"
+            if goals and group.get("goal"):
+                head += " " + t("experiment.goal", goal=group["goal"])
+            shown = names[:keep]
+            lines += [head, t("experiment.card.conditions", names=", ".join(shown) + (
+                t("experiment.card.more", n=len(names) - len(shown)) if len(names) > len(shown) else ""))]
+        return "\n".join(lines + [t("experiment.card.rule")])
+
+    for goals, keep in ((True, 99), (False, 99), (False, 6), (False, 3), (False, 1)):
+        text = build(goals, keep)
+        if len(text.encode("utf-8")) <= limit:
+            return text
+    only = t("experiment.card.catalog", path=path)
+    return only if len(only.encode("utf-8")) <= limit else ""
+
+
 def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[str] = ()) -> List[Dict[str, str]]:
     head: List[Dict[str, str]] = []
     if read.status == "missing":
@@ -1248,6 +1369,199 @@ def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[
     elif read.status == "invalid":
         head.append(_warn("catalog-invalid", CATALOG_REL, read.code or ""))
     return head + lint(read.doc if read.status == "ok" else None, expect, unlinked)
+
+
+# ---------------------------------------------------------------------------
+# scan: an internal name said without its catalog name (advice only)
+# ---------------------------------------------------------------------------
+#
+# A wrong warning is worse than a missed one, so the scan stays quiet whenever a token may be something
+# else: an ordinary word, number, or version string; code; a quoted saying; a path, URL, or file name; a
+# command line.  Only a token that by itself points at an experiment is reported: a run id or `run:row`,
+# an identifier-shaped alias (`rev-a`, `retain030`), or a former catalog name.
+
+_FENCE_LINE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_INDENTED_CODE = re.compile(r"(?: {4,}|\t)(?![-*+] |\d+[.)] )\S")
+_QUOTE_LINE = re.compile(r"\s*>")
+_QUIET_SPANS = re.compile(
+    r"`+[^`\n]*`+"                                                          # inline code
+    r"|\"[^\"\n]*\"|“[^”\n]*”|‘[^’\n]*’|'[^'\n]*'|「[^」\n]*」|『[^』\n]*』"     # words quoted as said
+    r"|[A-Za-z][A-Za-z0-9+.-]*://\S*|www\.\S+"                              # URLs
+    r"|\S*[/\\]\S*")                                                        # paths (a slash or backslash)
+_COMMAND = re.compile(
+    r"(?:^|(?<=[\s(\"'`]))(?:\$\s+|(?:sudo|git|gh|python3?|pip3?|uv|conda|npm|npx|pnpm|yarn|node|cargo|make|"
+    r"docker|kubectl|ssh|scp|rsync|curl|wget|bash|sh|zsh|cd|ls|cat|rm|mv|cp|mkdir|chmod|tar|grep|sed|awk|"
+    r"torchrun|accelerate|sbatch|srun)\s+(?=\S))[^\n]*", re.MULTILINE)       # a command, to the end of its line
+_OPTION_BEFORE = re.compile(r"(?:^|\s)--?[A-Za-z][\w-]*[ =]\Z")
+_ID_TAIL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+_ASCII_ALNUM = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+_NUMBER = re.compile(r"[+-]?(?:\d+(?:[.,_]\d+)*|\.\d+)(?:e[+-]?\d+)?%?\Z", re.IGNORECASE)
+_VERSION = re.compile(r"v\d+(?:[._]\d+)*\Z", re.IGNORECASE)
+_JOINED = re.compile(r"[^\W_][-_:.][^\W_]")
+_START = re.compile(r"(?<![\w-])\S")
+
+
+def _names_an_experiment(token: str, kind: str) -> bool:
+    """Whether `token` alone points at an experiment rather than an ordinary word, number, or version.
+
+    Run ids and aliases must look like an identifier: 3+ characters, no space, with a digit or a joined
+    part (`run-rev-1`, `rev-a`, `retain030`; not `E`, `base`, `v2`, `0.3`).  A former name is a catalog
+    name the condition used to have, so a phrase counts; a single plain English word does not."""
+    token = token.strip()
+    if not any(ch.isalpha() for ch in token) or _NUMBER.match(token) or _VERSION.match(token):
+        return False
+    if kind == "former-name":
+        return len(token) >= 2 and re.fullmatch(r"[A-Za-z]+", token) is None
+    return (len(token) >= 3 and not any(ch.isspace() for ch in token)
+            and (any(ch.isdigit() for ch in token) or _JOINED.search(token) is not None))
+
+
+def _lower_same_length(text: str) -> str:
+    low = text.lower()
+    if len(low) == len(text):
+        return low
+    return "".join(ch.lower() if len(ch.lower()) == 1 else ch for ch in text)
+
+
+def scan_index(doc: Optional[Mapping[str, Any]], *, unlinked: Sequence[str] = ()) -> Dict[str, Any]:
+    """The lookup table `scan_text` and `scan_fields` read: built once per catalog, used for every text.
+
+    Tokens two conditions answer to (the same judgment `resolve_ex` makes) and tokens that are not
+    clearly an experiment name are left out here, so a scan never walks the catalog again."""
+    conditions = [c for c in ((doc or {}).get("conditions") or []) if isinstance(c, Mapping) and c.get("id")]
+    name_owners: Dict[str, set] = {}
+    run_owners: Dict[str, set] = {}
+    row_owners: Dict[Tuple[str, Optional[str]], set] = {}
+    for cond in conditions:
+        for name in [cond.get("display_name")] + list(cond.get("aliases") or []) + list(cond.get("former_names") or []):
+            if name:
+                name_owners.setdefault(_fold(name), set()).add(cond["id"])
+        for run_id, row_id in _run_ref_keys(cond):
+            run_owners.setdefault(run_id, set()).add(cond["id"])
+            row_owners.setdefault((run_id, row_id), set()).add(cond["id"])
+
+    def owners(token: str) -> set:
+        run_id, colon, row_id = token.partition(":")
+        found = set(name_owners.get(_fold(token), ()))
+        if colon:
+            found |= row_owners.get((run_id, row_id), set()) | row_owners.get((run_id, None), set())
+        else:
+            found |= run_owners.get(token, set())
+        return found
+
+    table: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}
+    clashes = set()
+    for cond in conditions:
+        tokens = []
+        for run_id, row_id in _run_ref_keys(cond):
+            tokens.append((run_id, "run-id"))
+            if row_id:
+                tokens.append((f"{run_id}:{row_id}", "run-id"))
+        tokens += [(alias, "alias") for alias in cond.get("aliases") or [] if alias]
+        tokens += [(old, "former-name") for old in cond.get("former_names") or [] if old]
+        for token, kind in tokens:
+            key = _lower_same_length(str(token))
+            if not _names_an_experiment(str(token), kind) or len(owners(str(token))) > 1:
+                continue
+            if key in table and table[key][1] is not cond:
+                clashes.add(key)              # two conditions spelled alike: no name to offer
+            table.setdefault(key, (kind, cond))
+    for key in clashes:
+        table.pop(key, None)
+    for run_id in unlinked:
+        key = _lower_same_length(str(run_id or ""))
+        if key and key not in table and _names_an_experiment(key, "unregistered-run"):
+            table[key] = ("unregistered-run", None)
+    by_length: Dict[int, Dict[str, Tuple[str, Optional[Dict[str, Any]]]]] = {}
+    for key, entry in table.items():
+        by_length.setdefault(len(key), {})[key] = entry
+    return {"by_length": by_length, "lengths": sorted(by_length, reverse=True),
+            "first": frozenset(key[0] for key in table),
+            "names": [(cond["id"], _fold(cond["display_name"])) for cond in conditions if cond.get("display_name")]}
+
+
+def _quiet_mask(text: str) -> bytearray:
+    """1 where a token is not read as an experiment name: code, quotes, paths, URLs, commands."""
+    mask = bytearray(len(text))
+    offset, fence = 0, ""
+    for line in text.split("\n"):
+        marker = _FENCE_LINE.match(line)
+        quiet = bool(fence) or bool(marker) or _INDENTED_CODE.match(line) is not None or _QUOTE_LINE.match(line) is not None
+        if marker:
+            if not fence:
+                fence = marker.group(1)
+            elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = ""
+        if quiet:
+            mask[offset:offset + len(line)] = b"\x01" * len(line)
+        offset += len(line) + 1
+    for pattern in (_QUIET_SPANS, _COMMAND):
+        for match in pattern.finditer(text):
+            mask[match.start():match.end()] = b"\x01" * (match.end() - match.start())
+    return mask
+
+
+def _scan_one(text: str, index: Mapping[str, Any], named: set) -> List[Dict[str, Any]]:
+    if not text or not index["lengths"]:
+        return []
+    low = _lower_same_length(text)
+    mask = _quiet_mask(text)
+    found: List[Dict[str, Any]] = []
+    after = 0
+    for start in _START.finditer(text):
+        begin = start.start()
+        if begin < after or low[begin] not in index["first"]:
+            continue
+        for length in index["lengths"]:
+            entry = index["by_length"][length].get(low[begin:begin + length])
+            end = begin + length
+            if entry is None or (end < len(text) and text[end] in _ID_TAIL):
+                continue
+            kind, cond = entry
+            after = end
+            if cond is not None and cond["id"] in named:
+                break                          # the reader has the catalog name right here
+            before = text[begin - 1:begin]
+            nxt = text[end:end + 2]
+            if (any(mask[begin:end]) or (before and before in ".@#$=") or nxt[:1] == "="
+                    or (nxt[:1] == "." and nxt[1:2] in _ASCII_ALNUM)
+                    or _OPTION_BEFORE.search(text[max(0, begin - 40):begin])):
+                break                          # a file name, a key, an option value, code, a path, ...
+            line_start = text.rfind("\n", 0, begin) + 1
+            found.append({"token": text[begin:end], "line": text.count("\n", 0, begin) + 1,
+                          "col": begin - line_start + 1, "kind": kind,
+                          "name": (cond or {}).get("display_name") or None,
+                          "condition_id": (cond or {}).get("id")})
+            break
+    return found
+
+
+def scan_fields(fields: Sequence[Tuple[str, Any]], doc: Optional[Mapping[str, Any]], *,
+                unlinked: Sequence[str] = (), index: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
+    """`scan_text` over texts the reader sees together (a question, its options): `[{field, token, ...}]`.
+
+    One lookup table serves every field, and a catalog name in any field counts for all of them."""
+    try:
+        index = index if index is not None else scan_index(doc, unlinked=unlinked)
+        texts = [(field, text if isinstance(text, str) else "") for field, text in fields]
+        folded = _fold("\n".join(text for _field, text in texts))
+        named = {cid for cid, name in index["names"] if name and name in folded}
+        return [{"field": field, **hit} for field, text in texts for hit in _scan_one(text, index, named)]
+    except Exception:  # noqa: BLE001 -- a warning never fails its caller
+        return []
+
+
+def scan_text(text: str, doc: Optional[Mapping[str, Any]], *, unlinked: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Internal names in `text` that the reader cannot place: `[{token, line, col, kind, name, condition_id}]`.
+
+    `kind`: `run-id` (a run or `run:row` the catalog links to a condition), `alias`, `former-name`, or
+    `unregistered-run` (an id in `unlinked`, which the catalog does not know).  A token of a condition is
+    skipped when that condition's catalog name is in the same text; so is a token two conditions answer
+    to (no name to offer), a token that is not clearly an experiment name, and a token in code, quotes, a
+    path, URL, file name, or command (see `_names_an_experiment`, `_quiet_mask`).  Never raises, blocks,
+    or rewrites: it reports."""
+    hits = scan_fields([("", text if isinstance(text, str) else "")], doc, unlinked=unlinked)
+    return [{key: value for key, value in hit.items() if key != "field"} for hit in hits]
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1597,15 @@ def _unit_text(value: float, unit: Optional[str]) -> str:
     return _fmt(value) + (unit if unit == "%" else f" {unit}" if unit else "")
 
 
+def _measured_text(point: Mapping[str, Any], key: Optional[str], unit: Optional[str]) -> str:
+    """A point's value in the group's unit; a value measured in another metric names that metric and
+    takes no unit (a loss is never written as a WER percent)."""
+    measured = point.get("key")
+    if measured and measured != key:
+        return f"{_fmt(point['value'])} ({measured})"
+    return _unit_text(point["value"], unit)
+
+
 def _clock(iso: Optional[str]) -> str:
     epoch = _ts(iso)
     return "" if epoch is None else time.strftime("%m-%d %H:%M", time.localtime(epoch))
@@ -1296,24 +1619,18 @@ def _age_text(seconds: int, t: Callable[..., str]) -> str:
     return t("experiment.age_hours", n=round(seconds / 3600, 1))
 
 
-def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callable[..., str]) -> str:
-    name = row.get("display_name") or t("experiment.unnamed")
-    metric = group.get("metric") or {}
-    unit = metric.get("unit") or None
+def _value_parts(latest: Optional[Mapping[str, Any]], comparison: Optional[Mapping[str, Any]], unit: Optional[str],
+                 t: Callable[..., str], key: Optional[str] = None) -> List[str]:
+    """The latest value and how it stands against the target, in words: one place for a status line and a notice.
+    `key` is the declared metric: a latest value measured in another metric is named, not given `unit`."""
     parts: List[str] = []
-    progress = row.get("progress")
-    if progress and progress.get("reached") is not None:
-        parts.append(t("experiment.progress", reached=progress["reached"],
-                       total=progress.get("total") if progress.get("total") is not None else "?",
-                       unit=progress.get("unit") or ""))
-    latest = row.get("latest")
     if latest and latest.get("value") is not None:
-        parts.append(t("experiment.latest", value=_unit_text(latest["value"], unit), epoch=latest.get("epoch")))
+        parts.append(t("experiment.latest", value=_measured_text(latest, key, unit), epoch=latest.get("epoch")))
     elif latest and latest.get("nonfinite"):
         parts.append(t("experiment.latest_nonfinite", epoch=latest.get("epoch")))
     else:
         parts.append(t("experiment.latest_none"))
-    comparison = row.get("comparison") or {}
+    comparison = comparison or {}
     state, reason = comparison.get("state"), comparison.get("reason")
     if state == "ok":
         baseline = comparison["baseline"]
@@ -1329,6 +1646,40 @@ def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callabl
         parts.append(t(f"experiment.reason.{reason}"))
     elif state == "no-data" and reason == "control-no-observation":
         parts.append(t("experiment.reason.control-no-observation"))
+    return parts
+
+
+def notice_line(info: Mapping[str, Any], lang: Optional[str] = None) -> str:
+    """The first line of an experiment notice: `name — goal; latest, versus the target`."""
+    t = _translator(lang)
+    return t("experiment.notice.line", name=info["name"], goal=info.get("goal") or t("experiment.notice.goal_missing"),
+             values="; ".join(_value_parts(info.get("latest"), info.get("comparison"), info.get("metric_unit"), t,
+                                           info.get("metric_key"))))
+
+
+UNREGISTERED_NOTICE = "experiment.notice.unregistered"
+
+
+def unregistered_line(lang: Optional[str] = None) -> str:
+    return _translator(lang)(UNREGISTERED_NOTICE)
+
+
+def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callable[..., str]) -> str:
+    name = row.get("display_name") or t("experiment.unnamed")
+    metric = group.get("metric") or {}
+    unit = metric.get("unit") or None
+    parts: List[str] = []
+    # The row's own run state in words (RV-PR1596-R2): running, or ended without a recorded outcome.
+    if row.get("run_status") == "running":
+        parts.append(t("experiment.run_state.running"))
+    elif (row.get("unknown") or {}).get("run_status") == "row-ended":
+        parts.append(t("experiment.run_state.row-ended"))
+    progress = row.get("progress")
+    if progress and progress.get("reached") is not None:
+        parts.append(t("experiment.progress", reached=progress["reached"],
+                       total=progress.get("total") if progress.get("total") is not None else "?",
+                       unit=progress.get("unit") or ""))
+    parts.extend(_value_parts(row.get("latest"), row.get("comparison"), unit, t, metric.get("key")))
     if row.get("run_status") == "running":
         if row.get("expected_at"):
             parts.append(t("experiment.expected", time=_clock(row["expected_at"])))
@@ -1380,6 +1731,88 @@ def render_status(doc: Mapping[str, Any], lang: Optional[str] = None) -> str:
         lines.append(t("experiment.warning", code=t(f"experiment.warning.{warning['code']}"),
                        where=warning["where"], detail=warning.get("detail") or "-"))
     return "\n".join(lines)
+
+
+def _leader_point(point: Optional[Mapping[str, Any]], unit: Optional[str], key: Optional[str] = None) -> str:
+    if not point or point.get("value") is None:
+        return "-"
+    return _measured_text(point, key, unit) + (f"@{point['epoch']}" if point.get("epoch") is not None else "")
+
+
+def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., str], key: Optional[str] = None) -> List[str]:
+    comparison = row.get("comparison") or {}
+    state, reason = comparison.get("state"), comparison.get("reason")
+    baseline = comparison.get("baseline") if state == "ok" else None
+    delta = relative = "-"
+    if state == "ok":
+        delta = _signed(comparison["delta"]) + ("%p" if comparison.get("delta_unit") == "pp"
+                                                else f" {comparison['delta_unit']}" if comparison.get("delta_unit") else "")
+        if comparison.get("relative_percent") is not None:
+            relative = _signed(round(comparison["relative_percent"], 1)) + "%"
+    words = [t(f"experiment.anomaly.{a}") for a in row.get("anomalies") or ()]
+    if state == "ok":
+        words.append(t("experiment.leaderboard.comparable"))
+    elif state == "not-comparable":
+        words.append(t("experiment.not_comparable", reason=t(f"experiment.reason.{reason}")))
+    elif state == "no-target":
+        words.append(t(f"experiment.reason.{reason}"))
+    else:
+        words.append(t("experiment.latest_none"))
+    base = "-"
+    if baseline:
+        base = ((baseline.get("label") + " ") if baseline.get("label") else "") + _leader_point(baseline, unit)
+    return [row.get("display_name") or t("experiment.unnamed"), (row.get("current_run") or {}).get("run_id") or "-",
+            _leader_point(row.get("latest"), unit, key), _leader_point(row.get("best"), unit, key), base, delta, relative,
+            ", ".join(words)]
+
+
+def _leader_order(rows: Sequence[Mapping[str, Any]], direction: Optional[str]) -> List[Mapping[str, Any]]:
+    """Comparable rows first, the better latest value on top; the rest below in catalog order."""
+    ok = [r for r in rows if (r.get("comparison") or {}).get("state") == "ok" and (r.get("latest") or {}).get("value") is not None]
+    rest = [r for r in rows if r not in ok]
+    ok.sort(key=lambda r: r["latest"]["value"], reverse=direction != "min")  # stable: ties keep catalog order
+    return ok + rest
+
+
+def render_leaderboard(doc: Mapping[str, Any], group: Optional[str] = None, fmt: str = "md",
+                       lang: Optional[str] = None) -> str:
+    """One table per group from a `status()` document; every number is the one `compare()` made.
+
+    Groups are never mixed, and a row compared to nothing sits below the ranked ones with its reason.
+    `fmt` is `md` (a markdown table per group) or `tsv` (group name first, one header line)."""
+    t = _translator(lang)
+    catalog = doc.get("catalog") or {}
+    if catalog.get("status") == "invalid":
+        return t("experiment.leaderboard.unreadable", code=catalog.get("code") or "?")
+    groups = list(doc.get("groups") or ())
+    if group:
+        wanted = _fold(group)
+        groups = [g for g in groups if wanted in (_fold(g.get("id") or ""), _fold(g.get("display_name") or ""))]
+    groups = [g for g in groups if g.get("conditions")]
+    if not groups:
+        return t("experiment.leaderboard.empty")
+    heads = [t(f"experiment.leaderboard.col.{k}") for k in ("name", "run", "latest", "best", "baseline", "delta", "relative", "state")]
+    out: List[str] = []
+    for g in groups:
+        metric = g.get("metric") or {}
+        unit = metric.get("unit") or None
+        rows = [_leader_row(r, unit, t, metric.get("key")) for r in _leader_order(g["conditions"], metric.get("direction"))]
+        name = g.get("display_name") or t("experiment.no_group")
+        if fmt == "tsv":
+            if not out:
+                out.append("\t".join([t("experiment.leaderboard.col.group")] + heads))
+            out.extend("\t".join([name] + [c.replace("\t", " ") for c in row]) for row in rows)
+            continue
+        head = f"### {name}"
+        if g.get("goal"):
+            head += " " + t("experiment.goal", goal=g["goal"])
+            if metric.get("key"):
+                head += " " + t("experiment.metric", key=metric["key"], unit=unit or "?",
+                                direction=t(f"experiment.direction.{metric.get('direction') or 'min'}"))
+        out += [head, "", "| " + " | ".join(heads) + " |", "|" + "|".join("---" for _ in heads) + "|"]
+        out += ["| " + " | ".join(c.replace("|", "\\|") for c in row) + " |" for row in rows]
+        out += ["", t("experiment.leaderboard.note"), ""]
+    return "\n".join(out).rstrip("\n")
 
 
 def render_show(read: CatalogRead, lang: Optional[str] = None) -> str:
@@ -1438,6 +1871,11 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("show", parents=[where], help="the catalog as written")
     st = sub.add_parser("status", parents=[where], help="catalog + public run records, read together")
     st.add_argument("--expect", action="append", default=[], metavar="NAME")
+    lb = sub.add_parser("leaderboard", parents=[where], help="a table per group, ordered against the target; never blocks")
+    lb.add_argument("--group", help="one group, by id or name")
+    lb.add_argument("--format", choices=("md", "tsv"), default="md")
+    sc = sub.add_parser("scan", parents=[where], help="internal names in a text that lack their catalog name; never blocks")
+    sc.add_argument("--file", help="the text to read; `-` or nothing reads stdin")
     li = sub.add_parser("lint", parents=[where], help="warnings with their place; never blocks")
     li.add_argument("--expect", action="append", default=[], metavar="NAME")
     reg = sub.add_parser("register", parents=[where, write], help="add or update groups, conditions, and terms")
@@ -1528,7 +1966,9 @@ def _read_command(args: argparse.Namespace) -> int:
                               "updated_at": None},
                   "terms": [], "groups": [], "waiting": [], "unlinked_runs": {"run_ids": [], "truncated": 0},
                   "warnings": [_warn("catalog-invalid", CATALOG_REL, code)]}
-    if args.command == "lint":
+    if args.command == "leaderboard":
+        print(render_leaderboard(report, args.group, args.format, args.lang))
+    elif args.command == "lint":
         _print({"catalog": report["catalog"], "warnings": report["warnings"]}) if args.json else \
             print(render_status({**report, "groups": [], "unlinked_runs": {"run_ids": [], "truncated": 0}}, args.lang))
     elif args.json:
@@ -1538,12 +1978,35 @@ def _read_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_command(args: argparse.Namespace) -> int:
+    """`scan`: JSON of the internal names in a text; exit 0 whatever happens (advice, never a gate)."""
+    report: Dict[str, Any] = {"catalog": {"status": "unknown"}, "warnings": []}
+    try:
+        text = sys.stdin.read() if args.file in (None, "-") else Path(args.file).read_text(encoding="utf-8")
+        root = _root_from(args)
+        read = load(root)
+        report["catalog"] = {"status": read.status, "path": CATALOG_REL, "code": read.code}
+        if read.status == "ok":
+            unlinked: List[str] = []
+            try:
+                unlinked = list(status(root)["unlinked_runs"]["run_ids"])
+            except Exception:  # noqa: BLE001 -- without the run list only registered names are checked
+                pass
+            report["warnings"] = scan_text(text, read.doc, unlinked=unlinked)
+    except Exception as exc:  # noqa: BLE001
+        report["catalog"] = {"status": "unreadable", "code": type(exc).__name__}
+    _print(report)
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = _parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
-    if args.command in ("show", "status", "lint"):
+    if args.command == "scan":
+        return _scan_command(args)
+    if args.command in ("show", "status", "lint", "leaderboard"):
         return _read_command(args)
     try:
         root = _root_from(args)

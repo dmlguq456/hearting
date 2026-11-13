@@ -673,6 +673,12 @@ class ReviewFindings(Base):
         self.assertNotIn("끝난 행", [w["display_name"] for w in report["waiting"]])
         line = next(line for line in E.render_status(report, "ko").splitlines() if line.startswith("- 끝난 행"))
         self.assertNotIn("예상", line)
+        # RV-PR1596-R2: the text says in words what state each row is in
+        self.assertIn("행 종료, 결과 기록 없음", line)
+        live_line = next(line for line in E.render_status(report, "ko").splitlines() if line.startswith("- 진행 중 행"))
+        self.assertIn("실행 중", live_line)
+        self.assertNotIn("실행 중", next(line for line in E.render_status(report, "ko").splitlines()
+                                       if line.startswith("- 함께 끝난 행")))
 
 
 class Text(Base):
@@ -699,6 +705,372 @@ class Text(Base):
         unverified = E.render_status(E.status(bad, now=NOW), "ko")
         self.assertIn("비교 불가: 비교 기준의 평가 조건이 확인되지 않음", unverified)
         self.assertNotIn("%p", unverified)
+
+
+def summary_of(series, key="wer", direction="min", split="validation"):
+    samples = [{"split": split, "epoch": epoch, "metrics": {name: value}}
+               for name, points in series.items() for epoch, value in points]
+    return rp.metric_summary(samples, decision_metric=key, direction=direction)
+
+
+class Observation(Base):
+    """`describe_observation`: what a live run is called and where its latest value stands, before its record exists."""
+
+    def test_a_linked_run_gets_its_name_goal_and_the_same_comparison_a_status_makes(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        info = E.describe_observation(root, "run-a", None, summary_of({"wer": [(10, 21.0), (12, 20.4)]}))
+        self.assertEqual((info["name"], info["group_name"]), ("0.3초 이하 짧은 발화 유지", "AMI 가변 화자 개선"))
+        self.assertEqual(info["goal"], "AMI Dev에서 var WER이 fix 19.99%보다 낮은가")
+        self.assertEqual(info["decision_point"], {"metric": "wer", "epoch": 12, "value": 20.4})
+        self.write_run(root, "run-a", series={"wer": [(10, 21.0), (12, 20.4)]})
+        status_view = self.cond(E.status(root, now=NOW), "0.3초 이하 짧은 발화 유지")["comparison"]
+        self.assertEqual(info["comparison"], status_view)   # one `compare()`, never a second reading of the numbers
+        self.assertIn("0.3초 이하 짧은 발화 유지 — AMI Dev에서 var WER이 fix 19.99%보다 낮은가; 최근 20.40%@12; fix 19.99% 대비 +0.41%p", E.notice_line(info, "ko"))
+
+    def test_an_unlinked_run_a_missing_catalog_and_a_claimed_run_name_nothing(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        summary = summary_of({"wer": [(12, 20.4)]})
+        self.assertIsNone(E.describe_observation(root, "mpwav-20261111-stray", None, summary))
+        self.assertEqual(E.unregistered_line("ko"), "정본 이름 없음: run을 정본에 등록")
+        self.assertIsNone(E.describe_observation(self.make_root("none", "z"), "run-a", None, summary))
+        path = E.catalog_path(root)       # a hand edit the writer would refuse: a second condition answers to run-a
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["conditions"][1]["refs"]["runs"].append({"run_id": "run-a"})
+        path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        self.assertIsNone(E.describe_observation(root, "run-a", None, summary))   # two conditions claim it: neither
+
+    def test_a_metric_the_run_has_not_reported_has_no_decision_point(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        info = E.describe_observation(root, "run-a", None, summary_of({"loss": [(12, 1.5)]}, key="loss"))
+        self.assertIsNone(info["decision_point"])                       # the declared metric (wer) never arrived
+        self.assertNotEqual(info["comparison"]["state"], "ok")
+
+    def test_a_condition_target_reads_the_control_from_its_own_record(self):
+        root = self.make_root()
+        spec = {"groups": [group_spec(target={"kind": "condition", "condition": "기준 조건"}, metric={**METRIC, "scoring": None})],
+                "conditions": [
+                    {"display_name": "기준 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-ctl"}]}},
+                    {"display_name": "실험 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-exp"}]}}]}
+        self.register(root, spec)
+        self.write_run(root, "run-ctl", series={"wer": [(12, 20.0)]})
+        info = E.describe_observation(root, "run-exp", None, summary_of({"wer": [(12, 20.5)]}))
+        self.assertEqual(info["comparison"]["state"], "ok")
+        self.assertAlmostEqual(info["comparison"]["delta"], 0.5)
+        self.assertEqual(info["comparison"]["baseline"]["label"], "기준 조건")
+        other = E.describe_observation(root, "run-exp", None, summary_of({"wer": [(10, 20.5)]}))   # the control is further along
+        self.assertEqual(other["comparison"]["reason"], "epoch-mismatch")
+
+
+class Leaderboard(Base):
+    def setup_root(self):
+        root = self.make_root()
+        spec = {"groups": [group_spec(), group_spec(display_name="다른 묶음", goal="다른 목표", target=None)],
+                "conditions": [
+                    {"display_name": "느린 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-a"}]}},
+                    {"display_name": "빠른 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-b"}]}},
+                    {"display_name": "값 없는 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-c"}]}},
+                    {"display_name": "다른 묶음의 조건", "group": "다른 묶음", "refs": {"runs": [{"run_id": "run-d"}]}}]}
+        self.register(root, spec)
+        self.write_run(root, "run-a", series={"wer": [(12, 20.4)]})
+        self.write_run(root, "run-b", series={"wer": [(12, 18.0)]})
+        self.write_run(root, "run-c", series={})
+        self.write_run(root, "run-d", series={"wer": [(12, 5.0)]})
+        return root
+
+    def test_the_better_value_leads_unranked_rows_sit_below_with_a_reason_and_groups_stay_apart(self):
+        root = self.setup_root()
+        text = E.render_leaderboard(E.status(root, now=NOW), None, "md", "ko")
+        order = [text.index(name) for name in ("빠른 조건", "느린 조건", "값 없는 조건")]
+        self.assertEqual(order, sorted(order))                         # direction min: the lower WER first
+        self.assertIn("-1.99%p", text)                                  # percent values subtract into percentage points
+        self.assertIn("+0.41%p", text)
+        self.assertIn("fix 19.99%", text)
+        self.assertIn("최근 값 아직 없음", text)                       # no value: a word, not a zero
+        first, second = text.split("### 다른 묶음")
+        self.assertNotIn("다른 묶음의 조건", first)                     # groups are not mixed
+        self.assertNotIn("빠른 조건", second)
+        self.assertIn("최종 승자나 합격 판정이 아님", text)
+        only = E.render_leaderboard(E.status(root, now=NOW), "다른 묶음", "md", "ko")
+        self.assertNotIn("빠른 조건", only)
+
+    def test_direction_max_puts_the_larger_value_first_and_ties_keep_catalog_order(self):
+        root = self.make_root()
+        metric = {**METRIC, "key": "acc", "unit": "", "direction": "max", "scoring": "s"}
+        spec = {"groups": [group_spec(metric=metric, target={"kind": "fixed", "label": "fix", "value": 0.5, "split": "validation", "scoring": "s"})],
+                "conditions": [{"display_name": n, "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": f"run-{i}"}]}}
+                               for i, n in enumerate(("가", "나", "다"))]}
+        self.register(root, spec)
+        for i, value in enumerate((0.6, 0.9, 0.6)):
+            self.write_run(root, f"run-{i}", key="acc", series={"acc": [(5, value)]})
+        text = E.render_leaderboard(E.status(root, now=NOW), None, "md", "ko")
+        self.assertEqual([text.index(f"| {n} |") for n in ("나", "가", "다")], sorted(text.index(f"| {n} |") for n in ("나", "가", "다")))
+
+    def test_tsv_has_one_header_and_the_group_first(self):
+        root = self.setup_root()
+        lines = E.render_leaderboard(E.status(root, now=NOW), None, "tsv", "ko").splitlines()
+        self.assertEqual(lines[0].split("\t")[:2], ["묶음", "조건"])
+        self.assertEqual(len(lines), 1 + 4)
+        self.assertEqual({len(line.split("\t")) for line in lines}, {9})
+        self.assertTrue(lines[1].startswith("AMI 가변 화자 개선\t빠른 조건\t"))
+
+    def test_the_command_is_exit_zero_even_for_a_broken_or_missing_catalog(self):
+        root = self.setup_root()
+        ok = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(root), "--lang", "ko"],
+                            capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("빠른 조건", ok.stdout)
+        bad = self.make_root("bad", "y")
+        path = E.catalog_path(bad); path.parent.mkdir(parents=True, exist_ok=True); path.write_text("{no", encoding="utf-8")
+        broken = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(bad), "--lang", "ko"],
+                                capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(broken.returncode, 0, broken.stderr)
+        self.assertIn("순위표 없음", broken.stdout)
+        empty = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(self.make_root("e", "x")), "--lang", "ko"],
+                               capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(empty.returncode, 0)
+        self.assertIn("순위표에 올릴 조건이 없음", empty.stdout)
+
+
+class Values(Base):
+    """RV-PR1607-1113 #2: a value measured in another metric never takes the group's unit, latest or best."""
+
+    def test_mismatched_metric_unit(self):
+        root = self.make_root()
+        self.two_conditions(root)  # declared: wer (%)
+        self.write_run(root, "run-a", key="loss", series={"loss": [(1, 0.5), (2, 0.7)]})
+        self.write_run(root, "run-b", series={"wer": [(2, 18.0)]})
+        summary = rp.metric_summary([{"epoch": 2, "split": "valid", "metrics": {"loss": 0.7}}],
+                                    decision_metric="loss", direction="min")
+        line = E.notice_line(E.describe_observation(root, "run-a", None, summary), "ko")
+        self.assertNotIn("0.7%", line)
+        self.assertIn("최근 0.7 (loss)@2", line)                      # the metric it was measured in, by name
+        report = E.status(root, now=NOW)
+        row = self.cond(report, "0.3초 이하 짧은 발화 유지")
+        self.assertEqual((row["latest"]["key"], row["best"]["key"]), ("loss", "loss"))  # best keeps its metric too
+        board = E.render_leaderboard(report, lang="ko")
+        mine = next(text for text in board.splitlines() if "0.3초" in text)
+        for wrong in ("0.7%", "0.5%"):
+            self.assertNotIn(wrong, mine)
+        self.assertIn("| 0.7 (loss)@2 | 0.5 (loss)@1 |", mine)
+        self.assertIn("| 18.00%@2 | 18.00%@2 |", next(text for text in board.splitlines() if "짧은 발화 제외" in text))
+        status_line = next(text for text in E.render_status(report, "ko").splitlines() if text.startswith("- 0.3초"))
+        self.assertNotIn("0.7%", status_line)
+        self.assertIn("0.7 (loss)@2", status_line)
+
+
+class CardNames(Base):
+    """`catalog_brief`, `card_context`: the catalog's names for the card writing guide and the start context."""
+
+    def setup_root(self, extra=0):
+        root = self.make_root()
+        self.register(root, {"groups": [group_spec()], "conditions": [
+            {"display_name": "잔향 줄임", "group": "AMI 가변 화자 개선", "aliases": ["rev-a", "E"],
+             "refs": {"runs": [{"run_id": "run-1", "row_id": "arm-1"}]}},
+            {"display_name": "잡음 줄임", "group": "AMI 가변 화자 개선", "aliases": ["noise-b"],
+             "refs": {"runs": [{"run_id": "run-2"}]}}] + [
+            {"display_name": f"추가 조건 {i:02d}", "group": "AMI 가변 화자 개선"} for i in range(extra)]})
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "잡음 줄임", "잡음 섞기"), now=NOW + 1)   # `잡음 줄임` is now a former name
+        return root, E.load(root).doc
+
+    def test_the_brief_shrinks_in_steps_and_ends_at_the_location_line(self):
+        root, doc = self.setup_root(extra=40)
+        path = str(E.catalog_path(root))
+        full = E.catalog_brief(doc, path, 4000, "ko")
+        self.assertIn("목표: AMI Dev에서 var WER이 fix 19.99%보다 낮은가", full)
+        self.assertTrue(full.startswith("실험 정본: "))
+        self.assertTrue(full.endswith("조건은 이 이름으로 부른다"))
+        sizes = []
+        for limit in (360, 600):
+            brief = E.catalog_brief(doc, path, limit, "ko")
+            self.assertLessEqual(len(brief.encode("utf-8")), limit)
+            self.assertIn("잔향 줄임", brief)
+            self.assertIn("외 ", brief)                                    # the names left out are counted
+            sizes.append(len(brief.encode("utf-8")))
+        self.assertLessEqual(sizes[0], sizes[1])
+        only = E.catalog_brief(doc, path, len(("실험 정본: " + path).encode("utf-8")), "ko")
+        self.assertEqual(only, "실험 정본: " + path)                       # no room for names: the location only
+        self.assertEqual(E.catalog_brief(doc, path, 5, "ko"), "")
+        self.assertEqual(E.catalog_brief({"groups": [{"id": "g"}], "conditions": []}, path, 600, "ko"), "")
+
+    def test_card_context_needs_an_ok_catalog_with_a_named_condition(self):
+        root, _doc = self.setup_root()
+        sub = root.parent / "deep" / "inside"
+        sub.mkdir(parents=True)
+        self.assertEqual(E.card_context(root.parent)[0], root)
+        self.assertEqual(E.card_context(str(sub)), None if E.root_for_cwd(sub) is None else E.card_context(str(sub)))
+        self.assertIsNone(E.card_context(None))
+        self.assertIsNone(E.card_context(self.base / "nowhere"))
+        E.catalog_path(root).write_text("{no", encoding="utf-8")
+        self.assertIsNone(E.card_context(root.parent))
+
+
+class Scan(Base):
+    """`scan_text`: internal names said without their catalog name. Advice only."""
+
+    def setup_root(self):
+        root = self.make_root()
+        self.register(root, {"groups": [group_spec()], "conditions": [
+            {"display_name": "잔향 줄임", "group": "AMI 가변 화자 개선", "aliases": ["E", "rev-a"],
+             "refs": {"runs": [{"run_id": "run-1", "row_id": "arm-1"}]}},
+            {"display_name": "잡음 줄임", "group": "AMI 가변 화자 개선", "aliases": ["noise-b"],
+             "refs": {"runs": [{"run_id": "run-2"}]}}]})
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "잡음 줄임", "잡음 섞기"), now=NOW + 1)   # the old name is now a former name
+        return root, E.load(root).doc
+
+    def kinds(self, text, doc, **kw):
+        return [(row["token"], row["kind"], row["name"], row["line"], row["col"]) for row in E.scan_text(text, doc, **kw)]
+
+    def test_a_run_id_an_alias_and_a_former_name_are_found_with_their_place_and_name(self):
+        _root, doc = self.setup_root()
+        text = "먼저 run-1:arm-1 을 보고,\n그다음 rev-a 와 잡음 줄임, 마지막으로 run-2 를 본다."
+        self.assertEqual(self.kinds(text, doc), [
+            ("run-1:arm-1", "run-id", "잔향 줄임", 1, 4),
+            ("rev-a", "alias", "잔향 줄임", 2, 5),
+            ("잡음 줄임", "former-name", "잡음 섞기", 2, 13),
+            ("run-2", "run-id", "잡음 섞기", 2, 26)])
+
+    def test_the_catalog_name_in_the_same_text_silences_that_conditions_tokens_only(self):
+        _root, doc = self.setup_root()
+        self.assertEqual(self.kinds("잔향 줄임(run-1)과 run-2", doc), [("run-2", "run-id", "잡음 섞기", 1, 15)])
+        self.assertEqual(self.kinds("잔향 줄임(run-1)과 잡음 섞기(run-2)", doc), [])
+
+    def test_a_one_letter_alias_is_too_common_to_judge_and_a_token_counts_only_whole(self):
+        _root, doc = self.setup_root()
+        self.assertEqual(self.kinds("E는 좋고 E1과 base-E 와 Eagle 은 아니다", doc), [])   # `E` is registered, yet only a letter
+        self.assertEqual(self.kinds("A와 B와 F는 정본에 없다", doc), [])        # nothing is guessed for unregistered letters
+        self.assertEqual([row[0] for row in self.kinds("rev-ab 와 xrev-a 는 다르고 (rev-a)는 같다", doc)], ["rev-a"])
+
+    # --- a wrong warning is worse than a missed one (review RV-PR1608-1113, finding 2) ---------------------
+
+    def common_alias_root(self):
+        """The review's catalog: one condition answering to `base`, `v2`, `0.3`, `E`, `oldname`, and `retain030`."""
+        root = self.make_root("common")
+        self.register(root, {"groups": [{"display_name": "소리 실험", "goal": "기준보다 낮은가"}], "conditions": [
+            {"display_name": "잔향 감소", "group": "소리 실험", "aliases": ["E", "v2", "base", "0.3", "oldname", "retain030"],
+             "refs": {"runs": [{"run_id": "run-rev-1", "row_id": "arm-1"}]}}]})
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "잔향 감소", "잔향 더 감소"), now=NOW + 1)   # `잔향 감소` is a former name now
+        return E.load(root).doc
+
+    def test_the_reviews_seven_ordinary_phrases_get_no_warning(self):
+        doc = self.common_alias_root()
+        for text in ("base.py 파일을 연다", "/tmp/base/output", "https://example.org/base", "`base = 1`",
+                     "git rebase base", "버전 v2를 설치한다", "오차는 0.3이다"):
+            with self.subTest(text=text):
+                self.assertEqual(E.scan_text(text, doc), [])
+
+    def test_a_clear_name_is_quiet_inside_code_quotes_paths_files_commands_and_options(self):
+        doc = self.common_alias_root()
+        for text in ("```\nrun-rev-1\n```", "    run-rev-1 = 1", "\trun-rev-1", "> run-rev-1 로 가자",
+                     '"run-rev-1은 바꾸지 마"', "“run-rev-1은 그대로”", "`run-rev-1`", "/tmp/run-rev-1/log",
+                     r"C:\work\run-rev-1\out", "run-rev-1.log 를 본다", "./run-rev-1", "https://x.example/run-rev-1",
+                     "$ python3 train.py run-rev-1", "그다음 git log run-rev-1 를 본다", "--run run-rev-1", "run=run-rev-1",
+                     "run-rev-1=좋음", "@run-rev-1", "#run-rev-1", "오차 0.3 과 1e-3, 2026-11-13, v2.1, E 와 base"):
+            with self.subTest(text=text):
+                self.assertEqual(E.scan_text(text, doc), [])
+
+    def test_a_real_run_id_a_former_name_and_an_identifier_alias_still_warn(self):
+        doc = self.common_alias_root()
+        self.assertEqual(self.kinds("run-rev-1은 진행 중이고 잔향 감소는 예전 이름이다.\n(retain030)을 확인", doc), [
+            ("run-rev-1", "run-id", "잔향 더 감소", 1, 1),
+            ("잔향 감소", "former-name", "잔향 더 감소", 1, 19),
+            ("retain030", "alias", "잔향 더 감소", 2, 2)])
+        self.assertEqual([row[0] for row in self.kinds("- run-rev-1:arm-1 결과\n    - run-rev-1 다시", doc)],
+                         ["run-rev-1:arm-1", "run-rev-1"])                 # a nested list item is prose, not code
+        self.assertEqual([row[0] for row in self.kinds("run-rev-1. 끝", doc)], ["run-rev-1"])   # a full stop is not a file name
+        self.assertEqual(self.kinds("예전 이름 oldname을 정리", doc), [])     # a plain-word alias is not clear enough
+
+    # --- one lookup table, not one catalog walk per token (review RV-PR1608-1113, finding 1) --------------
+
+    def big_doc(self, n, parent="a"):
+        root = self.make_root(f"big{n}", parent)
+        self.register(root, {"groups": [{"display_name": "규모 시험"}], "conditions": [
+            {"display_name": f"조건 {i}", "group": "규모 시험", "aliases": [f"alias{i}x{j}" for j in range(4)],
+             "refs": {"runs": [{"run_id": f"run-{i}-a"}]}} for i in range(n)]})
+        return E.load(root).doc
+
+    def test_fields_share_one_table_and_the_lookups_do_not_grow_with_the_catalog(self):
+        from unittest import mock
+        fields = [("understanding", "일반적인 질문입니다"), ("q", "어떤 작업을 할까요"), ("l0", "그대로 진행"),
+                  ("m0", "추가 변경 없이 진행"), ("l1", "나중에 진행"), ("m1", "run-3-a 와 alias7x2 는 대기")]
+        counts = {}
+        for n in (32, 256):
+            doc = self.big_doc(n)
+            calls = {"index": 0, "claims": 0, "resolve": 0, "fold": 0}
+            real_index, real_claims, real_resolve, real_fold = E.scan_index, E._claims, E.resolve_ex, E._fold
+
+            def counted(key, real):
+                def call(*args, **kwargs):
+                    calls[key] += 1
+                    return real(*args, **kwargs)
+                return call
+            with mock.patch.object(E, "scan_index", counted("index", real_index)), \
+                    mock.patch.object(E, "_claims", counted("claims", real_claims)), \
+                    mock.patch.object(E, "resolve_ex", counted("resolve", real_resolve)):
+                hits = E.scan_fields(fields, doc)
+                index = real_index(doc)
+                with mock.patch.object(E, "_fold", counted("fold", real_fold)):
+                    self.assertEqual(E.scan_fields(fields, doc, index=index), hits)
+            self.assertEqual([(h["field"], h["token"]) for h in hits], [("m1", "run-3-a"), ("m1", "alias7x2")])
+            self.assertEqual((calls["index"], calls["claims"], calls["resolve"]), (1, 0, 0))   # one table per question
+            counts[n] = calls["fold"]
+        self.assertEqual(counts[32], counts[256])                         # scanning texts never walks the catalog
+        self.assertEqual(counts[256], 1)                                  # one fold of the question for the names
+        named = E.scan_fields([("understanding", "조건 3 을 다룬다"), ("m1", "run-3-a 와 alias7x2")], self.big_doc(32, "again"))
+        self.assertEqual([h["token"] for h in named], ["alias7x2"])        # a name in one field counts for all
+
+    def test_unlinked_runs_are_reported_with_no_name_and_the_longest_token_wins_an_overlap(self):
+        _root, doc = self.setup_root()
+        self.assertEqual(self.kinds("mpwav-20261111-stray 도 보인다", doc, unlinked=["mpwav-20261111-stray"]),
+                         [("mpwav-20261111-stray", "unregistered-run", None, 1, 1)])
+        self.assertEqual(len(E.scan_text("run-1:arm-1", doc)), 1)                  # not `run-1` and `run-1:arm-1`
+
+    def test_a_token_two_conditions_answer_to_is_left_alone_and_nothing_raises(self):
+        _root, doc = self.setup_root()
+        doc["conditions"][1]["aliases"].append("rev-a")                            # now ambiguous
+        self.assertEqual([row[0] for row in self.kinds("rev-a run-2", doc)], ["run-2"])
+        self.assertEqual(E.scan_text(None, doc), [])
+        self.assertEqual(E.scan_text("run-1", None), [])
+        self.assertEqual(E.scan_text("run-1", {"conditions": "broken"}), [])
+
+    def test_the_command_reads_stdin_and_a_file_and_is_exit_zero_even_for_a_broken_catalog(self):
+        root, _doc = self.setup_root()
+        run = lambda *args, text="": subprocess.run([sys.executable, str(SCRIPT), "scan", "--artifact-root", str(root), *args],  # noqa: E731
+                                                   input=text, capture_output=True, text=True, env=clean_env(self.home))
+        result = run(text="rev-a 와 mpwav-20261111-stray")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["catalog"]["status"], "ok")
+        self.assertEqual([w["token"] for w in report["warnings"]], ["rev-a"])     # the unlinked run needs a run record to be known
+        self.write_run(root, "mpwav-20261111-stray")
+        report = json.loads(run(text="rev-a 와 mpwav-20261111-stray").stdout)
+        self.assertEqual([(w["token"], w["kind"]) for w in report["warnings"]], [("rev-a", "alias"), ("mpwav-20261111-stray", "unregistered-run")])
+        path = self.base / "q.txt"
+        path.write_text("잔향 줄임 과 run-2\n", encoding="utf-8")
+        self.assertEqual([w["token"] for w in json.loads(run("--file", str(path)).stdout)["warnings"]], ["run-2"])
+        bad = self.make_root("bad", "y")
+        target = E.catalog_path(bad); target.parent.mkdir(parents=True, exist_ok=True); target.write_text("{no", encoding="utf-8")
+        broken = subprocess.run([sys.executable, str(SCRIPT), "scan", "--artifact-root", str(bad)], input="run-1",
+                                capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(broken.returncode, 0)
+        self.assertEqual(json.loads(broken.stdout)["warnings"], [])
+        self.assertEqual(run("--file", str(self.base / "missing.txt")).returncode, 0)
+
+
+class BaselineUnit(Base):
+    def test_unit_mismatch_gives_a_raw_baseline_and_no_delta(self):
+        """RV-PR1596-R2: a baseline measured in another unit is a number, not a value in this group's unit."""
+        group = {"metric": {"key": "si_sdr", "unit": "dB", "direction": "max", "split": "validation", "scoring": "s"},
+                 "target": {"kind": "condition", "condition": "cnd_x"}}
+        control = {"key": "si_sdr", "unit": "%", "direction": "max", "split": "validation", "scoring": "s"}
+        point = {"key": "si_sdr", "epoch": 3, "value": 9.0}
+        result = E.compare(group, point, {"key": "si_sdr", "epoch": 3, "value": 3.0}, control)
+        self.assertEqual((result["state"], result["reason"]), ("not-comparable", "unit-mismatch"))
+        self.assertIsNone(result["delta"])
+        self.assertEqual(result["baseline"]["value"], 3.0)
+        self.assertNotIn("unit", result["baseline"])
 
 
 class NoLeftovers(Base):

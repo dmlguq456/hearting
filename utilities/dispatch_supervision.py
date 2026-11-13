@@ -263,11 +263,46 @@ def runtime_tool_progress(metadata, previous=None):
     return latest
 
 
+# Retry waits each supervisor writes (`session_supervisor_decisions.wait_transient_retry`,
+# Codex `run_turn`): Codex names its turn by thread/turn id, Claude and OpenCode by turn ordinal.
+_TRANSIENT_WAIT_REASONS = {"codex": {"transient-capacity", "transient-edge-block"},
+                           "claude": {"transient-edge-block"},
+                           "opencode": {"transient-edge-block"}}
+
+
+def _transient_wait_turn(harness, row):
+    """The waiting turn's identity in this harness's own event shape, else ``None``."""
+    if harness == "codex":
+        thread, turn = row.get("thread_id"), row.get("turn_id")
+        return (thread, turn) if isinstance(thread, str) and thread and isinstance(turn, str) and turn else None
+    ordinal = row.get("turn_ordinal")
+    return ((ordinal,) if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 1
+            else None)
+
+
 def _transient_retry_wait_active(metadata, attempt_id):
-    """Recognize only a live, exact-attempt bounded Codex transport wait."""
+    """Recognize only an exact-attempt bounded retry wait its supervisor still runs."""
+    return _transient_retry_scan(metadata, attempt_id)[0]
+
+
+def _registered_process_live(metadata) -> bool:
+    """The attempt's recorded launch process (the supervisor's own) lives: PID and start time."""
+    from dispatch_contract import process_identity_is_live
+    raw_pid = str(metadata.get("pid", ""))
+    return raw_pid.isdigit() and process_identity_is_live(int(raw_pid), str(metadata.get("pid_start", "")))
+
+
+def _transient_retry_scan(metadata, attempt_id):
+    """``(waiting, resumed)`` from this attempt's own retry-wait events.
+
+    ``waiting``: an exact-attempt bounded retry wait its supervisor still runs.
+    ``resumed``: the monotonic time the latest finished wait handed the same session
+    back -- its next turn's own start time, else the wait's deadline -- or ``None``.
+    """
+    harness = metadata.get("harness")
     raw_path = metadata.get("log_file", "")
-    if not raw_path or not Path(raw_path).is_absolute():
-        return False
+    if harness not in _TRANSIENT_WAIT_REASONS or not raw_path or not Path(raw_path).is_absolute():
+        return False, None
     try:
         with Path(raw_path).open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -275,10 +310,16 @@ def _transient_retry_wait_active(metadata, attempt_id):
             handle.seek(start)
             if start:
                 handle.readline()
-            lines = handle.read(1024 * 1024).splitlines()
+            data = handle.read(1024 * 1024)
     except OSError:
-        return False
+        return False, None
+    if b"transient-wait.started" not in data:
+        return False, None
+    lines = data.splitlines()
+    clock = time.monotonic()
     active = None
+    finished = None  # the deadline of a wait that ended, until its next turn starts
+    resumed = None
     for line in lines:
         try:
             row = json.loads(line)
@@ -288,11 +329,10 @@ def _transient_retry_wait_active(metadata, attempt_id):
             continue
         kind = row.get("type")
         if kind == "dispatch.supervisor.transient-wait.started":
-            if (metadata.get("harness") == "codex"
+            turn = _transient_wait_turn(harness, row)
+            if (turn is not None
                     and row.get("parent_attempt_id") == attempt_id
-                    and isinstance(row.get("thread_id"), str) and row.get("thread_id")
-                    and isinstance(row.get("turn_id"), str) and row.get("turn_id")
-                    and row.get("reason_code") == "transient-capacity"
+                    and row.get("reason_code") in _TRANSIENT_WAIT_REASONS.get(harness, ())
                     and isinstance(row.get("ordinal"), int)
                     and not isinstance(row.get("ordinal"), bool)
                     and 1 <= row["ordinal"] <= 5):
@@ -301,23 +341,37 @@ def _transient_retry_wait_active(metadata, attempt_id):
                 except (TypeError, ValueError, OverflowError):
                     active = None
                     continue
-                active = ((row.get("thread_id"), row.get("turn_id"), deadline)
-                          if math.isfinite(deadline) and deadline - time.monotonic() <= 960
+                active = ((turn, deadline)
+                          if math.isfinite(deadline) and deadline - clock <= 960
                           else None)
+                finished = None
             else:
                 active = None
         elif kind in {"dispatch.supervisor.transient-wait.ended",
                       "dispatch.supervisor.turn.started", "turn.completed",
+                      "dispatch.supervisor.turn-started", "dispatch.supervisor.turn-completed",
                       "dispatch.supervisor.error"}:
-            if active is not None:
-                if (kind == "dispatch.supervisor.transient-wait.ended"
+            if kind == "dispatch.supervisor.transient-wait.ended":
+                if (active is not None
                         and row.get("parent_attempt_id") == attempt_id
-                        and row.get("thread_id") == active[0]
-                        and row.get("turn_id") == active[1]):
+                        and _transient_wait_turn(harness, row) == active[0]):
+                    # Its end hands the session back; the wait never outlasts its deadline.
+                    finished = resumed = active[1]
                     active = None
-                elif kind != "dispatch.supervisor.transient-wait.ended":
-                    active = None
-    return active is not None and time.monotonic() < active[2]
+                continue
+            deadline = active[1] if active is not None else finished
+            if deadline is not None and (
+                    (harness == "codex" and kind == "dispatch.supervisor.turn.started")
+                    or (harness != "codex" and kind == "dispatch.supervisor.turn-started"
+                        and row.get("parent_attempt_id") == attempt_id)):
+                # The next turn of the same session: progress from its own start time.
+                resumed = deadline
+                started_ns = row.get("monotonic_ns")
+                if isinstance(started_ns, int) and not isinstance(started_ns, bool):
+                    if deadline - 960 <= started_ns / 1e9 <= clock:
+                        resumed = started_ns / 1e9
+            active = finished = None
+    return active is not None and clock < active[1], resumed
 
 
 def verification_process_digest(pid):
@@ -734,7 +788,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                                      row=None):
     """Update one advisory observation without invoking watchdog terminal policy."""
     from dispatch_contract import (
-        attempt_execution_observation, dispatch_state_root,
+        attempt_execution_observation, dispatch_state_root, supervisor_lease_is_held,
     )
     from tools.fleet.model import ATTEMPT_CLASSIFIER_SOURCE, deterministic_progress_fingerprint
     jobs = Path(jobs).resolve(strict=True)
@@ -802,6 +856,16 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             if elapsed_windows:
                 quiet += elapsed_windows
                 last_window += elapsed_windows * max(1.0, progress_window_seconds)
+        retry_waiting, retry_resumed = _transient_retry_scan(metadata, attempt_id)
+        if retry_resumed is not None:
+            # A retry wait's end and the next turn it hands back are progress at their own
+            # time, seen or not: the windows count from there, never from the last sample.
+            resumed_at = now - max(0.0, time.monotonic() - retry_resumed)
+            if resumed_at > last_progress:
+                window = max(1.0, progress_window_seconds)
+                quiet = max(0, int((now - resumed_at) // window))
+                last_progress = resumed_at
+                last_window = resumed_at + quiet * window
         # When this exact tool event was first seen: an unfinished call is backed only by
         # a command that started for it, never by an older resident shell.
         try:
@@ -848,6 +912,15 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                     observation_state, reason = "stalled", "settlement-unresolved"
                 else:
                     observation_state, reason = "stalled", "execution-absent"
+        elif (execution.state in {"active", "unknown"} and retry_waiting
+              and supervisor_lease_is_held(jobs, metadata)
+              and _registered_process_live(metadata)):
+            # Its own supervisor, holding the exact lease, waits out a bounded retry and
+            # then resumes the same session: working, not quiet. Between turns that
+            # supervisor is the unclassified carrier, so "unknown" counts. The lease shows
+            # only that someone holds the file, so the attempt's recorded process must
+            # also live; past the deadline, or either unconfirmed, the branches below apply.
+            observation_state, reason = "waiting", "registered-transient-retry-backoff"
         elif (execution.state == "unknown" and tool_active and quiet < max_quiet_windows
               and any(len(identity) >= 3 and str(identity[2]).startswith("unclassified:")
                       for identity in execution.identities)):
@@ -859,8 +932,6 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "active", "owned-child-executing"
         elif execution.state == "unknown":
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
-        elif execution.state == "present" and _transient_retry_wait_active(metadata, attempt_id):
-            observation_state, reason = "waiting", "registered-transient-capacity-backoff"
         elif tool_active and (quiet < max_quiet_windows or _call_command_running(
                 metadata, tool_since - max(1.0, progress_window_seconds))):
             # An unfinished call record is not progress by itself: it counts inside the
@@ -870,9 +941,10 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "stalled", "no-comparable-progress"
         else:
             observation_state, reason = "active", "within-progress-window"
-        if reason in {"supervised-owner-parked", "owned-child-executing"}:
-            # A wait on its own work is not quiet: the owner resumes with a fresh window
-            # instead of the windows its children or resource run spent working.
+        if reason in {"supervised-owner-parked", "owned-child-executing",
+                      "registered-transient-retry-backoff"}:
+            # A wait on its own work or retry is not quiet: the owner resumes with a fresh
+            # window instead of the windows its children, resource run, or retry delay spent.
             last_progress = last_window = now
             quiet = 0
 
@@ -1677,9 +1749,10 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     try:
         utility = _printed("dispatch_terminal_commit.py")
     except Exception:  # noqa: BLE001 -- a read-only path fallback keeps the pending notice useful
-        utility = str(Path(__file__).resolve().parents[1] / "utilities" / "dispatch_terminal_commit.py")
+        utility = ""
     clean = lambda value: re.sub(r"[\x00-\x1f\x7f]", "", str(value))[:2048]
-    command = shlex.join(["python3", str(utility), "inspect",
+    command = shlex.join((["python3", str(utility)] if utility else
+                          ["hearting", "run", "dispatch_terminal_commit"]) + ["inspect",
                           "--jobs", clean(receipt["job_registry"]),
                           "--attempt", clean(receipt["owner_attempt_id"])])
     diagnosis = _exact_notice_diagnosis(receipt, notice_context)
@@ -1977,8 +2050,7 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
             next_command += "The route's existing authority and gate checks still apply."
         else:
             aid = receipt["monitored_attempt_ids"][0]
-            command = shlex.join(["python3", str(Path(__file__).resolve().parents[1]
-                                                    / "utilities/dispatch-registry.py"),
+            command = shlex.join(["python3", _printed("dispatch-registry.py"),
                                   "reconcile", "--jobs", receipt["job_registry"],
                                   "--attempt", aid])
             next_command = "Read-only next command: " + command + "."

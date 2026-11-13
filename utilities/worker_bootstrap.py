@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from parent_next_directive import entrypoint
+
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 RESERVED_UNITS = ("_kernel/owner", "_kernel/resource")
@@ -336,14 +338,69 @@ def prepare_runtime_dir(candidate: str) -> str:
         if not path.is_dir():
             return ""
         marker = path / ".gitignore"
-        if marker.exists() or marker.is_symlink():
-            if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"*\n":
-                return ""
-        else:
-            marker.write_bytes(b"*\n")
+        if not marker.exists() and not marker.is_symlink():
+            _publish_runtime_marker(marker)
+        if _read_runtime_marker(marker) != _RUNTIME_MARKER:
+            return ""
         return str(path)
     except (OSError, RuntimeError, TypeError, ValueError):
         return ""
+
+
+_RUNTIME_MARKER = b"*\n"
+# Without hard links the marker is visible empty between its exclusive create
+# and its fill; a reader re-reads such a prefix for at most this long.
+_RUNTIME_MARKER_SETTLE_SECONDS = 0.5
+
+
+def _publish_runtime_marker(marker: Path) -> None:
+    """Publish the marker, never over an existing file.
+
+    `write_bytes` creates the file before it fills it. A second launcher
+    preparing the same root at that moment read an empty marker, took it for
+    a foreign one and launched without its runtime root. A hard link makes
+    the whole file appear at once.
+    """
+    temporary = marker.with_name(f".gitignore.{os.getpid()}.{os.urandom(6).hex()}.tmp")
+    temporary.write_bytes(_RUNTIME_MARKER)
+    try:
+        os.link(temporary, marker)
+    except FileExistsError:
+        pass  # Another launcher published it first; the caller reads it back.
+    except OSError:
+        # Without hard links (EXDEV, EPERM, ENOTSUP...) an exclusive create is
+        # the only portable step that never replaces a marker another
+        # launcher published after the last look (a rename did, and took that
+        # root as its own). It is filled right after; `_read_runtime_marker`
+        # waits out the instant it is still empty.
+        try:
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(_RUNTIME_MARKER)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_runtime_marker(marker: Path) -> bytes | None:
+    """Read the marker; a prefix of `*\\n` is re-read briefly, never rewritten.
+
+    A launcher still filling the marker shows it empty (or `*`) for an
+    instant; that is not a foreign marker. One left that way past the bound
+    (its writer died between create and fill) is returned as is, so the root
+    is refused and the marker stays for whoever made it.
+    """
+    deadline = time.monotonic() + _RUNTIME_MARKER_SETTLE_SECONDS
+    while True:
+        if marker.is_symlink() or not marker.is_file():
+            return None
+        content = marker.read_bytes()
+        if (content == _RUNTIME_MARKER or not _RUNTIME_MARKER.startswith(content)
+                or time.monotonic() >= deadline):
+            return content
+        time.sleep(0.005)
 
 
 def artifact_context_prompt(environ) -> str:
@@ -732,7 +789,7 @@ def owner_gate_prompt(args) -> str:
     lines = []
     for node, gate in held:
         jobs = getattr(args, "jobs", None)
-        command = (f"python3 {Path(__file__).resolve().with_name('workflow-supervisor.py')} gate --route {route_file} "
+        command = (f"python3 {shlex.quote(entrypoint(_REPO_ROOT, 'utilities/workflow-supervisor.py'))} gate --route {route_file} "
                    f"--gate {gate} --block --artifact <preview>" + (f" --jobs {jobs}" if jobs else ""))
         before = _owner_stage_predecessors(route, node)
         first = (f"first finish stage {', '.join(before)} (dispatch it, or run it yourself and publish its marker "
@@ -778,7 +835,7 @@ def owner_inline_marker_prompt(args) -> str:
         return ""
     if not stages:
         return ""
-    command = (f"python3 {Path(__file__).resolve().with_name('capability-route.py')} complete --inline "
+    command = (f"python3 {shlex.quote(entrypoint(_REPO_ROOT, 'utilities/capability-route.py'))} complete --inline "
                f"--node <node> --reason \"<one line>\"")
     return (f"A declared stage ({', '.join(str(n['id']) for n in stages)}) you run yourself instead of dispatching "
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
@@ -786,7 +843,7 @@ def owner_inline_marker_prompt(args) -> str:
 
 def route_start_command(route_file, node_id: str, *, jobs=None, reviewed_evidence=None) -> str:
     """The exact command that starts `node_id` of a sealed route (text only; the start gate still decides)."""
-    script = Path(__file__).resolve().with_name("stage-dispatch-fallback.py")
+    script = entrypoint(_REPO_ROOT, "utilities/stage-dispatch-fallback.py")
     return (f"python3 {shlex.quote(str(script))} --route {shlex.quote(str(route_file))} "
             f"--node {shlex.quote(str(node_id))} --start"
             + (f" --jobs {shlex.quote(str(jobs))}" if jobs else "")
@@ -1009,7 +1066,7 @@ def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
 
 def inline_complete_command(node_id: str, evidence: str | None = None) -> str:
     """The exact command that publishes the completion marker of a stage the owner ran itself."""
-    script = Path(__file__).resolve().with_name("capability-route.py")
+    script = entrypoint(_REPO_ROOT, "utilities/capability-route.py")
     return (f"python3 {shlex.quote(str(script))} complete --inline --node {shlex.quote(str(node_id))}"
             + (f" --evidence {shlex.quote(str(evidence))}" if evidence else "") + ' --reason "<one line>"')
 
@@ -1108,7 +1165,7 @@ def owner_route_steps_prompt(args, environ) -> str:
                                if isinstance(name, str) and Path(name).name == "plan.md"), None)
             if node.get("subdivision") and plan_input and output_dir:
                 plan_path = _resolved_paths(output_dir, [plan_input])[0]
-                command = shlex.join(["python3", str(Path(__file__).with_name("dispatch-batch.py").resolve()),
+                command = shlex.join(["python3", entrypoint(_REPO_ROOT, "utilities/dispatch-batch.py"),
                                       "--parallel-group", node["id"], "--slices", plan_path, "--start"])
                 lines.append(f"   If the plan declares slices, use: `{command}`; "
                              "single-session-required returns to this node's ordinary start command.")
@@ -1125,7 +1182,7 @@ def owner_route_steps_prompt(args, environ) -> str:
                       f"auxiliary_findings_considered with exactly {len(auxiliary)} dispositions")
         if kind == route_base.AUXILIARY_ARBITER_OWNER_MERGE and output_dir:
             memo = str(Path(output_dir) / "_internal" / f"{route_base._safe_group_id(group)}-owner-merge.md")
-            command = shlex.join(["python3", str(Path(__file__).with_name("capability-route.py").resolve()),
+            command = shlex.join(["python3", entrypoint(_REPO_ROOT, "utilities/capability-route.py"),
                                   "arbitrate", "--route", str(route_file), "--group", group, "--evidence", memo])
             lines.append(f"{obligation} in `{memo}`, then run: `{command}`.")
         elif kind == route_base.AUXILIARY_ARBITER_NODE:

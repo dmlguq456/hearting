@@ -1403,6 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
     active_outbox: SupervisorOutbox | None = None
     delivery_timing = delivery_timing_fields()
     same_thread_resume_count = 0
+    edge_block_failures = 0
     launch_remediated: set[tuple[str, ...]] = set()
     # SD-116 (c): a one-element list, not a bool, so `_seal_terminal_handoff_or_raise`
     # can flip it for the whole loop -- the reserve is spendable exactly once
@@ -1596,10 +1597,25 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
                 terminal = classify_runtime_result(args, result, process_rc)
+                delay = DECISIONS.edge_block_retry_delay(terminal, edge_block_failures)
+                if delay is not None:
+                    # The edge network, not the provider, refused this turn: wait on the
+                    # shared schedule and continue the same session; its result is unchanged.
+                    edge_block_failures += 1
+                    DECISIONS.wait_transient_retry(delay, control=control, emit=emit, common={
+                        "parent_attempt_id": args.parent_attempt_id, "turn_ordinal": turn_ordinal,
+                        "reason_code": "transient-edge-block", "ordinal": edge_block_failures})
+                    if turn_transport == "stream-json":
+                        stream_session = ClaudeStreamSession(args, session_id, resume=True)
+                    if active_outbox is None and not resource_receipt_id:
+                        next_prompt = DECISIONS.EDGE_BLOCK_CONTINUE_PROMPT
+                    resume = True
+                    continue
                 if not reconcile(args, terminal):
                     return 70
                 emit(result)
                 return process_rc or 3
+            edge_block_failures = 0
             DECISIONS.refresh_owner_route(args)
             rows = current_children(Path(args.jobs), args.parent_attempt_id,
                                     route_id=args.route_id, route_hash=args.route_hash)

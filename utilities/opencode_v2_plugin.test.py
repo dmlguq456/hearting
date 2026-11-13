@@ -1246,9 +1246,9 @@ try {
   assert.equal(calls.length, 4)
   assert.deepEqual(calls.map(call => JSON.parse(call.body)), [
     { session_id: "ses_exact", request_id: "form_a", source: "opencode-form" },
-    { session_id: "ses_exact", request_id: "form_a" },
+    { session_id: "ses_exact", request_id: "form_a", closure_reason: "answered" },
     { session_id: "ses_exact", request_id: "perm_b" },
-    { session_id: "ses_exact", request_id: "perm_b" },
+    { session_id: "ses_exact", request_id: "perm_b", closure_reason: "answered" },
   ])
   assert.equal(calls[2].args.at(-1), "permission")
   assert.doesNotMatch(JSON.stringify(calls), /PRIVATE-|answers|questions|pattern/)
@@ -1342,8 +1342,13 @@ try {
   await after("ses-pair"); assert.equal(read("ses-pair")?.request_id, "f-b")
   await native({ type: "session.execution.succeeded", data: { sessionID: "ses-pair" } })
   assert.equal(read("ses-pair")?.request_id, "f-b")
+  const closedId = "S1:opencode:ses-pair:" + Math.trunc(read("ses-pair").waiting_since * 1000)
   await native({ type: "form.cancelled", data: { sessionID: "ses-pair", id: "f-b" } })
   assert.equal(read("ses-pair"), null)
+  const history = JSON.parse(fs.readFileSync(path.join(process.env.XDG_STATE_HOME,
+    "hearting/human-waits/projection.json"), "utf8")).closed_questions
+  assert.equal(history[closedId].status, "cancelled")
+  assert.deepEqual(Object.keys(history[closedId]).sort(), ["at", "status"])
   fs.mkdirSync(root, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(root, "ses-bare.json"), JSON.stringify({ schema_version: 1,
     harness: "opencode", session_id: "ses-bare", kind: "decision", source: "opencode-form",

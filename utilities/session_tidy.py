@@ -4,8 +4,9 @@
 One entry point for the parts of ``session-tidy`` that a session touches directly:
 
     session_tidy.py card [--harness H] [--session-id S] [--cwd D] [--file F | --text T]
-        Write the calling session's card (body from stdin, a file or --text).
-        Prints one line: ``card=<path> seat=<key>``.  Nothing is required.
+        Write the calling session's card (body from stdin, a file or --text), exactly as written.
+        Prints one line: ``card=<path> seat=<key>``, then a ``names=`` advice line only when the
+        card names an experiment condition by an internal name alone.  Nothing is required.
     session_tidy.py tidy [--harness H] [--session-id S] [--cwd D] [--file F | --text T]
                          [--no-clear | --no-continue] [--handoff TARGET]
         ``card`` then, only when the card was written, ``enqueue`` (and ``handoff``)
@@ -27,7 +28,8 @@ One entry point for the parts of ``session-tidy`` that a session touches directl
         booking, ``--no-continue`` clears without a continuation action.
     session_tidy.py handoff <target> [--harness H] [--session-id S] [--cwd D]
         Deliver this seat's card to a peer session through ``peer-steward.py prompt``
-        and report its structured delivery verdict and exit code on one line. The
+        and report its structured delivery verdict and exit code on one line (plus the
+        same ``names=`` advice as ``card`` for the handed-off card). The
         card is marked as handed off: this window is not continued from it.
 
 State lives in ``${XDG_STATE_HOME:-~/.local/state}/hearting/session-tidy/``
@@ -2557,6 +2559,55 @@ def _write_card_pair(seat: Seat, card: dict, *, rollback_on_error: bool = False)
         raise
 
 
+NAME_ADVICE_MAX = 8
+
+
+def card_name_advice(body: str, cwd: str) -> str:
+    """One `names=` advice line for a saved card that says a condition only by its internal name, or "".
+
+    The card is saved exactly as written; this only tells the writer which run ids, aliases, or former
+    names have no catalog name beside them, through the same quiet scan the question advice uses
+    (`experiment_catalog.scan_text`).  The dated user quotes and PRD locations are left out, since they
+    stay verbatim.  No model call, no question; no catalog, a broken one, or any failure gives ""."""
+    try:
+        import experiment_catalog
+        context = experiment_catalog.card_context(cwd)
+        if context is None or not body:
+            return ""
+        verbatim = {field["id"] for field in card_format.policy()["preserved"]}
+        text = "\n".join(part for key, _title, part in card_format._sections(body) if key not in verbatim)
+        pairs: list[str] = []
+        for hit in experiment_catalog.scan_text(text, context[1]):
+            pair = f"{hit['token']} (= {hit['name']})" if hit.get("name") else hit["token"]
+            if pair not in pairs:
+                pairs.append(pair)
+        if not pairs:
+            return ""
+        more = len(pairs) - NAME_ADVICE_MAX
+        shown = ", ".join(pairs[:NAME_ADVICE_MAX]) + (f", +{more} more" if more > 0 else "")
+        return ("names=The saved card uses internal names without their catalog names: " + shown
+                + ". It was saved as written; write the catalog name beside each next time (advice, not a gate).")
+    except Exception:  # noqa: BLE001 -- the card is saved whatever happens here
+        return ""
+
+
+LAB_BLOCK_BYTES = 360
+
+
+def _lab_block(cwd: str, room: int) -> str:
+    """The folder's experiment catalog names for the start context: at most 360 bytes and never more than `room`."""
+    try:
+        import experiment_catalog
+        context = experiment_catalog.card_context(cwd)
+        if context is None:
+            return ""
+        root, doc = context
+        return experiment_catalog.catalog_brief(doc, str(experiment_catalog.catalog_path(root)),
+                                                max(0, min(LAB_BLOCK_BYTES, room)))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def write_card(seat: Seat, harness: str, sid: str, body: str, *, cwd: str = "",
                now: Optional[float] = None, prompt_seq: Optional[int] = None,
                origin: Optional[str] = None, compact_context: Optional[dict] = None) -> dict:
@@ -3898,6 +3949,11 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if resume_text:
                 parts.append(resume_text)
         parts.extend(answer_wait_lines)
+        if card_due or event == "start" or (event == "prompt" and (startup_context or {}).get("due")):
+            # The experiment catalog's names, after everything else and inside the same 2400-byte budget.
+            lab = _lab_block(cwd, INJECTION_MAX_BYTES - 1 - len("\n".join(parts).encode("utf-8")) - 1)
+            if lab:
+                parts.append(lab)
         text = "\n".join(parts)
         # The person-only "previous conversation" line needs the whole shared
         # lineage (every seat ledger, about half of a 1 s start). Past
@@ -4074,8 +4130,9 @@ def _write_caller_card(args, cwd: str) -> tuple[Optional[tuple[Seat, str, str]],
     if caller is None:
         return None, "card=none reason=no-seat"
     seat, harness, sid = caller
-    write_session_card(seat, harness, sid, body, cwd=cwd)
-    return caller, f"card={card_text_path(seat)} seat={seat.key}"
+    card = write_session_card(seat, harness, sid, body, cwd=cwd)
+    advice = card_name_advice(card.get("body", "") if isinstance(card, dict) else "", cwd)
+    return caller, f"card={card_text_path(seat)} seat={seat.key}" + ("\n" + advice if advice else "")
 
 
 def cmd_card(args) -> int:
@@ -4308,6 +4365,9 @@ def cmd_handoff(args) -> int:
             raise StateError(str(exc)) from exc
     else:
         line, code = runner.handoff(caller[0], args.target, caller=caller)
+        advice = card_name_advice((read_latest_card(caller[0]) or {}).get("body", ""), args.cwd or os.getcwd())
+        if advice:
+            line += "\n" + advice
     print(line)
     return code
 

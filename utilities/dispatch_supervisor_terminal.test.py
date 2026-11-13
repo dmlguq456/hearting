@@ -396,6 +396,44 @@ class RuntimeFailureClassifierTest(unittest.TestCase):
         )
         self.assertEqual(passed.note, "completed-supervisor")
 
+    def test_an_edge_block_page_is_a_transient_runtime_end_and_a_real_refusal_stays_auth(self):
+        # The envelope eight Claude owners received on 2026-11-13 (shape and
+        # text exactly as logged): the edge network's page, not the provider's
+        # judgment of a key or account.
+        blocked = {"type": "result", "subtype": "success", "is_error": True,
+                   "api_error_status": 403, "api_error_origin": "first_party",
+                   "terminal_reason": "api_error",
+                   "result": "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"}
+        verdict = SUPERVISOR.classify_session_result(blocked, 1, runtime="claude")
+        self.assertEqual((verdict.note, verdict.failure_class, verdict.reconcile_reason, verdict.api_status),
+                         ("dead-runtime-error", "runtime", SUPERVISOR.EDGE_BLOCK_REASON, "403"))
+        challenge = SUPERVISOR.classify_session_result(
+            {"is_error": True, "error": {"status": 403, "message":
+             "<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>"}},
+            1, runtime="opencode")
+        self.assertEqual(challenge.reconcile_reason, SUPERVISOR.EDGE_BLOCK_REASON)
+        codex = SUPERVISOR.codex_turn_failure_terminal({
+            "codex_error_info": "unauthorized",
+            "message": "unexpected status 403 Forbidden: Attention Required! | Cloudflare"})
+        self.assertEqual((codex.note, codex.reconcile_reason),
+                         ("dead-runtime-error", SUPERVISOR.EDGE_BLOCK_REASON))
+        # Any other 401/403 body is the provider's refusal and keeps the auth stop.
+        for result in (
+            {**blocked, "result": 'API Error: 403 {"type":"error","error":{"type":"permission_error",'
+                                  '"message":"Your organization does not have access"}}'},
+            {**blocked, "api_error_status": 401, "result": "Failed to authenticate. API Error: 401 "
+                                                           '{"type":"error","error":{"type":"authentication_error"}}'},
+            {**blocked, "result": "Failed to authenticate. API Error: 403 Forbidden"},
+            {**blocked, "result": "Cloudflare"},
+        ):
+            with self.subTest(result=result["result"][:40]):
+                stop = SUPERVISOR.classify_session_result(result, 1, runtime="claude")
+                self.assertEqual((stop.note, stop.failure_class), ("dead-auth", "auth"))
+        # The page title alone without a 401/403 is not read as anything new.
+        other = SUPERVISOR.classify_session_result(
+            {**blocked, "api_error_status": 500}, 1, runtime="claude")
+        self.assertEqual((other.note, other.reconcile_reason), ("dead-runtime-error", "runtime-error-envelope"))
+
     def test_opencode_typed_provider_auth_stays_a_replaceable_runtime_death(self):
         # OpenCode 2 reports one provider's rejection by type, without a status.
         # It is not a whole-harness login failure: `dead-auth` would turn the
