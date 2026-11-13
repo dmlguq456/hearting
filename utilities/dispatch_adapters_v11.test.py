@@ -239,7 +239,7 @@ class AdapterV11Test(unittest.TestCase):
   art=root/".agent_reports"; art.mkdir(); return repo,art
  def command(self,harness,action,repo,jobs,logs,status="supported"):
   wrapper,model=ADAPTERS[harness]
-  return wrapper+[f"--{action}","--worktree",str(repo),"--slug",f"{harness}-v11","--capability","autopilot-code","--capability-mode","dev","--worker-mode","dev/backend","--intensity","standard","--dispatch-depth","2","--parent","owner","--worker-role","code-plan","--owner","autopilot-code","--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id",f"att-{harness}-fixture-0001","--parent-harness",harness,"--parent-transport","headless","--parent-sandbox","fixture","--launch-authority","conductor","--nested-eligibility",status,"--eligibility-source",f"{harness}-fixture","--fallback-ordinal","1"]+model
+  return wrapper+[f"--{action}","--worktree",str(repo),"--slug",f"{harness}-v11","--capability","autopilot-code","--capability-mode","dev","--worker-mode","dev/backend","--intensity","standard","--dispatch-depth","2","--parent","owner","--worker-role","code-plan","--owner","autopilot-code","--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id",fixture_processes.unique_attempt_id(f"att-{harness}-fixture-0001"),"--parent-harness",harness,"--parent-transport","headless","--parent-sandbox","fixture","--launch-authority","conductor","--nested-eligibility",status,"--eligibility-source",f"{harness}-fixture","--fallback-ordinal","1"]+model
  def run_parent_callback_cell(self,harness,force_foreground):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
@@ -300,7 +300,7 @@ class AdapterV11Test(unittest.TestCase):
             "--capability","autopilot-code","--capability-mode","dev","--intensity","standard",
             "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
             "--assigned-contract","autopilot-code","--owner-harness",harness,
-            "--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id","att-watcher-owner",
+            "--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id",fixture_processes.unique_attempt_id("att-watcher-owner"),
             "--prompt-text","finite fixture",*ADAPTERS[harness][1]]
       if harness!="opencode":argv += ["--completion-delivery","poll"]
      else:
@@ -1247,7 +1247,7 @@ class AdapterV11Test(unittest.TestCase):
     self.assertIn("child_spawned=1",run.receipt)
     self.assertNotIn("Traceback",run.stderr)
     self.assertNotIn("reason=codex-runtime-projection-mismatch",run.receipt)
-    row=[l for l in run.jobs.read_text().splitlines() if "att-codex-fixture-0001" in l][-1]
+    row=[l for l in run.jobs.read_text().splitlines() if fixture_processes.unique_attempt_id("att-codex-fixture-0001") in l][-1]
     meta=DC.parse_registry_metadata(row.split("\t")[5])
     self.assertEqual(Path(meta["launch_home"]).resolve(),ROOT.resolve())
     child_home=Path(meta["runtime_home"])
@@ -1512,7 +1512,7 @@ class AdapterV11Test(unittest.TestCase):
           "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
           "--assigned-contract","autopilot-code","--owner-harness","opencode",
           "--model","provider/test","--variant","low","--jobs",str(jobs),
-          "--log-dir",str(logs),"--attempt-id",f"att-opencode-owner-{repetition}",
+          "--log-dir",str(logs),"--attempt-id",fixture_processes.unique_attempt_id(f"att-opencode-owner-{repetition}"),
           "--foreground-timeout",FAKE_WORKER_TIMEOUT,"--prompt-text","ok"]
     resolution=wrapper.reconcile_launch_lifecycle(
      wrapper.DETACHED,{},evidence={
@@ -1858,7 +1858,7 @@ class AdapterV11Test(unittest.TestCase):
     (quota_home/".claude.json").write_text(json.dumps({"oauthAccount": {
      "accountUuid":"fixture-account", "organizationUuid":"fixture-org"}}))
     if harness=="opencode":
-     attempt_id="att-opencode-governor-transfer"
+     attempt_id=fixture_processes.unique_attempt_id("att-opencode-governor-transfer")
      argv=["dispatch-headless.py","--start","--worktree",str(repo),"--slug","opencode-owner",
            "--capability","autopilot-code","--capability-mode","dev","--intensity","standard",
            "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
@@ -1868,7 +1868,7 @@ class AdapterV11Test(unittest.TestCase):
            "--foreground-timeout","5","--prompt-text","ok"]
      env_extra={"OPENCODE_CONFIG_CONTENT":"{}"}
     else:
-     attempt_id=f"att-{harness}-fixture-0001"
+     attempt_id=fixture_processes.unique_attempt_id(f"att-{harness}-fixture-0001")
      self.seed_parent(jobs,repo,harness=harness)
      command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
      argv=["dispatch-headless.py",*command[2:]]
@@ -1933,7 +1933,7 @@ class AdapterV11Test(unittest.TestCase):
     fake.write_text(fake_shell(harness,"exec sleep 60\n"),encoding="utf-8"); fake.chmod(0o755)
     wrapper=self.load_wrapper(harness)
     if harness=="opencode":
-     attempt_id="att-opencode-governor-transfer-never-launched"
+     attempt_id=fixture_processes.unique_attempt_id("att-opencode-governor-transfer-never-launched")
      argv=["dispatch-headless.py","--start","--worktree",str(repo),"--slug","opencode-owner",
            "--capability","autopilot-code","--capability-mode","dev","--intensity","standard",
            "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
@@ -1943,7 +1943,7 @@ class AdapterV11Test(unittest.TestCase):
            "--foreground-timeout","5","--prompt-text","ok"]
      env_extra={"OPENCODE_CONFIG_CONTENT":"{}"}
     else:
-     attempt_id=f"att-{harness}-fixture-never-launched-0001"
+     attempt_id=fixture_processes.unique_attempt_id(f"att-{harness}-fixture-never-launched-0001")
      self.seed_parent(jobs,repo,harness=harness)
      command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
      argv=["dispatch-headless.py",*command[2:]]

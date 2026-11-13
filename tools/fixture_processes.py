@@ -24,7 +24,26 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from pathlib import Path
+
+
+_RUN_TOKEN = uuid.uuid4().hex[:12]
+
+
+def unique_attempt_id(name: str) -> str:
+    """``name`` made unique to this test run: ``<name>-<12 hex>``.
+
+    ``route_parent_close`` (``stop_failed_launch``, ``reap_terminal_descendants``,
+    ``stop_owner_consumer``) finds every process on the host whose environment holds
+    ``AGENT_DISPATCH_ATTEMPT_ID=<id>`` and signals it. A fixture that puts a fixed id such
+    as ``att-watcher-owner`` into a real process therefore lets a second copy of the same
+    suite, run at the same time on the same host, kill the first copy's processes. Production
+    ids are random, so only fixtures need this. The token is chosen once per interpreter, so
+    the same ``name`` yields the same id for the whole run (a test may build the id in two
+    places and compare) and two runs never share one.
+    """
+    return f"{name}-{_RUN_TOKEN}"
 
 
 def _start_ticks(pid: int) -> str | None:
