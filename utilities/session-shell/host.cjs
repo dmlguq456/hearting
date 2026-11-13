@@ -360,9 +360,18 @@ function foldedSegments(){
   const note=deliveryNote();
   return [...(footerSegments.length?footerSegments:[{text:footer||`${harness} · CTX ?`}]),...(note?[{text:note}]:[])];
 }
+// Correction 8 (11-13): the frame the shown state's rule motion began (running moves a light,
+// a wait breathes), so the rule follows the frame's color on the same paint.
+let ruleMotionKind='',ruleSince=0;
+function ruleMotionSince(shown){
+  const kind=shown==='blocked'?'wait':shown==='working'||shown==='submitting'?'scan':'';
+  if(kind!==ruleMotionKind){ruleMotionKind=kind;ruleSince=spinFrame();}
+  return ruleSince;
+}
 function panelViewNow(){
+  const shown=shownState();
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shownState(),sid,harness,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:ruleMotionSince(shown),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
     cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});

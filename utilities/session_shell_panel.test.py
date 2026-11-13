@@ -1667,6 +1667,22 @@ let dropped=0;
 for(let h=30;h>=8;h--){const v=run({state:'working',frame:7,height:h});
  if(ruleAt(v)<0){dropped++;assert.equal(v.motion,null,String(h));assert(!v.rows.flat().some(p=>p.motion),String(h));}}
 assert(dropped>0);
+// Correction 8 (11-13): the rule follows the state the moment it changes. `since` is the frame the
+// state began: the light is already coming in on that very paint (never waiting out a rest or a
+// dark turn), and the breath starts at its brightest; both run on from there.
+for(const since of [0,7,26,30,34,1000]){
+ const v=run({state:'working',frame:since,model:{}}),at=f=>view.render({width:40,height:40,side:true,fill:true,harness:'claude',
+  model:{...head,routes:[],route_count:0,messages:[],styles},state:'working',frame:f,since,questions:()=>[]});
+ const lit=f=>{const w=at(f),i=ruleAt(w);return cellsOf(w,i).map(c=>c.p.role==='rule'?ramp.indexOf(c.p.foreground)+1:0);};
+ const first=lit(since);assert(first[0]>0&&first.slice(6).every(x=>x===0),since+' '+first.join(''));
+ // The whole round trip and its rest follow from there.
+ assert.deepEqual(lit(since+CYCLE),first);assert(lit(since+25).every(x=>x===0)&&lit(since+34).every(x=>x===0));
+ const w=at(since);assert.equal(w.motion.next(since),since+1);assert.equal(w.motion.next(since+25),since+CYCLE);
+ assert.deepEqual(w.motion.at(since+3),at(since+3).rows[w.motion.row]);
+ const k=view.render({width:40,height:40,side:true,fill:true,harness:'claude',model:{...head,routes:[],route_count:0,messages:[],styles,colors:256},
+  state:'blocked',frame:since,since,questions:()=>[]});
+ assert.equal(k.rows[ruleAt(k)][2].step,0,String(since));
+}
 // The setting: on by default, `rule_motion` beside `route_line`, `on`/`off`.
 assert.equal(view.defaults.rule_motion,'on');assert.deepEqual(view.options.rule_motion,['on','off']);
 assert.equal(view.change(view.defaults,'rule_motion',1).rule_motion,'off');

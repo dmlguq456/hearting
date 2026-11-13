@@ -189,7 +189,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
   // Spec rule 49: a folded panel is the eight-cell strip beside the native area or one row under it.
   folded=folded===true&&!settings;
   width=Math.max(folded&&side?5:12,width);height=Math.max(folded?side?3:1:4,height);
@@ -360,6 +360,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||ruleColors<256;
   const ruleSteps=ruleColors>256?RULE_WAIT_STEPS:RULE_WAIT_STEPS_256;
   const ruleWidth=inner;
+  // Correction 8 (11-13): `since` is the frame this state began (the host's). The light is
+  // already coming in on that very paint and the breath starts at its brightest, so the rule
+  // never waits out a rest or a dark turn behind the frame's color. Without it the beat runs
+  // on the clock alone.
+  const anchored=Number.isFinite(since),ruleTick=t=>!anchored?Math.trunc(t):ruleKind==='scan'?Math.trunc(t)-Math.trunc(since)+1:Math.trunc(t)-Math.trunc(since);
   function ruleParts(tick){
     const flag=ruleStill||!ruleKind?{}:{motion:true},out=[];
     let run='',key='',cell=null;
@@ -367,7 +372,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       out.push(tone==='line'||tone==='base'?{...text(run,'dim'),role:'messages',...flag}:
         tone==='wait'?{...text(run,'g_blocked'),role:'rule',...(ruleStill?{}:{tone,step:level,steps:ruleSteps}),...flag}:
         {...text(run,'g_spin'),role:'rule',tone,level,...flag});};
-    for(let i=0;i<ruleWidth;i++){const c=ruleCell(ruleKind,tick,i,ruleWidth,{still:ruleStill,steps:ruleSteps}),k=c.join(':');if(k!==key){flush();run='';key=k;cell=c;}run+=c[0];}
+    for(let i=0;i<ruleWidth;i++){const c=ruleCell(ruleKind,ruleTick(tick),i,ruleWidth,{still:ruleStill,steps:ruleSteps}),k=c.join(':');if(k!==key){flush();run='';key=k;cell=c;}run+=c[0];}
     flush();
     return out;
   }
@@ -1478,7 +1483,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // beat it already keeps, its changed cells only.
   const motionAt=settings?-1:rows.slice(0,count).findIndex(row=>row.some(part=>part.motion));
   const motion=motionAt>=0?{row:motionAt,at:tick=>appearance([frameRow(ruleParts(tick))],cfg,{colors:model.colors??256,noColor:model.no_color===true,background})[0],
-    next:tick=>{if(ruleKind!=='wait')return scanNext(tick,ruleWidth);const now=breathStep(tick,ruleSteps);for(let t=Math.trunc(tick)+1;t<=Math.trunc(tick)+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t;return Math.trunc(tick)+RULE_BREATHE;}}:null;
+    next:tick=>{const local=ruleTick(tick),shift=Math.trunc(tick)-local;if(ruleKind!=='wait')return scanNext(local,ruleWidth)+shift;
+      const now=breathStep(local,ruleSteps);for(let t=local+1;t<=local+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t+shift;return local+RULE_BREATHE+shift;}}:null;
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;

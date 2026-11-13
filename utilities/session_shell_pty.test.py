@@ -519,6 +519,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    const now=Date.now()/1000;
    fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
    await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
+   const opened=Date.now();
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
    // The rule's row: the thin rule (spec rule 52) whose cells are not all the plain dim line.
    // (`at`: that row however it stands, lit or dark.)
@@ -527,23 +528,26 @@ function existing(file){return new Promise((resolve,reject)=>{
      const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
      if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),cells:m[1],colors};}return null;};
    let first=null;const began=Date.now();
-   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,50));}
+   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
+   // Correction 8: the light comes in on the paint that shows the turn (it never waits out a rest).
+   const litAfter=Date.now()-opened;
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
    // (1.95 s: not a whole number of the light's 3.5 s period, so the two readings differ.)
    await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
    // (The same row, lit or resting: the light may be out on its rest by then.)
    const second=first&&rule(first.y);
-   // Spec rule 51 (c): the next rest (frames 26-34 of the 35-frame period and the frame after,
-   // 100 ms each on the wall clock the host beats by). Inside it the host writes nothing for the
-   // rule's row: what goes out is the spinner's own glyph only, the beat it already kept.
-   const period=3500,restAt=26*100,clock=Date.now(),start=clock-clock%period+restAt+(clock%period>=restAt-400?period:0);
-   await new Promise(r=>setTimeout(r,start+300-Date.now()));
+   // Spec rule 51 (c): the rest (the dark rule for 1 s once the light has left on its first side;
+   // the far end's dark beat lasts 0.1 s). Seen dark and still dark 0.25 s later, it is the rest:
+   // for the next 0.5 s the host writes nothing for the rule's row, only the spinner's own glyph.
+   const dark=()=>{const r=first&&rule(first.y);return !!r&&r.colors.split(',').every(c=>c.endsWith('d'));};
+   let restAt=0;const looking=Date.now();
+   while(!restAt&&Date.now()-looking<6000){await flush();if(dark()){await new Promise(r=>setTimeout(r,250));await flush();if(dark())restAt=Date.now();}else await new Promise(r=>setTimeout(r,20));}
    const rest=[];const restSub=child.onData(t=>rest.push(t));
-   await new Promise(r=>setTimeout(r,start+900-Date.now()));restSub.dispose();await flush();
+   await new Promise(r=>setTimeout(r,500));restSub.dispose();await flush();
    const resting=first&&rule(first.y);
-   await new Promise(r=>setTimeout(r,start+1300-Date.now()));await flush();
-   const back=first&&rule(first.y);
-   Object.assign(ruleMotion,{first,second,bytes,writes,rest,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
+   let back=null;const waiting=Date.now();
+   while(Date.now()-waiting<1500&&!(back=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
+   Object.assign(ruleMotion,{first,second,bytes,writes,rest,rest_seen:!!restAt,lit_after_ms:litAfter,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
    await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
  }
  const nativeBg={};
@@ -841,6 +845,9 @@ class SessionShellPTYTest(unittest.TestCase):
         # Spec E9 rule 51 (c): through the rest the rule's row stands dark and nothing is written
         # to it; the host's writes there are the spinner's glyph alone (one cell each). Then the
         # light comes back in.
+        # Correction 8: the light shows on the first paint of the turn (within 0.3 s of it).
+        self.assertLess(result['lit_after_ms'],300,result)
+        self.assertTrue(result['rest_seen'],result)
         y=result['rest_row'];self.assertIsNotNone(y,result)
         self.assertTrue(all(c.endswith('d') for c in result['resting'].split(',')),result['resting'])
         self.assertTrue(result['rest'],result)

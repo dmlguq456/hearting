@@ -279,7 +279,9 @@ shades); the light runs at one speed from fully outside one end to fully
 outside the other and back every 2.6 seconds, turning at the far end after one
 dark beat; once it has left on the side it came in from the dark rule rests
 for one second (its turn beat included) and the light comes in again on that
-side. While an answer or a confirmation waits the whole
+side. The light starts with the state: on the very paint that shows the
+session running it is already coming in (it never waits out a rest), and a
+wait's breath starts at its brightest. While an answer or a confirmation waits the whole
 rule is red and breathes, never blinking, once every 3.6 seconds on
 a cosine through eight shades in 24-bit color (when `COLORTERM` says the
 terminal takes it) or six in 256 colors, one shade at a time, each for an equal
