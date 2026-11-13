@@ -162,6 +162,27 @@ class UnchangedTagSnapshotTest(unittest.TestCase):
         self.assertEqual({row["session_id"] for row in rows}, {"sid-unchanged", "sid-new"})
         self.assertEqual(session_tags.assigned_tag("codex", "sid-unchanged"), tag)
 
+    def test_only_the_passive_fleet_passes_open_a_collection_pass(self):
+        """A pass is one snapshot (what it memoizes is a display input, not what a carrier, hook,
+        delivery, settlement or question path acts on). Those paths must stay outside any pass,
+        so only Fleet's two read-only collectors open one."""
+        openers = set()
+        for top in ("tools", "utilities", "hooks", "adapters", "capabilities", "roles", "core"):
+            for base, dirs, files in os.walk(ROOT / top):
+                dirs[:] = [d for d in dirs if d not in {"node_modules", "__pycache__", ".git"}]
+                for name in files:
+                    if not name.endswith(".py") or ".test." in name or name.startswith("test_"):
+                        continue
+                    path = Path(base) / name
+                    if path.name == "pass_scope.py":
+                        continue
+                    if "collection_pass(" in path.read_text(encoding="utf-8", errors="replace"):
+                        parts = path.relative_to(ROOT).parts
+                        if parts[0] == "adapters" and parts[2:3] == ("tools",):
+                            parts = parts[2:]          # an adapter's copy of the same file
+                        openers.add("/".join(parts))
+        self.assertEqual(openers, {"tools/fleet/collectors/__init__.py", "tools/fleet/details.py"})
+
     def test_a_failed_generation_mark_falls_back_to_the_rewrite(self):
         session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
                           pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))

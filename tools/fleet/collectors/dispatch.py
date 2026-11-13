@@ -2115,6 +2115,8 @@ def _notice_current_in_pass(supervision, record, delivery_id, digest, recipient_
     Several monitored attempts point at the same stall delivery. Its receipt
     (identified by delivery, receipt digest and recipient) is evaluated once
     per pass; the next pass evaluates it again. A raised verdict is shared too.
+    The verdict is that pass's snapshot (see ``_stall_observation_for_notice``): a display input,
+    never the verdict a carrier or hook acts on, which asks ``notice_is_current`` itself.
     """
     from ..pass_scope import cached
 

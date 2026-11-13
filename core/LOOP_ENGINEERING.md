@@ -539,6 +539,11 @@ Registry replacement may retain exact-field row conversions from its predecessor
 Whole display projections may also reuse their complete observed input generation.
 Process observations shared by readers belong to one collection pass, with entry
 and byte bounds; each following pass observes PID identity and clock again.
+A collection pass is one snapshot: what it memoizes (a process table, a stall
+observation, a notice's currency) is the same for every reader inside it and a
+change after the first read shows in the next pass. That holds only for passive
+display; a carrier, hook, delivery, settlement or question path never runs inside
+a pass and observes afresh.
 An unchanged display publication may retain its immutable content while fresh
 readiness and action metadata advance independently. Reuse never delays a tick.
 
