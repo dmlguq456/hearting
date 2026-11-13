@@ -1245,6 +1245,79 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
     return out
 
 
+# ---------------------------------------------------------------------------
+# cards: the catalog's names for the card writing guide and the start context (a card is never rewritten)
+# ---------------------------------------------------------------------------
+
+_PROJECT_STATUS: Any = None
+
+
+def root_for_cwd(cwd: Any) -> Optional[Path]:
+    """The artifact root for a work folder, from file reads only (Fleet's `project_status.artifact_root`)."""
+    global _PROJECT_STATUS
+    try:
+        if not cwd:
+            return None
+        if _PROJECT_STATUS is None:
+            import importlib.util
+            path = Path(__file__).resolve().parents[1] / "tools" / "fleet" / "collectors" / "project_status.py"
+            spec = importlib.util.spec_from_file_location("experiment_catalog_project_status", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PROJECT_STATUS = module
+        root = _PROJECT_STATUS.artifact_root(str(cwd))
+        return Path(root) if root else None
+    except Exception:  # noqa: BLE001 -- a card or a start never waits on this
+        return None
+
+
+def card_context(cwd: Any) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    """`(root, catalog doc)` for a folder whose catalog reads ok and names at least one condition, else None."""
+    root = root_for_cwd(cwd)
+    if root is None:
+        return None
+    try:
+        read = load(root)
+        if read.status != "ok" or not read.doc or not any(c.get("display_name") for c in read.doc.get("conditions", [])):
+            return None
+        return root, read.doc
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def catalog_brief(doc: Mapping[str, Any], path: str, limit: int, lang: Optional[str] = None) -> str:
+    """The catalog's location, each group's goal and its condition names, in at most `limit` bytes.
+
+    Tries the whole thing, then without goals, then fewer names with "… and N more", and at the end only
+    the location line; "" when no group has a named condition."""
+    t = _translator(lang)
+    groups = []
+    for group in doc.get("groups", []):
+        names = [c["display_name"] for c in doc.get("conditions", []) if c.get("group") == group.get("id") and c.get("display_name")]
+        if names:
+            groups.append((group, names))
+    if not groups:
+        return ""
+
+    def build(goals: bool, keep: int) -> str:
+        lines = [t("experiment.card.catalog", path=path)]
+        for group, names in groups:
+            head = f"[{group.get('display_name') or t('experiment.no_group')}]"
+            if goals and group.get("goal"):
+                head += " " + t("experiment.goal", goal=group["goal"])
+            shown = names[:keep]
+            lines += [head, t("experiment.card.conditions", names=", ".join(shown) + (
+                t("experiment.card.more", n=len(names) - len(shown)) if len(names) > len(shown) else ""))]
+        return "\n".join(lines + [t("experiment.card.rule")])
+
+    for goals, keep in ((True, 99), (False, 99), (False, 6), (False, 3), (False, 1)):
+        text = build(goals, keep)
+        if len(text.encode("utf-8")) <= limit:
+            return text
+    only = t("experiment.card.catalog", path=path)
+    return only if len(only.encode("utf-8")) <= limit else ""
+
+
 def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[str] = ()) -> List[Dict[str, str]]:
     head: List[Dict[str, str]] = []
     if read.status == "missing":

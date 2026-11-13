@@ -707,6 +707,52 @@ class Text(Base):
         self.assertNotIn("%p", unverified)
 
 
+class CardNames(Base):
+    """`catalog_brief`, `card_context`: the catalog's names for the card writing guide and the start context."""
+
+    def setup_root(self, extra=0):
+        root = self.make_root()
+        self.register(root, {"groups": [group_spec()], "conditions": [
+            {"display_name": "잔향 줄임", "group": "AMI 가변 화자 개선", "aliases": ["rev-a", "E"],
+             "refs": {"runs": [{"run_id": "run-1", "row_id": "arm-1"}]}},
+            {"display_name": "잡음 줄임", "group": "AMI 가변 화자 개선", "aliases": ["noise-b"],
+             "refs": {"runs": [{"run_id": "run-2"}]}}] + [
+            {"display_name": f"추가 조건 {i:02d}", "group": "AMI 가변 화자 개선"} for i in range(extra)]})
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "잡음 줄임", "잡음 섞기"), now=NOW + 1)   # `잡음 줄임` is now a former name
+        return root, E.load(root).doc
+
+    def test_the_brief_shrinks_in_steps_and_ends_at_the_location_line(self):
+        root, doc = self.setup_root(extra=40)
+        path = str(E.catalog_path(root))
+        full = E.catalog_brief(doc, path, 4000, "ko")
+        self.assertIn("목표: AMI Dev에서 var WER이 fix 19.99%보다 낮은가", full)
+        self.assertTrue(full.startswith("실험 정본: "))
+        self.assertTrue(full.endswith("조건은 이 이름으로 부른다"))
+        sizes = []
+        for limit in (360, 600):
+            brief = E.catalog_brief(doc, path, limit, "ko")
+            self.assertLessEqual(len(brief.encode("utf-8")), limit)
+            self.assertIn("잔향 줄임", brief)
+            self.assertIn("외 ", brief)                                    # the names left out are counted
+            sizes.append(len(brief.encode("utf-8")))
+        self.assertLessEqual(sizes[0], sizes[1])
+        only = E.catalog_brief(doc, path, len(("실험 정본: " + path).encode("utf-8")), "ko")
+        self.assertEqual(only, "실험 정본: " + path)                       # no room for names: the location only
+        self.assertEqual(E.catalog_brief(doc, path, 5, "ko"), "")
+        self.assertEqual(E.catalog_brief({"groups": [{"id": "g"}], "conditions": []}, path, 600, "ko"), "")
+
+    def test_card_context_needs_an_ok_catalog_with_a_named_condition(self):
+        root, _doc = self.setup_root()
+        sub = root.parent / "deep" / "inside"
+        sub.mkdir(parents=True)
+        self.assertEqual(E.card_context(root.parent)[0], root)
+        self.assertEqual(E.card_context(str(sub)), None if E.root_for_cwd(sub) is None else E.card_context(str(sub)))
+        self.assertIsNone(E.card_context(None))
+        self.assertIsNone(E.card_context(self.base / "nowhere"))
+        E.catalog_path(root).write_text("{no", encoding="utf-8")
+        self.assertIsNone(E.card_context(root.parent))
+
+
 class Scan(Base):
     """`scan_text`: internal names said without their catalog name. Advice only."""
 
