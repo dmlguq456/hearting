@@ -707,6 +707,160 @@ class Text(Base):
         self.assertNotIn("%p", unverified)
 
 
+def summary_of(series, key="wer", direction="min", split="validation"):
+    samples = [{"split": split, "epoch": epoch, "metrics": {name: value}}
+               for name, points in series.items() for epoch, value in points]
+    return rp.metric_summary(samples, decision_metric=key, direction=direction)
+
+
+class Observation(Base):
+    """`describe_observation`: what a live run is called and where its latest value stands, before its record exists."""
+
+    def test_a_linked_run_gets_its_name_goal_and_the_same_comparison_a_status_makes(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        info = E.describe_observation(root, "run-a", None, summary_of({"wer": [(10, 21.0), (12, 20.4)]}))
+        self.assertEqual((info["name"], info["group_name"]), ("0.3초 이하 짧은 발화 유지", "AMI 가변 화자 개선"))
+        self.assertEqual(info["goal"], "AMI Dev에서 var WER이 fix 19.99%보다 낮은가")
+        self.assertEqual(info["decision_point"], {"metric": "wer", "epoch": 12, "value": 20.4})
+        self.write_run(root, "run-a", series={"wer": [(10, 21.0), (12, 20.4)]})
+        status_view = self.cond(E.status(root, now=NOW), "0.3초 이하 짧은 발화 유지")["comparison"]
+        self.assertEqual(info["comparison"], status_view)   # one `compare()`, never a second reading of the numbers
+        self.assertIn("0.3초 이하 짧은 발화 유지 — AMI Dev에서 var WER이 fix 19.99%보다 낮은가; 최근 20.40%@12; fix 19.99% 대비 +0.41%p", E.notice_line(info, "ko"))
+
+    def test_an_unlinked_run_a_missing_catalog_and_a_claimed_run_name_nothing(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        summary = summary_of({"wer": [(12, 20.4)]})
+        self.assertIsNone(E.describe_observation(root, "mpwav-20261111-stray", None, summary))
+        self.assertEqual(E.unregistered_line("ko"), "정본 이름 없음: run을 정본에 등록")
+        self.assertIsNone(E.describe_observation(self.make_root("none", "z"), "run-a", None, summary))
+        path = E.catalog_path(root)       # a hand edit the writer would refuse: a second condition answers to run-a
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["conditions"][1]["refs"]["runs"].append({"run_id": "run-a"})
+        path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        self.assertIsNone(E.describe_observation(root, "run-a", None, summary))   # two conditions claim it: neither
+
+    def test_a_metric_the_run_has_not_reported_has_no_decision_point(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        info = E.describe_observation(root, "run-a", None, summary_of({"loss": [(12, 1.5)]}, key="loss"))
+        self.assertIsNone(info["decision_point"])                       # the declared metric (wer) never arrived
+        self.assertNotEqual(info["comparison"]["state"], "ok")
+
+    def test_a_condition_target_reads_the_control_from_its_own_record(self):
+        root = self.make_root()
+        spec = {"groups": [group_spec(target={"kind": "condition", "condition": "기준 조건"}, metric={**METRIC, "scoring": None})],
+                "conditions": [
+                    {"display_name": "기준 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-ctl"}]}},
+                    {"display_name": "실험 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-exp"}]}}]}
+        self.register(root, spec)
+        self.write_run(root, "run-ctl", series={"wer": [(12, 20.0)]})
+        info = E.describe_observation(root, "run-exp", None, summary_of({"wer": [(12, 20.5)]}))
+        self.assertEqual(info["comparison"]["state"], "ok")
+        self.assertAlmostEqual(info["comparison"]["delta"], 0.5)
+        self.assertEqual(info["comparison"]["baseline"]["label"], "기준 조건")
+        other = E.describe_observation(root, "run-exp", None, summary_of({"wer": [(10, 20.5)]}))   # the control is further along
+        self.assertEqual(other["comparison"]["reason"], "epoch-mismatch")
+
+
+class Leaderboard(Base):
+    def setup_root(self):
+        root = self.make_root()
+        spec = {"groups": [group_spec(), group_spec(display_name="다른 묶음", goal="다른 목표", target=None)],
+                "conditions": [
+                    {"display_name": "느린 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-a"}]}},
+                    {"display_name": "빠른 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-b"}]}},
+                    {"display_name": "값 없는 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-c"}]}},
+                    {"display_name": "다른 묶음의 조건", "group": "다른 묶음", "refs": {"runs": [{"run_id": "run-d"}]}}]}
+        self.register(root, spec)
+        self.write_run(root, "run-a", series={"wer": [(12, 20.4)]})
+        self.write_run(root, "run-b", series={"wer": [(12, 18.0)]})
+        self.write_run(root, "run-c", series={})
+        self.write_run(root, "run-d", series={"wer": [(12, 5.0)]})
+        return root
+
+    def test_the_better_value_leads_unranked_rows_sit_below_with_a_reason_and_groups_stay_apart(self):
+        root = self.setup_root()
+        text = E.render_leaderboard(E.status(root, now=NOW), None, "md", "ko")
+        order = [text.index(name) for name in ("빠른 조건", "느린 조건", "값 없는 조건")]
+        self.assertEqual(order, sorted(order))                         # direction min: the lower WER first
+        self.assertIn("-1.99%p", text)                                  # percent values subtract into percentage points
+        self.assertIn("+0.41%p", text)
+        self.assertIn("fix 19.99%", text)
+        self.assertIn("최근 값 아직 없음", text)                       # no value: a word, not a zero
+        first, second = text.split("### 다른 묶음")
+        self.assertNotIn("다른 묶음의 조건", first)                     # groups are not mixed
+        self.assertNotIn("빠른 조건", second)
+        self.assertIn("최종 승자나 합격 판정이 아님", text)
+        only = E.render_leaderboard(E.status(root, now=NOW), "다른 묶음", "md", "ko")
+        self.assertNotIn("빠른 조건", only)
+
+    def test_direction_max_puts_the_larger_value_first_and_ties_keep_catalog_order(self):
+        root = self.make_root()
+        metric = {**METRIC, "key": "acc", "unit": "", "direction": "max", "scoring": "s"}
+        spec = {"groups": [group_spec(metric=metric, target={"kind": "fixed", "label": "fix", "value": 0.5, "split": "validation", "scoring": "s"})],
+                "conditions": [{"display_name": n, "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": f"run-{i}"}]}}
+                               for i, n in enumerate(("가", "나", "다"))]}
+        self.register(root, spec)
+        for i, value in enumerate((0.6, 0.9, 0.6)):
+            self.write_run(root, f"run-{i}", key="acc", series={"acc": [(5, value)]})
+        text = E.render_leaderboard(E.status(root, now=NOW), None, "md", "ko")
+        self.assertEqual([text.index(f"| {n} |") for n in ("나", "가", "다")], sorted(text.index(f"| {n} |") for n in ("나", "가", "다")))
+
+    def test_tsv_has_one_header_and_the_group_first(self):
+        root = self.setup_root()
+        lines = E.render_leaderboard(E.status(root, now=NOW), None, "tsv", "ko").splitlines()
+        self.assertEqual(lines[0].split("\t")[:2], ["묶음", "조건"])
+        self.assertEqual(len(lines), 1 + 4)
+        self.assertEqual({len(line.split("\t")) for line in lines}, {9})
+        self.assertTrue(lines[1].startswith("AMI 가변 화자 개선\t빠른 조건\t"))
+
+    def test_the_command_is_exit_zero_even_for_a_broken_or_missing_catalog(self):
+        root = self.setup_root()
+        ok = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(root), "--lang", "ko"],
+                            capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("빠른 조건", ok.stdout)
+        bad = self.make_root("bad", "y")
+        path = E.catalog_path(bad); path.parent.mkdir(parents=True, exist_ok=True); path.write_text("{no", encoding="utf-8")
+        broken = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(bad), "--lang", "ko"],
+                                capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(broken.returncode, 0, broken.stderr)
+        self.assertIn("순위표 없음", broken.stdout)
+        empty = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(self.make_root("e", "x")), "--lang", "ko"],
+                               capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(empty.returncode, 0)
+        self.assertIn("순위표에 올릴 조건이 없음", empty.stdout)
+
+
+class Values(Base):
+    """RV-PR1607-1113 #2: a value measured in another metric never takes the group's unit, latest or best."""
+
+    def test_mismatched_metric_unit(self):
+        root = self.make_root()
+        self.two_conditions(root)  # declared: wer (%)
+        self.write_run(root, "run-a", key="loss", series={"loss": [(1, 0.5), (2, 0.7)]})
+        self.write_run(root, "run-b", series={"wer": [(2, 18.0)]})
+        summary = rp.metric_summary([{"epoch": 2, "split": "valid", "metrics": {"loss": 0.7}}],
+                                    decision_metric="loss", direction="min")
+        line = E.notice_line(E.describe_observation(root, "run-a", None, summary), "ko")
+        self.assertNotIn("0.7%", line)
+        self.assertIn("최근 0.7 (loss)@2", line)                      # the metric it was measured in, by name
+        report = E.status(root, now=NOW)
+        row = self.cond(report, "0.3초 이하 짧은 발화 유지")
+        self.assertEqual((row["latest"]["key"], row["best"]["key"]), ("loss", "loss"))  # best keeps its metric too
+        board = E.render_leaderboard(report, lang="ko")
+        mine = next(text for text in board.splitlines() if "0.3초" in text)
+        for wrong in ("0.7%", "0.5%"):
+            self.assertNotIn(wrong, mine)
+        self.assertIn("| 0.7 (loss)@2 | 0.5 (loss)@1 |", mine)
+        self.assertIn("| 18.00%@2 | 18.00%@2 |", next(text for text in board.splitlines() if "짧은 발화 제외" in text))
+        status_line = next(text for text in E.render_status(report, "ko").splitlines() if text.startswith("- 0.3초"))
+        self.assertNotIn("0.7%", status_line)
+        self.assertIn("0.7 (loss)@2", status_line)
+
+
 class CardNames(Base):
     """`catalog_brief`, `card_context`: the catalog's names for the card writing guide and the start context."""
 

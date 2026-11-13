@@ -190,7 +190,7 @@ the goal and deciding metric are. One file per project root, next to `project-me
   mixed into a latest comparison. Anything else is `no-data` or `not-comparable` with the
   reason; no number is invented. A linked row is read on its own: a row that has ended is not
   running and has no expected time, and the run's progress or ETA never stands in for the row's.
-- Commands: `python3 utilities/experiment_catalog.py show|status|lint|register|rename|merge|link|add-term`
+- Commands: `python3 utilities/experiment_catalog.py show|status|lint|leaderboard|register|rename|merge|link|add-term`
   (`--artifact-root ROOT` or `--path PROJECT`; writes take `--dry-run`).
 - Advice: `python3 utilities/experiment_catalog.py scan [--file F]` reads a text on stdin or from a file and
   reports run ids, aliases, and former names the text uses without the condition's catalog name (JSON, exit 0;

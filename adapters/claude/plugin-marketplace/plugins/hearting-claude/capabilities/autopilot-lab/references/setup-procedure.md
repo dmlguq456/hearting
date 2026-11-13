@@ -102,7 +102,7 @@ Required outputs:
 
 Matrix plans default to queueing each completed row's decision-metric evaluation
 on the existing approved queue while the next row trains, then updating the
-leaderboard artifact; successive halving is a default option for many rows.
+leaderboard artifact (`python3 utilities/experiment_catalog.py leaderboard`); successive halving is a default option for many rows.
 Known metric/proxy/rules/time budget/baselines are optional. A long CPU scoring or
 inference stage may call `write_progress(done, "item", total=n)` for an earlier ETA.
 New per-epoch JSON output folders belong beneath a folder containing `CACHEDIR.TAG`;

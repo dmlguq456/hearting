@@ -3285,6 +3285,115 @@ class CompletionWatchTest(unittest.TestCase):
                                               sleep=lambda s: self.fail("slept"), now=lambda: 0.0), 0)
 
 
+class CatalogNameTest(unittest.TestCase):
+    """`runs` and the run-ended notice call a run by its experiment-catalog name when it has one."""
+    RUN = "here-20261110-101010-reverb"
+
+    def setUp(self):
+        import artifact_admission as admission
+        import experiment_catalog as catalog
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.artifact = self.root / "artifacts"
+        self.artifact.mkdir()
+        admission.ensure_root_identity(self.artifact)
+        spec = {"groups": [{"display_name": "소리 분리 개선", "goal": "g"}],
+                "conditions": [{"display_name": "잔향 줄임", "group": "소리 분리 개선",
+                                "refs": {"runs": [{"run_id": self.RUN}]}}]}
+        catalog.run_write(self.artifact, lambda ctx: catalog.op_register(ctx, spec), now=1_790_000_000.0)
+        self.catalog = catalog
+        self.run_root = self.root / "runs"
+        for name in (self.RUN, "here-20261110-101011-stray"):
+            run_dir = self.run_root / name
+            run_dir.mkdir(parents=True)
+            (run_dir / "exit_code").write_text("0\n")   # finished runs are listed without probing a host
+            (run_dir / "meta.json").write_text(json.dumps({
+                "run_id": name, "host": "here", "command": ["python", "train.py"], "artifact_root": str(self.artifact),
+                "provenance": {"session": {"harness": "claude", "id": "sid-7"},
+                               "route": {"route_id": "rt-0123456789abcdef"}}}))
+        env = mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(self.root / "state"), "FLEET_NOW_LANG": "Korean"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def runs(self, as_json):
+        module = load_module()
+        config = {"run_root": self.run_root}
+        with mock.patch.object(module, "load_config", return_value=config), \
+                mock.patch.object(module, "_refuse_namespace_self"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(module.cmd_runs(SimpleNamespace(limit=10, host=None, json=as_json)), 0)
+        return output.getvalue()
+
+    def test_runs_text_and_json_carry_the_catalog_name_and_read_the_catalog_once(self):
+        calls = []
+        real = self.catalog.load
+        with mock.patch.object(self.catalog, "load", side_effect=lambda root: calls.append(root) or real(root)):
+            rows = {row["run_id"]: row for row in json.loads(self.runs(True))}
+            text = self.runs(False)
+        self.assertEqual(rows[self.RUN]["experiment"]["name"], "잔향 줄임")
+        self.assertIsNone(rows["here-20261110-101011-stray"]["experiment"])
+        self.assertNotIn("artifact_root", rows[self.RUN])  # the listing keeps its old keys, plus `experiment`
+        self.assertEqual(len(calls), 2)  # one read per call, two runs in the same root
+        line = next(line for line in text.splitlines() if self.RUN in line)
+        self.assertIn("잔향 줄임", line)
+        stray = next(line for line in text.splitlines() if "stray" in line)
+        self.assertRegex(stray, r"exit 0\s+-\s")
+
+    def watch(self, name):
+        module = load_module()
+        notices = []
+        clock = [0.0]
+        run_dir = self.run_root / name
+        (run_dir / "exit_code").unlink()
+
+        def sleep(seconds):
+            clock[0] += seconds
+            (run_dir / "exit_code").write_text("0\n")
+        with mock.patch("session_notice.notify", side_effect=lambda *a, **kw: notices.append(kw) or {"state": "pending"}), \
+                mock.patch("peer_obligations.ensure_normal_runner", return_value=False), \
+                mock.patch("peer_obligations.request_dispatch_reconciliation", return_value=False):
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(run_dir)), sleep=sleep, now=lambda: clock[0])
+        return notices
+
+    def test_the_ended_notice_leads_with_the_name_and_an_unnamed_run_keeps_its_text(self):
+        import dispatch_session_sweep as sweep
+        named = self.watch(self.RUN)[0]["text"]
+        stray = self.watch("here-20261110-101011-stray")[0]["text"]
+        self.assertTrue(named.startswith("잔향 줄임: run " + self.RUN + " on here ended with exit 0; "), named)
+        self.assertTrue(stray.startswith("run here-20261110-101011-stray on here ended with exit 0; "), stray)
+        self.assertEqual(named[len("잔향 줄임: "):].replace(self.RUN, "X"), stray.replace("here-20261110-101011-stray", "X"))
+
+        def record(name, text):
+            return {"receipt": {"kind": "notice", "key": f"compute-run:{name}", "subject": "compute run", "text": text}}
+        # `dispatch_session_sweep` matches the no-observation words of this notice literally and folds three
+        # exit-0 notices of one label into a summary.  The words are untouched, and the catalog name in front
+        # is an optional prefix of that pattern: a named notice is recognized the same way and keeps its name.
+        literal = (f"run {self.RUN} on here ended with exit 0; 지표 없음; 계획 시간 미상; run 기록 경로 없음; "
+                   f"read it with: compute-hosts tail {self.RUN}")
+        plain = sweep._compute_run_notice(record(self.RUN, literal))
+        self.assertIsNotNone(plain)
+        self.assertEqual(plain["name"], "")
+        prefixed = sweep._compute_run_notice(record(self.RUN, "잔향 줄임: " + literal))
+        self.assertIsNotNone(prefixed)
+        self.assertEqual((prefixed["name"], prefixed["run_id"], prefixed["exit"]), ("잔향 줄임", self.RUN, 0))
+
+    def test_named_ended_notices_fold_by_name_in_the_render_order(self):
+        import dispatch_session_sweep as sweep
+        runs = [f"here-20261110-10101{i}-sweep" for i in (1, 2, 3)]
+
+        def record(run_id, name):
+            text = f"{name}: run {run_id} on here ended with exit 0; read it with: compute-hosts tail {run_id}"
+            return {"receipt": {"kind": "notice", "key": f"compute-run:{run_id}", "subject": "compute run",
+                                "text": text, "required_action": "report-to-user"}}
+        same = [record(run_id, "잔향 줄임") for run_id in runs]
+        keys = sweep._render_keys([("/r", same)])
+        self.assertEqual({keys[id(item)][:2] for item in same}, {(1, 1)})   # three of one name: one folded summary
+        mixed = [record(runs[0], "잔향 줄임"), record(runs[1], "잡음 줄임"), record(runs[2], "잔향 줄임")]
+        keys = sweep._render_keys([("/r", mixed)])
+        self.assertEqual({keys[id(item)][:2] for item in mixed}, {(1, 0)})  # two and one: nobody folds
+
+
 class ProbeCommandHashTest(unittest.TestCase):
     """Per-GPU process command hash: stable same-EUID read, else None.
 

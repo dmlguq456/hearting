@@ -595,6 +595,43 @@ def compare(group: Optional[Mapping[str, Any]], cond_point: Optional[Mapping[str
                   relative_percent=relative, better=better)
 
 
+def describe_observation(root: Path, run_id: str, row_id: Optional[str], summary: Mapping[str, Any], *,
+                         doc: Optional[Mapping[str, Any]] = None, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """What a notice about a live observation calls this run, and how its latest value stands against the
+    target: `{name, condition_id, group_name, goal, metric_key, decision_point, comparison}`.
+
+    `summary` is the observation's metric summary (`latest_metrics`, `metric`, `latest`), read before the
+    public record is written, so the first notice already has the name.  The comparison is the same
+    `compare()` a status makes; a control's value is read from its own public record.  None when the run
+    is not linked, or two conditions claim it (`describe_run` decides)."""
+    root = Path(root)
+    if doc is None:
+        read = load(root)
+        doc = read.doc if read.status == "ok" else None
+    info = describe_run(doc, run_id, row_id)
+    if info is None or doc is None:
+        return None
+    by_id, groups_by_id = _conditions_by_id(doc), _groups_by_id(doc)
+    cond, group = by_id[info["condition_id"]], groups_by_id.get(by_id[info["condition_id"]].get("group"))
+    metric = (group or {}).get("metric") if isinstance((group or {}).get("metric"), dict) else None
+    key = (metric or {}).get("key")
+    latest, _best = _observed(summary if isinstance(summary, Mapping) else {}, key)
+    target = (group or {}).get("target") if isinstance((group or {}).get("target"), dict) else None
+    control_id = target.get("condition") if target and target.get("kind") == "condition" else None
+    control_cond = by_id.get(control_id) if control_id else None
+    control_latest = control_metric = None
+    if control_cond is not None and control_id != cond["id"]:
+        control_group = groups_by_id.get(control_cond.get("group"))
+        control_metric = (control_group or {}).get("metric")
+        control_latest = _condition_status(root, control_group, control_cond, doc, by_id,
+                                           time.time() if now is None else now, {}).get("latest")
+    comparison = _condition_comparison(group, cond, latest, control_id, control_cond, control_latest, control_metric)
+    point = {"metric": key, "epoch": latest.get("epoch"), "value": latest.get("value")} \
+        if latest and key and latest.get("key") == key and latest.get("value") is not None else None
+    return {**info, "metric_key": key, "metric_unit": (metric or {}).get("unit"), "latest": latest,
+            "decision_point": point, "comparison": comparison}
+
+
 # ---------------------------------------------------------------------------
 # lint (warnings only; never blocks)
 # ---------------------------------------------------------------------------
@@ -1177,6 +1214,20 @@ def _condition_status(root: Path, group: Optional[Mapping[str, Any]], cond: Mapp
     return out
 
 
+def _condition_comparison(group: Optional[Mapping[str, Any]], cond: Mapping[str, Any], latest: Optional[Mapping[str, Any]],
+                          control_id: Optional[str], control_cond: Optional[Mapping[str, Any]],
+                          control_latest: Optional[Mapping[str, Any]], control_metric: Any) -> Dict[str, Any]:
+    """One condition's `comparison`, the same for `status()` and for a notice written from a live
+    observation: the control itself has no target, any other condition goes through `compare()`."""
+    if control_id == cond["id"]:
+        return {"state": "no-target", "reason": "is-control", "value": None, "baseline": None,
+                "delta": None, "delta_unit": None, "relative_percent": None, "better": None}
+    comparison = compare(group, latest, control_latest, control_metric if isinstance(control_metric, dict) else None)
+    if comparison["baseline"] and control_id and control_cond:
+        comparison["baseline"]["label"] = control_cond.get("display_name") or None
+    return comparison
+
+
 def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) -> Dict[str, Any]:
     """`experiment-status/v1`: the catalog and the public run records, read together, read only."""
     root = Path(root)
@@ -1218,16 +1269,9 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
             control_metric = (control_group or {}).get("metric")
             for cond in conds:
                 row = statuses[cond["id"]]
-                if control_id == cond["id"]:
-                    row["comparison"] = {"state": "no-target", "reason": "is-control", "value": None, "baseline": None,
-                                         "delta": None, "delta_unit": None, "relative_percent": None, "better": None}
-                else:
-                    control_point = control.get("latest") if control else None
-                    comparison = compare(group, row.get("latest"), control_point,
-                                         control_metric if isinstance(control_metric, dict) else None)
-                    if comparison["baseline"] and control_id and by_id.get(control_id):
-                        comparison["baseline"]["label"] = by_id[control_id].get("display_name") or None
-                    row["comparison"] = comparison
+                row["comparison"] = _condition_comparison(
+                    group, cond, row.get("latest"), control_id, by_id.get(control_id),
+                    control.get("latest") if control else None, control_metric)
                 if row["run_status"] == "running" and row["latest"] is None:
                     out["waiting"].append({"condition_id": cond["id"], "display_name": cond.get("display_name") or None,
                                            "expected_at": row["expected_at"]})
@@ -1553,6 +1597,15 @@ def _unit_text(value: float, unit: Optional[str]) -> str:
     return _fmt(value) + (unit if unit == "%" else f" {unit}" if unit else "")
 
 
+def _measured_text(point: Mapping[str, Any], key: Optional[str], unit: Optional[str]) -> str:
+    """A point's value in the group's unit; a value measured in another metric names that metric and
+    takes no unit (a loss is never written as a WER percent)."""
+    measured = point.get("key")
+    if measured and measured != key:
+        return f"{_fmt(point['value'])} ({measured})"
+    return _unit_text(point["value"], unit)
+
+
 def _clock(iso: Optional[str]) -> str:
     epoch = _ts(iso)
     return "" if epoch is None else time.strftime("%m-%d %H:%M", time.localtime(epoch))
@@ -1564,6 +1617,51 @@ def _age_text(seconds: int, t: Callable[..., str]) -> str:
     if seconds < 5400:
         return t("experiment.age_minutes", n=round(seconds / 60))
     return t("experiment.age_hours", n=round(seconds / 3600, 1))
+
+
+def _value_parts(latest: Optional[Mapping[str, Any]], comparison: Optional[Mapping[str, Any]], unit: Optional[str],
+                 t: Callable[..., str], key: Optional[str] = None) -> List[str]:
+    """The latest value and how it stands against the target, in words: one place for a status line and a notice.
+    `key` is the declared metric: a latest value measured in another metric is named, not given `unit`."""
+    parts: List[str] = []
+    if latest and latest.get("value") is not None:
+        parts.append(t("experiment.latest", value=_measured_text(latest, key, unit), epoch=latest.get("epoch")))
+    elif latest and latest.get("nonfinite"):
+        parts.append(t("experiment.latest_nonfinite", epoch=latest.get("epoch")))
+    else:
+        parts.append(t("experiment.latest_none"))
+    comparison = comparison or {}
+    state, reason = comparison.get("state"), comparison.get("reason")
+    if state == "ok":
+        baseline = comparison["baseline"]
+        relative = comparison.get("relative_percent")
+        parts.append(t("experiment.vs_ok", label=baseline.get("label") or t("experiment.baseline"),
+                       base=_unit_text(baseline["value"], unit),
+                       delta=_signed(comparison["delta"]) + ("%p" if comparison.get("delta_unit") == "pp"
+                                                             else f" {comparison['delta_unit']}" if comparison.get("delta_unit") else ""),
+                       relative=(t("experiment.relative", value=_signed(round(relative, 1))) if relative is not None else "")))
+    elif state == "not-comparable":
+        parts.append(t("experiment.not_comparable", reason=t(f"experiment.reason.{reason}")))
+    elif state == "no-target":
+        parts.append(t(f"experiment.reason.{reason}"))
+    elif state == "no-data" and reason == "control-no-observation":
+        parts.append(t("experiment.reason.control-no-observation"))
+    return parts
+
+
+def notice_line(info: Mapping[str, Any], lang: Optional[str] = None) -> str:
+    """The first line of an experiment notice: `name — goal; latest, versus the target`."""
+    t = _translator(lang)
+    return t("experiment.notice.line", name=info["name"], goal=info.get("goal") or t("experiment.notice.goal_missing"),
+             values="; ".join(_value_parts(info.get("latest"), info.get("comparison"), info.get("metric_unit"), t,
+                                           info.get("metric_key"))))
+
+
+UNREGISTERED_NOTICE = "experiment.notice.unregistered"
+
+
+def unregistered_line(lang: Optional[str] = None) -> str:
+    return _translator(lang)(UNREGISTERED_NOTICE)
 
 
 def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callable[..., str]) -> str:
@@ -1581,29 +1679,7 @@ def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callabl
         parts.append(t("experiment.progress", reached=progress["reached"],
                        total=progress.get("total") if progress.get("total") is not None else "?",
                        unit=progress.get("unit") or ""))
-    latest = row.get("latest")
-    if latest and latest.get("value") is not None:
-        parts.append(t("experiment.latest", value=_unit_text(latest["value"], unit), epoch=latest.get("epoch")))
-    elif latest and latest.get("nonfinite"):
-        parts.append(t("experiment.latest_nonfinite", epoch=latest.get("epoch")))
-    else:
-        parts.append(t("experiment.latest_none"))
-    comparison = row.get("comparison") or {}
-    state, reason = comparison.get("state"), comparison.get("reason")
-    if state == "ok":
-        baseline = comparison["baseline"]
-        relative = comparison.get("relative_percent")
-        parts.append(t("experiment.vs_ok", label=baseline.get("label") or t("experiment.baseline"),
-                       base=_unit_text(baseline["value"], unit),
-                       delta=_signed(comparison["delta"]) + ("%p" if comparison.get("delta_unit") == "pp"
-                                                             else f" {comparison['delta_unit']}" if comparison.get("delta_unit") else ""),
-                       relative=(t("experiment.relative", value=_signed(round(relative, 1))) if relative is not None else "")))
-    elif state == "not-comparable":
-        parts.append(t("experiment.not_comparable", reason=t(f"experiment.reason.{reason}")))
-    elif state == "no-target":
-        parts.append(t(f"experiment.reason.{reason}"))
-    elif state == "no-data" and reason == "control-no-observation":
-        parts.append(t("experiment.reason.control-no-observation"))
+    parts.extend(_value_parts(row.get("latest"), row.get("comparison"), unit, t, metric.get("key")))
     if row.get("run_status") == "running":
         if row.get("expected_at"):
             parts.append(t("experiment.expected", time=_clock(row["expected_at"])))
@@ -1655,6 +1731,88 @@ def render_status(doc: Mapping[str, Any], lang: Optional[str] = None) -> str:
         lines.append(t("experiment.warning", code=t(f"experiment.warning.{warning['code']}"),
                        where=warning["where"], detail=warning.get("detail") or "-"))
     return "\n".join(lines)
+
+
+def _leader_point(point: Optional[Mapping[str, Any]], unit: Optional[str], key: Optional[str] = None) -> str:
+    if not point or point.get("value") is None:
+        return "-"
+    return _measured_text(point, key, unit) + (f"@{point['epoch']}" if point.get("epoch") is not None else "")
+
+
+def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., str], key: Optional[str] = None) -> List[str]:
+    comparison = row.get("comparison") or {}
+    state, reason = comparison.get("state"), comparison.get("reason")
+    baseline = comparison.get("baseline") if state == "ok" else None
+    delta = relative = "-"
+    if state == "ok":
+        delta = _signed(comparison["delta"]) + ("%p" if comparison.get("delta_unit") == "pp"
+                                                else f" {comparison['delta_unit']}" if comparison.get("delta_unit") else "")
+        if comparison.get("relative_percent") is not None:
+            relative = _signed(round(comparison["relative_percent"], 1)) + "%"
+    words = [t(f"experiment.anomaly.{a}") for a in row.get("anomalies") or ()]
+    if state == "ok":
+        words.append(t("experiment.leaderboard.comparable"))
+    elif state == "not-comparable":
+        words.append(t("experiment.not_comparable", reason=t(f"experiment.reason.{reason}")))
+    elif state == "no-target":
+        words.append(t(f"experiment.reason.{reason}"))
+    else:
+        words.append(t("experiment.latest_none"))
+    base = "-"
+    if baseline:
+        base = ((baseline.get("label") + " ") if baseline.get("label") else "") + _leader_point(baseline, unit)
+    return [row.get("display_name") or t("experiment.unnamed"), (row.get("current_run") or {}).get("run_id") or "-",
+            _leader_point(row.get("latest"), unit, key), _leader_point(row.get("best"), unit, key), base, delta, relative,
+            ", ".join(words)]
+
+
+def _leader_order(rows: Sequence[Mapping[str, Any]], direction: Optional[str]) -> List[Mapping[str, Any]]:
+    """Comparable rows first, the better latest value on top; the rest below in catalog order."""
+    ok = [r for r in rows if (r.get("comparison") or {}).get("state") == "ok" and (r.get("latest") or {}).get("value") is not None]
+    rest = [r for r in rows if r not in ok]
+    ok.sort(key=lambda r: r["latest"]["value"], reverse=direction != "min")  # stable: ties keep catalog order
+    return ok + rest
+
+
+def render_leaderboard(doc: Mapping[str, Any], group: Optional[str] = None, fmt: str = "md",
+                       lang: Optional[str] = None) -> str:
+    """One table per group from a `status()` document; every number is the one `compare()` made.
+
+    Groups are never mixed, and a row compared to nothing sits below the ranked ones with its reason.
+    `fmt` is `md` (a markdown table per group) or `tsv` (group name first, one header line)."""
+    t = _translator(lang)
+    catalog = doc.get("catalog") or {}
+    if catalog.get("status") == "invalid":
+        return t("experiment.leaderboard.unreadable", code=catalog.get("code") or "?")
+    groups = list(doc.get("groups") or ())
+    if group:
+        wanted = _fold(group)
+        groups = [g for g in groups if wanted in (_fold(g.get("id") or ""), _fold(g.get("display_name") or ""))]
+    groups = [g for g in groups if g.get("conditions")]
+    if not groups:
+        return t("experiment.leaderboard.empty")
+    heads = [t(f"experiment.leaderboard.col.{k}") for k in ("name", "run", "latest", "best", "baseline", "delta", "relative", "state")]
+    out: List[str] = []
+    for g in groups:
+        metric = g.get("metric") or {}
+        unit = metric.get("unit") or None
+        rows = [_leader_row(r, unit, t, metric.get("key")) for r in _leader_order(g["conditions"], metric.get("direction"))]
+        name = g.get("display_name") or t("experiment.no_group")
+        if fmt == "tsv":
+            if not out:
+                out.append("\t".join([t("experiment.leaderboard.col.group")] + heads))
+            out.extend("\t".join([name] + [c.replace("\t", " ") for c in row]) for row in rows)
+            continue
+        head = f"### {name}"
+        if g.get("goal"):
+            head += " " + t("experiment.goal", goal=g["goal"])
+            if metric.get("key"):
+                head += " " + t("experiment.metric", key=metric["key"], unit=unit or "?",
+                                direction=t(f"experiment.direction.{metric.get('direction') or 'min'}"))
+        out += [head, "", "| " + " | ".join(heads) + " |", "|" + "|".join("---" for _ in heads) + "|"]
+        out += ["| " + " | ".join(c.replace("|", "\\|") for c in row) + " |" for row in rows]
+        out += ["", t("experiment.leaderboard.note"), ""]
+    return "\n".join(out).rstrip("\n")
 
 
 def render_show(read: CatalogRead, lang: Optional[str] = None) -> str:
@@ -1713,6 +1871,9 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("show", parents=[where], help="the catalog as written")
     st = sub.add_parser("status", parents=[where], help="catalog + public run records, read together")
     st.add_argument("--expect", action="append", default=[], metavar="NAME")
+    lb = sub.add_parser("leaderboard", parents=[where], help="a table per group, ordered against the target; never blocks")
+    lb.add_argument("--group", help="one group, by id or name")
+    lb.add_argument("--format", choices=("md", "tsv"), default="md")
     sc = sub.add_parser("scan", parents=[where], help="internal names in a text that lack their catalog name; never blocks")
     sc.add_argument("--file", help="the text to read; `-` or nothing reads stdin")
     li = sub.add_parser("lint", parents=[where], help="warnings with their place; never blocks")
@@ -1805,7 +1966,9 @@ def _read_command(args: argparse.Namespace) -> int:
                               "updated_at": None},
                   "terms": [], "groups": [], "waiting": [], "unlinked_runs": {"run_ids": [], "truncated": 0},
                   "warnings": [_warn("catalog-invalid", CATALOG_REL, code)]}
-    if args.command == "lint":
+    if args.command == "leaderboard":
+        print(render_leaderboard(report, args.group, args.format, args.lang))
+    elif args.command == "lint":
         _print({"catalog": report["catalog"], "warnings": report["warnings"]}) if args.json else \
             print(render_status({**report, "groups": [], "unlinked_runs": {"run_ids": [], "truncated": 0}}, args.lang))
     elif args.json:
@@ -1843,7 +2006,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return int(exc.code or 0)
     if args.command == "scan":
         return _scan_command(args)
-    if args.command in ("show", "status", "lint"):
+    if args.command in ("show", "status", "lint", "leaderboard"):
         return _read_command(args)
     try:
         root = _root_from(args)
