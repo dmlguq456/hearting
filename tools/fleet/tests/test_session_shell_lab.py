@@ -322,6 +322,79 @@ run(async()=>{
 });
 """
 
+# Review RV-PR1612 R3: a watch that fails again and again. The host's real `projection()` runs with
+# `queueProjection` and `observeFiles`, so the redraw a watch made again asks for is the host's own;
+# `source` reads the synthetic files as the backend would. While `failing` holds, every watch made on
+# the run folder fails (the review's injection: an error emitted on the real `fs.watch` object).
+HOST_FAILING = r"""
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const host=fs.readFileSync(process.argv[1],'utf8');
+const body=host.slice(host.indexOf('function queueProjection('),host.indexOf('\nfunction claudePanelPainted('));
+const input=JSON.parse(process.argv[2]),runs=input.runs,q=input.question,record=path.join(runs,'run-00.json');
+const read=file=>{try{return fs.readFileSync(file,'utf8');}catch{return '';}};
+const wait=ms=>new Promise(done=>setTimeout(done,ms));
+const fail=w=>w.emit('error',Object.assign(new Error('injected watch failure'),{code:'ENOSPC'}));
+let failing=false,current,made=[],asked=[],drawn=[];
+const nativeWatch=fs.watch.bind(fs);
+fs.watch=(...args)=>{
+ const w=nativeWatch(...args);
+ if(String(args[0])===runs){current=w;made.push(Date.now());if(failing)setImmediate(()=>fail(w));}
+ return w;
+};
+const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),sid:'s',ended:false,relay:false,succeeding:false,
+ projectionTimer:undefined,projecting:false,projectionPending:false,selection:0,clock:0,nativeSelectionRevision:0,
+ sourceError:undefined,openColumns:()=>40,rows:30,cols:80,state:'idle',expanded:true,nativeContext:undefined,
+ nativeMcp:undefined,block:{references:()=>[],update(){}},actionWorker:undefined,currentDelivery:undefined,
+ upgradeNoteNow:()=>'',displayValues:{},harness:'codex',turnRecord:'',readTurnRecord(){},noteTurn(){},
+ projectionKey:'',heldBytes:0,shownState:()=>'idle',bootstrapModel:false,nativeSelected:{},publishNativeDisplay(){},
+ height:()=>30,applyLayout(){},nativeFooter:null,footer:'',footerSegments:[],panelLines:[],panelSections:undefined,
+ panelModel:{},
+ // The backend's read takes about as long as the real one (20 ms) and asks for the same watch.
+ source:async()=>{const at=Date.now(),lines=[read(q),read(record)];asked.push(at);await wait(20);
+  return {ok:true,watch:[q,runs+path.sep],lines};},
+ rebuildDisplay(){drawn.push({at:Date.now(),question:c.panelLines[0],record:c.panelLines[1]});}};
+vm.createContext(c);vm.runInContext(body,c);
+const settle=()=>wait(1100);
+const reset=()=>{made.length=0;asked.length=0;drawn.length=0;};
+const apart=(times,what)=>{for(let i=1;i<times.length;i++)
+ assert(times[i]-times[i-1]>=950,what+' '+(times[i]-times[i-1])+' ms apart: '+times.map(t=>t-times[0]).join(','));};
+(async()=>{
+ c.projection();await settle();await settle();
+ assert(current&&made.length>=1,'the run folder is watched');
+ // Every watch on the run folder fails from now on, the one in place first: three seconds.
+ failing=true;reset();fail(current);
+ let start=Date.now();
+ await wait(1200);fs.writeFileSync(record,'during');
+ await wait(1800);
+ const remade=made.length,projected=asked.length;
+ assert(remade>=2,'a failed watch is made again: '+remade);
+ assert(remade<=4,'watches made again in three failing seconds: '+remade);
+ assert(projected<=4,'projections in three failing seconds: '+projected);
+ apart(asked,'projections');
+ await settle();
+ assert.equal(drawn.at(-1)?.record,'during','the last change is drawn while the watch fails');
+ // A question written while the run folder's watch keeps failing is drawn in its 25 ms batch.
+ reset();await wait(500);
+ const at=Date.now();fs.writeFileSync(q,'asked');
+ await wait(300);
+ const shown=drawn.find(row=>row.question==='asked');
+ assert(shown,'the question is drawn within 300 ms');
+ assert(shown.at-at<300,'the question drawn after '+(shown.at-at)+' ms');
+ await wait(1700);
+ assert(made.length<=4,'watches made again in the question\'s 2.5 s: '+made.length);
+ // The failure stops: the next watch made again stays, and the next write redraws once.
+ failing=false;await settle();await settle();await settle();
+ assert(c.watchers.get(runs)&&!c.watchers.get(runs).failed,'the run folder is watched again');
+ reset();fs.writeFileSync(record,'after');await settle();
+ assert.equal(made.length,0,'no watch made again once it holds');
+ assert.equal(asked.length,1,'one write, one projection: '+asked.length);
+ assert.equal(drawn.length,1,'one write, one redraw: '+drawn.length);
+ assert.equal(drawn[0].record,'after');
+ c.ended=true;clearTimeout(c.projectionTimer);
+ for(const row of c.watchers.values())row.watch.close();c.watchers.clear();
+})().catch(error=>{console.error(error);process.exit(1);});
+"""
+
 
 class ShellLabWatch(LabBase):
     """Review RV-PR1612 R1: a record past the first few is watched like the first one. R2: a folder
@@ -372,6 +445,13 @@ class ShellLabWatch(LabBase):
         question = self.base / "questions" / "q.json"
         question.parent.mkdir()
         self.host(HOST_BUSY, {"runs": str(root / "resource-runs"), "question": str(question)})
+
+    def test_a_watch_that_keeps_failing_is_made_again_at_most_once_a_second(self):
+        """Review RV-PR1612 R3: each watch made again for its failure asked a 25 ms redraw (67 in 3.2 s)."""
+        root = self.project()
+        question = self.base / "questions" / "q.json"
+        question.parent.mkdir()
+        self.host(HOST_FAILING, {"runs": str(root / "resource-runs"), "question": str(question)})
 
     def test_more_record_folders_than_the_cap_are_unconfirmed_never_left_out_silently(self):
         root = self.project()

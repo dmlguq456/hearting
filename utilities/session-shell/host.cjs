@@ -747,6 +747,10 @@ function folderIdentity(directory){try{const s=fs.statSync(directory);return [s.
 // replaced, added or removed in it redraws, however many files it holds (LAB's run records).
 // A watched folder removed, renamed away or made again leaves its watch on the old folder: the
 // watch is dropped at that event, or at the next projection's observation, and made again.
+// A watch that fails stays as failed until the next projection's observation makes it again. Made
+// again for its failure alone (the same folder, the same targets), it asks no 25 ms redraw: its
+// re-read takes a folder's once-a-second pace, so a watch failing again and again is made again,
+// and redrawn for, at most once a second, the last change still drawn.
 function observeFiles(paths) {
   const wanted=new Map();let changed=false;
   for(const target of (Array.isArray(paths)?paths:[]).slice(0,64)){
@@ -758,7 +762,8 @@ function observeFiles(paths) {
   for(const [directory,row] of watchers)if(!wanted.has(directory)){row.watch.close();watchers.delete(directory);changed=true;}
   for(const [directory,targets] of wanted){
     const existing=watchers.get(directory),identity=folderIdentity(directory);
-    if(existing&&existing.identity!==identity){existing.watch.close();watchers.delete(directory);}
+    const retried=!!existing?.failed&&existing.identity===identity&&JSON.stringify(existing.targets)===JSON.stringify(targets);
+    if(existing&&(existing.failed||existing.identity!==identity)){existing.watch.close();watchers.delete(directory);}
     else if(existing){if(JSON.stringify(existing.targets)!==JSON.stringify(targets))changed=true;existing.targets=targets;continue;}
     try{
       const row={targets,identity};
@@ -779,11 +784,10 @@ function observeFiles(paths) {
           queueProjection(!!name&&folder(hits));
         }
       });
-      // A watch that fails is made again at the next projection (at most once a second).
-      row.watch.on('error',()=>{row.watch.close();if(watchers.get(directory)===row)watchers.delete(directory);
+      row.watch.on('error',()=>{row.watch.close();row.failed=true;
         sourceError={reason:'file-observation-unavailable'};queueProjection(true);});
       watchers.set(directory,row);
-      changed=true;
+      if(retried)queueProjection(true);else changed=true;
     }catch{sourceError={reason:'file-observation-unavailable'};}
   }
   return changed;
