@@ -2,6 +2,9 @@
 """Temporary-root checks for durable peer obligations and native readiness."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import fcntl
 import contextlib
@@ -784,6 +787,44 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertIn("terminal_evidence", late["observation"])
         self.assertEqual(late["observation"]["receiver_receipt"]["ref"], ref)
 
+    def test_native_ended_evidence_rechecks_exact_recipient_and_cancels(self):
+        ref, digest = "5" * 32, "6" * 64
+        recipient = {"harness": "claude", "session_id": "sid-native-ended", "name": "worker"}
+        identity = {"server": "default", "pane": "", **recipient}
+        duty = self.store.create("message-" + ref, "message", identity,
+                                 {"ref": ref, "body_digest": digest, "to": dict(recipient)})
+        pending = {"ref": ref, "body_sha256": digest, "state": "pending", "to": dict(recipient)}
+        evidence = {"kind": "recipient-session-ended", "server": "default",
+                    "harness": "claude", "session_id": recipient["session_id"],
+                    "lifetime": "ended", "recipient_binding":
+                        {"recipient": dict(recipient), "watches": []}}
+        from fleet.collectors import steward
+        with mock.patch.object(steward, "session_liveness", return_value="ended") as proof:
+            cancelled = self.store.cancel_message_delivery(
+                duty["id"], expected_revision=duty["revision"], ref=ref,
+                body_digest=digest, identity=identity, message=pending, evidence=evidence)
+        self.assertEqual(cancelled["state"], "cancelled")
+        proof.assert_called_once_with("claude", recipient["session_id"], agents=())
+        self.assertEqual(cancelled["observation"]["reason"], "recipient-session-ended")
+
+    def test_unknown_native_lifetime_does_not_cancel_the_message(self):
+        ref, digest = "7" * 32, "8" * 64
+        recipient = {"harness": "codex", "session_id": "sid-native-unknown"}
+        identity = {"server": "default", "pane": "", **recipient}
+        duty = self.store.create("message-" + ref, "message", identity,
+                                 {"ref": ref, "body_digest": digest, "to": dict(recipient)})
+        pending = {"ref": ref, "body_sha256": digest, "state": "pending", "to": dict(recipient)}
+        evidence = {"kind": "recipient-session-ended", "server": "default",
+                    "harness": "codex", "session_id": recipient["session_id"],
+                    "lifetime": "ended", "recipient_binding":
+                        {"recipient": dict(recipient), "watches": []}}
+        from fleet.collectors import steward
+        with mock.patch.object(steward, "session_liveness", return_value="unknown"):
+            current = self.store.cancel_message_delivery(
+                duty["id"], expected_revision=duty["revision"], ref=ref,
+                body_digest=digest, identity=identity, message=pending, evidence=evidence)
+        self.assertEqual(current["state"], "pending")
+
     def test_receipt_wins_over_a_stale_terminal_cancellation(self):
         ref, digest = "1" * 32, "2" * 64
         recipient = {"harness": "codex", "session_id": "sid-race"}
@@ -1131,6 +1172,49 @@ class ObligationStoreTest(unittest.TestCase):
         if referenced:
             self.assertIsNotNone(peer._read_pending(ref).get("body_ref"))
         return ref, recipient, records, duties
+
+    def test_session_notice_row_is_settled_once_every_exact_dispatch_record_is_terminal(self):
+        """A runtime notice the hook delivered (its own transcript ACK), the steward check
+        retired (rejected) or that expired is no longer a pending peer message; one still
+        open or one whose binding does not match stays pending."""
+        import dispatch_pending_delivery as pending
+        peer = peer_steward.peer_message
+        for harness in ("claude", "codex", "opencode"):
+            for how in ("acked", "rejected", "expired", "open", "digest-mismatch"):
+                with self.subTest(harness=harness, how=how):
+                    ref, recipient, records, _duties = self.notice_transfer(
+                        harness, member_count=2, suffix=f"-settle-{how}")
+                    sid = recipient["session_id"]
+                    row = peer._read_pending(ref)
+                    self.assertEqual((row["state"], len(peer.pending_messages(recipient))), ("pending", 1))
+                    for record in records if how != "open" else ():
+                        did = record["delivery_id"]
+                        if how == "acked":
+                            pending.ack_received(
+                                self.root, sid, did, acked_by="hook-transcript",
+                                expected_identity=pending.received_ack_identity(record, sid, did))
+                        elif how == "rejected":
+                            pending.reject_claimed(self.root, sid, did, claim_owner=record["claim_owner"],
+                                                   reason="notice-obligation-resolved")
+                        elif how == "expired":
+                            path = pending.record_path(self.root, sid, did)
+                            raw = json.loads(path.read_text())
+                            raw["state"] = "expired"
+                            path.write_text(json.dumps(raw))
+                    if how == "digest-mismatch":
+                        pending.ack_received(
+                            self.root, sid, records[0]["delivery_id"], acked_by="hook-transcript",
+                            expected_identity=pending.received_ack_identity(
+                                records[0], sid, records[0]["delivery_id"]))
+                        path = pending.record_path(self.root, sid, records[1]["delivery_id"])
+                        raw = json.loads(path.read_text())
+                        raw["state"] = "acked"
+                        raw["receipt_digest"] = "0" * 64
+                        path.write_text(json.dumps(raw))
+                    settled = how in {"acked", "rejected", "expired"}
+                    self.assertEqual(peer._registered_delivery_settled(peer._read_pending(ref)), settled)
+                    self.assertEqual(len(peer.pending_messages(recipient)), 0 if settled else 1)
+                    self.assertEqual(peer._read_pending(ref)["state"], "pending")  # nothing rewritten
 
     def _native_first_write(self, ref, recipient, *, before=None):
         """Both actual transport boundaries; a native mock invokes before_add."""
@@ -1938,6 +2022,118 @@ class ObligationStoreTest(unittest.TestCase):
                 if duty["intent"]["identity"]["storage_sid"] in gone:
                     self.assertEqual(duty["state"], "pending")
 
+    def test_answer_for_a_confirmed_ended_recipient_settles_and_unknown_never_does(self):
+        """#1529's "answer with no receiver" stays open unless the native end is confirmed.
+
+        An answer notice completes (answer preserved in the record) only when the
+        recipient's native end is confirmed and its lineage has no successor; any
+        unknown end, or a successor, keeps the duty pending as ``recipient-unavailable``.
+        The same pass still goes on to the live group behind the settled one.
+        """
+        import peer_address
+        import peer_steward_native
+        import session_notice
+        import dispatch_seat_handover as handover
+        import human_wait_state as waits
+
+        cases = (("ended", "self", "complete", "recipient-session-ended-answer-preserved"),
+                 ("unknown", "self", "pending", "recipient-unavailable"),
+                 ("ended", "successor", "pending", "recipient-unavailable"),
+                 ("ended", "unresolved", "pending", "recipient-unavailable"))
+        for lifetime, disposition, state, reason in cases:
+            with self.subTest(lifetime=lifetime, disposition=disposition):
+                case_root = self.root / f"answer-gone-{lifetime}-{disposition}"
+                case_root.mkdir()
+                jobs = case_root / "jobs.log"
+                jobs.touch()
+                env = {"HOME": str(case_root / "home"),
+                       "XDG_STATE_HOME": str(case_root / "state"),
+                       "XDG_DATA_HOME": str(case_root / "data"),
+                       "XDG_CONFIG_HOME": str(case_root / "config"),
+                       "XDG_CACHE_HOME": str(case_root / "cache"),
+                       "HARNESS_STATE_ROOT": str(case_root / "harness"),
+                       "AGENT_PEER_LEDGER_ROOT": str(case_root / "peer-ledger"),
+                       "AGENT_DISPATCH_JOBS": str(jobs)}
+                binding = {"request_id": "req-gone", "harness": "claude",
+                           "session_id": "sid-a-gone"}
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(obligations, "ensure_normal_runner", return_value=False), \
+                     mock.patch.object(waits, "message_binding_valid", return_value=True), \
+                     mock.patch.object(waits, "message_answer_body", return_value="answer"):
+                    import hashlib
+                    import dispatch_pending_delivery as pending
+                    from harness_capabilities import parent_completion
+                    def retain(sid, receipt):
+                        delivery_id = "delivery-" + hashlib.sha256(
+                            receipt["key"].encode()).hexdigest()
+                        record = pending.create(
+                            case_root, recipient_kind=parent_completion("claude")["carrier"],
+                            recipient_key=sid, delivery_id=delivery_id,
+                            session_generation="", session_generation_supported="0",
+                            attempt_ids=[], parent_attempt_id="", route_id="route-free",
+                            route_node="notice", receipt=receipt,
+                            receipt_digest=session_notice.receipt_digest(receipt),
+                            row_revisions={},
+                            lineage=[session_notice._stored_lineage(jobs, {
+                                "kind": "provenance", "harness": "claude",
+                                "session_id": sid})])
+                        self.assertTrue(obligations.retain_session_notice(
+                            jobs, "claude", sid, record))
+
+                    seats = case_root / "state" / "hearting" / "session-tidy" / "sessions"
+                    seats.mkdir(parents=True, exist_ok=True)
+                    (seats / "known-seat.jsonl").write_text(
+                        json.dumps({"event": "start", "harness": "claude",
+                                    "sid": "sid-z-live"}) + "\n")
+                    retain("sid-a-gone", session_notice.validate({
+                        "schema_version": 1, "kind": "notice", "key": "question-answer:req-gone",
+                        "subject": "Question answer", "text": "private-answer",
+                        "required_action": "read-question-answer", "answer_binding": binding}))
+                    retain("sid-z-live", session_notice.validate({
+                        "schema_version": 1, "kind": "notice", "key": "notice:fresh",
+                        "subject": "note", "text": "fresh", "required_action": "read-notice"}))
+                    store = obligations.ObligationStore(case_root)
+                    sent = []
+
+                    def courier(_args, *, expected_recipient, on_prepared,
+                                producer_binding=None):
+                        sent.append(expected_recipient)
+                        on_prepared("fresh-transfer")
+                        return 0
+
+                    selection = {}
+                    answer_id = next(
+                        d["id"] for d in store.list(kinds={"run-notice"})
+                        if d["intent"]["identity"]["storage_recipient"] == "sid-a-gone")
+                    with mock.patch.object(
+                            peer_address, "presence",
+                            side_effect=lambda _h, sid, **_k: (
+                                "present" if sid == "sid-z-live" else "absent")), \
+                         mock.patch.object(peer_steward_native, "native_lifetime",
+                                           return_value=lifetime), \
+                         mock.patch.object(
+                             handover, "_chain_end",
+                             side_effect=lambda _g, _h, sid: (
+                                 (sid, "self") if sid == "sid-z-live"
+                                 else ("sid-next", disposition))), \
+                         mock.patch.object(peer_steward, "_resolve_target",
+                                           return_value=("claude", "sid-z-live", "current")), \
+                         mock.patch.object(peer_steward.peer_message, "_read_pending",
+                                           return_value=None), \
+                         mock.patch.object(peer_steward, "_schedule_message_obligation"), \
+                         mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+                        peer_steward._reconcile_obligations(
+                            store, store.list(kinds={"session-notice", "run-notice"}),
+                            notice_selection=selection, runner_incarnation="runner-answer")
+                    answer = store.get(answer_id)
+                    self.assertIsNotNone(answer)
+                    self.assertEqual(answer["state"], state)
+                    self.assertEqual(answer["observation"]["reason"], reason)
+                    if state == "complete":
+                        self.assertEqual(answer["observation"]["answer_binding"], binding)
+                    # The group behind the gone one is reached in the same pass.
+                    self.assertEqual(sent, [("claude", "sid-z-live")])
+
     def test_notice_runner_rotates_past_blocked_recipient_groups(self):
         from types import SimpleNamespace
         import dispatch_pending_delivery as pending
@@ -2583,105 +2779,70 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
             self.root, self.jobs, self.state, self.bindir,
             self.fifo, self.session, mode))
 
-    def _arm_watch(self, mode="held"):
-        env = _fixture_env(self.root, self.jobs, self.state, self.bindir,
-                           self.fifo, self.session, mode)
-        proc = subprocess.run(
-            [sys.executable, str(_HERE / "peer-steward.py"), "watch", "peer-a"],
-            capture_output=True, text=True, env=env, timeout=30)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        fields = {}
-        for token in proc.stdout.split():
-            key, separator, value = token.partition("=")
-            if separator:
-                fields[key] = value
-        return fields["watch_id"], int(fields["pid"]), env
+    def _arm_native_watch(self):
+        watch_id = "native-watch-1"
+        root = self.state / "peer-watches"
+        root.mkdir(parents=True, exist_ok=True)
+        from dispatch_contract import process_start_ticks
+        pid = os.getpid()
+        arm = {
+            "schema_version": 1, "watch_id": watch_id, "target": "peer-a",
+            "server": "default", "readiness_endpoint": "native:default",
+            "agent": {"harness": "claude", "session_id": "sid-fake", "name": "peer-a",
+                      "pane": "w1:p9", "pid": pid,
+                      "pid_start": process_start_ticks(pid),
+                      "pid_namespace": os.readlink(f"/proc/{pid}/ns/pid")},
+            "steward": {"harness": "claude", "session_id": self.session},
+            "steward_seat": None, "until": [], "initial_state": "working",
+            "observer_protocol": 3, "watcher": {"pid": pid,
+                "pid_start": process_start_ticks(pid)},
+        }
+        (root / f"{watch_id}.json").write_text(json.dumps(arm), encoding="utf-8")
+        return watch_id, arm, root
 
-    @staticmethod
-    def _wait_for_death(pid: int, seconds: float = 10.0):
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return
-            time.sleep(0.02)
-        raise AssertionError(f"fixture observer {pid} never died")
+    def test_unknown_lifetime_does_not_settle_a_native_watch(self):
+        watch_id, arm, root = self._arm_native_watch()
+        paths = peer_steward._watch_paths(watch_id, root)
+        with mock.patch.object(peer_steward, "native_agent", return_value=None), \
+             mock.patch.object(peer_steward._WatchCloseEvidence, "liveness", return_value="unknown"):
+            self.assertIsNone(peer_steward._watch_close_reason(watch_id, arm,
+                                                               peer_steward._WatchCloseEvidence()))
+        self.assertFalse(paths.receipt.exists())
 
-    def test_watch_duty_survives_observer_death_and_resumes_same_id(self):
-        watch_id, pid, _env = self._arm_watch(mode="held")
-        arm_path = self.state / "peer-watches" / f"{watch_id}.json"
-        first = json.loads(arm_path.read_text(encoding="utf-8"))
-        self.assertEqual(first["watch_id"], watch_id)
-        os.kill(pid, signal.SIGKILL)
-        self._wait_for_death(pid)
+    def test_blocked_native_change_is_recorded_once_without_herdr(self):
+        watch_id, arm, root = self._arm_native_watch()
+        payload = {"result": {"agent": {"agent": "claude", "agent_status": "blocked",
+            "agent_session": {"value": "sid-fake"}, "pane_id": "w1:p9", "pid": arm["agent"]["pid"],
+            "pid_start": arm["agent"]["pid_start"], "pid_namespace": arm["agent"]["pid_namespace"]}}}
+        store = obligations.ObligationStore(self.state)
+        snapshot = {"watch_root": root, "watches": [(watch_id, arm)]}
+        with mock.patch.object(peer_steward, "native_agent", return_value=payload) as observe, \
+             mock.patch.object(peer_steward, "_wake_watch_observer", return_value=True) as wake:
+            self.assertTrue(peer_steward._publish_watch_readiness(
+                store, snapshot, read_context=None, incarnation="test-runner"))
+            self.assertFalse(peer_steward._publish_watch_readiness(
+                store, snapshot, read_context=None, incarnation="test-runner"))
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(wake.call_count, 1)
+        observation = json.loads(peer_steward._watch_paths(watch_id, root).observation.read_text())
+        self.assertEqual(observation["native_wait"]["agent_state"], "blocked")
+        self.assertNotIn("herdr_exit", observation)
 
-        self._apply_fixture_env(mode="held")
-        spawned = []
-        real_popen = subprocess.Popen
+    def test_settling_confirmed_native_end_writes_one_receipt_without_wait_child(self):
+        watch_id, arm, root = self._arm_native_watch()
+        original_paths = peer_steward._watch_paths
+        with mock.patch.object(peer_steward, "_watch_paths",
+                               side_effect=lambda current, selected=None:
+                               original_paths(current, selected or root)), \
+             mock.patch.object(peer_steward, "_prepare_watch_notice", return_value=None):
+            receipt = peer_steward._write_terminal_watch_receipt(watch_id, arm, "session-ended")
+        self.assertEqual(receipt["state"], "session-ended")
+        self.assertNotIn("herdr_exit", receipt)
+        self.assertTrue(peer_steward._watch_paths(watch_id, root).receipt.exists())
+        self.assertFalse((root / f"{watch_id}.observation.json").exists())
 
-        def tracked_spawn(*args, **kwargs):
-            process = real_popen(*args, **kwargs)
-            spawned.append(process)
-            return process
-
-        def reap_spawned():
-            for process in spawned:
-                if process.poll() is None:
-                    process.terminate()
-                process.wait(timeout=5)
-
-        self.addCleanup(reap_spawned)
-        with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=tracked_spawn):
-            peer_steward._ensure_watch_observers()
-
-        resumed = json.loads(arm_path.read_text(encoding="utf-8"))
-        self.assertEqual(resumed["watch_id"], watch_id,
-                         "restart replaces only the observer, never the duty")
-        self.assertGreaterEqual(resumed.get("observer_generation", 1), 2)
-        new_pid = int((resumed.get("watcher") or {})["pid"])
-        self.assertNotEqual(new_pid, pid)
-        try:
-            os.kill(new_pid, 0)
-        except OSError:
-            self.fail("resumed observer is not alive")
-        # Death never fulfills the duty: no terminal receipt was written.
-        self.assertFalse((self.state / "peer-watches" / f"{watch_id}.receipt.json").exists())
-
-    def test_settling_dead_observers_watch_stops_its_recorded_native_wait(self):
-        watch_id, pid, _env = self._arm_watch(mode="held")
-        observation_path = self.state / "peer-watches" / f"{watch_id}.observation.json"
-        deadline = time.monotonic() + 10
-        wait_record = {}
-        while time.monotonic() < deadline:
-            with contextlib.suppress(OSError, ValueError):
-                wait_record = json.loads(observation_path.read_text(encoding="utf-8")).get(
-                    "native_wait") or {}
-            if wait_record.get("state") == "started":
-                break
-            time.sleep(0.02)
-        self.assertEqual(wait_record.get("state"), "started", wait_record)
-        wait_pid, wait_start = int(wait_record["pid"]), wait_record["pid_start"]
-        os.kill(pid, signal.SIGKILL)
-        self._wait_for_death(pid)
-        self.assertFalse(fixture_processes._gone(wait_pid, wait_start),
-                         "the native wait outlives its observer by design")
-
-        self._apply_fixture_env(mode="held")
-        self.assertTrue(peer_steward.settle_steward_exited_watch(watch_id))
-        receipt = self.state / "peer-watches" / f"{watch_id}.receipt.json"
-        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["state"],
-                         "steward-exited")
-        deadline = time.monotonic() + 5
-        while (not fixture_processes._gone(wait_pid, wait_start)
-               and time.monotonic() < deadline):
-            time.sleep(0.02)
-        self.assertTrue(fixture_processes._gone(wait_pid, wait_start),
-                        "settling the watch left its native wait running")
-
-    def test_pending_duties_reach_the_read_only_collector_body_free(self):
-        watch_id, pid, _env = self._arm_watch(mode="held")
-        self._children.append(pid)
+    def test_pending_native_watch_rows_reach_the_read_only_collector_body_free(self):
+        watch_id, arm, root = self._arm_native_watch()
         store = obligations.ObligationStore(self.state)
         store.create("message-" + "r" * 32, "message",
                      {"server": "default", "pane": "w1:p9",
@@ -2700,170 +2861,6 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
         self.assertIn("message", kinds)
         for item in pending:
             self.assertLessEqual(set(item), {"kind", "state", "age_min", "ref"})
-        os.kill(pid, signal.SIGKILL)
-        self._wait_for_death(pid)
-        self._children.remove(pid)
-
-    def test_fleet_cancelled_child_no_longer_keeps_parent_pane_unknown(self):
-        from dispatch_contract import ObservedAttemptLiveness
-        attempt = "att-f3daf5ab6f9a367410542ca045fd243d"
-        sid = "01000039-0000-7000-8000-000000000045"
-        metadata = {"attempt_schema_version": "2", "attempt_id": attempt,
-                    "harness": "opencode", "worker_type": "frame", "route_node": "frame",
-                    "dispatch_depth": "1", "parent_sid": sid, "launch_started": "1",
-                    "note": "fleet-kill", "failure_class": "cancelled",
-                    "classifier_source": "fleet-cancel-v1", "reconcile_reason": "user-terminated"}
-        self.jobs.write_text("2026-10-20T00:00:00Z\tdone\trepo\t-\topencode-v2-worker-closure-frame\t"
-                             + ",".join(f"{k}={v}" for k, v in metadata.items()) + "\n")
-        before = self.jobs.read_bytes()
-        for process_state, expected in (("quiescent", "ready"), ("live", "pending"),
-                                        ("unverifiable", "unknown")):
-            with self.subTest(process_state=process_state), split_patch(
-                    "dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
-                        "dead" if process_state == "quiescent" else
-                        "alive" if process_state == "live" else "unverifiable",
-                        "fixture", process_state, "fixture")):
-                work, state = obligations.bound_work_for_pane("wB:p89", "codex", sid, jobs=self.jobs)
-                self.assertEqual((len(work), state), (1, "observed"))
-                self.assertEqual(work[0].pane_relation, "parent")
-                self.assertEqual(work[0].decision.outcome, "cancelled")
-                ready = obligations.pane_readiness(
-                    server="fixture-server", pane="wB:p89", harness="codex", session_id=sid,
-                    pid_birth="pid:9@start:4", identity_verified=True, native_turn="idle",
-                    bound_work=work, bindings_state=state)
-                self.assertEqual(ready.state, expected)
-                self.assertEqual(self.jobs.read_bytes(), before)
-                if expected == "ready":
-                    self.assertEqual(ready.outcome, "cancelled")
-
-    def test_bound_registered_row_overrides_idle_pane_through_real_jobs(self):
-        from dispatch_contract import (ATTEMPT_SCHEMA_VERSION, claim_attempt_row,
-                                       process_launch_identity, ObservedAttemptLiveness)
-        metadata = {"attempt_schema_version": str(ATTEMPT_SCHEMA_VERSION),
-                    "dispatch_depth": "1", "transport": "headless",
-                    "execution_surface": "registered-headless", "registered_worker": "1",
-                    "fallback_hop": "same-harness-headless", "harness": "codex",
-                    "worker_type": "dev/backend", "owner_route_id": "route-fixture",
-                    "owner_route_hash": "sha256:" + "a" * 64, "route_node": "execute",
-                    "attempt_id": "att-fixture-1", "parent_sid": "sid-1",
-                    "parent_harness": "codex", **process_launch_identity(os.getpid())}
-        self.assertNotIn("parent_pane", metadata)
-        row = "2026-10-09T00:00:00Z\topen\trepo\t-\tslug\t" + ",".join(
-            f"{key}={value}" for key, value in metadata.items())
-        self.assertTrue(claim_attempt_row(self.jobs, "att-fixture-1", row, launch=True))
-        for process_state, expected in (("live", "pending"), ("unverifiable", "unknown")):
-            with self.subTest(process_state=process_state), split_patch(
-                    "dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
-                        "alive" if process_state == "live" else "unverifiable",
-                        "fixture", process_state, "fixture")):
-                work, state = obligations.bound_work_for_pane(
-                    "w1:p4", "codex", "sid-1", jobs=self.jobs)
-                self.assertEqual((len(work), state), (1, "observed"))
-                ready = obligations.pane_readiness(
-                    server="fixture-server", pane="w1:p4", harness="codex",
-                    session_id="sid-1", pid_birth="pid:9@start:4",
-                    identity_verified=True, native_turn="idle", bound_work=work,
-                    bindings_state=state)
-                self.assertEqual(ready.state, expected)
-                self.assertIsNone(ready.outcome)
-        for harness, sid in (("codex", "unrelated"), ("claude", "sid-1")):
-            self.assertEqual(obligations.bound_work_for_pane(
-                "w1:p4", harness, sid, jobs=self.jobs), ((), "observed"))
-        with mock.patch("dispatch_seat_handover._handover_binding_keys_for_session",
-                        return_value=(("route-fixture", "sha256:" + "a" * 64, "execute"),)), \
-             mock.patch("dispatch_seat_handover.effective_parent", return_value="successor"), \
-             mock.patch("dispatch_seat_handover.effective_parent_harness", return_value="claude"):
-            work, state = obligations.bound_work_for_pane(
-                "w2:p7", "claude", "successor", jobs=self.jobs)
-            self.assertEqual((len(work), state), (1, "observed"))
-
-    def test_parent_watch_uses_exact_delivery_without_rechecking_owner_closure(self):
-        from dispatch_contract import ATTEMPT_SCHEMA_VERSION, ObservedAttemptLiveness
-        import dispatch_pending_delivery as pending
-        jobs = self.root / "parent-delivery-jobs.log"
-        receipt = {"schema_version": 1, "attempt_id": "att-parent-delivery",
-                   "route_id": "rt-parent-delivery", "route_node": "execute"}
-        receipt_digest = pending._canonical_receipt_digest(receipt)
-        metadata = {
-            "attempt_schema_version": str(ATTEMPT_SCHEMA_VERSION), "dispatch_depth": "1",
-            "transport": "headless", "execution_surface": "registered-headless",
-            "registered_worker": "1", "fallback_hop": "same-harness-headless",
-            "harness": "codex", "worker_type": "dev/backend",
-            "owner_route_id": "rt-parent-delivery", "owner_route_hash": "sha256:" + "b" * 64,
-            "route_node": "execute", "attempt_id": "att-parent-delivery", "parent_sid": "sid-a",
-            "parent_harness": "codex", "failure_class": "pass", "note": "completed-marker",
-            "delivery_intent": "1", "delivery_id": "delivery-parent",
-            "delivery_receipt_digest": receipt_digest,
-            "delivery_row_revision": "revision-parent",
-            "parent_completion_delivery": "codex-native-queue",
-        }
-        jobs.write_text("2026-10-20T00:00:00Z\tdone\trepo\t-\tchild\t" + ",".join(
-            f"{key}={value}" for key, value in metadata.items()) + "\n")
-        pending.create(
-            root=jobs.parent, recipient_kind="codex-native-queue", recipient_key="sid-a",
-            delivery_id="delivery-parent", session_generation="",
-            session_generation_supported="0", attempt_ids=["att-parent-delivery"],
-            parent_attempt_id="att-parent-owner", route_id="rt-parent-delivery",
-            route_node="execute", receipt=receipt,
-            receipt_digest=receipt_digest,
-            row_revisions={"att-parent-delivery": "revision-parent"},
-        )
-
-        def observe():
-            with mock.patch("dispatch_seat_handover._handover_binding_keys_for_session",
-                            return_value=(("rt-parent-delivery", "sha256:" + "b" * 64, "execute"),)), \
-                 mock.patch("dispatch_seat_handover.effective_parent", return_value="sid-current"), \
-                 mock.patch("dispatch_seat_handover.effective_parent_harness", return_value="codex"), \
-                 split_patch("dispatch_contract.observed_attempt_liveness", return_value=
-                            ObservedAttemptLiveness("dead", "fixture", "quiescent", "fixture")), \
-                 mock.patch("dispatch_terminal_commit.owner_completion_state",
-                            side_effect=AssertionError(
-                                "parent readiness must not inspect owner closure")):
-                work, state = obligations.bound_work_for_pane(
-                    "w3:p7", "codex", "sid-current", jobs=jobs)
-            ready = obligations.pane_readiness(
-                server="fixture", pane="w3:p7", harness="codex",
-                session_id="sid-current", pid_birth="pid:9@start:4",
-                identity_verified=True, native_turn="idle", bound_work=work,
-                bindings_state=state)
-            return work, state, ready
-
-        work, state, ready = observe()
-        self.assertEqual((len(work), state), (1, "observed"))
-        self.assertEqual((work[0].pane_relation, work[0].delivery_state), ("parent", "pending"))
-        self.assertEqual(ready.state, "pending")
-
-        pending.claim(jobs.parent, "sid-a", "delivery-parent",
-                      claim_owner="parent-watch-test", lease_seconds=30)
-        claimed_work, _claimed_state, claimed_ready = observe()
-        self.assertEqual((claimed_work[0].delivery_state, claimed_ready.state),
-                         ("claimed", "pending"))
-
-        pending.ack(jobs.parent, "sid-a", "delivery-parent", acked_by="recipient-consumed")
-        acked_work, _acked_state, acked_ready = observe()
-        self.assertEqual((acked_work[0].delivery_state, acked_ready.state), ("acked", "ready"))
-
-        # A fresh ACK cannot satisfy a different result revision in jobs.log.
-        fields = jobs.read_text(encoding="utf-8").rstrip("\n").split("\t")
-        fields[5] = fields[5].replace(
-            "delivery_row_revision=revision-parent",
-            "delivery_row_revision=revision-replaced")
-        jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
-        mismatched_work, _mismatch_state, mismatched_ready = observe()
-        self.assertEqual((mismatched_work[0].delivery_state, mismatched_ready.state),
-                         ("unknown", "unknown"))
-
-        # A delivery record that is readable and ended (rejected) is a known state, not `unknown`.
-        fields[5] = fields[5].replace("delivery_row_revision=revision-replaced",
-                                      "delivery_row_revision=revision-parent")
-        jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
-        path = pending.record_path(jobs.parent, "sid-a", "delivery-parent")
-        record = json.loads(path.read_text(encoding="utf-8"))
-        path.write_text(json.dumps({**record, "state": "rejected", "expiry_reason": "fixture-refusal"}),
-                        encoding="utf-8")
-        ended_work, _ended_state, ended_ready = observe()
-        self.assertEqual(ended_work[0].delivery_state, "rejected")
-        self.assertEqual(ended_ready.state, "ready")
 
 
 class CanonicalNoticeJoinTest(unittest.TestCase):

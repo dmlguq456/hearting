@@ -3642,6 +3642,26 @@ def cancel_message_obligation(ref, *, duty_id, expected_revision, identity,
                 if (effective.get("session_id") != evidence.get("session_id")
                         or effective.get("harness") != evidence.get("harness")):
                     return "changed"
+            elif evidence.get("kind") == "recipient-session-ended":
+                if (effective.get("session_id") != evidence.get("session_id")
+                        or effective.get("harness") != evidence.get("harness")
+                        or evidence.get("lifetime") != "ended"):
+                    return "changed"
+                try:
+                    from peer_steward_native import native_lifetime
+                    if native_lifetime(effective.get("harness"),
+                                       effective.get("session_id")) != "ended":
+                        return "unknown"
+                    import dispatch_seat_handover as handover
+                    graph = handover.lineage_graph()
+                    _end, disposition = handover._chain_end(
+                        graph, effective.get("harness"), effective.get("session_id"))
+                    if disposition == "successor":
+                        return "changed"
+                    if disposition != "self":
+                        return "unknown"
+                except Exception:
+                    return "unknown"
             elif evidence.get("kind") == "first-input-process-dead":
                 if original_process is None:
                     return "unknown"
@@ -4720,7 +4740,11 @@ def mark_steward(harness, session_id, to, kind, ts, source=None):
     return grant_steward(harness, session_id, to, kind, ts, source)["written"]
 
 
-def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=None):
+_SEAT_UNRESOLVED = object()
+
+
+def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=None,
+                  steward_seat=_SEAT_UNRESOLVED):
     """Raise (or extend) the session's steward marker with one evidence entry.
 
     ``source`` is required and says why the entry counts (`explicit` | `watch` |
@@ -4731,7 +4755,10 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
     A session that is not yet a supervisor of its repository is granted only while the
     repository has fewer than ``steward.max_supervisors_per_repo`` counted supervisors;
     the census and the write run under one grant lock so concurrent grants cannot pass
-    the limit together. Returns ``{"status": granted|extended|limited|refused|
+    the limit together. ``steward_seat`` is the caller's already-proven seat (a dict with
+    its ``key``, or None for none) when the caller proved it itself, as `watch` and `wait`
+    do without asking Herdr about other panes; left out, the shared resolver proves it.
+    Returns ``{"status": granted|extended|limited|refused|
     unavailable, "written", "repository", "holders", "limit", "reason"}``."""
     result = {"status": "refused", "written": False, "repository": None, "holders": [],
               "limit": None, "reason": None}
@@ -4824,7 +4851,9 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     result.update(status="unavailable", reason="census-unavailable")
                     return
                 try:
-                    rows = fleet._projection_sessions()
+                    # Native registry rows only: a grant made while arming a watch or
+                    # wait must not ask Herdr for its agent list.
+                    rows = fleet._registry_sessions()
                     repository = fleet.repository_for_session(harness, session_id, sessions=rows)
                     if repository is None:
                         result.update(status="granted", reason="repository-unknown")
@@ -4837,7 +4866,7 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                             result.update(status="granted", reason="foreign-target")
                             result["written"] = write_locked()
                             return
-                    supervision = fleet.repo_supervision(repository_key=repository, sessions=rows)
+                    supervision = fleet.repo_supervision(repository_key=repository, sessions=rows, agents=())
                 except Exception as exc:
                     result.update(status="unavailable", reason=f"census-failed:{type(exc).__name__}")
                     return
@@ -4862,11 +4891,13 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
         # Serialize role creation with same-seat clear adoption and release.
         import dispatch_seat_handover as handover
         import session_tidy as tidy
-        seat = handover.pane_seat(os.environ, harness, session_id)
-        if seat is None:
+        proof = (handover.pane_seat(os.environ, harness, session_id)
+                 if steward_seat is _SEAT_UNRESOLVED else steward_seat)
+        seat_key = proof.get("key") if isinstance(proof, dict) else getattr(proof, "key", None)
+        if not seat_key:
             decide_and_write()
         else:
-            with tidy.seat_lock(seat.key):
+            with tidy.seat_lock(seat_key):
                 decide_and_write()
     except Exception as exc:
         result.update(status="unavailable", written=False,

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """A56-5 — Claude `asyncRewake` carrier for a detached steward watch.
 
-Exercises the real `utilities/peer-steward.py` with only `herdr` faked, so the
-hook's contract with the utility is tested rather than mocked.
+Exercises the real `utilities/peer-steward.py` against a real native session (a
+process the runtime's own registry record names), so the hook's contract with the
+utility is tested rather than mocked. No Herdr is installed, reachable or faked: a
+watch reads the target's native state and the shared runner publishes the change.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import io
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -26,95 +30,31 @@ _PEER_STEWARD = _HERE.parent / "utilities" / "peer-steward.py"
 sys.path.insert(0, str(_HERE.parent / "tools"))
 sys.path.insert(0, str(_HERE.parent / "utilities"))
 import fixture_processes  # noqa: E402
-from dispatch_contract import process_start_ticks  # noqa: E402
-
-_FAKE_HERDR = r'''#!/usr/bin/env python3
-import json, os, sys
-argv = sys.argv[1:]
-mode = os.environ.get("FAKE_HERDR_MODE", "idle")
-if os.environ.get("FAKE_HERDR_MODE_FILE"):
-    with open(os.environ["FAKE_HERDR_MODE_FILE"]) as handle:
-        mode = handle.read().strip() or mode
-target = argv[2] if len(argv) > 2 else "-"
-shell_pid = int(os.environ["FAKE_HERDR_SHELL_PID"])
-shell_pgid = int(os.environ["FAKE_HERDR_SHELL_PGID"])
-shell_argv = json.loads(os.environ["FAKE_HERDR_SHELL_ARGV"])
-info = {"result": {"agent": {"agent": "claude", "agent_session": {"value": "sid-fake"},
-        "agent_status": "idle", "name": target, "pane_id": "w1:p9"}, "type": "agent_info"}}
-verb = argv[1] if len(argv) > 1 else ""
-if argv[:2] == ["pane", "process-info"]:
-    print(json.dumps({"result": {"process_info": {
-        "pane_id": argv[-1], "shell_pid": shell_pid,
-        "foreground_process_group_id": shell_pgid,
-        "foreground_processes": [{"pid": shell_pid, "argv": shell_argv}]}}}))
-    sys.exit(0)
-if verb == "wait" and mode == "held":
-    with open(os.environ["FAKE_HERDR_FIFO"], "r") as fh:
-        fh.read()
-print(json.dumps(info)); sys.exit(0)
-'''
-
 
 class _HookMixin:
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        self.shell = subprocess.Popen(
-            ["/bin/sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
-        self.addCleanup(self._stop_shell)
-        # Reap detached watches before the target shell and temporary state go away.
-        self.addCleanup(fixture_processes.reap, str(self.root), fifo=str(self.root / "release.fifo"))
+        # Reap detached watches before the target session and temporary state go away.
+        self.addCleanup(fixture_processes.reap, str(self.root))
         self.jobs = self.root / "peer-state" / "jobs.log"
         self.jobs.parent.mkdir(parents=True)
         self.jobs.touch()
-        self.bin = self.root / "fakebin"
-        self.bin.mkdir()
-        fake = self.bin / "herdr"
-        fake.write_text(_FAKE_HERDR)
-        fake.chmod(0o755)
-        self.fifo = self.root / "release.fifo"
-        os.mkfifo(self.fifo)
-        self.endpoint_path = self.root / "herdr.sock"
-        self.endpoint_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.endpoint_listener.bind(str(self.endpoint_path))
-        self.endpoint_listener.listen()
-        self.endpoint_listener.settimeout(0.1)
-        self.endpoint_stop = threading.Event()
-        self.endpoint_accepts = 0
-        self.endpoint_thread = threading.Thread(target=self._serve_endpoint, daemon=True)
-        self.endpoint_thread.start()
-        self.addCleanup(self._stop_endpoint)
         self.session = "steward-hook-1"
+        # The one session every watch below observes. It is real: a process the
+        # production readers see plus the runtime's own registry record. No Herdr.
+        self.target = fixture_processes.NativeSession(self, sid="sid-fixture", home=self.root / "home",
+                                    name="peer-a")
 
-    def _stop_shell(self):
-        if self.shell.poll() is None:
-            self.shell.terminate()
-        try:
-            self.shell.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.shell.kill()
-            self.shell.wait(timeout=2)
+    def _wake_runner(self):
+        """The shared runner reads native state when it is woken; nothing polls."""
+        import peer_obligations
+        import shared_readiness
+        root = self.root / "peer-state" / "peer-steward" / "obligations"
+        shared_readiness.wake_runner(peer_obligations.ObligationStore(root).root)
 
-    def _serve_endpoint(self):
-        while not self.endpoint_stop.is_set():
-            try:
-                connection, _address = self.endpoint_listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            self.endpoint_accepts += 1
-            connection.close()
-
-    def _stop_endpoint(self):
-        self.endpoint_stop.set()
-        self.endpoint_listener.close()
-        self.endpoint_thread.join(timeout=1)
-
-    def _env(self, mode="idle", session_id=None):
+    def _env(self, mode=None, session_id=None):
         env = dict(os.environ)
         # Drop inherited runtime/session/dispatch identities before supplying
         # fixture values; a worker runtime's own session id must never become
@@ -135,19 +75,15 @@ class _HookMixin:
         # records out of the real per-user ledger root.
         env["AGENT_PEER_LEDGER_ROOT"] = str(self.root / "peer-state")
         env["HOME"] = str(self.root / "home")
+        env["CLAUDE_CONFIG_DIR"] = str(self.root / "home" / ".claude")
         env["XDG_STATE_HOME"] = str(self.root / "state")
         env["XDG_CONFIG_HOME"] = str(self.root / "config")
         env["XDG_DATA_HOME"] = str(self.root / "data")
-        env["FAKE_HERDR_MODE"] = mode
-        env["FAKE_HERDR_FIFO"] = str(self.fifo)
-        env["FAKE_HERDR_SHELL_PID"] = str(self.shell.pid)
-        env["FAKE_HERDR_SHELL_PGID"] = str(os.getpgid(self.shell.pid))
-        env["FAKE_HERDR_SHELL_ARGV"] = json.dumps([
-            part.decode("utf-8", errors="replace") for part in
-            Path(f"/proc/{self.shell.pid}/cmdline").read_bytes().split(b"\0") if part])
-        env["HERDR_SOCKET_PATH"] = str(self.endpoint_path)
+        # `held` is a target mid-turn: the watch only notifies on the change to idle.
+        # No mode leaves the target as it is.
+        if mode is not None:
+            self.target.set("working" if mode == "held" else "idle")
         env["CLAUDE_CODE_SESSION_ID"] = session_id or self.session
-        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
         env.pop("AGENT_PEER_STEWARD_REWAKE_MAX_SECONDS", None)
         return env
 
@@ -190,16 +126,10 @@ class _HookMixin:
         return out
 
     def _release(self):
-        # A held reader can close between our open() and write() (a watcher that just
-        # got EOF from the previous release): EPIPE means "no reader took it", retry.
-        for _ in range(100):
-            try:
-                with open(self.fifo, "w") as fh:
-                    fh.write("go")
-                return
-            except BrokenPipeError:
-                time.sleep(0.01)
-        self.fail("no reader took the FIFO release")
+        """The target finishes its turn: its runtime record changes, then the shared
+        runner is woken for its next pass."""
+        self.target.set("idle")
+        self._wake_runner()
 
 
 class ArmingTest(_HookMixin, unittest.TestCase):
@@ -291,8 +221,10 @@ class ArmingTest(_HookMixin, unittest.TestCase):
 
 class DeliveryTest(_HookMixin, unittest.TestCase):
     def test_receipt_acks_once_and_wakes_with_exit_two(self):
-        armed = self._arm(mode="idle")
+        # Armed on a working target: only the change to idle is a notice.
+        armed = self._arm(mode="held")
         watch_id = self._fields(armed)["watch_id"]
+        self._release()
         proc = self._run_hook(self._payload(armed))
 
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
@@ -307,25 +239,20 @@ class DeliveryTest(_HookMixin, unittest.TestCase):
         self.assertEqual(ack["carrier"], "claude-async-rewake")
         self.assertEqual(ack["session_id"], self.session)
 
-        # The explicit local endpoint accepted real ObservationTransport
-        # connections and closed them without a census. The existing runner
-        # then used the stable-identity Herdr CLI path to publish readiness.
-        self.assertGreater(self.endpoint_accepts, 0)
+        # The shared runner read the target's native state and published readiness:
+        # the identity is the native session itself, never a Herdr endpoint.
         readiness_root = (self.root / "peer-state" / "peer-steward" /
                           "obligations" / "readiness-v1")
         projections = [json.loads(path.read_text())
                        for path in readiness_root.glob("*.json")
                        if path.name != "runner.json"]
         matches = [item for item in projections
-                   if item.get("identity", {}).get("endpoint") == str(self.endpoint_path)
-                   and item.get("identity", {}).get("pane") == "w1:p9"
-                   and item.get("identity", {}).get("session_id") == "sid-fake"]
+                   if item.get("identity", {}).get("session_id") == "sid-fixture"
+                   and item.get("identity", {}).get("pane") == "w1:p9"]
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["result"]["state"], "ready")
-        self.assertEqual(matches[0].get("lineage"), {
-            "shell_pid": self.shell.pid,
-            "shell_start": str(process_start_ticks(self.shell.pid)),
-        })
+        self.assertTrue(str(matches[0]["identity"].get("endpoint")).startswith("native:"),
+                        matches[0]["identity"])
 
         # A second carrier must not create a second ack.
         again = subprocess.run(
@@ -337,16 +264,10 @@ class DeliveryTest(_HookMixin, unittest.TestCase):
         self.assertEqual(json.loads(ack_path.read_text())["carrier"], "claude-async-rewake")
 
     def test_dead_watcher_rearms_exactly_once_then_delivers(self):
-        # The target's state belongs to the fake target, not to whichever process
-        # spawned an observer: the shared runner's observer recovery and the
+        # The target's state belongs to the native session record, not to whichever
+        # process spawned an observer: the shared runner's observer recovery and the
         # hook's rearm both restore this watch, and both must see the same target.
-        mode_file = self.root / "fake-herdr-mode"
-        mode_file.write_text("held")
-        def env(mode):
-            values = self._env(mode)
-            values["FAKE_HERDR_MODE_FILE"] = str(mode_file)
-            return values
-        armed = self._arm(env=env("held"))
+        armed = self._arm(mode="held")
         fields = self._fields(armed)
         arm_path = self._watch_root() / f"{fields['watch_id']}.json"
         watcher = json.loads(arm_path.read_text())["watcher"]
@@ -354,29 +275,20 @@ class DeliveryTest(_HookMixin, unittest.TestCase):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and Path(f"/proc/{watcher['pid']}/stat").exists():
             time.sleep(0.02)
-        mode_file.write_text("idle")
-        # An observer restored before the switch is already waiting on the held
-        # target; the target turning idle releases it, whenever it started.
+        # An observer restored before the switch already watches the working target;
+        # the target turning idle is what the runner then publishes, whenever it started.
+        self.target.set("idle")
         stop = threading.Event()
-        def release_waiters():
+        def wake_runner():
             while not stop.wait(0.2):
-                try:
-                    fd = os.open(self.fifo, os.O_WRONLY | os.O_NONBLOCK)
-                except OSError:
-                    continue
-                try:
-                    os.write(fd, b"go")
-                except OSError:
-                    pass
-                finally:
-                    os.close(fd)
-        releaser = threading.Thread(target=release_waiters, daemon=True)
-        releaser.start()
+                self._wake_runner()
+        waker = threading.Thread(target=wake_runner, daemon=True)
+        waker.start()
         try:
-            proc = self._run_hook(self._payload(armed), env=env("idle"))
+            proc = self._run_hook(self._payload(armed), env=self._env())
         finally:
             stop.set()
-            releaser.join(timeout=5)
+            waker.join(timeout=5)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("state=idle", proc.stderr)
 
@@ -394,20 +306,45 @@ class DeliveryTest(_HookMixin, unittest.TestCase):
         self.assertGreaterEqual(arms[0][1].get("observer_generation", 1), 2)
 
     def test_second_death_is_attention_not_another_rearm(self):
-        armed = self._arm(mode="held")
-        fields = self._fields(armed)
-        os.kill(int(fields["pid"]), signal.SIGKILL)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and Path(f"/proc/{fields['pid']}/stat").exists():
-            time.sleep(0.02)
+        # The hook's own rule, driven through its real `main` with a scripted utility:
+        # the watcher dies, the hook rearms once, the rearmed watcher dies too, and the
+        # hook stops at attention instead of rearming again.
+        spec = importlib.util.spec_from_file_location("rewake_second_death", str(_HOOK))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        watch_id, new_id = "0123456789abcdef", "fedcba9876543210"
+        status = {"watch_root": str(self.root), "watches": [{
+            "recipient": {"harness": "claude", "session_id": self.session},
+            "receipt": str(self.root / f"{watch_id}.receipt.json"), "target": "peer-a"}]}
+        calls = []
 
-        # `herdr` missing -> the rearm cannot spawn a live watcher, so the hook
-        # must stop at attention instead of rearming again.
-        env = self._env("held")
-        env["PATH"] = "/nonexistent"
-        proc = self._run_hook(self._payload(armed), env=env)
-        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-        self.assertIn("state=watcher-dead", proc.stderr)
+        def fake_run(command, **kwargs):
+            args = command[2:]
+            calls.append(args[0])
+            if args[0] == "status":
+                return subprocess.CompletedProcess(command, 0, json.dumps(status), "")
+            if args[0] == "join":
+                return subprocess.CompletedProcess(
+                    command, 5, "state=watcher-dead agent=claude session_id=sid-fixture "
+                    "name=peer-a pane=w1:p9", "")
+            if args[0] == "rearm":
+                return subprocess.CompletedProcess(
+                    command, 0, f"watch_id={new_id} state=rearmed", "")
+            if args[0] == "ack":
+                return subprocess.CompletedProcess(command, 0, "ack=created", "")
+            self.fail(f"unexpected hook utility command: {args!r}")
+
+        hook_sys = types.SimpleNamespace(
+            stdin=io.StringIO(json.dumps(self._payload(f"state=armed wake=hook watch_id={watch_id}"))),
+            stdout=io.StringIO(), stderr=io.StringIO(), executable=sys.executable)
+        with mock.patch.object(module, "sys", hook_sys), \
+                mock.patch.object(module, "subprocess", types.SimpleNamespace(run=fake_run)):
+            result = module.main()
+        self.assertEqual(result, 2)
+        self.assertEqual(calls.count("rearm"), 1, calls)
+        self.assertEqual(calls.count("join"), 2, calls)
+        self.assertIn("state=watcher-dead", hook_sys.stderr.getvalue())
+        self.assertIn("rearmed=1", hook_sys.stderr.getvalue())
 
     def test_join_outlives_the_short_subprocess_cap(self):
         # B1 regression: the join must not be cut by the utility subprocess cap.
@@ -519,7 +456,7 @@ class SubprocessTimeoutContractTest(unittest.TestCase):
         self.assertEqual(calls[0][0][0], "status")
         self.assertEqual(calls[0][1], short_cap)
         self.assertEqual(calls[1][0], [
-            "join", watch_id, "--timeout", str(remaining_seconds * 1000)
+            "join", watch_id, "--timeout", str(remaining_seconds * 1000), "--no-ack"
         ])
         self.assertEqual(calls[1][1], remaining_seconds + module.BUDGET_MARGIN_SECONDS)
         self.assertGreater(calls[1][1], short_cap)
