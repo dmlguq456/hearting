@@ -508,29 +508,46 @@ def statusline_bindings(parent_pid, sid: str, home: str | os.PathLike, *,
     return None, None, "unobserved"
 
 
-def _remote_mount(home: Path, mounts_path: Path) -> bool:
+_REMOTE_FILESYSTEMS = frozenset(("nfs", "nfs4", "cifs", "smb3", "9p", "sshfs", "ceph", "glusterfs"))
+
+
+def read_mount_table(mounts_path: str | os.PathLike = "/proc/mounts"):
+    """``{mountpoint: filesystem type}`` from one read of the mount table (None when unreadable).
+
+    A caller that classifies many paths in one pass reads the table once and hands it to
+    ``is_local_path(..., mount_table=table)``; the table is never kept between passes.
+    The first row wins for a repeated mountpoint, as in the one-path read.
+    """
+    try:
+        rows = Path(mounts_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    table = {}
+    for row in rows:
+        fields = row.split()
+        if len(fields) >= 3:
+            table.setdefault(os.path.normpath(fields[1].replace("\\040", " ")), fields[2])
+    return table
+
+
+def _remote_mount(home: Path, mounts_path: Path, table=None) -> bool:
     try:
         home = home.resolve(strict=True)
     except OSError:
         return True
-    try:
-        rows = mounts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    if table is None:
+        table = read_mount_table(mounts_path)
+    if table is None:
         return True
-    best = (0, "")
-    for row in rows:
-        fields = row.split()
-        if len(fields) < 3:
-            continue
-        mountpoint = fields[1].replace("\\040", " ")
-        try:
-            relative = home.relative_to(Path(mountpoint))
-        except ValueError:
-            continue
-        if len(mountpoint) > best[0]:
-            best = (len(mountpoint), fields[2])
-    return (not best[1] or best[1] in
-            {"nfs", "nfs4", "cifs", "smb3", "9p", "sshfs", "ceph", "glusterfs"})
+    # The longest mountpoint that is an ancestor of (or is) the path decides: walk up from the path.
+    current = str(home)
+    while True:
+        if current in table:
+            return table[current] in _REMOTE_FILESYSTEMS
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True     # no known mount holds the path
+        current = parent
 
 
 def _owner_directory(path: Path) -> bool:
@@ -541,10 +558,13 @@ def _owner_directory(path: Path) -> bool:
     return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
 
 
-def is_local_path(path: str | os.PathLike, *, mounts_path: str | os.PathLike = "/proc/mounts") -> bool:
-    """Require a known local filesystem for native session or watch evidence."""
-    mount_file = Path(mounts_path)
-    return not _remote_mount(Path(path), mount_file)
+def is_local_path(path: str | os.PathLike, *, mounts_path: str | os.PathLike = "/proc/mounts",
+                  mount_table=None) -> bool:
+    """Require a known local filesystem for native session or watch evidence.
+
+    ``mount_table`` (from ``read_mount_table``) lets one pass classify many paths on one read.
+    """
+    return not _remote_mount(Path(path), Path(mounts_path), mount_table)
 
 
 class ClaimedSessions(set):

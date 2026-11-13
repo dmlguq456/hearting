@@ -4076,6 +4076,50 @@ class WakeSourceTests(unittest.TestCase):
             self.assertEqual(list(part), sorted(part))
         self.assertEqual(state._wake_sources(None), state._wake_sources(None))
 
+    # the cost of naming the sources must not grow with how many directories the pass read
+    def test_a_pass_with_many_directories_reads_the_mount_table_once(self):
+        import claude_process_identity as identity
+        jobs = []
+        for index in range(60):
+            directory = self.base / "many" / f"d{index}"
+            directory.mkdir(parents=True)
+            jobs.append(SimpleNamespace(status="open", harness="claude", pid=None, proc_start=None,
+                                        _transcript_path=str(directory / "s.jsonl")))
+        reads = []
+        real = identity.read_mount_table
+        with mock.patch.object(identity, "read_mount_table", side_effect=lambda *a, **k: reads.append(1) or real(*a, **k)):
+            sources = state._wake_sources(SimpleNamespace(jobs=jobs, sessions=[]))
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(sum(1 for path in sources[0] if "/many/" in path), 60)
+        reads.clear()
+        with mock.patch.object(identity, "read_mount_table", side_effect=lambda *a, **k: reads.append(1) or real(*a, **k)):
+            state._wake_sources(SimpleNamespace(jobs=jobs, sessions=[]))
+        self.assertEqual(len(reads), 1)       # nothing is kept: the next call reads the table again
+
+    def test_the_mount_table_gives_the_same_answer_as_the_one_path_read(self):
+        import claude_process_identity as identity
+        net, inner, spaced = self.base / "net", self.base / "net" / "inner", self.base / "with space"
+        for directory in (net / "x", inner / "y", spaced / "z", self.base / "plain"):
+            directory.mkdir(parents=True, exist_ok=True)
+        mounts = self.base / "mounts"
+        mounts.write_text("\n".join([
+            "rootfs / ext4 rw 0 0", f"srv:/a {net} nfs4 rw 0 0", f"/dev/b {inner} ext4 rw 0 0",
+            f"tmpfs {str(spaced).replace(' ', chr(92) + '040')} tmpfs rw 0 0",
+            f"dup {net} ext4 rw 0 0", "short row", ""]), encoding="utf-8")
+        table = identity.read_mount_table(mounts)
+        link = self.base / "link"
+        link.symlink_to(net / "x")
+        cases = {self.base / "plain": True, net / "x": False, net: False, inner / "y": True, inner: True,
+                 spaced / "z": True, link: False, self.base / "missing" / "q": False}
+        for path, local in cases.items():
+            with self.subTest(path=str(path)):
+                self.assertEqual(identity.is_local_path(path, mounts_path=mounts), local)
+                self.assertEqual(identity.is_local_path(path, mount_table=table), local)
+        # a table that could not be read, and a path no row holds, are not local
+        self.assertIsNone(identity.read_mount_table(self.base / "absent"))
+        self.assertFalse(identity.is_local_path(self.base / "plain", mounts_path=self.base / "absent"))
+        self.assertFalse(identity.is_local_path(self.base / "plain", mount_table={"/nowhere": "ext4"}))
+
     # the producer's own passes: the number of passes is the cadence's, not the wakes'
     def _run_producer(self, seconds, *, delay=None, vary=False, snapshot=None):
         """Run the real producer loop (real passes, real listener) for `seconds`.

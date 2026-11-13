@@ -463,7 +463,17 @@ def drawn_detail(fleet: list[dict]) -> dict:
 
 
 def _publisher_pass(passes: list[dict], detect_ns: int):
-    done = [p for p in passes if p["t1"] <= detect_ns + 5_000_000]
+    """The pass that published the value seen at ``detect_ns``.
+
+    The publish is not the last thing a pass does (the producer then learns its next wake
+    sources), so the detect can fall inside the publishing pass: that pass is the one whose
+    span holds the detect. Otherwise it is the last pass that ended before it.
+    """
+    slack = 5_000_000
+    inside = [p for p in passes if p["t0"] <= detect_ns <= p["t1"] + slack]
+    if inside:
+        return inside[-1]
+    done = [p for p in passes if p["t1"] <= detect_ns + slack]
     return done[-1] if done else None
 
 

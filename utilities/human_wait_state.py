@@ -4781,7 +4781,7 @@ def _wake_sources(snapshot=None, *, registry_paths=None, route_paths=None):
     stat'ed instead of watched. Without a snapshot only the registry, the S4 signal directory
     and the S1 state directories are named.
     """
-    from claude_process_identity import is_local_path
+    from claude_process_identity import is_local_path, read_mount_table
     paths = set(registry_paths if registry_paths is not None else (_registry_paths() or ()))
     if route_paths is None:
         try:
@@ -4826,11 +4826,15 @@ def _wake_sources(snapshot=None, *, registry_paths=None, route_paths=None):
         processes = set(sorted(processes)[:_WAKE_PROCESS_LIMIT])
     local, local_patterns, remote = set(), set(), set()
     kinds = {}
+    # One read of the mount table serves every directory of this call (a pass names about a
+    # thousand): re-reading and re-matching it per directory was most of a pass. It is read
+    # again on the next call, so a mount change is seen as before.
+    table = read_mount_table()
 
     def is_local(directory):
         if directory not in kinds:
             try:
-                kinds[directory] = bool(is_local_path(directory))
+                kinds[directory] = bool(is_local_path(directory, mount_table=table))
             except Exception:
                 kinds[directory] = False
         return kinds[directory]
