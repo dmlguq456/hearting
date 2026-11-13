@@ -309,6 +309,20 @@ class CurrentSessionTest(unittest.TestCase):
                 mock.patch.object(herdr, "list_panes", return_value=None):
             self.assertIsNone(claude.session_id_of_process(self.pid, str(self.home)))
 
+    def test_standalone_claude_outside_herdr_asks_herdr_nothing(self):
+        # A Claude TUI under tmux or a bare terminal has no Herdr pane to
+        # observe: a request, report or redelivery that only re-reads its own
+        # native identity must not run `herdr pane list`.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(procscan, "_comm_of", return_value="claude"), \
+                mock.patch.object(procscan, "provenance", return_value="terminal"), \
+                mock.patch.object(procscan, "read_environ", return_value={}), \
+                mock.patch.object(procscan, "read_proc_start", return_value=self.start), \
+                mock.patch.object(procscan, "_read_cwd", return_value=(self.cwd, False)), \
+                mock.patch.object(herdr, "list_panes", side_effect=AssertionError("herdr pane probe")):
+            claude.session_id_of_process(self.pid, str(self.home))
+
     def _enrich_failed_agent_list(self, lineage, bound=False):
         s = Session(harness="claude", pid=self.pid, proc_start=self.start, cwd=self.cwd)
         panes = [{"pane_id": "wB:p3N", "agent": "claude", "cwd": self.cwd,

@@ -267,11 +267,12 @@ def _resolve_target(target):
     return harness, sid, agent.get("name") or None
 
 
-def _prompt_agent_inventory():
+def _prompt_agent_inventory(tmux=None):
     """Read the selected herdr endpoint's complete agent inventory, or explain why not.
 
-    Without herdr, the tmux server this process runs in answers the same shape."""
-    tmux = _tmux_inventory()
+    Without herdr, the tmux server this process runs in answers the same shape;
+    ``tmux`` is a tmux server an address already named."""
+    tmux = tmux if tmux is not None else _tmux_inventory()
     if tmux is not None:
         payload = tmux.agents()
         if payload is None:
@@ -397,9 +398,17 @@ def _prompt_current_candidate(pane, *, expected_harness=None, expected_sid=None,
 
 def _prompt_candidate_snapshot(target, *, wanted_tag=None):
     """Discover address candidates before proving their exact native identities."""
-    agents, inventory_error = _prompt_agent_inventory()
+    # A tmux pane address (`%N` or `%N@/socket`) is answered by its own tmux
+    # server alone; only a Herdr window address or a name/tag asks Herdr.
+    named_tmux = None
+    if terminal_surface.is_tmux_pane(target):
+        named_tmux = terminal_surface.pane_surface(target)
+        if named_tmux is None or not named_tmux.answers():
+            return None, "pane-census-unavailable", [target]
+    agents, inventory_error = (_prompt_agent_inventory(named_tmux) if named_tmux is not None
+                               else _prompt_agent_inventory())
     endpoint = herdr_observation.endpoint_name(_HERDR_SESSION)
-    census = (_tmux_census(agents, endpoint) if _tmux_inventory() is not None
+    census = (_tmux_census(agents, endpoint) if (named_tmux or _tmux_inventory()) is not None
               else herdr_observation.pane_census(session=_HERDR_SESSION))
     if census is None:
         return None, "pane-census-unavailable", sorted(_prompt_inventory_panes(agents))

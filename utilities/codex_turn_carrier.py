@@ -448,6 +448,13 @@ def nudge_text(items: list[dict]) -> str:
         if item.get("kind") == "completion":
             lines.append(f"- completion attempt={item.get('attempt_id')} "
                          f"required_action={item.get('required_action')}")
+        elif item.get("kind") == "peer-report" and item.get("request"):
+            # A sealed request (or follow-up) is owed an answer; its notice line is not the body.
+            import peer_request
+            lines.append("- another session's request %s arrived as this turn's prompt: open it with `%s %s`, "
+                         "then report with `%s %s --result \"<one line>\"` (or `--partial --result` / "
+                         "`--reject`)" % (item["request"], peer_request.SHOW_COMMAND, item["request"],
+                                          peer_request.REPORT_COMMAND, item["request"]))
         elif item.get("kind") == "peer-report":
             lines.append("- another session's report arrived as this turn's prompt")
         else:

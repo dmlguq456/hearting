@@ -800,14 +800,19 @@ def _request_body(peer, ref):
     return text
 
 
-def _request_views(harness, sid, now):
+def _request_views(harness, sid, now, errors=None):
     """``(views, watched)``: what this session sent and received as requests, read from the
     request records through its own small index (never the recent-message tail), with the
-    delivery rows of their messages. The files read are watched so a change repaints the panel."""
+    delivery rows of their messages. The files read are watched so a change repaints the panel.
+
+    A read that fails shows no request lines, and says why: its reason is appended to
+    ``errors`` (the panel keeps it beside its content, never on screen)."""
     try:
         import peer_request
         listing = peer_request.session_requests(harness, sid)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a display read never stops the panel
+        if errors is not None:
+            errors.append("%s: %s" % (type(exc).__name__, str(exc)[:96]))
         return [], []
     if not listing["out"] and not listing["in"]:
         return [], []
@@ -852,6 +857,30 @@ def _request_views(harness, sid, now):
                 body = _request_body(peer, current["transfer_ref"])
             views.append({"record": record, "side": side, "rows": rows, "gone": gone, "body": body})
     return views, watched
+
+
+def _without_request_transfers(received, sent):
+    """The recent messages without the transfers of a request (the request itself, a follow-up,
+    a report, a cancel notice, a late answer): the route box's request line and its opened
+    detail show that work once, so the message lists do not repeat it. A transfer is a request's
+    when it carries the sealed ``request`` field (a received one through its transfer record, a
+    sent one through the request ref its ledger record names). Display only."""
+    import peer_request
+    peer = _peer_message()
+
+    def sealed(ref):
+        try:
+            record = peer._read_transfer_record(ref)
+            return bool(record) and peer_request.valid_seal(record.get("request"))
+        except Exception:  # noqa: BLE001 - an unreadable record stays an ordinary message
+            return False
+
+    kept_received = [row for row in received or ()
+                     if not (isinstance(row, dict) and isinstance(row.get("ref"), str)
+                             and sealed(row["ref"]))]
+    kept_sent = [row for row in sent or ()
+                 if not peer_request.delivery_ref_refs({"refs": row.get("refs")})]
+    return kept_received, kept_sent
 
 
 def _sent_peer_messages(sid, limit=8):
@@ -901,7 +930,9 @@ def _sent_peer_messages(sid, limit=8):
             rows.append({"to": record.get("to") if isinstance(record.get("to"), dict) else {},
                          "summary": record["summary"][:400], "at": at, "message_id": message_id,
                          "kind": record.get("kind") if isinstance(record.get("kind"), str) else None,
-                         "status": status})
+                         "status": status,
+                         "refs": [ref for ref in (record.get("refs") or ())[:8] if isinstance(ref, str)]
+                         if isinstance(record.get("refs"), list) else []})
     except OSError:
         return [], [str(shard)]
     rows = rows[-limit:]
@@ -1085,12 +1116,16 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["work"] = styled([("◌ ", "dim"), (str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
-    panel["messages"] = peer_message_rows(received, sent, assigned_tag, limit=8)
+    received_plain, sent_plain = _without_request_transfers(received, sent)
+    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8)
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).
-    request_views, request_paths = _request_views(harness, sid, time.time())
+    request_errors = []
+    request_views, request_paths = _request_views(harness, sid, time.time(), request_errors)
     watched.extend(request_paths)
     panel["requests"] = request_rows(request_views, time.time(), assigned_tag) if request_views else []
+    if request_errors:
+        panel["request_error"] = request_errors[0]
     if harness == "claude":
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time(), upgrade_note=upgrade_note))

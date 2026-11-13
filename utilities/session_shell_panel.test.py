@@ -912,6 +912,65 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             # A session with no requests costs one small read and shows nothing.
             self.assertEqual(shell._request_views("claude", "absent-session", time.time()), ([], []))
 
+    def test_z_a_requests_transfers_stand_in_the_request_line_not_in_the_message_lists(self):
+        # R29: one line of work is counted once. The request, its report and its cancel notice are
+        # shown by the route box's request line; ordinary messages stay in MESSAGES.
+        import time
+        from unittest import mock
+        import peer_request
+        shell.registry_root()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            for harness in ("claude", "codex", "opencode"):
+                sid = "00000000-0000-4000-8000-0000000000e9"
+                other = "00000000-0000-4000-8000-0000000000e7"
+                peer = shell._peer_message()
+                shard = peer._ledger_path(sid)
+                shard.parent.mkdir(parents=True, exist_ok=True)
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                record = lambda text, refs, n: {"ts": stamp, "from": {"session_id": sid},  # noqa: E731
+                    "to": {"harness": harness, "session_id": other, "name": "n"}, "kind": "steer",
+                    "summary": text, "message_id": "m%d" % n, "delivery": {"status": "queued"}, "refs": refs}
+                rows = [record("ORDINARY_NOTE", [], 1),
+                        record("[요청 rq-aaaaaa] REQUEST_LINE", ["peer-request:rq-aaaaaa:1:request"], 2),
+                        record("[요청 취소 rq-aaaaaa] CANCEL_LINE", ["peer-request:rq-aaaaaa:1:cancel"], 3)]
+                shard.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+                shell._SENT_CACHE.clear()
+                sealed = {"schema": peer_request.REF_SCHEMA, "id": "rq-bbbbbb", "revision": 1, "role": "report"}
+                received = [{"source": "peer", "text": "RECEIVED_REPORT", "ref": "b" * 32, "at": time.time(),
+                             "sender": "n", "sender_harness": harness, "sender_session_id": other},
+                            {"source": "peer", "text": "RECEIVED_ORDINARY", "ref": "c" * 32, "at": time.time(),
+                             "sender": "n", "sender_harness": harness, "sender_session_id": other}]
+                transfers = {"b" * 32: {"request": sealed}, "c" * 32: {}}
+                import session_tidy
+                with mock.patch.object(session_tidy, "prompt_display", return_value={"received": received}), \
+                        mock.patch.object(peer, "_read_transfer_record", side_effect=lambda ref, **k: transfers[ref]):
+                    messages = shell.panel_projection(harness, sid, columns=60, rows=30)["panel"]["messages"]
+                texts = [row["text"] for row in messages]
+                self.assertEqual(sorted(texts), ["ORDINARY_NOTE", "RECEIVED_ORDINARY"], harness)
+
+    def test_z_a_failed_request_read_is_kept_beside_the_panel_not_swallowed(self):
+        from unittest import mock
+        import peer_request
+        errors = []
+        with mock.patch.object(peer_request, "session_requests", side_effect=ValueError("peer-request-directory-symlink")):
+            self.assertEqual(shell._request_views("claude", "a-session", 0, errors), ([], []))
+        self.assertEqual(errors, ["ValueError: peer-request-directory-symlink"])
+
+    def test_z_every_harness_lists_its_requests_in_the_panel(self):
+        import tempfile as _t
+        from unittest import mock
+        import peer_request
+        shell.registry_root()
+        with _t.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            for harness in ("claude", "codex", "opencode"):
+                mine = {"harness": harness, "session_id": "00000000-0000-4000-8000-0000000000a%d" % len(harness), "name": "a1"}
+                theirs = {"harness": harness, "session_id": "00000000-0000-4000-8000-0000000000b%d" % len(harness), "name": "b1"}
+                request_id = peer_request.reserve(mine, theirs, title="검토 제목")
+                peer_request.commit_open(request_id, "a" * 32, label="판1")
+                panel = shell.panel_projection(harness, mine["session_id"], columns=40, rows=30)["panel"]
+                self.assertEqual([row["id"] for row in panel["requests"]], [request_id], harness)
+                self.assertNotIn("request_error", panel)
+
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''
 const assert=require('node:assert/strict'),d=require(process.argv[1]);

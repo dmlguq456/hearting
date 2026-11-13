@@ -12,6 +12,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -64,6 +65,7 @@ class Fixture(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.patch(peer_steward, "_current_session_identity", lambda: (self.caller[1], self.caller[0]))
+        self._orig_binding = peer_steward._current_shell_binding
         self.patch(peer_steward, "_current_shell_binding", lambda h, s: (None, ""))
         self.patch(peer_steward, "_prompt_codex_native_owner", lambda sid: None)
         self.patch(peer_steward, "_prompt_codex_owner_conflict", lambda sid: False)
@@ -682,6 +684,71 @@ class RealLineageTest(Fixture):
         stranger = ("codex", "sid-bbbb-9999")
         rc, out = self.report(stranger, request_id, result="x")
         self.assertIn("reporter-not-recipient", out)
+
+
+class NoHerdrOnTheRequestPathTest(Fixture):
+    """A request, a report or a redelivery that names an exact native session asks Herdr nothing.
+
+    A fake ``herdr`` records every call; the caller has no TMUX and no Herdr variables."""
+
+    def setUp(self):
+        super().setUp()
+        for key in tuple(os.environ):
+            if key.startswith(("TMUX", "HERDR")):
+                os.environ.pop(key, None)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.calls = self.root / "herdr-calls.log"
+        fake = self.bin / "herdr"
+        fake.write_text('#!/bin/sh\necho "$@" >> %s\nexit 1\n' % self.calls)
+        fake.chmod(0o755)
+        os.environ["PATH"] = str(self.bin) + os.pathsep + os.environ.get("PATH", "")
+
+    def herdr_calls(self):
+        return self.calls.read_text() if self.calls.exists() else ""
+
+    def test_request_and_report_by_native_identity_make_no_herdr_call(self):
+        request_id, _ = self.new_request()
+        rc, out = self.report(B, request_id, result="done")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.herdr_calls(), "")
+
+    def test_a_tmux_socket_pane_is_resolved_by_that_socket_alone(self):
+        import terminal_surface
+
+        class Surface:
+            def answers(self):
+                return True
+
+            def agents(self):
+                return {"result": {"agents": []}}
+
+        pane = "%0@/tmp/hbt-private/s"
+        with mock.patch.object(terminal_surface, "pane_surface", return_value=Surface()), \
+                mock.patch.object(peer_steward, "_tmux_inventory", return_value=None), \
+                mock.patch.object(peer_steward, "_prompt_current_candidate",
+                                  return_value=(None, "target-identity-unverified")):
+            _candidate, error, _panes = peer_steward._resolve_prompt_target(pane)
+        self.assertTrue(error)
+        self.assertEqual(self.herdr_calls(), "")
+
+    def test_the_shell_attachment_check_of_a_claude_native_makes_no_herdr_call(self):
+        # The recipient's own process proof (`_current_shell_binding`) used to run
+        # `herdr pane list` for every Claude, even one in a plain tmux or terminal.
+        import session_shell
+        link = self.bin / "claude"
+        link.symlink_to(sys.executable)
+        proc = subprocess.Popen([str(link), "-c", "import time; time.sleep(60)"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env={k: v for k, v in os.environ.items()})
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        time.sleep(0.3)
+        binding = {"harness": "claude", "sid": B[1], "native_pid": proc.pid}
+        with mock.patch.object(peer_steward, "_current_shell_binding", self._orig_binding), \
+                mock.patch.object(session_shell, "exact_binding", return_value=(binding, "")):
+            found, reason = peer_steward._current_shell_binding("claude", B[1])
+        self.assertEqual(self.herdr_calls(), "")
 
 
 def peer_request_kind(row):
