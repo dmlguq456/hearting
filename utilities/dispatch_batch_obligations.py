@@ -825,6 +825,9 @@ class OwnerSettlementReadContext:
         # jobs key -> (view path identity, resolved path, last proven order,
         #             {byte_end: digest} of the view it was proven in)
         self._owner_scan_resume = {}
+        # jobs key -> {attempt id: digest of the registry inputs an unfinished
+        # scan proved that owner over}; dropped when the scan finishes.
+        self._owner_scan_proved = {}
         self._seen = {}
         self._settled = {}
         self._active_owners = {}
@@ -1540,20 +1543,45 @@ class OwnerSettlementReadContext:
         return self._clock() + max(0.0, float(self._owner_scan_budget_s))
 
     def owner_scan_resume_order(self, jobs: Path, view):
-        """The last owner row an unfinished historical scan already proved.
+        """The last owner row an unfinished historical scan reached, or None.
 
-        Like the candidate floor, it holds only over the leading bytes this view
-        shares with the view the scan proved them in: a row that changed or moved
-        before it (a registration that has since finished, a row an archive
-        pulled forward) is due again. With no shared boundary the walk starts
-        over; owners it already proved keep their cached proof and spend no
-        budget.
+        The rows after it are the ones the scan has not reached yet. Only the
+        rows up to ``owner_scan_proven_rows`` are known to be the bytes it
+        proved; ``owner_scan_proved`` tells an owner between the two apart.
         """
         prior = self._owner_scan_resume.get(str(jobs.resolve(strict=False)))
         if prior is None or prior[:2] != (view.path_identity, view.resolved_path):
             return None
-        proven = _rows_proven_by(view, prior[3])
-        return None if proven < 0 else min(prior[2], proven)
+        return prior[2]
+
+    def owner_scan_proven_rows(self, jobs: Path, view):
+        """The last row of ``view`` whose leading bytes the unfinished scan saw, or -1.
+
+        Like the candidate floor, the resume order holds only over the leading
+        bytes this view shares with the view it was reached in: a row that
+        changed or moved before it (a registration that has since finished, a
+        row an archive pulled forward) can be due again.
+        """
+        prior = self._owner_scan_resume.get(str(jobs.resolve(strict=False)))
+        if prior is None or prior[:2] != (view.path_identity, view.resolved_path):
+            return -1
+        return _rows_proven_by(view, prior[3])
+
+    def _owner_scan_inputs(self, status, raw, related_rows):
+        return _digest_value(((status, raw), self._fingerprint_rows(related_rows)))
+
+    def note_owner_scan_proof(self, jobs: Path, status: str, raw: str, metadata: dict,
+                              related_rows):
+        """Record the registry inputs this unfinished scan proved an owner over."""
+        self._owner_scan_proved.setdefault(str(jobs.resolve(strict=False)), {})[
+            metadata.get("attempt_id", "")] = self._owner_scan_inputs(status, raw, related_rows)
+
+    def owner_scan_proved(self, jobs: Path, status: str, raw: str, metadata: dict,
+                          related_rows) -> bool:
+        """Whether this unfinished scan already proved the owner over these inputs."""
+        proved = self._owner_scan_proved.get(str(jobs.resolve(strict=False)), {})
+        token = proved.get(metadata.get("attempt_id", ""))
+        return token is not None and token == self._owner_scan_inputs(status, raw, related_rows)
 
     def continue_owner_scan(self, jobs: Path, view, order):
         self._owner_scan_resume[str(jobs.resolve(strict=False))] = (
@@ -1561,6 +1589,7 @@ class OwnerSettlementReadContext:
 
     def finish_owner_scan(self, jobs: Path):
         self._owner_scan_resume.pop(str(jobs.resolve(strict=False)), None)
+        self._owner_scan_proved.pop(str(jobs.resolve(strict=False)), None)
 
     def owner_scan_unfinished(self, jobs: Path | None = None):
         """Rows proved so far by unfinished scans; empty once every scan finished."""
@@ -1820,23 +1849,30 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             candidates = tuple(selected.values())
     except FileNotFoundError:
         return ()
-    resume_after = None
+    resume_after, resume_proven = None, -1
     if context is None:
         reselected = ()
     else:
         context.begin_dependency_pass()
         resume_after = context.owner_scan_resume_order(jobs, view)
+        resume_proven = context.owner_scan_proven_rows(jobs, view)
         candidates = tuple(sorted(candidates, key=lambda record: record.order))
     # One read-only classification section observes the generation that
     # selected its candidates; settlement writes run after this returns.
-    with registry_read_scope(pinned=view):
-        # Classification only observes history: one /proc walk serves every
-        # candidate of this pass instead of one walk per owner proof.
-        from dispatch_contract import process_table_scan_scope
-        with process_table_scan_scope():
-            pending, proven_through = _classify_owner_candidates(
-                jobs, view, candidates, context, resume_after=resume_after,
-                reselected=reselected)
+    try:
+        with registry_read_scope(pinned=view):
+            # Classification only observes history: one /proc walk serves every
+            # candidate of this pass instead of one walk per owner proof.
+            from dispatch_contract import process_table_scan_scope
+            with process_table_scan_scope():
+                pending, proven_through = _classify_owner_candidates(
+                    jobs, view, candidates, context, resume_after=resume_after,
+                    resume_proven=resume_proven, reselected=reselected)
+    except BaseException:
+        # Owners due again stay due: the resume order no longer holds them.
+        for attempt_id in reselected:
+            context.reselect_owner(jobs, attempt_id)
+        raise
     if context is not None:
         if proven_through is None:
             context.finish_owner_scan(jobs)
@@ -1849,7 +1885,7 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
 
 
 def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_after=None,
-                               reselected=()):
+                               resume_proven=-1, reselected=()):
     from dispatch_contract import (
         SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
     )
@@ -1917,25 +1953,34 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
             if deferred == "not-applicable":
                 context.forget_active_owner(jobs, attempt_id)
                 continue
+            if (deferred is None and resume_after is not None and order <= resume_after
+                    and attempt_id not in reselected):
+                if order <= resume_proven or context.owner_scan_proved(
+                        jobs, fields[1], raw, meta, related_rows):
+                    # An earlier pass of this unfinished scan already proved
+                    # it, over these same bytes.
+                    continue
+                # Changed or moved behind the resume order since: due again, on
+                # the reselection path, so the rows the scan has not reached
+                # keep their turn and the resume order does not move back.
+                reselected.add(attempt_id)
             if deferred is not None:
                 # Unchanged inputs before the retry time: keep the unfinished
                 # owner visible without observing it again.
                 context.remember_active_owner(jobs, candidate)
-            elif (resume_after is not None and order <= resume_after
-                    and attempt_id not in reselected):
-                # An earlier pass of this unfinished scan already proved it.
-                continue
             elif (deadline is not None and proved_this_pass
                     and context._clock() >= deadline):
                 # This pass spent its proof budget; prove the rest next pass.
-                walk.defer(order)
                 if attempt_id in reselected:
-                    # Behind the resume order: keep it on the reselection path.
+                    # Kept on the reselection path, it holds no resume gap.
                     context.reselect_owner(jobs, attempt_id)
+                walk.defer(order, reselected=attempt_id in reselected)
                 continue
             else:
                 proved_this_pass = True
                 walk.proving()
+                if deadline is not None:
+                    context.note_owner_scan_proof(jobs, fields[1], raw, meta, related_rows)
                 try:
                     observed = dependencies = None
                     if context is not None:
@@ -1999,11 +2044,14 @@ class _OwnerProofWalk:
 
     The rows after the resume order (owners not yet proved by this scan) take
     the pass's first proof, so they advance on every pass however many earlier
-    proofs become invalid. Owners due again (proof invalidated, or deferred by
-    an earlier budget) follow, oldest first, so a repeatedly invalidated owner
-    neither takes every pass's proof nor stays hidden behind the resume order;
-    the remaining rows keep registry order. A pass without a budget proves
-    every owner, so its order is the registry order.
+    proofs become invalid. Owners due again (proof invalidated, deferred by an
+    earlier budget, or a row behind the resume order that changed or moved
+    since this scan proved it) follow, oldest first, so a repeatedly
+    invalidated owner neither takes every pass's proof nor stays hidden behind
+    the resume order; the remaining rows keep registry order. An owner waiting
+    on that reselection path holds no resume gap, so the resume order does not
+    move back for it. A pass without a budget proves every owner, so its order
+    is the registry order.
     """
 
     def __init__(self, candidates, resume_after, reselected, *, budgeted):
@@ -2059,8 +2107,11 @@ class _OwnerProofWalk:
     def proving(self):
         self._suffix_turn_taken = True
 
-    def defer(self, order):
+    def defer(self, order, *, reselected=False):
+        """Leave an owner for a later pass; one kept reselected holds no gap."""
         self._deferred = True
+        if reselected:
+            return
         if self._resume_after is None or order > self._resume_after:
             if self._first_gap is None or order < self._first_gap:
                 self._first_gap = order
@@ -2071,7 +2122,8 @@ class _OwnerProofWalk:
             return None
         floor = -1 if self._resume_after is None else self._resume_after
         if self._first_gap is None:
-            return floor
+            # Only reselected owners wait: every other row was reached.
+            return max([floor, *(candidate.order for candidate in self._candidates)])
         return max(floor, self._first_gap - 1)
 
 
