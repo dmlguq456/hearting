@@ -671,12 +671,20 @@ stamp path in `core/HOOKS.md`.
   recoverable. Human-gate notices retain their existing speculative lease and
   release semantics, and another carrier's successor claim is preserved.
   The same in-wait wake carries an experiment's attention or failed-run notice
-  stored for the owner's supervising session (`session_notice.wakes_resting_recipient`:
-  a new or changed attention, and a final that did not succeed or whose outcome is unknown;
-  a normal finish, a checkpoint and the same attention re-posted at a checkpoint wait for
-  the next input) when its lineage names this owner
+  stored for the owner's supervising session (the `attention` class of `session_notice.classify`:
+  a new or changed attention, a final that did not succeed or whose outcome is unknown, and a
+  compute run that ended with a nonzero exit; a normal finish, a checkpoint and the same
+  attention re-posted at a checkpoint are `routine`/`progress` and wait for the next input)
+  when its lineage names this owner
   attempt or the session itself; the claim lease decides which hook announces it, and the
-  wake says the owner is still running. One `asyncRewake` wait lasts at most six hours
+  wake says the owner is still running. The same classification orders every carrier's
+  delivered text (`delivery_context`): attention first under its own heading, other notices
+  next, and routine notices (normal checkpoints and ends) on one line with their count and
+  names. A routine notice its producer called quiet (`, quiet` subject: a normal end under
+  `QUIET_RUN_SECONDS`, or a normal checkpoint or end with no metric) never has a line of its
+  own, and when it is addressed to the session supervising the run's owner (`attempt-parent`)
+  the runner and the OpenCode carrier open no turn for it alone: it rides that session's
+  next delivery or next turn. One `asyncRewake` wait lasts at most six hours
   (`AGENT_CLAUDE_REWAKE_MAX_SECONDS`); after it only the next Bash call, `Stop` or
   `SessionStart` arms again, so a session left resting longer than that is not woken by this
   carrier and no periodic model wake stands in for it.

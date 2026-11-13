@@ -146,13 +146,28 @@ class SessionNoticeTest(unittest.TestCase):
             with self.subTest(final=status), mock.patch.object(
                     N, "_run_state", return_value=None if status is None else {"status": status}):
                 self.assertIs(N.wakes_resting_recipient(final), wakes)
+        # A compute run's end follows the same rule: a nonzero exit wakes, exit 0 does not.
+        ended = "run h-20261114-101010-x on h ended with exit {}; read it with: compute-hosts tail h-20261114-101010-x"
+        for code, wakes in ((6, True), (0, False)):
+            with self.subTest(compute_exit=code):
+                compute = record("compute-run:h-20261114-101010-x:claude:sid-1", "compute run")
+                compute["receipt"]["text"] = ended.format(code)
+                self.assertIs(N.wakes_resting_recipient(compute), wakes)
+        quiet = record("experiment:run-1:final:ab:1:claude:sid-1", "experiment final, quiet (1/1)")
+        self.assertFalse(N.wakes_resting_recipient(quiet))   # its producer saw it succeed
+        self.assertTrue(N.is_quiet(quiet["receipt"]))
+        self.assertFalse(N.is_quiet(final["receipt"]))
         self.assertFalse(N.wakes_resting_recipient(record("steward-check:x")))
         self.assertFalse(N.wakes_resting_recipient({"receipt": {"kind": "notice"}}))
         self.assertFalse(N.wakes_resting_recipient({}))
-        # The existing classification does not move.
-        self.assertEqual(N.classify(attention["receipt"]), N.PROGRESS)
-        self.assertEqual(N.classify(checkpoint["receipt"]), N.PROGRESS)
-        self.assertEqual(N.classify(final["receipt"]), N.TERMINAL)
+        # Waking is the attention class itself: one classification for the whole notice path.
+        self.assertEqual(N.classify(attention["receipt"]), N.ATTENTION)
+        self.assertEqual(N.classify(checkpoint["receipt"]), N.ROUTINE)
+        self.assertEqual(N.classify(final["receipt"]), N.ATTENTION)   # outcome not known yet
+        for status, kind in (("succeeded", N.ROUTINE), ("failed", N.ATTENTION)):
+            with self.subTest(classify=status), mock.patch.object(
+                    N, "_run_state", return_value={"status": status}):
+                self.assertEqual(N.classify(final["receipt"]), kind)
 
 class MessageNoticeBoundaryTests(unittest.TestCase):
     def test_context_sweep_cannot_claim_or_ack_the_peer_couriers_message_answer(self):

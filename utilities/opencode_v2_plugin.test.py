@@ -517,6 +517,104 @@ try {
                 capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_a_quiet_supervisor_notice_opens_no_idle_turn_and_rides_the_next_natural_turn(self):
+        # `dispatch_session_sweep deliver` marks a quiet notice to a supervising session
+        # `waits` (session_notice.waits_for_next_delivery). The carrier keeps it deferred,
+        # like a resend-limited record: no idle turn, carried by the next natural turn.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for behavioral carrier checks")
+        with ExitStack() as stack:
+            root = Path(fixture_tempdir(stack))
+            script = root / "quiet.mjs"
+            script.write_text(r"""
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {createHash} from 'node:crypto'
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const extract = (start, end) => {
+  const a = source.indexOf(start), b = source.indexOf(end, a)
+  assert(a >= 0 && b > a, `missing actual source: ${start}`)
+  return source.slice(a, b)
+}
+const limit = Number(/const CARRIER_UNOBSERVED_SEND_LIMIT = (\d+)/.exec(source)[1])
+assert(limit >= 1)
+let tick, writes = 0, owedState = 'claimed'
+const actions = [], logs = []
+const record = {root: '/fixture', storage_key: 'B', delivery_id: 'delivery-fixture',
+  claim_owner: 'sweep-carrier', immutable_identity: {delivery_id: 'delivery-fixture'}, waits: true}
+const body = 'Hearting runtime delivery\nHEARTING_RECEIPT_V1 delivery-fixture ' + '0'.repeat(64)
+const command = async (action, sid, data) => {
+  actions.push(action)
+  if (action === 'roots') return ['/fixture']
+  if (action === 'recipients')
+    return {generation: 'g', digests: [], delivery_ids: owedState === 'acked' ? [] : [record.delivery_id]}
+  if (action === 'deliver') return owedState === 'acked' ? {text: '', records: []} : {text: body, records: [record]}
+  if (action === 'settle') return {received_ids: [], settled_count: 0, unknown_ids: [],
+    text: data.text, records: data.records}
+  if (action === 'release') return {count: 1}
+  if (action === 'ack') { owedState = 'acked'; return {count: 1} }
+  throw Error('unexpected ' + action)
+}
+const nativeResponse = data => ({data, response: {ok: true, status: 200}})
+const session = {
+  get: async () => nativeResponse({id: 'B', projectID: 'fixture', directory: process.cwd(),
+    slug: 'fixture', title: 'fixture', version: '1', time: {created: 1, updated: 1}}),
+  status: async () => nativeResponse({B: {type: 'idle'}}),
+  messages: async () => nativeResponse([]),
+  promptAsync: async () => { writes++; return {response: {ok: true, status: 204}} },
+}
+const ctx = {directory: process.cwd(), client: {session, app: {log: async row => logs.push(row.body.extra)}}}
+const sync = (action, sid, data) => {
+  actions.push(action)
+  return {received_ids: [], settled_count: 0, unknown_ids: [], text: data.text, records: data.records}
+}
+const carrierCommand = (action, sid, data, observe, synchronous = false) =>
+  synchronous ? sync(action, sid, data) : command(action, sid, data)
+const realTimeout = setTimeout
+const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'readFileSync',
+  'realpathSync', 'createHash', 'setInterval', 'setTimeout', 'baseDir', 'isWorkerSession', 'pendingPeerDelivery',
+  `let paneNativeOrigin = {sid: 'B', directory: ctx.directory, state: 'pending'};
+   const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
+   let paneOwningContext = ctx;
+   const pendingPeerStatus = new Map();
+   const sessionInfoById = new Map(), v2SessionInfo = new Map();
+   ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
+   ${extract('function sdkResponseData(result)', 'function runCompactHook')}
+   ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
+   ${extract('const CARRIER_ENV =', '// One bounded sweep step')}
+   ${extract('function createCompletionCarrier(ctx)', '// Session card / tidy notice')}
+   return createCompletionCarrier(ctx);`)
+// The post-send history look-again waits are collapsed; nothing else is timed.
+const fastTimeout = (fn, ms) => realTimeout(fn, ms === 500 ? 0 : ms)
+const carrier = setup(ctx, carrierCommand, path, fs.readdirSync, fs.readFileSync, fs.realpathSync,
+  createHash, fn => {tick = fn; return {unref(){}}}, fastTimeout, x => x.directory, () => false, async () => {})
+carrier.env('B')
+carrier.status('B', 'idle')
+const drain = async () => {for (let i = 0; i < 200; i++) await new Promise(resolve => realTimeout(resolve, 0))}
+try {
+  // Only a quiet notice to a supervising session is owed: idle ticks open no turn.
+  for (let pass = 0; pass < 3; pass++) { tick(); await drain() }
+  assert.equal(writes, 0, JSON.stringify({writes, actions, logs}))
+  assert(logs.some(row => row.reason === 'quiet-waits-for-next-turn'))
+  assert(actions.includes('release'))
+  // After the first look it is deferred: later ticks do not claim it again.
+  const claims = actions.filter(action => action === 'deliver').length
+  tick(); await drain()
+  assert.equal(actions.filter(action => action === 'deliver').length, claims)
+  // The next natural turn carries it and acks it.
+  const text = await carrier.inTurn('B')
+  assert.equal(text, body)
+  assert.equal(owedState, 'acked')
+  assert.equal(writes, 0)
+  console.log(JSON.stringify({writes, claims}))
+} finally { carrier.dispose(true) }
+""")
+            result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
+                PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js")),
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_natural_turn_takes_over_the_live_claim_right_after_the_resend_limit(self):
         # The review's gap (RV-PR1454): the limited second send still holds its
         # 120-second claim lease, and a fresh claim is refused while it lives. A

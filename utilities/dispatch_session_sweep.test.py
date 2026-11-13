@@ -2294,13 +2294,16 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         forward = SWEEP.delivery_context([(self.root, records)])
         reverse = SWEEP.delivery_context([(self.root, list(reversed(records)))])
         self.assertEqual(forward, reverse)
-        self.assertIn("compute run summary: 3 runs on gpu-a label=resnet-e4-w4", forward)
-        self.assertIn("exit 0:3", forward)
-        self.assertIn("compute-hosts tail gpu-a-20261024-120003-resnet-e4-w4", forward)
+        # The failure is shown first and on its own; the five normal ends are one routine line.
+        lines = forward.splitlines()
+        self.assertEqual(lines[1], "Needs attention (1), shown first:")
+        self.assertIn("ended with exit 2", lines[2])
+        self.assertIn("- Routine, nothing to do (5 runs): 5 ended normally -- "
+                      "gpu-a-20261024-120001-resnet-e4-w4, gpu-a-20261024-120002-resnet-e4-w4, "
+                      "gpu-a-20261024-120003-resnet-e4-w4 and 2 more", forward)
         self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
-        self.assertIn("exit 2", forward)
-        self.assertIn("resnet-e4-w5", forward)
-        self.assertEqual(forward.count("run gpu-a-20261024-120004-resnet-e4-w5"), 1)
+        self.assertEqual(forward.count("run gpu-a-20261024-120004-resnet-e4-w5"), 0)
+        self.assertTrue(all(record["delivery_id"] in forward for record in records))
 
     def test_named_compute_run_notices_bundle_by_name_and_the_summary_keeps_the_name(self):
         # `compute-hosts` leads an ended notice with the experiment catalog name; the sweep recognizes that
@@ -2312,10 +2315,11 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         forward = SWEEP.delivery_context([(self.root, records)])
         reverse = SWEEP.delivery_context([(self.root, list(reversed(records)))])
         self.assertEqual(forward, reverse)
-        self.assertIn("compute run summary: 3 runs on gpu-a label=sweep name=잔향 줄임;", forward)
-        self.assertIn("compute run summary: 3 runs on gpu-a label=sweep; exit 0:3", forward)  # unnamed: as before
-        self.assertEqual(forward.count("compute run summary:"), 2)
-        self.assertEqual(forward.count("run gpu-a-20261024-120011-sweep"), 1)   # two of another name stay single
+        # One routine line counts every run and names the catalog names first.
+        self.assertIn("- Routine, nothing to do (8 runs): 8 ended normally -- "
+                      "잔향 줄임, 잡음 줄임, gpu-a-20261024-120021-sweep and 2 more", forward)
+        self.assertNotIn("Needs attention", forward)
+        self.assertEqual(forward.count("run gpu-a-20261024-120011-sweep"), 0)
         self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
 
     def test_the_notice_pattern_takes_an_optional_name_and_nothing_else_in_front(self):

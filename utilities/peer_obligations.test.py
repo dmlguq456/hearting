@@ -2870,7 +2870,7 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
     _native_first_write = ObligationStoreTest._native_first_write
 
     def notices(self, harness="claude", sid="canonical-A", count=1, *, label="trial", offset=0,
-                exit_code=0, lineage=None):
+                exit_code=0, lineage=None, subject="compute run"):
         import session_notice
         records = []
         with mock.patch.object(obligations, "ensure_normal_runner", return_value=False), \
@@ -2878,7 +2878,7 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             for index in range(offset, offset + count):
                 run = f"host-20261025-12{index:02d}00-{label}"
                 records.append(session_notice.notify(harness, sid, key="compute-run:" + run,
-                    subject="compute run", jobs=self.jobs, lineage=lineage,
+                    subject=subject, jobs=self.jobs, lineage=lineage,
                     text=f"run {run} on host ended with exit {exit_code}; read it with: compute-hosts tail {run}"))
         self.assertTrue(all(record["attempt_ids"] == [] and record["parent_attempt_id"] == ""
                             and record["row_revisions"] == {} for record in records))
@@ -3230,11 +3230,14 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         with self.courier("claude", "canonical-A", receive=True) as sent:
             peer_steward._reconcile_obligations(self.store, duties)
         self.assertEqual(len(sent), 1)
-        self.assertIn("compute run summary: 4 runs", sent[0]["text"])
+        # Four metric-less normal ends: quiet, so one routine line (the launching session
+        # itself still gets the delivery: only a supervisor's quiet notices wait).
+        self.assertIn("Routine, nothing to do (4 runs): 4 ended normally (4 short or without metrics)",
+                      sent[0]["text"])
         self.assertEqual(sent[0]["text"].count("HEARTING_RECEIPT_V1 "), 4)
         self.assertTrue(all(duty["intent"]["delivery_id"] in sent[0]["text"] for duty in duties))
 
-    def test_checkpoint_and_experiment_exit_keep_their_own_lines_and_receipts(self):
+    def test_a_checkpoint_joins_the_routine_line_and_an_unrecognized_event_keeps_its_own(self):
         import session_notice
         records = self.notices(count=3)
         with mock.patch.object(obligations, "ensure_normal_runner", return_value=False):
@@ -3246,9 +3249,10 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             peer_steward._reconcile_obligations(self.store, self.duties())
         self.assertEqual(len(sent), 1)
         body = sent[0]["text"]
-        self.assertEqual(body.count("compute run summary: 3 runs"), 1)
-        for event in ("checkpoint", "exit"):
-            self.assertIn("experiment " + event + " (1/1): own-run " + event + ": keep metrics and timing", body)
+        # The normal checkpoint and the three normal compute ends are one routine line.
+        self.assertIn("Routine, nothing to do (4 runs): 3 ended normally, 1 still running normally", body)
+        self.assertNotIn("experiment checkpoint (1/1): own-run checkpoint", body)
+        self.assertIn("experiment exit (1/1): own-run exit: keep metrics and timing", body)
         self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 5)
         self.assertTrue(all(record["delivery_id"] in body for record in records))
 
@@ -3263,13 +3267,48 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             peer_steward._reconcile_obligations(self.store, self.duties())
         self.assertEqual(len(sent), 1)
         body = sent[0]["text"]
-        self.assertEqual(body.count("compute run summary: 3 runs"), 2)
-        self.assertIn("label=trial", body)
-        self.assertIn("label=other", body)
-        self.assertIn("ended with exit 1", body)
-        self.assertIn("unclassified exit observation", body)
+        # The failure first, the unclassified notice on its own line, the six normal ends one line.
+        self.assertLess(body.index("Needs attention (1), shown first:"), body.index("ended with exit 1"))
+        self.assertLess(body.index("ended with exit 1"), body.index("Other notices:"))
+        self.assertLess(body.index("unclassified exit observation"), body.index("Routine, nothing to do"))
+        self.assertIn("Routine, nothing to do (6 runs): 6 ended normally -- ", body)
         self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 8)
         self.assertTrue(all(record["delivery_id"] in body for record in records))
+
+    def test_a_supervisors_quiet_notices_wait_and_ride_its_next_attention(self):
+        import dispatch_pending_delivery as pending
+        meta = self.parent_row("A")
+        parent = {"kind": "attempt-parent", "harness": "claude", "session_id": "A",
+                  "attempt_id": meta["attempt_id"]}
+        quiet = self.notices(sid="A", count=2, label="check", lineage=parent,
+                             subject="compute run, quiet")
+        # Two short check runs of the owner ended normally: no turn of their own.
+        with self.courier("claude", "A", receive=True) as sent:
+            peer_steward._reconcile_obligations(self.store, self.duties("A"))
+        self.assertEqual(sent, [])
+        self.assertTrue(all(pending.read(self.root, "A", record["delivery_id"])["state"] == "pending"
+                            for record in quiet))
+        # A failure arrives: it is sent at once, first, and the quiet ones ride along on one line.
+        failed, = self.notices(sid="A", label="train", offset=5, exit_code=6, lineage=parent)
+        with self.courier("claude", "A", receive=True) as sent:
+            peer_steward._reconcile_obligations(self.store, self.duties("A"))
+        self.assertEqual(len(sent), 1)
+        body = sent[0]["text"]
+        self.assertLess(body.index("Needs attention (1), shown first:"), body.index("ended with exit 6"))
+        self.assertLess(body.index("ended with exit 6"),
+                        body.index("Routine, nothing to do (2 runs): 2 ended normally (2 short or without metrics)"))
+        self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 3)
+        self.assertTrue(all(record["delivery_id"] in body for record in [*quiet, failed]))
+
+    def test_a_quiet_notice_to_the_session_that_started_the_run_is_still_sent(self):
+        # The launching session may be waiting for exactly this end; only a supervisor's wait.
+        record, = self.notices(sid="B", label="check", subject="compute run, quiet")
+        with self.courier("claude", "B", receive=True) as sent:
+            peer_steward._reconcile_obligations(self.store, self.duties("B"))
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Routine, nothing to do (1 run): 1 ended normally (1 short or without metrics)",
+                      sent[0]["text"])
+        self.assertIn(record["delivery_id"], sent[0]["text"])
 
     def test_first_eight_then_four_and_other_recipient_progress(self):
         self.notices(sid="A", count=12)
