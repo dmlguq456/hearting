@@ -78,14 +78,40 @@ def _git_words(values, *, branch_cells=32):
     return words
 
 
-def _git_text(values, *, worktrees=True, branch_cells=32):
-    """``main ✓ 🚧 3`` and its existing Git warnings, for the dim parentheses.
+def fresh_key(word):
+    """Spec E9 rule 50 (a): ``↑N`` (ahead) takes Fleet's green ``lvl_g`` and ``↓N`` (behind)
+    its red ``lvl_r``, the keys Fleet's own Git suffix uses; ``✓`` stays dim."""
+    return {"↑": "lvl_g", "↓": "lvl_r"}.get(str(word)[:1], "dim")
+
+
+def fresh_part(text, key):
+    """Whether a painted part is one of Git's ahead/behind words (`` ↑2`` in ``lvl_g``, `` ↓5``
+    in ``lvl_r``): where no hue is shown they read as the rest of the Git words (rule 50 (d))."""
+    return key in ("lvl_g", "lvl_r") and re.fullmatch(r" ?[↑↓][0-9]+", str(text)) is not None
+
+
+def _git_parts(values, *, worktrees=True, branch_cells=32):
+    """``main ✓ 🚧 3`` and its existing Git warnings as painted parts: dim, but ``↑N``/``↓N``
+    in Fleet's green and red (spec E9 rule 50); neighbouring dim words stay one part.
 
     ``worktrees=False`` leaves the worktree count out (the side panel draws it beside the
     repository name, spec E9 rule 37 (a)); every other surface keeps it here."""
     words = _git_words(values, branch_cells=branch_cells)
-    parts = [words["branch"], words["flag"], *words["fresh"], words["worktrees"] if worktrees else ""]
-    return " ".join(part for part in parts if part)
+    shown = [(words["branch"], "dim"), (words["flag"], "dim"), *[(word, fresh_key(word)) for word in words["fresh"]],
+             (words["worktrees"] if worktrees else "", "dim")]
+    parts = []
+    for text, key in ((text, key) for text, key in shown if text):
+        text = (" " if parts else "") + text
+        if parts and key == "dim" and parts[-1][1] == "dim":
+            parts[-1] = (parts[-1][0] + text, "dim")
+        else:
+            parts.append((text, key))
+    return parts
+
+
+def _git_text(values, *, worktrees=True, branch_cells=32):
+    """``main ✓ 🚧 3`` and its existing Git warnings, for the dim parentheses."""
+    return "".join(text for text, _key in _git_parts(values, worktrees=worktrees, branch_cells=branch_cells))
 
 
 def gauge_parts(percent, *, cells=10):
@@ -136,10 +162,15 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     project = project_of(values.get("cwd")) if values.get("cwd") else None
     # Spec E9 rule 40 (b): the branch keeps 20 cells, 32 on a line of 60 cells or more
     # (``branch_room``: the width a wrapped, complete line is shown at).
-    git = _git_text(values, branch_cells=git_branch_cells(columns if branch_room is None else branch_room))
+    git = _git_parts(values, branch_cells=git_branch_cells(columns if branch_room is None else branch_room))
     if values.get("git") and (values["git"] or {}).get("repo") == 0:
-        git = "no-git"
-    after = [(" (" + git + ")", "dim")] if git else []
+        git = [("no-git", "dim")]
+    # The dim parentheses around the Git words; only ``↑N``/``↓N`` take a color (rule 50).
+    after = ([(" (" + git[0][0], "dim")] if git[0][1] == "dim" else [(" (", "dim"), git[0]]) if git else []
+    if len(git) > 1:
+        after.extend(git[1:])
+    if after:
+        after[-1:] = [(after[-1][0] + ")", "dim")] if after[-1][1] == "dim" else [after[-1], (")", "dim")]
     if project:
         # Spec E9 rule 29: the repository name ends in `/` (a folder); a name cut to its
         # budget loses the mark with its tail, so it shows only on a whole name.
@@ -302,7 +333,6 @@ def claude_native_statusline(callback, environ):
     import sys
     from pathlib import Path
     from .native_display import claude_fields
-    from .palette import ansi_segments
     from .session_tags import assigned_tag
     from . import session_registry
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
@@ -347,7 +377,16 @@ def claude_native_statusline(callback, environ):
     # panel goes away, the native row is already complete.
     rows = [clip_segments(line, columns) for line in status_lines(values, columns, reported_only=True)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
-    return "\n".join(ansi_segments(row, colors=colors, no_color="NO_COLOR" in environ) for row in rows)
+    return statusline_ansi(rows, colors=colors, no_color="NO_COLOR" in environ)
+
+
+def statusline_ansi(rows, *, colors=256, no_color=False):
+    """Claude's statusline rows in the shared palette. Spec E9 rule 50 (d): in eight colors
+    Git's ``↑N``/``↓N`` keep their words and read dim as the rest of the Git words."""
+    from .palette import ansi_segments
+    if colors < 256:
+        rows = [[(text, "dim" if fresh_part(text, key) else key) for text, key in row] for row in rows]
+    return "\n".join(ansi_segments(row, colors=colors, no_color=no_color) for row in rows)
 
 
 def _shell_directory(environ):

@@ -806,7 +806,7 @@ for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,tru
  const rows=paint(width,height,side,focused,models.short,n);
  for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB',models.short.wait,'◑ 질문 1'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
- const branch=rows.findIndex(s=>s.includes('(values-fixture*'));
+ const branch=rows.findIndex(s=>s.includes('(values-fix'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
  // The Git row sits right below the repo row and never shares it.
  // Spec rule 29: the number moves to the top border; the repo row keeps `project/`.
@@ -1375,6 +1375,32 @@ for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
  assert(ctx&&ctx.includes(pct),seen);
 }
 """
+        self.node(script, "panel-view.cjs")
+
+    def test_the_git_arrows_keep_fleets_green_and_red_only_where_the_panel_shows_hue(self):
+        # Spec E9 rule 50: the backend paints `↑N` in Fleet's `lvl_g` and `↓N` in its `lvl_r`
+        # (marked `git-fresh`); the GIT row beside the native area and the bottom layout's head
+        # keep those colors in 256 colors, and in mono or eight colors read as the rest of the Git
+        # words, dim with no hue (rule 50 (d)). The words and cells stay.
+        script = self.FIXTURE + r'''
+const G=114,R=174,fresh=(t,o)=>({text:t,bold:false,dim:false,reverse:false,role:'git-fresh',...o});
+const sideGit=[{text:'main',dim:true},fresh(' ↑2',{foreground:G}),fresh(' ↓5',{foreground:R,bold:true})];
+const underGit=[{text:'(main',dim:true},fresh(' ↑2',{foreground:G}),fresh(' ↓5',{foreground:R,bold:true}),{text:' 🚧 3)',dim:true}];
+const side=view.render({width:40,height:40,side:true,model:{...head,git_side:sideGit,routes:[],route_count:0},state:'idle',configuration:{},questions:()=>[]});
+const under=view.render({width:100,height:14,side:false,model:{...head,git:underGit,routes:[],route_count:0},state:'idle',configuration:{layout:'bottom'},questions:()=>[]});
+for(const [rows,re] of [[side.rows,/^│ GIT    main ↑2 ↓5 +│$/],[under.rows,/^│ \(main ↑2 ↓5 🚧 3\) +│$/]]){
+ const row=rows.find(r=>re.test(r.map(p=>p.text).join('')));assert(row,rows.map(r=>r.map(p=>p.text).join('')).join('\n'));
+ const look=(theme,colors)=>{const shown=view.appearance([row],{theme},{colors})[0];
+  assert.equal(shown.map(p=>p.text).join(''),row.map(p=>p.text).join(''));
+  return shown.filter(p=>/[↑↓]|main/.test(p.text)).map(p=>[p.text.trim(),p.foreground??null,p.bold===true,p.dim===true]);};
+ const branch=look('terminal',256)[0];assert.deepEqual(branch.slice(1),[null,false,true]);
+ assert.deepEqual(look('terminal',256).slice(1),[['↑2',G,false,false],['↓5',R,true,false]]);
+ for(const [theme,colors] of [['mono',256],['terminal',8],['mono',8],['light',8]])
+  assert.deepEqual(look(theme,colors),[branch,['↑2',null,false,true],['↓5',null,false,true]],theme+' '+colors);
+ // NO_COLOR: the backend sent no color; the panel paints the parts as they came.
+ assert.deepEqual(view.appearance([row],{},{noColor:true})[0],row);
+}
+'''
         self.node(script, "panel-view.cjs")
 
     def test_the_title_value_is_bold_in_the_sessions_harness_color(self):

@@ -239,7 +239,10 @@ parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
 warnings and `💀merged`; no Git row when nothing is left; no folder or branch
-glyph. The bottom layout and Claude's statusline keep the repository name
+glyph. Only `↑N` and `↓N` take a color, Fleet's own (`lvl_g` green, `lvl_r`
+red), on the Git row, the bottom layout's head and Claude's statusline alike;
+mono and eight colors paint them dim as the other Git words, and `NO_COLOR`
+keeps the words with no color. The bottom layout and Claude's statusline keep the repository name
 ending in `/` (`hearting/`, the mark only on a whole name) with Git dim in
 parentheses (`(main ✓ 🚧 3)`, the same branch cut and `✓`; Claude's statusline
 cuts at the width its lines are shown at, its bash fallback by `COLUMNS`),

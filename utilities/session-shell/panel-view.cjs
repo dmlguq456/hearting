@@ -53,11 +53,14 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     const role=theme==='mono'&&part.role==='frame-state'?'frame':theme==='mono'&&part.role==='route-dead'?'route':part.role||'';
     // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
     if(role==='route-dead')bold=false;
+    // Spec rule 50 (d): Git's `↑N`/`↓N` keep Fleet's green and red only where the panel shows
+    // hue; in mono and eight colors they read as the rest of the Git words, dim.
+    if(role==='git-fresh'&&(theme==='mono'||!full)){foreground=null;bold=false;dim=true;}
     if(!full){
       // Eight colors: the light theme leaves the pale default white to the terminal.
       if(theme==='mono')foreground=null;
       else if(theme==='light'&&foreground===7)foreground=null;
-      return {...part,foreground,bold};
+      return {...part,foreground,bold,...(role==='git-fresh'?{dim}:{})};
     }
     if(theme==='mono')foreground=null;
     else if(foreground!==null&&(known==='light'||shade))foreground=HUES[known||'dark'][foreground]??foreground;
