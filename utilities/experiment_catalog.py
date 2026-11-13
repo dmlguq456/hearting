@@ -1400,6 +1400,199 @@ def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[
 
 
 # ---------------------------------------------------------------------------
+# scan: an internal name said without its catalog name (advice only)
+# ---------------------------------------------------------------------------
+#
+# A wrong warning is worse than a missed one, so the scan stays quiet whenever a token may be something
+# else: an ordinary word, number, or version string; code; a quoted saying; a path, URL, or file name; a
+# command line.  Only a token that by itself points at an experiment is reported: a run id or `run:row`,
+# an identifier-shaped alias (`rev-a`, `retain030`), or a former catalog name.
+
+_FENCE_LINE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_INDENTED_CODE = re.compile(r"(?: {4,}|\t)(?![-*+] |\d+[.)] )\S")
+_QUOTE_LINE = re.compile(r"\s*>")
+_QUIET_SPANS = re.compile(
+    r"`+[^`\n]*`+"                                                          # inline code
+    r"|\"[^\"\n]*\"|“[^”\n]*”|‘[^’\n]*’|'[^'\n]*'|「[^」\n]*」|『[^』\n]*』"     # words quoted as said
+    r"|[A-Za-z][A-Za-z0-9+.-]*://\S*|www\.\S+"                              # URLs
+    r"|\S*[/\\]\S*")                                                        # paths (a slash or backslash)
+_COMMAND = re.compile(
+    r"(?:^|(?<=[\s(\"'`]))(?:\$\s+|(?:sudo|git|gh|python3?|pip3?|uv|conda|npm|npx|pnpm|yarn|node|cargo|make|"
+    r"docker|kubectl|ssh|scp|rsync|curl|wget|bash|sh|zsh|cd|ls|cat|rm|mv|cp|mkdir|chmod|tar|grep|sed|awk|"
+    r"torchrun|accelerate|sbatch|srun)\s+(?=\S))[^\n]*", re.MULTILINE)       # a command, to the end of its line
+_OPTION_BEFORE = re.compile(r"(?:^|\s)--?[A-Za-z][\w-]*[ =]\Z")
+_ID_TAIL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+_ASCII_ALNUM = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+_NUMBER = re.compile(r"[+-]?(?:\d+(?:[.,_]\d+)*|\.\d+)(?:e[+-]?\d+)?%?\Z", re.IGNORECASE)
+_VERSION = re.compile(r"v\d+(?:[._]\d+)*\Z", re.IGNORECASE)
+_JOINED = re.compile(r"[^\W_][-_:.][^\W_]")
+_START = re.compile(r"(?<![\w-])\S")
+
+
+def _names_an_experiment(token: str, kind: str) -> bool:
+    """Whether `token` alone points at an experiment rather than an ordinary word, number, or version.
+
+    Run ids and aliases must look like an identifier: 3+ characters, no space, with a digit or a joined
+    part (`run-rev-1`, `rev-a`, `retain030`; not `E`, `base`, `v2`, `0.3`).  A former name is a catalog
+    name the condition used to have, so a phrase counts; a single plain English word does not."""
+    token = token.strip()
+    if not any(ch.isalpha() for ch in token) or _NUMBER.match(token) or _VERSION.match(token):
+        return False
+    if kind == "former-name":
+        return len(token) >= 2 and re.fullmatch(r"[A-Za-z]+", token) is None
+    return (len(token) >= 3 and not any(ch.isspace() for ch in token)
+            and (any(ch.isdigit() for ch in token) or _JOINED.search(token) is not None))
+
+
+def _lower_same_length(text: str) -> str:
+    low = text.lower()
+    if len(low) == len(text):
+        return low
+    return "".join(ch.lower() if len(ch.lower()) == 1 else ch for ch in text)
+
+
+def scan_index(doc: Optional[Mapping[str, Any]], *, unlinked: Sequence[str] = ()) -> Dict[str, Any]:
+    """The lookup table `scan_text` and `scan_fields` read: built once per catalog, used for every text.
+
+    Tokens two conditions answer to (the same judgment `resolve_ex` makes) and tokens that are not
+    clearly an experiment name are left out here, so a scan never walks the catalog again."""
+    conditions = [c for c in ((doc or {}).get("conditions") or []) if isinstance(c, Mapping) and c.get("id")]
+    name_owners: Dict[str, set] = {}
+    run_owners: Dict[str, set] = {}
+    row_owners: Dict[Tuple[str, Optional[str]], set] = {}
+    for cond in conditions:
+        for name in [cond.get("display_name")] + list(cond.get("aliases") or []) + list(cond.get("former_names") or []):
+            if name:
+                name_owners.setdefault(_fold(name), set()).add(cond["id"])
+        for run_id, row_id in _run_ref_keys(cond):
+            run_owners.setdefault(run_id, set()).add(cond["id"])
+            row_owners.setdefault((run_id, row_id), set()).add(cond["id"])
+
+    def owners(token: str) -> set:
+        run_id, colon, row_id = token.partition(":")
+        found = set(name_owners.get(_fold(token), ()))
+        if colon:
+            found |= row_owners.get((run_id, row_id), set()) | row_owners.get((run_id, None), set())
+        else:
+            found |= run_owners.get(token, set())
+        return found
+
+    table: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}
+    clashes = set()
+    for cond in conditions:
+        tokens = []
+        for run_id, row_id in _run_ref_keys(cond):
+            tokens.append((run_id, "run-id"))
+            if row_id:
+                tokens.append((f"{run_id}:{row_id}", "run-id"))
+        tokens += [(alias, "alias") for alias in cond.get("aliases") or [] if alias]
+        tokens += [(old, "former-name") for old in cond.get("former_names") or [] if old]
+        for token, kind in tokens:
+            key = _lower_same_length(str(token))
+            if not _names_an_experiment(str(token), kind) or len(owners(str(token))) > 1:
+                continue
+            if key in table and table[key][1] is not cond:
+                clashes.add(key)              # two conditions spelled alike: no name to offer
+            table.setdefault(key, (kind, cond))
+    for key in clashes:
+        table.pop(key, None)
+    for run_id in unlinked:
+        key = _lower_same_length(str(run_id or ""))
+        if key and key not in table and _names_an_experiment(key, "unregistered-run"):
+            table[key] = ("unregistered-run", None)
+    by_length: Dict[int, Dict[str, Tuple[str, Optional[Dict[str, Any]]]]] = {}
+    for key, entry in table.items():
+        by_length.setdefault(len(key), {})[key] = entry
+    return {"by_length": by_length, "lengths": sorted(by_length, reverse=True),
+            "first": frozenset(key[0] for key in table),
+            "names": [(cond["id"], _fold(cond["display_name"])) for cond in conditions if cond.get("display_name")]}
+
+
+def _quiet_mask(text: str) -> bytearray:
+    """1 where a token is not read as an experiment name: code, quotes, paths, URLs, commands."""
+    mask = bytearray(len(text))
+    offset, fence = 0, ""
+    for line in text.split("\n"):
+        marker = _FENCE_LINE.match(line)
+        quiet = bool(fence) or bool(marker) or _INDENTED_CODE.match(line) is not None or _QUOTE_LINE.match(line) is not None
+        if marker:
+            if not fence:
+                fence = marker.group(1)
+            elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = ""
+        if quiet:
+            mask[offset:offset + len(line)] = b"\x01" * len(line)
+        offset += len(line) + 1
+    for pattern in (_QUIET_SPANS, _COMMAND):
+        for match in pattern.finditer(text):
+            mask[match.start():match.end()] = b"\x01" * (match.end() - match.start())
+    return mask
+
+
+def _scan_one(text: str, index: Mapping[str, Any], named: set) -> List[Dict[str, Any]]:
+    if not text or not index["lengths"]:
+        return []
+    low = _lower_same_length(text)
+    mask = _quiet_mask(text)
+    found: List[Dict[str, Any]] = []
+    after = 0
+    for start in _START.finditer(text):
+        begin = start.start()
+        if begin < after or low[begin] not in index["first"]:
+            continue
+        for length in index["lengths"]:
+            entry = index["by_length"][length].get(low[begin:begin + length])
+            end = begin + length
+            if entry is None or (end < len(text) and text[end] in _ID_TAIL):
+                continue
+            kind, cond = entry
+            after = end
+            if cond is not None and cond["id"] in named:
+                break                          # the reader has the catalog name right here
+            before = text[begin - 1:begin]
+            nxt = text[end:end + 2]
+            if (any(mask[begin:end]) or (before and before in ".@#$=") or nxt[:1] == "="
+                    or (nxt[:1] == "." and nxt[1:2] in _ASCII_ALNUM)
+                    or _OPTION_BEFORE.search(text[max(0, begin - 40):begin])):
+                break                          # a file name, a key, an option value, code, a path, ...
+            line_start = text.rfind("\n", 0, begin) + 1
+            found.append({"token": text[begin:end], "line": text.count("\n", 0, begin) + 1,
+                          "col": begin - line_start + 1, "kind": kind,
+                          "name": (cond or {}).get("display_name") or None,
+                          "condition_id": (cond or {}).get("id")})
+            break
+    return found
+
+
+def scan_fields(fields: Sequence[Tuple[str, Any]], doc: Optional[Mapping[str, Any]], *,
+                unlinked: Sequence[str] = (), index: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
+    """`scan_text` over texts the reader sees together (a question, its options): `[{field, token, ...}]`.
+
+    One lookup table serves every field, and a catalog name in any field counts for all of them."""
+    try:
+        index = index if index is not None else scan_index(doc, unlinked=unlinked)
+        texts = [(field, text if isinstance(text, str) else "") for field, text in fields]
+        folded = _fold("\n".join(text for _field, text in texts))
+        named = {cid for cid, name in index["names"] if name and name in folded}
+        return [{"field": field, **hit} for field, text in texts for hit in _scan_one(text, index, named)]
+    except Exception:  # noqa: BLE001 -- a warning never fails its caller
+        return []
+
+
+def scan_text(text: str, doc: Optional[Mapping[str, Any]], *, unlinked: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Internal names in `text` that the reader cannot place: `[{token, line, col, kind, name, condition_id}]`.
+
+    `kind`: `run-id` (a run or `run:row` the catalog links to a condition), `alias`, `former-name`, or
+    `unregistered-run` (an id in `unlinked`, which the catalog does not know).  A token of a condition is
+    skipped when that condition's catalog name is in the same text; so is a token two conditions answer
+    to (no name to offer), a token that is not clearly an experiment name, and a token in code, quotes, a
+    path, URL, file name, or command (see `_names_an_experiment`, `_quiet_mask`).  Never raises, blocks,
+    or rewrites: it reports."""
+    hits = scan_fields([("", text if isinstance(text, str) else "")], doc, unlinked=unlinked)
+    return [{key: value for key, value in hit.items() if key != "field"} for hit in hits]
+
+
+# ---------------------------------------------------------------------------
 # text output (shared catalog `experiment.*`)
 # ---------------------------------------------------------------------------
 
@@ -1587,6 +1780,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("show", parents=[where], help="the catalog as written")
     st = sub.add_parser("status", parents=[where], help="catalog + public run records, read together")
     st.add_argument("--expect", action="append", default=[], metavar="NAME")
+    sc = sub.add_parser("scan", parents=[where], help="internal names in a text that lack their catalog name; never blocks")
+    sc.add_argument("--file", help="the text to read; `-` or nothing reads stdin")
     li = sub.add_parser("lint", parents=[where], help="warnings with their place; never blocks")
     li.add_argument("--expect", action="append", default=[], metavar="NAME")
     reg = sub.add_parser("register", parents=[where, write], help="add or update groups, conditions, and terms")
@@ -1687,11 +1882,34 @@ def _read_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_command(args: argparse.Namespace) -> int:
+    """`scan`: JSON of the internal names in a text; exit 0 whatever happens (advice, never a gate)."""
+    report: Dict[str, Any] = {"catalog": {"status": "unknown"}, "warnings": []}
+    try:
+        text = sys.stdin.read() if args.file in (None, "-") else Path(args.file).read_text(encoding="utf-8")
+        root = _root_from(args)
+        read = load(root)
+        report["catalog"] = {"status": read.status, "path": CATALOG_REL, "code": read.code}
+        if read.status == "ok":
+            unlinked: List[str] = []
+            try:
+                unlinked = list(status(root)["unlinked_runs"]["run_ids"])
+            except Exception:  # noqa: BLE001 -- without the run list only registered names are checked
+                pass
+            report["warnings"] = scan_text(text, read.doc, unlinked=unlinked)
+    except Exception as exc:  # noqa: BLE001
+        report["catalog"] = {"status": "unreadable", "code": type(exc).__name__}
+    _print(report)
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = _parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+    if args.command == "scan":
+        return _scan_command(args)
     if args.command in ("show", "status", "lint"):
         return _read_command(args)
     try:
