@@ -225,8 +225,9 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
  if(question){assert(text.includes('─ Choose the destination ')&&text.includes('│ │ 1 Current project'),state+' question box title and inner padding');}
- if(state!=='start')assert(text.includes('route 1')&&text.includes('Current task'),state+' route row missing');
- else assert(!text.includes('route'),state+' a known-empty route list draws no box');
+ // Spec E9 rule 45: beside the native area the count leads its upper-case word.
+ if(state!=='start')assert(text.includes(side?'1 ROUTE':'route 1')&&text.includes('Current task'),state+' route row missing');
+ else assert(!/route/i.test(text),state+' a known-empty route list draws no box');
 }
 '''
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],

@@ -30,18 +30,36 @@ def observe(cwd, journal_ids=()):
     return WorkRows(rows, project.get("open_total"), data.get("headlines")), [str(path), str(path) + "-wal"]
 
 
-def latest_memory(cwd):
-    """Spec E9 rule 37 (b): this repo's newest saved memory row from the journal Fleet reads
-    (``memory.by_repo``'s grouping), and the journal path to watch; ``(None, [])`` without a cwd.
-    A supersede names its replacement in the snippet; the replacement's headline is asked for."""
+def recent_memory(cwd, limit=2):
+    """Spec E9 rules 37 (b), 46 (c): this repo's newest saved memory records from the journal
+    Fleet reads (``memory.by_repo``'s grouping), ``limit`` at most, newest first, and the journal
+    path to watch; ``([], [])`` without a cwd. A supersede names its replacement in the snippet;
+    the replacement's headline is asked for, and the replacement's own add right beside it
+    names the same record, so it is shown once; the retired record's own older add is not shown."""
     if not cwd:
-        return None, []
-    row, path = memory.latest_saved(project_of(cwd))
-    if row:
+        return [], []
+    rows, path = memory.recent_saved(project_of(cwd))
+    out, seen = [], set()
+    for row in rows:
         snippet = str(row.get("snippet") or "")
         target = snippet[len("superseded_by="):].strip() if snippet.startswith("superseded_by=") else ""
         row["headline_id"] = target or row.get("id")
-    return row, [path]
+        retired = row["headline_id"] in seen or (target and row.get("id") in seen)
+        seen.update({row["headline_id"], row.get("id")} if target else {row["headline_id"]})
+        if retired:
+            continue
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out, [path]
+
+
+def latest_memory(cwd):
+    """The newest of ``recent_memory`` (spec E9 rule 37 (b)), or None, and the journal path."""
+    if not cwd:
+        return None, []
+    rows, paths = recent_memory(cwd, 1)
+    return (rows[0] if rows else None), paths
 
 
 def open_count(work):
