@@ -232,8 +232,19 @@ def _model_family(model):
     return "other"
 
 
-def _model_key(model, dim=False):
-    return ("famd_" if dim else "fam_") + _model_family(model)
+_MODEL_HARNESSES = ("claude", "codex", "opencode")
+
+
+def _model_key(model, dim=False, harness=None):
+    """A model name's colour key: its family's, else the hue of the harness running it.
+
+    A model with no family of its own (glm/deepseek/… under OpenCode) wears that harness's
+    existing ``hb_*`` (``h_*`` dim) key instead of the default foreground, so the palette
+    gains no per-model colour. Without a known harness the ``other`` key stays."""
+    family = _model_family(model)
+    if family == "other" and harness in _MODEL_HARNESSES and str(model or "").strip():
+        return ("h_" if dim else "hb_") + harness
+    return ("famd_" if dim else "fam_") + family
 
 
 # bare model-ROLE tokens (dispatch env exports the portable role, not a concrete model id) →
@@ -697,11 +708,11 @@ def _eff_key(effort, dim):
 _EFF_SHORT = {"low": "lo", "medium": "md", "high": "hi", "xhigh": "xh", "max": "mx"}
 
 
-def _model_cell(model, effort, width, dim=False):
+def _model_cell(model, effort, width, dim=False, harness=None):
     """Render model and effort together as one flowing phrase, padded to width."""
     name = _clean_model(dash(model)) or "—"
     sfx = _effort_text(effort)
-    lkey = _model_key(model, dim=dim)
+    lkey = _model_key(model, dim=dim, harness=harness)
     if sfx:
         name = name[: max(1, width - len(sfx) - 4)]
         pad = max(0, width - len(name) - len(sfx) - 3)
@@ -743,16 +754,16 @@ def _harness_model_cell(harness, model, effort, width, hkey, dim=False, unknown=
         if eff and room < len(name) + 1 + len(eff):
             eff = ""
         if eff:
-            segs += [(" (", "dim"), (name, _model_key(model, dim=dim)),
+            segs += [(" (", "dim"), (name, _model_key(model, dim=dim, harness=harness)),
                      ("·", "dim"), (eff, _eff_key(eff_full, dim)), (")", "dim")]
             used += 2 + len(name) + 1 + len(eff) + 1
         elif effort_default and room >= len(name) + 1 + len(_DEFAULT_EFFORT_MARK):
-            segs += [(" (", "dim"), (name, _model_key(model, dim=dim)),
+            segs += [(" (", "dim"), (name, _model_key(model, dim=dim, harness=harness)),
                      ("·", "dim"), (_DEFAULT_EFFORT_MARK, "dim"), (")", "dim")]
             used += 2 + len(name) + 1 + len(_DEFAULT_EFFORT_MARK) + 1
         elif room > 0:
             nm = name[: max(1, room)]
-            segs += [(" (", "dim"), (nm, _model_key(model, dim=dim)), (")", "dim")]
+            segs += [(" (", "dim"), (nm, _model_key(model, dim=dim, harness=harness)), (")", "dim")]
             used += 2 + len(nm) + 1
     if used < width:
         segs.append((" " * (width - used), None))
