@@ -2278,6 +2278,46 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
             connection.close()
 
 
+def read_message_tokens(session_id: str, message_ids, *,
+                        db_path: str | Path | None = None) -> dict:
+    """``{message id: tokens}`` of exact finished V2 assistant rows of one session.
+
+    V2 ``run`` streams no event for a turn's last model request; its counters exist
+    only in the native ``session_message`` row its final ``text`` names. One bounded
+    read-only lookup by primary key; a row counts only once it has finished
+    (``finish`` or ``time.completed``). Any failure returns ``{}``, never an estimate.
+    """
+    ids = [mid for mid in dict.fromkeys(message_ids or ())
+           if isinstance(mid, str) and mid][:MAX_SESSION_MESSAGES]
+    if not ids or not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        return {}
+    path = Path(db_path) if db_path is not None else opencode_db_path()
+    if not path.is_file():
+        return {}
+    uri = "file:" + quote(str(path.resolve()), safe="/:\\") + "?mode=ro"
+    connection = None
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=0.5)
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=500")
+        field = "CASE WHEN json_valid(data) THEN json_extract(data,'$.%s') END"
+        rows = connection.execute(
+            "SELECT id, " + ", ".join(field % key for key in ("tokens", "finish", "time.completed"))
+            + " FROM session_message WHERE session_id=? AND type='assistant' AND id IN ("
+            + ",".join("?" for _ in ids) + ")", [session_id, *ids]).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+    finally:
+        if connection is not None:
+            connection.close()
+    found = {}
+    for message_id, raw, finish, completed in rows:
+        tokens = _decode_json(raw)
+        if tokens and (finish or completed):
+            found[message_id] = tokens
+    return found
+
+
 def _bounded_rows(con, select, order_column, session_id, after_cursor, refresh, limit, newest,
                   before_cursor):
     """Budgeted variant of the viewer read: rows come back oldest first (see read_session_parts)."""
