@@ -578,7 +578,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         command("gate", "--block", "--artifact", str(question_path))
         resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
     if response is None and decision == "proceed" and refused_answer:
-        return {"state": "needs-question", "required_action": "ask-registered-question",
+        return _with_name_warnings(route, question, {"state": "needs-question", "required_action": "ask-registered-question",
                 "reason": "supervisor-choice-crosses-not-doing", "refused_answer": refused_answer,
                 "interview_file": str(question_path), "interview": question,
                 "answers_template": FI.answers_template(question),
@@ -589,9 +589,9 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                               + "; ".join(refused_answer["crossed_not_doing"]) + "), so only the person can "
                               "choose it; the answer was not recorded. Present the registered question to the "
                               "person once, then rerun resume_command with their answer (actor_kind user). "
-                              + FI.PENDING_ANSWER_RULE)}
+                              + FI.PENDING_ANSWER_RULE)})
     if response is None and decision == "proceed":
-        return {"state": "needs-question", "required_action": "ask-registered-question" if ask_now else "wait-for-user-answer",
+        return _with_name_warnings(route, question, {"state": "needs-question", "required_action": "ask-registered-question" if ask_now else "wait-for-user-answer",
                 "interview_file": str(question_path), "interview": question,
                 "answers_template": FI.answers_template(question),
                 "supervisor_answers_template": {**FI.answers_template(question), "actor_kind": "supervisor"},
@@ -614,7 +614,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                     "depth-0 supervisor's answer on the person's behalf. " + FI.ANSWER_SOURCE_GUIDANCE + " "
                     "An acknowledgement or template is never a decision. Then rerun "
                     "resume_command with --answers <file>. The runtime renders intent and releases the gate. "
-                    "For a revise/stop decision also pass --decision revise|stop. " + FI.PENDING_ANSWER_RULE}
+                    "For a revise/stop decision also pass --decision revise|stop. " + FI.PENDING_ANSWER_RULE})
     if resolution["status"] in {"proceed", "revise", "stop"}:
         if resolution["status"] != decision or (decision != "stop" and resolution.get("answers") != response):
             raise ValueError("frame-answer-conflict: the recorded decision cannot be replaced")
@@ -1570,6 +1570,48 @@ def _marked_route_proposals(route, jobs, interview):
     if errors:
         return interview, errors
     return {**interview, "route_proposals": {"question": question.get("id"), "by_option": by_option}}, []
+
+
+def _name_warning_fields(route, question):
+    """Advice for the registered question before the agent shows it: `{"name_warnings": [...]}` or `{}`.
+
+    Internal names the project's experiment catalog knows (run ids, aliases, former names) that the
+    understanding sentence, a question, or an option says without the condition's catalog name anywhere
+    in the question; ordinary words, numbers, code, paths, and commands stay quiet (`scan_fields`).  This
+    is the one moment a Hearting-written question has not yet reached the person, so it is where the
+    check can come early.  Advice only: nothing here changes `state`, `required_action`, the errors,
+    or what `frame_interview.validate` decides, and any trouble gives `{}`."""
+    try:
+        root = route.get("artifact_root") if isinstance(route, dict) else None
+        if not root:
+            return {}
+        import experiment_catalog as EC
+        read = EC.load(Path(root))
+        if read.status != "ok":
+            return {}
+        fields = [("understanding", question.get("understanding"))]
+        for q_index, item in enumerate(question.get("questions") or []):
+            fields.append((f"questions[{q_index}].question", item.get("question")))
+            for o_index, option in enumerate(item.get("options") or []):
+                for part in ("label", "means"):
+                    fields.append((f"questions[{q_index}].options[{o_index}].{part}", option.get(part)))
+        # One lookup table for the whole question; a catalog name in any field counts for all of them.
+        found = [{"field": hit["field"], "token": hit["token"], "kind": hit["kind"], "name": hit["name"]}
+                 for hit in EC.scan_fields(fields, read.doc)][:8]
+        return {"name_warnings": found} if found else {}
+    except Exception:  # noqa: BLE001 -- advice never holds a question back
+        return {}
+
+
+def _with_name_warnings(route, question, step):
+    """`step` plus the name advice: the `name_warnings` field and one sentence at the end of `next_step`."""
+    extra = _name_warning_fields(route, question)
+    if not extra:
+        return step
+    tokens = ", ".join(sorted({f"{w['token']} (= {w['name']})" if w["name"] else w["token"] for w in extra["name_warnings"]}))
+    note = (" This question uses internal names without their catalog names: " + tokens
+            + ". Write the catalog name beside each before presenting it; this is advice, not a gate.")
+    return {**step, **extra, "next_step": step.get("next_step", "") + note}
 
 
 def _interview_repository_preparation(route, jobs, interview, original):
