@@ -1474,6 +1474,9 @@ function runSuccessor() {
   if(running||!switched)return;
   running=true;
   child.resume();createInputOwner();process.stdin.resume();
+  // From now on this host is the window's display, so it notices the next install as the first
+  // host does: by the watch on the link's directory. The check below sees one made before the watch.
+  watchRelease();
   refreshReadiness().finally(()=>{detectRelease();checkRelease();});
 }
 

@@ -539,7 +539,9 @@ class SessionShellSuccessionTest(unittest.TestCase):
         # DONE_x clears the screen; one more flood leaves rows above the viewport.
         window.type('y\r'); window.until('DONE_y'); window.wait_empty()
         window.point('rel-b'); second = self.switched(window, first['host_pid'])
-        window.wait_empty(); window.point('rel-c'); self.switched(window, second['host_pid'])
+        # The next install comes after the second host has settled and made its own start check, as a
+        # person's next install does: only that host's watch on the link can notice it (no idle event follows).
+        window.wait_empty(); window.pump(.5); window.point('rel-c'); self.switched(window, second['host_pid'])
         seeds = window.seeds()
         self.assertEqual(len(seeds), 2, seeds)
         one, two = (json.loads(path.read_text()) for path in seeds)
