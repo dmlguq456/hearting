@@ -11,7 +11,7 @@ This holds the static half in one user-owned file and measures the rest:
     list    inventory plus reachability, GPU load/VRAM, and exact process owners
     probe   the live GPU/process measurement alone, for one host or all of them
     self    measure this machine without requiring an inventory
-    claim   bind a detached root PID to its exact launcher session identity
+    claim   bind a detached root PID and its live run notices to a session
     run     start a detached command on a host under a stable run id
     runs    what has been started, and which of those are still alive
     tail    read a run's log from any host that shares the run root
@@ -2772,12 +2772,121 @@ for line in status.splitlines():
         break
 if effective != os.geteuid():
     raise SystemExit("process belongs to another effective uid")
+run_id, run_id_error = None, None
+try:
+    # Only this PID's environment; a parent's run is not this process's claim.
+    raw = (root / "environ").read_bytes()
+    for item in raw.split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if separator and key == b"HEARTING_COMPUTE_RUN_ID":
+            run_id = value.decode("utf-8", errors="strict")
+            break
+except (OSError, UnicodeError) as exc:
+    run_id_error = "process environment unreadable: %s" % type(exc).__name__
 print(json.dumps({
     "pid": pid, "start": start,
     "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+    "run_id": run_id, "run_id_error": run_id_error,
 }, sort_keys=True))
 PY
 """
+
+
+def _claim_run_recipient(run_root, identity, claim):
+    """Move a live standalone run's notices, independently of its GPU claim."""
+    run_id = identity.get("run_id")
+
+    def unchanged(reason):
+        return {"status": "unchanged", "run_id": run_id,
+                "message": "run 알림 수신처를 옮기지 못함: " + reason}
+
+    if identity.get("run_id_error"):
+        return unchanged(identity["run_id_error"])
+    if not run_id:
+        return unchanged("이 PID에 HEARTING_COMPUTE_RUN_ID가 없음")
+    if (not isinstance(run_id, str) or len(run_id) > 255
+            or Path(run_id).name != run_id or run_id in {".", ".."}
+            or any(ord(char) < 32 or ord(char) == 127 for char in run_id)):
+        return unchanged("유효하지 않은 run id")
+    owner = claim["owner"]
+    # Explicit --harness/--session or the existing unambiguous launcher identity.
+    # Never copy attempt-parent authority from the run's previous recipient.
+    verified = _unique_session_owner({CANONICAL_SESSION_KEY[owner["harness"]]: owner["id"]})
+    if verified is None:
+        return unchanged("넘겨받는 세션 신원을 확인할 수 없음")
+    recipient = {"harness": verified["harness"], "id": verified["id"]}
+    root = Path(run_root)
+    run_dir = root / run_id
+    meta_path = run_dir / "meta.json"
+    try:
+        # Reuse the claim lock so two claimers preserve both handover records.
+        with (root / OWNER_CLAIMS_LOCK).open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if run_dir.is_symlink() or meta_path.is_symlink():
+                return unchanged("실행 폴더 또는 meta.json이 심볼릭 링크임")
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict) or not isinstance(meta.get("provenance"), dict):
+                return unchanged("meta.json의 provenance를 읽을 수 없음")
+            if meta.get("host") != claim["host"] or meta.get("run_id") != run_id:
+                return unchanged("실행의 호스트 또는 run id가 다름")
+            if (run_dir / "exit_code").exists():
+                return unchanged("이미 끝난 실행")
+            provenance = meta["provenance"]
+            if provenance.get("resource") is not None or meta.get("owner_wait") is not None:
+                return unchanged("route 자원 알림은 담당 계보를 따름")
+            previous = {key: provenance.get(key) for key in ("session", "notify")}
+            import resource_progress
+            targets = resource_progress._notice_targets(previous)
+            if (previous["session"] == recipient
+                    and ("notify" not in provenance or previous["notify"] == recipient)):
+                return {"status": "unchanged", "run_id": run_id,
+                        "message": f"run {run_id}의 알림은 이미 이 세션으로 옴"}
+            history = provenance.setdefault("recipient_handovers", [])
+            if not isinstance(history, list):
+                return unchanged("meta.json의 인계 이력을 읽을 수 없음")
+            handover = {"from": previous["session"], "to": recipient,
+                        "by": "compute-hosts claim", "at": claim["recorded_at"]}
+            if "notify" in provenance:
+                handover["notify_from"] = previous["notify"]
+                provenance["notify"] = recipient
+            provenance["session"] = recipient
+            history.append(handover)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=run_dir,
+                                                 prefix=".claim-", delete=False) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(meta, handle, ensure_ascii=False, indent=1, sort_keys=True)
+                    handle.write("\n")
+                os.replace(temporary, meta_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError) as exc:
+        return unchanged(f"meta.json 읽기·교체 실패 ({type(exc).__name__})")
+
+    old_labels = ", ".join(f"{row['harness']}:{row['session_id']}" for row in targets) or "미확인"
+    result = {"status": "moved", "run_id": run_id, "from": previous, "to": recipient,
+              "message": f"run {run_id}의 알림은 이제 이 세션으로 옴 (전에는 {old_labels})"}
+    warnings = []
+    for target in targets:
+        harness, session_id = target["harness"], target["session_id"]
+        if (harness, session_id) == (recipient["harness"], recipient["id"]):
+            continue
+        try:
+            from session_notice import notify
+            notice = notify(harness, session_id,
+                key=f"compute-run-claim:{run_id}:{len(history)}:{harness}:{session_id}",
+                subject="compute run recipient",
+                text=f"run {run_id}의 알림이 {recipient['harness']}:{recipient['id']}로 옮겨짐 (compute-hosts claim)",
+                lineage=target["lineage"])
+            if notice is None:
+                warnings.append(f"{harness}:{session_id}에 인계 알림을 남기지 못함")
+        except Exception:  # noqa: BLE001 -- the recipient and GPU claim are already recorded
+            warnings.append(f"{harness}:{session_id}에 인계 알림을 남기지 못함")
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def cmd_claim(args):
@@ -2821,10 +2930,14 @@ def cmd_claim(args):
         "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     _record_claim(config["run_root"], claim)
+    claim["run_recipient"] = _claim_run_recipient(config["run_root"], identity, claim)
     if args.json:
         print(json.dumps(claim, ensure_ascii=False, sort_keys=True))
     else:
         print("claimed %s pid %d -> %s" % (name, args.pid, claim["owner"]["label"]))
+        print(claim["run_recipient"]["message"])
+        for warning in claim["run_recipient"].get("warnings", []):
+            print("warning: " + warning)
     return 0
 
 
@@ -4328,7 +4441,7 @@ def build_parser():
     p_self.set_defaults(func=cmd_self)
 
     p_claim = sub.add_parser(
-        "claim", help="Bind a detached root PID to its exact launcher session")
+        "claim", help="Bind a detached root PID and its live run notices to a session")
     p_claim.add_argument("host")
     p_claim.add_argument("pid", type=int)
     p_claim.add_argument("--harness", choices=("claude", "codex", "opencode"),
