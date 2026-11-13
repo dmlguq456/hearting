@@ -120,8 +120,18 @@ class _RequestScenario(WatchWakeScenario):
 
     # --- script ------------------------------------------------------------
     def script(self, run):
-        self.ctx = self.make_context(run)
-        return lambda record, earlier: answer(self.ctx, record, earlier)
+        """Built before the home, the receiver TUI and ``target_address`` exist (``Run.execute`` order):
+        it only reads ``self.ctx``, which ``prepare`` fills once those are settled."""
+        return self._scripted
+
+    def _scripted(self, record, earlier):
+        if self.ctx is None:  # the receiver's own start-up turn (inside prepare): nothing to act on yet
+            return Reply("initialized.")
+        return answer(self.ctx, record, earlier)
+
+    def prepare(self, run):
+        super().prepare(run)  # starts the receiving TUI and fixes target_address
+        self.ctx = self.make_context(run)  # needs run.home.workspace and target_address
 
     def make_context(self, run):
         raise NotImplementedError

@@ -106,5 +106,45 @@ class ScriptedModelTest(unittest.TestCase):
         self.assertIn("rq-ffffff", step.shell)
 
 
+class RunExecuteOrderTest(unittest.TestCase):
+    """``Run.execute`` calls ``script(run)`` before the home exists and ``prepare(run)`` (which starts the
+    receiving TUI and fixes ``target_address``) after it. The scenarios must work in that order."""
+
+    ADDRESS = "%7@/tmp/receiver-socket"
+
+    def run_in_execute_order(self, scenario, startup_probe):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run = SimpleNamespace(evidence={})  # no home yet, as when ModelFixture(script(run)) is built
+        script = scenario.script(run)  # must not touch run.home or target_address
+        run.home = SimpleNamespace(workspace=Path(tmp.name), env={})
+
+        def fake_watch_prepare(self_, run_):  # WatchWakeScenario.prepare without a real TUI
+            startup_probe.append(script(record("SCENARIO-WATCH-TARGET INIT", "SCENARIO-WATCH-TARGET INIT"), []))
+            self_.target_tui = SimpleNamespace(screen=lambda: "")
+            self_.target_address = self.ADDRESS
+
+        original = cases.WatchWakeScenario.prepare
+        cases.WatchWakeScenario.prepare = fake_watch_prepare
+        try:
+            scenario.prepare(run)
+        finally:
+            cases.WatchWakeScenario.prepare = original
+        return script, Path(tmp.name)
+
+    def test_every_request_scenario_follows_the_execute_order(self):
+        for cls in cases.SCENARIOS:
+            with self.subTest(scenario=cls.name):
+                scenario = cls()
+                probe = []
+                script, workspace = self.run_in_execute_order(scenario, probe)
+                self.assertEqual(len(probe), 1)
+                self.assertFalse(probe[0].shell)  # the receiver's start-up turn, answered before ctx exists
+                reply = script(record("SCENARIO-REQ-A send the request", "SCENARIO-REQ-A send the request"), [])
+                self.assertIn('peer-steward.py" request ' + self.ADDRESS, reply.shell)
+                self.assertIn("--body-file " + str(workspace), reply.shell)
+                self.assertTrue(any(workspace.glob("*.txt")))
+
+
 if __name__ == "__main__":
     unittest.main()
