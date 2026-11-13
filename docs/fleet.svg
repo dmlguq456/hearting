@@ -135,8 +135,7 @@
 <text x="351" y="252" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="252" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">e8</text>
 <text x="378" y="252" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="252" textLength="72" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode</text>
-<text x="513" y="252" textLength="63" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">glm-5.2</text>
+<text x="432" y="252" textLength="144" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode glm-5.2</text>
 <text x="585" y="252" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">high</text>
 <text x="648" y="252" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
 <text x="675" y="252" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">───────</text>
@@ -161,8 +160,8 @@
 <text x="351" y="288" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="288" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">31</text>
 <text x="378" y="288" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="288" textLength="72" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode</text>
-<text x="513" y="288" textLength="99" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">glm-5.2 med</text>
+<text x="432" y="288" textLength="144" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode glm-5.2</text>
+<text x="585" y="288" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="288" textLength="9" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━</text>
 <text x="657" y="288" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────────</text>
 <text x="756" y="288" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">14%</text>

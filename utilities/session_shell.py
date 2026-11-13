@@ -963,9 +963,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
-    for row in panel["routes"]:
+    def route_paint(row):
         paint = {}
         for name, key in (("glyph", "glyph_key"), ("harness", "harness_key"), ("model_text", "model_key"),
                           ("effort", "effort_key"), ("ctx", "ctx_key")):
@@ -974,7 +974,14 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         for name in ("gauge", "gauge5", "gauge_row"):
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
-        row["paint"] = paint
+        return paint
+    for row in panel["routes"]:
+        row["paint"] = route_paint(row)
+        # Spec E9 rule 43: the owner apart from a worker that leads the row, and each live worker.
+        if isinstance(row.get("owner_paint"), dict):
+            row["owner_paint"] = route_paint(row["owner_paint"])
+        for worker in row.get("workers_live") or ():
+            worker["paint"] = route_paint(worker)
     # The repo's open work, as the earlier panel's tail row read it.
     panel["work"] = styled([("◌ ", "dim"), (str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
     sent, sent_paths = _sent_peer_messages(sid)

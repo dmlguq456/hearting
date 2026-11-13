@@ -8177,7 +8177,11 @@ def _continue_native_session(pane, harness, *, process_info):
     foreground = _retire_foreground(pane, harness, strict=False, info=process_info)
     if not foreground:
         return None
-    if harness == "codex":
+    if harness == "codex" and foreground.get("attachment"):
+        # A shell seat: its Codex TUI is the shell's child, not the pane's foreground, so
+        # the attachment's thread is read by the same current-root reader the clear's looks use.
+        session_id = _process_session(pane, harness)
+    elif harness == "codex":
         try:
             from pane_ownership import current_codex_thread
             session_id = current_codex_thread(
@@ -8281,11 +8285,16 @@ def cmd_clear(args):
     Both looks (`_clear_look`) are taken, the second immediately before the single
     `herdr agent prompt`; herdr offers no send conditional on the pane's revision, so a keystroke
     landing between that look and the send cannot be ruled out -- hence no trailer, no Enter
-    retry, and nothing is ever re-sent after a doubtful result.
+    retry, and nothing is ever re-sent after a doubtful result. Only a /compact the session
+    provably dropped (`compact_preempted`: Codex disables it while a queued turn that started
+    just before the keys runs) is typed again by the helper after that turn, and not at all
+    when an earlier typing compacted after all.
 
     `cleared=true` only with the same session's compaction boundary in its native history
     (`compact_confirmed`); otherwise `unverified compact-pending` and the helper waits for it.
-    Exit 0 true / 3 skipped / 1 failed / 5 unverified. One ledger row (`kind=notice`,
+    A working session is `queued` (`not-idle-*`): nothing was typed and the booking holds, so
+    the helper waits for that turn to end. Exit 0 true / 3 skipped or queued / 1 failed /
+    5 unverified. One ledger row (`kind=notice`,
     `action=clear` in the receipt) per judgement.
     """
     import session_tidy_clear as clear
@@ -8351,6 +8360,10 @@ def cmd_clear(args):
     req, why = clear.recheck_idle_input(args.request, req)
     if req is None:
         return finish("skipped", why, agent)
+    if "first_offset" in (req.get("clear_claim") or {}) and clear.compact_confirmed(req):
+        # Typing again after a dropped /compact: an earlier typing compacted after all.
+        new_session = old_sid
+        return finish("true", None, agent)
     rc, payload = _herdr_prompt(target, command, wait=False, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc is None:
         return finish("failed", "herdr-invocation-failed", agent)
@@ -8470,6 +8483,8 @@ _SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answe
 
 
 def _look_outcome(reason):
+    if reason.startswith("not-idle-"):
+        return "queued"    # a working session took no input and keeps its booking
     return "failed" if reason.startswith(("herdr-", "agent-not-found")) else "skipped"
 
 

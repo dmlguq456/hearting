@@ -3635,14 +3635,16 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
 
         The runner settles the same owner rows on every pass. A context rebuilt each pass proves
         every one of them again from scratch; the kept one serves all of them as cache hits when
-        the registry is read again in full (the file was replaced, so its owner cursor is void),
-        and proves none again while the registry stays as it was."""
+        the registry is read again in full (a replacement changed a row before them, so the
+        bytes its owner cursor proved are gone), and proves none again while the registry stays
+        as it was."""
         import dispatch_registry_cache
         from dispatch_terminal_commit import CompletionState
         batch = peer_steward.dispatch_batch_obligations
         owners = ["att-owner-%d" % index for index in range(5)]
         jobs = self.tmp_root / "owner-jobs.log"
-        text = "".join(
+        unrelated = "2026-10-18T00:00:00Z\t%s\t/repo\t/wt\tchild\tattempt_id=att-unrelated\n"
+        text = unrelated % "running" + "".join(
             "2026-10-18T00:00:00Z\tdone\t/repo\t/wt\towner\t" + ",".join((
                 "attempt_schema_version=2", "dispatch_depth=1", "worker_type=owner",
                 "launch_started=1", "supervisor_lease=flock-v1",
@@ -3657,9 +3659,11 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
 
         def settle_owners(context):
             if len(seen) == 1:
-                # Same rows in a replaced file: the next read is a full read.
+                # The owner rows are unchanged, but the row before them is not:
+                # no proved prefix is left, so the next read is a full read.
                 replacement = jobs.with_name("owner-jobs.replacement")
-                replacement.write_text(text, encoding="utf-8")
+                replacement.write_text(text.replace(unrelated % "running", unrelated % "done", 1),
+                                       encoding="utf-8")
                 os.replace(replacement, jobs)
             batch._resume_owner_settlements(jobs, context=context)
             seen.append((context, context.metrics()))

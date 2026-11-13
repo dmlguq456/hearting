@@ -131,17 +131,26 @@ console.log(JSON.stringify(out));'''
             self.assertEqual(staged["owner_line"], "owner · claude (Opus 5.5·high)")
             self.assertEqual(staged["harness"], "codex")              # the live worker of the shown stage
             self.assertIn("code-execute ●", staged["flow"])
+            paint = lambda row: {name: {"text": row[name]} for name in ("glyph", "harness", "model_text", "effort", "ctx")
+                                 if row.get(name)}
             for route in presented["routes"]:
-                route["paint"] = {name: {"text": route[name]} for name in ("glyph", "harness", "model_text", "effort", "ctx")
-                                  if route.get(name)}
+                route["paint"] = paint(route)
+                # Spec E9 rule 43: the owner apart from a leading worker, and each live worker.
+                if isinstance(route.get("owner_paint"), dict):
+                    route["owner_paint"] = paint(route["owner_paint"])
+                for worker in route.get("workers_live") or ():
+                    worker["paint"] = paint(worker)
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # Beside the native area a folded route reads who / context and time / what (spec
-            # rules 24, 36, 38): its glyph, role and harness, then its time, then its title.
+            # Beside the native area a folded route reads who / context / what and time (spec
+            # rules 24, 36, 38, 43): its glyph, role and harness, then its title ending in its time.
             lines = side.splitlines()
-            rows = [lines[i - 2:i] for i, line in enumerate(lines) if i > 1 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("owner" in who and "codex" in who and "5m" in time for who, time in rows), side)
+            rows = [(lines[i - 1], line) for i, line in enumerate(lines) if i > 0 and "│ │ " in line and "Fixture solo route" in line]
+            self.assertTrue(any("owner" in who and "codex" in who and "5m" in title for who, title in rows), side)
+            # The staged route: its owner first, its live worker under it.
+            self.assertIn("owner  claude Opus 5.5 high", side)
+            self.assertIn("└─⠋ worker codex", side)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)
             self.assertNotIn("hb_", side + bottom)

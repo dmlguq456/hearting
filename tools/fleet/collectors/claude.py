@@ -167,8 +167,14 @@ def _tail_ai_title(path, chunk=8192, max_scan=None):
     return title
 
 
-_SUBAGENT_CACHE = {}   # path -> (mtime, size, [SubAgent,...]) — separate from _TITLE_CACHE;
-                        # same (mtime, size) key pattern, independent invalidation.
+_SUBAGENT_CACHE = {}   # path -> (identity, [SubAgent,...]) — separate from _TITLE_CACHE;
+                        # independent invalidation. ``identity`` is the exact stat identity
+                        # (dev, ino, size, mtime_ns, ctime_ns): a rewrite that restores size
+                        # and mtime still moves ctime, so it never answers from this cache.
+
+
+def _file_identity(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 # Async Agent lifecycle markers (see _tail_subagents docstring). The ack text and the
 # notification tag are harness-emitted fixed phrases; ids are compared verbatim.
@@ -214,9 +220,10 @@ def _tail_subagents(path, chunk=8192, max_scan=None):
         st = os.stat(path)
     except OSError:
         return None
+    identity = _file_identity(st)
     cached = _SUBAGENT_CACHE.get(path)
-    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
-        return cached[2]
+    if cached and cached[0] == identity:
+        return cached[1]
     sz = st.st_size
     limit = sz if max_scan is None else min(sz, max_scan)
     window = chunk
@@ -303,7 +310,7 @@ def _tail_subagents(path, chunk=8192, max_scan=None):
         out.append(sa)
     _join_subagent_budget(path, calls)
     out.sort(key=lambda sa: sa.started_at or 0, reverse=True)
-    _SUBAGENT_CACHE[path] = (st.st_mtime, st.st_size, out)
+    _SUBAGENT_CACHE[path] = (identity, out)
     return out
 
 
