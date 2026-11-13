@@ -207,18 +207,40 @@ class LabPageTest(T.Base):
         self.assertRegex(two_days, r"\d\d-\d\d \d\d:\d\d")   # the read time carries its date, not "just now"
 
     def test_the_since_column_ages_from_the_draw_clock_like_observed(self):
-        for i in range(4):          # a known last-progress age on every row: 10 minutes at the read
-            self.write_run(self.root, f"run-{i}", key="si_sdr", series={"si_sdr": [(5, 8.4)]},
-                           stagnation={"state": "ok", "seconds_since_anchor": 600.0}, reached=36, total=60)
         minute = int(NOW_EPOCH // 60 * 60)
-        lab = self.board(minute)                           # read exactly on a minute: since = 10m
+        for i in range(4):          # 10 minutes since progress, measured at an observation 3 minutes before the read
+            self.write_run(self.root, f"run-{i}", key="si_sdr", series={"si_sdr": [(5, 8.4)]}, at=minute - 180,
+                           stagnation={"state": "ok", "seconds_since_anchor": 600.0}, reached=36, total=60)
+        lab = self.board(minute)                           # read on a minute: since = 3m + 10m
         def since_cells(text):
             return [row.split()[-2] for row in text.splitlines() if "기본 구성" in row or "잔향 줄임" in row]
         read_time, same_minute = self.page_at(lab, minute), self.page_at(lab, minute + 59.9)
         self.assertEqual(read_time, same_minute)                      # one HH:MM, one set of cells
-        self.assertEqual(since_cells(read_time), ["10m", "10m"])
-        self.assertEqual(since_cells(self.page_at(lab, minute + 120)), ["12m", "12m"])   # +2 min: since +2 min
-        self.assertEqual(since_cells(self.page_at(lab, minute + 120 + 59)), ["12m", "12m"])
+        self.assertEqual(since_cells(read_time), ["13m", "13m"])
+        self.assertEqual(since_cells(self.page_at(lab, minute + 120)), ["15m", "15m"])   # +2 min: since +2 min
+        self.assertEqual(since_cells(self.page_at(lab, minute + 120 + 59)), ["15m", "15m"])
+        self.assertEqual(since_cells(self.page_at(self.board(minute + 120), minute + 120)), ["15m", "15m"])  # a later read agrees
+
+    def test_numeric_cells_are_not_truncated(self):
+        """RV-PR1606-1113 #3: a long number is shown whole or its column leaves whole, never cut in the middle."""
+        from tools.fleet.explorer import lab_table as L
+        from tools.fleet.explorer.grid import cell_width
+        self.write_run(self.root, "run-0", key="si_sdr", series={"si_sdr": [(1234567, 12345678.9)]}, stagnation=HEALTHY)
+        group = self.board()["groups"][0]
+        table = [L.cells(row, group, NOW_EPOCH) for row in group["rows"]]
+        headers = {name: L._header(name) for name in ("name",) + L.COLUMNS}
+        self.assertEqual(table[0]["latest"][0], "12345678.90@1234567")
+        for room in (200, 116, 64, 40):
+            order, widths = L.layout(table, room, headers)
+            cut = {c: t[c][0] for t in table for c in order if c != "name" and cell_width(t[c][0]) > widths[c]}
+            self.assertEqual(cut, {}, room)
+            self.assertLessEqual(sum(widths[c] for c in order) + L.GAP * (len(order) - 1), room, room)
+        for cols in (240, 168, 98):
+            text = self.page(self.board(), cols=cols)
+            self.assertNotIn("12345678.90@1…", text)
+            self.assertNotIn("+12345670", text.replace("+12345670.90 dB", ""))   # the difference whole, or not at all
+            if "최근" in text and "12345678" in text:
+                self.assertIn("12345678.90@1234567", text)
 
     def test_a_saved_view_never_replays_a_board(self):
         from tools.fleet.explorer.view_model import persistable_view_model, restore_persisted_view_model

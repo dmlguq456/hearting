@@ -243,12 +243,12 @@ class ReadCache(T.Base):
     def test_b11_the_last_progress_moment_is_kept_so_a_screen_counts_its_own_age(self):
         root = self.setup_root()
         stagnant = {"state": "ok", "seconds_since_anchor": 600.0}
-        self.write_run(root, "run-a", stagnation=stagnant)
+        self.write_run(root, "run-a", stagnation=stagnant)   # observed at NOW - 180: progress at NOW - 780
         row = B.read(root, now=NOW, cache={})[0]["groups"][0]["rows"][0]
         self.assertEqual(row["since_last_progress_seconds"], 600)
-        self.assertEqual(B.age_seconds(row, NOW, "last_progress_at"), 600)
-        self.assertEqual(B.age_seconds(row, NOW + 120, "last_progress_at"), 720)
-        self.assertEqual(B.age_seconds(row, NOW - 630, "last_progress_at"), 0)     # inside the minute, not unknown
+        self.assertEqual(B.age_seconds(row, NOW, "last_progress_at"), 780)
+        self.assertEqual(B.age_seconds(row, NOW + 120, "last_progress_at"), 900)
+        self.assertEqual(B.age_seconds(row, NOW - 810, "last_progress_at"), 0)     # inside the minute, not unknown
         self.assertIsNone(B.age_seconds(row, NOW - 1000, "last_progress_at"))      # a clock that disagrees
 
     def test_b7b_an_unchanged_redraw_reads_the_status_once(self):
@@ -283,6 +283,37 @@ class ReadCache(T.Base):
         self.assertTrue(result["visible"])
         self.assertEqual((result["catalog"]["status"], result["strip"]), ("unreadable", "?1LB"))
         self.assertTrue(watch)  # a later change to the catalog still wakes the screen
+
+
+class Review(T.Base):
+    """RV-PR1606-1113: the progress age, the best value's metric, and long numbers."""
+
+    def fixture(self):
+        root = self.make_root()
+        self.register(root, {"groups": [T.group_spec()], "conditions": [condition("조건 0", "r0")]})
+        return root
+
+    def test_progress_age(self):
+        """`seconds_since_anchor` was measured at the observation, not at this read: an hour-old record that said
+        "two hours since progress" means three hours now, and the age grows on every later read."""
+        root = self.fixture()
+        self.write_run(root, "r0", at=NOW - 3600, stagnation={"state": "stagnant", "seconds_since_anchor": 7200})
+        cache, ages = {}, []
+        for now in (NOW, NOW + 61, NOW + 122):
+            row = B.read(root, now=now, cache=cache)[0]["groups"][0]["rows"][0]
+            ages.append(B.age_seconds(row, now, "last_progress_at"))
+        self.assertEqual(ages, [10800, 10861, 10922])
+        self.assertEqual(row["last_progress_at"], E._rfc3339(NOW - 10800))   # the same moment whenever it is read
+
+    def test_best_metric_identity(self):
+        """A WER (%) group whose run reported only loss: the best is loss's best, and it says so."""
+        root = self.fixture()
+        self.write_run(root, "r0", key="loss", series={"loss": [(1, 0.5), (2, 0.7)]}, stagnation=HEALTHY)
+        group = B.read(root, now=NOW, cache={})[0]["groups"][0]
+        row = group["rows"][0]
+        self.assertEqual((row["latest"]["key"], row["best"]["key"]), ("loss", "loss"))
+        self.assertEqual(B.latest_text(row, group["metric"], unit=True), "0.7 (loss)")
+        self.assertEqual(B.best_text(row, group["metric"], unit=True), "0.5 (loss)")   # not "0.5%@1"
 
 
 class NoLeftovers(T.Base):

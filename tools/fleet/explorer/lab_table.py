@@ -5,7 +5,9 @@ aggregate of the catalog's ``status()``).  This module chooses columns and words
 decide a name, a state, or whether two values may be subtracted.  Column choice follows the
 room the page has (``right - x``), not the screen width, and a whole column leaves before any
 number is cut: observation age, then time since progress, expected time, best, baseline, and
-last the latest value and its difference.  Colors are the existing palette keys.
+last the latest value and its difference.  A value column is as wide as its widest value, so a
+long number is shown whole or not at all; only the condition name is shortened with an ellipsis.
+Colors are the existing palette keys.
 """
 from collections.abc import Mapping, Sequence
 import sys
@@ -27,8 +29,7 @@ NAME_MAX = 28
 MAX_ROWS = 8                    # rows one group shows before "and N more"
 MAX_NOTES = 5
 DROP_ORDER = ("observed", "since", "expected", "best", "base", "pair")
-CAPS = {"state": 8, "progress": 11, "latest": 14, "best": 14, "base": 18, "delta": 10,
-        "expected": 11, "since": 6, "observed": 6}
+COLUMNS = ("state", "progress", "latest", "best", "base", "delta", "expected", "since", "observed")
 STATE_KEY = {"running": "g_spin", "failed": "lvl_r", "stagnant": "lvl_y", "unknown": "lvl_y",
              "waiting": "dim", "ended": "soft"}
 
@@ -110,9 +111,11 @@ def cells(row, group, now):
     base = board.baseline_text(row)
     delta = _delta_cell(row)
     progress = board.progress_text(row)
-    # Both ages count from the draw clock; a board without the anchor (an older shape) keeps the read-time value.
-    since_s = board.age_seconds(row, now, "last_progress_at") if now is not None and _g(row, "last_progress_at") \
-        else _g(row, "since_last_progress_seconds")
+    # Both ages count from the draw clock.  A board row always has the anchor field; None there means the
+    # moment is unknown (no observation time), never the elapsed value as if it were measured now.
+    # Only a row without the field at all (an older shape) shows the elapsed value as it was read.
+    since_s = (board.age_seconds(row, now, "last_progress_at") if isinstance(row, Mapping) and "last_progress_at" in row
+               else _g(row, "since_last_progress_seconds")) if now is not None else _g(row, "since_last_progress_seconds")
     since = board.duration_text(since_s)
     age = board.age_seconds(row, now) if now is not None else _g(row, "observed_age_seconds")
     return {
@@ -134,20 +137,24 @@ def _header(name):
 
 
 def layout(table, room, headers):
-    """``(columns in order, width per column)`` that fit ``room`` cells; ``table`` is ``cells()`` per row."""
-    widths = {}
-    for name in CAPS:
-        widest = max([cell_width(headers[name])] + [cell_width(t[name][0]) for t in table])
-        widths[name] = min(widest, CAPS[name])
+    """``(columns in order, width per column)`` that fit ``room`` cells; ``table`` is ``cells()`` per row.
+
+    Every value column is as wide as its widest cell (no cap): a column that does not fit leaves whole,
+    in ``DROP_ORDER``, and when even the kept ones do not fit the rightmost leave too, down to the state."""
+    widths = {name: max([cell_width(headers[name])] + [cell_width(t[name][0]) for t in table]) for name in COLUMNS}
     name_width = min(NAME_MAX, max([cell_width(headers["name"])] + [cell_width(t["name"][0]) for t in table]))
-    order = ["name", "state", "progress", "latest", "best", "base", "delta", "expected", "since", "observed"]
-    for drop in DROP_ORDER + (None,):
+    order = ["name", *COLUMNS]
+
+    def need():
         used = [c for c in order if c != "name"]
-        need = NAME_MIN + sum(widths[c] for c in used) + GAP * len(used)
-        if need <= room or drop is None:
+        return NAME_MIN + sum(widths[c] for c in used) + GAP * len(used)
+    for drop in DROP_ORDER:
+        if need() <= room:
             break
         for gone in (("latest", "delta") if drop == "pair" else (drop,)):
             order.remove(gone)
+    while need() > room and len(order) > 2:
+        order.pop()
     used = [c for c in order if c != "name"]
     name_width = max(1, min(name_width, room - sum(widths[c] for c in used) - GAP * len(used)))
     widths["name"] = name_width
@@ -167,7 +174,7 @@ def _draw_table(grid, group, x, y, right, now):
     room = max(1, right - x)
     shown = rows[:MAX_ROWS]
     body = [cells(row, group, now) for row in shown]
-    headers = {name: _header(name) for name in ("name",) + tuple(CAPS)}
+    headers = {name: _header(name) for name in ("name",) + COLUMNS}
     order, widths = layout(body, room, headers)
     cursor = x
     for name in order:

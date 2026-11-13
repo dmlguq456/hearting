@@ -177,11 +177,12 @@ def board(status_doc: Mapping[str, Any]) -> Dict[str, Any]:
     news = [w for w in warnings if w.get("code") != "catalog-missing" and not str(w.get("where", "")).startswith("resource-runs/")]
     visible = bool(groups or unlinked["count"] or news or catalog.get("status") == "invalid")
     # The moment of the last progress, so a screen counts the age from its own clock like `observed_at`.
-    read_at = E._ts(status_doc.get("generated_at"))
+    # `since_last_progress_seconds` was measured at the observation (`observed_at`, the checkpoint the
+    # record was written at), not at this read, so the moment is the observation minus that elapsed time.
     for group in groups:
         for row in group["rows"]:
-            since = row.get("since_last_progress_seconds")
-            row["last_progress_at"] = None if read_at is None or since is None else E._rfc3339(read_at - since)
+            since, observed = row.get("since_last_progress_seconds"), E._ts(row.get("observed_at"))
+            row["last_progress_at"] = None if observed is None or since is None else E._rfc3339(observed - since)
     return {
         "schema": CONTRACT, "generated_at": status_doc.get("generated_at"), "visible": visible,
         "catalog": {k: catalog.get(k) for k in ("status", "code", "path", "updated_at")},
