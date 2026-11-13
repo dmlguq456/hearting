@@ -240,13 +240,20 @@ the jobs). Beside the native area one thin rule (the messages rules' color)
 then parts it from this session's content. The rule follows this session's own
 state, from the frame's source (not a route's): while the session runs a
 six-cell heavy bar (`━`, the session spinner's color, its two end cells one
-step lower) moves between its ends and back every five seconds, easing at the
-ends; while an answer or a confirmation waits the whole rule is heavy and red,
-lit and receding on the panel's one-second beat (the steward `⚑`'s); otherwise
-it is the plain thin rule. It moves on the beat the spinner already keeps and
-the host sends only that row's changed cells; idle, nothing repaints. `rule
-motion` off, `mono` and `NO_COLOR` move nothing (a wait stays a still heavy
-rule), and a panel short of rows that drops the rule adds nothing. The
+step lower) moves between its ends and back every 2.6 seconds, easing at the
+ends; while an answer or a confirmation waits the whole rule is heavy and red
+and breathes, never blinking, once every four seconds through three steps
+(the frame's waiting red, a middle red, a dark red that still shows, the
+middle again); the steward `⚑` keeps its own blink. Otherwise it is the plain
+thin rule. The two speeds are constants in one place (`RULE_SCAN`,
+`RULE_BREATHE` in `panel-view.cjs`). It moves on the beat the spinner already
+keeps: the host wakes at the next frame anything painted changes (a spinner's
+frame, the rule's next step: every frame for the bar, four times a breath),
+repaints the whole panel only for a one-second blink, and otherwise sends only
+the changed cells (the spinner glyphs, the rule's changed cells); idle, nothing
+wakes and nothing is sent. `rule motion` off, `mono` and `NO_COLOR` move
+nothing (a wait stays a still heavy rule), and a panel short of rows that drops
+the rule adds nothing. The
 content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,
@@ -319,16 +326,24 @@ keeps its one doer), the context row
 starts with a dim `CTX` in the role column with the gauge under the harness
 (`CTX    ━━━━──── 52%`; no row for an unknown context), the route's time ends
 the title's last row (the title folds and ends in `…` within the cells left
-beside it), and no `owner <model>` word follows the stage. Each live worker
-hangs under the owner two cells in on a dim branch (`├─`, the last `└─`; `│`
-down the owner's rows and an earlier worker's): its own mark, `worker` (or
-`frame`), harness, model and effort (effort, then the harness go), its `CTX`
-row, then its stage, open tool and target (the path, the file name, the tool,
-then none) with its own time at the right; a finished stage's worker is not
-drawn. Short of rows a worker first takes one row (model, percent, time), then
-the workers go and the kind row ends with `· worker N`, before the steps
-below, and come back only with the owner's context and kind rows; a producer
-that sends no `workers_live` keeps the one-doer rows. Each worker is Fleet's
+beside it), and no `owner <model>` word follows the stage. The owner's live
+workers stand in one rounded box under its rows (dim lines, no branch and no
+guide beside the owner): each worker's first row, its own mark, `worker` (or
+`frame`), harness, model and effort, stands in the box's top line (`╭─ ⠸ worker
+claude Sonnet 5.5 ─╮`; a later worker's in the line between, `├─ … ─┤`; the
+bottom line once, so N workers take 3N+1 rows), then inside the box, four
+cells narrower, its `CTX` row (`CTX` under the role word, the gauge under the
+harness) and its stage, open tool and target (the path, the file name, the
+tool, then none) with its own time at the right. Short of cells the top line
+lets the effort go, then the harness (`─` fills; a model longer than the line
+is cut with `…`); a finished stage's worker is not drawn. Short of rows the
+owners and their workers fold together, every route at the same step: every
+owner's context folds into its first row and, in the same step, each worker
+takes one row two cells in (no box; its percent and time in the owners'
+columns); then the workers go and the kind row ends with `· worker N`; then
+the steps below. An owner in its whole form never stands over a worker on one
+row, or the reverse; a producer that sends no `workers_live` keeps the
+one-doer rows. Each worker is Fleet's
 own live worker of its stage, found again by the attempt id Fleet records with
 it (an earlier producer's row, without one, by its values). A fourth row says which
 kind of route it is and where it stands, dim: Fleet's kind word (`code`, `lab`,
@@ -417,6 +432,12 @@ during the read, or a failed read of a readable OpenCode database) keeps the pan
 session, as Fleet's native reader does; the next projection reads it again.
 Another session, a new process, an absent or refused source and an ended
 process still clear them, and an unobserved value is never made up.
+Beside the native area the two cells between the native and the panel take the
+native's own background at that edge when it paints one (OpenCode paints its
+whole area): the native's area then reaches the panel's frame and the panel
+stands with the same space on both sides (inside, one cell between the frame
+and the text on every row, in every harness); a native on the terminal's own
+background keeps them plain. The panel's own background does not change.
 The route box carries `route N` in its top border (beside the native area
 `N ROUTE`, the count first; the producer's own label alone, over a `Checking`
 row, while its rows are not read yet). Each current
