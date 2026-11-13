@@ -389,7 +389,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const routeLine=['time','model'].includes(cfg.route_line)?cfg.route_line:'time';
     // The session's own model: the native selection when it is shown, else Fleet's.
     const nativeModel=native.model&&(native.model!==model.model_value||!painted(model.selected).length);
-    const selected=nativeModel?[text(native.model,'loc_repo'),...(native.effort?[text(' '+native.effort)]:[])]:
+    // The native's own model name takes the color the backend gave it (its family's, else the
+    // harness's, as route rows); until that arrives for a new name, the harness's color.
+    const nativePart=model.native_model_part&&model.native_model_part.text===native.model?{...model.native_model_part,text:native.model}:
+      text(native.model,['claude','codex','opencode'].includes(harness)?'hb_'+harness:'loc_repo');
+    const selected=nativeModel?[nativePart,...(native.effort?[text(' '+native.effort)]:[])]:
       painted(model.selected).length?model.selected:line(t('checking','Checking'));
     // Spec rule 15: the repo row carries the project only; Git takes the row below. Spec rule
     // 29: the session number moves to the top border, so the row keeps `hearting/`.

@@ -333,6 +333,45 @@ for(let height=10;height<=22;height++){
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_the_natives_own_model_name_takes_the_route_rows_color_rule(self):
+        # The head's MODEL row shows the model name read off the native's own screen when it
+        # differs from Fleet's; it takes the route rows' color rule (its family's color, else the
+        # harness's: `_model_key(model, harness=...)`), keyed by the backend so the panel keeps no
+        # family table; until the key for a new name arrives, the harness's color. Effort as before.
+        sys.path.insert(0, str(ROOT / "tools"))
+        from unittest import mock
+        import human_wait_state
+        from fleet.palette import style_components
+        from fleet.session_line import _model_key
+        shell.registry_root()
+        # (The answer-wait cache stays untouched: later projections read it as they found it.)
+        quiet = mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, ""))
+        quiet.start(); self.addCleanup(quiet.stop)
+        for harness in ("claude", "codex", "opencode"):
+            for name in ("claude-opus-5-5", "glm-5.2", "gpt-5.5"):
+                part = shell.panel_projection(harness, "", columns=40, rows=30, native_model=name)["panel"]["native_model_part"]
+                colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+                want = style_components(_model_key(name, harness=harness), colors=colors, no_color="NO_COLOR" in os.environ)
+                self.assertEqual({key: part[key] for key in want}, want, (harness, name))
+                self.assertEqual(part["text"], name)
+            self.assertNotIn("native_model_part", shell.panel_projection(harness, "", columns=40, rows=30, native_model="bad\x1bname")["panel"])
+            self.assertNotIn("native_model_part", shell.panel_projection(harness, "", columns=40, rows=30)["panel"])
+        self.assertEqual(_model_key("glm-5.2", harness="opencode"), "hb_opencode")
+        script = r"""
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const styles={dim:{dim:true},loc_repo:{foreground:253},hb_claude:{foreground:116},hb_opencode:{foreground:110}};
+const row=(harness,native,extra={})=>view.render({width:40,height:24,side:true,harness,native,model:{selected:[{text:'Fleet model'}],model_value:'fleet-model',styles,...extra},
+ configuration:{},questions:()=>[]}).rows.find(r=>r.some(p=>p.text==='MODEL  '));
+let r=row('opencode',{model:'glm-5.2',effort:'max'},{native_model_part:{text:'glm-5.2',foreground:110}});
+assert.equal(r.find(p=>p.text==='glm-5.2').foreground,110);assert.equal(r.find(p=>p.text===' max').foreground??null,null);
+r=row('claude',{model:'claude-opus-5-5'},{native_model_part:{text:'claude-opus-5-5',foreground:116,bold:false}});
+assert.equal(r.find(p=>p.text==='claude-opus-5-5').foreground,116);
+// A new name before its key arrives: the harness's color, never the plain white of before.
+r=row('opencode',{model:'kimi-k3'},{native_model_part:{text:'glm-5.2',foreground:110}});
+assert.equal(r.find(p=>p.text==='kimi-k3').foreground,110);assert.notEqual(r.find(p=>p.text==='kimi-k3').foreground,253);
+"""
+        self.node(script, "panel-view.cjs")
+
     def test_the_projection_carries_the_natives_own_turn_record_and_its_path(self):
         # Spec rule 26 and the 11-12 rule 6: Claude's REPL writes its own UI state into its
         # session record (busy / waiting / idle); the projection reads it with the session

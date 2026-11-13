@@ -850,7 +850,7 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="") -> dict:
+                     upgrade_note="", native_model=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -1001,6 +1001,12 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
+    # The model name the host reads off the native's own screen, painted by the rule route rows
+    # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
+    # panel keeps no family table of its own. Display only.
+    if isinstance(native_model, str) and 0 < len(native_model) <= 128 and native_model.isprintable():
+        from fleet.session_line import _model_key
+        panel["native_model_part"] = styled([(native_model, _model_key(native_model, harness=harness))])[0]
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
@@ -1259,7 +1265,8 @@ def _backend_operation(request: dict) -> dict:
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,
-            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "")}
+            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "",
+            native_model=request.get("native_model"))}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":
