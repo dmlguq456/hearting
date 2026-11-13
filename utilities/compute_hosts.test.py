@@ -2946,6 +2946,342 @@ def probe_namespace():
     return namespace
 
 
+class ClaimRunRecipientTest(unittest.TestCase):
+    """Claims use synthetic runs and remote identities, never an operating host."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.module = load_module()
+        self.run_dir = self.root / "runs" / "here-1"
+        self.run_dir.mkdir(parents=True)
+        self.old = {"harness": "claude", "id": "old-session"}
+        self.new = {"harness": "codex", "id": "new-session"}
+        self.meta = {"run_id": "here-1", "host": "here",
+                     "artifact_root": str(self.root / "artifacts"),
+                     "provenance": {"session": self.old, "notify": self.old}}
+        self.write_meta()
+        self.identity = {"pid": 321, "start": 42, "cmdline_sha256": "a" * 64,
+                         "run_id": "here-1"}
+        self.config = {"run_root": self.run_dir.parent,
+                       "hosts": {"here": {"hostname": "local", "transport": "local"}}}
+        patches = [mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(self.root / "state"),
+                                              "AGENT_ARTIFACT_ROOT": str(self.root / "artifacts")}),
+                   mock.patch.object(self.module, "load_config", return_value=self.config),
+                   mock.patch.object(self.module, "remote", side_effect=lambda *a, **kw:
+                                     SimpleNamespace(returncode=0, stdout=json.dumps(self.identity))),
+                   mock.patch("session_notice.notify", return_value={"state": "pending"})]
+        for patch in patches:
+            value = patch.start()
+            self.addCleanup(patch.stop)
+        self.notify = value
+        watch = mock.patch.object(self.module, "_spawn_completion_watch", return_value=True)
+        self.watch = watch.start()
+        self.addCleanup(watch.stop)
+        self.frozen = datetime.datetime(2026, 11, 14, 1, 2, 3)
+        clock = mock.patch.object(self.module.datetime, "datetime", wraps=datetime.datetime)
+        clock.start().now.return_value = self.frozen
+        self.addCleanup(clock.stop)
+
+    def write_meta(self):
+        (self.run_dir / "meta.json").write_text(json.dumps(self.meta))
+
+    def read_meta(self):
+        return json.loads((self.run_dir / "meta.json").read_text())
+
+    def claim(self, recipient=None, *, as_json=True):
+        recipient = self.new if recipient is None else recipient
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = self.module.cmd_claim(SimpleNamespace(
+                host="here", pid=321, harness=recipient.get("harness"),
+                session=recipient.get("id"), json=as_json))
+        self.assertEqual(rc, 0)
+        return json.loads(output.getvalue()) if as_json else output.getvalue()
+
+    def test_claim_moves_end_notices_and_tells_the_previous_session_once(self):
+        (self.run_dir / "meta.json").chmod(0o640)
+        with mock.patch.object(self.module, "_observe_compute_experiment", return_value=None):
+            self.module._report_run_end(self.run_dir, 0, None, lambda: 100)
+            self.assertEqual(self.notify.call_args.args, ("claude", "old-session"))
+            self.notify.reset_mock()
+            moved = self.claim()["run_recipient"]
+            self.assertEqual(moved["status"], "moved")
+            self.assertIn("전에는 claude:old-session", moved["message"])
+            self.notify.assert_called_once()
+            self.assertEqual(self.notify.call_args.args, ("claude", "old-session"))
+            self.assertIn("codex:new-session로 옮겨짐", self.notify.call_args.kwargs["text"])
+            self.claim()
+            self.notify.assert_called_once()  # the same claim is not a second handover
+            self.notify.reset_mock()
+            self.module._report_run_end(self.run_dir, 0, None, lambda: 200)
+            self.notify.assert_called_once()
+            self.assertEqual(self.notify.call_args.args, ("codex", "new-session"))
+        provenance = self.read_meta()["provenance"]
+        self.assertEqual(provenance["session"], self.new)
+        self.assertEqual((self.run_dir / "meta.json").stat().st_mode & 0o777, 0o640)
+        self.assertEqual(provenance["notify"], self.new)
+        self.assertEqual(provenance["recipient_handovers"], [{
+            "from": self.old, "to": self.new, "notify_from": self.old,
+            "by": "compute-hosts claim", "at": "2026-11-14T01:02:03"}])
+
+    def test_dispatch_claim_uses_registered_parent_and_keeps_worker_gpu_label(self):
+        jobs = self.root / "jobs.log"
+        owner = {"attempt_id": "att-owner", "worker_type": "owner", "dispatch_depth": "1",
+                 "owner_route_id": "rt-claim", "owner_route_hash": "sha256:claim",
+                 "parent_sid": "parent-seat", "parent_harness": "claude"}
+        child = {"attempt_id": "att-child", "parent_attempt_id": "att-owner",
+                 "worker_type": "stage", "dispatch_depth": "2", "route_id": "rt-claim",
+                 "route_hash": "sha256:claim", "route_node": "execute"}
+        jobs.write_text("".join("\t".join(("2099-01-01T00:00:00Z", "open", "/work", "/work",
+                                           "fixture", ",".join(f"{k}={v}" for k, v in row.items()))) + "\n"
+                                for row in (owner, child)))
+        for depth, attempt in (("1", "att-owner"), ("2", "att-child")):
+            for harness, key in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID")):
+                with self.subTest(depth=depth, harness=harness):
+                    self.write_meta()
+                    env = {"HOME": str(self.root), "XDG_STATE_HOME": str(self.root / "state"),
+                           "HARNESS_STATE_ROOT": str(self.root / "state"),
+                           "FLEET_ROUTE_CHAIN_DIR": str(self.root / "chains"),
+                           "AGENT_DISPATCH_ATTEMPT_ID": attempt, "AGENT_DISPATCH_DEPTH": depth,
+                           "AGENT_DISPATCH_JOBS": str(jobs), key: "worker-thread"}
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        result = self.claim({} if harness == "codex" else
+                                            {"harness": harness, "id": "worker-thread"})
+                    self.assertEqual(result["run_recipient"]["to"],
+                                     {"harness": "claude", "id": "parent-seat"})
+                    self.assertEqual(self.read_meta()["provenance"]["session"],
+                                     {"harness": "claude", "id": "parent-seat"})
+                    self.assertEqual(result["owner"]["id"], "worker-thread")
+                    self.assertEqual(result["owner"]["harness"], harness)
+
+    def test_dispatch_claim_without_parent_keeps_recipient_and_gpu_claim(self):
+        before = (self.run_dir / "meta.json").read_bytes()
+        for depth in ("1", "2"):
+            with self.subTest(depth=depth), mock.patch.dict(os.environ, {
+                    "HOME": str(self.root), "HARNESS_STATE_ROOT": str(self.root / "state"),
+                    "AGENT_DISPATCH_JOBS": str(self.root / "missing-jobs.log"),
+                    "AGENT_DISPATCH_ATTEMPT_ID": "att-missing", "AGENT_DISPATCH_DEPTH": depth,
+                    "CODEX_THREAD_ID": "worker-thread"}, clear=True):
+                result = self.claim({})
+                self.assertEqual(result["run_recipient"]["status"], "unchanged")
+                self.assertIn("dispatch 작업자 세션으로는 알림을 옮기지 않음",
+                              result["run_recipient"]["message"])
+                self.assertEqual((self.run_dir / "meta.json").read_bytes(), before)
+                self.assertEqual(self.module._load_claims(self.run_dir.parent)[0]["owner"]["id"],
+                                 "worker-thread")
+        self.notify.assert_not_called()
+        self.watch.assert_not_called()
+
+    def test_watch_reads_the_new_recipient_on_its_next_progress_and_end(self):
+        import resource_progress
+        records, clock = [], [100.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+            if len(records) == 1:
+                self.claim()
+            else:
+                (self.run_dir / "exit_code").write_text("0")
+
+        with mock.patch.object(resource_progress, "observe_experiment",
+                               side_effect=lambda record, *a, **kw: records.append(record)), \
+                mock.patch.object(self.module, "_run_quiet_since", return_value=None):
+            self.module._watch_run(SimpleNamespace(run_dir=self.run_dir), sleep=sleep, now=lambda: clock[0])
+        self.assertEqual([r["session"] for r in records], [self.old, self.new, self.new])
+        self.assertEqual([r["notify"] for r in records], [self.old, self.new, self.new])
+        for record, expected in zip(records, (self.old, self.new, self.new)):
+            self.assertEqual([(r["harness"], r["session_id"])
+                              for r in resource_progress._notice_targets(record)],
+                             [(expected["harness"], expected["id"])])
+        ended = [call for call in self.notify.call_args_list if call.kwargs["key"].startswith("compute-run:")]
+        self.assertEqual([call.args for call in ended], [("codex", "new-session")])
+
+    def test_successive_claims_keep_both_handovers_and_last_recipient(self):
+        self.claim()
+        last = {"harness": "opencode", "id": "last-session"}
+        self.claim(last)
+        provenance = self.read_meta()["provenance"]
+        self.assertEqual(provenance["session"], last)
+        self.assertEqual([(r["from"], r["to"]) for r in provenance["recipient_handovers"]],
+                         [(self.old, self.new), (self.new, last)])
+        self.assertEqual([call.args for call in self.notify.call_args_list],
+                         [("claude", "old-session"), ("codex", "new-session")])
+        self.assertNotEqual(*[call.kwargs["key"] for call in self.notify.call_args_list])
+
+    def test_old_seat_retirement_does_not_redirect_the_claim_but_new_seat_handoff_does(self):
+        import session_tidy as tidy
+        from peer_obligations import _ordinary_notice_target
+        from split_module_fixture import patch_split
+        from harness_capabilities import parent_completion
+        self.claim()
+        self.notify.reset_mock()
+        with mock.patch.object(self.module, "_observe_compute_experiment", return_value=None):
+            self.module._report_run_end(self.run_dir, 0, None, lambda: 100)
+        binding = {"jobs": str(self.root / "state" / "jobs.log"), "storage_recipient": "new-session",
+                   "lineage": self.notify.call_args.kwargs["lineage"]}
+        carrier = parent_completion("codex")["carrier"]
+        with patch_split(tidy, "state_root", return_value=self.root / "state"):
+            tidy._append_ledger_entry(tidy.Seat("pane", "old-successor"), {
+                "event": "handover", "from": {"harness": "claude", "sid": "old-session"},
+                "sid": "old-successor", "harness": "claude", "source": "retire", "bindings": [], "ts": 10.0})
+            self.assertEqual(_ordinary_notice_target(binding, carrier),
+                             ("codex", "new-session", "new-session"))
+            tidy._append_ledger_entry(tidy.Seat("pane", "new-successor"), {
+                "event": "handover", "from": {"harness": "codex", "sid": "new-session"},
+                "sid": "new-successor", "harness": "opencode", "source": "retire", "bindings": [], "ts": 20.0})
+            self.assertEqual(_ordinary_notice_target(binding, carrier),
+                             ("opencode", "new-successor", "new-session"))
+
+    def test_ineligible_runs_keep_recipients_and_still_record_gpu_claim(self):
+        for case in ("ended", "host", "run-id", "no-run-id", "resource", "owner-wait",
+                     "corrupt", "bad-provenance", "bad-history", "unreadable-env", "unsafe-id", "symlink"):
+            with self.subTest(case=case):
+                self.identity = {"pid": 321, "start": 42, "cmdline_sha256": "a" * 64, "run_id": "here-1"}
+                self.meta = {"host": "here", "run_id": "here-1", "provenance": {"session": self.old}}
+                if case == "host": self.meta["host"] = "elsewhere"
+                if case == "run-id": self.meta["run_id"] = "another-run"
+                if case == "no-run-id": self.identity.pop("run_id")
+                if case == "unsafe-id": self.identity["run_id"] = "../elsewhere"
+                if case == "unreadable-env": self.identity["run_id_error"] = "process environment unreadable"
+                if case == "resource": self.meta["provenance"]["resource"] = {"owner_wait": {"session_id": "owner"}}
+                if case == "owner-wait": self.meta["owner_wait"] = {"session_id": "owner"}
+                if case == "bad-provenance": self.meta["provenance"] = []
+                if case == "bad-history": self.meta["provenance"]["recipient_handovers"] = {}
+                self.write_meta()
+                path = self.run_dir / "meta.json"
+                if case == "corrupt": path.write_text("{broken")
+                if case == "ended": (self.run_dir / "exit_code").write_text("0")
+                if case == "symlink":
+                    target = self.root / "unrelated.json"
+                    target.write_bytes(path.read_bytes())
+                    path.unlink()
+                    path.symlink_to(target)
+                before = path.read_bytes()
+                result = self.claim()
+                self.assertEqual(result["run_recipient"]["status"], "unchanged")
+                expected = "등록 실행이 아니어서 옮길 알림 없음" if case == "no-run-id" else "옮기지 못함"
+                self.assertIn(expected, result["run_recipient"]["message"])
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(self.module._load_claims(self.run_dir.parent)[0]["owner"]["id"], "new-session")
+                self.notify.assert_not_called()
+                (self.run_dir / "exit_code").unlink(missing_ok=True)
+                path.unlink()
+
+    def test_failed_atomic_replace_leaves_original_meta_and_gpu_claim(self):
+        before = (self.run_dir / "meta.json").read_bytes()
+        replace = os.replace
+
+        def fail_meta(source, target):
+            if Path(target).name == "meta.json":
+                raise PermissionError("fixture")
+            return replace(source, target)
+
+        with mock.patch.object(self.module.os, "replace", side_effect=fail_meta):
+            result = self.claim()
+        self.assertIn("PermissionError", result["run_recipient"]["message"])
+        self.assertEqual((self.run_dir / "meta.json").read_bytes(), before)
+        self.assertEqual(len(self.module._load_claims(self.run_dir.parent)), 1)
+        self.assertEqual(list(self.run_dir.glob(".claim-*")), [])
+        self.notify.assert_not_called()
+
+    def test_explicit_or_unambiguous_session_is_used_without_guessing(self):
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "env-session"}, clear=True):
+            self.assertEqual(self.claim({})["run_recipient"]["to"],
+                             {"harness": "codex", "id": "env-session"})
+        before = (self.run_dir / "meta.json").read_bytes()
+        for env in ({}, {"CODEX_THREAD_ID": "a", "CLAUDE_SESSION_ID": "b"}):
+            with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(self.module.ConfigError):
+                self.claim({})  # the existing GPU claim rejects unknown/ambiguous identity
+        # Existing explicit GPU labels allow controls; never use one as a notice recipient.
+        result = self.claim({"harness": "codex", "id": "unknown\nidentity"})
+        self.assertIn("신원을 확인할 수 없음", result["run_recipient"]["message"])
+        self.assertEqual((self.run_dir / "meta.json").read_bytes(), before)
+
+    def test_sessionless_claim_attaches_watch_once_without_rewriting_dispatch_meta(self):
+        self.meta["provenance"] = {"session": None, "route": None}
+        self.write_meta()
+        self.claim()
+        self.watch.assert_called_once()
+        args, kwargs = self.watch.call_args
+        self.assertEqual(args, (self.run_dir, self.read_meta()))
+        self.assertEqual(args[1]["provenance"]["session"], self.new)
+        self.assertEqual(kwargs["environ"]["AGENT_DISPATCH_DEPTH"], "0")
+        self.claim()
+        self.watch.assert_called_once()
+
+    def test_watch_start_failure_is_visible_after_recipient_moves(self):
+        self.watch.return_value = False
+        result = self.claim()["run_recipient"]
+        self.assertEqual(result["status"], "moved")
+        self.assertIn("감시자를 시작하지 못함", result["warnings"][0])
+        self.assertEqual(self.read_meta()["provenance"]["session"], self.new)
+
+    def test_blank_session_aliases_are_ignored_but_explicit_gpu_owner_still_wins(self):
+        env = {"CLAUDE_CODE_SESSION_ID": "claude-session", "CODEX_THREAD_ID": "",
+               "CODEX_SESSION_ID": "", "OPENCODE_SESSION_ID": ""}
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = self.claim({})
+            self.assertEqual(result["owner"]["harness"], "claude")
+            self.assertEqual(result["owner"]["id"], "claude-session")
+            self.assertEqual(result["run_recipient"]["to"],
+                             {"harness": "claude", "id": "claude-session"})
+            result = self.claim()
+            self.assertEqual(result["owner"]["id"], self.new["id"])
+            self.assertEqual(result["run_recipient"]["to"], self.new)
+        with mock.patch.dict(os.environ, {**env, "CLAUDE_SESSION_ID": "other-session"}, clear=True):
+            with self.assertRaises(self.module.ConfigError):
+                self.claim({})
+
+    def test_notify_is_not_added_when_absent_and_distinct_old_targets_are_each_told(self):
+        self.meta["provenance"]["notify"] = {"harness": "opencode", "id": "old-supervisor"}
+        self.write_meta()
+        self.claim()
+        self.assertEqual({call.args for call in self.notify.call_args_list},
+                         {("claude", "old-session"), ("opencode", "old-supervisor")})
+        self.meta["provenance"].pop("notify")
+        self.write_meta()
+        self.claim()
+        self.assertNotIn("notify", self.read_meta()["provenance"])
+
+    def test_handover_notice_failure_is_visible_and_does_not_undo_claim(self):
+        self.notify.side_effect = OSError("fixture")
+        output = self.claim(as_json=False)
+        self.assertIn("claimed here pid 321 -> codex:new-sess", output)
+        self.assertIn("run here-1의 알림은 이제 이 세션으로 옴 (전에는 claude:old-session)", output)
+        self.assertIn("warning: claude:old-session에 인계 알림을 남기지 못함", output)
+        self.assertEqual(self.read_meta()["provenance"]["session"], self.new)
+
+    def test_identity_probe_reads_only_the_claimed_pid_environment(self):
+        proc = self.root / "proc"
+        for pid, run_id in ((321, "here-1"), (123, "parent-run")):
+            folder = proc / str(pid)
+            folder.mkdir(parents=True)
+            fields = ["S", "123"] + ["0"] * 18
+            fields[19] = "42"
+            (folder / "stat").write_text(f"{pid} (fixture) " + " ".join(fields))
+            uid = os.geteuid()
+            (folder / "status").write_text(f"Uid: {uid} {uid} {uid} {uid}\n")
+            (folder / "cmdline").write_bytes(b"fixture\0")
+            (folder / "environ").write_bytes(b"PRIVATE=never-export\0HEARTING_COMPUTE_RUN_ID=" + run_id.encode() + b"\0")
+        script = self.module.CLAIM_IDENTITY_SCRIPT.replace('Path("/proc")', f"Path({str(proc)!r})")
+        for content, expected in ((b"HEARTING_COMPUTE_RUN_ID=here-1\0", "here-1"), (b"", None)):
+            (proc / "321" / "environ").write_bytes(content)
+            result = subprocess.run(["sh"], input=script, text=True, capture_output=True,
+                                    env={**os.environ, "HEARTING_CLAIM_PID": "321"}, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            identity = json.loads(result.stdout)
+            self.assertEqual(identity["run_id"], expected)
+            self.assertNotIn("parent-run", result.stdout)
+            self.assertNotIn("PRIVATE", result.stdout)
+        (proc / "321" / "environ").unlink()
+        result = subprocess.run(["sh"], input=script, text=True, capture_output=True,
+                                env={**os.environ, "HEARTING_CLAIM_PID": "321"}, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unreadable", json.loads(result.stdout)["run_id_error"])
+
+
 class CompletionWatchTest(unittest.TestCase):
     """A run started from an interactive session tells that session once when it ends."""
 

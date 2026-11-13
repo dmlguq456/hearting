@@ -191,14 +191,62 @@ class JoinWithResourceAttentionTest(unittest.TestCase):
         return D.join_with_resource_attention(self.args, self.state, self.control, set(), self.join,
                                               clock=lambda: self.now[0], **kw)
 
-    def test_an_owner_holding_nothing_gets_the_one_original_join(self):
-        with mock.patch.object(D.resource_wait, "context", return_value=None):
+    def test_an_owner_holding_nothing_waits_the_same_total_in_pieces_without_a_look(self):
+        with mock.patch.object(D.resource_wait, "context", return_value=None) as context, \
+             mock.patch.object(D.resource_wait, "observe_once") as look:
             receipt = self.wrapped()({"att-child"})
-        self.assertEqual(self.calls, [100.0])
+        self.assertEqual(self.calls, [30.0, 30.0, 30.0, 10.0])
         self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(context.call_count, 1)
+        look.assert_not_called()
+        self.calls.clear()
         with mock.patch.object(D.resource_wait, "context", side_effect=ValueError("unreadable")):
             self.wrapped()({"att-child"})
-        self.assertEqual(self.calls, [100.0, 100.0])
+        self.assertEqual(sum(self.calls), 100.0)
+        # A wait with no deadline of its own is still the one join.
+        self.calls.clear()
+        self.args.join_timeout = 0
+        self.wrapped()({"att-child"})
+        self.assertEqual(self.calls, [0])
+
+    def test_a_pending_correction_ends_the_wait_at_the_next_checkpoint(self):
+        """Observation 5: the correction is not held behind the model children."""
+        arrived = []
+        self.control = SimpleNamespace(thread_id="native", pending=lambda: bool(arrived))
+        def join(args, attempts):
+            self.calls.append(args.join_timeout)
+            if len(self.calls) == 2:
+                arrived.append(True)  # the supervisor's `correct` lands during the second piece
+            return {"state": "timeout", "children": []}
+        for holds in (None, object()):
+            with self.subTest(holds=holds is not None):
+                self.calls.clear()
+                arrived.clear()
+                with mock.patch.object(D.resource_wait, "context", return_value=holds), \
+                     mock.patch.object(D.resource_wait, "observe_once",
+                                       return_value=D.resource_wait.WAITING) as look:
+                    with self.assertRaises(D.CorrectionReady) as caught:
+                        D.join_with_resource_attention(self.args, self.state, self.control, set(), join,
+                                                       clock=lambda: 0.0, check_seconds=30.0)({"att-child"})
+                self.assertEqual(self.calls, [30.0, 30.0])
+                self.assertEqual(look.call_count, 1 if holds is not None else 0)
+                self.assertIn("still running", caught.exception.prompt)
+                # caught where a resource receipt is, and never a delivery of the children
+                self.assertIsInstance(caught.exception, D.ResourceAttentionReady)
+                self.assertIsInstance(caught.exception, D.StopWaiting)
+        # A ready join wins over a correction that arrived meanwhile: the children are delivered.
+        arrived.append(True)
+        receipt = D.join_with_resource_attention(
+            self.args, self.state, self.control, set(),
+            lambda args, attempts: {"state": "ready", "children": []})({"att-child"})
+        self.assertEqual(receipt["state"], "ready")
+        # An unreadable channel is not a correction.
+        def broken():
+            raise OSError("input state unreadable")
+        self.control = SimpleNamespace(thread_id="native", pending=broken)
+        self.calls.clear()
+        with mock.patch.object(D.resource_wait, "context", return_value=None):
+            self.assertEqual(self.wrapped()({"att-child"})["state"], "timeout")
 
     def test_a_holder_not_read_yet_keeps_the_short_pieces_until_it_is_read(self):
         """RV-PR1602 finding 2: one transient read error is "not read yet", never "holds nothing"."""
@@ -214,13 +262,14 @@ class JoinWithResourceAttentionTest(unittest.TestCase):
         self.assertEqual(context.call_count, 3)
         self.assertEqual(look.call_count, len(self.calls) - 1)
 
-    def test_a_holder_read_later_as_holding_nothing_finishes_with_one_join(self):
+    def test_a_holder_read_later_as_holding_nothing_is_not_looked_at(self):
         unread = D.resource_wait.HolderUnobserved("registry-unobserved:OSError")
-        with mock.patch.object(D.resource_wait, "context", side_effect=[unread, None]), \
+        with mock.patch.object(D.resource_wait, "context", side_effect=[unread, None]) as context, \
              mock.patch.object(D.resource_wait, "observe_once") as look:
             receipt = self.wrapped(check_seconds=30.0)({"att-child"})
         self.assertEqual(receipt["state"], "timeout")
-        self.assertEqual(self.calls, [30.0, 70.0])
+        self.assertEqual(self.calls, [30.0, 30.0, 30.0, 10.0])
+        self.assertEqual(context.call_count, 2)
         look.assert_not_called()
 
     def test_held_resources_are_looked_at_between_pieces_of_the_same_total_wait(self):

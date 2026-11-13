@@ -103,6 +103,65 @@ class TransientRetryTest(unittest.TestCase):
         self.assertEqual([e["ordinal"] for e in starts], [1, 1, 2, 3, 4, 5])
         self.assertIn("completed real work", prompts[1])
 
+    def test_edge_block_retry_uses_the_shared_schedule_only_for_the_named_page(self):
+        terminal = self.supervisor.codex_turn_failure_terminal({
+            "codex_error_info": "unauthorized", "message": "403 Attention Required! | Cloudflare"})
+        policy = self.decisions.edge_block_retry_delay
+        self.assertEqual([policy(terminal, n) for n in range(6)], [60, 120, 240, 480, 960, None])
+        refused = self.supervisor.codex_turn_failure_terminal({"codex_error_info": "unauthorized"})
+        self.assertEqual(refused.note, "dead-auth")
+        self.assertIsNone(policy(refused, 0))
+        self.assertIsNone(policy(terminal, True))
+
+    def test_a_pending_correction_ends_the_wait_early(self):
+        clock = SimpleNamespace(now=0.0)
+        events = []
+        control = SimpleNamespace(pending=lambda: clock.now >= 5)
+
+        def sleep(seconds):
+            clock.now += seconds
+
+        outcome = self.decisions.wait_transient_retry(
+            60, control=control, emit=events.append, common={"ordinal": 1},
+            clock=lambda: clock.now, sleep=sleep)
+        self.assertEqual(outcome, "owner-input")
+        self.assertLess(clock.now, 6)
+        self.assertEqual([e["type"] for e in events], [
+            "dispatch.supervisor.transient-wait.started", "dispatch.supervisor.transient-wait.ended"])
+        clock.now = 0.0
+        self.assertEqual(self.decisions.wait_transient_retry(
+            2, control=None, emit=events.append, common={}, clock=lambda: clock.now, sleep=sleep),
+            "deadline")
+
+    def test_codex_retries_an_edge_block_turn_on_the_same_thread(self):
+        clock = SimpleNamespace(now=0.0)
+        events, calls = [], []
+        payload = {"turn_id": "turn-1", "codex_error_info": "unauthorized",
+                   "message": "unexpected status 403 Forbidden: Attention Required! | Cloudflare"}
+
+        def once(server, *, thread_id, prompt, args, activity=None):
+            calls.append(thread_id)
+            if len(calls) == 1:
+                raise self.supervisor.TurnFailed(payload)
+            return "done", None
+
+        def sleep(seconds):
+            clock.now += max(seconds, 60)
+
+        with mock.patch.object(self.supervisor, "_run_turn_once", side_effect=once), \
+             mock.patch.object(self.supervisor, "emit", side_effect=events.append):
+            result = self.supervisor.run_turn(SimpleNamespace(), thread_id="thread-e", prompt="p",
+                args=SimpleNamespace(owner_input=None), clock=lambda: clock.now, sleep=sleep)
+        self.assertEqual((result[0], calls), ("done", ["thread-e", "thread-e"]))
+        self.assertEqual(events[0]["reason_code"], "transient-edge-block")
+        refused = dict(payload, message="403 Forbidden")
+        with mock.patch.object(self.supervisor, "_run_turn_once",
+                               side_effect=self.supervisor.TurnFailed(refused)), \
+             mock.patch.object(self.supervisor, "emit"):
+            with self.assertRaises(self.supervisor.TurnFailed):
+                self.supervisor.run_turn(SimpleNamespace(), thread_id="thread-f", prompt="p",
+                    args=SimpleNamespace(owner_input=None), clock=lambda: clock.now, sleep=sleep)
+
     def test_non_transient_and_account_limit_keep_existing_failure(self):
         usage = self.supervisor.codex_turn_failure_terminal({
             "codex_error_info": {"kind": "usageLimitExceeded"}})

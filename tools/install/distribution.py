@@ -3224,7 +3224,7 @@ def _route_registry_index(text: str) -> dict:
                 and metadata.get("failure_class") == "fail")
             # Same columns as `dispatch_supervisor_terminal.runtime_ended_without_result`:
             # the supervisor recorded a runtime end, whatever the harness named the reason.
-            or ((metadata.get("note") in {"dead-runtime-exit", "dead-runtime-error"}
+            or ((metadata.get("note") in {"dead-runtime-exit", "dead-runtime-error", "dead-auth"}
                  or (metadata.get("terminal_event") == "dispatch.supervisor.error"
                      and metadata.get("failure_class") in {"runtime", "protocol"}))
                 and metadata.get("launch_started") == "1"
