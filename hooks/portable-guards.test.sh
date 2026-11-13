@@ -2348,6 +2348,8 @@ fi
 # the byte figures themselves are not asserted -- pinning them made this case
 # red on every legitimate bootstrap edit (a 7467 -> 8321 byte drift reddened
 # it while the census was unchanged), which is noise, not a regression signal.
+# The shared LAB guidance adds the Codex bootstrap baseline warning (21 -> 22);
+# the one-sentence addition is intentional, with no new worker/router surfaces.
 if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --skip-hooks >"$TMP/context_footprint.out" 2>"$TMP/context_footprint.err" \
   && grep -q '^context_footprint_report=1' "$TMP/context_footprint.out" \
   && grep -q '^surface=codex-plugin ' "$TMP/context_footprint.out" \
@@ -2357,7 +2359,7 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
   && grep -q '^unit-family=qa ' "$TMP/context_footprint.out" \
   && ! grep -q '^surface=native-bootstrap-agent-modes' "$TMP/context_footprint.out" \
   && { grep -q '^status=ok' "$TMP/context_footprint.out" \
-    || python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); warnings=re.findall(r"^warning=.+$",text,re.M); status=re.search(r"^status=warn warnings=([0-9]+)$",text,re.M); assert status and int(status[1]) == len(warnings) and len(warnings) <= 21' "$TMP/context_footprint.out"; }; then
+    || python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); warnings=re.findall(r"^warning=.+$",text,re.M); status=re.search(r"^status=warn warnings=([0-9]+)$",text,re.M); assert status and int(status[1]) == len(warnings) and len(warnings) <= 22' "$TMP/context_footprint.out"; }; then
   ok "context-footprint reports bootstrap and skill metadata without runtime hooks"
 else
   bad "context-footprint should report deterministic metadata footprint"

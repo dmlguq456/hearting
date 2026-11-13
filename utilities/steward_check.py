@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -458,9 +459,56 @@ def _pending_count(module, harness: str, session_id) -> int:
                 and (row.get("from") or {}).get("harness") != "runtime"])
 
 
+def _observe_lab(cwds) -> dict:
+    """One shared board read per target artifact root; optional, read-only evidence."""
+    if not cwds:
+        return {}
+    try:
+        from fleet.collectors.project_status import artifact_root
+        roots = {root for cwd in sorted(cwds) if (root := artifact_root(cwd))}
+        if not roots:
+            return {}
+        import experiment_board
+        import experiment_catalog
+    except Exception:  # noqa: BLE001 - LAB must not disable the existing check
+        return {}
+    lab = {}
+    for root in sorted(roots):
+        try:
+            if not experiment_catalog.catalog_path(Path(root)).is_file():
+                continue
+            board, _ = experiment_board.read(Path(root))
+            if not board["visible"] or board["catalog"]["status"] != "ok":
+                continue
+            groups = []
+            for group in board["groups"]:
+                headline = group["headline"]
+                groups.append({"name": group["name"],
+                               **{key: group["counts"][key] for key in ("failed", "stagnant", "unknown")},
+                               "headline_name": headline["name"]})
+            lab[root] = {**{key: board["totals"][key] for key in ("failed", "stagnant", "unknown")},
+                         "unlinked": board["unlinked"]["count"], "groups": groups}
+        except Exception:  # noqa: BLE001 - missing/broken optional evidence changes no duty behavior
+            continue
+    return lab
+
+
+def _lab_line(observation: dict) -> str:
+    parts = []
+    for lab in (observation.get("lab") or {}).values():
+        groups = lab["groups"] or [{"name": None, "headline_name": None, **lab}]
+        for group in groups:
+            parts.append(f"{group['name'] or '-'} — 실패 {group['failed']}·정체 {group['stagnant']}"
+                         f"·미확인 {group['unknown']}, 지금 볼 것: {group['headline_name'] or '-'}")
+        if lab["unlinked"]:
+            parts[-1] += f", 미연결 {lab['unlinked']}"
+    return "LAB: " + "; ".join(parts) if parts else ""
+
+
 def _observe_role(harness: str, session_id: str) -> dict:
     """``{"targets": [{name, harness, session_id, state, liveness, owed}],
-    "pending_messages": n, "open_work": [headline, ...], "user_decisions": [headline, ...]}``
+    "pending_messages": n, "open_work": [headline, ...], "user_decisions": [headline, ...],
+    "lab": {root: counts_and_group_names}}``
     for this holder's own winner targets only; ``owed`` and ``pending_messages`` count peer
     requests queued but not yet delivered to that target or to the holder."""
     collector = _collector()
@@ -469,6 +517,7 @@ def _observe_role(harness: str, session_id: str) -> dict:
     except Exception:  # noqa: BLE001
         module = None
     targets = []
+    cwds = set()
     agents = ()
     observation = _end_observation()
     if collector is not None:
@@ -488,6 +537,14 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 agent = None
             if target.get("unresolved"):
                 agent = None
+            if not target.get("unresolved"):
+                directories = {row.cwd for row in rows if getattr(row, "cwd", None)
+                               and getattr(row, "harness", None) == t_harness
+                               and t_sid in (getattr(row, "session_id", None),
+                                             *(getattr(row, "session_aliases", None) or ()))}
+                if not directories and (agent or {}).get("cwd"):
+                    directories.add(agent["cwd"])
+                cwds.update(directories)
             state = (agent or {}).get("agent_status") or "unknown"
             targets.append({
                 "name": str(target.get("name") or (t_sid or "-")[:8]),
@@ -500,7 +557,7 @@ def _observe_role(harness: str, session_id: str) -> dict:
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
     return {"targets": targets, "pending_messages": pending,
-            "open_work": work, "user_decisions": decisions}
+            "open_work": work, "user_decisions": decisions, "lab": _observe_lab(cwds)}
 
 
 def _queued_for(target: dict) -> int:
@@ -580,6 +637,15 @@ def _signature(action: str, observation: dict) -> str:
     raw = repr((action, rows, observation["pending_messages"],
                 tuple(observation.get("open_work") or ()),
                 tuple(observation.get("user_decisions") or ())))
+    if observation.get("lab"):
+        # Keep the board's actual headline for display, but a healthy best-name change
+        # is new-result news, not a change in this duty's attention evidence.
+        lab = {root: {**summary, "groups": [
+            {**group, "headline_name": group["headline_name"] if any(
+                group[key] for key in ("failed", "stagnant", "unknown")) else None}
+            for group in summary["groups"]]}
+            for root, summary in observation["lab"].items()}
+        raw += json.dumps(lab, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -881,6 +947,14 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         text = _actions_text(next_actions(seen, waiting_since, now))
     else:
         text = TEXT_RUN_CHECK
+    lab_line = _lab_line(seen)
+    if lab_line:
+        import session_notice
+        # Leave room for the existing advice and keep LAB visible within the carrier budget.
+        lab_line = lab_line if len(lab_line) <= 250 else lab_line[:249] + "…"
+        budget = session_notice.MAX_TEXT - len(lab_line) - 1
+        text = text if len(text) <= budget else text[:budget - 1] + "…"
+        text += "\n" + lab_line
     cycle = int(observation.get("cycle") or 0)
     key = _notice_key(harness, session_id, observation["epoch"], cycle)
     delivery_id = _delivery_id(key)

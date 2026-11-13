@@ -127,6 +127,156 @@ class CheckBase(unittest.TestCase):
         return out.getvalue()
 
 
+
+class StewardCheckLabTest(CheckBase):
+    """Real catalog/board, synthetic roots only; no native model or live check."""
+
+    def setUp(self):
+        super().setUp()
+        import experiment_board as board
+        import experiment_catalog as catalog
+        spec = importlib.util.spec_from_file_location("lab_catalog_fixture", HERE / "experiment_catalog.test.py")
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        self.fixture = fixture.Base()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.board, self.catalog = board, catalog
+        board.clear_cache()
+        self.addCleanup(board.clear_cache)
+        self.root = self.fixture.make_root()
+        self.now = fixture.NOW
+        self.fixture.register(self.root, {"groups": [fixture.group_spec()], "conditions": [
+            {"display_name": name, "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": rid}]}}
+            for name, rid in (("작은 모델", "small"), ("큰 모델", "large"))]})
+        self.write_run("small", 20.0)
+        self.write_run("large", 21.0)
+        self.targets = [target("a", state="done"), target("b", state="done")]
+        self.rows = [SimpleNamespace(harness=t["harness"], session_id=t["session_id"],
+                                     cwd=str(self.root.parent)) for t in self.targets]
+        self.collector = SimpleNamespace(
+            _registry_sessions=lambda: self.rows, role_targets=lambda *a, **kw: self.targets,
+            _peer_message_module=lambda: None)
+        for patch in (
+            mock.patch.object(SC, "_collector", return_value=self.collector),
+            mock.patch.object(SC, "_observe_role", side_effect=REAL_OBSERVE),
+            mock.patch.object(SC, "_end_observation", return_value=None),
+            mock.patch.object(SC, "_open_work", return_value=([], [])),
+            mock.patch("peer_steward_native.native_agent", return_value={"result": {"agent": {"agent_status": "done"}}}),
+            mock.patch.object(board.time, "time", return_value=self.now)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def write_run(self, rid, value):
+        self.fixture.write_run(self.root, rid, series={"wer": [(12, value)]},
+                               stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+
+    def test_lab_change_notice_repeat_quiet_for_each_harness(self):
+        from harness_capabilities import parent_completion
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                sid = "lab-" + harness
+                duty = SC.register(harness, sid, now=T0, store=self.store, ensure_runner=False)
+                def step(now):
+                    SC.advance(self.store.get(duty["id"]), self.store, now=now)
+                    return self.store.get(duty["id"])["observation"]
+                def ack():
+                    claimed, _ = sweep.sweep_deliver(self.tmp, parent_completion(harness)["carrier"], sid)
+                    self.assertEqual(sweep.ack_delivered(self.tmp, sid, claimed, acked_by="test"), 1)
+                step(T0 + INTERVAL)
+                ack()
+                step(T0 + INTERVAL + 100)
+                before = self.notify.call_count
+                with mock.patch.object(self.board, "read", wraps=self.board.read) as read:
+                    step(T0 + 2 * INTERVAL + 100)
+                self.assertEqual(read.call_count, 1)  # two target cwd values, one root
+                self.assertEqual(self.notify.call_count, before)
+                self.fixture.write_run(self.root, "small", at=self.now - 1000,
+                                       stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+                step(T0 + 3 * INTERVAL + 100)
+                self.assertEqual(self.notify.call_count, before + 1)
+                notice = self.notice()
+                self.assertIn("LAB: AMI 가변 화자 개선 — 실패 0·정체 0·미확인 1", notice["text"])
+                self.assertIn("지금 볼 것: 작은 모델", notice["text"])
+                self.assertNotIn("20.4", notice["text"])
+                ack()
+                step(T0 + 3 * INTERVAL + 200)
+                result = step(T0 + 4 * INTERVAL + 200)
+                self.assertEqual(result["reason"], "quiet-no-change")
+                self.assertEqual(self.notify.call_count, before + 1)
+                self.write_run("small", 20.0)
+
+    def test_only_new_values_even_new_best_name_do_not_change_signature(self):
+        self.assertEqual(self.board.read(self.root)[0]["groups"][0]["headline"]["name"], "작은 모델")
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.deliver_and_ack()
+        self.step(T0 + INTERVAL + 100)
+        self.write_run("large", 18.0)  # changes board headline from small to large
+        self.assertEqual(self.board.read(self.root)[0]["groups"][0]["headline"]["name"], "큰 모델")
+        self.assertEqual(REAL_OBSERVE(HARNESS, SID)["lab"][str(self.root)]["groups"][0]["headline_name"], "큰 모델")
+        result = self.step(T0 + 2 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 1)
+        self.assertEqual(result["observation"]["reason"], "quiet-no-change")
+
+    def test_missing_root_catalog_and_broken_catalog_keep_existing_observation(self):
+        for kind in ("missing-root", "missing-catalog", "broken"):
+            with self.subTest(kind=kind):
+                root = self.fixture.base / kind / ".agent_reports"
+                root.parent.mkdir()
+                if kind != "missing-root":
+                    root.mkdir()
+                if kind == "broken":
+                    path = self.catalog.catalog_path(root)
+                    path.parent.mkdir(parents=True)
+                    path.write_text("{broken")
+                for row in self.rows:
+                    row.cwd = str(root.parent)
+                seen = REAL_OBSERVE(HARNESS, SID)
+                self.assertFalse(seen.get("lab"))
+                self.assertEqual(SC._classify(seen), "tidy-and-release")
+                old = {k: v for k, v in seen.items() if k != "lab"}
+                self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature("tidy-and-release", old))
+
+    def test_counts_from_board_and_unlinked_changes_are_observed(self):
+        self.fixture.write_run(self.root, "small", status="failed")
+        self.fixture.write_run(self.root, "large", stagnation={"state": "stagnant", "seconds_since_anchor": 9000.0})
+        self.write_run("unlinked", 12.3)
+        seen = REAL_OBSERVE(HARNESS, SID)
+        lab = seen["lab"][str(self.root)]
+        self.assertEqual({key: lab[key] for key in ("failed", "stagnant", "unknown", "unlinked")},
+                         {"failed": 1, "stagnant": 1, "unknown": 0, "unlinked": 1})
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.assertIn("미연결 1", self.notice()["text"])
+        self.assertIn("지금 볼 것: 작은 모델", self.notice()["text"])
+        self.write_run("unlinked-two", 11.0)
+        after = REAL_OBSERVE(HARNESS, SID)
+        self.assertNotEqual(SC._signature("tidy-and-release", seen), SC._signature("tidy-and-release", after))
+
+    def test_multiple_roots_and_notice_budget(self):
+        second = self.fixture.make_root("second")
+        spec = {"groups": [{"display_name": "둘째 묶음"}], "conditions": [
+            {"display_name": "미확인 조건", "group": "둘째 묶음", "refs": {"runs": [{"run_id": "missing"}]}}]}
+        self.fixture.register(second, spec)
+        self.rows[1].cwd = str(second.parent)
+        with mock.patch.object(self.board, "read", wraps=self.board.read) as read:
+            seen = REAL_OBSERVE(HARNESS, SID)
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(set(seen["lab"]), {str(self.root), str(second)})
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.assertIn("둘째 묶음 — 실패 0·정체 0·미확인 1", self.notice()["text"])
+        self.assertLessEqual(len(self.notice()["text"]), session_notice.MAX_TEXT)
+
+    def test_foreign_registry_rows_are_never_read(self):
+        self.rows.append(SimpleNamespace(harness="claude", session_id="foreign", cwd="/not-a-target"))
+        from fleet.collectors import project_status
+        with mock.patch.object(project_status, "artifact_root", wraps=project_status.artifact_root) as resolve:
+            REAL_OBSERVE(HARNESS, SID)
+        self.assertEqual([call.args[0] for call in resolve.call_args_list], [str(self.root.parent)])
+
+
 class StewardCheckScheduleTest(CheckBase):
     def test_default_interval_is_two_hours(self):
         self.assertEqual(SC.interval_seconds(), INTERVAL)
