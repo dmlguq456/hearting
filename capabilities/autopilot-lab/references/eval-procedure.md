@@ -60,7 +60,8 @@ The user runs heavy evaluation. For an explicit lightweight request such as `가
 
 For a matrix, the default plan queues each completed row's decision-metric
 evaluation on the existing approved queue while the next row trains, then updates
-the leaderboard artifact. Successive halving is a default option for many rows.
+the leaderboard artifact (`python3 utilities/experiment_catalog.py leaderboard`; see
+`outputs-and-examples.md`). Successive halving is a default option for many rows.
 Known metric/proxy/rules/time budget/baselines remain optional; long CPU scoring or
 inference may publish `write_progress(done, "item", total=n)` for an earlier ETA.
 
