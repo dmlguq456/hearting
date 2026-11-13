@@ -135,6 +135,17 @@ class GrantFixture(unittest.TestCase):
 
 
 class GrantLimitTest(GrantFixture):
+    def test_limited_names_only_counted_holders_and_never_shows_seat_hash(self):
+        holders = [dict(name=name, harness='claude', session_id=name, counted=counted,
+                        seat_key='0123456789abcdef', liveness=live)
+                   for name, counted, live in (('current', True, 'live'),
+                       ('uncertain', True, 'unknown'), ('ended', False, 'ended'),
+                       ('prior-seat', False, 'unknown'))]
+        line = peer_message.format_steward_limited(dict(holders=holders, counted=2, limit=2))
+        self.assertIn('holders=current,uncertain limit=2', line.splitlines()[0])
+        self.assertNotIn('0123456789abcdef', line)
+        self.assertNotIn('seat=', line)
+
     def fill(self, *sids, cwd=None):
         for sid in sids:
             self.session(sid, cwd or self.primary)

@@ -4731,8 +4731,7 @@ def format_steward_census(result):
         lines.append(f"holder={holder.get('harness')}:{holder.get('session_id')} "
                      f"liveness={holder.get('liveness', 'unknown')} "
                      f"reason={holder.get('count_reason', 'unknown')} "
-                     f"last_activity={holder.get('last_activity') or '-'} activity_basis=role-marker "
-                     f"seat={holder.get('seat_key') or '-'}")
+                     f"last_activity={holder.get('last_activity') or '-'} activity_basis=role-marker")
     return "\n".join(lines)
 
 
@@ -4740,6 +4739,8 @@ def format_steward_limited(result):
     """One line for a refused grant: ``steward=limited repo=<name> holders=<a,b> limit=<n>``."""
     names = []
     for holder in result.get("holders") or ():
+        if not holder.get("counted"):
+            continue
         names.append(holder.get("name") or
                      f"{holder.get('harness') or 'unknown'}:{str(holder.get('session_id') or '-')[:8]}")
     return (f"steward=limited repo={result.get('repository') or '-'} "
@@ -5320,6 +5321,36 @@ def _steward_process_evidence(harness, session_id):
         return None
 
 
+def _steward_ending_process(harness, session_id):
+    """Bind an end hook to its own runtime, never another window's registry row."""
+    try:
+        import pane_ownership
+        import session_shell
+        context = _steward_process_context()
+        pid = os.getppid()
+        for _ in range(16):
+            before = pane_ownership._process(pid)
+            if not before:
+                break
+            if pane_ownership._native_user_tui(pid, harness):
+                if (os.readlink(f"/proc/{pid}/ns/pid") == context["pid_namespace"]
+                        and pane_ownership._process(pid) == before):
+                    return dict(context, pid=pid, pid_start=str(before[5]))
+                return None
+            pid = before[1]
+        binding, _reason = session_shell.exact_binding(harness, session_id)
+        if binding:
+            pid, birth = int(binding["native_pid"]), str(binding["native_start"])
+            before = pane_ownership._process(pid)
+            if (before and str(before[5]) == birth
+                    and os.readlink(f"/proc/{pid}/ns/pid") == context["pid_namespace"]
+                    and pane_ownership._process(pid) == before):
+                return dict(context, pid=pid, pid_start=birth)
+    except Exception:
+        pass
+    return None
+
+
 def _steward_marker(harness, session_id):
     try:
         marker = json.loads(steward_marker_path(harness, session_id).read_text())
@@ -5358,6 +5389,8 @@ def _write_steward_lifetime(harness, session_id, *, ended=None, process=None):
             return
         if ended is not None:
             marker["session_end"] = {"reason": ended, "at": time.time()}
+            if process:
+                marker["session_end"]["process"] = process
         else:
             marker.pop("session_end", None)
             # An old dead process must never stand for a resumed instance.
@@ -5381,7 +5414,9 @@ def observe_steward_end(harness, session_id, *, reason):
             or reason in {"clear", "cleared", "compact", "compaction"}):
         return
     try:
-        _write_steward_lifetime(harness, session_id, ended=reason)
+        _write_steward_lifetime(harness, session_id, ended=reason,
+                                process=_steward_ending_process(harness, session_id)
+                                if harness != "codex" else None)
     except Exception:
         pass  # End hooks never prevent exit; the normal check retries observation.
 
@@ -5406,12 +5441,18 @@ def observe_steward_resume(harness, session_id):
         pass
 
 
-def steward_session_end_proof(harness, session_id):
+def steward_session_end_proof(harness, session_id, *, observation=None):
     """Ended only from native SessionEnd or an exact, locally fenced process birth."""
     marker = _steward_marker(harness, session_id) or {}
-    if marker.get("session_end"):
+    receipt = marker.get("session_end")
+    process = receipt.get("process") if isinstance(receipt, dict) else marker.get("session_process")
+    if harness != "codex" and (receipt or process):
+        fleet = _fleet_steward()
+        if fleet and fleet.other_session_process_live(harness, session_id, process,
+                                                      observation=observation):
+            return "live"
+    if receipt:
         return "ended"
-    process = marker.get("session_process")
     if (not isinstance(process, dict) or not all(process.get(key) for key in
             ("host", "boot_id", "pid_namespace", "pid", "pid_start"))
             or type(process.get("pid")) is not int or process["pid"] <= 1):

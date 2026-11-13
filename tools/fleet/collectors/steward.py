@@ -727,6 +727,76 @@ def _process_proof(harness, session_id, observation):
     return "unknown"
 
 
+def other_session_process_live(harness, session_id, ended_process, *, observation=None):
+    """Positive ownership outside the process named by a lifetime receipt.
+
+    A stale claim from the exiting process (including a /resume elsewhere) is
+    not a second holder. The native census implementations remain unchanged.
+    """
+    from . import liveness, procscan
+    observation = end_observation() if observation is None else observation
+    ended_process = ended_process if isinstance(ended_process, dict) else {}
+    try:
+        mod = _peer_message_module()
+        context = mod._steward_process_context()
+        same_context = all(ended_process.get(key) == value for key, value in context.items())
+    except (OSError, AttributeError):
+        same_context = False
+
+    def other(pid, birth):
+        return not (same_context and pid == ended_process.get("pid")
+                    and str(birth) == ended_process.get("pid_start"))
+
+    # Read every record: the first SID match may be the exiting process itself.
+    for record in _registry_records(harness) or ():
+        pid, birth = record.get("pid"), record.get("procStart")
+        if (record.get("sessionId") == session_id and record.get("status") != "exited"
+                and type(pid) is int and birth and other(pid, birth)):
+            alive, match = liveness._proc_evidence(pid, birth)
+            if alive and match is True:
+                return True
+    if _process_proof(harness, session_id, observation) != "live":
+        return False
+    # An unbound/legacy receipt cannot disprove a current native holder.
+    if not same_context:
+        return True
+    alive, match = liveness._proc_evidence(ended_process.get("pid"), ended_process.get("pid_start"))
+    if not alive or match is False:
+        return True
+    pids = procscan._visible_pids()
+    if pids is None:
+        return False
+    if harness == "opencode":
+        from . import opencode
+        seen = opencode.session_visibility(pids=[pid for pid in pids
+            if other(pid, procscan.read_proc_start(pid))])
+        return bool(seen and session_id in seen["visible"])
+    if harness == "claude":
+        import claude_process_identity as identity
+        # The census supplies session-level evidence. Resolve its other process
+        # claims with the same native/argv/tap readers, excluding this birth.
+        for pid in pids:
+            process = identity.observe_process(pid)
+            if not process or process["kind"] != "runtime" or not other(pid, process["proc_start"]):
+                continue
+            env = procscan.read_environ(pid)
+            home = env.get("CLAUDE_CONFIG_DIR") or str(Path(env.get("HOME", "")) / ".claude")
+            if not Path(home).is_absolute():
+                continue
+            try:
+                native, valid = identity._native_session_claim(Path(home), str(pid), process["proc_start"])
+                claims = identity._argument_sessions(process["argv"])
+                if valid:
+                    claims.update(identity.tap_sids_by_pid(home, pid, process["proc_start"]))
+                    if native:
+                        claims.add(native)
+                if session_id in claims and identity.observe_process(pid) == process:
+                    return True
+            except (OSError, ValueError):
+                continue
+    return False
+
+
 def session_liveness(harness, session_id, *, agents=None, observation=None):
     """``"live"`` | ``"ended"`` | ``"unknown"``. Only proof of exit says ``ended``:
     a herdr row means live; Claude, Codex and OpenCode then answer from the processes that
@@ -738,8 +808,10 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
         return "unknown"
     mod = _peer_message_module()
     end_proof = getattr(mod, "steward_session_end_proof", None)
-    if end_proof is not None and end_proof(harness, session_id) == "ended":
-        return "ended"
+    if end_proof is not None:
+        proof = end_proof(harness, session_id, observation=observation)
+        if proof in {"live", "ended"}:
+            return proof
     if agents is None:
         try:
             from . import herdr

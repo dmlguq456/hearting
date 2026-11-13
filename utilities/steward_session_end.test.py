@@ -34,6 +34,130 @@ class SessionEndTest(f.GrantFixture):
                 self.assertTrue(f.fleet_steward.role_flag(harness, sid, sessions=self.rows))
                 f.peer_message.observe_steward_end(harness, sid, reason='logout')
 
+    def test_other_registry_process_keeps_watch_for_three_harnesses(self):
+        import subprocess
+        from types import SimpleNamespace
+        from fleet import session_registry
+        from fleet.collectors import procscan, codex
+        import dispatch_seat_handover as handover
+        import peer_obligations
+        sc = f._load('steward_check_duplicate_end', 'steward_check.py')
+        store = peer_obligations.ObligationStore(f.peer_message.peer_state_root())
+        for harness in ('claude', 'opencode', 'codex'):
+            with self.subTest(harness=harness):
+                sid = harness + '-duplicate'
+                self.session(sid, self.primary, harness)
+                f.peer_message.grant_steward(harness, sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                             source='explicit', steward_seat=None)
+                second = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+                try:
+                    birth = procscan.read_proc_start(second.pid)
+                    directory = Path(session_registry._dir_for(harness))
+                    directory.mkdir(parents=True, exist_ok=True)
+                    record = directory / (str(second.pid) + '.json')
+                    record.write_text(json.dumps(dict(pid=second.pid, procStart=birth,
+                        sessionId=sid, cwd=str(self.primary), kind='interactive')))
+                    duty = sc.register(harness, sid, store=store, ensure_runner=False)
+                    if harness == 'codex':
+                        # Codex already rejects a delayed unload while a new TUI owns it.
+                        hook = f._load('codex_duplicate_end', '../adapters/codex/hooks/sessionend-lifecycle.py')
+                        with mock.patch.object(hook, 'load_payload', return_value={'session_id':sid}), \
+                             mock.patch.object(codex, 'process_for_thread', return_value=(second.pid, birth)), \
+                             mock.patch('session_summary_trigger.launch_trigger'):
+                            self.assertEqual(hook.main(), 0)
+                    else:
+                        f.peer_message.observe_steward_end(harness, sid, reason='logout')
+                    settled = []
+                    fake = SimpleNamespace(settle_steward_exited_watch=lambda wid: settled.append(wid) or True)
+                    with mock.patch.object(handover, 'resolved_watch_references', return_value=[
+                            {'watch_id':'duplicate-watch', 'storage_root':str(f.peer_message.peer_state_root())}]), \
+                         mock.patch.object(f.peer_message, '_peer_steward_module', return_value=fake), \
+                         mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message):
+                        released = sc._release_if_window_closed(duty, store, harness, sid, 1e10)
+                    actual = (f.fleet_steward.session_liveness(harness, sid, agents=()),
+                              released, len(settled), store.get(duty['id'])['state'])
+                    print('duplicate-process', harness, actual, flush=True)
+                    self.assertEqual(actual, ('live', False, 0, 'pending'))
+                    self.assertTrue(f.fleet_steward.role_flag(harness, sid, sessions=self.rows))
+                finally:
+                    second.kill(); second.wait()
+                    record.unlink(missing_ok=True)
+                    f.peer_message.observe_steward_end(harness, sid, reason='logout')
+
+    def test_end_receipt_records_exact_shell_process(self):
+        import session_shell
+        from fleet.collectors import procscan
+        self.session('owner', self.primary)
+        self.grant('owner')
+        birth = procscan.read_proc_start(os.getpid())
+        binding = {'native_pid':os.getpid(), 'native_start':birth}
+        with mock.patch.object(session_shell, 'exact_binding', return_value=(binding, '')):
+            f.peer_message.observe_steward_end('claude', 'owner', reason='logout')
+        end = json.loads(f.peer_message.steward_marker_path('claude', 'owner').read_text())['session_end']
+        self.assertEqual((end['process']['pid'], end['process']['pid_start']), (os.getpid(), birth))
+
+    def test_same_process_stale_record_does_not_resurrect_ended_session(self):
+        from fleet.collectors import procscan
+        self.session('owner', self.primary)
+        self.grant('owner')
+        process = dict(f.peer_message._steward_process_context(), pid=os.getpid(),
+                       pid_start=procscan.read_proc_start(os.getpid()))
+        with mock.patch.object(f.peer_message, '_steward_ending_process', return_value=process):
+            f.peer_message.observe_steward_end('claude', 'owner', reason='logout')
+        record = dict(pid=process['pid'], procStart=process['pid_start'], sessionId='owner')
+        with mock.patch.object(f.fleet_steward, '_registry_records', return_value=[record]), \
+             mock.patch.object(f.fleet_steward, '_process_proof', return_value='live'), \
+             mock.patch.object(procscan, '_visible_pids', return_value={os.getpid()}):
+            self.assertEqual(f.peer_message.steward_session_end_proof('claude', 'owner'), 'ended')
+
+    def test_native_holders_override_only_outside_ending_process(self):
+        from fleet.collectors import procscan, opencode
+        import claude_process_identity as identity
+        process = dict(f.peer_message._steward_process_context(), pid=os.getpid(),
+                       pid_start=procscan.read_proc_start(os.getpid()))
+        other = os.getpid() + 100000
+        claim = dict(pid=other, proc_start='123', kind='runtime', argv=['claude', '--resume', 'owner'])
+        for harness in ('claude', 'opencode'):
+            for has_other in (False, True):
+                with self.subTest(harness=harness, has_other=has_other), \
+                     mock.patch.object(f.fleet_steward, '_registry_records', return_value=[]), \
+                     mock.patch.object(f.fleet_steward, '_process_proof', return_value='live'), \
+                     mock.patch.object(procscan, '_visible_pids', return_value={os.getpid(), other}), \
+                     mock.patch.object(procscan, 'read_proc_start', side_effect=lambda pid: process['pid_start'] if pid == os.getpid() else '123'), \
+                     mock.patch.object(procscan, 'read_environ', return_value={'HOME':str(self.base)}), \
+                     mock.patch.object(identity, 'observe_process', side_effect=lambda pid: claim if pid == other and has_other else None), \
+                     mock.patch.object(identity, '_native_session_claim', return_value=(None, True)), \
+                     mock.patch.object(identity, 'tap_sids_by_pid', return_value=set()), \
+                     mock.patch.object(identity, '_argument_sessions', return_value={'owner'}), \
+                     mock.patch.object(opencode, 'session_visibility', side_effect=lambda pids: {'visible':{'owner'} if other in pids and has_other else set()}):
+                    self.assertEqual(f.fleet_steward.other_session_process_live(harness, 'owner', process), has_other)
+
+    def test_end_hooks_finish_existing_work_before_steward_import_failure(self):
+        import builtins
+        import io
+        from fleet import interaction
+        for harness, filename in (
+                ('claude', '../hooks/fleet-interaction-state.py'),
+                ('codex', '../adapters/codex/hooks/sessionend-lifecycle.py')):
+            with self.subTest(harness=harness):
+                hook = f._load(harness + '_end_order', filename)
+                calls = []
+                real_import = builtins.__import__
+                def failing_import(name, *args, **kwargs):
+                    if name == 'peer_steward_base':
+                        calls.append('steward')
+                        raise ImportError('fixture')
+                    return real_import(name, *args, **kwargs)
+                payload = json.dumps({'session_id':'order', 'hook_event_name':'SessionEnd'})
+                with mock.patch.object(sys, 'stdin', io.StringIO(payload)), \
+                     mock.patch.object(sys, 'argv', ['hook', 'clear']), \
+                     mock.patch.object(interaction, 'clear_wait', side_effect=lambda *a, **k: calls.append('clear')), \
+                     mock.patch('session_summary_trigger.launch_trigger', side_effect=lambda *a: calls.append('summary')), \
+                     mock.patch('builtins.__import__', side_effect=failing_import):
+                    self.assertEqual(hook.main(), 0)
+                self.assertEqual(calls, ['clear', 'steward'] if harness == 'claude'
+                                 else ['clear', 'summary', 'steward'])
+
     def test_clear_and_compact_leave_role_and_watch_untouched(self):
         self.session('owner', self.primary)
         self.grant('owner')
