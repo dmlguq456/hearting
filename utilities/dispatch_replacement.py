@@ -23,7 +23,7 @@ from typing import Callable
 
 import dispatch_contract as DC
 from artifact_receipt import _write_once
-from dispatch_registry_cache import registry_lines, registry_view
+from dispatch_registry_cache import demand_replacement_rows, registry_lines, registry_view
 import route_authority
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -158,27 +158,41 @@ def _rows(lines):
     return {aid: (lines[index].split('\t'), dict(meta)) for aid, (index, meta) in cached.items()}
 
 
-_REGISTRY_ROWS_MEMO = [None, None]
+_REGISTRY_ROWS_MEMO = [None, None, None]
 
 
 def registry_rows(jobs):
     """Read-only rows by attempt id of one registry file, parsed once per file generation.
 
-    For lookups that never change the rows (Fleet's per-tick notice checks): an
-    unchanged file (same device, inode, size, mtime and ctime) is not read, split or
-    copied again. Callers must not mutate the returned rows."""
+    For lookups that never change the rows (Fleet's per-tick notice checks). The
+    rows come from the shared registry view, so a generation another reader already
+    parsed is not split or parsed again, and a rewrite that kept the leading rows
+    keeps their rows. A file the view cannot answer exactly as ``read_text`` would
+    (other line separators, invalid UTF-8) is read and parsed as text, memoized by
+    its stat. Callers must not mutate the returned rows."""
     path = Path(jobs)
+    demand_replacement_rows()
+    view = registry_view(path)
+    found = view.replacement_rows()
+    if found is not None:
+        memo_key, rows, duplicate = _REGISTRY_ROWS_MEMO
+        if memo_key is not view:
+            rows, duplicate = found
+            _REGISTRY_ROWS_MEMO[:] = [view, rows, duplicate]
+        if duplicate is not None:
+            raise DC.DispatchContractError('replacement-attempt-ambiguous', duplicate)
+        return rows
     before = path.stat()
     key = (str(path), before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
            before.st_ctime_ns)
-    memo_key, cached = _REGISTRY_ROWS_MEMO
+    memo_key, cached, _duplicate = _REGISTRY_ROWS_MEMO
     if cached is not None and memo_key == key:
         return cached
     cached = _parse_rows(path.read_text(encoding='utf-8').splitlines())
     after = path.stat()
     if (str(path), after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
             after.st_ctime_ns) == key:
-        _REGISTRY_ROWS_MEMO[:] = [key, cached]
+        _REGISTRY_ROWS_MEMO[:] = [key, cached, None]
     return cached
 
 

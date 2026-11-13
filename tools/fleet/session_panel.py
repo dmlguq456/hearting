@@ -299,7 +299,7 @@ def doer_paint(row, cells=None):
         shown.update(harness=harness, harness_key="hb_" + harness)
     model = row.get("model")
     if model:
-        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model))
+        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model, harness=harness or None))
     effort = effort_label(row.get("effort"))
     if effort:
         shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
@@ -574,7 +574,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")
-    model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
     effort = _effort_text(values.get("effort"))
     model_line += [(" · " + (effort or "?"), _eff_key(values.get("effort"), False) if effort else "dim")]
     labels = {name: ui_text("fleet.session_panel." + name) for name in (
@@ -588,7 +588,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     labels.update(settings="Settings", routes="route", context="context", route_line="route line",
                   rule_motion="rule motion")
     from .session_line import effort_label, gauge_parts, answer_wait_word
-    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
     if effort_label(values.get("effort")):
         selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
     gauge = gauge_parts(values.get("ctx_pct"))

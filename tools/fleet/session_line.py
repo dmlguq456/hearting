@@ -152,7 +152,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
         words("thread", values["native_sid"], "dim", 256, 0)
     effort = effort_label(values.get("effort"))
     suffix = [(" ", "dim"), (effort, _eff_key(values.get("effort"), False))] if effort else []
-    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
+    words("model", _clean_model(values.get("model")), _model_key(values.get("model"), harness=values.get("harness")),
+          48 if complete else 24, 4, after=suffix)
     percent = values.get("ctx_pct")
     unreported = reported_only and _percent(percent) == "?"
     if not unreported:
@@ -679,7 +680,7 @@ def route_doer(route, jobs, get, live):
     if job is None:
         return None
     harness = get(job, "harness")
-    pair = live._model_pair(get(job, "resolved_model", "model"))
+    pair = live._model_pair(get(job, "resolved_model", "model"), harness)
     # Spec E9 rule 36 (a): the attempt's recorded role (a frame leg names itself by its node
     # or worker type, as Fleet's ``_is_frame_leg`` reads it).
     role = "owner" if job is owner else (
@@ -740,7 +741,7 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
 
     def values_of(job):
         if id(job) not in shown:
-            pair = live._model_pair(get(job, "resolved_model", "model"))
+            pair = live._model_pair(get(job, "resolved_model", "model"), get(job, "harness"))
             percent = job_context(job, get)[0]
             shown[id(job)] = ((pair[0][:64] if pair else None), (None if percent is None else round(percent, 1)))
         return shown[id(job)]

@@ -179,7 +179,7 @@ def _model_cell(grid, x, y, harness, value, shown, effort_keys, room, limit=None
     name = shown.get(str(model), model)
     try:
         from .. import render
-        model_key = render._model_key(model)
+        model_key = render._model_key(model, harness=harness)
     except Exception:
         model_key = "fam_other"
     cursor = _write(grid, x, y, clip_cells(str(name), room - 9), model_key, limit=limit)
