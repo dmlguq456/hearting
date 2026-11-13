@@ -3605,6 +3605,26 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         self.assertEqual(captured[0], captured[2])
         self.assertEqual(captured[1], captured[3])
 
+    def test_namespace_refusal_record_is_terminal_to_state_and_watch(self):
+        module = self.module
+        run_dir = Path(self.tmp.name) / "run"
+        run_dir.mkdir()
+        (run_dir / "stop_reason").write_text("path-namespace-unshare\n")
+        (run_dir / "exit_code").write_text("125\n")
+        meta = {"run_id": "fixture-run", "host": "gpu-c",
+                "provenance": {"notify": {"harness": "codex", "id": "session-1"}}}
+        (run_dir / "meta.json").write_text(json.dumps(meta))
+        config = {"run_root": Path(self.tmp.name), "hosts": {}}
+        state = module._run_state(config, "run")
+        self.assertEqual((state["state"], state["exit_code"], state["stop_reason"]),
+                         ("finished", 125, "path-namespace-unshare"))
+        notice = mock.Mock()
+        with mock.patch.object(module, "load_config", return_value=config), \
+             mock.patch.dict(sys.modules, {"session_notice": SimpleNamespace(notify=notice)}):
+            self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(run_dir))), 0)
+        notice.assert_called_once()
+        self.assertIn("exit 125", notice.call_args.kwargs["text"])
+
     def test_a_watcher_vouches_for_a_run_only_while_its_own_files_change(self):
         module = self.module
         run_dir = Path(self.tmp.name) / "run"
@@ -3629,27 +3649,6 @@ class PathNamespaceInventoryTest(unittest.TestCase):
                                                             str(cwd), {}, config, None))
         self.assertIsNone(module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config,
                                                             {"output_dir": "/declared"}))
-
-    def test_namespace_refusal_record_is_terminal_to_state_and_watch(self):
-        module = self.module
-        run_dir = Path(self.tmp.name) / "run"
-        run_dir.mkdir()
-        (run_dir / "stop_reason").write_text("path-namespace-unshare\n")
-        (run_dir / "exit_code").write_text("125\n")
-        meta = {"run_id": "fixture-run", "host": "gpu-c",
-                "provenance": {"notify": {"harness": "codex", "id": "session-1"}}}
-        (run_dir / "meta.json").write_text(json.dumps(meta))
-        config = {"run_root": Path(self.tmp.name), "hosts": {}}
-        state = module._run_state(config, "run")
-        self.assertEqual((state["state"], state["exit_code"], state["stop_reason"]),
-                         ("finished", 125, "path-namespace-unshare"))
-        notice = mock.Mock()
-        with mock.patch.object(module, "load_config", return_value=config), \
-             mock.patch.dict(sys.modules, {"session_notice": SimpleNamespace(notify=notice)}):
-            self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(run_dir))), 0)
-        notice.assert_called_once()
-        self.assertIn("exit 125", notice.call_args.kwargs["text"])
-
 
 if __name__ == "__main__":
     unittest.main()

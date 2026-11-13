@@ -1430,6 +1430,49 @@ def _notice_targets(run):
     return list(result.values())
 
 
+def _latest_source_update(samples, progress, now):
+    """When the run's progress or metric files last changed, as this observer saw it (the newest
+    `source_updated_at` of a sample or the progress file), or None when nothing was read."""
+    times = [sample.get("source_updated_at") for sample in samples or () if isinstance(sample, dict)]
+    if isinstance(progress, dict):
+        if isinstance(progress.get("age_s"), (int, float)) and not isinstance(progress.get("age_s"), bool):
+            times.append(float(now) - float(progress["age_s"]))
+        times.append(progress.get("updated_at"))
+    times = [float(value) for value in times if isinstance(value, (int, float))
+             and not isinstance(value, bool) and math.isfinite(float(value)) and value <= float(now)]
+    return max(times) if times else None
+
+
+# What a notice says, in one phrase, for a run whose observer has no progress file or output
+# folder to read (`_public_output_state` reasons), instead of five "no metric" cells.
+_UNDECLARED_TEXT = {"not-declared": "resource.no_progress_declared",
+                    "node-declares-no-training-output": "resource.no_progress_declared",
+                    "remote-unmapped": "resource.progress_not_visible",
+                    "declared-unresolved": "resource.progress_not_visible"}
+
+
+def declaration_note(run):
+    """The one line a launch prints when its run declares no progress file or output folder.
+
+    A note, never a refusal: the run starts all the same and its notices say so in one phrase.
+    None when the run declares one (a folder that does not exist yet included), when its route
+    node declares no training output, or when this cannot be told."""
+    try:
+        observation = run.get("observation") if isinstance(run.get("observation"), dict) else {}
+        if run.get("output_dir") or observation.get("source_bindings"):
+            return None
+        folder, reason = discover_output_binding(run)
+        if folder or reason not in ("not-declared", "remote-unmapped"):
+            return None
+        if reason == "not-declared" and _public_output_state(run, None, binding_given=False)[0] == "none":
+            return None
+        t = _ui_translator()
+        return t("resource.declare_progress_note" if reason == "not-declared"
+                 else "resource.declared_progress_unmapped_note")
+    except Exception:  # noqa: BLE001 -- a note never stops a launch
+        return None
+
+
 def _ui_translator():
     """The shared UI-text catalog (English by default, Korean when declared).
 
@@ -1544,51 +1587,9 @@ def _quiet_checkpoint(context, previous, samples):
     return told == mark
 
 
-def _latest_source_update(samples, progress, now):
-    """When the run's progress or metric files last changed, as this observer saw it (the newest
-    `source_updated_at` of a sample or the progress file), or None when nothing was read."""
-    times = [sample.get("source_updated_at") for sample in samples or () if isinstance(sample, dict)]
-    if isinstance(progress, dict):
-        if isinstance(progress.get("age_s"), (int, float)) and not isinstance(progress.get("age_s"), bool):
-            times.append(float(now) - float(progress["age_s"]))
-        times.append(progress.get("updated_at"))
-    times = [float(value) for value in times if isinstance(value, (int, float))
-             and not isinstance(value, bool) and math.isfinite(float(value)) and value <= float(now)]
-    return max(times) if times else None
-
-
-# What a notice says, in one phrase, for a run whose observer has no progress file or output
-# folder to read (`_public_output_state` reasons), instead of five "no metric" cells.
-_UNDECLARED_TEXT = {"not-declared": "resource.no_progress_declared",
-                    "node-declares-no-training-output": "resource.no_progress_declared",
-                    "remote-unmapped": "resource.progress_not_visible",
-                    "declared-unresolved": "resource.progress_not_visible"}
-
-
-def declaration_note(run):
-    """The one line a launch prints when its run declares no progress file or output folder.
-
-    A note, never a refusal: the run starts all the same and its notices say so in one phrase.
-    None when the run declares one (a folder that does not exist yet included), when its route
-    node declares no training output, or when this cannot be told."""
-    try:
-        observation = run.get("observation") if isinstance(run.get("observation"), dict) else {}
-        if run.get("output_dir") or observation.get("source_bindings"):
-            return None
-        folder, reason = discover_output_binding(run)
-        if folder or reason not in ("not-declared", "remote-unmapped"):
-            return None
-        if reason == "not-declared" and _public_output_state(run, None, binding_given=False)[0] == "none":
-            return None
-        t = _ui_translator()
-        return t("resource.declare_progress_note" if reason == "not-declared"
-                 else "resource.declared_progress_unmapped_note")
-    except Exception:  # noqa: BLE001 -- a note never stops a launch
-        return None
-
-
-def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=(), undeclared=None):
+def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
     t = _ui_translator()
+    undeclared = observation.get("undeclared")
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
     stagnation = observation.get("stagnation") if isinstance(observation.get("stagnation"), dict) else {}
@@ -2066,6 +2067,9 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             observation["eta_seconds"] = None
             observation["eta_vs_plan"] = None
         observation["source_updated_at"] = _latest_source_update(samples, progress, now)
+        # Why there is nothing to read, when there is no folder (the public record's reason).
+        observation["undeclared"] = (None if metric_root is not None else _public_output_state(
+            run, None, binding_given=bool(root_value), discovered_reason=discovered_reason)[1])
         artifact_root = run.get("artifact_root")
         record_locator = public_record_path(artifact_root, run_id) if artifact_root else None
         catalog_context = []
@@ -2117,10 +2121,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             new_event = True
             notice_texts = _notice_texts({**run, "row_id": str(identity)}, event_kind,
                 observation, record_locator, sources or previous.get("sources", []),
-                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"),
-                undeclared=(None if metric_root is not None else _public_output_state(
-                    run, None, binding_given=bool(root_value),
-                    discovered_reason=discovered_reason)[1]))
+                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
             outbox.append({"key": event_key, "kind": event_kind,
                            "recipients": _notice_targets(run),
                            "texts": notice_texts, "text": notice_texts[0]})

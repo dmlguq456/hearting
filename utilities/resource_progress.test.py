@@ -1709,13 +1709,13 @@ class ExperimentObservationTest(unittest.TestCase):
         # unavailable" said one thing five times. Nothing declared is said once.
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         bare = {"summary": {}, "elapsed_seconds": 3720, "planned_seconds": None}
-        final = "; ".join(progress._notice_texts(run, "final", bare, None, [], undeclared="not-declared"))
+        final = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": "not-declared"}, None, []))
         self.assertIn("status=succeeded; exit=0; 실제=1h02m; 진행 파일 선언 없음", final)
-        checkpoint = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, [],
-                                                      undeclared="not-declared"))
+        checkpoint = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "not-declared"},
+                                                      None, []))
         self.assertIn("경과 1h02m; 진행 파일 선언 없음", checkpoint)
-        unmapped = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, [],
-                                                    undeclared="remote-unmapped"))
+        unmapped = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "remote-unmapped"},
+                                                    None, []))
         self.assertIn("선언한 진행 폴더가 여기서 안 보임", unmapped)
         for text in (final, checkpoint, unmapped):
             self.assertNotIn("지표 없음", text)
@@ -1723,7 +1723,7 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertNotIn("ETA", text)
             self.assertNotIn("source metrics unavailable", text)
         # A declared folder that has not produced anything yet keeps the full form.
-        declared = "; ".join(progress._notice_texts(run, "final", bare, None, [], undeclared=None))
+        declared = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": None}, None, []))
         self.assertIn("마지막=지표 없음", declared)
 
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})

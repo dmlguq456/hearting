@@ -2902,6 +2902,24 @@ def _print_run_gpu_observation(observation):
               "(idle at probe time)")
 
 
+def _progress_declaration_note(command, workdir, host, config, resource_parent):
+    """One line when this launch declares no progress file or output folder; None otherwise.
+    It never stops the launch (resource_progress.declaration_note)."""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import resource_progress
+        resource = resource_parent if isinstance(resource_parent, dict) else {}
+        route = resource.get("route_file") or None
+        return resource_progress.declaration_note({
+            "command": list(command), "cwd": workdir, "path_namespace": host.get("path_namespace"),
+            "run_root": str(config["run_root"]), "output_dir": resource.get("output_dir"),
+            "observation": resource.get("observation"), "route": route, "node": resource.get("node")})
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def cmd_run(args):
     config = load_config()
     _refuse_namespace_self(config, "run")
@@ -3554,24 +3572,6 @@ def _report_run_end(run_dir, code, last_observation, now):
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
-
-
-def _progress_declaration_note(command, workdir, host, config, resource_parent):
-    """One line when this launch declares no progress file or output folder; None otherwise.
-    It never stops the launch (resource_progress.declaration_note)."""
-    try:
-        here = str(Path(__file__).resolve().parent)
-        if here not in sys.path:
-            sys.path.insert(0, here)
-        import resource_progress
-        resource = resource_parent if isinstance(resource_parent, dict) else {}
-        route = resource.get("route_file") or None
-        return resource_progress.declaration_note({
-            "command": list(command), "cwd": workdir, "path_namespace": host.get("path_namespace"),
-            "run_root": str(config["run_root"]), "output_dir": resource.get("output_dir"),
-            "observation": resource.get("observation"), "route": route, "node": resource.get("node")})
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _run_state(config, run_id):
