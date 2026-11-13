@@ -3605,6 +3605,31 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         self.assertEqual(captured[0], captured[2])
         self.assertEqual(captured[1], captured[3])
 
+    def test_a_watcher_vouches_for_a_run_only_while_its_own_files_change(self):
+        module = self.module
+        run_dir = Path(self.tmp.name) / "run"
+        run_dir.mkdir()
+        log = run_dir / "log"
+        log.write_text("epoch 1\n")
+        os.utime(log, (5000.0, 5000.0))
+        self.assertTrue(module._run_recently_active(run_dir, 5000.0 + 600))
+        self.assertTrue(module._run_recently_active(run_dir, 5000.0 + 900))
+        self.assertFalse(module._run_recently_active(run_dir, 5000.0 + 901))
+        (run_dir / ".observation-watch.lock").write_text("")   # the observer's own file is not the run's
+        self.assertFalse(module._run_recently_active(run_dir, 5000.0 + 901))
+        self.assertFalse(module._run_recently_active(Path(self.tmp.name) / "missing", 5000.0))
+
+    def test_a_launch_note_names_a_missing_declaration_once(self):
+        module = self.module
+        cwd = Path(self.tmp.name)
+        (cwd / "cfg.json").write_text(json.dumps({"output_dir": "out"}))
+        config = {"run_root": cwd / "runs"}
+        self.assertIn("--config", module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config, None))
+        self.assertIsNone(module._progress_declaration_note(["python", "train.py", "--config", "./cfg.json"],
+                                                            str(cwd), {}, config, None))
+        self.assertIsNone(module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config,
+                                                            {"output_dir": "/declared"}))
+
     def test_namespace_refusal_record_is_terminal_to_state_and_watch(self):
         module = self.module
         run_dir = Path(self.tmp.name) / "run"

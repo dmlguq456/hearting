@@ -1105,7 +1105,9 @@ def observe_run_if_due(run_id: str, run: dict, registry: Path, *, now=None,
             final=final,
             status=((run.get("status") if run.get("status") not in {None, "running"}
                      else view.get("liveness")) if final else public_status),
-            poll_interval_seconds=interval_seconds)
+            poll_interval_seconds=interval_seconds,
+            # The process identity was just confirmed live: the observer is watching it.
+            alive=not final and view.get("liveness") == "working")
     return normalize_run(run_id, run, Path(registry), identity_reader=proc_identity, now=now)
 
 

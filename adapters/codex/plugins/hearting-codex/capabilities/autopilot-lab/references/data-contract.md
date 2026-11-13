@@ -73,6 +73,20 @@ separate; `compaction` only says what this file left out.
   `remote-unmapped` (the run declared or referenced a path on its host that the
   observer cannot map to a visible folder: outside the host's `path_namespace` and
   the shared run root, or through a namespace source this observer does not mount).
+  With nothing to read, a run's notices say so once (`no progress file declared`, or
+  the folder is not visible here) instead of listing each missing metric, and a launch
+  (`compute-hosts run`, `resource-runner start`) that declares no folder prints one
+  note naming the way to declare it (a `--config` whose `output_dir`, `output_folder`
+  or `save_dir` names it) and starts all the same. With a folder, notices carry the
+  step or epoch reached, the latest metrics and the time since the files last changed.
+- **Observed time.** `last_checkpoint.at` is when the observer last wrote the record.
+  While the observer has just seen the run alive (a local process it confirmed, or a
+  compute run's own files changing within the 900 s the LAB board allows), it rewrites
+  the record at least every 300 s (`PUBLIC_REFRESH_SECONDS`) even when nothing new was
+  measured; without that evidence it writes only on news. So a running record older
+  than 900 s (`observation-stale`) means nobody could vouch for the run (an observer
+  gone, a host that stopped writing), never just a long epoch. A local resource run's
+  live status `working` reads as `running`.
   A run without a declaration is filled only from its exact evidence: the
   observation metadata's `path`, the hash-bound `--request` or the `--config`
   output keys. Without such evidence it stays `unknown`/`not-declared`; no folder

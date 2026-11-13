@@ -38,6 +38,11 @@ MAX_SOURCE_BINDING_ASSERTIONS = 8
 MAX_ARMS = 32
 OBSERVATION_VERSION = 2
 CHECKPOINT_INTERVAL = 12 * 60 * 60
+# While its observer has just seen the run alive (`observe_experiment(alive=True)`), the public
+# record is written at least this often even with nothing new, so its observed time says the
+# observer is watching. Readers call a running record older than 900 s stale
+# (`experiment_catalog.STALE_OBSERVATION_SECONDS`); a third of that leaves room for the 60 s look.
+PUBLIC_REFRESH_SECONDS = 300
 # The time rule: a predicted (or, unmeasured, elapsed) total of 1.5x the plan, or past
 # six hours without a plan, is an attention.
 ETA_ATTENTION_RATIO = 1.5
@@ -1539,7 +1544,50 @@ def _quiet_checkpoint(context, previous, samples):
     return told == mark
 
 
-def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
+def _latest_source_update(samples, progress, now):
+    """When the run's progress or metric files last changed, as this observer saw it (the newest
+    `source_updated_at` of a sample or the progress file), or None when nothing was read."""
+    times = [sample.get("source_updated_at") for sample in samples or () if isinstance(sample, dict)]
+    if isinstance(progress, dict):
+        if isinstance(progress.get("age_s"), (int, float)) and not isinstance(progress.get("age_s"), bool):
+            times.append(float(now) - float(progress["age_s"]))
+        times.append(progress.get("updated_at"))
+    times = [float(value) for value in times if isinstance(value, (int, float))
+             and not isinstance(value, bool) and math.isfinite(float(value)) and value <= float(now)]
+    return max(times) if times else None
+
+
+# What a notice says, in one phrase, for a run whose observer has no progress file or output
+# folder to read (`_public_output_state` reasons), instead of five "no metric" cells.
+_UNDECLARED_TEXT = {"not-declared": "resource.no_progress_declared",
+                    "node-declares-no-training-output": "resource.no_progress_declared",
+                    "remote-unmapped": "resource.progress_not_visible",
+                    "declared-unresolved": "resource.progress_not_visible"}
+
+
+def declaration_note(run):
+    """The one line a launch prints when its run declares no progress file or output folder.
+
+    A note, never a refusal: the run starts all the same and its notices say so in one phrase.
+    None when the run declares one (a folder that does not exist yet included), when its route
+    node declares no training output, or when this cannot be told."""
+    try:
+        observation = run.get("observation") if isinstance(run.get("observation"), dict) else {}
+        if run.get("output_dir") or observation.get("source_bindings"):
+            return None
+        folder, reason = discover_output_binding(run)
+        if folder or reason not in ("not-declared", "remote-unmapped"):
+            return None
+        if reason == "not-declared" and _public_output_state(run, None, binding_given=False)[0] == "none":
+            return None
+        t = _ui_translator()
+        return t("resource.declare_progress_note" if reason == "not-declared"
+                 else "resource.declared_progress_unmapped_note")
+    except Exception:  # noqa: BLE001 -- a note never stops a launch
+        return None
+
+
+def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=(), undeclared=None):
     t = _ui_translator()
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
@@ -1604,7 +1652,23 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
         entries.append(f"no observed increase for {_duration(stagnation.get('seconds_since_anchor'), t)} since {anchor}")
     elif stagnation.get("state") == "unknown":
         entries.append("progress stagnation=unknown")
-    if event_kind == "final":
+    # Nothing was read because nothing was declared (or it is not visible here): one phrase.
+    bare = (undeclared in _UNDECLARED_TEXT and not sources
+            and not (latest or summary.get("latest_metrics"))
+            and observation.get("reached") is None and not observation.get("source_observations"))
+    if bare:
+        if event_kind == "final":
+            entries.append(f"status={run.get('status') or 'unknown'}; exit={run.get('exit_code')}")
+            entries.append(t("resource.final_time", actual=_duration(observation.get("elapsed_seconds"), t),
+                             plan=_duration(observation.get("planned_seconds"), t))
+                           if observation.get("planned_seconds")
+                           else t("resource.actual_time", actual=_duration(observation.get("elapsed_seconds"), t)))
+        else:
+            entries.append(t("resource.elapsed", elapsed=_duration(observation.get("elapsed_seconds"), t)))
+        if observation.get("attention"):
+            entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
+        entries.append(t(_UNDECLARED_TEXT[undeclared]))
+    elif event_kind == "final":
         entries.append(f"status={run.get('status') or 'unknown'}; exit={run.get('exit_code')}")
         entries.append(t("resource.final_metrics", latest=points("latest_metrics", latest),
                          best=points("best_metrics", best), trend=trend))
@@ -1623,13 +1687,23 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
                          elapsed=_duration(observation.get("elapsed_seconds"), t)))
         if observation.get("attention"):
             entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
+    if not bare:
+        # Step or epoch reached, and how long ago the progress or metric files last changed.
+        if observation.get("reached") is not None:
+            entries.append(t("resource.progress", reached=observation["reached"],
+                             total=observation.get("total") if observation.get("total") is not None else "?",
+                             unit=observation.get("unit") or ""))
+        updated = observation.get("source_updated_at")
+        if isinstance(updated, (int, float)) and not isinstance(updated, bool):
+            entries.append(t("resource.last_update",
+                             age=_duration(float(observation.get("at", updated)) - float(updated), t)))
     source_lines = []
-    for source in (sources or [])[:3]:
+    for source in (sources or [])[:3] if not bare else ():
         path = source.get("path")
         if isinstance(path, list):
             path = path[0] if path else None
         source_lines.append(f"source {source.get('format') or 'unknown'}={path or t('resource.no_path')}")
-    if not source_lines:
+    if not source_lines and not bare:
         source_lines.append("source metrics unavailable")
     entries.extend(source_lines)
     text = "; ".join([*name_lines, *entries])
@@ -1741,11 +1815,16 @@ def read_experiment_observation(run, registry, row_key):
 def observe_experiment(run, registry, now, *, root=None, row_key=None,
                        started_at=None, planned_seconds=None, progress=None,
                        final=False, status=None, notify_events=True,
-                       poll_interval_seconds=60.0, row_scoped=None):
+                       poll_interval_seconds=60.0, row_scoped=None, alive=None):
     """Advance one detached row's durable observation and public run record.
 
     Metric discovery is deliberately caller-bound: `root` must come from an
     exact run/config binding or explicit optional observation metadata.
+    `alive=True` says the caller has just seen the run live (its process, or the run's own
+    files changing): the public record's observed time is then kept fresh
+    (`PUBLIC_REFRESH_SECONDS`) even when nothing new was measured, so a long epoch does
+    not read as a lost observation. Without that evidence nothing is refreshed and a
+    silent run still turns stale.
     """
     run = run if isinstance(run, dict) else {}
     run_id = run.get("run_id")
@@ -1986,6 +2065,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             observation["predicted_total_seconds"] = None
             observation["eta_seconds"] = None
             observation["eta_vs_plan"] = None
+        observation["source_updated_at"] = _latest_source_update(samples, progress, now)
         artifact_root = run.get("artifact_root")
         record_locator = public_record_path(artifact_root, run_id) if artifact_root else None
         catalog_context = []
@@ -2037,7 +2117,10 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             new_event = True
             notice_texts = _notice_texts({**run, "row_id": str(identity)}, event_kind,
                 observation, record_locator, sources or previous.get("sources", []),
-                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
+                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"),
+                undeclared=(None if metric_root is not None else _public_output_state(
+                    run, None, binding_given=bool(root_value),
+                    discovered_reason=discovered_reason)[1]))
             outbox.append({"key": event_key, "kind": event_kind,
                            "recipients": _notice_targets(run),
                            "texts": notice_texts, "text": notice_texts[0]})
@@ -2081,8 +2164,12 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                       "warnings": sorted(set([*previous.get("warnings", []), *warnings]))[-64:],
                       "event_keys": list(seen)[-256:], "outbox": outbox[-32:]}
         record_path = None
+        last_public = previous.get("last_public_write_at")
+        refresh_due = bool(alive is True and not final and isinstance(last_public, (int, float))
+                           and not isinstance(last_public, bool)
+                           and float(now) - float(last_public) >= PUBLIC_REFRESH_SECONDS)
         publish_public = bool(artifact_root and (
-            previous.get("last_public_write_at") is None or final
+            previous.get("last_public_write_at") is None or final or refresh_due
             or status != previous.get("public_status")
             or observation["checkpoint_due"] or new_event
             or bool(new_samples) or sources != previous.get("sources", [])

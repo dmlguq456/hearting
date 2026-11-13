@@ -285,6 +285,65 @@ class ReadCache(T.Base):
         self.assertTrue(watch)  # a later change to the catalog still wakes the screen
 
 
+class ObserverWatching(T.Base):
+    """BC-LAB-OBSERVATION-STALE-FLICKER-1114: a run whose observer is watching it is not "unknown"
+    between two measurements, however long an epoch is; a run nobody can vouch for still is."""
+
+    def setup_root(self):
+        root = self.make_root()
+        self.register(root, {"groups": [T.group_spec()], "conditions": [condition("긴 에폭", "run-long")]})
+        return root
+
+    def look(self, root, now, state, *, alive):
+        run = {"run_id": "run-long", "started_at": NOW - 3600, "artifact_root": str(root), "status": "running"}
+        with mock.patch.object(B.rp, "_observation_state_path", return_value=state):
+            B.rp.observe_experiment(run, root / "registry.json", now, row_key="run", started_at=NOW - 3600,
+                                    status="running", notify_events=False, alive=alive)
+
+    def watch(self, alive):
+        """Forty minutes of 60 s looks with nothing new measured; the board read at every look."""
+        root = self.setup_root()
+        state = self.base / f"state-{alive}.json"
+        stale_at, writes = [], 0
+        real = B.rp.write_public_run_record
+
+        def counted(*args, **kwargs):
+            nonlocal writes
+            writes += 1
+            return real(*args, **kwargs)
+        with mock.patch.object(B.rp, "write_public_run_record", side_effect=counted):
+            for minute in range(41):
+                now = NOW + 60 * minute
+                self.look(root, now, state, alive=alive)
+                row = B.read(root, now=now, cache={})[0]["groups"][0]["rows"][0]
+                if "observation-stale" in row["anomalies"]:
+                    stale_at.append(minute)
+        return stale_at, writes
+
+    def test_a_watching_observer_keeps_a_long_epoch_observed(self):
+        stale_at, writes = self.watch(alive=True)
+        self.assertEqual(stale_at, [])
+        # The cost: one public record write per PUBLIC_REFRESH_SECONDS while nothing changes.
+        self.assertEqual(writes, 1 + 40 * 60 // B.rp.PUBLIC_REFRESH_SECONDS)
+
+    def test_an_observer_that_cannot_vouch_for_the_run_still_reads_stale(self):
+        stale_at, writes = self.watch(alive=False)
+        self.assertEqual(stale_at[0], 16)            # past the 900 s mark, as before
+        self.assertEqual(stale_at, list(range(16, 41)))
+        self.assertEqual(writes, 1)
+
+    def test_a_local_run_published_as_working_is_a_running_row(self):
+        # A local resource run's observer publishes `working`; the board counts it running and
+        # applies the same stale rule to it.
+        root = self.setup_root()
+        self.write_run(root, "run-long", status="working", at=NOW - 60, stagnation=HEALTHY)
+        row = B.read(root, now=NOW, cache={})[0]["groups"][0]["rows"][0]
+        self.assertEqual((row["run_status"], row["status"]), ("running", "running"))
+        self.write_run(root, "run-long", status="working", at=NOW - 1000, stagnation=HEALTHY)
+        row = B.read(root, now=NOW, cache={})[0]["groups"][0]["rows"][0]
+        self.assertIn("observation-stale", row["anomalies"])
+
+
 class Review(T.Base):
     """RV-PR1606-1113: the progress age, the best value's metric, and long numbers."""
 

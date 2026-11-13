@@ -1703,6 +1703,65 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("status=succeeded; exit=0; latest=no metrics; best=no metrics; trend=improving", text)
         self.assertIn("actual=1m; plan=unknown duration", text)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
+    def test_a_run_with_nothing_declared_says_so_in_one_phrase(self):
+        # Observation 3: "마지막 지표 없음; 최고 지표 없음; 추세 판정 불가; ETA 미상; source metrics
+        # unavailable" said one thing five times. Nothing declared is said once.
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        bare = {"summary": {}, "elapsed_seconds": 3720, "planned_seconds": None}
+        final = "; ".join(progress._notice_texts(run, "final", bare, None, [], undeclared="not-declared"))
+        self.assertIn("status=succeeded; exit=0; 실제=1h02m; 진행 파일 선언 없음", final)
+        checkpoint = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, [],
+                                                      undeclared="not-declared"))
+        self.assertIn("경과 1h02m; 진행 파일 선언 없음", checkpoint)
+        unmapped = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, [],
+                                                    undeclared="remote-unmapped"))
+        self.assertIn("선언한 진행 폴더가 여기서 안 보임", unmapped)
+        for text in (final, checkpoint, unmapped):
+            self.assertNotIn("지표 없음", text)
+            self.assertNotIn("판정 불가", text)
+            self.assertNotIn("ETA", text)
+            self.assertNotIn("source metrics unavailable", text)
+        # A declared folder that has not produced anything yet keeps the full form.
+        declared = "; ".join(progress._notice_texts(run, "final", bare, None, [], undeclared=None))
+        self.assertIn("마지막=지표 없음", declared)
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_a_declared_run_carries_its_step_loss_and_the_time_since_its_last_update(self):
+        run = {"run_id": "r1", "status": "running"}
+        observation = {"summary": {"metric": "loss", "latest": {"value": 0.42, "epoch": 12},
+                                   "latest_metrics": {"loss": {"value": 0.42, "epoch": 12}},
+                                   "best": {"value": 0.40, "epoch": 11}, "trend": "개선"},
+                       "reached": 12, "total": 60, "unit": "epoch", "at": 10_000.0,
+                       "source_updated_at": 10_000.0 - 1500, "elapsed_seconds": 7200}
+        text = "; ".join(progress._notice_texts(run, "checkpoint", observation, None,
+                                                [{"format": "jsonl", "path": "/o/log.jsonl"}]))
+        self.assertIn("최근=loss=0.42@12", text)
+        self.assertIn("진행 12/60 epoch", text)
+        self.assertIn("마지막 갱신 25m 전", text)
+        self.assertIn("source jsonl=/o/log.jsonl", text)
+
+    def test_the_last_update_is_the_newest_source_change_this_observer_saw(self):
+        samples = [{"source_updated_at": 100.0}, {"source_updated_at": 400.0}, {"epoch": 3}]
+        self.assertEqual(progress._latest_source_update(samples, None, 1000), 400.0)
+        self.assertEqual(progress._latest_source_update(samples, {"age_s": 30}, 1000), 970.0)
+        self.assertIsNone(progress._latest_source_update([], None, 1000))
+        self.assertEqual(progress._latest_source_update([{"source_updated_at": 5000.0}], None, 1000), None)
+
+    def test_a_launch_without_a_declared_folder_gets_one_note_and_is_never_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            (cwd / "cfg.json").write_text(json.dumps({"output_dir": "out/run-1"}))
+            bare = {"command": ["python", "train.py"], "cwd": str(cwd)}
+            self.assertIn("--config", progress.declaration_note(bare))
+            for declared in ({**bare, "command": ["python", "train.py", "--config", "./cfg.json"]},
+                             {**bare, "output_dir": "/somewhere"},
+                             {**bare, "observation": {"source_bindings": [{"path": "/c.json"}]}}):
+                with self.subTest(declared=declared):
+                    self.assertIsNone(progress.declaration_note(declared))
+            with mock.patch.object(progress, "discover_output_binding", side_effect=RuntimeError("x")):
+                self.assertIsNone(progress.declaration_note(bare))
+
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},

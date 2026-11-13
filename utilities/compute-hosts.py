@@ -3008,6 +3008,7 @@ def cmd_run(args):
         "HEARTING_COMPUTE_HOST": name,
         "HEARTING_GPU_LEASE_RELEASE": "",
     })
+    declaration_note = _progress_declaration_note(command, workdir, host, config, resource_parent)
     options = {"state_path": str(gpu_leases.state_path()), "observation": gpu_observation,
                "requested": requested, "share": share, "owner": lease_owner,
                "task": args.name or rendered, "run_id": run_id, "run_dir": str(run_dir),
@@ -3025,6 +3026,8 @@ def cmd_run(args):
               f"agent_home_reason: {agent_home_reason}\n"
               f"would run: {rendered}\nsetup: {preamble}")
         _print_run_gpu_observation(gpu_observation)
+        if declaration_note:
+            print(declaration_note, file=sys.stderr)
         return 0
 
     namespaced = "path_namespace" in host
@@ -3094,6 +3097,8 @@ def cmd_run(args):
     except OSError as exc:
         print(f"note: could not record run metadata: {exc}", file=sys.stderr)
     watching = _spawn_completion_watch(run_dir, meta)
+    if declaration_note:
+        print(declaration_note, file=sys.stderr)
     if args.json:
         print(json.dumps(meta, ensure_ascii=False, sort_keys=True))
     else:
@@ -3138,6 +3143,20 @@ def _run_last_activity(run_dir):
             continue
         newest = changed if newest is None else max(newest, changed)
     return newest
+
+
+def _run_recently_active(run_dir, now):
+    """The run's own files (its log, under the shared run root) changed within the window the
+    LAB board allows an observation (`experiment_catalog.STALE_OBSERVATION_SECONDS`): this
+    watcher sees the run alive and its host still writing. A run silent for longer, or one
+    whose files cannot be read, is not vouched for."""
+    last = _run_last_activity(run_dir)
+    try:
+        import experiment_catalog
+        window = experiment_catalog.STALE_OBSERVATION_SECONDS
+    except Exception:  # noqa: BLE001 -- without the window nothing is vouched for
+        return False
+    return last is not None and 0 <= float(now) - float(last) <= window
 
 
 def _run_quiet_since(run_dir, now):
@@ -3269,7 +3288,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
             root=output_dir, row_key=record.get("row_id") or record["run_id"],
             row_scoped=bool(record.get("row_id")), started_at=started,
             planned_seconds=record["planned_seconds"], final=final,
-            status=record["status"], notify_events=not final)
+            status=record["status"], notify_events=not final,
+            alive=not final and _run_recently_active(run_dir, now))
     except Exception:  # noqa: BLE001 -- observation must never change run completion
         return None
 
@@ -3534,6 +3554,24 @@ def _report_run_end(run_dir, code, last_observation, now):
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
+
+
+def _progress_declaration_note(command, workdir, host, config, resource_parent):
+    """One line when this launch declares no progress file or output folder; None otherwise.
+    It never stops the launch (resource_progress.declaration_note)."""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import resource_progress
+        resource = resource_parent if isinstance(resource_parent, dict) else {}
+        route = resource.get("route_file") or None
+        return resource_progress.declaration_note({
+            "command": list(command), "cwd": workdir, "path_namespace": host.get("path_namespace"),
+            "run_root": str(config["run_root"]), "output_dir": resource.get("output_dir"),
+            "observation": resource.get("observation"), "route": route, "node": resource.get("node")})
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _run_state(config, run_id):

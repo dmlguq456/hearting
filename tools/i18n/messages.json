@@ -1862,9 +1862,25 @@
    "en": "Kept an existing {name}: it carries no Hearting entrance marker.",
    "ko": "기존 {name}은(는) 하팅 표지가 없어 덮지 않았습니다."
   },
+  "resource.actual_time": {
+   "en": "actual={actual}",
+   "ko": "실제={actual}"
+  },
   "resource.checkpoint_metrics": {
    "en": "latest={latest}; best={best}; baseline delta={delta}; trend={trend}",
    "ko": "최근={latest}; 최고={best}; 기준 delta={delta}; 추세={trend}"
+  },
+  "resource.declare_progress_note": {
+   "en": "note: no progress file or output folder is declared, so this run's notices carry no step, epoch or loss. Give the command a --config whose output_dir (or output_folder, save_dir) names its folder.",
+   "ko": "참고: 진행 파일·출력 폴더 선언이 없어 이 실행의 알림에는 step·epoch·손실이 실리지 않습니다. 명령에 output_dir(또는 output_folder, save_dir)가 적힌 --config를 주면 됩니다."
+  },
+  "resource.declared_progress_unmapped_note": {
+   "en": "note: the declared output folder is not visible from this machine, so this run's notices carry no step, epoch or loss.",
+   "ko": "참고: 선언한 출력 폴더가 이 기계에서 보이지 않아 이 실행의 알림에는 step·epoch·손실이 실리지 않습니다."
+  },
+  "resource.elapsed": {
+   "en": "elapsed {elapsed}",
+   "ko": "경과 {elapsed}"
   },
   "resource.eta": {
    "en": "estimated total time {total}; planned {plan}; elapsed {elapsed}",
@@ -1878,6 +1894,10 @@
    "en": "actual={actual}; planned={plan}",
    "ko": "실제={actual}; 계획={plan}"
   },
+  "resource.last_update": {
+   "en": "last update {age} ago",
+   "ko": "마지막 갱신 {age} 전"
+  },
   "resource.no_baseline": {
    "en": "no baseline",
    "ko": "기준 없음"
@@ -1890,9 +1910,21 @@
    "en": "no path",
    "ko": "경로 없음"
   },
+  "resource.no_progress_declared": {
+   "en": "no progress file declared",
+   "ko": "진행 파일 선언 없음"
+  },
   "resource.no_record_path": {
    "en": "no record path",
    "ko": "기록 경로 없음"
+  },
+  "resource.progress": {
+   "en": "progress {reached}/{total} {unit}",
+   "ko": "진행 {reached}/{total} {unit}"
+  },
+  "resource.progress_not_visible": {
+   "en": "declared progress folder not visible here",
+   "ko": "선언한 진행 폴더가 여기서 안 보임"
   },
   "resource.trend.flat": {
    "en": "flat",
