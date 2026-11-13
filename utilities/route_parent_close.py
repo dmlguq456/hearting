@@ -1331,6 +1331,12 @@ def _finish_existing_cycle(route, *, jobs=None):
         pass
 
 
+def _file_version(path):
+    """File identity and version: a replace, truncation, rewrite or append changes it."""
+    stat = os.stat(path)
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def verified_owner_pin_handoff_close(route, *, jobs=None):
     """Return durable owner-pin handoff evidence, including its successor when prepared.
 
@@ -1362,6 +1368,8 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
         ledger = WS.WorkflowLedger(route_id, route_hash, jobs=jobs)
         # One read of the journal answers every journal check below (intent, result,
         # their parent-close entries, workflow state) instead of one read per check.
+        # Its file version is taken first and compared again before the proof stands.
+        journal_version = _file_version(ledger.journal_path)
         journal = ledger.journal()
         close_intent = ledger_intent(sealed, ledger, journal=journal)
         result = settled_result(sealed, ledger, journal=journal)
@@ -1467,6 +1475,11 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
                    and row["by"].get("harness") in AUTH.PIN_HARNESSES
                    and datetime.fromisoformat(str(row.get("at", "")).replace("Z", "+00:00")) <= close_at]
         if not target_harness or not changes:
+            return None
+        # The checks above judged the one journal read. A journal replaced, emptied or
+        # appended to since then is not what they judged, so this pass proves nothing;
+        # the next pass reads it afresh.
+        if _file_version(ledger.journal_path) != journal_version:
             return None
         return {"route": sealed, "route_file": str(path), "owner_attempt_id": owner_attempt,
                 "launch_harness": launch_harness, "target_harness": target_harness,
