@@ -1403,6 +1403,11 @@ def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callabl
     metric = group.get("metric") or {}
     unit = metric.get("unit") or None
     parts: List[str] = []
+    # The row's own run state in words (RV-PR1596-R2): running, or ended without a recorded outcome.
+    if row.get("run_status") == "running":
+        parts.append(t("experiment.run_state.running"))
+    elif (row.get("unknown") or {}).get("run_status") == "row-ended":
+        parts.append(t("experiment.run_state.row-ended"))
     progress = row.get("progress")
     if progress and progress.get("reached") is not None:
         parts.append(t("experiment.progress", reached=progress["reached"],
