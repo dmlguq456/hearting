@@ -206,6 +206,8 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
     terminal_stop = False
     runtime_error = None
     usage = {}
+    # Native message ids this turn's events named, and those a `step_finish` counted.
+    seen_messages, counted_messages = {}, set()
     binary_parts = shlex.split(getattr(args, "opencode_command", None) or "opencode")
     runtime_binary = binary_parts[-1] if binary_parts else "opencode"
     native_opencode = Path(runtime_binary).name == "opencode"
@@ -247,6 +249,11 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
                   "session_id": session, "cwd": args.worktree})
             publish_permission_projection()
         part = value.get("part") or {}
+        message = part.get("messageID") if isinstance(part, dict) else None
+        if isinstance(message, str) and message:
+            seen_messages[message] = None
+            if kind == "step_finish":
+                counted_messages.add(message)
         if kind == "text":
             final_text = part.get("text", "")
             terminal_stop = False
@@ -352,6 +359,21 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
         terminal_stop = True
     if session and not runtime_error and (not terminal_stop or not isinstance(final_text, str)):
         raise OpenCodeTransportError("opencode-final-stop-missing")
+    if modern and session:
+        # V2 streams no `step_finish` for a turn's last model request, so the turn's
+        # usage and the context gauge missed it. Take each uncounted step from the
+        # exact finished native row its own events named; unreadable stays as before.
+        missing = [message for message in seen_messages if message not in counted_messages]
+        found = opencode_runtime.read_message_tokens(session, missing) if missing else {}
+        for message in missing:
+            tokens = found.get(message)
+            if not isinstance(tokens, dict):
+                continue
+            _add_step_tokens(usage, tokens)
+            counts = _step_token_record(tokens)
+            if counts:
+                emit({"type": "dispatch.supervisor.step_tokens", "runtime": "opencode",
+                      "sessionID": session, "tokens": counts})
     result = {"type": "result", "runtime": "opencode", "session_id": session or "",
               "subtype": "error_during_execution" if runtime_error or code else "success",
               "is_error": bool(runtime_error or code), "result": final_text}

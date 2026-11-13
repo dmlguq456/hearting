@@ -47,10 +47,20 @@ class OwnerNowTest(unittest.TestCase):
         dispatch._OPENCODE_ACTIVITY_CACHE.clear()
         dispatch._OPENCODE_ATTEMPT_CACHE.clear()
 
-    def message(self, mid="m1", sid="ses_owner", role="assistant", completed=False, stamp=1000):
-        self.con.execute("INSERT INTO message VALUES(?,?,?,?,?)", (mid,sid,json.dumps({
-            "role":role,"time":{"completed":stamp} if completed else {}}),stamp,stamp))
+    def message(self, mid="m1", sid="ses_owner", role="assistant", completed=False, stamp=1000,
+                tokens=None):
+        value = {"role":role,"time":{"completed":stamp} if completed else {}}
+        if tokens is not None:
+            value["tokens"] = tokens
+        self.con.execute("INSERT INTO message VALUES(?,?,?,?,?)", (mid,sid,json.dumps(value),stamp,stamp))
         self.con.commit()
+
+    def step_row(self, tokens, kind="dispatch.supervisor.step_tokens"):
+        row = ({"type":kind,"runtime":"opencode","sessionID":"ses_owner","tokens":tokens}
+               if kind == "dispatch.supervisor.step_tokens" else
+               {"type":kind,"sessionID":"ses_owner","part":{"reason":"tool-calls","tokens":tokens}})
+        with self.log.open("a") as f:
+            f.write(json.dumps(row) + "\n")
 
     def part(self, value, mid="m1", sid="ses_owner", stamp=1000):
         self.con.execute("INSERT INTO part VALUES(?,?,?,?)", (mid,sid,json.dumps(value),stamp))
@@ -195,6 +205,56 @@ class OwnerNowTest(unittest.TestCase):
         self.enrich()
         self.assertEqual(self.job.summary,"runtime waiting")
         self.assertEqual(before,{str(p):p.read_bytes() for p in paths if p.exists()})
+
+    def test_finished_turn_context_is_the_last_native_step_not_the_last_logged_one(self):
+        # OpenCode v2 `run` never logs a turn's last step (RV-PR1584 follow-up 1); the
+        # attempt-private DB this detail refresh already copies has it.
+        self.job._registry_metadata["opencode_context_window_final_limit_context"] = "200000"
+        self.step_row({"input":3000,"output":200,"cache":{"read":12000,"write":0}})        # 15200
+        self.message("m1",completed=True,stamp=1000,
+                     tokens={"input":3000,"output":200,"cache":{"read":12000,"write":0}})
+        self.message("m2",completed=True,stamp=2000,
+                     tokens={"input":3000,"output":100,"reasoning":7,"cache":{"read":15000,"write":0}})
+        self.message("m3",stamp=3000,tokens={"input":0,"output":0,"cache":{"read":0,"write":0}})
+        self.message("foreign","ses_other",completed=True,stamp=4000,tokens={"total":99999})
+        self.enrich()
+        self.assertEqual(self.job.active_context_tokens,18100)
+        self.assertEqual(render._native_context_gauge(self.job),(9,200000))
+        # First publication defers the snapshot, so the logged step stays until detail.
+        dispatch._OPENCODE_ATTEMPT_CACHE.clear()
+        dispatch._enrich_opencode_attempt_session(self.job,fast_first=True)
+        self.assertEqual(self.job.active_context_tokens,15200)
+        # Without the attempt-private DB nothing new is read; the logged step stays.
+        self.job._registry_metadata = {"opencode_context_window_final_limit_context":"200000"}
+        with mock.patch.object(rt,"_opencode_snapshot",side_effect=AssertionError("DB opened")):
+            dispatch._enrich_opencode_attempt_session(self.job)
+        self.assertEqual(self.job.active_context_tokens,15200)
+
+    def test_v2_private_db_corrects_owner_and_stage_worker_finished_turns(self):
+        self.con.executescript(
+            "CREATE TABLE session_v2 (id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);"
+            "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER,"
+            " time_created INTEGER, time_updated INTEGER, data TEXT);")
+        self.con.execute("INSERT INTO session_v2 VALUES('ses_owner','/wt',1,1)")
+        rows = [("msg_u","ses_owner","user",1,{"text":"question"}),
+                ("msg_a","ses_owner","assistant",2,{"time":{"created":1,"completed":2},"finish":"tool-calls",
+                                                    "tokens":{"input":2000,"output":150,"cache":{"read":19000,"write":0}}}),
+                ("msg_b","ses_owner","assistant",3,{"time":{"created":3,"completed":4},"finish":"stop",
+                                                    "tokens":{"input":3000,"output":90,"reasoning":0,"cache":{"read":21000,"write":0}}}),
+                ("msg_x","ses_other","assistant",4,{"time":{"completed":5},"tokens":{"total":99999}})]
+        self.con.executemany("INSERT INTO session_message VALUES(?,?,?,?,?,?,?)",
+                             [(mid,sid,kind,seq,seq,seq,json.dumps(data)) for mid,sid,kind,seq,data in rows])
+        self.con.commit()
+        for kind in ("dispatch.supervisor.step_tokens", "step_finish"):    # owner, then stage worker
+            with self.subTest(kind=kind):
+                if kind == "step_finish":
+                    self.log.write_text("")
+                dispatch._OPENCODE_ACTIVITY_CACHE.clear()
+                dispatch._OPENCODE_ATTEMPT_CACHE.clear()
+                self.step_row({"input":2000,"output":150,"cache":{"read":19000,"write":0}},kind)   # 21150
+                self.enrich()
+                self.assertEqual(self.job._runtime_session_id,"ses_owner")
+                self.assertEqual(self.job.active_context_tokens,24090)
 
     def test_announcement_survives_a_large_control_only_tail(self):
         with self.log.open("a") as f:
