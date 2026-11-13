@@ -38,6 +38,22 @@ class DraftTest(unittest.TestCase):
         self.assertEqual((english["intent"], english["scope"], english["not_doing"]),
                          ("Keep one row.", "utilities/", ["new flags"]))
 
+    def test_answer_first_leg_keeps_the_original_intent_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            intent = root / "shards/frame/intent.md"
+            intent.parent.mkdir(parents=True)
+            intent.write_text("The user's answers take precedence.\nOnly train E on mpwav 0.\n")
+            for request in (HEADER, "Fix the question guidance. Keep the existing lifecycle."):
+                route = {"route_id": "rt-intent-fixture", "artifact_root": str(root),
+                         "work_request": {"text": request}}
+                task = work_start._leg_task_text(route, root, root, [], {},
+                                                {"given": [], "execution_scope": "complete"})
+                self.assertTrue(task.startswith("## Agreed intent"))
+                self.assertLess(task.index("Only train E"), task.index("## Original work request"))
+                self.assertEqual(WI.draft(task), WI.draft(request))
+                self.assertEqual(WI.parse_header(task), WI.parse_header(request))
+
     def test_without_header_the_first_sentence_is_a_marked_draft(self):
         found = WI.draft("Fix: the Fleet row repeats. Keep one row per session.\n")
         self.assertEqual(found, {"intent": "Fix: the Fleet row repeats.", "basis": "first-sentence"})

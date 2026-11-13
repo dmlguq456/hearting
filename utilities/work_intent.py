@@ -76,6 +76,12 @@ def _label(raw: str) -> str | None:
 
 def _split_header(text: str) -> tuple[dict, str]:
     """The leading label lines of a prompt file and the text after them."""
+    # Leg prompts put the agreed answers first. The original request still owns
+    # these display/intent fields; headings in the generated wrapper are not goals.
+    if (text or "").startswith("## Agreed intent\n"):
+        _, separator, original = text.partition("\n## Original work request\n\n")
+        if separator and "\n## Frame briefs (read-only input)\n" in original:
+            text = original.rsplit("\n## Frame briefs (read-only input)\n", 1)[0].strip()
     found: dict = {}
     lines = (text or "").splitlines()
     index = 0
