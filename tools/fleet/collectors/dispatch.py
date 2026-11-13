@@ -1356,6 +1356,30 @@ _NATIVE_TERMINAL_PROOF = _terminal_row_process_alive
 _JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=12 * 1024 * 1024)
 
 
+# What the selection index needs from one job's latest row is a pure function of that row (its
+# fields and parsed metadata) under the PID namespace and the policy functions of the pass. The
+# row tuples of a registry generation come from per-segment parts, so a segment a rewrite did not
+# rebuild still holds the very same tuples: their facts are kept per tuple object (and the tuple
+# is held beside them, so an id that is reused never answers for another row). Nothing that
+# changes with the clock or the processes is kept here: those are read per pass below.
+_SELECTION_FACTS = {"scope": None, "rows": {}}
+
+
+def _selection_facts(fields, meta):
+    status = fields[1]
+    identity = _authoritative_registry_pid(meta)
+    if status in ('open', 'running'):
+        return (identity, True, None, None, None, False, False, False)
+    pid, start, _source = identity
+    pid_entry = (pid, str(start)) if pid and start else None
+    attempt = meta.get('attempt_id') or None
+    stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
+    dead = bool(_dead_terminal_owner_row(status, meta))
+    dead_dated = dead and stamp is not None and meta.get('intensity') != 'quick'
+    done_dated = not dead and status == 'done' and stamp is not None
+    return (identity, False, pid_entry, attempt, stamp, dead, dead_dated, done_dated)
+
+
 def _job_selection(derived, live_attempt_ids, *, include_stall):
     """Reuse the whole generation's selection index, observing PID/time afresh."""
     if (_COLLECTION_INPUTS.get() is None
@@ -1376,27 +1400,40 @@ def _job_selection(derived, live_attempt_ids, *, include_stall):
             _JOB_SELECTION_CACHE.move_to_end(key)
     if compiled is None:
         fixed, dated, dead_dates, pids, attempts, identities, positions = set(), [], [], {}, {}, {}, {}
+        scope = (namespace, policy)
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            if _SELECTION_FACTS["scope"] != scope:
+                _SELECTION_FACTS["scope"], _SELECTION_FACTS["rows"] = scope, {}
+            known = _SELECTION_FACTS["rows"]
+        kept = {}
         for position, job_key in enumerate(derived['job_order']):
-            _order, fields, meta = derived['latest_jobs'][job_key]
+            latest_row = derived['latest_jobs'][job_key]
+            held = known.get(id(latest_row))
+            if held is None or held[0] is not latest_row:
+                held = (latest_row, _selection_facts(latest_row[1], latest_row[2]))
+                _REGISTRY_FOLD_STATS["selection_fact_builds"] += 1
+            else:
+                _REGISTRY_FOLD_STATS["selection_fact_reuses"] += 1
+            kept[id(latest_row)] = held
+            identity, is_open, pid_entry, attempt, stamp, dead, dead_dated, done_dated = held[1]
             positions[job_key] = position
-            identity = _authoritative_registry_pid(meta)
             identities[job_key] = identity
-            status = fields[1]
-            if status in ('open', 'running'):
+            if is_open:
                 fixed.add(job_key)
                 continue
-            pid, start, _source = identity
-            if pid and start:
-                pids.setdefault(pid, []).append((job_key, str(start)))
-            if meta.get('attempt_id'):
-                attempts.setdefault(meta['attempt_id'], []).append(job_key)
-            stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
-            if _dead_terminal_owner_row(status, meta):
+            if pid_entry is not None:
+                pids.setdefault(pid_entry[0], []).append((job_key, pid_entry[1]))
+            if attempt:
+                attempts.setdefault(attempt, []).append(job_key)
+            if dead:
                 fixed.add(job_key)
-                if stamp is not None and meta.get('intensity') != 'quick':
+                if dead_dated:
                     dead_dates.append((stamp, position, job_key))
-            elif status == 'done' and stamp is not None:
+            elif done_dated:
                 dated.append((stamp, position, job_key))
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            if _SELECTION_FACTS["scope"] == scope:
+                _SELECTION_FACTS["rows"] = kept
         compiled = dict(fixed=frozenset(fixed), dated=tuple(sorted(dated)),
                         dead_dates=tuple(sorted(dead_dates)), pids=pids, attempts=attempts,
                         identities=identities, positions=positions)
@@ -4318,7 +4355,8 @@ class RegistryEvidence(dict):
 # path is held (each entry keeps its ``records`` alive, so the id cannot name another tuple).
 _REGISTRY_FOLD_PARTS = {}
 _REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0,
-                        "index_segment_builds": 0, "index_segment_reuses": 0}
+                        "index_segment_builds": 0, "index_segment_reuses": 0,
+                        "selection_fact_builds": 0, "selection_fact_reuses": 0}
 _REGISTRY_INDEX_PARTS = {}
 
 
