@@ -64,6 +64,8 @@ _METRICS = {
     "prefix_bytes_reused": 0,
     "line_parse_reuses": 0,
     "replacement_segment_builds": 0,
+    "segment_resyncs": 0,
+    "segment_rebuilds": 0,
 }
 # Set once a process asks for ``replacement_rows``: segments built afterwards keep
 # the attempt index they already compute, so that request costs no second parse.
@@ -312,22 +314,27 @@ class _RegistrySegment:
                  "completion_errors", "completion_all", "completion_children",
                  "completion_by_parent_sid",
                  "completion_by_route_alias", "settlement_owners",
-                 "observation_owners",
+                 "observation_owners", "observation_owner_keys",
                  "handover_latest", "handover_by_parent", "handover_by_binding",
                  "headless_owner_rows", "selection_by_parent", "selection_by_slug",
                  "selection_by_attempt", "selection_by_parent_slug",
                  "byte_end", "prefix_sha256", "order_end", "replacement_rows",
-                 "inner_proofs")
+                 "order_start", "content_sha256", "inner_proofs")
 
     def __init__(self, lines, order_base: int, *, hint=None, byte_end=None,
-                 prefix_sha256=None):
+                 prefix_sha256=None, content_sha256=None):
         # ``byte_end``/``prefix_sha256``: where this segment's last row ends in the
         # file and the digest of every byte up to there (None: not reusable).
         # ``hint`` maps the fields of an earlier row to its record: an identical row
         # shares that record's fields and, for an open row, its parsed pairs instead
         # of parsing them again. Records themselves are always rebuilt (new order).
+        # ``content_sha256``: the digest of this segment's own bytes alone (None: unknown, so a
+        # rewrite cannot recognise this segment again and builds it anew). With ``order_start`` it
+        # names the whole input of everything below, which is a pure function of the two.
         self.byte_end = byte_end
         self.prefix_sha256 = prefix_sha256
+        self.content_sha256 = content_sha256
+        self.order_start = order_base
         # ``(byte_end, prefix_sha256, order_end)`` of member boundaries a compaction
         # merged away (see ``compact``); a plain segment has none.
         self.inner_proofs = ()
@@ -348,6 +355,7 @@ class _RegistrySegment:
         completion_by_route_alias = {}
         settlement_owners = []
         observation_owners = []
+        observation_owner_keys = []
         handover_latest = {}
         selection_by_parent = {}
         selection_by_slug = {}
@@ -417,6 +425,9 @@ class _RegistrySegment:
                 settlement_owners.append(record)
             if completion_meta.get("worker_type") == "owner":
                 observation_owners.append(record)
+                # What a consumer that keeps one row per attempt keys on, known here so it never
+                # parses a finished row's metadata again just to find it.
+                observation_owner_keys.append(attempt_id or record.order)
             handover_attempt = handover_meta.get("attempt_id")
             if handover_attempt:
                 handover_latest[handover_attempt] = (fields[1], record)
@@ -440,6 +451,7 @@ class _RegistrySegment:
         }
         self.settlement_owners = tuple(settlement_owners)
         self.observation_owners = tuple(observation_owners)
+        self.observation_owner_keys = tuple(observation_owner_keys)
         self.handover_latest = handover_latest
         self.selection_by_parent = {key: tuple(value) for key, value in selection_by_parent.items()}
         self.selection_by_slug = {key: tuple(value) for key, value in selection_by_slug.items()}
@@ -448,6 +460,24 @@ class _RegistrySegment:
             key: tuple(value) for key, value in selection_by_parent_slug.items()
         }
         self._index_handover(handover_keys)
+
+    @classmethod
+    def resynced(cls, old: "_RegistrySegment", byte_end: int, prefix_sha256: bytes):
+        """A new segment object standing for the same rows as ``old`` at a new byte position.
+
+        Only the position (``byte_end``) and the digest of everything before it are new; the rows,
+        their records and every index are ``old``'s own immutable objects, so what a consumer
+        keyed on them (``records`` is the identity of the content) computed still holds.
+        """
+        result = cls.__new__(cls)
+        for name in cls.__slots__:
+            setattr(result, name, getattr(old, name))
+        result.byte_end = byte_end
+        result.prefix_sha256 = prefix_sha256
+        # Only a plain segment (one with its own content digest) is recognised again, and it
+        # has no merged-away member boundaries; none that described the old byte positions stay.
+        result.inner_proofs = ()
+        return result
 
     def _index_handover(self, handover_keys=None):
         self.handover_by_parent = {}
@@ -491,6 +521,8 @@ class _RegistrySegment:
         # enough for a cursor a few generations behind and bounds the list.
         result.byte_end = segments[-1].byte_end
         result.prefix_sha256 = segments[-1].prefix_sha256
+        result.content_sha256 = None      # the boundaries inside are gone: not recognisable again
+        result.order_start = segments[0].order_start
         result.order_end = segments[-1].order_end
         inner = []
         for segment in segments:
@@ -544,6 +576,8 @@ class _RegistrySegment:
                                         for record in segment.settlement_owners)
         result.observation_owners = tuple(record for segment in segments
                                           for record in segment.observation_owners)
+        result.observation_owner_keys = tuple(key for segment in segments
+                                              for key in segment.observation_owner_keys)
         result.selection_by_parent = {key: tuple(value) for key, value in selection_by_parent.items()}
         result.selection_by_slug = {key: tuple(value) for key, value in selection_by_slug.items()}
         result.selection_by_attempt = {key: tuple(value) for key, value in selection_by_attempt.items()}
@@ -554,12 +588,12 @@ class _RegistrySegment:
         return result
 
 
-def _iter_lf_chunks(raw: bytes, boundary: int, chunk_lines: int):
-    """Yield ``(rows, end offset)`` for the LF rows of ``raw[:boundary]``, ``chunk_lines`` at a time.
+def _iter_lf_chunks(raw: bytes, boundary: int, chunk_lines: int, start: int = 0):
+    """Yield ``(rows, end offset)`` for the LF rows of ``raw[start:boundary]``, ``chunk_lines`` at a time.
 
     The rows equal ``splitlines`` of that text when LF is the only separator.
     """
-    position = 0
+    position = start
     while position < boundary:
         rows = []
         while position < boundary and len(rows) < chunk_lines:
@@ -569,16 +603,72 @@ def _iter_lf_chunks(raw: bytes, boundary: int, chunk_lines: int):
         yield rows, position
 
 
+def _resync_segments(data: bytes, boundary: int, base: int, hasher, order: int, hint, olds):
+    """Segments of ``data[:boundary]`` after the first digest mismatch, following the old cuts.
+
+    ``olds`` are the cached segments past the kept prefix. Each is given the same number of
+    rows from ``data``; when that piece's own bytes have the digest the old segment recorded
+    **and** its first row has the order the old segment began at, the piece is the same rows at
+    the same positions, so a new segment object takes over the old one's rows and indexes
+    (``_RegistrySegment.resynced``). Any other piece is parsed anew, with ``hint`` for the rows
+    it still shares with the old ones. The walk ends at the first old segment that cannot be
+    recognised again (no own digest: merged or built without one) or when ``data`` runs out;
+    the caller cuts the rest the ordinary way. ``hasher`` has consumed everything up to the
+    piece being cut and leaves each segment's cumulative digest behind, as the ordinary cut does.
+
+    Returns ``(segments, consumed, order, resynced_rows, rebuilds)``.
+    """
+    segments = []
+    window = memoryview(data)
+    position = resynced_rows = rebuilds = 0
+    for old in olds:
+        if position >= boundary or old.content_sha256 is None:
+            break
+        want = old.order_end - old.order_start
+        rows_end, cut = position, 0
+        while cut < want and rows_end < boundary:
+            rows_end = data.find(b"\n", rows_end) + 1
+            cut += 1
+        piece = window[position:rows_end]
+        content = hashlib.sha256(piece).digest()
+        hasher.update(piece)
+        end = rows_end
+        if cut == want and order == old.order_start and content == old.content_sha256:
+            segments.append(_RegistrySegment.resynced(old, base + end, hasher.copy().digest()))
+            resynced_rows += cut
+            _METRICS["segment_resyncs"] += 1
+        else:
+            rows = [data[start:stop].decode("utf-8", errors="replace")
+                    for start, stop in _line_spans(data, position, end)]
+            segments.append(_RegistrySegment(rows, order, hint=hint, byte_end=base + end,
+                                             prefix_sha256=hasher.copy().digest(),
+                                             content_sha256=content))
+            rebuilds += 1
+            _METRICS["segment_rebuilds"] += 1
+        order += cut
+        position = end
+    return segments, position, order, resynced_rows, rebuilds
+
+
+def _line_spans(data: bytes, start: int, end: int):
+    """``(start, stop)`` of each LF row of ``data[start:end]`` (stop excludes the LF)."""
+    while start < end:
+        stop = data.find(b"\n", start)
+        yield start, stop
+        start = stop + 1
+
+
 def _reusable_prefix(cached, raw: bytes, resolved: str):
     """What of the cached parse the new bytes ``raw`` still prove unchanged.
 
-    Returns ``(segments, byte_end, hasher, hint, whole)`` or None. ``segments`` are the
-    leading cached segments whose cumulative digest equals the digest of the same
-    byte range of ``raw`` (the first mismatch stops the walk; the inode is not
-    asked, the digest proves the bytes). ``hasher`` has consumed ``raw[:byte_end]``
-    for the new view to continue. ``hint`` maps the fields of every discarded
-    cached row to its record (no row text is copied); ``whole`` says every cached
-    segment was kept.
+    Returns ``(segments, byte_end, hasher, hint, whole, discarded)`` or None.
+    ``segments`` are the leading cached segments whose cumulative digest equals the
+    digest of the same byte range of ``raw`` (the first mismatch stops the walk; the
+    inode is not asked, the digest proves the bytes). ``hasher`` has consumed
+    ``raw[:byte_end]`` for the new view to continue. ``hint`` maps the fields of
+    every discarded cached row to its record (no row text is copied); ``whole``
+    says every cached segment was kept. ``discarded`` are the cached segments past the kept
+    prefix, which ``_resync_segments`` may recognise again.
     None means a plain full parse.
     """
     if (cached is None or not cached._prefix_reuse_eligible
@@ -603,7 +693,7 @@ def _reusable_prefix(cached, raw: bytes, resolved: str):
         return None
     discarded = cached._segments[kept:]
     hint = {record.fields: record for segment in discarded for record in segment.records} or None
-    return cached._segments[:kept], position, good, hint, kept == len(cached._segments)
+    return cached._segments[:kept], position, good, hint, kept == len(cached._segments), discarded
 
 
 def demand_replacement_rows() -> None:
@@ -637,7 +727,7 @@ class RegistryView:
                  "last_observed_at", "_has_duplicate_attempts", "_invalid_utf8_prefix",
                  "has_invalid_utf8", "_raw_digest", "_prefix_reuse_eligible",
                  "_asserted_suffix", "_settled",
-                 "_parent_sessions", "_complete_digest")
+                 "_parent_sessions", "_complete_digest", "_resynced_rows")
 
     def __init__(self, path_identity: str, resolved_path: str, signature: tuple,
                  raw: bytes, *, previous: "RegistryView | None" = None, fd: int = -1,
@@ -654,6 +744,7 @@ class RegistryView:
         # older than the timestamp granularity: any later write changes the stat.
         self._settled = bool(settled and not self._asserted_suffix)
         self._parent_sessions = None
+        self._resynced_rows = 0
         self.last_observed_at = time.monotonic()
         self._has_duplicate_attempts = None
         self._complete_digest = None
@@ -681,13 +772,27 @@ class RegistryView:
                 lf_rows = data.count(b"\n", 0, boundary)
                 chunk_lines = max(_PARSE_CHUNK_LINES, -(-lf_rows // _COMPACT_SEGMENTS))
                 window, consumed = memoryview(data), 0
-                for rows, end in _iter_lf_chunks(data, boundary, chunk_lines):
-                    hasher.update(window[consumed:end])
+                olds = reuse[5] if reuse is not None and len(reuse) > 5 else ()
+                if olds:
+                    # Past the first mismatch the old segments' own cuts are followed, so a
+                    # rewrite leaves the segments whose rows did not change as they were.
+                    synced, consumed, order, self._resynced_rows, _built = _resync_segments(
+                        data, boundary, base, hasher, order, hint, olds)
+                    segments.extend(synced)
+                for rows, end in _iter_lf_chunks(data, boundary, chunk_lines, consumed):
+                    piece = window[consumed:end]
+                    hasher.update(piece)
                     consumed = end
                     segments.append(_RegistrySegment(
                         rows, order, hint=hint, byte_end=base + end,
-                        prefix_sha256=hasher.copy().digest()))
+                        prefix_sha256=hasher.copy().digest(),
+                        content_sha256=hashlib.sha256(piece).digest()))
+                    _METRICS["segment_rebuilds"] += 1
                     order += len(rows)
+                # A finished view holds at most _MAX_SEGMENTS segments: the one that makes it
+                # _MAX_SEGMENTS + 1 (257) exists only here, and is merged at once with the
+                # _COMPACT_SEGMENTS before it. A resynced rewrite keeps the old cuts, so it does
+                # not change that count.
                 if len(segments) > _MAX_SEGMENTS:
                     compacted = _RegistrySegment.compact(tuple(segments[-_COMPACT_SEGMENTS:]))
                     segments = segments[:-_COMPACT_SEGMENTS] + [compacted]
@@ -739,9 +844,12 @@ class RegistryView:
                     prefix_digest = hasher.digest()
                 self._complete_digest = hasher
             if complete:
+                own = (hashlib.sha256(memoryview(combined)[:len(combined) - len(tail)]).digest()
+                       if prefix_digest is not None else None)
                 appended_segment = _RegistrySegment(complete, order_base, byte_end=byte_end,
-                                                    prefix_sha256=prefix_digest)
+                                                    prefix_sha256=prefix_digest, content_sha256=own)
                 new_segments.append(appended_segment)
+            # Same bound as in the full read above: 257 segments exist only until this merge.
             if len(new_segments) > _MAX_SEGMENTS:
                 compacted = _RegistrySegment.compact(tuple(new_segments[-_COMPACT_SEGMENTS:]))
                 new_segments = new_segments[:-_COMPACT_SEGMENTS] + [compacted]
@@ -916,6 +1024,15 @@ class RegistryView:
     def answer_wait_owner_candidates(self):
         """All owner rows for observational wait projection (no lease filter)."""
         return tuple(record for segment in self._segments for record in segment.observation_owners)
+
+    def answer_wait_owner_keyed(self):
+        """``(attempt id or row order, record)`` of every owner row, in registry order.
+
+        The key is each row's ``attempt_id`` (its order when it has none); the segments computed
+        it once, so a pass that keeps the last row per attempt does not parse a finished row.
+        """
+        return tuple(pair for segment in self._segments
+                     for pair in zip(segment.observation_owner_keys, segment.observation_owners))
 
     def route_alias_candidates(self, *aliases):
         """Return every row matching aliases; callers must validate full route identity."""
@@ -1574,7 +1691,8 @@ def _count_generation(view: RegistryView, reuse) -> None:
     """Account one generation built from a full read, with or without a reused prefix."""
     kept = len(reuse[0]) if reuse is not None else 0
     reused_rows = sum(len(segment.records) for segment in reuse[0]) if kept else 0
-    _METRICS["metadata_rows_parsed"] += view.record_count - reused_rows
+    # Rows of segments recognised again past the first mismatch were not parsed either.
+    _METRICS["metadata_rows_parsed"] += view.record_count - reused_rows - view._resynced_rows
     if not kept:
         _METRICS["full_metadata_parses"] += 1
     elif reuse[4]:

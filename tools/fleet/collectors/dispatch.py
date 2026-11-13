@@ -173,16 +173,13 @@ def _prime_route_display_rows(paths, scope):
         # interpreter Fleet's parent-edge join uses, never through pane/cwd.
         if scope["holders"]:
             from . import _parent_read_context
-            from dispatch_seat_handover import resolve_recipient
+            from dispatch_seat_handover import job_holders
             context = _parent_read_context()
             owners = {}
-            for record in view.answer_wait_owner_candidates():
-                owners[record.completion_metadata().get("attempt_id") or record.order] = record
-            for record in owners.values():
-                if record.order in chosen:
-                    continue
-                answer = resolve_recipient("job-holder", metadata=record.handover_metadata(),
-                                           jobs=path, read_context=context)
+            for attempt_key, record in view.answer_wait_owner_keyed():
+                owners[attempt_key] = record
+            asked = [record for record in owners.values() if record.order not in chosen]
+            for record, answer in zip(asked, job_holders(asked, path, read_context=context)):
                 if (answer.harness, answer.session_id) in scope["holders"]:
                     chosen[record.order] = record
         for record in chosen.values():
@@ -883,6 +880,92 @@ def _index_registry_rows_by_attempt(rows):
     return indexed
 
 
+def _registry_segments_of(path, rows):
+    """``(absolute path, segments)`` of the registry generation ``rows`` was parsed from, or None."""
+    absolute = os.path.abspath(os.fspath(path))
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        rows_key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
+        if rows_key is None or _PARSED_REGISTRY_ROWS.get(rows_key) is not rows:
+            return None
+        segments = _PARSED_REGISTRY_SEGMENTS.get(rows_key)
+    if not segments or not all(hasattr(segment, "records") and hasattr(segment, "order_start")
+                               for segment in segments):
+        return None
+    return absolute, segments
+
+
+def _index_segment_part(segment_rows):
+    """What ``_build_registry_derived_index`` collects from one segment's rows (immutable values)."""
+    all_by_attempt, latest_by_attempt, children, latest_jobs = {}, {}, {}, {}
+    for registry_order, fields, metadata in segment_rows:
+        attempt_id = metadata.get("attempt_id")
+        if attempt_id:
+            all_by_attempt.setdefault(attempt_id, []).append((fields, metadata))
+            latest_by_attempt[attempt_id] = (registry_order, fields, metadata)
+            parent = metadata.get('parent_attempt_id')
+            if parent:
+                children.setdefault(parent, set()).add(attempt_id)
+        if not "\t".join(fields).strip():
+            continue
+        latest_jobs[attempt_id or fields[4]] = (registry_order, fields, metadata)
+    return ({attempt: tuple(items) for attempt, items in all_by_attempt.items()}, latest_by_attempt,
+            {parent: frozenset(attempts) for parent, attempts in children.items()}, latest_jobs)
+
+
+def _segmented_derived_index(path, rows):
+    """``_build_registry_derived_index(rows)`` from per-segment parts, or None when not usable.
+
+    The same keying as ``_segmented_evidence``: a segment's part is a pure function of its rows, which
+    are a pure function of its ``records`` tuple. Parts merge in file order: later rows win in
+    ``latest_*``, an attempt's rows concatenate, a parent's children union; first-seen order of
+    jobs and attempts is the dict insertion order."""
+    found = _registry_segments_of(path, rows)
+    if found is None:
+        return None
+    absolute, segments = found
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        reusable = _REGISTRY_INDEX_PARTS.get(absolute) or {}
+    current, parts, covered = {}, [], 0
+    for segment in segments:
+        low = bisect.bisect_left(rows, segment.order_start, key=_row_order)
+        high = bisect.bisect_left(rows, segment.order_end, key=_row_order)
+        covered += high - low
+        key = id(segment.records)
+        entry = reusable.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _index_segment_part(rows[low:high]))
+            _REGISTRY_FOLD_STATS["index_segment_builds"] += 1
+        else:
+            _REGISTRY_FOLD_STATS["index_segment_reuses"] += 1
+        current[key] = entry
+        parts.append(entry[1])
+    if covered != len(rows):
+        return None
+    all_by_attempt, latest_by_attempt, children_by_parent, latest_jobs = {}, {}, {}, {}
+    for part_all, part_latest, part_children, part_jobs in parts:
+        for attempt, items in part_all.items():
+            held = all_by_attempt.get(attempt)
+            all_by_attempt[attempt] = items if held is None else held + items
+        latest_by_attempt.update(part_latest)
+        for parent, attempts in part_children.items():
+            held = children_by_parent.get(parent)
+            children_by_parent[parent] = attempts if held is None else held | attempts
+        latest_jobs.update(part_jobs)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_INDEX_PARTS[absolute] = current
+        while len(_REGISTRY_INDEX_PARTS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_INDEX_PARTS.pop(next(iter(_REGISTRY_INDEX_PARTS)))
+    return MappingProxyType({
+        "token": object(),
+        "job_order": tuple(latest_jobs),
+        "latest_jobs": MappingProxyType(latest_jobs),
+        "all_by_attempt": MappingProxyType(all_by_attempt),
+        "attempt_positions": MappingProxyType({attempt: position for position, attempt in enumerate(all_by_attempt)}),
+        "children_by_parent": MappingProxyType(children_by_parent),
+        "latest_by_attempt": MappingProxyType(latest_by_attempt),
+    })
+
+
 def _registry_derived_index(path, rows):
     """Reuse immutable row indexes only while their parsed generation is retained."""
     absolute = os.path.abspath(os.fspath(path))
@@ -899,7 +982,7 @@ def _registry_derived_index(path, rows):
                 return cached
     if key is None:
         return _build_registry_derived_index(rows)
-    index = _build_registry_derived_index(rows)
+    index = _segmented_derived_index(path, rows) or _build_registry_derived_index(rows)
     with _PARSED_REGISTRY_CACHE_LOCK:
         if (key in _PARSED_REGISTRY_ROWS
                 and _PARSED_REGISTRY_ROWS[key] is rows
@@ -956,27 +1039,39 @@ def _row_order(row):
 
 
 def _carried_segment_rows(old_rows, old_segments, new_segments):
-    """Converted rows of every new segment that is the same object as an old one.
+    """Converted rows of every new segment whose rows are the very records of an old one.
 
-    A segment object is immutable and owns a fixed range of physical orders, so
-    the rows already converted for that range are the rows of the same segment
-    now, whatever else the new generation changed (a rewrite included).
+    A converted row is a pure function of its record and the physical order it stands at, and
+    ``records`` is the identity of a segment's content: a segment object that a rewrite recognised
+    again (``_RegistrySegment.resynced``) is a new object holding the old segment's own ``records``
+    tuple at the same physical orders. So the rows already converted for that range are the rows of
+    that segment now, whatever else the new generation changed. A segment of other records, or the
+    same records at other orders, is not carried; ``by_fields`` of ``_parse_registry_view`` proves
+    those row by row. Returns ``(carried, used)``: the rows by new segment, and the index ranges of
+    ``old_rows`` that were handed over (a row at an order a carried segment owns cannot be the
+    answer for a segment that was not carried).
+
+    The key is ``id(records)``, which names one object only while the old segments are held (and
+    the tuple itself is compared): ``_PARSED_REGISTRY_SEGMENTS`` keeps them for as long as
+    ``old_rows`` is kept.
     """
     if not old_rows or not old_segments:
-        return {}
+        return {}, []
     spans = {}
     start = 0
     for segment in old_segments:
-        spans[id(segment)] = (start, segment.order_end)
+        spans[id(segment.records)] = (start, segment.order_end, segment.records)
         start = segment.order_end
-    carried = {}
+    carried, used = {}, []
     for segment in new_segments:
-        span = spans.get(id(segment))
-        if span is not None:
+        span = spans.get(id(segment.records))
+        if (span is not None and span[2] is segment.records
+                and span[0] == segment.order_start and span[1] == segment.order_end):
             low = bisect.bisect_left(old_rows, span[0], key=_row_order)
             high = bisect.bisect_left(old_rows, span[1], key=_row_order)
             carried[id(segment)] = old_rows[low:high]
-    return carried
+            used.append((low, high))
+    return carried, used
 
 
 def _parse_registry_view(path, view, generation):
@@ -987,7 +1082,7 @@ def _parse_registry_view(path, view, generation):
         current_sources = _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources()
         old_rows = _PARSED_REGISTRY_ROWS.get(previous, ()) if current_sources else ()
         old_segments = _PARSED_REGISTRY_SEGMENTS.get(previous) if current_sources else None
-    carried = _carried_segment_rows(old_rows, old_segments, view._segments)
+    carried, carried_ranges = _carried_segment_rows(old_rows, old_segments, view._segments)
     # A replacement carries a new file generation; exact fields still prove
     # an unchanged row conversion, independently of its new physical order.
     by_fields = None
@@ -996,9 +1091,20 @@ def _parse_registry_view(path, view, generation):
         held = carried.get(id(segment))
         if held is not None:
             rows.extend(held)
+            _REGISTRY_FOLD_STATS["rows_carried_by_segment"] += len(held)
             continue
         if by_fields is None:
-            by_fields = {row[1]: row for row in old_rows}
+            # Only the old rows nobody carried over can answer for a segment that was not carried
+            # (the others stand at the orders of the carried segments).
+            by_fields, start = {}, 0
+            for low, high in sorted(carried_ranges):
+                for row in old_rows[start:low]:
+                    by_fields[row[1]] = row
+                start = high
+            for row in old_rows[start:]:
+                by_fields[row[1]] = row
+            _REGISTRY_FOLD_STATS["by_fields_rows"] += len(by_fields)
+        _REGISTRY_FOLD_STATS["rows_proved_by_fields"] += len(segment.records)
         for record in segment.records:
             old = (by_fields.get(record.fields)
                    if type(record) is _dispatch_registry_cache.RegistryRecord else None)
@@ -1268,6 +1374,31 @@ _NATIVE_TERMINAL_PROOF = _terminal_row_process_alive
 _JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=12 * 1024 * 1024)
 
 
+# What the selection index needs from one job's latest row is a pure function of that row (its
+# fields and parsed metadata) under the PID namespace and the policy functions of the pass. The
+# row tuples of a registry generation come from per-segment parts, so a segment a rewrite did not
+# rebuild still holds the very same tuples: their facts are kept per tuple object (and the tuple
+# is held beside them, so an id that is reused never answers for another row). Nothing that
+# changes with the clock or the processes is kept here: those are read per pass below.
+_SELECTION_FACTS = {"scope": None, "rows": {}}
+_JOB_SELECTION_BYTES_PER_JOB = 450
+
+
+def _selection_facts(fields, meta):
+    status = fields[1]
+    identity = _authoritative_registry_pid(meta)
+    if status in ('open', 'running'):
+        return (identity, True, None, None, None, False, False, False)
+    pid, start, _source = identity
+    pid_entry = (pid, str(start)) if pid and start else None
+    attempt = meta.get('attempt_id') or None
+    stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
+    dead = bool(_dead_terminal_owner_row(status, meta))
+    dead_dated = dead and stamp is not None and meta.get('intensity') != 'quick'
+    done_dated = not dead and status == 'done' and stamp is not None
+    return (identity, False, pid_entry, attempt, stamp, dead, dead_dated, done_dated)
+
+
 def _job_selection(derived, live_attempt_ids, *, include_stall):
     """Reuse the whole generation's selection index, observing PID/time afresh."""
     if (_COLLECTION_INPUTS.get() is None
@@ -1288,32 +1419,48 @@ def _job_selection(derived, live_attempt_ids, *, include_stall):
             _JOB_SELECTION_CACHE.move_to_end(key)
     if compiled is None:
         fixed, dated, dead_dates, pids, attempts, identities, positions = set(), [], [], {}, {}, {}, {}
+        scope = (namespace, policy)
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            if _SELECTION_FACTS["scope"] != scope:
+                _SELECTION_FACTS["scope"], _SELECTION_FACTS["rows"] = scope, {}
+            known = _SELECTION_FACTS["rows"]
+        kept = {}
         for position, job_key in enumerate(derived['job_order']):
-            _order, fields, meta = derived['latest_jobs'][job_key]
+            latest_row = derived['latest_jobs'][job_key]
+            held = known.get(id(latest_row))
+            if held is None or held[0] is not latest_row:
+                held = (latest_row, _selection_facts(latest_row[1], latest_row[2]))
+                _REGISTRY_FOLD_STATS["selection_fact_builds"] += 1
+            else:
+                _REGISTRY_FOLD_STATS["selection_fact_reuses"] += 1
+            kept[id(latest_row)] = held
+            identity, is_open, pid_entry, attempt, stamp, dead, dead_dated, done_dated = held[1]
             positions[job_key] = position
-            identity = _authoritative_registry_pid(meta)
             identities[job_key] = identity
-            status = fields[1]
-            if status in ('open', 'running'):
+            if is_open:
                 fixed.add(job_key)
                 continue
-            pid, start, _source = identity
-            if pid and start:
-                pids.setdefault(pid, []).append((job_key, str(start)))
-            if meta.get('attempt_id'):
-                attempts.setdefault(meta['attempt_id'], []).append(job_key)
-            stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
-            if _dead_terminal_owner_row(status, meta):
+            if pid_entry is not None:
+                pids.setdefault(pid_entry[0], []).append((job_key, pid_entry[1]))
+            if attempt:
+                attempts.setdefault(attempt, []).append(job_key)
+            if dead:
                 fixed.add(job_key)
-                if stamp is not None and meta.get('intensity') != 'quick':
+                if dead_dated:
                     dead_dates.append((stamp, position, job_key))
-            elif status == 'done' and stamp is not None:
+            elif done_dated:
                 dated.append((stamp, position, job_key))
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            if _SELECTION_FACTS["scope"] == scope:
+                _SELECTION_FACTS["rows"] = kept
         compiled = dict(fixed=frozenset(fixed), dated=tuple(sorted(dated)),
                         dead_dates=tuple(sorted(dead_dates)), pids=pids, attempts=attempts,
                         identities=identities, positions=positions)
         with _PARSED_REGISTRY_CACHE_LOCK:
-            _JOB_SELECTION_CACHE[key] = compiled
+            # Charged by schema (measured 377 bytes per job at 15,444 jobs) instead of walking
+            # the whole compiled index to size it, which cost as much as building it.
+            _JOB_SELECTION_CACHE.remember(
+                key, compiled, weight=_JOB_SELECTION_BYTES_PER_JOB * len(compiled['positions']) + 8192)
     alive = set()
     for pid in compiled['pids'].keys() & visible:
         start = procscan.read_proc_start(pid)
@@ -2310,8 +2457,10 @@ _CLAUDE_SUBAGENT_SCAN_BYTES = 8 * 1024 * 1024
 _CLAUDE_STREAM_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _CODEX_ATTEMPT_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _OPENCODE_ATTEMPT_CACHE = {}    # path -> ((mtime_ns, size, dev, ino), parsed)
-# Every registry attempt is re-observed each tick, so the FIFO bound must exceed the
-# attempt count; a smaller bound evicts each entry before its next hit.
+# The attempt logs a pass reads are those of the jobs ``_job_selection`` selects (an open or live
+# attempt, a recent one, a dead owner inside its window), not every registry attempt: a finished
+# attempt older than that is no job at all. The FIFO bound only has to exceed that selected set, so
+# a smaller bound would evict an entry before its next hit; 4,096 is well above it and unchanged.
 _ATTEMPT_PARSE_CACHE_LIMIT = 4096
 
 
@@ -3470,7 +3619,11 @@ _OPENCODE_ACTIVITY_BYTES = 32 * 1024 * 1024
 
 
 def _enrich_opencode_native_activity(job, session_id, fast_first=False):
-    """Observe only the attempt-private DB; first publication remains log-only."""
+    """Observe only the attempt-private DB; first publication remains log-only.
+
+    The same snapshot gives ``_native_context_tokens``, the newest request's prompt
+    size, which includes the turn's last step the attempt log never receives."""
+    job._native_context_tokens = None
     if fast_first:
         job.shell_jobs = []
         job.shell_job_observation = {"state": "unobserved", "reason": "detail-refresh-deferred"}
@@ -3534,6 +3687,7 @@ def _enrich_opencode_native_activity(job, session_id, fast_first=False):
             _OPENCODE_ACTIVITY_CACHE[key] = (signatures, activity, shell_observation)
             if len(_OPENCODE_ACTIVITY_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
                 _OPENCODE_ACTIVITY_CACHE.pop(next(iter(_OPENCODE_ACTIVITY_CACHE)))
+        job._native_context_tokens = activity.get("context_tokens")
         tool = activity.get("tool")
         label = _tool_label(tool.get("name"), tool.get("input")) if tool else None
         _job_activity(job, _tool_call(label, tool.get("name"), tool.get("input")) if label else None,
@@ -3582,9 +3736,11 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
         job.association_ambiguity = "opencode-announcement-identity-mismatch"
         return
     job._dispatch_context_owned = True
+    native_context = None
     if parsed.get("session_id"):
         job._runtime_session_id = parsed["session_id"]
         _enrich_opencode_native_activity(job, parsed["session_id"], fast_first=fast_first)
+        native_context = getattr(job, "_native_context_tokens", None)
     metadata = getattr(job, "_registry_metadata", None) or {}
     raw_window = _opencode_job_context_window(job)
     record = None
@@ -3634,7 +3790,8 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
             reason="native-chat-params-policy-not-found-or-stale")
     telemetry = telemetry_from_explicit(
         adapter="opencode", session_id=parsed.get("session_id"),
-        active_context_tokens=parsed.get("active_context_tokens"),
+        active_context_tokens=(parsed.get("active_context_tokens") if native_context is None
+                               else native_context),
         context_window_tokens=raw_window)
     for field_name in ("active_context_tokens", "context_window_tokens"):
         setattr(job, field_name, getattr(telemetry, field_name))
@@ -4221,6 +4378,171 @@ class RegistryEvidence(dict):
     """A published registry graph whose route histories have copy-on-write ownership."""
 
 
+# Per-segment partial folds of ``_registry_evidence_for_path`` (see ``_segmented_evidence``): the
+# partial of a segment is a pure function of its rows, which are a pure function of the segment's
+# ``records`` tuple (the same object means the same bytes at the same orders; a rewrite that
+# recognised a segment keeps that tuple) and of the four classifying functions. One generation per
+# path is held (each entry keeps its ``records`` alive, so the id cannot name another tuple).
+_REGISTRY_FOLD_PARTS = {}
+_REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0,
+                        "index_segment_builds": 0, "index_segment_reuses": 0,
+                        "selection_fact_builds": 0, "selection_fact_reuses": 0,
+                        "rows_carried_by_segment": 0, "rows_proved_by_fields": 0,
+                        "by_fields_rows": 0}
+_REGISTRY_INDEX_PARTS = {}
+
+
+def registry_fold_metrics():
+    return dict(_REGISTRY_FOLD_STATS)
+
+
+def _fold_registry_segment(rows, path):
+    """What folding these rows one by one (``_registry_evidence_for_path``) adds, kept apart.
+
+    Returns ``(nodes, attempts)``: ``nodes[route_id][route_node] = (attempt history, values)`` where
+    the values are the keys the rows set on the node in file order (later rows win) and the history
+    is the entries they appended; ``attempts[attempt_id]`` is the evidence of that attempt's last row.
+    """
+    nodes = {}
+    for registry_order, fields, meta in rows:
+        ts, status, _repo, _worktree, slug, _pipe = fields
+        route_id = meta.get("route_id")
+        route_node = meta.get("route_node")
+        attempt_id = meta.get("attempt_id")
+        if not attempt_id and (not route_id or not route_node):
+            continue
+        attempt_contract = _attempt_contract(meta)
+        harness = _infer_harness(meta, slug) if attempt_id else None
+        if not route_id or not route_node:
+            continue
+        pid_s = meta.get("pid")
+        pid = int(pid_s) if (pid_s or "").isdigit() else None
+        attention_reason = _attempt_attention(meta)
+        per_route = nodes.get(route_id)
+        if per_route is None:
+            per_route = nodes[route_id] = {}
+        cell = per_route.get(route_node)
+        if cell is None:
+            cell = per_route[route_node] = ([], {})
+        history, values = cell
+        history.append({
+            "attempt_id": attempt_id,
+            "status": status,
+            "pid": pid,
+            "dispatch_depth": attempt_contract["dispatch_depth"],
+            "transport": attempt_contract["transport"],
+            "execution_surface": attempt_contract["execution_surface"],
+            "registered_worker": attempt_contract["registered_worker"],
+            "fallback_hop": attempt_contract["fallback_hop"],
+            "contract_status": attempt_contract["attempt_contract_status"],
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "note": meta.get("note"),
+            "registry_order": registry_order,
+            "attention_reason": attention_reason,
+        })
+        values.update({
+            "route_file": meta.get("route_file"),
+            "route_hash": meta.get("route_hash"),
+            "parent": meta.get("parent") or meta.get("parent_slug"),
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "registry_order": registry_order,
+            "_registry_path": path,
+            "attempt_id": attempt_id,
+            "attention_reason": (attention_reason
+                                 if attempt_contract["attempt_contract_status"] == "current"
+                                 else None),
+        })
+        if attempt_contract["attempt_contract_status"] != "current":
+            continue
+        values.update({
+            "status": status, "slug": slug, "ts": _iso_to_epoch(ts),
+            "pid": pid,
+            "harness": harness if harness is not None else _infer_harness(meta, slug),
+            "model": meta.get("model"),
+            "effort": meta.get("effort") or meta.get("reasoning"),
+            "completion_gate": meta.get("completion_gate"),
+            "note": meta.get("note"),
+        })
+    latest = {}
+    for registry_order, fields, meta in rows:
+        if meta.get("attempt_id"):
+            latest[meta["attempt_id"]] = (registry_order, fields, meta)
+    attempts = {}
+    for attempt_id, (registry_order, fields, meta) in latest.items():
+        _ts, status, _repo, _worktree, slug, _pipe = fields
+        attempts[attempt_id] = {
+            "attempt_id": attempt_id,
+            "status": status,
+            "route_id": meta.get("route_id"),
+            "route_node": meta.get("route_node"),
+            "harness": _infer_harness(meta, slug),
+            "slug": slug,
+            "registry_order": registry_order,
+            **_attempt_contract(meta),
+        }
+    return nodes, attempts
+
+
+def _segmented_evidence(path, rows, functions):
+    """The evidence of ``rows`` from per-segment partial folds, or None when they cannot be used.
+
+    The registry's segments are immutable ranges of whole rows; a rewrite recognises the segments
+    whose bytes and first order did not change and keeps their ``records``. The partial of such a
+    segment is kept, and only new or changed segments are folded; the partials are merged in file
+    order with the rules of the row-by-row fold (later rows win per key, histories concatenate,
+    an attempt's last row decides). The merge copies, so nothing a kept partial holds is mutated.
+    """
+    found = _registry_segments_of(path, rows)
+    if found is None:
+        return None
+    absolute, segments = found
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _REGISTRY_FOLD_PARTS.get(absolute)
+    reusable = held[1] if held is not None and all(a is b for a, b in zip(functions, held[0])) else {}
+    current, parts, covered = {}, [], 0
+    for segment in segments:
+        low = bisect.bisect_left(rows, segment.order_start, key=_row_order)
+        high = bisect.bisect_left(rows, segment.order_end, key=_row_order)
+        covered += high - low
+        key = id(segment.records)
+        entry = reusable.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _fold_registry_segment(rows[low:high], path))
+            _REGISTRY_FOLD_STATS["segment_folds"] += 1
+        else:
+            _REGISTRY_FOLD_STATS["segment_fold_reuses"] += 1
+        current[key] = entry
+        parts.append(entry[1])
+    if covered != len(rows):
+        return None
+    routes, path_attempts = {}, {}
+    for nodes, attempts in parts:
+        for route_id, per_route in nodes.items():
+            target = routes.get(route_id)
+            if target is None:
+                target = routes[route_id] = {}
+            for route_node, (history, values) in per_route.items():
+                cell = target.get(route_node)
+                if cell is None:
+                    cell = target[route_node] = ([], {})
+                cell[0].extend(history)
+                cell[1].update(values)
+        path_attempts.update(attempts)
+    path_result = {}
+    for route_id, per_route in routes.items():
+        evidence = RegistryRouteEvidence()
+        for route_node, (history, values) in per_route.items():
+            node = {"attempt_history": history}
+            node.update(values)
+            evidence[route_node] = node
+        path_result[route_id] = evidence
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_FOLD_PARTS[absolute] = (functions, current)
+        while len(_REGISTRY_FOLD_PARTS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_FOLD_PARTS.pop(next(iter(_REGISTRY_FOLD_PARTS)))
+    return path_result, path_attempts
+
+
 def _registry_evidence_for_path(path, rows):
     """Fold only appended records, without mutating any published history graph."""
     key = (type(path), os.fspath(path))
@@ -4241,6 +4563,12 @@ def _registry_evidence_for_path(path, rows):
     path_result = dict(held[2]) if prefix else {}
     path_attempts = dict(held[3]) if prefix else {}
     suffix = rows[len(held[0].rows):] if prefix else rows
+    if not prefix:
+        # A rewrite, not an append: only the segments that changed are folded again.
+        segmented = _segmented_evidence(path, rows, functions)
+        if segmented is not None:
+            path_result, path_attempts = segmented
+            suffix = ()
     changed_routes, changed_nodes = set(), set()
     for registry_order, fields, parsed_meta in suffix:
         # Parsed metadata is immutable and every consumer below is read-only.
@@ -4339,7 +4667,10 @@ def _registry_evidence_for_path(path, rows):
             **attempt_contract,
         }
     with _PARSED_REGISTRY_CACHE_LOCK:
-        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts))
+        # A schema-derived charge (about 3 KB of evidence per row, measured on the live shape):
+        # measuring the exact graph walks every row's evidence again on every new generation.
+        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts),
+                                          weight=len(rows) * 3000 + 4096)
         if key in _REGISTRY_EVIDENCE_CACHE:
             _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
         while len(_REGISTRY_EVIDENCE_CACHE) > _PARSED_REGISTRY_ROWS_LIMIT:

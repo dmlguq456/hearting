@@ -8,8 +8,9 @@ unchanged warm passes, events are injected through the real writers
 
 T1  event -> (producer wake -> pass -> publish) -> the first ``projection.json`` that
     carries the value (``visible.t1``) -> host debounce -> ``session_shell.panel_projection``.
-T2  event -> the first Fleet ``_explorer_compose`` whose screen model carries the value
-    (``visible.t2``, from the digest the shim takes after each compose).
+T2  event -> the first Fleet ``_draw`` whose screen model carries the value
+    (``visible.t2``, from the digest the shim takes after each ``_draw`` returns: the model the
+    frame was actually drawn from, after the publication decision).
 
 A value that never shows within the wait is ``not_visible``: it gets no time, and every
 table says how many of the injected events were seen (``n_visible / n``).
@@ -76,13 +77,27 @@ def summarize(samples, total: int | None = None) -> dict:
     return out
 
 
+# A value read from the producer's source that fell back to its default because the source no
+# longer has the shape the regex expects. ``measure`` copies these into the report's notes, so a
+# changed source line cannot silently turn the timing model back to a stale number.
+SOURCE_SHAPE_WARNINGS: list[str] = []
+
+
+def _warn_default(name: str, default: float, why: str) -> float:
+    message = (f"WARNING: {name} could not be read from the producer source ({why}); the default {default:g} "
+               f"is used. The source line changed shape: update the pattern in tools/e2e_latency/t12.py.")
+    if message not in SOURCE_SHAPE_WARNINGS:
+        SOURCE_SHAPE_WARNINGS.append(message)
+    return default
+
+
 def registry_min_gap() -> float:
     """``_REGISTRY_MIN_GAP`` from the producer's own source (not a copy of the number)."""
     try:
         text = (REPO / "utilities" / "human_wait_state.py").read_text(encoding="utf-8")
         return float(re.search(r"^_REGISTRY_MIN_GAP\s*=\s*([0-9.]+)", text, re.M).group(1))
-    except (OSError, AttributeError, ValueError):
-        return 2.0
+    except (OSError, AttributeError, ValueError) as exc:
+        return _warn_default("registry_min_gap", 2.0, type(exc).__name__)
 
 
 def host_debounce_s() -> float:
@@ -90,8 +105,8 @@ def host_debounce_s() -> float:
         text = (REPO / "utilities" / "session-shell" / "host.cjs").read_text(encoding="utf-8")
         match = re.search(r"projectionTimer=setTimeout\(\(\)=>\{[^}]*\},(\d+)\)", text)
         return int(match.group(1)) / 1000.0
-    except (OSError, AttributeError, ValueError):
-        return HOST_DEBOUNCE_S
+    except (OSError, AttributeError, ValueError) as exc:
+        return _warn_default("host_debounce_s", HOST_DEBOUNCE_S, type(exc).__name__)
 
 
 class Children:
@@ -247,8 +262,8 @@ def producer_cadence_s() -> float:
     try:
         text = (REPO / "utilities" / "human_wait_state.py").read_text(encoding="utf-8")
         return float(re.search(r"delay = min\(\s*([0-9.]+)\s*,\s*max\(1\.0,\s*600\.0 - idle\)\)", text).group(1))
-    except (OSError, AttributeError, ValueError):
-        return 30.0
+    except (OSError, AttributeError, ValueError) as exc:
+        return _warn_default("producer_cadence_s", 30.0, type(exc).__name__)
 
 
 # Events outside the registry: a worker stream line, an answer-wait signal and an owner process
@@ -400,6 +415,53 @@ def wait_warm(children: Children, *, timeout: float) -> dict:
     return state
 
 
+def _has_detail(digest) -> bool:
+    """Does a drawn-model digest show any route's owner attempt or active stage?"""
+    return any(isinstance(row, dict) and (row.get("attempt") or row.get("active"))
+               for row in ((digest or {}).get("routes") or {}).values())
+
+
+def drawn_detail(fleet: list[dict]) -> dict:
+    """How often the screen was drawn from a model whose routes carry no detail.
+
+    Counted over the ``_draw`` frames from the first one that showed detail on: a frame is
+    *empty* when the model has routes but none of them shows an owner attempt or an active stage
+    (the detail a route row prints), after some earlier frame did. One alternating empty frame
+    every few seconds is the flicker a user sees; ``empty_s`` is the time those frames stayed
+    on screen and ``longest_empty_s`` the longest unbroken stretch.
+    """
+    draws = [r for r in shim_pass.with_models(fleet) if r["root"] == "render._draw"]
+    started = next((i for i, r in enumerate(draws) if _has_detail(r.get("model_now"))), None)
+    out = {"frames": 0, "with_detail": 0, "empty": 0, "empty_runs": 0, "empty_s": 0.0,
+           "longest_empty_s": 0.0, "span_s": 0.0}
+    if started is None:
+        return out
+    draws = draws[started:]
+    run_start = None
+    for i, rec in enumerate(draws):
+        digest = rec.get("model_now")
+        shown = isinstance(digest, dict) and bool(digest.get("routes"))
+        if not shown:
+            continue
+        out["frames"] += 1
+        empty = not _has_detail(digest)
+        until = draws[i + 1]["t1"] if i + 1 < len(draws) else rec["t1"]
+        if empty:
+            out["empty"] += 1
+            out["empty_s"] += (until - rec["t1"]) / 1e9
+            if run_start is None:
+                run_start = rec["t1"]
+                out["empty_runs"] += 1
+            out["longest_empty_s"] = max(out["longest_empty_s"], (until - run_start) / 1e9)
+        else:
+            out["with_detail"] += 1
+            run_start = None
+    out["span_s"] = round((draws[-1]["t1"] - draws[0]["t1"]) / 1e9, 2)
+    out["empty_s"] = round(out["empty_s"], 2)
+    out["longest_empty_s"] = round(out["longest_empty_s"], 2)
+    return out
+
+
 def _publisher_pass(passes: list[dict], detect_ns: int):
     done = [p for p in passes if p["t1"] <= detect_ns + 5_000_000]
     return done[-1] if done else None
@@ -416,7 +478,7 @@ def _pass_row(index: int, kind: str, rec: dict, role: str) -> dict:
 
 
 def _fleet_arrival(composes: list[dict], ev: dict):
-    """The first ``_explorer_compose`` that ends after the event with the event's value in its model."""
+    """The first ``_draw`` that ends after the event with the event's value in the model it drew."""
     for rec in composes:
         if rec["t1"] >= ev["t_ns"] and visible.t2(ev, rec.get("model_now")):
             return rec
@@ -429,7 +491,7 @@ def _fleet_baseline(fleet: list[dict], ev: dict) -> bool | None:
     if "route_id" not in expect:
         return None
     before = [r for r in shim_pass.with_models(fleet)
-              if r["root"] == "render._explorer_compose" and r["t1"] <= ev["t_start_ns"]]
+              if r["root"] == "render._draw" and r["t1"] <= ev["t_start_ns"]]
     digest = before[-1].get("model_now") if before else None
     return bool(digest and expect["route_id"] in (digest.get("routes") or {}))
 
@@ -506,7 +568,7 @@ def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout
         tail_end = time.monotonic() + FLEET_TAIL_S
         while time.monotonic() < tail_end:
             fleet = shim_pass.with_models(shim_pass.read_passes(children.fleet_log))
-            composes = [r for r in fleet if r["root"] == "render._explorer_compose"]
+            composes = [r for r in fleet if r["root"] == "render._draw"]
             if injected and all(_fleet_arrival(composes, e) is not None for e in injected):
                 break
             time.sleep(0.5)
@@ -544,7 +606,7 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
     totals = {k: sum(1 for e in injected if e["kind"] == k) for k in kinds}
     publisher_passes: dict[int, str] = {}
     fleet_collects = [r for r in fleet if r["root"] == "__init__.collect_all"]
-    fleet_composes = [r for r in shim_pass.with_models(fleet) if r["root"] == "render._explorer_compose"]
+    fleet_composes = [r for r in shim_pass.with_models(fleet) if r["root"] == "render._draw"]
     outside = []
     unresolved = []
     for ev in injected:
@@ -590,6 +652,11 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
                               "woken_early": bool(gap is not None and gap < cadence - 1.0),
                               "host_shows": ev.get("host_shows")}
                     outside.append(record)
+            else:
+                unresolved.append({"what": f"{kind}#{ev['seq']} T1",
+                                   "reason": "no_publisher_pass: projection.json showed the value "
+                                             f"(detect_ns recorded) but no producer pass ended at or before that moment, "
+                                             "so the pass that published it cannot be named and no segment split is given"})
         else:
             unresolved.append({"what": f"{kind}#{ev['seq']} T1",
                                "reason": f"not_visible: its value was not in projection.json within the wait "
@@ -600,11 +667,11 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
             collect = [r for r in fleet_collects if r["t1"] <= arrival["t0"]]
             collect = collect[-1] if collect else None
             t2_total[kind].append((arrival["t1"] - ev["t_ns"]) / 1e9)
-            t2_seg[kind].setdefault("compose_s", []).append((arrival["t1"] - arrival["t0"]) / 1e9)
+            t2_seg[kind].setdefault("draw_s", []).append((arrival["t1"] - arrival["t0"]) / 1e9)
             if collect is not None:
                 t2_seg[kind].setdefault("wait_for_collect_s", []).append(max(0.0, (collect["t0"] - ev["t_ns"]) / 1e9))
                 t2_seg[kind].setdefault("collect_s", []).append((collect["t1"] - collect["t0"]) / 1e9)
-                t2_seg[kind].setdefault("compose_wait_s", []).append((arrival["t0"] - collect["t1"]) / 1e9)
+                t2_seg[kind].setdefault("draw_wait_s", []).append((arrival["t0"] - collect["t1"]) / 1e9)
         else:
             unresolved.append({"what": f"{kind}#{ev['seq']} T2",
                                "reason": "not_visible: its value was not in the Fleet screen model within the wait"})
@@ -647,13 +714,15 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
                            "false": sum(1 for r in outside if r["host_shows"] is False),
                            "unchecked": sum(1 for r in outside if r["host_shows"] is None)},
             "samples": outside}
+    notes.extend(SOURCE_SHAPE_WARNINGS)
     notes.append("latency starts at the completed write; T1 includes the 25 ms host debounce constant "
                  "read from host.cjs and the panel_projection call; the host's own paint is not measured.")
     notes.append("T1 arrival is the first projection.json that carries the event's value (route row with its "
                  "owner attempt, new stage, tool name, closed outcome, item id, owner no longer working); "
                  "a write the reader does not show is `not_visible`, never given a time.")
-    notes.append("T2 arrival is the first _explorer_compose whose screen model (digest taken by the shim "
-                 "after the compose) carries the same value.")
+    notes.append("T2 arrival is the first _draw whose screen model (digest taken by the shim after _draw "
+                 "returns: the model that frame was drawn from, after the publication decision) carries the "
+                 "same value.")
     notes.append(f"registry-outside events are placed at seeded, stratified phases over the producer's "
                  f"{cadence:g}s cadence (phase = seconds after the last publish).")
     return {
@@ -661,6 +730,7 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
         "events": [{k: v for k, v in e.items() if k != "anchor_ns"} for e in injected],
         "warm": warm, "self_check": {"checks": checks, "failures": failures},
         "shim_mode": shim_pass.shim_mode(producer_log),
+        "drawn_detail": drawn_detail(fleet),
         "notes": notes, "not_measured": not_measured + unresolved,
         "min_gap_s": min_gap, "debounce_s": debounce, "cadence_s": cadence,
     }
@@ -674,52 +744,70 @@ def _median(values):
     return data[mid] if len(data) % 2 else (data[mid - 1] + data[mid]) / 2
 
 
-def measure_replace(fixture: dict, *, scratch: Path, warm_passes: int = 3, timeout: float = 400.0) -> dict:
+def measure_replace(fixture: dict, *, scratch: Path, warm_passes: int = 3, timeout: float = 400.0,
+                    replacements: int = 3) -> dict:
     """Warm unchanged passes versus the pass right after a whole-registry replacement.
 
-    Open routes and sessions stay as they are, no event is injected apart from
-    the replacement; both children run as in ``measure``. The result carries the
-    median warm duration, the after-replace duration and the extra the replacement
+    Open routes and sessions stay as they are, no event is injected apart from the
+    replacements; both children run as in ``measure``. The registry is replaced
+    ``replacements`` times, each from a settled state (both roles have run a pass since the
+    previous replacement), and the pass right after each one is a sample: one pass is too
+    noisy to compare two history sizes by. The result carries the median warm duration, the
+    median after-replace duration with all of its samples and the extra the replacement
     adds, for the producer and for the Fleet collect, with their registry metrics.
     """
     children = Children(fixture, scratch)
-    after_t = None
+    after_times: list[int] = []
+
+    def read():
+        return (shim_pass.read_passes(children.producer_log),
+                [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"])
+
+    def wait_for(predicate, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            producer, fleet = read()
+            if predicate(producer, fleet):
+                return True
+            time.sleep(0.2)
+        return False
+
     try:
         children.start_producer()
         children.start_fleet()
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            producer = shim_pass.read_passes(children.producer_log)
-            fleet = [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"]
-            if len(producer) >= 1 + warm_passes and len(fleet) >= 1 + 5:
-                break
-            time.sleep(0.5)
+        wait_for(lambda producer, fleet: len(producer) >= 1 + warm_passes and len(fleet) >= 1 + 5, timeout)
         time.sleep(0.3)
-        event = events.registry_replace(fixture, 0)
-        after_t = event["t_ns"]
-        deadline = time.monotonic() + 90.0
-        while time.monotonic() < deadline:
-            producer = shim_pass.read_passes(children.producer_log)
-            fleet = [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"]
-            if (any(r["t0"] >= after_t for r in producer)
-                    and any(r["t0"] >= after_t for r in fleet)):
-                break
-            time.sleep(0.2)
-        producer = shim_pass.read_passes(children.producer_log)
-        fleet = [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"]
+        for n in range(max(1, replacements)):
+            event = events.registry_replace(fixture, n)
+            after_times.append(event["t_ns"])
+            at = event["t_ns"]
+            wait_for(lambda producer, fleet: any(r["t0"] >= at for r in producer)
+                     and any(r["t0"] >= at for r in fleet), 90.0)
+            # settle: a pass of each role that began after the one that saw the replacement ended
+            producer, fleet = read()
+            seen = [next((r["t1"] for r in rows if r["t0"] >= at), at) for rows in (producer, fleet)]
+            wait_for(lambda producer, fleet: any(r["t0"] > seen[0] for r in producer)
+                     and any(r["t0"] > seen[1] for r in fleet), 30.0)
+        producer, fleet = read()
     finally:
         children.close()
-    out = {"rows": fixture.get("rows"), "registry_bytes": fixture.get("bytes"), "roles": {}}
+    first_after = after_times[0]
+    out = {"rows": fixture.get("rows"), "registry_bytes": fixture.get("bytes"), "roles": {},
+           "replacements": len(after_times)}
     for role, rows in (("producer", producer), ("fleet", fleet)):
-        before = [r for r in rows if r["t1"] <= after_t][1:]  # drop the cold pass
-        after = next((r for r in rows if r["t0"] >= after_t), None)
+        before = [r for r in rows if r["t1"] <= first_after][1:]  # drop the cold pass
+        afters = [next((r for r in rows if r["t0"] >= at), None) for at in after_times]
+        afters = [r for r in afters if r is not None]
         warm = [(r["t1"] - r["t0"]) / 1e9 for r in before]
         entry = {"warm_passes": len(warm), "warm_median_s": _median(warm),
                  "warm_samples_s": [round(v, 4) for v in warm]}
-        if after is not None:
-            dur = (after["t1"] - after["t0"]) / 1e9
-            entry.update(after_replace_s=round(dur, 4), extra_s=round(dur - (entry["warm_median_s"] or 0), 4),
-                         after_row=_pass_row(0, "after-replace", after, role),
+        if afters:
+            durations = sorted(((r["t1"] - r["t0"]) / 1e9, i) for i, r in enumerate(afters))
+            dur, pick = durations[len(durations) // 2] if len(durations) % 2 else durations[len(durations) // 2 - 1]
+            median = _median([d for d, _ in durations])
+            entry.update(after_replace_s=round(median, 4), extra_s=round(median - (entry["warm_median_s"] or 0), 4),
+                         after_samples_s=[round(d, 4) for d, _ in sorted(durations, key=lambda x: x[1])],
+                         after_row=_pass_row(0, "after-replace", afters[pick], role),
                          warm_row=_pass_row(0, "warm-unchanged", before[-1], role) if before else None)
             if entry["warm_median_s"] is not None:
                 entry["warm_median_s"] = round(entry["warm_median_s"], 4)

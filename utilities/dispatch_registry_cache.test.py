@@ -27,6 +27,24 @@ class RegistryLinesCacheTest(unittest.TestCase):
             row = CACHE.registry_view(self.jobs).records[0]
             self.assertEqual(row.handover_metadata(), row.completion_metadata())
 
+    def test_owner_rows_carry_the_key_a_pass_keeps_one_row_per_attempt_by(self):
+        # the key is computed once per segment: the attempt id, or the row order when it has none;
+        # it equals what parsing every row's metadata gives, in registry order, across a merge
+        rows = ["t\tdone\t/repo\t/wt\towner\tworker_type=owner,attempt_id=att-a,parent_sid=p",
+                "t\tdone\t/repo\t/wt\tchild\tworker_type=child,attempt_id=att-c",
+                "t\tdone\t/repo\t/wt\towner\tworker_type=owner,parent_sid=p",
+                "t\topen\t/repo\t/wt\towner\tworker_type=owner,attempt_id=att-a,parent_sid=p",
+                "t\topen\t/repo\t/wt\towner\tworker_type=owner,attempt_id=,parent_sid=p"]
+        self.jobs.write_text("".join(row + "\n" for row in rows))
+        with mock.patch.object(CACHE, "_PARSE_CHUNK_LINES", 2):
+            view = CACHE.registry_view(self.jobs)
+            keyed = view.answer_wait_owner_keyed()
+            self.assertGreater(len(view._segments), 1)
+        by_parsing = tuple((record.completion_metadata().get("attempt_id") or record.order, record)
+                           for record in view.answer_wait_owner_candidates())
+        self.assertEqual(keyed, by_parsing)
+        self.assertEqual([key for key, _record in keyed], ["att-a", 2, "att-a", 4])
+
     def test_noncanonical_key_collisions_keep_handover_ordering(self):
         examples = [" a=1,a=2, a=3", "=empty,parent=p", " a=one, a=two,a=three"]
         self.jobs.write_text("".join("t\topen\t/repo\t/wt\towner\t" + raw + "\n"
@@ -1379,12 +1397,22 @@ class PrefixReuseAfterReplacementTest(unittest.TestCase):
                 self.assertIsNot(first, second)
                 self.assertIs(second._segments[0], first._segments[0])
                 self.assertIsNot(second._segments[1], first._segments[1])
+                # The two segments after the changed one hold the same rows at the same order:
+                # new objects at new byte positions that share the old rows and indexes.
+                for index in (2, 3):
+                    self.assertIsNot(second._segments[index], first._segments[index])
+                    self.assertIs(second._segments[index].records, first._segments[index].records)
+                    self.assertEqual(second._segments[index].content_sha256,
+                                     first._segments[index].content_sha256)
+                self.assertIsNot(second._segments[1].records, first._segments[1].records)
                 metrics = CACHE.metrics_snapshot()
                 self.assertEqual(metrics["full_metadata_parses"], 1)
                 self.assertEqual(metrics["prefix_reuses"], 1)
                 self.assertEqual(metrics["prefix_segments_reused"], 1)
                 self.assertGreater(metrics["prefix_bytes_reused"], 0)
-                self.assertEqual(metrics["metadata_rows_parsed"], 14 + 15 - 4)
+                self.assertEqual(metrics["segment_resyncs"], 2)
+                self.assertEqual(metrics["segment_rebuilds"], 4 + 2)   # first read's four, the changed one, the new row
+                self.assertEqual(metrics["metadata_rows_parsed"], 14 + 15 - 4 - 6)
                 self.assertEqual(second.completion_attempt("att-5")[0].status, "killed")
                 self._assert_digests(second)
                 self._assert_same_as_fresh_read(second)
