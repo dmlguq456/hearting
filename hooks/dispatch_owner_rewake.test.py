@@ -4043,6 +4043,237 @@ class GateCarrierTest(unittest.TestCase):
         self.assertFalse(rewake.is_human_gate_record(record))
 
 
+def _resource_notice(state_root, jobs, *, session, key, lineage="attempt-parent", attempt="att-gate-owner",
+                     subject="experiment attention (1/1)"):
+    """The notice `resource_progress` stores for a supervising session (the runner wake is not started)."""
+    import session_notice
+    binding = {"kind": lineage, "harness": "claude", "session_id": session}
+    if lineage != "provenance":
+        binding["attempt_id"] = attempt
+    with mock.patch.object(session_notice, "_retain"):
+        return session_notice.notify("claude", session, key=key, subject=subject, text="loss is NaN",
+                                     jobs=jobs, lineage=binding)
+
+
+class ResourceNoticeWakeTest(unittest.TestCase):
+    """A resting Claude supervisor is woken, while its owner is waited on, by an experiment's
+    attention or failure (BC-AMI-CHILD-FAIL-NO-WAKE-1111, observation 2)."""
+
+    _launch = GateCarrierTest._launch
+
+    def setUp(self):
+        GateCarrierTest.setUp(self)
+        for table in (rewake._PROBE_DIRECTORY_MTIME, rewake._PROBE_NEXT_DEADLINE_NS, rewake._RECIPIENT_KEY_CACHE):
+            table.clear()
+
+    def notice(self, key="experiment:run-1:attention:id:0123:1:claude:session-gate", **kw):
+        return _resource_notice(self.state, self.jobs, session="session-gate", key=key, **kw)
+
+    def other_owner(self, attempt="att-gate-owner-b"):
+        row = self.jobs.read_text().strip().split("\t")
+        row[5] = row[5].replace("attempt_id=att-gate-owner", f"attempt_id={attempt}")
+        self.jobs.write_text(self.jobs.read_text() + "\t".join(row) + "\n")
+        return rewake.Launch(attempt_id=attempt, jobs=self.jobs, session_id="session-gate")
+
+    def test_the_hook_and_the_notice_use_the_same_recipient_directory(self):
+        record = self.notice()
+        launch = self._launch()
+        self.assertEqual(rewake._recipient_key(launch), "session-gate")
+        directory = rewake.pending_delivery.record_directory(launch.jobs.resolve(strict=False).parent,
+                                                              rewake._recipient_key(launch))
+        self.assertTrue((directory / (record["delivery_id"] + ".json")).is_file())
+
+    def test_an_attention_notice_for_this_owner_is_announced_once_and_touches_no_owner_row(self):
+        record = self.notice()
+        rows_before = self.jobs.read_bytes()
+        self.assertTrue(rewake._open_gate_pending(self._launch()))
+        claims = []
+        notices = rewake._gate_notices(self._launch(), attempt_only=True, supervision_claims=claims)
+        self.assertEqual(len(notices), 1)
+        self.assertIn("loss is NaN", notices[0])
+        self.assertEqual(rewake.pending_delivery.read(self.state, "session-gate", record["delivery_id"])["state"],
+                         "sent-ambiguous")
+        self.assertEqual([c[2] for c in claims], [record["delivery_id"]])
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+        self.assertEqual(self.jobs.read_bytes(), rows_before)
+        text = rewake.gate_wake_message(self._launch(), notices, human_gate=False, resource_notice=True)
+        self.assertIn("not the owner's completion", text)
+        self.assertIn("loss is NaN", text)
+
+    def test_only_what_needs_a_decision_wakes(self):
+        import session_notice
+        self.notice("experiment:run-2:checkpoint:id:1:claude:session-gate", subject="experiment checkpoint (1/1)")
+        self.notice("experiment:run-3:final:id:1:claude:session-gate", subject="experiment final (1/1)")
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "succeeded"}):
+            self.assertFalse(rewake._open_gate_pending(self._launch()))
+            self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "failed"}):
+            self.assertTrue(rewake._open_gate_pending(self._launch()))
+
+    def test_a_notice_whose_lineage_does_not_check_out_is_not_this_hooks_to_wake(self):
+        record = self.notice()
+        path = rewake.pending_delivery.record_path(self.state, "session-gate", record["delivery_id"])
+        value = json.loads(path.read_text())
+        value["lineage"] = []
+        path.write_text(json.dumps(value))
+        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+
+    def test_parallel_owners_wake_for_their_own_notice_and_a_shared_one_exactly_once(self):
+        other = self.other_owner()
+        self.notice()  # attempt-parent of att-gate-owner
+        self.assertFalse(rewake._open_gate_pending(other))
+        self.assertEqual(rewake._gate_notices(other, attempt_only=True), [])
+        self.assertEqual(len(rewake._gate_notices(self._launch(), attempt_only=True)), 1)
+        self.notice("experiment:run-9:attention:id:abcd:1:claude:session-gate", lineage="provenance")
+        woken = [len(rewake._gate_notices(launch, attempt_only=True)) for launch in (other, self._launch())]
+        self.assertEqual(sorted(woken), [0, 1])
+
+    def test_a_notice_another_carrier_holds_live_is_left_alone(self):
+        record = self.notice()
+        rewake.pending_delivery.claim(self.state, "session-gate", record["delivery_id"],
+                                      claim_owner="courier", lease_seconds=600)
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+
+    def _wake_and_ack(self, record):
+        """One hook look: whether it wakes, and the notice acknowledged as the sweep would."""
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        woke = rewake._open_gate_pending(self._launch())
+        announced = rewake._gate_notices(self._launch(), attempt_only=True)
+        if announced:
+            rewake.pending_delivery.ack(self.state, "session-gate", record["delivery_id"],
+                                        acked_by="session-sweep:fixture")
+        return woke, len(announced)
+
+    def test_the_same_attention_reposted_at_a_checkpoint_does_not_wake_again(self):
+        """RV-PR1602 finding 1 (direct keys): the first attention wakes once; the same digest
+        at the 2h checkpoint waits for the next input; a changed attention wakes again."""
+        first = self.notice("experiment:run-1:attention:id:0123:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(first), (True, 1))
+        repost = self.notice("experiment:run-1:attention-checkpoint:id:7200:0123:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(repost), (False, 0))
+        # Not lost: it stays pending for the recipient's next input.
+        self.assertEqual(rewake.pending_delivery.read(self.state, "session-gate", repost["delivery_id"])["state"],
+                         "pending")
+        changed = self.notice("experiment:run-1:attention:id:4567:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(changed), (True, 1))
+
+    def test_an_unchanged_attention_from_the_producer_wakes_once_across_a_checkpoint(self):
+        """RV-PR1602 finding 1 (real producer): epoch 1's NaN, unchanged, observed at 100s and
+        again at the 7201s checkpoint wakes the resting session once; a new NaN wakes again."""
+        import resource_progress as progress
+        import session_notice
+        original_notify = session_notice.notify
+        output = self.root / "training"
+        (output / "logs").mkdir(parents=True)
+        epochs = output / "logs" / "epochs.jsonl"
+        epochs.write_text('{"epoch":1,"split":"valid","losses":{"L_se":NaN}}\n')
+        artifact = self.root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        run = {"run_id": "run-1", "status": "running", "started_at": 1, "artifact_root": str(artifact),
+               "route_id": "rt-gate", "node": "full-run", "jobs": str(self.jobs)}
+        notices = []
+
+        def notify(harness, session_id, **kw):
+            with mock.patch.object(session_notice, "notify", original_notify):
+                record = self.notice(kw["key"], subject=kw["subject"])
+            woke, announced = self._wake_and_ack(record)
+            notices.append({"key": kw["key"], "wake": woke, "announced": announced})
+            return {"state": "acked"}
+
+        with mock.patch.object(progress, "_observation_state_path", return_value=self.root / "observation.json"), \
+             mock.patch.object(progress, "_notice_targets", return_value=[("claude", "session-gate")]), \
+             mock.patch("session_notice.notify", side_effect=notify):
+            due = [progress.observe_experiment(run, self.root / "runs.json", now,
+                                               root=str(output), row_key="ident", started_at=1
+                                               )["observation"]["checkpoint_due"] for now in (100, 7201)]
+            self.assertTrue(due[1])
+            self.assertEqual([n["wake"] for n in notices], [True, False], notices)
+            self.assertTrue(notices[0]["key"].startswith("experiment:run-1:attention:"))
+            self.assertTrue(notices[1]["key"].startswith("experiment:run-1:attention-checkpoint:"))
+            # A new NaN (epoch 2) at the next (12h) checkpoint is a changed attention: it wakes.
+            epochs.write_text(epochs.read_text() + '{"epoch":2,"split":"valid","losses":{"L_se":NaN}}\n')
+            changed = progress.observe_experiment(run, self.root / "runs.json", 7201 + progress.CHECKPOINT_INTERVAL,
+                                                  root=str(output), row_key="ident", started_at=1)
+            self.assertTrue(changed["observation"]["checkpoint_due"])
+        self.assertEqual([n["wake"] for n in notices], [True, False, True], notices)
+        self.assertTrue(notices[2]["key"].startswith("experiment:run-1:attention:"))
+
+    def _eta_notices(self, planned, total, sequence):
+        """The real producer over step progress only (an ETA attention, no metric); one
+        hook look per notice it sends, acknowledged as the next prompt's sweep would."""
+        import resource_progress as progress
+        import session_notice
+        original_notify = session_notice.notify
+        output = self.root / "training"
+        output.mkdir()
+        artifact = self.root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        run = {"run_id": "run-1", "status": "running", "started_at": 1, "artifact_root": str(artifact),
+               "route_id": "rt-gate", "node": "full-run", "jobs": str(self.jobs)}
+        notices, predicted = [], []
+
+        def notify(harness, session_id, **kw):
+            with mock.patch.object(session_notice, "notify", original_notify):
+                record = self.notice(kw["key"], subject=kw["subject"])
+            woke, announced = self._wake_and_ack(record)
+            notices.append({"key": kw["key"], "wake": woke, "announced": announced})
+            return {"state": "acked"}
+
+        with mock.patch.object(progress, "_observation_state_path", return_value=self.root / "observation.json"), \
+             mock.patch.object(progress, "_notice_targets", return_value=[("claude", "session-gate")]), \
+             mock.patch("session_notice.notify", side_effect=notify):
+            for now, completed in sequence:
+                result = progress.observe_experiment(
+                    run, self.root / "runs.json", now, root=str(output), row_key="ident", started_at=1,
+                    planned_seconds=planned,
+                    progress={"completed": completed, "total": total, "unit": "step", "updated_at": now})
+                predicted.append(result["observation"]["predicted_total_seconds"])
+        return notices, predicted
+
+    def test_an_eta_attention_that_grew_several_fold_wakes_again_at_a_checkpoint(self):
+        """RV-PR1602-R2 finding 1: the predicted total grew from ~1.0M to ~4.0M seconds; that
+        is a changed attention even at the 7201s checkpoint, so it wakes instead of reposting."""
+        notices, predicted = self._eta_notices(100000, 10000, [(6700, 0), (6800, 1), (7201, 2)])
+        self.assertEqual([round(value) if value else value for value in predicted], [None, 1006699, 4016398])
+        self.assertEqual([n["wake"] for n in notices], [True, True], notices)
+        self.assertTrue(all(n["key"].startswith("experiment:run-1:attention:") for n in notices), notices)
+
+    def test_an_eta_attention_that_cleared_and_came_back_wakes_again(self):
+        """RV-PR1602-R2 finding 1: ETA over plan, then back within plan, then over plan again
+        is a new episode of the attention, not the first one still standing."""
+        notices, predicted = self._eta_notices(1000, 1000, [(100, 0), (200, 1), (300, 900), (400, 901)])
+        self.assertLess(predicted[2], 1000)
+        attention = [n for n in notices if n["key"].startswith("experiment:run-1:attention:")]
+        self.assertEqual([n["wake"] for n in attention], [True, True], notices)
+        # The plain 250s checkpoint in between (no attention then) does not wake.
+        self.assertEqual(sum(n["wake"] for n in notices), 2, notices)
+
+    def test_the_same_eta_attention_wobbling_does_not_wake_again(self):
+        """The same attention whose prediction only wobbles (under the rule's own 1.5x step,
+        or around its 1.5x-plan boundary without coming back within plan) does not wake again;
+        at a checkpoint it is reposted for the next input."""
+        notices, predicted = self._eta_notices(
+            100000, 10000, [(6700, 0), (6800, 1), (6940, 2), (7201, 4)])
+        self.assertLess(max(predicted[1:]), 1.5 * predicted[1])
+        self.assertEqual([n["wake"] for n in notices], [True, False], notices)
+        self.assertTrue(notices[1]["key"].startswith("experiment:run-1:attention-checkpoint:"), notices)
+
+    def test_an_eta_attention_wobbling_at_its_boundary_does_not_wake_again(self):
+        notices, predicted = self._eta_notices(
+            1000, 1000, [(901, 450), (1001, 500), (1101, 600), (1201, 702), (1301, 800)])
+        # Over 1.5x plan, just under it (not back within plan), and over it again.
+        self.assertGreaterEqual(predicted[1], 1500)
+        self.assertTrue(1000 < predicted[3] < 1500, predicted)
+        self.assertGreaterEqual(predicted[4], 1500)
+        # The plain 100s checkpoint (no attention yet) does not wake; the attention wakes once.
+        self.assertEqual([n["wake"] for n in notices], [False, True], notices)
+        self.assertTrue(notices[0]["key"].startswith("experiment:run-1:checkpoint:"), notices)
+
+
 class SupervisionWakeRearmTest(unittest.TestCase):
     """An attention wake must hand its notice to the immediate prompt sweep,
     so that turn can arm a second carrier for the same owner's success."""
@@ -4313,6 +4544,48 @@ class SupervisionWakeRearmTest(unittest.TestCase):
             self.assertEqual(by_event[event], by_event["PostToolUse"])
             self.assertTrue(by_event[event][0]["asyncRewake"])
 
+
+
+class ResourceNoticeRearmTest(unittest.TestCase):
+    """The wake a resource notice causes hands the notice to the prompt sweep, so that turn
+    re-arms the same owner and its own completion still wakes the session (observation 2, R5)."""
+
+    ANCESTRY = CarrierOneClaimGateTest.ANCESTRY
+    payload = CarrierOneClaimGateTest.payload
+    _run = SupervisionWakeRearmTest._run
+    _parent_call = SupervisionWakeRearmTest._parent_call
+    _dead_holder = SupervisionWakeRearmTest._dead_holder
+    _complete_owner = SupervisionWakeRearmTest._complete_owner
+
+    def setUp(self):
+        CarrierOneClaimGateTest.setUp(self)
+        CarrierOneClaimGateTest._open_row(self)
+        self.jobs.write_text(self.jobs.read_text().replace("parent_attempt_id=att-owner-parent,", ""), encoding="utf-8")
+        for table in (rewake._RECIPIENT_KEY_CACHE, rewake._PROBE_DIRECTORY_MTIME, rewake._PROBE_NEXT_DEADLINE_NS):
+            table.clear()
+        self.notice = _resource_notice(self.root, self.jobs, session="session-1", attempt="att-owner-1",
+                                       key="experiment:run-1:attention:id:0123:1:claude:session-1")
+
+    def test_a_notice_wake_then_the_owners_own_completion_wake(self):
+        from dispatch_session_sweep import sweep_deliver, ack_delivered
+        code, text = self._run("gate")
+        self.assertEqual(code, 2)
+        self.assertIn("not the owner's completion", text)
+        self.assertIn("loss is NaN", text)
+        self._dead_holder()  # the first async hook process exited with its wake
+        records, _ = sweep_deliver(self.root, "claude-parent-runtime", "session-1")
+        self.assertEqual([r["delivery_id"] for r in records], [self.notice["delivery_id"]])
+        self.assertEqual(ack_delivered(self.root, "session-1", records, acked_by="parent-prompt"), 1)
+        # The ordinary Bash call in that awakened turn arms the same owner again.
+        launch, claim = rewake.registry_launch(self._parent_call())
+        self.assertEqual((launch.attempt_id, claim.arms), ("att-owner-1", 2))
+        self.assertFalse(rewake._open_gate_pending(launch))
+        self._dead_holder()
+        completion = self._complete_owner()
+        code, text = self._run("ready", self._parent_call())
+        self.assertEqual(code, 2)
+        self.assertIn("state=success", text)
+        self.assertEqual(json.loads(completion.read_text())["state"], "sent-ambiguous")
 
 class GateCloseRearmTest(GateCarrierTest):
     """SD-129 without command parsing: the wake spent on a gate is re-armed by

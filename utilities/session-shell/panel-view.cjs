@@ -133,21 +133,40 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
-// Spec rule 47 (the user's final values, 11-13): every value of the moving rule in one place.
-// Running, a light passes over the heavy rule: RULE_PEAK cells at its middle are brightest and
-// RULE_FADE cells on each side step down one shade each (RULE_PEAK + 2 RULE_FADE cells, five
-// shades); its middle runs at one speed from fully outside one end to fully outside the other
-// and back in RULE_SCAN spinner frames (100 ms each: 32 = 3.2 s). Waiting, the whole heavy red
-// rule breathes once every RULE_BREATHE frames (36 = 3.6 s) through RULE_WAIT_STEPS shades on a
-// cosine (24-bit color; the 256-color palette has six reds for it), each shade an equal time.
-const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=32,RULE_BREATHE=36,RULE_WAIT_STEPS=8,RULE_WAIT_STEPS_256=6;
+// Spec rule 47 (the user's final values, 11-13), as rules 51 and 52 retune it: every value of the
+// moving rule in one place. The rule is the thin `─` in every state (no heavy cell anywhere on it).
+// Running, a light passes over it: RULE_PEAK cells at its middle are brightest and RULE_FADE cells
+// on each side step down one shade each (RULE_PEAK + 2 RULE_FADE cells, five shades); its middle
+// runs at one speed from fully outside one end to fully outside the other and back in RULE_SCAN
+// spinner frames (100 ms each: 26 = 2.6 s). Having left on the side it came in from, the dark rule
+// rests RULE_REST frames (10 = 1 s, the light's own turn beat included) and the light comes in
+// again on that side; at the far end it turns after one dark beat. Waiting, the whole red rule
+// breathes once every RULE_BREATHE frames (36 = 3.6 s) through RULE_WAIT_STEPS shades on a cosine
+// (24-bit color; the 256-color palette has six reds for it), each shade an equal time.
+const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,RULE_BREATHE=36,RULE_WAIT_STEPS=8,RULE_WAIT_STEPS_256=6;
+const RULE_CYCLE=RULE_SCAN+RULE_REST-1;
 const mod=(t,n)=>((Math.trunc(t)%n)+n)%n;
+// Where the light's middle stands at a frame on an `n`-cell rule, or null while the dark rule rests.
+function scanAt(tick,n){
+  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_CYCLE);
+  if(q>=RULE_SCAN)return null;
+  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
+  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2);
+  return Math.round(lo+y*(hi-lo));
+}
 // The light's shade at cell `i` of an `n`-cell rule (5 brightest, 0 none).
 function scanLevel(tick,i,n){
-  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_SCAN);
-  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
-  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2),c=Math.round(lo+y*(hi-lo));
-  return Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+  const plateau=(RULE_PEAK-1)/2,c=scanAt(tick,n);
+  return c===null?0:Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+}
+// The next frame after `tick` at which an `n`-cell running rule looks different: the next frame
+// while the light is inside, the light's return at the end of the rest (nothing to wake for or
+// write before it).
+function scanNext(tick,n){
+  const t=Math.trunc(tick),lit=f=>{const c=scanAt(f,n),plateau=(RULE_PEAK-1)/2,reach=RULE_FADE+plateau;return c!==null&&c+reach>=0&&c-reach<n;};
+  if(lit(t))return t+1;
+  for(let f=t+1;f<=t+RULE_CYCLE;f++)if(lit(f))return f;
+  return t+1;
 }
 // A breath's shade at a frame: 0 brightest .. steps-1 darkest, down and back up, each shade for an
 // equal stretch of the breath (2 (steps-1) stretches).
@@ -155,13 +174,13 @@ function breathStep(tick,steps){
   const slots=2*(steps-1),s=Math.floor(mod(tick,RULE_BREATHE)*slots/RULE_BREATHE);
   return s<steps?s:slots-s;
 }
-// One cell `i` of an `n`-cell rule at spinner frame `tick`: running (`scan`), every cell heavy,
-// the light's shade (0: the dark rule); waiting (`wait`), heavy red at the breath's shade; `still`
-// moves nothing (rule motion off, mono, NO_COLOR, eight colors): a running rule stays the plain
-// thin one, a waiting one stays heavy. Anything else is the plain thin rule.
+// One cell `i` of an `n`-cell rule at spinner frame `tick`, always the thin `─` (spec rule 52):
+// running (`scan`), the light's shade (0: the dark rule); waiting (`wait`), red at the breath's
+// shade; `still` moves nothing (rule motion off, mono, NO_COLOR, eight colors): a running rule
+// stays the plain one, a waiting one stays red. Anything else is the plain rule.
 function ruleCell(kind,tick,i,n,{still=false,steps=RULE_WAIT_STEPS}={}){
-  if(kind==='wait')return still?['━','wait',0]:['━','wait',breathStep(tick,steps)];
-  if(kind==='scan'&&!still){const level=scanLevel(tick,i,n);return ['━',level?'scan':'base',level];}
+  if(kind==='wait')return still?['─','wait',0]:['─','wait',breathStep(tick,steps)];
+  if(kind==='scan'&&!still){const level=scanLevel(tick,i,n);return ['─',level?'scan':'base',level];}
   return ['─','line',0];
 }
 function change(value,key,step){
@@ -170,7 +189,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
   // Spec rule 49: a folded panel is the eight-cell strip beside the native area or one row under it.
   folded=folded===true&&!settings;
   width=Math.max(folded&&side?5:12,width);height=Math.max(folded?side?3:1:4,height);
@@ -331,15 +350,21 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     add(footRow(left),undefined,groups);
   }
   // Spec rule 47: the thin rule under the metadata follows this session's own state, the
-  // frame's source (not a route's): running moves a bar along it, an answer or confirmation
-  // wait breathes it red, anything else is the plain rule. Rule motion off, mono and NO_COLOR
-  // move nothing (a wait stays a still heavy rule). A moving rule's parts carry `motion`: the
-  // host repaints that one row, its changed cells only, at the frames it changes.
+  // frame's source (not a route's): running moves a light along it, an answer or confirmation
+  // wait breathes it red, anything else is the plain rule; it stays the thin rule throughout
+  // (spec rule 52). Rule motion off, mono and NO_COLOR move nothing (a wait stays a still red
+  // rule). A moving rule's parts carry `motion`: the host repaints that one row, its changed
+  // cells only, at the frames it changes.
   const ruleKind=settings?'':state==='blocked'?'wait':LIVE[state]?.[0]==='spin'?'scan':'';
   const ruleColors=model.colors??256;
   const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||ruleColors<256;
   const ruleSteps=ruleColors>256?RULE_WAIT_STEPS:RULE_WAIT_STEPS_256;
   const ruleWidth=inner;
+  // Correction 8 (11-13): `since` is the frame this state began (the host's). The light is
+  // already coming in on that very paint and the breath starts at its brightest, so the rule
+  // never waits out a rest or a dark turn behind the frame's color. Without it the beat runs
+  // on the clock alone.
+  const anchored=Number.isFinite(since),ruleTick=t=>!anchored?Math.trunc(t):ruleKind==='scan'?Math.trunc(t)-Math.trunc(since)+1:Math.trunc(t)-Math.trunc(since);
   function ruleParts(tick){
     const flag=ruleStill||!ruleKind?{}:{motion:true},out=[];
     let run='',key='',cell=null;
@@ -347,7 +372,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       out.push(tone==='line'||tone==='base'?{...text(run,'dim'),role:'messages',...flag}:
         tone==='wait'?{...text(run,'g_blocked'),role:'rule',...(ruleStill?{}:{tone,step:level,steps:ruleSteps}),...flag}:
         {...text(run,'g_spin'),role:'rule',tone,level,...flag});};
-    for(let i=0;i<ruleWidth;i++){const c=ruleCell(ruleKind,tick,i,ruleWidth,{still:ruleStill,steps:ruleSteps}),k=c.join(':');if(k!==key){flush();run='';key=k;cell=c;}run+=c[0];}
+    for(let i=0;i<ruleWidth;i++){const c=ruleCell(ruleKind,ruleTick(tick),i,ruleWidth,{still:ruleStill,steps:ruleSteps}),k=c.join(':');if(k!==key){flush();run='';key=k;cell=c;}run+=c[0];}
     flush();
     return out;
   }
@@ -915,8 +940,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // context), then the kind row goes, then the route takes one row.
     // Spec rule 43: a backend that sends `workers_live` names the owner and each stage worker
     // running now apart. The owner leads the route (its values in `owner_paint` while a worker
-    // leads the row). The route's time stands at the end of the title, and the context rows
-    // start with a dim `CTX` in the role column, the gauge under the harness. Spec rule 48: the
+    // leads the row). The context rows start with a dim `CTX` in the role column, the gauge
+    // under the harness, and (spec rule 57) the route's time follows the percent. Spec rule 48: the
     // owner's live workers stand in one rounded box under it (below). An older backend's row
     // keeps its one doer and the rows as they were.
     const treeOf=r=>side&&Array.isArray(r.workers_live);
@@ -995,56 +1020,66 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // Spec rule 43 (d): `CTX` in the role column (one space after it with no role column); an
     // unknown context draws no row.
     const ctxLabel=()=>roleWidth?[text('CTX'.padEnd(roleWidth),'dim'),text(' ')]:[text('CTX','dim'),text(' ')];
-    const gaugeCells=p=>{const {bar,pct}=gaugeOfPaint(p);
-      return pct.length?[...ctxLabel(),...(bar.length?bar:[pad(barWidth)]),...(barWidth?[text(' ')]:[]),pad(pctWidth-size(pct)),...pct]:null;};
-    // Spec rule 43 (c): the time at the right end of the title's last row; the title folds and
-    // ends in `…` within the cells left beside it.
-    function timedTitle(title,E){
-      const room=Math.max(1,inner-2-(E.length?size(E)+1:0));
-      let rows=wrapAll(title,room);if(rows.length>2)rows=[rows[0],ellipsis(rows[1],room)];
-      const end=row=>E.length?[...row,pad(inner-2-size(row)-size(E)),...E]:row;
-      return {rows:rows.map((row,i)=>i===rows.length-1?end(row):row),one:[end(cut(title,room))]};
+    // Spec rule 57 (a), (d): the `CTX` row as before (label, bar, percent) with the time right
+    // after the percent (` · `, dim), not at the right edge. Short of cells the bar shortens
+    // (four cells at least), then goes, then the time; the percent stays. An unknown context
+    // with a time keeps the time in the value column; with neither, no row.
+    function ctxTimed(p,E,room){
+      const {bar,pct}=gaugeOfPaint(p),label=ctxLabel(),time=E.length?[text(' · ','dim'),...E]:[];
+      if(!pct.length)return E.length?[pad(size(label)),...E]:null;
+      const full=bar.length?size(bar):barWidth;
+      const cells=n=>{
+        if(!bar.length||n>=full)return bar.length?bar:[pad(n)];
+        const on=measure(clean(bar[0].text)),f=full?Math.round(on*n/full):0;
+        return [{...bar[0],text:'━'.repeat(f)},...(bar[1]?[{...bar[1],text:'─'.repeat(n-f)}]:[])];
+      };
+      const row=(n,t)=>[...label,...(n?[...cells(n),text(' '),pad(pctWidth-size(pct))]:[]),...pct,...t];
+      for(let n=full;n>=Math.min(4,full);n--){if(!n)break;const r=row(n,time);if(size(r)<=room)return r;}
+      const bare=row(0,time);
+      return size(bare)<=room?bare:row(0,[]);
     }
     // Spec rule 48 (a-1), (b), (d): a worker's rows read as the owner's: who (its own mark,
     // role, harness, model, effort) stands in the top line of the workers' box (`╭─ … ─╮`, a
-    // later worker's in the line between, `├─ … ─┤`); inside the box, four cells narrower,
-    // `CTX` under the role word with the gauge under the harness, then the stage, the open tool
-    // and its target (the path, the file name, the tool, then none) with the worker's time at
-    // the right. Short of cells the who loses its effort, then its harness, and `─` fills.
-    // Short of rows (rule 48 (c)) the worker takes the owner's one-row form, two cells in.
+    // later worker's in the line between, `├─ … ─┤`); inside the box, `CTX` under the role word
+    // with the gauge under the harness and the worker's time after its percent (spec rule 57),
+    // then the stage, the open tool and its target (the path, the file name, the tool, then
+    // none). Spec rule 57 (c): the box stands two cells further in (its left line under the
+    // owner's text, its right line where it was), six cells narrower inside than the route's
+    // rows. Short of cells the who loses its effort, then its harness, and `─` fills. Short of
+    // rows (rule 48 (c)) the worker takes the owner's one-row form, two cells in.
     const boxLine=s=>({...text(s,'dim'),role:'messages'});
     function workerBlock(w){
       const p=w.paint||{},glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
-      const lead=[glyph,text(' '),...roleCell(w.role)],body=[],room=inner-4;
+      const lead=[glyph,text(' '),...roleCell(w.role)],body=[],room=inner-6;
       // (At least one `─` after the who while its model fits so; the narrowest panel gives that up first.)
-      let who=whoOf(lead,p,w.role,[],inner-6)||cut(lead,inner-6);
-      if(size(who)<=size(lead))who=whoOf(lead,p,w.role,[],inner-5)||cut(lead,inner-5);
+      let who=whoOf(lead,p,w.role,[],inner-8)||cut(lead,inner-8);
+      // (A value kept is worth more than the `─`: the who may run up to the corner, as rule 57 draws it.)
+      const wide=whoOf(lead,p,w.role,[],inner-6);if(wide&&size(wide)>size(who))who=wide;
+      if(size(who)<=size(lead))who=whoOf(lead,p,w.role,[],inner-7)||cut(lead,inner-7);
       // A model name longer than the line itself is cut with `…` rather than left out.
-      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-5);
-      // Short of cells (a four-cell percent at the narrowest panel) the bar goes and `CTX` and the
-      // percent stay, as the owner's row gives way (#1583 review follow-up (가)).
-      const g=gaugeCells(p),fit=g&&3+size(g)>room?[...ctxLabel(),...gaugeOfPaint(p).pct]:g;
-      if(fit)body.push([text('   '),...fit]);
+      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-7);
+      const c=ctxTimed(p,E,room-3);
+      if(c)body.push([text('   '),...c]);
       const stage=w.stage?[text(w.stage,'loc_repo')]:[],tool=w.tool?[text(w.tool,'loc_repo')]:[];
-      const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3-(E.length?size(E)+1:0);
+      const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3;
       for(const t of [[...tool,...(w.target?[text(' '+w.target,'loc_repo')]:[])],[...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool,[]]){
         const row=[...stage,...(stage.length&&t.length?[text(' · ','dim')]:[]),...t];
         if(t.length&&size(row)>what)continue;
-        const kept=cut(row,Math.max(0,what));
-        if(row.length||E.length)body.push([text('   '),...kept,...(E.length?[pad(room-3-size(kept)-size(E)),...E]:[])]);
+        if(row.length)body.push([text('   '),...cut(row,Math.max(0,what))]);
         break;
       }
       const lead1=[text('  '),glyph,text(' '),...roleCell(w.role)];
       return {who,body,one:foldRow(lead1,p,w.role,E)||cut(lead1,inner)};
     }
     function workerBox(blocks){
-      const out=[];
+      const out=[],indent=text('  ');
       blocks.forEach((b,i)=>{
         const [l,r]=i?['├','┤']:['╭','╮'];
-        out.push([boxLine(l+'─ '),...b.who,boxLine(' '+'─'.repeat(Math.max(0,inner-5-size(b.who)))+r)]);
-        for(const row of b.body)out.push([boxLine('│'),text(' '),...row,pad(inner-4-size(row)),text(' '),boxLine('│')]);
+        const dashes=inner-7-size(b.who);
+        out.push([indent,boxLine(l+'─ '),...b.who,boxLine(dashes>=0?' '+'─'.repeat(dashes)+r:r)]);
+        for(const row of b.body)out.push([indent,boxLine('│'),text(' '),...row,pad(inner-6-size(row)),text(' '),boxLine('│')]);
       });
-      out.push([boxLine('╰'+'─'.repeat(Math.max(0,inner-2))+'╯')]);
+      out.push([indent,boxLine('╰'+'─'.repeat(Math.max(0,inner-4))+'╯')]);
       return out;
     }
     // Spec rule 24 (11-12), 36 (b): the third row says which kind of route it is and where it
@@ -1104,7 +1139,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const tree=treeOf(r),workers=tree?workersOf(r).map(workerBlock):[];
         routeRows.push({parts:folded(r),two:side,who:side?whoRow(r):null,lead:side?leadRow(r):null,ctx:side?ctxRow(r):null,
           names,name:[cut(title,inner-2)],glyph,place:side?placeRow(r):null,action:key,kind:r.kind,
-          ...(tree?{tree,workers,box:workers.length?workerBox(workers):[],timed:timedTitle(title,r.elapsed?[text(r.elapsed)]:[]),gauge:gaugeCells(leadPaint(r)),
+          ...(tree?{tree,workers,box:workers.length?workerBox(workers):[],gauge:ctxTimed(leadPaint(r),r.elapsed?[text(r.elapsed)]:[],inner-2),
             counted:workers.length?placeRow(r,workers.length):null}:{})});
         if(open.has(key))for(const d of details(r))detailRows.push({...d,action:key,after:r.id});
       }
@@ -1229,7 +1264,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // the owner and its workers fold to one row together (rule 48 (c)), never one without the other.
     function treeForm(x){
       const workers=keepWorkers?x.workers:[],bar=[text('  ')],out=[];
-      const head=keepCtx?x.who:x.lead,names=keepCtx?(keepMulti?x.timed.rows:x.timed.one):(keepMulti?x.names:x.name);
+      // Spec rule 57 (b): the title takes its rows whole; the time is on the `CTX` row (or, folded, the first row).
+      const head=keepCtx?x.who:x.lead,names=keepMulti?x.names:x.name;
       if(head){out.push(head);if(keepCtx&&x.gauge)out.push([...bar,...x.gauge]);out.push(...names.map(row=>[...bar,...row]));}
       else{out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[...bar,...row]));if(keepCtx&&x.gauge)out.push([...bar,...x.gauge]);}
       const place=!keepWorkers&&x.counted?x.counted:x.place;
@@ -1346,26 +1382,21 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       });
       routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
-    // Messages have no box: a titled upper rule and a lower rule, fixed at the
-    // bottom right above 5h/7d (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside
-    // the native area the title is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their
-    // own titled rule (`── MEM ──`) in place of the messages' lower rule, and the one closing
-    // rule ends both; the count of messages not shown (`+N`) then stays with the messages, at
-    // the end of their title rule.
+    // Messages have no box: a label row and a lower rule, fixed at the bottom right above 5h/7d
+    // (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside the native area the
+    // label is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their own label, and the
+    // one closing rule ends both. Spec rule 58: the labels stand alone (no long rule beside
+    // them), and the count of messages not shown (`+N`) follows the messages' label.
     const keepMessageRows=keepMessages&&messages.length>0;
     if(keepMessageRows||memShown()){
       const key=tone.messages,hidden=keepMessageRows?hiddenMessages():0;
-      const note=hidden?[text(' +'+hidden+' ','loc_repo'),text('─',key)]:[];
-      const noted=parts=>parts.map(x=>x.text==='─'?{...x,role:'messages'}:x);
-      const titleRule=(word,tail=[])=>{const head=fitted([{...text(word,key),role:'title'}]);
-        return [...[...head,text('─'.repeat(Math.max(0,inner-size(head)-size(tail))))].map(x=>({...x,...(styles[key]||{dim:true}),role:x.role||'messages'})),...noted(tail)];};
+      const label=(word,tail=[])=>clip([{...text(word,key),...(styles[key]||{dim:true}),role:'title'},...tail],inner).parts;
       if(keepMessageRows){
-        messageBlock.push({parts:titleRule(side?'MESSAGES':'messages',memShown()?note:[])});
+        messageBlock.push({parts:label(side?'MESSAGES':'messages',hidden?[text(' +'+hidden,'loc_repo')]:[])});
         messageBlock.push(...visibleMessages());
       }
-      if(memShown()){messageBlock.push({parts:titleRule('MEM')});messageBlock.push(...memRowsOf());}
-      const closing=memShown()?[]:note;
-      messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(closing))),key),role:'messages'},...noted(closing)]});
+      if(memShown()){messageBlock.push({parts:label('MEM')});messageBlock.push(...memRowsOf());}
+      messageBlock.push({parts:[{...text('─'.repeat(inner),key),role:'messages'}]});
     }
     // Each section is placed whole or not at all; the empty row under the route box goes first.
     const tail=ask.length+messageBlock.length+1;
@@ -1385,8 +1416,23 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     }else for(const item of ask)add(item.parts,item.action);
     // A reset time that does not fit goes whole, never as a cut `(↻ …`. Spec rule 49 (b): 5h/7d
     // share the last row with the fold button and the gear, which stay however short rows run.
+    // Correction 7 (11-13): the model windows (Fable's) stand after 7d; short of cells the row
+    // gives way in this order: the reset times, then 5h (the windows shorter than 7d), then the
+    // model values from the last, then 7d. Each value goes whole.
     const quotaRoom=inner-BUTTONS-1;
-    const quotaRow=size(quota)<=quotaRoom?quota:quota.filter(part=>!/^\(↻/.test(String(part.text)));
+    const quotaRow=(()=>{
+      const groups=[];let cur=[],sep=null;
+      for(const part of quota){if(String(part.text)===' │ '){sep=sep||part;if(cur.length)groups.push(cur);cur=[];}else cur.push(part);}
+      if(cur.length)groups.push(cur);
+      const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
+      const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g]:g);
+      let kept=groups.map(g=>g.filter(part=>!/^\(↻/.test(String(part.text))));
+      const tries=[groups,kept];
+      kept=kept.filter(g=>kind(g)!=='window');tries.push(kept);
+      while(kept.some(g=>kind(g)==='model')){const at=kept.map(kind).lastIndexOf('model');kept=kept.filter((_,i)=>i!==at);tries.push(kept);}
+      tries.push([]);
+      return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
+    })();
     lastRow(keepQuota?quotaRow:[],keepQuota&&quota.length?['quota']:[],order.length);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
@@ -1438,15 +1484,17 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // Only a blinking part needs the one-second repaint (a spinner and the rule turn on their own).
   const blinks=rows.slice(0,count).some(row=>row.some(part=>part.beat));
   // Spec rule 47 (d): the moving rule's row, that row painted at any spinner frame, and the next
-  // frame it changes at (the bar: every frame; a breath: its next step, four a breath): the host
-  // repaints this one row then, on the beat it already keeps, its changed cells only.
+  // frame it changes at (the light: every frame while it is inside, then the end of its rest,
+  // spec rule 51 (c); a breath: its next step): the host repaints this one row then, on the
+  // beat it already keeps, its changed cells only.
   const motionAt=settings?-1:rows.slice(0,count).findIndex(row=>row.some(part=>part.motion));
   const motion=motionAt>=0?{row:motionAt,at:tick=>appearance([frameRow(ruleParts(tick))],cfg,{colors:model.colors??256,noColor:model.no_color===true,background})[0],
-    next:tick=>{if(ruleKind!=='wait')return Math.trunc(tick)+1;const now=breathStep(tick,ruleSteps);for(let t=Math.trunc(tick)+1;t<=Math.trunc(tick)+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t;return Math.trunc(tick)+RULE_BREATHE;}}:null;
+    next:tick=>{const local=ruleTick(tick),shift=Math.trunc(tick)-local;if(ruleKind!=='wait')return scanNext(local,ruleWidth)+shift;
+      const now=breathStep(local,ruleSteps);for(let t=local+1;t<=local+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t+shift;return local+RULE_BREATHE+shift;}}:null;
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,blinks:blinks&&!settings,spins,motion};
 }
 module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,ruleCell,scanLevel,breathStep,
-  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,BREATHE:RULE_BREATHE,WAIT_STEPS:RULE_WAIT_STEPS,WAIT_STEPS_256:RULE_WAIT_STEPS_256}};
+  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,BREATHE:RULE_BREATHE,WAIT_STEPS:RULE_WAIT_STEPS,WAIT_STEPS_256:RULE_WAIT_STEPS_256}};

@@ -1817,8 +1817,8 @@ class ExperimentObservationTest(unittest.TestCase):
             for item in observation["attention"]]
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
             separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
-        if observation["checkpoint_due"]:
-            return f"attention-checkpoint:run:{int(observation['due_checkpoint_at'])}:{digest}"
+        # A changed attention is `attention:` even when a checkpoint is due; only the same
+        # attention re-posted at a checkpoint is `attention-checkpoint:` (RV-PR1602 1).
         return f"attention:run:{digest}"
 
     def test_final_source_change_creates_attention_and_preserves_pending_or_acked_final(self):
