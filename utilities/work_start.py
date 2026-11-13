@@ -2725,6 +2725,13 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 return {**result, "state": "preparing", "reason": "frame-cleanup-unverifiable",
                         "required_action": "wait-for-frame-results",
                         "parent_next": "bounded-wait", "parent_next_command": resume + " --wait"}
+            if children and all(child.get("status") in {"done", "killed", "cancelled"} for child in children):
+                # Every leg already ended and only the runtime's own settlement is open. The wake that
+                # would bring the result is not proven here, so the bounded wait that settles it is the
+                # next action, not "end the turn" (BC-FRAME-DONE-NO-WAKE-BCRESNET-1113).
+                return {**result, "state": "preparing", "reason": "frame-result-settling",
+                        "required_action": "wait-for-frame-results",
+                        "parent_next": "bounded-wait", "parent_next_command": resume + " --wait"}
             return {**result, "state": "preparing",
                     "required_action": "wait-for-frame-results"}
         result.pop("parent_next", None)

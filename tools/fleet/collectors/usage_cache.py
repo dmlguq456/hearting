@@ -389,6 +389,33 @@ def _owns_claude_lease(owner, credential):
     return lease.get("owner") == owner and lease.get("generation") == credential.generation
 
 
+# A Claude reading is refreshed once two thirds of its fresh window have passed, so the new
+# one lands while the old one still counts as fresh: Fleet's collection and the shell panel's
+# projection (the statusline callback repaints at least every 60 s) both reach that point
+# inside the window. Display keeps the window itself; a reading past it is not shown as now.
+CLAUDE_EARLY_REFRESH = 2.0 / 3.0
+
+
+def claude_refresh_due(snapshot, now=None):
+    """Whether this Claude reading is due for the existing refresh (review 1597-r2)."""
+    now = time.time() if now is None else float(now)
+    if not isinstance(snapshot, dict) or snapshot.get("freshness") != "fresh":
+        return True
+    observed = snapshot.get("observed_at")
+    return (not _valid_time(observed, now)
+            or now - float(observed) >= FRESH_WINDOWS["claude"] * CLAUDE_EARLY_REFRESH)
+
+
+def wake_claude_refresh(snapshot, now=None):
+    """Wake the existing Claude refresh once for a reader without a collection pass of its
+    own (the shell panel), when the reading it just read is due. The refresh's own lease,
+    retry spacing and credential binding still decide whether anything is fetched."""
+    try:
+        return claude_refresh_due(snapshot, now) and _request_claude_refresh(now)
+    except Exception:
+        return False
+
+
 def _request_claude_refresh(now=None):
     from . import usage_api
     now = time.time() if now is None else float(now)
@@ -401,7 +428,7 @@ def _request_claude_refresh(now=None):
             error = snapshot.get("error_observation") or {}
             if _valid_retry(error.get("retry_at")) and now < error["retry_at"]:
                 return False
-            if snapshot.get("freshness") == "fresh" and not error:
+            if not claude_refresh_due(snapshot, now) and not error:
                 return False
             attempted = snapshot.get("attempted_at")
             if (not _valid_retry(error.get("retry_at")) and _valid_time(attempted, now)

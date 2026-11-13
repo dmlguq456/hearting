@@ -1657,9 +1657,26 @@ def _recipient_key(launch: Launch) -> str:
     return recipient_key
 
 
-def _recipient_gate_records(launch: Launch) -> list[tuple[Path, str, str, dict]]:
+def _resource_notice_for_launch(launch: Launch, recipient_key: str, record: dict) -> bool:
+    """A notice that wakes a resting session (an experiment's attention or failure) and is
+    addressed to this owner's supervising session: its own attempt-parent lineage, or a
+    provenance notice any owner of that session may announce (one claim decides which).
+    A notice whose storage or lineage does not check out is not this hook's to wake."""
+
+    try:
+        import session_notice
+        if record.get("receipt", {}).get("kind") != "notice" or not session_notice.wakes_resting_recipient(record):
+            return False
+        _jobs, lineage = session_notice.pending_lineage(record, "claude", recipient_key, launch.jobs)
+    except (ValueError, TypeError, KeyError, OSError, RuntimeError):
+        return False
+    return lineage.get("kind") == "provenance" or lineage.get("attempt_id") == launch.attempt_id
+
+
+def _recipient_gate_records(launch: Launch, *, notices: bool = False) -> list[tuple[Path, str, str, dict]]:
     """Every open gate record addressed to this launch's depth-0 session:
-    `(root, recipient_key, delivery_id, record)`; empty on any refusal."""
+    `(root, recipient_key, delivery_id, record)`; empty on any refusal.
+    `notices` also lists the resource notices `_resource_notice_for_launch` accepts."""
 
     recipient_key = _recipient_key(launch)
     if not recipient_key:
@@ -1679,7 +1696,8 @@ def _recipient_gate_records(launch: Launch) -> list[tuple[Path, str, str, dict]]
             continue
         if record is None or record.get("state") not in pending_delivery.OPEN_STATES:
             continue
-        if not is_human_gate_record(record) and record.get("receipt", {}).get("kind") != "supervision":
+        if (not is_human_gate_record(record) and record.get("receipt", {}).get("kind") != "supervision"
+                and not (notices and _resource_notice_for_launch(launch, recipient_key, record))):
             continue
         found.append((root, recipient_key, delivery_id, record))
     return found
@@ -1718,8 +1736,9 @@ def _open_gate_pending(launch: Launch) -> bool:
         return False
     _PROBE_DIRECTORY_MTIME[key] = mtime
     _PROBE_NEXT_DEADLINE_NS.pop(key, None)
-    for _root, _key, _delivery_id, record in _recipient_gate_records(launch):
-        if launch.attempt_id not in (record.get("attempt_ids") or []):
+    for _root, _key, _delivery_id, record in _recipient_gate_records(launch, notices=True):
+        if (record.get("receipt", {}).get("kind") != "notice"
+                and launch.attempt_id not in (record.get("attempt_ids") or [])):
             continue
         state = record.get("state")
         if state == "pending":
@@ -1756,8 +1775,9 @@ def _gate_notices(
     """
 
     notices: list[str] = []
-    for root, recipient_key, delivery_id, record in _recipient_gate_records(launch):
-        if attempt_only and launch.attempt_id not in (record.get("attempt_ids") or []):
+    for root, recipient_key, delivery_id, record in _recipient_gate_records(launch, notices=attempt_only):
+        if (attempt_only and record.get("receipt", {}).get("kind") != "notice"
+                and launch.attempt_id not in (record.get("attempt_ids") or [])):
             continue
         claim_owner = f"claude-async-rewake-gate:{os.getpid()}:{time.monotonic_ns()}"
         try:
@@ -1802,7 +1822,7 @@ def _gate_notices(
             announced_records.append(record)
         if announced is not None:
             announced.append(delivery_id)
-        if supervision_claims is not None and record.get("receipt", {}).get("kind") == "supervision":
+        if supervision_claims is not None and record.get("receipt", {}).get("kind") in {"supervision", "notice"}:
             supervision_claims.append((root, recipient_key, delivery_id, claim_owner))
         try:
             # Hook output/exit is ambiguous delivery. The native recipient
@@ -1815,13 +1835,16 @@ def _gate_notices(
     return notices
 
 
-def gate_wake_message(launch: Launch, notices: list[str], *, human_gate: bool) -> str:
+def gate_wake_message(launch: Launch, notices: list[str], *, human_gate: bool,
+                      resource_notice: bool = False) -> str:
     """The in-wait gate wake: bounded, typed, and explicit that the gate is
     answered, not harvested; the owner may still be waiting or may have paused
     at the gate."""
 
     if not human_gate:
-        return " ".join(notices)
+        return ((f"Hearting resource notice while owner attempt_id={launch.attempt_id} is still running; "
+                 "this is not the owner's completion, and its own completion will still wake this session. "
+                 if resource_notice else "") + " ".join(notices))
     return (
         "Hearting human gate awaiting your decision (SD-123/129). Runtime gate receipt "
         f"schema=2 state=attention attempt_id={launch.attempt_id} armed={launch.armed} "
@@ -2014,7 +2037,9 @@ def _announce_gate(launch: Launch, claim: ArmClaim, observation: dict[str, Any])
         observation.update(wait_state="gate", reason="human-gate-open")
         code = emit_receipt("attention", gate_wake_message(
             launch, notices, human_gate=any(is_human_gate_record(record)
-                                          for record in announced_records)), block=False)
+                                          for record in announced_records),
+            resource_notice=any(record.get("receipt", {}).get("kind") == "notice"
+                                for record in announced_records)), block=False)
         settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
     # The native wake immediately runs UserPromptSubmit. Keeping
     # this exited carrier's 30s lease prevents that synchronous

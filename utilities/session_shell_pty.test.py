@@ -120,7 +120,10 @@ while True:
         if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
         if line=='side-unicode':print('\x1b[3;1H🙂',end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
-        if line=='paint-bg':print('\x1b[48;5;232m\x1b[2KPAINTED_BG\x1b[0m\r\n',end='',flush=True)
+        if line=='mouse-on':print('\x1b[?1000h\x1b[?1006h',end='',flush=True)
+        if line=='paint-bg':print('\x1b[48;5;232m\x1b[2KPAINTED_BG\x1b[0m\r\n'
+                                  '\x1b[48;5;24m\x1b[2KINVERSE_EDGE\x1b[138G\x1b[7;38;5;88;48;5;52mX\x1b[0m\r\n'
+                                  '\x1b[48;5;24m\x1b[2KINVERSE_PLAIN\x1b[138G\x1b[7;48;5;52mX\x1b[0m\r\n',end='',flush=True)
 """
 
 HOST_LAUNCHER=r"""
@@ -308,6 +311,17 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!/«   ⚙ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
    if(/⚙/.test(row(38).slice(42)))throw Error('panel painted twice');
+   // #1586 review follow-up 7: folded at the left the native stands nine cells right (the strip
+   // and its blank cell): a press in the native area reaches the native at its own column, a press
+   // on the strip opens the panel.
+   const pinnedLeft=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
+   await rpc(pinnedLeft.socket,{...pinnedLeft,op:'panel',expanded:false});
+   await rpc(cfg.inlet,{batch:Buffer.from('mouse-on\r').toString('base64')});await waitFor(/DONE_mouse-on/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-strip\r').toString('base64')});await waitFor(/GEOMETRY_geometry-strip_171x40/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;12;5M\x1b[<0;12;5mMOUSE_AT\r').toString('base64')});
+   await waitFor(/NATIVE_ESC_\^\[<0;3;5M\^\[<0;3;5mMOUSE_AT/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;4;10M\x1b[<0;4;10m').toString('base64')});await new Promise(r=>setTimeout(r,150));
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-opened\r').toString('base64')});await waitFor(/GEOMETRY_geometry-opened_138x40/);
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
@@ -332,6 +346,23 @@ function existing(file){return new Promise((resolve,reject)=>{
    // would leave the native no cell), and the open panel stands again once the window widens.
    child.resize(9,40);await new Promise(r=>setTimeout(r,150));
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry10','138x40');
+   // #1586 review follow-up 6: folding by hand while the settings editor is open closes the
+   // editor first; the strip stands and the keys reach the native.
+   const pinnedFold=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
+   raw='';await press(178,39);await waitFor(/rule motion/);
+   await rpc(pinnedFold.socket,{...pinnedFold,op:'panel',expanded:false});await new Promise(r=>setTimeout(r,150));
+   await geometry('geometry11','171x40');
+   const after=await rpc(pinnedFold.socket,{...pinnedFold,op:'status'});
+   if(after.expanded!==false||after.focused!==false)throw Error('the editor outlived the fold '+JSON.stringify(after));
+   await press(177,10);await geometry('geometry12','138x40');
+   // #1586 review follow-up 3: a width set in the settings editor counts as opening the panel by
+   // hand at this window width (as a drag does): applying a wider panel that would fold keeps it
+   // open; the next window width judges again.
+   child.resize(125,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry13','83x40');
+   raw='';await press(123,39);await waitFor(/rule motion/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\t\t++++++\r').toString('base64')});await new Promise(r=>setTimeout(r,300));
+   await geometry('geometry14','77x40');
+   child.resize(126,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry15','117x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
@@ -488,17 +519,35 @@ function existing(file){return new Promise((resolve,reject)=>{
    const now=Date.now()/1000;
    fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
    await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
+   const opened=Date.now();
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
-   const rule=()=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
+   // The rule's row: the thin rule (spec rule 52) whose cells are not all the plain dim line.
+   // (`at`: that row however it stands, lit or dark.)
+   const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
      const m=line.slice(140).match(/^│ ([─━]{36}) │$/);
-     if(m&&m[1].includes('━'))return {y,native:line.slice(0,138),cells:m[1],colors:Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',')};}return null;};
+     const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
+     if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),cells:m[1],colors};}return null;};
    let first=null;const began=Date.now();
-   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,50));}
+   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
+   // Correction 8: the light comes in on the paint that shows the turn (it never waits out a rest).
+   const litAfter=Date.now()-opened;
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
-   // (1.95 s: not a whole number of the light's 3.2 s round trips, so the two readings differ.)
+   // (1.95 s: not a whole number of the light's 3.5 s period, so the two readings differ.)
    await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
-   const second=rule();
-   Object.assign(ruleMotion,{first,second,bytes,writes});
+   // (The same row, lit or resting: the light may be out on its rest by then.)
+   const second=first&&rule(first.y);
+   // Spec rule 51 (c): the rest (the dark rule for 1 s once the light has left on its first side;
+   // the far end's dark beat lasts 0.1 s). Seen dark and still dark 0.25 s later, it is the rest:
+   // for the next 0.5 s the host writes nothing for the rule's row, only the spinner's own glyph.
+   const dark=()=>{const r=first&&rule(first.y);return !!r&&r.colors.split(',').every(c=>c.endsWith('d'));};
+   let restAt=0;const looking=Date.now();
+   while(!restAt&&Date.now()-looking<6000){await flush();if(dark()){await new Promise(r=>setTimeout(r,250));await flush();if(dark())restAt=Date.now();}else await new Promise(r=>setTimeout(r,20));}
+   const rest=[];const restSub=child.onData(t=>rest.push(t));
+   await new Promise(r=>setTimeout(r,500));restSub.dispose();await flush();
+   const resting=first&&rule(first.y);
+   let back=null;const waiting=Date.now();
+   while(Date.now()-waiting<1500&&!(back=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
+   Object.assign(ruleMotion,{first,second,bytes,writes,rest,rest_seen:!!restAt,lit_after_ms:litAfter,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
    await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
  }
  const nativeBg={};
@@ -511,8 +560,11 @@ function existing(file){return new Promise((resolve,reject)=>{
    const bg=(line,x)=>{const c=line.getCell(x);return c.isBgDefault()?'default':c.getBgColor();};
    const lines=rowsOf(),painted=lines.findIndex(l=>(l?.translateToString()||'').includes('PAINTED_BG'));
    const plain=lines.findIndex((l,y)=>y!==painted&&(l?.translateToString()||'').slice(140,141)==='│'&&bg(l,10)==='default');
+   // #1583 review follow-up (다): an inverse edge cell shows its foreground as its background,
+   // so the gap takes that color (the terminal's own where the foreground is the default).
+   const edge=word=>{const y=lines.findIndex(l=>(l?.translateToString()||'').includes(word));return y<0?null:[138,139].map(x=>bg(lines[y],x));};
    Object.assign(nativeBg,{painted:painted<0?null:[137,138,139,140].map(x=>bg(lines[painted],x)),plain:plain<0?null:[137,138,139].map(x=>bg(lines[plain],x)),
-     border:painted<0?null:lines[painted].getCell(140).getChars()});
+     border:painted<0?null:lines[painted].getCell(140).getChars(),inverse:edge('INVERSE_EDGE'),inverse_plain:edge('INVERSE_PLAIN')});
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
@@ -780,14 +832,30 @@ class SessionShellPTYTest(unittest.TestCase):
         # row, so a beat stays small (the whole row each beat would be about 500 bytes), and the
         # native half stays put.
         result=self.run_loop('rule-motion')['rule_motion']
-        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes']}))
+        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes'],
+                          'rest_writes':len(result['rest']),'rest_bytes':[len(c.encode()) for c in result['rest']]}))
         first,second=result['first'],result['second']
         self.assertIsNotNone(first);self.assertIsNotNone(second)
-        for value in (first,second):self.assertEqual(value['cells'],'━'*36,value)
+        # Spec E9 rule 52: the moving rule is the thin rule; no heavy cell anywhere on it.
+        for value in (first,second):self.assertEqual(value['cells'],'─'*36,value)
         self.assertNotEqual(first['colors'],second['colors'])
         self.assertEqual(first['native'],second['native'])
         self.assertGreaterEqual(result['writes'],15)
         self.assertLess(result['bytes']/result['writes'],400,result)
+        # Spec E9 rule 51 (c): through the rest the rule's row stands dark and nothing is written
+        # to it; the host's writes there are the spinner's glyph alone (one cell each). Then the
+        # light comes back in.
+        # Correction 8: the light shows on the first paint of the turn (within 0.3 s of it).
+        self.assertLess(result['lit_after_ms'],300,result)
+        self.assertTrue(result['rest_seen'],result)
+        y=result['rest_row'];self.assertIsNotNone(y,result)
+        self.assertTrue(all(c.endswith('d') for c in result['resting'].split(',')),result['resting'])
+        self.assertTrue(result['rest'],result)
+        for chunk in result['rest']:
+            self.assertNotIn('\x1b[%d;'%(y+1),chunk,result['rest'])
+            self.assertLess(len(chunk.encode()),96,chunk)
+        self.assertIsNotNone(result['back'],result)
+        self.assertTrue(any(not c.endswith('d') for c in result['back'].split(',')),result['back'])
 
     def test_the_gap_beside_the_panel_takes_the_natives_own_background(self):
         # A native that paints its whole area (OpenCode) reaches the panel's frame: the two cells
@@ -797,6 +865,8 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertEqual(result['painted'],[232,232,232,'default'],result)
         self.assertEqual(result['border'],'│')
         self.assertEqual(result['plain'],['default','default','default'],result)
+        self.assertEqual(result['inverse'],[88,88],result)
+        self.assertEqual(result['inverse_plain'],['default','default'],result)
 
     def test_the_border_names_the_state_right_after_start_without_a_key(self):
         # Spec rule 26: a start event leaves the host's own state unknown; until the
