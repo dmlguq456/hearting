@@ -436,6 +436,10 @@ def wait_governor_reservation_claim(
         timeout = reservation_claim_timeout()
     deadline = time.monotonic() + max(0.1, timeout)
     while True:
+        # Look for exit before the read, not after it: a runner that claims and
+        # exits while the read is in flight would otherwise be reported as an
+        # unclaimed timeout although it ran (and the parent would retry it).
+        exited = proc.poll() is not None
         payload = _governor_json(
             [
                 sys.executable,
@@ -468,7 +472,7 @@ def wait_governor_reservation_claim(
                 "model-worker-reservation-lost",
                 "reservation disappeared before the governed runner claimed it",
             )
-        if proc.poll() is not None or time.monotonic() >= deadline:
+        if exited or time.monotonic() >= deadline:
             raise DispatchContractError(
                 "model-worker-reservation-claim-timeout",
                 f"state={payload.get('state', 'unknown')} exit={proc.returncode}",

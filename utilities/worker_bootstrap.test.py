@@ -201,6 +201,30 @@ class WorkerBootstrapTest(unittest.TestCase):
             self.assertIn(f"- runtime_dir: {explicit}", prompt)
             self.assertIn("checkpoints under runtime_dir", prompt)
 
+    def test_runtime_root_survives_a_launcher_preparing_it_mid_write(self):
+        # Two starts prepare one new root. The second ran while the first had
+        # created the marker but not yet filled it, read it empty, and launched
+        # without runtime_dir (CI run 43419406229: duplicate codex start sealed
+        # a different launch input and exited 73 attempt-identity-conflict).
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "project" / ".agent_runtime"
+            real_write = Path.write_bytes
+            concurrent = []
+
+            def write_in_two_steps(self, data):
+                if self.parent == runtime and not concurrent:
+                    concurrent.append(None)
+                    with open(self, "wb"):
+                        pass  # created, not yet filled
+                    concurrent[0] = W.prepare_runtime_dir(str(runtime))
+                return real_write(self, data)
+
+            with mock.patch.object(Path, "write_bytes", write_in_two_steps):
+                first = W.prepare_runtime_dir(str(runtime))
+            self.assertEqual([first, *concurrent], [str(runtime), str(runtime)])
+            self.assertEqual((runtime / ".gitignore").read_bytes(), b"*\n")
+            self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
     def test_non_git_runtime_uses_stable_state_and_exact_inheritance(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

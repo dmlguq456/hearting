@@ -6478,6 +6478,31 @@ class ReservationClaimTimeoutTest(unittest.TestCase):
             self.assertLess(time.monotonic() - start, 5.0)
             self.assertEqual(ctx.exception.reason, "model-worker-reservation-claim-timeout")
 
+    def test_runner_that_claims_and_exits_during_the_read_is_claimed(self):
+        # CI run 43419406229: the read said unclaimed, the fast runner claimed
+        # and exited before the exit check, and a launch that ran was reported
+        # `claim-timeout state=unclaimed exit=0` (exit 75, row closed dead).
+        class Proc:
+            pid = 4242
+            returncode = None
+            def poll(self):
+                return self.returncode
+        proc = Proc()
+        claimed = {"state": "claimed", "claimant_pid": 4242, "claimant_starttime": "7"}
+        reads = []
+        def read(*_args, **_kwargs):
+            reads.append(1)
+            if len(reads) == 1:
+                proc.returncode = 0  # claims and exits while this read is in flight
+                return {"state": "unclaimed"}
+            return claimed
+        with patch_split(D, "_governor_json", side_effect=read), \
+             patch_split(D, "process_start_ticks", return_value=None), \
+             patch_split(D, "_return_governor_witness") as returned:
+            payload = D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", proc, timeout=5)
+        self.assertEqual(payload, claimed)
+        returned.assert_called_once_with(Path("/r"), "tok", claimed)
+
 
 class SealedLaunchHomeRowFieldTest(unittest.TestCase):
     # C47-13 (SD-115 axis 4 (a)): dispatch_adapters_v11.test.py's

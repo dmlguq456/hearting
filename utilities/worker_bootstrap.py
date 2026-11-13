@@ -336,14 +336,37 @@ def prepare_runtime_dir(candidate: str) -> str:
         if not path.is_dir():
             return ""
         marker = path / ".gitignore"
-        if marker.exists() or marker.is_symlink():
-            if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"*\n":
-                return ""
-        else:
-            marker.write_bytes(b"*\n")
+        if not marker.exists() and not marker.is_symlink():
+            _publish_runtime_marker(marker)
+        if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"*\n":
+            return ""
         return str(path)
     except (OSError, RuntimeError, TypeError, ValueError):
         return ""
+
+
+def _publish_runtime_marker(marker: Path) -> None:
+    """Publish the whole marker in one step, never over an existing file.
+
+    `write_bytes` creates the file before it fills it. A second launcher
+    preparing the same root at that moment read an empty marker, took it for
+    a foreign one and launched without its runtime root.
+    """
+    temporary = marker.with_name(f".gitignore.{os.getpid()}.{os.urandom(6).hex()}.tmp")
+    temporary.write_bytes(b"*\n")
+    try:
+        os.link(temporary, marker)
+    except FileExistsError:
+        pass  # Another launcher published it first; the caller reads it back.
+    except OSError:
+        # A filesystem without hard links falls back to the earlier direct write.
+        try:
+            with marker.open("xb") as handle:
+                handle.write(b"*\n")
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def artifact_context_prompt(environ) -> str:
