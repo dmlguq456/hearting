@@ -137,7 +137,9 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    existing `admit-shared --kind spec` implementation automatically and reports
    its revision to the caller. Admission failure/conflict remains a retryable
    publication gap; it does not undo terminal PASS, route closure or the sealed
-   cycle, and never becomes a gate before those steps. Status detects missing
+   cycle, and never becomes a gate before or after those steps: the completion
+   is delivered once with one line naming the unpublished spec, and the next
+   normal `start` of the same route retries admission. Status detects missing
    cycle-to-shared lineage from the actual records. Seed selects the unique
    reference keyed `spec` when older references coexist; an existing seed
    receipt keeps its original reference and revision. Ambiguity, base/latest
