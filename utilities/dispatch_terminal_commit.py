@@ -504,6 +504,16 @@ def _completed_result(request, services, route, binding, terminal_nodes, envelop
         publication = observed if observed.get("status") != "not-applicable" else None
         if publication is not None and getattr(services, "crash_after", None) == "admission-after":
             raise RuntimeError("crash-after-admission")
+    # The summary is sealed after the publication attempt, so the one delivery
+    # names a publication that did not happen instead of holding the closure.
+    slot = _commit_state_path(request).parent
+    try:
+        sealed = json.loads((slot / "owner-envelope.json").read_text(encoding="utf-8"))
+        primary = sealed.get("primary_path") if isinstance(sealed, Mapping) else None
+    except (OSError, ValueError):
+        primary = None
+    if isinstance(primary, str):
+        _seal_completion_summary(request, route, primary, slot, publication=publication)
     return TerminalCommitResult("completed", None, detail, terminal_nodes, envelope, publication)
 
 
@@ -536,11 +546,10 @@ def _seal_owner_envelope(*, request: TerminalCommitRequest, route: Mapping[str, 
             "primary_digest": second_digest, "terminal_commit_id": commit_id,
             "owner_attempt_id": request.owner_attempt_id, "terminal_nodes": list(terminal_nodes)}
     _atomic_json(slot / "owner-envelope.json", meta, exclusive=not (slot / "owner-envelope.json").exists())
-    _seal_completion_summary(request, route, primary, slot)
     return text
 
 
-def _seal_completion_summary(request, route, primary, slot) -> None:
+def _seal_completion_summary(request, route, primary, slot, *, publication=None) -> None:
     """Write-once runtime close text beside the envelope (WORKFLOW §0.5); never fails the commit."""
     try:
         import work_intent
@@ -556,7 +565,7 @@ def _seal_completion_summary(request, route, primary, slot) -> None:
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,
                                               cost=_completion_cost(request, route),
                                               corrections=completion_corrections(request.jobs, request.owner_attempt_id),
-                                              assessment=assessment)
+                                              assessment=assessment, publication=publication)
         _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return
@@ -2277,8 +2286,12 @@ def recorded_owner_completion_notice(jobs, status, metadata, *, observer=None):
     return result
 
 
-def _observe_settled_transaction(request, state, *, selected_registry_rows=None):
-    """Prove immutable history and current obligations without locks or repairs."""
+def _observe_settled_transaction(request, state, *, selected_registry_rows=None, publication=False):
+    """Prove immutable history and current obligations without locks or repairs.
+
+    The shared-spec publication is read only when a caller asks for it: it is
+    information beside the completion, never part of whether the work completed.
+    """
     route = json.loads(request.route_file.read_text())
     module = _route_module()
     gates = _settled_gate_rows(module, route, request,
@@ -2305,7 +2318,7 @@ def _observe_settled_transaction(request, state, *, selected_registry_rows=None)
     value = binding.binding if binding else None
     _verify_settled_outputs(request, route, commit_id, value, historical=True)
     envelope = _read_sealed_owner_envelope(request, commit_id)
-    publication = _publication_observation(request, route, value)
+    publication = _publication_observation(request, route, value) if publication else None
     goal_path = campaign_goal_path(request)
     goal = json.loads(goal_path.read_text()) if goal_path.exists() else None
     if goal is not None and (not isinstance(goal, Mapping)
@@ -2393,9 +2406,8 @@ def _owner_completion_state_scoped(jobs, status, metadata, *, selected_registry_
                 # settle would produce the same refusal.
                 facts["finalize_refusal_held"] = _finalize_refusal_held(request, facts["checkpoint"])
             elif facts["checkpoint"] == "owner-envelope-sealed":
-                _, publication, goal_pending = _observe_settled_transaction(
+                _, _, goal_pending = _observe_settled_transaction(
                     request, state, selected_registry_rows=selected_registry_rows)
-                facts["publication_pending"] = publication is not None and publication["status"] == "pending"
                 facts["goal_pending"] = goal_pending
         else:
             request = _completion_request(
@@ -2446,7 +2458,7 @@ def completed_owner_publication(jobs, status, metadata):
     if request is None or owner_completion_state(jobs, status, metadata).state != "complete":
         return None
     state = json.loads(_commit_state_path(request).read_text())
-    return _observe_settled_transaction(request, state)[1]
+    return _observe_settled_transaction(request, state, publication=True)[1]
 
 
 def inspect_owner_completion(jobs, status, metadata):
@@ -2559,9 +2571,11 @@ def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | No
         # terminal failure. Preserve their typed reason without model content.
         result = TerminalCommitResult("recoverable", "recovery-unavailable",
                                       str(getattr(exc, "code", type(exc).__name__)))
-    publication_pending = result.shared_publication is not None and result.shared_publication.get("status") == "pending"
+    # An unpublished shared spec is not a pending closure: the completion is
+    # delivered once and its sealed summary names the publication that did not
+    # happen (see `_completed_result`).
     goal_pending = result.campaign_goal is not None and result.campaign_goal.get("status") == "pending"
-    if (result.result != "completed" or publication_pending or goal_pending) and _parent_has_notice_carrier(metadata):
+    if (result.result != "completed" or goal_pending) and _parent_has_notice_carrier(metadata):
         from dispatch_supervision import materialize
         try:
             materialize(Path(jobs), {metadata["attempt_id"]}, reason="workflow-completion-pending")
