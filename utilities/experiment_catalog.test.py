@@ -828,6 +828,33 @@ class Leaderboard(Base):
         self.assertIn("순위표에 올릴 조건이 없음", empty.stdout)
 
 
+class Values(Base):
+    """RV-PR1607-1113 #2: a value measured in another metric never takes the group's unit, latest or best."""
+
+    def test_mismatched_metric_unit(self):
+        root = self.make_root()
+        self.two_conditions(root)  # declared: wer (%)
+        self.write_run(root, "run-a", key="loss", series={"loss": [(1, 0.5), (2, 0.7)]})
+        self.write_run(root, "run-b", series={"wer": [(2, 18.0)]})
+        summary = rp.metric_summary([{"epoch": 2, "split": "valid", "metrics": {"loss": 0.7}}],
+                                    decision_metric="loss", direction="min")
+        line = E.notice_line(E.describe_observation(root, "run-a", None, summary), "ko")
+        self.assertNotIn("0.7%", line)
+        self.assertIn("최근 0.7 (loss)@2", line)                      # the metric it was measured in, by name
+        report = E.status(root, now=NOW)
+        row = self.cond(report, "0.3초 이하 짧은 발화 유지")
+        self.assertEqual((row["latest"]["key"], row["best"]["key"]), ("loss", "loss"))  # best keeps its metric too
+        board = E.render_leaderboard(report, lang="ko")
+        mine = next(text for text in board.splitlines() if "0.3초" in text)
+        for wrong in ("0.7%", "0.5%"):
+            self.assertNotIn(wrong, mine)
+        self.assertIn("| 0.7 (loss)@2 | 0.5 (loss)@1 |", mine)
+        self.assertIn("| 18.00%@2 | 18.00%@2 |", next(text for text in board.splitlines() if "짧은 발화 제외" in text))
+        status_line = next(text for text in E.render_status(report, "ko").splitlines() if text.startswith("- 0.3초"))
+        self.assertNotIn("0.7%", status_line)
+        self.assertIn("0.7 (loss)@2", status_line)
+
+
 class NoLeftovers(Base):
     def test_zz_no_child_process_is_left(self):
         with self.assertRaises(ChildProcessError):

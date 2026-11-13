@@ -2481,12 +2481,38 @@ class CatalogNoticeTest(unittest.TestCase):
         self.assertEqual(persisted["last_checkpoint_at"], 7200.0)  # the schedule moved on
         record = progress.read_public_run_record(self.artifact, "name-run")
         self.assertEqual(record["last_checkpoint"]["at"], 7200.0)  # and the public record the board reads is current
-        self.assertEqual(persisted["notified_decision_point"], {"metric": "SISNRi", "epoch": 1, "value": 11.0})
+        told = persisted["notified_decision_point"]
+        self.assertEqual({k: told[k] for k in ("metric", "epoch", "value")}, {"metric": "SISNRi", "epoch": 1, "value": 11.0})
         self.epochs(2)
         news = set(self.observe(10800)) - keys
         self.assertEqual(len(news), 1)  # a new epoch is a new decision point
         self.epochs(2)
         self.assertEqual(set(self.observe(14400)) - keys - news, set())  # and then quiet again
+
+    def append_point(self, epoch, value):
+        with (self.output / "logs" / "epochs.jsonl").open("a") as handle:
+            handle.write(json.dumps({"epoch": epoch, "split": "valid", "losses": {"SISNRi": value}}) + "\n")
+
+    def test_out_of_order_new_result(self):
+        """RV-PR1607-1113 #1: epochs 1 and 3 were told; epoch 2 arriving afterwards (here a new best) is news."""
+        self.register()
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        self.append_point(2, 25.0)
+        late = set(self.observe(7200)) - keys
+        self.assertEqual(len(late), 1, "a first evaluation of an earlier epoch went untold")
+        summary = progress._read_observation_state(self.state)["observation"]["summary"]
+        self.assertEqual((summary["best"]["epoch"], summary["latest"]["epoch"]), (2, 3))  # the latest point did not move
+        self.assertEqual(set(self.observe(10800)) - keys - late, set())  # and nothing new afterwards is quiet again
+
+    def test_a_corrected_earlier_epoch_is_news(self):
+        """An earlier epoch's value rewritten (not the latest one) is a new evaluation as well."""
+        self.register()
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600))
+        self.append_point(1, 12.5)  # epoch 1 corrected from 11.0; the latest (epoch 3) stays 13.0
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)
 
     def test_unconfirmed_runs_keep_their_checkpoints(self):
         # no catalog at all

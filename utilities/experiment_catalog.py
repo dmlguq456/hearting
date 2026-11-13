@@ -1059,18 +1059,22 @@ def _public_point(raw: Any) -> Optional[Dict[str, Any]]:
     return {"epoch": raw.get("epoch"), "value": _num(raw.get("value")), "nonfinite": bool(raw.get("nonfinite"))}
 
 
+def _keyed_point(key: str, raw: Any) -> Optional[Dict[str, Any]]:
+    point = _public_point(raw)
+    return None if point is None else {"key": key, **point}
+
+
 def _observed(summary: Mapping[str, Any], key: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """(latest, best) for the declared metric; falls back to the run's own decision metric so a
-    different metric shows up as a mismatch rather than as no value."""
+    different metric shows up as a mismatch rather than as no value.  Both points carry the key
+    they were measured in, so another metric's best never reads as the declared metric's value."""
     latest_metrics = summary.get("latest_metrics") if isinstance(summary.get("latest_metrics"), dict) else {}
     best_metrics = summary.get("best_metrics") if isinstance(summary.get("best_metrics"), dict) else {}
     if key and isinstance(latest_metrics.get(key), dict):
-        latest = {"key": key, **_public_point(latest_metrics[key])}
-        return latest, _public_point(best_metrics.get(key))
+        return _keyed_point(key, latest_metrics[key]), _keyed_point(key, best_metrics.get(key))
     own = summary.get("metric") if isinstance(summary.get("metric"), str) else None
-    latest = _public_point(summary.get("latest"))
-    if latest is not None and own:
-        return {"key": own, **latest}, _public_point(summary.get("best"))
+    if own and isinstance(summary.get("latest"), dict):
+        return _keyed_point(own, summary.get("latest")), _keyed_point(own, summary.get("best"))
     return None, None
 
 
@@ -1327,6 +1331,15 @@ def _unit_text(value: float, unit: Optional[str]) -> str:
     return _fmt(value) + (unit if unit == "%" else f" {unit}" if unit else "")
 
 
+def _measured_text(point: Mapping[str, Any], key: Optional[str], unit: Optional[str]) -> str:
+    """A point's value in the group's unit; a value measured in another metric names that metric and
+    takes no unit (a loss is never written as a WER percent)."""
+    measured = point.get("key")
+    if measured and measured != key:
+        return f"{_fmt(point['value'])} ({measured})"
+    return _unit_text(point["value"], unit)
+
+
 def _clock(iso: Optional[str]) -> str:
     epoch = _ts(iso)
     return "" if epoch is None else time.strftime("%m-%d %H:%M", time.localtime(epoch))
@@ -1341,11 +1354,12 @@ def _age_text(seconds: int, t: Callable[..., str]) -> str:
 
 
 def _value_parts(latest: Optional[Mapping[str, Any]], comparison: Optional[Mapping[str, Any]], unit: Optional[str],
-                 t: Callable[..., str]) -> List[str]:
-    """The latest value and how it stands against the target, in words: one place for a status line and a notice."""
+                 t: Callable[..., str], key: Optional[str] = None) -> List[str]:
+    """The latest value and how it stands against the target, in words: one place for a status line and a notice.
+    `key` is the declared metric: a latest value measured in another metric is named, not given `unit`."""
     parts: List[str] = []
     if latest and latest.get("value") is not None:
-        parts.append(t("experiment.latest", value=_unit_text(latest["value"], unit), epoch=latest.get("epoch")))
+        parts.append(t("experiment.latest", value=_measured_text(latest, key, unit), epoch=latest.get("epoch")))
     elif latest and latest.get("nonfinite"):
         parts.append(t("experiment.latest_nonfinite", epoch=latest.get("epoch")))
     else:
@@ -1373,7 +1387,8 @@ def notice_line(info: Mapping[str, Any], lang: Optional[str] = None) -> str:
     """The first line of an experiment notice: `name — goal; latest, versus the target`."""
     t = _translator(lang)
     return t("experiment.notice.line", name=info["name"], goal=info.get("goal") or t("experiment.notice.goal_missing"),
-             values="; ".join(_value_parts(info.get("latest"), info.get("comparison"), info.get("metric_unit"), t)))
+             values="; ".join(_value_parts(info.get("latest"), info.get("comparison"), info.get("metric_unit"), t,
+                                           info.get("metric_key"))))
 
 
 UNREGISTERED_NOTICE = "experiment.notice.unregistered"
@@ -1393,7 +1408,7 @@ def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callabl
         parts.append(t("experiment.progress", reached=progress["reached"],
                        total=progress.get("total") if progress.get("total") is not None else "?",
                        unit=progress.get("unit") or ""))
-    parts.extend(_value_parts(row.get("latest"), row.get("comparison"), unit, t))
+    parts.extend(_value_parts(row.get("latest"), row.get("comparison"), unit, t, metric.get("key")))
     if row.get("run_status") == "running":
         if row.get("expected_at"):
             parts.append(t("experiment.expected", time=_clock(row["expected_at"])))
@@ -1447,13 +1462,13 @@ def render_status(doc: Mapping[str, Any], lang: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-def _leader_point(point: Optional[Mapping[str, Any]], unit: Optional[str]) -> str:
+def _leader_point(point: Optional[Mapping[str, Any]], unit: Optional[str], key: Optional[str] = None) -> str:
     if not point or point.get("value") is None:
         return "-"
-    return _unit_text(point["value"], unit) + (f"@{point['epoch']}" if point.get("epoch") is not None else "")
+    return _measured_text(point, key, unit) + (f"@{point['epoch']}" if point.get("epoch") is not None else "")
 
 
-def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., str]) -> List[str]:
+def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., str], key: Optional[str] = None) -> List[str]:
     comparison = row.get("comparison") or {}
     state, reason = comparison.get("state"), comparison.get("reason")
     baseline = comparison.get("baseline") if state == "ok" else None
@@ -1476,7 +1491,7 @@ def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., st
     if baseline:
         base = ((baseline.get("label") + " ") if baseline.get("label") else "") + _leader_point(baseline, unit)
     return [row.get("display_name") or t("experiment.unnamed"), (row.get("current_run") or {}).get("run_id") or "-",
-            _leader_point(row.get("latest"), unit), _leader_point(row.get("best"), unit), base, delta, relative,
+            _leader_point(row.get("latest"), unit, key), _leader_point(row.get("best"), unit, key), base, delta, relative,
             ", ".join(words)]
 
 
@@ -1510,7 +1525,7 @@ def render_leaderboard(doc: Mapping[str, Any], group: Optional[str] = None, fmt:
     for g in groups:
         metric = g.get("metric") or {}
         unit = metric.get("unit") or None
-        rows = [_leader_row(r, unit, t) for r in _leader_order(g["conditions"], metric.get("direction"))]
+        rows = [_leader_row(r, unit, t, metric.get("key")) for r in _leader_order(g["conditions"], metric.get("direction"))]
         name = g.get("display_name") or t("experiment.no_group")
         if fmt == "tsv":
             if not out:
