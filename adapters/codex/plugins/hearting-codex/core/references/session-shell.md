@@ -238,22 +238,29 @@ than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
 then parts it from this session's content. The rule follows this session's own
-state, from the frame's source (not a route's): while the session runs a
-six-cell heavy bar (`━`, the session spinner's color, its two end cells one
-step lower) moves between its ends and back every 2.6 seconds, easing at the
-ends; while an answer or a confirmation waits the whole rule is heavy and red
-and breathes, never blinking, once every four seconds through three steps
-(the frame's waiting red, a middle red, a dark red that still shows, the
-middle again); the steward `⚑` keeps its own blink. Otherwise it is the plain
-thin rule. The two speeds are constants in one place (`RULE_SCAN`,
-`RULE_BREATHE` in `panel-view.cjs`). It moves on the beat the spinner already
+state, from the frame's source (not a route's): while the session runs every
+cell of the rule is heavy (`━`, the dark rule) and a light passes over it, its
+middle five cells brightest (the session spinner's color) and four cells on
+each side one shade down each (thirteen cells, five shades); the light runs at
+one speed from fully outside one end to fully outside the other and back every
+3.2 seconds, so at each end the rule is briefly dark before the light comes
+back in on the same side. While an answer or a confirmation waits the whole
+rule is heavy and red and breathes, never blinking, once every 3.6 seconds on
+a cosine through eight shades in 24-bit color (when `COLORTERM` says the
+terminal takes it) or six in 256 colors, one shade at a time, each for an equal
+stretch, the brightest the frame's waiting red and the darkest still showing;
+the steward `⚑` keeps its own blink. Otherwise it is the plain thin rule, so a
+heavy rule means working or waiting and a thin one idle. Every value (the five
+bright cells, the four fading ones, the shades, the round trip, the breath and
+its shade count) is a constant in one place (`RULE_*` in `panel-view.cjs`). It moves on the beat the spinner already
 keeps: the host wakes at the next frame anything painted changes (a spinner's
-frame, the rule's next step: every frame for the bar, four times a breath),
+frame, the rule's next step: every frame for the light, at each shade change of
+a breath),
 repaints the whole panel only for a one-second blink, and otherwise sends only
 the changed cells (the spinner glyphs, the rule's changed cells); idle, nothing
-wakes and nothing is sent. `rule motion` off, `mono` and `NO_COLOR` move
-nothing (a wait stays a still heavy rule), and a panel short of rows that drops
-the rule adds nothing. The
+wakes and nothing is sent. `rule motion` off, `mono`, `NO_COLOR` and eight
+colors move nothing (running keeps the thin rule, a wait a still heavy one), and
+a panel short of rows that drops the rule adds nothing. The
 content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,

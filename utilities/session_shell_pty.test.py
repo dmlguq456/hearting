@@ -467,12 +467,13 @@ function existing(file){return new Promise((resolve,reject)=>{
    fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
    await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
-   const rule=()=>{for(let y=0;y<sideTerm.rows;y++){const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'';
-     const m=line.slice(140).match(/^│ ([─━]{36}) │$/);if(m&&m[1].includes('━'))return {y,native:line.slice(0,138),cells:m[1]};}return null;};
+   const rule=()=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
+     const m=line.slice(140).match(/^│ ([─━]{36}) │$/);
+     if(m&&m[1].includes('━'))return {y,native:line.slice(0,138),cells:m[1],colors:Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',')};}return null;};
    let first=null;const began=Date.now();
    while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,50));}
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
-   // (1.95 s: not a whole number of the bar's 2.6 s round trips, so the two readings differ.)
+   // (1.95 s: not a whole number of the light's 3.2 s round trips, so the two readings differ.)
    await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
    const second=rule();
    Object.assign(ruleMotion,{first,second,bytes,writes});
@@ -739,7 +740,7 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertEqual(result['state_colors'][2][1],colors['idle'])
 
     def test_the_head_rule_moves_on_the_spinner_beat_sending_only_its_changed_cells(self):
-        # Spec E9 rule 47 (d): a running session's head rule moves (six heavy cells) on the beat the
+        # Spec E9 rule 47 (d): a running session's head rule (every cell heavy) carries a moving light on the beat the
         # spinner already keeps; each beat sends only the rule's changed cells beside the spinner's
         # row, so a beat stays small (the whole row each beat would be about 500 bytes), and the
         # native half stays put.
@@ -747,8 +748,8 @@ class SessionShellPTYTest(unittest.TestCase):
         print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes']}))
         first,second=result['first'],result['second']
         self.assertIsNotNone(first);self.assertIsNotNone(second)
-        for value in (first,second):self.assertEqual(value['cells'].count('━'),6,value)
-        self.assertNotEqual(first['cells'],second['cells'])
+        for value in (first,second):self.assertEqual(value['cells'],'━'*36,value)
+        self.assertNotEqual(first['colors'],second['colors'])
         self.assertEqual(first['native'],second['native'])
         self.assertGreaterEqual(result['writes'],15)
         self.assertLess(result['bytes']/result['writes'],400,result)

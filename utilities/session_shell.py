@@ -901,6 +901,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     board = session_questions(harness, sid, view=view, retained=retained_questions)
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+    # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving
+    # rule's breath may use it (spec E9 rule 47); every other color stays a 256-color index.
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        colors = 1 << 24
     def styled(parts):
         return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
     segments = styled(line_segments(values, columns))

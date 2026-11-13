@@ -344,10 +344,17 @@ let viewGroups=[],paintedGroups=new Set(),viewSpins=[],paintedSpins=new Set(),vi
 // write it (`serialize`'s per-cell attributes; every cell of that row is one cell wide), so a
 // native frame and the beat write the same line, and the beat sends only the cells that changed.
 let viewMotion=null,paintedMotion=null,viewBlinks=false,panelBlinks=false;
+// A part's foreground as SGR: a 256-color index, or `#rrggbb` (24-bit, where the terminal takes it:
+// the moving rule's breath), as the scratch VT writes them back.
+function foregroundSgr(value){
+  if(Number.isInteger(value)&&value>=0&&value<=255)return '38;5;'+value;
+  const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(value??''));
+  return m?'38;2;'+m.slice(1).map(x=>parseInt(x,16)).join(';'):null;
+}
 function motionCells(parts){
   const cells=[];
   for(const part of parts){
-    const a=[0,Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255?'38;5;'+part.foreground:'39',
+    const a=[0,foregroundSgr(part.foreground)||'39',
       Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
     if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
     const attr=a.join(';');
@@ -561,7 +568,7 @@ function displayLines(lines,height,done) {
   const safe=s=>String(s).replace(/[\x00-\x1f\x7f]/g,' ');
   const paint=line=>Array.isArray(line)?line.map(part=>{
     const attrs=[0];
-    if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    const fg=foregroundSgr(part.foreground);if(fg)attrs.push(fg);
     if(Number.isInteger(part.background)&&part.background>=0&&part.background<=255)attrs.push(48,5,part.background);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;

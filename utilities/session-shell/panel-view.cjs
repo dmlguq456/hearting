@@ -12,12 +12,14 @@ const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom'
 const FACES={
   dark:{light:234,medium:235,body:253,secondary:248,title:246,frame:244,route:245,messages:242,accent:174,
     working:150,idle:186,blocked:174,dead:210,done:150,steward:[219,132],
-    // Spec rule 47: the moving rule's tones (running: the session spinner's vanilla and one
-    // step lower; waiting: three steps of red, the brightest the frame's waiting color).
-    rule:{lit:230,edge:187,wait:217,'wait-mid':174,'wait-off':131}},
+    // Spec rule 47: the moving rule's tones. The running light's five steps, dimmest first (the
+    // session spinner's vanilla at the top, just above the dark rule at the bottom); a waiting
+    // rule's steps of red, brightest first (the frame's waiting red) in 256 colors, and its two
+    // ends in 24-bit color.
+    scan:[243,101,144,187,230],wait:[217,210,174,167,131,95],waitRGB:[[255,175,175],[90,56,56]]},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
-    rule:{lit:22,edge:65,wait:88,'wait-mid':131,'wait-off':174}},
+    scan:[251,151,108,65,22],wait:[88,124,131,167,174,181],waitRGB:[[135,0,0],[225,190,190]]},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -26,6 +28,18 @@ const FACES={
 const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
+// A moving rule cell's color: a light step from its face's ramp; a waiting step from its face's
+// 256-color reds, or in 24-bit color (when the terminal says it takes it) a point on the cosine
+// between its face's two ends.
+function ruleTone(part,F,colors){
+  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
+  const steps=part.steps,k=part.step;
+  if(colors>256&&steps>1){
+    const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.waitRGB;
+    return '#'+hi.map((c,i)=>Math.round(lo[i]+(c-lo[i])*f).toString(16).padStart(2,'0')).join('');
+  }
+  return F.wait[Math.max(0,Math.min(F.wait.length-1,k))];
+}
 function appearance(rows,configuration={},{colors=256,noColor=false,background=''}={}){
   const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
   if(noColor)return rows;
@@ -34,7 +48,7 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
   const shade=['light','medium'].includes(cfg.shade)&&full&&known?cfg.shade:'';
   const F=FACES[known||'dark'];
   return rows.map(row=>row.map(part=>{
-    let foreground=Number.isInteger(part.foreground)&&part.foreground>=0?part.foreground:null,dim=part.dim===true,bold=part.bold===true;
+    let foreground=Number.isInteger(part.foreground)&&part.foreground>=0||/^#[0-9a-f]{6}$/i.test(String(part.foreground))?part.foreground:null,dim=part.dim===true,bold=part.bold===true;
     // Spec rule 25: a frame or route box in a state color reads as the plain line where no hue is shown.
     const role=theme==='mono'&&part.role==='frame-state'?'frame':theme==='mono'&&part.role==='route-dead'?'route':part.role||'';
     // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
@@ -66,10 +80,9 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // The steward's number does not blink (spec rule 35 (a)): it keeps the lit pink.
     else if(role==='steward'&&theme!=='mono'&&known){foreground=F.steward[part.beat===true&&!bold?1:0];dim=false;}
     else if(role==='steward'&&theme==='mono')dim=false;
-    // Spec rule 47: the moving rule's cells take their face's tone at full strength; an unknown
-    // face keeps the session keys (the bar's end cells dimmed) and the dark face's three reds;
-    // mono never moves (no tone).
-    else if(role==='rule'&&theme!=='mono'&&(known||part.tone==='wait-mid'||part.tone==='wait-off')&&FACES[known||'dark'].rule[part.tone]){foreground=FACES[known||'dark'].rule[part.tone];dim=false;}
+    // Spec rule 47: the moving rule's cells take their step's tone on their face (an unknown face
+    // the dark face's), at full strength; mono never moves (no tone).
+    else if(role==='rule'&&theme!=='mono'&&part.tone){foreground=ruleTone(part,FACES[known||'dark'],colors);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -114,27 +127,36 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
-// Spec rule 47 (user-confirmed 11-13: the scanner; a waiting rule breathes): the two speeds, in
-// 100 ms spinner frames, in one place to tune. RULE_SCAN: the bar's round trip (26 = 2.6 s);
-// RULE_BREATHE: one breath of a waiting rule (40 = 4 s).
-const RULE_SCAN=26,RULE_BREATHE=40;
-// A breath's three steps (bright, middle, dark, middle): cosine over the breath, cut at 0.66/0.33.
-const breathLevel=tick=>{const t=((Math.trunc(tick)%RULE_BREATHE)+RULE_BREATHE)%RULE_BREATHE,lv=(Math.cos(2*Math.PI*t/RULE_BREATHE)+1)/2;
-  return lv>0.66?'wait':lv>0.33?'wait-mid':'wait-off';};
-// One cell `i` of an `n`-cell rule at spinner frame `tick`: `scan` (this session running) moves
-// a six-cell heavy bar between the ends and back in RULE_SCAN frames, easing at the ends
-// (smoothstep), its two end cells one step lower; `wait` (an answer or a confirmation waits) is
-// the whole heavy rule breathing through three steps of red in RULE_BREATHE frames; `still`
-// moves nothing (rule motion off, mono, NO_COLOR): a running rule stays the plain one, a waiting
-// one stays heavy. Anything else is the plain thin rule. Returns the glyph and its tone.
-function ruleCell(kind,tick,i,n,{still=false}={}){
-  if(kind==='wait')return ['━',still?'wait':breathLevel(tick)];
-  if(kind==='scan'&&!still){
-    const L=Math.min(6,n),t=((Math.trunc(tick)%RULE_SCAN)+RULE_SCAN)%RULE_SCAN;
-    const x=t<RULE_SCAN/2?t/(RULE_SCAN/2):2-t/(RULE_SCAN/2),head=Math.round(x*x*(3-2*x)*(n-L)),d=i-head;
-    if(d>=0&&d<L)return ['━',d===0||d===L-1?'edge':'lit'];
-  }
-  return ['─','line'];
+// Spec rule 47 (the user's final values, 11-13): every value of the moving rule in one place.
+// Running, a light passes over the heavy rule: RULE_PEAK cells at its middle are brightest and
+// RULE_FADE cells on each side step down one shade each (RULE_PEAK + 2 RULE_FADE cells, five
+// shades); its middle runs at one speed from fully outside one end to fully outside the other
+// and back in RULE_SCAN spinner frames (100 ms each: 32 = 3.2 s). Waiting, the whole heavy red
+// rule breathes once every RULE_BREATHE frames (36 = 3.6 s) through RULE_WAIT_STEPS shades on a
+// cosine (24-bit color; the 256-color palette has six reds for it), each shade an equal time.
+const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=32,RULE_BREATHE=36,RULE_WAIT_STEPS=8,RULE_WAIT_STEPS_256=6;
+const mod=(t,n)=>((Math.trunc(t)%n)+n)%n;
+// The light's shade at cell `i` of an `n`-cell rule (5 brightest, 0 none).
+function scanLevel(tick,i,n){
+  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_SCAN);
+  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
+  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2),c=Math.round(lo+y*(hi-lo));
+  return Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+}
+// A breath's shade at a frame: 0 brightest .. steps-1 darkest, down and back up, each shade for an
+// equal stretch of the breath (2 (steps-1) stretches).
+function breathStep(tick,steps){
+  const slots=2*(steps-1),s=Math.floor(mod(tick,RULE_BREATHE)*slots/RULE_BREATHE);
+  return s<steps?s:slots-s;
+}
+// One cell `i` of an `n`-cell rule at spinner frame `tick`: running (`scan`), every cell heavy,
+// the light's shade (0: the dark rule); waiting (`wait`), heavy red at the breath's shade; `still`
+// moves nothing (rule motion off, mono, NO_COLOR, eight colors): a running rule stays the plain
+// thin one, a waiting one stays heavy. Anything else is the plain thin rule.
+function ruleCell(kind,tick,i,n,{still=false,steps=RULE_WAIT_STEPS}={}){
+  if(kind==='wait')return still?['━','wait',0]:['━','wait',breathStep(tick,steps)];
+  if(kind==='scan'&&!still){const level=scanLevel(tick,i,n);return ['━',level?'scan':'base',level];}
+  return ['─','line',0];
 }
 function change(value,key,step){
   const options=OPTIONS;
@@ -219,15 +241,18 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // move nothing (a wait stays a still heavy rule). A moving rule's parts carry `motion`: the
   // host repaints that one row, its changed cells only, at the frames it changes.
   const ruleKind=settings?'':state==='blocked'?'wait':LIVE[state]?.[0]==='spin'?'scan':'';
-  const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono';
+  const ruleColors=model.colors??256;
+  const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||ruleColors<256;
+  const ruleSteps=ruleColors>256?RULE_WAIT_STEPS:RULE_WAIT_STEPS_256;
   const ruleWidth=inner;
   function ruleParts(tick){
     const flag=ruleStill||!ruleKind?{}:{motion:true},out=[];
-    let run='',tone='';
-    const flush=()=>{if(!run)return;
-      out.push(tone==='line'?{...text(run,'dim'),role:'messages',...flag}:
-        {...text(run,/^wait/.test(tone)?'g_blocked':'g_spin'),...(tone==='edge'||tone==='wait-off'?{dim:true}:{}),role:'rule',tone,...flag});};
-    for(let i=0;i<ruleWidth;i++){const [glyph,kind]=ruleCell(ruleKind,tick,i,ruleWidth,{still:ruleStill});if(kind!==tone){flush();run='';tone=kind;}run+=glyph;}
+    let run='',key='',cell=null;
+    const flush=()=>{if(!run)return;const [,tone,level]=cell;
+      out.push(tone==='line'||tone==='base'?{...text(run,'dim'),role:'messages',...flag}:
+        tone==='wait'?{...text(run,'g_blocked'),role:'rule',...(ruleStill?{}:{tone,step:level,steps:ruleSteps}),...flag}:
+        {...text(run,'g_spin'),role:'rule',tone,level,...flag});};
+    for(let i=0;i<ruleWidth;i++){const c=ruleCell(ruleKind,tick,i,ruleWidth,{still:ruleStill,steps:ruleSteps}),k=c.join(':');if(k!==key){flush();run='';key=k;cell=c;}run+=c[0];}
     flush();
     return out;
   }
@@ -1317,10 +1342,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // repaints this one row then, on the beat it already keeps, its changed cells only.
   const motionAt=settings?-1:rows.slice(0,count).findIndex(row=>row.some(part=>part.motion));
   const motion=motionAt>=0?{row:motionAt,at:tick=>appearance([frameRow(ruleParts(tick))],cfg,{colors:model.colors??256,noColor:model.no_color===true,background})[0],
-    next:tick=>{if(ruleKind!=='wait')return Math.trunc(tick)+1;const now=breathLevel(tick);for(let t=Math.trunc(tick)+1;t<=Math.trunc(tick)+RULE_BREATHE;t++)if(breathLevel(t)!==now)return t;return Math.trunc(tick)+RULE_BREATHE;}}:null;
+    next:tick=>{if(ruleKind!=='wait')return Math.trunc(tick)+1;const now=breathStep(tick,ruleSteps);for(let t=Math.trunc(tick)+1;t<=Math.trunc(tick)+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t;return Math.trunc(tick)+RULE_BREATHE;}}:null;
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,blinks:blinks&&!settings,spins,motion};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,ruleCell,RULE_SCAN,RULE_BREATHE};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,ruleCell,scanLevel,breathStep,
+  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,BREATHE:RULE_BREATHE,WAIT_STEPS:RULE_WAIT_STEPS,WAIT_STEPS_256:RULE_WAIT_STEPS_256}};
