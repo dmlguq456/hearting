@@ -6934,11 +6934,14 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         # projection changes, not only at its 2 s tick (the tick's phase was most of what a
         # route start or an answer wait waited for). Fleet writes neither file, so this cannot
         # wake itself; the pump's adaptive rest still bounds the cadence, and without kernel
-        # notification (or on a network file) the 2 s tick alone remains.
-        basic_events = _basic_source_events()
+        # notification (or on a network file) the 2 s tick alone remains. It is armed once the
+        # first basic snapshot is in (below): the modules it needs are loaded by that collection,
+        # and building it before the first frame put their import (~0.4 s) in front of the saved
+        # model's replay.
+        basic_events, basic_events_pending = None, True
     else:
         _EXPLORER_NATIVE_DISPLAY = None
-        basic_events = None
+        basic_events, basic_events_pending = None, False
     selection_feed = None
     sessions, jobs = snapshot.sessions, snapshot.jobs
     resources = snapshot.resources
@@ -7052,6 +7055,9 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 generation, basic_snapshot = update
                 if _EXPLORER_ENABLED:
                     detail_pump.request(force=True)
+                if basic_events_pending:
+                    basic_events_pending = False
+                    basic_events = _basic_source_events()
             detail_update = detail_pump.poll(detail_generation)
             if detail_update is not None:
                 detail_generation, next_detail = detail_update

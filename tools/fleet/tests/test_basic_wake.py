@@ -140,5 +140,99 @@ class BasicSourceEventsTest(unittest.TestCase):
             self.assertIsNone(render._basic_source_events())
 
 
+class ArmingOrderTest(unittest.TestCase):
+    """The listener's imports (~0.4 s cold) must not sit in front of the saved model's replay."""
+
+    def run_loop(self, updates):
+        from fleet.refresh import LiveSnapshot
+        events = []
+
+        class Runtime:
+            has_complete = False
+            cached_continuation = None
+            def configure_persistence(self, *_a, **_k):
+                pass
+            def load_last_complete(self, *_a, **_k):
+                return object()
+
+        class Pump:
+            def __init__(self, _producer, _interval, **kwargs):
+                self.name = kwargs.get("name", "fleet-refresh")
+                self.generation, self.running = 0, False
+            def start(self):
+                self.running = True
+            def health(self, *_a, **_k):
+                return {}
+            def request_due(self, **_k):
+                return False
+            def request(self, **_k):
+                return False
+            def request_soon(self, **_k):
+                return False
+            def poll(self, *_a, **_k):
+                if self.name == "fleet-refresh" and updates[0]:
+                    updates[0] = False
+                    events.append("update")
+                    return 1, LiveSnapshot()
+                return None
+            def stop(self, **_k):
+                pass
+
+        class Screen:
+            def getmaxyx(self):
+                return 45, 168
+            def timeout(self, _v):
+                pass
+            def keypad(self, _v):
+                pass
+
+        class Reader:
+            def __init__(self, curses_mod, *_a, **_k):
+                self.error, self.calls = curses_mod.ERR, 0
+            def read(self, *_a, **_k):
+                self.calls += 1
+                return (self.error if self.calls < 3 else ord("q")), None
+            def has_buffered_input(self):
+                return False
+
+        collector = lambda **_k: None
+        collector.install_follower = SimpleNamespace(target=lambda: None)
+        collector.compute_hosts_refresh = lambda: None
+        prior = [render._EXPLORER_ENABLED, render._EXPLORER_PUBLISHED_MODEL, render._EXPLORER_MODEL,
+                 render._EXPLORER_READINESS, render._EXPLORER_REPLAY_ACTIVE, render._EXPLORER_SHOWN]
+        self.addCleanup(render.set_explorer_mode, prior[0])
+        for name, value in zip(("_EXPLORER_PUBLISHED_MODEL", "_EXPLORER_MODEL", "_EXPLORER_READINESS",
+                                "_EXPLORER_REPLAY_ACTIVE", "_EXPLORER_SHOWN"), prior[1:]):
+            self.addCleanup(setattr, render, name, value)
+        render.set_explorer_mode(True)
+        armed = SimpleNamespace(take_changed=lambda: False, stop=lambda **_k: events.append("stop"))
+        with mock.patch.object(render, "_explorer_runtime", return_value=Runtime()), \
+                mock.patch.object(render, "_init_colors"), mock.patch.object(render, "_configure_input"), \
+                mock.patch.object(render, "_CursesInput", Reader), mock.patch.object(render, "RefreshPump", Pump), \
+                mock.patch.object(render, "_ExplorerFeed", return_value=None), \
+                mock.patch("fleet.explorer.focus.FocusReader", return_value=object()), \
+                mock.patch.object(render, "set_refresh_health"), mock.patch.object(render.curses, "curs_set"), \
+                mock.patch.object(render, "_draw", side_effect=lambda *a, **k: events.append("draw")), \
+                mock.patch.object(render, "_basic_source_events",
+                                  side_effect=lambda: events.append("arm") or armed), \
+                mock.patch.object(render.os, "write", return_value=0):
+            try:
+                render._loop(Screen(), collector, None, "both", 2.0)
+            except Exception as exc:       # the fake snapshot may not satisfy every later step
+                events.append("loop-ended:" + type(exc).__name__)
+        return events
+
+    def test_the_listener_is_armed_after_the_first_frame_and_the_first_snapshot(self):
+        events = self.run_loop([True])
+        self.assertEqual(events.count("arm"), 1, events)
+        self.assertLess(events.index("draw"), events.index("update"), events)
+        self.assertLess(events.index("update"), events.index("arm"), events)
+
+    def test_no_snapshot_yet_means_no_listener(self):
+        events = self.run_loop([False])
+        self.assertNotIn("arm", events, events)
+        self.assertIn("draw", events)
+
+
 if __name__ == "__main__":
     unittest.main()
