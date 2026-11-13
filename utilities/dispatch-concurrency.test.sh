@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-concurrency.test.sh — SD-16(d) thorough+ 다축 동시성 실측 검증
 #   (계약: WORKFLOW §1.1 / OPERATIONS §5.10 ④ — thorough/adversarial 에서 depth-1 owner 가
 #   다축 depth-2 perspective/verifier/adversary 워커를 열고 ⑤ 동시 상한 아래 병렬 실행).

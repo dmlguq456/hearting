@@ -5,6 +5,9 @@ Split from peer_steward.test.py, which keeps the shared fixtures, helpers and
 screen constants, so the parts run on separate CI shards. Test class and method
 names are unchanged.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import sys
 import unittest
@@ -6373,739 +6376,339 @@ class RegisteredParentReceiptAfterSuccessorTest(unittest.TestCase):
 
 
 class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
+    """Native watch receipt publication keeps one bounded lock/deadline boundary."""
     def setUp(self):
         super().setUp()
         from dispatch_contract import process_start_ticks
-        import session_tidy
+        self.server="receipt-lock-server"; self.pane="w1:p55"
+        self.socket_path=None; self.watch_id="a1b2c3d4e5f60718"
+        self.watch_root=Path(peer_steward._watch_root()); self.watch_root.mkdir(parents=True,exist_ok=True)
+        self.paths=peer_steward._watch_paths(self.watch_id,self.watch_root)
+        self.start=str(process_start_ticks(os.getpid()))
+        self.namespace=os.readlink(f"/proc/{os.getpid()}/ns/pid")
+        self.identity=peer_steward.shared_readiness.target_identity(
+            server=self.server,endpoint="native:"+self.server,pane=self.pane,harness="claude",
+            session_id="target-session",shell_pid=os.getpid(),shell_start=self.start,native_state="idle")
+        self.arm={"watch_id":self.watch_id,"target":"target-agent","server":self.server,
+            "readiness_endpoint":"native:"+self.server,"observer_protocol":3,
+            "until":["idle"],"initial_state":"working","armed_ts":"armed",
+            "agent":{"pane":self.pane,"harness":"claude","session_id":"target-session",
+                "name":"target-agent","pid":os.getpid(),"pid_start":self.start,
+                "pid_namespace":self.namespace},
+            "pane_identity":{"native_pid":os.getpid(),"native_start":self.start,
+                "pid_namespace":self.namespace},
+            "steward":{"harness":"claude","session_id":"receipt-lock-steward"},
+            "watcher":{"pid":os.getpid(),"pid_start":self.start},"refs":[]}
+        peer_steward._write_json_atomic(self.paths.arm,self.arm)
+        self.store=peer_steward.peer_obligations.ObligationStore()
+        self.receipt={"schema_version":1,"watch_id":self.watch_id,"target":"target-agent",
+            "server":self.server,"steward":self.arm["steward"],"armed_ts":"armed",
+            "done_ts":"done","state":"idle","agent":self.arm["agent"],
+            "watcher":self.arm["watcher"],"refs":[]}
 
-        self.server = "receipt-lock-server"
-        self.socket_path = str(self.tmp_root / "herdr.sock")
-        self.pane = "w1:p55"
-        self.watch_id = "a1b2c3d4e5f60718"
-        self.watch_root = Path(peer_steward._watch_root())
-        self.watch_root.mkdir(parents=True, exist_ok=True)
-        self.paths = peer_steward._watch_paths(self.watch_id, self.watch_root)
-        self.start = str(process_start_ticks(os.getpid()))
-        self.identity = {
-            "server": self.server, "endpoint": self.socket_path,
-            "pane": self.pane, "harness": "claude", "session_id": "target-session",
-            "shell_pid": os.getpid(), "shell_start": self.start,
-            "native_state": "idle", "purpose": "completion",
-        }
-        self.steward_sid = "receipt-lock-steward"
-        steward_seat = session_tidy.Seat(
-            "pane", "receipt-lock-steward-seat", "w1:p56", "claude",
-            sid=self.steward_sid, endpoint=self.socket_path).as_dict()
-        self.arm = {
-            "watch_id": self.watch_id, "target": "target-agent", "server": self.server,
-            "armed_ts": "2026-10-21T00:00:00Z", "agent": {
-                "pane": self.pane, "harness": "claude", "session_id": "target-session",
-                "name": "target-agent",
-            },
-            "pane_identity": {"shell_pid": os.getpid(), "shell_start": self.start},
-            "steward": {"harness": "claude", "session_id": self.steward_sid,
-                        "project": str(self.tmp_root)},
-            "steward_seat": steward_seat,
-            "watcher": {"pid": os.getpid(), "pid_start": self.start},
-            "refs": [],
-        }
-        self.native_wait = {
-            "state": "result", "agent_state": "idle", "agent": self.arm["agent"],
-            "reason": "native-idle", "done_ts": "2026-10-21T00:00:01Z",
-        }
-        self.token = "receipt-lock-request-token"
-        self.observation = {
-            "watch_id": self.watch_id, "state": "pending",
-            "native_wait": self.native_wait,
-            "readiness_transition": {
-                "token": self.token, "identity": self.identity,
-                "consumer": {"pid": os.getpid(), "pid_start": self.start},
-                "requested_at": time.time(),
-            },
-        }
-        peer_steward._write_json_atomic(self.paths.arm, self.arm)
-        peer_steward._write_json_atomic(self.paths.observation, self.observation)
-        self.store = peer_steward.peer_obligations.ObligationStore()
-        peer_steward.shared_readiness.publish_runner_incarnation(
-            self.store.root, os.getpid(), self.start, "receipt-lock-incarnation")
-        self._publish_transition_response()
-        self.receipt = {
-            "schema_version": 1, "watch_id": self.watch_id,
-            "target": "target-agent", "server": self.server,
-            "steward": self.arm["steward"], "armed_ts": self.arm["armed_ts"],
-            "done_ts": "2026-10-21T00:00:02Z", "state": "idle",
-            "agent": self.arm["agent"], "herdr_exit": 0,
-            "watcher": self.arm["watcher"], "rearmed_from": None, "refs": [],
-        }
-
-    def _publish_transition_response(self):
-        from dispatch_registry_cache import registry_view
-
-        peer_steward.shared_readiness.publish_watch_transition(
-            self.store.root, self.watch_id, self.identity, self.token,
-            {"state": "ready", "reason": "native-turn-ready"},
-            producer_pid=os.getpid(), producer_start=self.start,
-            incarnation="receipt-lock-incarnation",
-            generation=peer_steward.shared_readiness.registry_generation(
-                self.jobs_path, registry_view(self.jobs_path), selected=True),
-            lineage={"shell_pid": os.getpid(), "shell_start": self.start},
-            authority={"rows": [], "handover_keys": []})
-
-    @contextlib.contextmanager
-    def _holder(self, mode, *, hold_seconds=0.08):
-        ctx = multiprocessing.get_context("fork")
-        ready, jobs_released, release = ctx.Event(), ctx.Event(), ctx.Event()
-        process = ctx.Process(
-            target=_hold_receipt_transition_locks,
-            args=(mode, str(self.jobs_path) + ".lock", self.pane, self.server,
-                  self.socket_path, ready, jobs_released, release, hold_seconds))
-        process.start()
-        try:
-            self.assertTrue(ready.wait(3), f"{mode} writer did not acquire its lock")
-            yield jobs_released
-        finally:
-            release.set()
-            process.join(3)
-            if process.is_alive():
-                process.terminate()
-                process.join(2)
-            self.assertEqual(process.exitcode, 0, f"{mode} writer exit={process.exitcode}")
-
-    def _publish_receipt(self, *, deadline=None, readiness=None):
-        readiness = readiness or SimpleNamespace(state="ready", reason="native-turn-ready")
-        readiness_patch = ({"side_effect": readiness} if callable(readiness)
-                           else {"return_value": readiness})
-        with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward.herdr_observation,
-                                  "socket_path_for_endpoint", return_value=self.socket_path), \
-                mock.patch.object(peer_steward, "_watch_transition_readiness",
-                                  **readiness_patch):
+    def _publish(self, *, deadline=None, readiness=None):
+        value=readiness or SimpleNamespace(state="ready",reason="native-ready")
+        patch_readiness=(dict(side_effect=value) if callable(value) else dict(return_value=value))
+        with mock.patch.object(peer_steward,"_watch_readiness_identity",return_value=self.identity), \
+             mock.patch.object(peer_steward,"_watch_transition_readiness",**patch_readiness):
             return peer_steward._watch_publish_ready_receipt(
-                "target-agent", "idle", self.arm,
-                {"pane": self.pane, "harness": "claude", "session_id": "target-session"},
-                self.server, self.watch_id, self.paths, self.receipt, deadline=deadline)
+                "target-agent","idle",self.arm,self.arm["agent"],self.server,
+                self.watch_id,self.paths,self.receipt,deadline=deadline)
+
+    def _holder(self,mode,hold_seconds=0.06):
+        ctx=multiprocessing.get_context("fork")
+        ready,jobs_released,release=ctx.Event(),ctx.Event(),ctx.Event()
+        process=ctx.Process(target=_hold_receipt_transition_locks,args=(
+            mode,str(self.jobs_path)+".lock",self.pane,self.server,None,
+            ready,jobs_released,release,hold_seconds))
+        process.start(); self.assertTrue(ready.wait(3))
+        return process,release
+
+    def _release(self,process,release):
+        release.set(); process.join(3)
+        if process.is_alive(): process.terminate(); process.join(2)
+        self.assertEqual(process.exitcode,0)
+
+    def test_selected_dispatch_root_owns_authority_lock(self):
+        jobs=self.tmp_root/"dispatch"/"jobs.log"; jobs.parent.mkdir(); jobs.touch()
+        peer_root=self.tmp_root/"peer-state"; peer_root.mkdir()
+        with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs),
+                                         "AGENT_PEER_LEDGER_ROOT":str(peer_root)}):
+            with peer_steward._watch_transition_authority_lock(self.identity,self.server):
+                selected=os.open(str(jobs)+".lock",os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(selected,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                finally: os.close(selected)
+                peer_lock=peer_root/"jobs.log.lock"
+                peer_fd=os.open(peer_lock,os.O_RDWR|os.O_CREAT,0o600)
+                try:
+                    fcntl.flock(peer_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    fcntl.flock(peer_fd,fcntl.LOCK_UN)
+                finally: os.close(peer_fd)
+
+    def test_jobs_lock_contention_releases_to_writer_then_receipt_completes(self):
+        process,release=self._holder("jobs")
+        try: result=self._publish()
+        finally: self._release(process,release)
+        self.assertTrue(result)
+        self.assertEqual(peer_steward._read_json(self.paths.receipt)["watch_id"],self.watch_id)
+
+    def test_seat_lock_contention_is_bounded_and_keeps_receipt_pending(self):
+        process,release=self._holder("seat")
+        try: result=self._publish()
+        finally: self._release(process,release)
+        self.assertEqual(result,peer_steward._WATCH_RECEIPT_CONTENDED)
+        self.assertFalse(self.paths.receipt.exists())
+        fd=os.open(str(self.jobs_path)+".lock",os.O_RDWR|os.O_CREAT,0o600)
+        try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); fcntl.flock(fd,fcntl.LOCK_UN)
+        finally: os.close(fd)
+
+    def test_deadline_wins_at_receipt_edge(self):
+        self.assertEqual(self._publish(deadline=time.monotonic()-0.01),
+                         peer_steward._WATCH_RECEIPT_EXPIRED)
+        self.assertFalse(self.paths.receipt.exists())
+
+    def test_unknown_readiness_keeps_receipt_pending(self):
+        self.assertFalse(self._publish(readiness=SimpleNamespace(state="unknown",reason="native-unknown")))
+        self.assertFalse(self.paths.receipt.exists())
 
     def _probe_jobs_writer_progress(self):
-        fd = os.open(str(self.jobs_path) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fd=os.open(str(self.jobs_path)+".lock",os.O_RDWR|os.O_CREAT,0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
             self.fail("jobs writer remained blocked after the seat acquisition failed")
         finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError): fcntl.flock(fd,fcntl.LOCK_UN)
             os.close(fd)
 
-    def _runner_pass(self, wake):
-        from peer_read_context import PeerReadContext
-
-        readiness_identity = {
-            "server": self.server, "pane": self.pane, "harness": "claude",
-            "session_id": "target-session",
-            "pid_birth": f"{os.getpid()}:{self.start}",
-        }
-        def ready(*_args, authority_out=None, **_kwargs):
-            if authority_out is not None:
-                authority_out.update(rows=[], handover_keys=[])
-            return SimpleNamespace(state="ready", reason="native-turn-ready",
-                                   identity=tuple(readiness_identity.items()))
-        transport = SimpleNamespace(observe=lambda: object(), close=lambda: None)
-        snapshot = {"watch_root": self.watch_root, "watches": ((self.watch_id, self.arm),)}
-        with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                  return_value=transport), \
-                mock.patch.object(peer_steward, "_target_from_readiness_view",
-                                  return_value=("idle", self.arm["agent"], 0, "")), \
-                mock.patch.object(peer_steward, "_retire_pane_info",
-                                  return_value={"shell_pid": os.getpid(),
-                                                "foreground_processes": []}), \
-                mock.patch.object(peer_steward, "_pane_readiness", side_effect=ready), \
-                patch_split(peer_steward, "_wake_watch_observer", wake), \
-                mock.patch.object(peer_steward.shared_readiness,
-                                  "publish_target_projection", return_value=False):
-            return peer_steward._publish_watch_readiness(
-                self.store, snapshot,
-                read_context=PeerReadContext(registry_append_only=True),
-                incarnation="receipt-lock-incarnation")
-
-    def test_authority_lock_uses_selected_dispatch_root_when_peer_storage_differs(self):
-        dispatch_jobs = self.tmp_root / "dispatch" / "jobs.log"
-        dispatch_jobs.parent.mkdir()
-        peer_root = self.tmp_root / "peer-state"
-        peer_root.mkdir()
-        os.environ["AGENT_DISPATCH_JOBS"] = str(dispatch_jobs)
-        os.environ["AGENT_PEER_LEDGER_ROOT"] = str(peer_root)
-
-        peer_lock = peer_root / "jobs.log.lock"
-        peer_fd = os.open(peer_lock, os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(peer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            with mock.patch.object(peer_steward.herdr_observation,
-                                   "socket_path_for_endpoint", return_value=self.socket_path):
-                with peer_steward._watch_transition_authority_lock(self.identity, self.server):
-                    selected_lock = Path(str(dispatch_jobs) + ".lock")
-                    self.assertTrue(selected_lock.is_file())
-                    selected_probe = os.open(selected_lock, os.O_RDWR)
-                    try:
-                        with self.assertRaises(BlockingIOError):
-                            fcntl.flock(selected_probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    finally:
-                        os.close(selected_probe)
-                    peer_probe = os.open(peer_lock, os.O_RDWR)
-                    try:
-                        with self.assertRaises(BlockingIOError):
-                            fcntl.flock(peer_probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    finally:
-                        os.close(peer_probe)
-        finally:
-            fcntl.flock(peer_fd, fcntl.LOCK_UN)
-            os.close(peer_fd)
-
-        selected_fd = os.open(str(dispatch_jobs) + ".lock", os.O_RDWR)
-        try:
-            fcntl.flock(selected_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(selected_fd, fcntl.LOCK_UN)
-            os.close(selected_fd)
-
-    def test_jobs_lock_contention_releases_to_writer_and_receipt_completes(self):
-        with self._holder("jobs", hold_seconds=0.08):
-            result = self._publish_receipt()
-        self.assertTrue(result)
-        self.assertEqual(peer_steward._read_json(self.paths.receipt)["state"], "idle")
-
-    def test_seat_contention_is_bounded_and_releases_partial_jobs_ownership(self):
-        with self._holder("seat"):
-            result = self._publish_receipt()
-            self.assertEqual(result, peer_steward._WATCH_RECEIPT_CONTENDED)
-            self._probe_jobs_writer_progress()
-        self.assertFalse(self.paths.receipt.exists())
+    def _assert_terminal_timeout(self, arm=None):
+        terminal=peer_steward._write_terminal_watch_receipt(
+            self.watch_id,arm or self.arm,"watch-deadline")
+        self.assertEqual((terminal["state"],terminal["reason"]),("timeout","watch-deadline"))
 
     def test_jobs_then_seat_share_one_remaining_budget(self):
         import dispatch_seat_handover
-
-        budget = peer_steward._WATCH_TRANSITION_LOCK_BUDGET_SEC
-        scheduler_delay = budget * 0.8
+        budget=peer_steward._WATCH_TRANSITION_LOCK_BUDGET_SEC
+        scheduler_delay=budget*0.8
 
         class _LocalClock:
             """Inject a scheduler pause without patching process-global time."""
             def __init__(self):
-                self.now = 10.0
-                self.deadline = None
-                self.delay_after_jobs_lock = False
-                self.delay_applied = False
-
+                self.now=10.0; self.deadline=None
+                self.delay_after_jobs_lock=False; self.delay_applied=False
             def monotonic(self):
-                if self.deadline is None:
-                    self.deadline = self.now + budget
+                if self.deadline is None: self.deadline=self.now+budget
                 if self.delay_after_jobs_lock:
-                    self.now += scheduler_delay
-                    self.delay_after_jobs_lock = False
-                    self.delay_applied = True
+                    self.now+=scheduler_delay
+                    self.delay_after_jobs_lock=False; self.delay_applied=True
                 return self.now
+            def __getattr__(self,name): return getattr(time,name)
 
-            def __getattr__(self, name):
-                return getattr(time, name)
-
-        clock = _LocalClock()
-        real_fcntl = peer_steward.fcntl
+        clock=_LocalClock(); real_fcntl=peer_steward.fcntl
 
         class _LocalFcntl:
             """Advance only peer-steward's clock after its jobs flock succeeds."""
-            def flock(self, fd, operation):
-                result = real_fcntl.flock(fd, operation)
-                if (operation & real_fcntl.LOCK_EX
-                        and operation & real_fcntl.LOCK_NB):
-                    clock.delay_after_jobs_lock = True
+            def flock(self,fd,operation):
+                result=real_fcntl.flock(fd,operation)
+                if operation&real_fcntl.LOCK_EX and operation&real_fcntl.LOCK_NB:
+                    clock.delay_after_jobs_lock=True
                 return result
+            def __getattr__(self,name): return getattr(real_fcntl,name)
 
-            def __getattr__(self, name):
-                return getattr(real_fcntl, name)
-
-        real_seat_lock = dispatch_seat_handover.readiness_transition_lock
-        with self._holder("seat"):
-            with patch_split(peer_steward, "time", clock), \
-                    patch_split(peer_steward, "fcntl", _LocalFcntl()), \
-                    mock.patch.object(
-                        dispatch_seat_handover, "readiness_transition_lock",
-                        wraps=real_seat_lock) as seat_lock:
-                result = self._publish_receipt()
-            self.assertEqual(result, peer_steward._WATCH_RECEIPT_CONTENDED)
+        real_seat_lock=dispatch_seat_handover.readiness_transition_lock
+        process,release=self._holder("seat")
+        try:
+            with patch_split(peer_steward,"time",clock), \
+                 patch_split(peer_steward,"fcntl",_LocalFcntl()), \
+                 mock.patch.object(dispatch_seat_handover,"readiness_transition_lock",
+                                   wraps=real_seat_lock) as seat_lock:
+                result=self._publish()
+            self.assertEqual(result,peer_steward._WATCH_RECEIPT_CONTENDED)
             self.assertTrue(clock.delay_applied)
             seat_lock.assert_called_once()
-            self.assertAlmostEqual(
-                seat_lock.call_args.kwargs["wait"],
-                clock.deadline - clock.now, places=6)
-            self.assertAlmostEqual(
-                seat_lock.call_args.kwargs["wait"], budget - scheduler_delay,
-                places=6)
+            self.assertAlmostEqual(seat_lock.call_args.kwargs["wait"],
+                                   clock.deadline-clock.now,places=6)
+            self.assertAlmostEqual(seat_lock.call_args.kwargs["wait"],
+                                   budget-scheduler_delay,places=6)
             self._probe_jobs_writer_progress()
+        finally: self._release(process,release)
         self.assertFalse(self.paths.receipt.exists())
 
     def test_watch_deadline_during_lock_acquisition_uses_terminal_timeout_receipt(self):
-        with self._holder("jobs", hold_seconds=0.4):
-            deadline = time.monotonic() + 0.07
-            started = time.monotonic()
-            result = self._publish_receipt(deadline=deadline)
-            elapsed = time.monotonic() - started
-        self.assertEqual(result, peer_steward._WATCH_RECEIPT_EXPIRED)
-        self.assertLess(elapsed, 0.18)
+        process,release=self._holder("jobs",hold_seconds=0.4)
+        try:
+            deadline=time.monotonic()+0.07
+            started=time.monotonic()
+            result=self._publish(deadline=deadline)
+            elapsed=time.monotonic()-started
+        finally: self._release(process,release)
+        self.assertEqual(result,peer_steward._WATCH_RECEIPT_EXPIRED)
+        self.assertLess(elapsed,0.18)
         self.assertFalse(self.paths.receipt.exists())
-        terminal = peer_steward._write_terminal_watch_receipt(
-            self.watch_id, self.arm, "watch-deadline")
-        self.assertEqual((terminal["state"], terminal["reason"]),
-                         ("timeout", "watch-deadline"))
+        self._assert_terminal_timeout()
 
     def test_watch_deadline_during_fresh_authority_blocks_late_receipt(self):
-        deadline = time.monotonic() + 0.04
-        def late_ready(*_args, **_kwargs):
+        deadline=time.monotonic()+0.04
+        def late_ready(*_args,**_kwargs):
             time.sleep(0.07)
-            return SimpleNamespace(state="ready", reason="native-turn-ready")
-        result = self._publish_receipt(deadline=deadline, readiness=late_ready)
-        self.assertEqual(result, peer_steward._WATCH_RECEIPT_EXPIRED)
+            return SimpleNamespace(state="ready",reason="native-ready")
+        result=self._publish(deadline=deadline,readiness=late_ready)
+        self.assertEqual(result,peer_steward._WATCH_RECEIPT_EXPIRED)
         self.assertFalse(self.paths.receipt.exists())
-        terminal = peer_steward._write_terminal_watch_receipt(
-            self.watch_id, self.arm, "watch-deadline")
-        self.assertEqual((terminal["state"], terminal["reason"]),
-                         ("timeout", "watch-deadline"))
+        self._assert_terminal_timeout()
 
     def test_real_500ms_deadline_keeps_timeout_after_valid_late_ready(self):
-        arm = {**self.arm, "timeout": 500,
-               "deadline": peer_steward._watch_deadline(500)}
-        original_deadline = copy.deepcopy(arm["deadline"])
-        self.assertIsNot(arm["deadline"], original_deadline)
-        self.arm = arm
-        peer_steward._write_json_atomic(self.paths.arm, arm)
-
+        arm={**self.arm,"timeout":500,"deadline":peer_steward._watch_deadline(500)}
+        original_deadline=copy.deepcopy(arm["deadline"])
+        self.arm=arm
+        peer_steward._write_json_atomic(self.paths.arm,arm)
         # One fixed real wait lets the original absolute deadline expire.
         time.sleep(0.55)
-        self.assertEqual(peer_steward._watch_timeout_remaining_ms(arm), (0, "expired"))
-        resolved_deadline = peer_steward._watch_monotonic_deadline(arm)
-        self.assertEqual(resolved_deadline, original_deadline["monotonic_deadline"])
-        self.assertEqual(arm["deadline"], original_deadline)
-
-        # Publish a fresh protocol-valid response after expiry, then let the
-        # production receipt edge enforce the arm's original deadline.
-        self._publish_transition_response()
-        late_ready = peer_steward.shared_readiness.watch_transition_result(
-            self.store.root, self.watch_id, self.identity, self.token)
-        self.assertIsNotNone(late_ready)
-        self.assertEqual((late_ready["state"], late_ready["reason"]),
-                         ("ready", "native-turn-ready"))
-        self.assertEqual(late_ready["lineage"], {
-            "shell_pid": os.getpid(), "shell_start": self.start})
-        self.assertTrue(peer_steward.shared_readiness.valid_watch_authority(
-            late_ready["authority"]))
-
-        result = peer_steward._watch_publish_ready_receipt(
-            "target-agent", "idle", arm,
-            {"pane": self.pane, "harness": "claude", "session_id": "target-session"},
-            self.server, self.watch_id, self.paths, self.receipt,
-            deadline=resolved_deadline)
-        self.assertEqual(result, peer_steward._WATCH_RECEIPT_EXPIRED)
+        self.assertEqual(peer_steward._watch_timeout_remaining_ms(arm),(0,"expired"))
+        resolved=peer_steward._watch_monotonic_deadline(arm)
+        self.assertEqual(resolved,original_deadline["monotonic_deadline"])
+        self.assertEqual(arm["deadline"],original_deadline)
+        # The native readiness is still valid (late); the receipt edge enforces the arm's deadline.
+        late=SimpleNamespace(state="ready",reason="native-ready")
+        self.assertEqual(self._publish(deadline=resolved,readiness=late),
+                         peer_steward._WATCH_RECEIPT_EXPIRED)
         self.assertFalse(self.paths.receipt.exists())
-        terminal = peer_steward._write_terminal_watch_receipt(
-            self.watch_id, arm, "watch-deadline")
-        self.assertEqual((terminal["state"], terminal["reason"]),
-                         ("timeout", "watch-deadline"))
+        self._assert_terminal_timeout(arm)
 
-    def test_unchanged_runner_response_recovers_once_after_lock_contention(self):
-        jobs_before = self.jobs_path.read_bytes()
-        runner_wake_fd = peer_steward.shared_readiness.open_runner_wake(self.store.root)
-        try:
-            with self._holder("seat"):
-                result = self._publish_receipt()
-            self.assertEqual(result, peer_steward._WATCH_RECEIPT_CONTENDED)
-            self.assertEqual(os.read(runner_wake_fd, 32), b"\0")
-        finally:
-            os.close(runner_wake_fd)
-        pending = peer_steward._read_json(self.paths.observation)
-        self.assertEqual(pending.get("native_wait"), self.native_wait)
-        self.assertEqual(pending.get("readiness_transition", {}).get("token"), self.token)
-        self.assertIsNone(peer_steward.shared_readiness.watch_transition_result(
-            self.store.root, self.watch_id, self.identity, self.token))
+    def _write_pending_transition(self,**extra):
+        observation={"watch_id":self.watch_id,"native_wait":{"state":"result","agent_state":"idle"},
+                     "readiness_transition":{"token":"same-token","identity":self.identity,
+                         "consumer":{"pid":os.getpid(),"pid_start":self.start},
+                         "requested_at":time.time()},**extra}
+        peer_steward._write_json_atomic(self.paths.observation,observation)
+        return observation
 
-        wake = mock.Mock(return_value=True)
-        self.assertTrue(self._runner_pass(wake))
-        self.assertEqual(wake.call_count, 1)
-        response = peer_steward.shared_readiness.watch_transition_result(
-            self.store.root, self.watch_id, self.identity, self.token)
-        self.assertEqual(response["state"], "ready")
-        self.assertTrue(self._runner_pass(wake))
-        self.assertEqual(
-            wake.call_count, 2,
-            "an unchanged current response still needs notification while its request is pending")
-        self.assertEqual(self.jobs_path.read_bytes(), jobs_before)
+    def test_repeated_same_transition_contention_coalesces_runner_wake(self):
+        root=peer_steward.peer_obligations.ObligationStore().root
+        self._write_pending_transition()
+        with mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner") as wake, \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner") as ensure:
+            peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+            noted=peer_steward._read_json(self.paths.observation)
+            self.assertEqual(noted["readiness_contention"],{"request_token":"same-token"})
+            self.assertEqual(noted["reason"],"shared-readiness-authority-lock-busy")
+            wake.assert_called_once_with(root)
+            ensure.assert_called_once_with(reconciliation_required=True)
+            # The same unchanged request contending again wakes no live runner.
+            wake.reset_mock(); ensure.reset_mock()
+            with mock.patch.object(peer_steward,"process_start_ticks",return_value=self.start):
+                (root/"readiness-v1").mkdir(parents=True,exist_ok=True)
+                peer_steward._write_json_atomic(root/"readiness-v1"/"runner.json",
+                    {"pid":os.getpid(),"pid_start":self.start})
+                peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+            wake.assert_not_called(); ensure.assert_not_called()
 
-        result = self._publish_receipt()
-        self.assertTrue(result)
-        self.assertEqual(peer_steward._read_json(self.paths.receipt)["watch_id"], self.watch_id)
-        peer_steward._prepare_watch_notice(self.watch_id, self.arm, self.receipt)
-        peer_steward._record(
-            to_harness="claude", to_name="target-agent", kind="notice", ref=[],
-            receipt=self.watch_id, status="received",
-            summary_text=f"[notice] watch {self.watch_id} state=idle target=target-agent",
-            from_identity=(self.steward_sid, "claude", str(self.tmp_root)))
-        notices = [row for row in self._all_records()
-                   if row.get("kind") == "notice"
-                   and (row.get("delivery") or {}).get("receipt") == self.watch_id]
-        self.assertEqual(len(notices), 1)
-
-        from dispatch_seat_handover import acknowledge_watch, watch_ack_valid
-        self.assertEqual(acknowledge_watch(
-            self.watch_id, "claude", self.steward_sid, "receipt-lock-recovery"), "created")
-        self.assertTrue(watch_ack_valid(
-            self.paths.ack, self.watch_id, "claude", self.steward_sid))
-        receipt_bytes = self.paths.receipt.read_bytes()
-        self.assertFalse(self._runner_pass(wake))
-        self.assertEqual(self.paths.receipt.read_bytes(), receipt_bytes)
-        self.assertEqual(acknowledge_watch(
-            self.watch_id, "claude", self.steward_sid, "receipt-lock-reconnect"), "already")
-        self.assertEqual(len([row for row in self._all_records()
-                             if row.get("kind") == "notice"
-                             and (row.get("delivery") or {}).get("receipt") == self.watch_id]), 1)
-        self.assertEqual(wake.call_count, 2)
+    def _transition_readiness(self,cached):
+        with mock.patch.object(peer_steward,"_watch_readiness_identity",return_value=self.identity), \
+             mock.patch.object(peer_steward,"_watch_shared_readiness",return_value=cached), \
+             mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner",return_value=False) as wake, \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner",return_value=True) as ensure:
+            result=peer_steward._watch_transition_readiness(
+                "target-agent","idle",self.arm,self.arm["agent"],self.server,self.watch_id,self.paths)
+        return result,wake,ensure
 
     def test_missing_initial_projection_ensures_the_existing_runner(self):
-        observation = dict(self.observation)
-        observation.pop("readiness_transition", None)
-        peer_steward._write_json_atomic(self.paths.observation, observation)
-        unavailable = SimpleNamespace(state="unknown", reason="shared-readiness-unavailable")
-        with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward, "_watch_shared_readiness",
-                                  return_value=unavailable), \
-                mock.patch.object(peer_steward.shared_readiness, "wake_runner",
-                                  return_value=False) as wake, \
-                mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner",
-                                  return_value=True) as ensure:
-            result = peer_steward._watch_transition_readiness(
-                "target-agent", "idle", self.arm,
-                {"pane": self.pane, "harness": "claude", "session_id": "target-session"},
-                self.server, self.watch_id, self.paths)
-        self.assertEqual((result.state, result.reason),
-                         ("pending", "shared-readiness-revalidating"))
-        request = peer_steward._read_json(self.paths.observation)["readiness_transition"]
-        self.assertEqual(request["identity"], self.identity)
-        self.assertTrue(peer_steward.shared_readiness.consumer_is_current(
-            {"consumer": request["consumer"]}))
+        self._write_pending_transition()
+        observation=peer_steward._read_json(self.paths.observation); observation.pop("readiness_transition")
+        peer_steward._write_json_atomic(self.paths.observation,observation)
+        result,wake,ensure=self._transition_readiness(
+            SimpleNamespace(state="unknown",reason="shared-readiness-unavailable"))
+        self.assertEqual((result.state,result.reason),("pending","shared-readiness-revalidating"))
+        request=peer_steward._read_json(self.paths.observation)["readiness_transition"]
+        self.assertEqual(request["identity"],self.identity)
+        self.assertEqual(request["consumer"],{"pid":os.getpid(),"pid_start":self.start})
         self.assertTrue(request["token"])
-        wake.assert_called_once_with(self.store.root)
+        wake.assert_called_once_with(peer_steward.peer_obligations.ObligationStore().root)
         ensure.assert_called_once_with(reconciliation_required=True)
 
     def test_stale_pending_write_keeps_new_consumer_and_contention_reset(self):
-        previous = dict(self.observation)
-        previous["readiness_transition"] = {
-            "token": "dead-previous-consumer-token", "identity": self.identity,
-            "consumer": {"pid": 2147483000, "pid_start": "1"},
-            "requested_at": time.time() - 30,
-        }
-        previous["readiness_contention"] = {
-            "request_token": "dead-previous-consumer-token"}
-        peer_steward._write_json_atomic(self.paths.observation, previous)
+        previous=self._write_pending_transition(readiness_contention={"request_token":"same-token"})
+        previous["readiness_transition"]={**previous["readiness_transition"],
+            "token":"dead-previous-consumer-token","consumer":{"pid":2147483000,"pid_start":"1"}}
+        previous["readiness_contention"]={"request_token":"dead-previous-consumer-token"}
+        peer_steward._write_json_atomic(self.paths.observation,previous)
+        result,_wake,_ensure=self._transition_readiness(SimpleNamespace(state="ready",reason="fixture-ready"))
+        self.assertEqual((result.state,result.reason),("pending","shared-readiness-revalidating"))
+        fresh=peer_steward._read_json(self.paths.observation)["readiness_transition"]
+        self.assertNotEqual(fresh["token"],"dead-previous-consumer-token")
+        self.assertEqual(fresh["consumer"],{"pid":os.getpid(),"pid_start":self.start})
+        self.assertNotIn("readiness_contention",peer_steward._read_json(self.paths.observation))
+        # The stale local snapshot written right after it must not roll the request back.
+        peer_steward._write_watch_observation(self.paths,{**previous,"state":"pending",
+            "reason":result.reason,"observed_ts":peer_steward._utc_now()})
+        after=peer_steward._read_json(self.paths.observation)
+        self.assertEqual(after["readiness_transition"],fresh)
+        self.assertNotIn("readiness_contention",after)
 
-        with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward.peer_obligations,
-                                  "ObligationStore", return_value=self.store), \
-                mock.patch.object(peer_steward, "_watch_shared_readiness",
-                                  return_value=SimpleNamespace(state="ready", reason="fixture-ready")), \
-                mock.patch.object(peer_steward.shared_readiness, "clear_watch_transition"), \
-                mock.patch.object(peer_steward.shared_readiness, "wake_runner"), \
-                mock.patch.object(peer_steward.peer_obligations,
-                                  "ensure_normal_runner"):
-            result = peer_steward._watch_transition_readiness(
-                "target-agent", "idle", self.arm,
-                {"pane": self.pane, "harness": "claude", "session_id": "target-session"},
-                self.server, self.watch_id, self.paths)
+    def test_same_transition_contention_restarts_a_dead_runner_without_waking(self):
+        root=peer_steward.peer_obligations.ObligationStore().root
+        self._write_pending_transition(readiness_contention={"request_token":"same-token"})
+        with mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner") as wake, \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner") as ensure:
+            peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+        wake.assert_not_called()
+        ensure.assert_called_once_with(reconciliation_required=True)
 
-        self.assertEqual((result.state, result.reason),
-                         ("pending", "shared-readiness-revalidating"))
-        replaced = peer_steward._read_json(self.paths.observation)
-        fresh = replaced["readiness_transition"]
-        self.assertNotEqual(fresh["token"], "dead-previous-consumer-token")
-        self.assertEqual(fresh["consumer"], {"pid": os.getpid(), "pid_start": self.start})
-        self.assertNotIn("readiness_contention", replaced)
-
-        # This is the exact stale local snapshot write immediately following
-        # _watch_transition_readiness() in cmd_watch_run.
-        stale_pending = {**previous, "state": "pending",
-                         "reason": result.reason, "native_wait": self.native_wait,
-                         "observed_ts": peer_steward._utc_now()}
-        peer_steward._write_watch_observation(self.paths, stale_pending)
-        after = peer_steward._read_json(self.paths.observation)
-        self.assertEqual(after["readiness_transition"], fresh)
-        self.assertNotIn("readiness_contention", after)
-        self.assertEqual(after["native_wait"], self.native_wait)
-
-        # Explicit contention updates still own their marker, and an ordinary
-        # write carrying the old marker cannot roll it back.
-        with mock.patch.object(peer_steward.shared_readiness, "clear_watch_transition"), \
-                mock.patch.object(peer_steward.shared_readiness, "wake_runner"), \
-                mock.patch.object(peer_steward.peer_obligations,
-                                  "ensure_normal_runner"):
-            peer_steward._watch_note_transition_lock_contention(
-                self.store.root, self.watch_id, self.paths)
-        contention = peer_steward._read_json(self.paths.observation)["readiness_contention"]
-        self.assertEqual(contention, {"request_token": fresh["token"]})
-        peer_steward._write_watch_observation(self.paths, stale_pending)
-        after_contention = peer_steward._read_json(self.paths.observation)
-        self.assertEqual(after_contention["readiness_transition"], fresh)
-        self.assertEqual(after_contention["readiness_contention"], contention)
-        self.assertEqual(after_contention["native_wait"], self.native_wait)
-
-    def test_runner_uses_bound_cli_observation_when_transport_is_unavailable(self):
-        from peer_read_context import PeerReadContext
-
-        observation = dict(self.observation)
-        observation.pop("readiness_transition", None)
-        peer_steward._write_json_atomic(self.paths.observation, observation)
-        selected_jobs = self.tmp_root / "dispatch" / "jobs.log"
-        selected_jobs.parent.mkdir()
-        readiness_identity = {
-            "server": self.server, "pane": self.pane, "harness": "claude",
-            "session_id": "target-session",
-            "pid_birth": f"{os.getpid()}:{self.start}",
-        }
-
-        def ready(*_args, authority_out=None, **_kwargs):
-            if authority_out is not None:
-                authority_out.update(rows=[], handover_keys=[])
-            return SimpleNamespace(state="ready", reason="cli-observation-ready",
-                                   identity=tuple(readiness_identity.items()))
-
-        read_context = PeerReadContext(registry_append_only=True)
-        with mock.patch.dict(os.environ, {
-                    "AGENT_HOME": str(_HERE.parent),
-                    "AGENT_DISPATCH_JOBS": str(selected_jobs)}), \
-                mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                  return_value=None), \
-                mock.patch.object(peer_steward, "_retire_target",
-                                  return_value=("idle", self.arm["agent"], 0, None)) as cli_read, \
-                mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                    "shell_pid": os.getpid(), "foreground_processes": []}), \
-                mock.patch.object(peer_steward, "_pane_readiness", side_effect=ready) as classify, \
-                patch_split(peer_steward, "_wake_watch_observer", return_value=True):
-            result = peer_steward._publish_watch_readiness(
-                self.store, {"watch_root": self.watch_root,
-                             "watches": ((self.watch_id, self.arm),)},
-                read_context=read_context, incarnation="receipt-lock-incarnation")
-
-        self.assertTrue(result)
-        cli_read.assert_called_once_with("target-agent", server=self.server)
-        self.assertEqual(classify.call_count, 1)
-        projection = peer_steward.shared_readiness._read_json(
-            peer_steward.shared_readiness._target_path(self.store.root, self.identity))
-        self.assertEqual((projection["result"]["state"], projection["result"]["reason"]),
-                         ("ready", "cli-observation-ready"))
-        self.assertEqual(projection["generation"].get("missing"), True)
-        self.assertEqual(Path(projection["generation"]["path"]), selected_jobs)
-        selected_jobs.write_text(
-            "2026-10-21T00:00:00Z\topen\t/repo\t/wt\tnew-bound-work\t"
-            "attempt_id=att-new-bound-work,attempt_schema_version=2,dispatch_depth=1,"
-            "worker_type=execute,registered_worker=1,harness=claude,"
-            "parent_sid=target-session,parent_harness=claude\n",
-            encoding="utf-8")
-        with mock.patch.dict(os.environ, {
-                "AGENT_HOME": str(_HERE.parent),
-                "AGENT_DISPATCH_JOBS": str(selected_jobs)}):
-            self.assertIsNone(peer_steward.shared_readiness.target_result(
-                self.store.root, self.identity),
-                "file creation invalidates the prior known-absence projection")
-            from peer_read_context import PeerReadContext
-            work, binding_state = peer_steward.peer_obligations.bound_work_for_pane(
-                self.pane, "claude", "target-session",
-                read_context=PeerReadContext(registry_append_only=True),
-                registry_append_only=True)
-            self.assertEqual(binding_state, "observed")
-            self.assertTrue(work, "the selected registry now contains exact-session work")
-
-            with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                                   return_value=self.identity), \
-                    mock.patch.object(peer_steward.herdr_observation,
-                                      "socket_path_for_endpoint", return_value=self.socket_path), \
-                    mock.patch.object(peer_steward.shared_readiness, "wake_runner",
-                                      return_value=True), \
-                    mock.patch.object(peer_steward.peer_obligations,
-                                      "ensure_normal_runner"):
-                result = peer_steward._watch_publish_ready_receipt(
-                    "target-agent", "idle", self.arm,
-                    {"pane": self.pane, "harness": "claude",
-                     "session_id": "target-session"},
-                    self.server, self.watch_id, self.paths, self.receipt)
-            self.assertEqual(result, peer_steward._WATCH_RECEIPT_PENDING)
-            self.assertFalse(self.paths.receipt.exists(),
-                             "new work must block the receipt boundary")
-
-    def test_complete_census_absence_does_not_get_overridden_by_cli(self):
-        observation = dict(self.observation)
-        observation.pop("readiness_transition", None)
-        peer_steward._write_json_atomic(self.paths.observation, observation)
-        transport = SimpleNamespace(observe=lambda: SimpleNamespace(
-            complete=True, agents=()))
-        read_context = SimpleNamespace(registry_view=lambda path, **_kwargs:
-            SimpleNamespace(signature=(1, 2, 3), resolved_path=str(path)))
-        with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                  return_value=transport), \
-                mock.patch.object(peer_steward, "_retire_target") as cli_read, \
-                mock.patch.object(peer_steward, "_retire_pane_info", return_value=None), \
-                patch_split(peer_steward, "_wake_watch_observer", return_value=True):
-            peer_steward._publish_watch_readiness(
-                self.store, {"watch_root": self.watch_root,
-                             "watches": ((self.watch_id, self.arm),)},
-                read_context=read_context, incarnation="receipt-lock-incarnation")
-        cli_read.assert_not_called()
-
-    def test_unavailable_cli_observation_stays_unknown(self):
-        observation = dict(self.observation)
-        observation.pop("readiness_transition", None)
-        peer_steward._write_json_atomic(self.paths.observation, observation)
-        read_context = SimpleNamespace(registry_view=lambda path, **_kwargs:
-            SimpleNamespace(signature=(1, 2, 3), resolved_path=str(path)))
-        with mock.patch.object(peer_steward, "_watch_readiness_identity",
-                               return_value=self.identity), \
-                mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                  return_value=None), \
-                mock.patch.object(peer_steward, "_retire_target", return_value=(
-                    "herdr-unavailable", {"harness": "-", "session_id": "-",
-                                          "name": "target-agent", "pane": "-"},
-                    4, "herdr-protocol-error")), \
-                mock.patch.object(peer_steward, "_retire_pane_info", return_value=None), \
-                mock.patch.object(peer_steward, "_pane_readiness") as classify, \
-                patch_split(peer_steward, "_wake_watch_observer", return_value=True):
-            peer_steward._publish_watch_readiness(
-                self.store, {"watch_root": self.watch_root,
-                             "watches": ((self.watch_id, self.arm),)},
-                read_context=read_context, incarnation="receipt-lock-incarnation")
-        classify.assert_not_called()
-        projection = peer_steward.shared_readiness._read_json(
-            peer_steward.shared_readiness._target_path(self.store.root, self.identity))
-        self.assertEqual(projection["result"]["state"], "unknown")
-
-    def test_server_specific_cli_observation_does_not_change_global_binding(self):
-        selected = "another-herdr-server"
-        before = peer_steward._HERDR_SESSION
-        process = subprocess.CompletedProcess(
-            ["herdr"], 0, json.dumps({"result": {"agent": {"agent_status": "idle"}}}), "")
-        with mock.patch.object(peer_steward.subprocess, "run", return_value=process) as run:
-            payload = peer_steward._run_herdr_get("target-agent", server=selected)
-        self.assertEqual(payload["result"]["agent"]["agent_status"], "idle")
-        argv = run.call_args.args[0]
-        self.assertEqual(argv, ["herdr", "--session", selected,
-                                "agent", "get", "target-agent"])
-        self.assertEqual(run.call_args.kwargs["env"]["AGENT_HERDR_SESSION"], selected)
-        self.assertEqual(peer_steward._HERDR_SESSION, before)
-
-    def test_repeated_same_transition_contention_coalesces_runner_wake(self):
-        wake_fd = peer_steward.shared_readiness.open_runner_wake(self.store.root)
-        try:
-            with self._holder("both", hold_seconds=0.8):
-                first = self._publish_receipt()
-                self.assertEqual(first, peer_steward._WATCH_RECEIPT_CONTENDED)
-                self.assertEqual(os.read(wake_fd, 32), b"\0")
-                first_observation = peer_steward._read_json(self.paths.observation)
-                request = first_observation.get("readiness_transition")
-                self.assertEqual(
-                    first_observation.get("readiness_contention", {}).get("request_token"),
-                    request.get("token"))
-
-                # Simulate the same unchanged runner response arriving again
-                # while the writer locks remain owned.
-                self._publish_transition_response()
-                second = self._publish_receipt()
-                self.assertEqual(second, peer_steward._WATCH_RECEIPT_CONTENDED)
-                self.assertEqual(peer_steward._read_json(self.paths.observation).get("native_wait"),
-                                 self.native_wait)
-                with self.assertRaises(BlockingIOError):
-                    os.read(wake_fd, 32)
-        finally:
-            os.close(wake_fd)
-
-        wake = mock.Mock(return_value=True)
-        self.assertTrue(self._runner_pass(wake), "the existing runner pass can refresh the token")
-        response = peer_steward.shared_readiness.watch_transition_result(
-            self.store.root, self.watch_id, self.identity, self.token)
-        self.assertEqual(response["state"], "ready")
-        self.assertTrue(self._publish_receipt(),
-                        "same watch recovers after the writer releases its locks")
-        self.assertEqual(peer_steward._read_json(self.paths.receipt)["watch_id"], self.watch_id)
+    def test_stale_pending_write_cannot_roll_back_the_contention_marker(self):
+        root=peer_steward.peer_obligations.ObligationStore().root
+        previous=self._write_pending_transition()
+        with mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner"), \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner"):
+            peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+        contention=peer_steward._read_json(self.paths.observation)["readiness_contention"]
+        self.assertEqual(contention,{"request_token":"same-token"})
+        # An ordinary write carrying the old snapshot keeps the newer request and its marker.
+        stale={**previous,"state":"pending","reason":"shared-readiness-revalidating",
+               "observed_ts":peer_steward._utc_now()}
+        peer_steward._write_watch_observation(self.paths,stale)
+        after=peer_steward._read_json(self.paths.observation)
+        self.assertEqual(after["readiness_transition"],previous["readiness_transition"])
+        self.assertEqual(after["readiness_contention"],contention)
 
 
 class SharedReadinessRunnerTest(unittest.TestCase):
-    def test_known_watch_sidless_census_requires_matching_foreground_proof(self):
-        from dispatch_contract import process_start_ticks
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            jobs = root / "dispatch" / "jobs.log"
-            jobs.parent.mkdir()
-            jobs.write_text("", encoding="utf-8")
-            state_root = root / "peer-state"
-            start = str(process_start_ticks(os.getpid()))
-            identity = peer_steward.shared_readiness.target_identity(
-                server="fixture", endpoint="/fixture.sock", pane="w1:p1",
-                harness="codex", session_id="thread-a", shell_pid=os.getpid(),
-                shell_start=start, native_state="idle")
-            result = {"state": "ready", "reason": "native-turn-ready",
-                      "lineage": {"shell_pid": os.getpid(), "shell_start": start}}
-            pane_info = {"shell_pid": os.getpid(),
-                         "foreground_processes": [{"pid": os.getpid()}]}
-            selected_env = {"AGENT_HOME": str(_HERE.parent),
-                            "AGENT_DISPATCH_JOBS": str(jobs),
-                            "AGENT_PEER_LEDGER_ROOT": str(state_root)}
-            with mock.patch.dict(os.environ, selected_env), \
-                    mock.patch.object(peer_steward, "_retire_target", return_value=(
-                        "idle", {"server": "fixture", "pane": "w1:p1",
-                                 "harness": "codex", "session_id": "-",
-                                 "name": "agent-a"}, 0, "")), \
-                    mock.patch.object(peer_steward, "_retire_pane_info",
-                                      return_value=pane_info), \
-                    mock.patch.object(peer_steward.peer_obligations,
-                                      "execution_attempts_for_processes", return_value=()):
-                with mock.patch.object(peer_steward, "_proven_session",
-                                       return_value="thread-a"):
-                    proven = peer_steward._watch_readiness_result(
-                        "agent-a", "idle", identity, result, "fixture")
-                self.assertEqual((proven.state, proven.reason),
-                                 ("ready", "native-turn-ready"))
-                with mock.patch.object(peer_steward, "_proven_session",
-                                       return_value="thread-b"):
-                    unproven = peer_steward._watch_readiness_result(
-                        "agent-a", "idle", identity, result, "fixture")
-                self.assertEqual(unproven.state, "unknown")
-                with mock.patch.object(peer_steward, "_retire_target", return_value=(
-                        "idle", {"server": "fixture", "pane": "w1:p1",
-                                 "harness": "codex", "session_id": "thread-b",
-                                 "name": "agent-a"}, 0, "")), \
-                        mock.patch.object(peer_steward, "_proven_session",
-                                          return_value="thread-a"):
-                    conflicting = peer_steward._watch_readiness_result(
-                        "agent-a", "idle", identity, result, "fixture")
-                self.assertEqual(conflicting.state, "unknown")
+    def test_legacy_sidless_watch_stays_unknown_without_native_session_id(self):
+        identity={"server":"fixture","endpoint":"native:fixture","pane":"w1:p1",
+                  "harness":"codex","session_id":"","shell_pid":None,"shell_start":"",
+                  "native_state":"idle","purpose":"completion"}
+        result={"state":"ready","reason":"old-view"}
+        with mock.patch.object(peer_steward,"native_agent",return_value=None), \
+             mock.patch.object(peer_steward,"_retire_target",side_effect=AssertionError("no Herdr view")):
+            observed=peer_steward._watch_readiness_result("pane","idle",identity,result,"fixture")
+        self.assertEqual(observed.state,"unknown")
+        self.assertEqual(observed.reason,"shared-readiness-native-identity-changed")
 
     def test_watch_identity_keeps_its_selected_endpoint_across_runner_contexts(self):
         from dispatch_contract import process_start_ticks
         start = str(process_start_ticks(os.getpid()))
         arm = {
-            "server": "default", "target": "agent-a",
-            "readiness_endpoint": "/fixture/default.sock",
-            "agent": {"pane": "w1:p1", "harness": "claude", "session_id": "sid-a"},
-            "pane_identity": {"shell_pid": os.getpid(), "shell_start": start},
+            "server": "default", "target": "agent-a", "observer_protocol": 3,
+            "readiness_endpoint": "native:default",
+            "agent": {"pane": "w1:p1", "harness": "claude", "session_id": "sid-a",
+                      "pid": os.getpid(), "pid_start": start,
+                      "pid_namespace": os.readlink(f"/proc/{os.getpid()}/ns/pid")},
+            "pane_identity": {"native_pid": os.getpid(), "native_start": start,
+                              "pid_namespace": os.readlink(f"/proc/{os.getpid()}/ns/pid")},
         }
         with mock.patch.dict(os.environ, {
                 "AGENT_HERDR_SESSION": "secondary",
                 "HERDR_SOCKET_PATH": "/fixture/secondary.sock"}):
             identity = peer_steward._watch_readiness_identity(arm, "idle")
-            self.assertEqual(identity["endpoint"], "/fixture/default.sock")
+            self.assertEqual(identity["endpoint"], "native:default")
             self.assertTrue(peer_steward._watch_readiness_identity_matches_arm(
                 identity, arm, "idle"))
-            crossed = {**identity, "endpoint": "/fixture/secondary.sock"}
+            crossed = {**identity, "endpoint": "native:secondary"}
             self.assertFalse(peer_steward._watch_readiness_identity_matches_arm(
                 crossed, arm, "idle"), "a runner's endpoint cannot replace the arm's endpoint")
 
@@ -7154,369 +6757,190 @@ class SharedReadinessRunnerTest(unittest.TestCase):
 
     def test_watch_consumes_pending_projection_and_rechecks_ready_projection(self):
         from dispatch_contract import process_start_ticks
-        start = str(process_start_ticks(os.getpid()))
-        arm = {"server": "server-a", "target": "agent-a",
-               "agent": {"pane": "w1:p1", "harness": "claude", "session_id": "sid-a"},
-               "pane_identity": {"shell_pid": os.getpid(), "shell_start": start}}
-        expected = {"pane": "w1:p1", "harness": "claude", "session_id": "sid-a"}
-        pending = SimpleNamespace(state="pending", reason="bound-registered-work-pending")
-        with mock.patch.object(peer_steward.herdr_observation,
-                               "socket_path_for_endpoint", return_value="/tmp/herdr.sock"), \
-                mock.patch.object(peer_steward.peer_obligations, "ObligationStore"), \
-                mock.patch.object(peer_steward.shared_readiness, "target_result",
-                                  return_value={"state": "pending", "reason": pending.reason}), \
-                mock.patch.object(peer_steward, "_pane_readiness",
-                                  side_effect=AssertionError("pending projection re-read per watch")):
-            observed = peer_steward._watch_shared_readiness(
-                "agent-a", "idle", arm, expected, "server-a")
-        self.assertEqual((observed.state, observed.reason), (pending.state, pending.reason))
+        start=str(process_start_ticks(os.getpid())); namespace=os.readlink(f"/proc/{os.getpid()}/ns/pid")
+        arm={"server":"server-a","target":"agent-a","observer_protocol":3,
+             "readiness_endpoint":"native:server-a",
+             "agent":{"pane":"w1:p1","harness":"claude","session_id":"sid-a",
+                      "pid":os.getpid(),"pid_start":start,"pid_namespace":namespace}}
+        expected={"pane":"w1:p1","harness":"claude","session_id":"sid-a"}
+        pending=SimpleNamespace(state="pending",reason="bound-registered-work-pending")
+        with mock.patch.object(peer_steward.peer_obligations,"ObligationStore"), \
+             mock.patch.object(peer_steward.shared_readiness,"target_result",
+                               return_value={"state":"pending","reason":pending.reason}), \
+             mock.patch.object(peer_steward,"_pane_readiness",
+                               side_effect=AssertionError("pending projection re-read per watch")):
+            observed=peer_steward._watch_shared_readiness("agent-a","idle",arm,expected,"server-a")
+        self.assertEqual((observed.state,observed.reason),(pending.state,pending.reason))
 
-        ready = SimpleNamespace(state="ready", reason="native-turn-ready", identity=(
-            ("server", "server-a"), ("pane", "w1:p1"), ("harness", "claude"),
-            ("session_id", "sid-a"), ("pid_birth", f"{os.getpid()}:{start}")))
-        with mock.patch.object(peer_steward.herdr_observation,
-                               "socket_path_for_endpoint", return_value="/tmp/herdr.sock"), \
-                mock.patch.object(peer_steward.peer_obligations, "ObligationStore"), \
-                mock.patch.object(peer_steward.shared_readiness, "target_result",
-                                  return_value={"state": "ready", "reason": "native-turn-ready",
-                                                "lineage": {"shell_pid": os.getpid(),
-                                                            "shell_start": start}}), \
-                mock.patch.object(peer_steward, "_retire_target", return_value=(
-                    "idle", {"pane": "w1:p1", "harness": "claude", "session_id": "sid-a"}, 0, "")), \
-                mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                    "shell_pid": os.getpid()}), \
-                mock.patch.object(peer_steward, "_pane_readiness",
-                                  side_effect=AssertionError("ready consumer rebuilt registry view")):
-            observed = peer_steward._watch_shared_readiness(
-                "agent-a", "idle", arm, expected, "server-a")
-        self.assertEqual(observed.state, "ready")
-        self.assertEqual(dict(observed.identity), dict(ready.identity))
+        ready=SimpleNamespace(state="ready",reason="native-turn-ready",identity=(
+            ("server","server-a"),("pane","w1:p1"),("harness","claude"),
+            ("session_id","sid-a"),("pid_birth",f"{os.getpid()}:{start}")))
+        payload={"result":{"agent":{"agent":"claude","agent_status":"idle",
+            "agent_session":{"value":"sid-a"},"pane_id":"w1:p1","pid":os.getpid(),
+            "pid_start":start,"pid_namespace":namespace}}}
+        with mock.patch.object(peer_steward.peer_obligations,"ObligationStore"), \
+             mock.patch.object(peer_steward.shared_readiness,"target_result",return_value={
+                "state":"ready","reason":"native-turn-ready",
+                "lineage":{"shell_pid":os.getpid(),"shell_start":start}}), \
+             mock.patch.object(peer_steward,"native_agent",return_value=payload), \
+             mock.patch.object(peer_steward,"_pane_readiness",return_value=ready) as classify:
+            observed=peer_steward._watch_shared_readiness("agent-a","idle",arm,expected,"server-a")
+        self.assertEqual(observed.state,"ready")
+        self.assertEqual(dict(observed.identity),dict(ready.identity))
+        classify.assert_called_once()
 
-    def test_runner_reads_once_for_five_stewards_and_separates_another_pane(self):
+    def test_runner_reads_once_for_five_watches_per_exact_native_target(self):
         from dispatch_contract import process_start_ticks
-        from dispatch_registry_cache import registry_view
         with tempfile.TemporaryDirectory() as temporary:
-            state_root = Path(temporary) / "peer-state"
-            dispatch_root = Path(temporary) / "dispatch"
-            dispatch_root.mkdir()
-            watch_root = state_root / "peer-watches"
-            watch_root.mkdir(parents=True)
-            jobs = dispatch_root / "jobs.log"
-            jobs.write_text("fixture\n", encoding="utf-8")
-            store = peer_steward.peer_obligations.ObligationStore(state_root)
-            store.root.mkdir(parents=True)
-            start = str(process_start_ticks(os.getpid()))
-            arms = []
-            for index in range(6):
-                pane = "w1:p1" if index < 5 else "w1:p2"
-                sid = "sid-a" if index < 5 else "sid-b"
-                watch_id = f"watch-{index}"
-                arm = {"watch_id": watch_id, "target": f"agent-{index}",
-                       "server": "server-a",
-                       "agent": {"pane": pane, "harness": "claude", "session_id": sid,
-                                 "name": f"agent-{index}"},
-                       "pane_identity": {"shell_pid": os.getpid(), "shell_start": start},
-                       "steward": {"session_id": f"steward-{index}"}}
-                arms.append((watch_id, arm))
-                paths = peer_steward._watch_paths(watch_id, watch_root)
-                peer_steward._write_json_atomic(paths.arm, arm)
-                peer_steward._write_json_atomic(paths.observation, {
-                    "watch_id": watch_id, "state": "pending",
-                    "native_wait": {"state": "result", "agent_state": "idle"}})
-
-            producer_start = str(process_start_ticks(os.getpid()))
-            incarnation = "runner-projection-test"
+            state_root=Path(temporary)/"peer-state"; state_root.mkdir()
+            watch_root=state_root/"peer-watches"; watch_root.mkdir()
+            jobs=Path(temporary)/"dispatch"/"jobs.log"; jobs.parent.mkdir(); jobs.write_text("")
+            store=peer_steward.peer_obligations.ObligationStore(state_root); store.ensure_directory()
+            pid=os.getpid(); start=str(process_start_ticks(pid)); namespace=os.readlink(f"/proc/{pid}/ns/pid")
             peer_steward.shared_readiness.publish_runner_incarnation(
-                store.root, os.getpid(), producer_start, incarnation)
-            read_context = SimpleNamespace(registry_view=mock.Mock(side_effect=lambda path, **kwargs:
-                registry_view(path, append_only=kwargs.get("append_only", False))))
-            agents = []
+                store.root,pid,start,"shared-native-runner")
+            arms=[]
             for index in range(6):
-                pane = "w1:p1" if index < 5 else "w1:p2"
-                sid = "sid-a" if index < 5 else "sid-b"
-                agents.append({"name": f"agent-{index}", "agent": "claude",
-                               "agent_session": {"value": sid}, "pane_id": pane,
-                               "agent_status": "idle"})
-            transport = mock.Mock()
-            transport.observe.return_value = SimpleNamespace(agents=tuple(agents))
-            def readiness(target, _state, **_kwargs):
-                index = int(target.rsplit("-", 1)[1])
-                pane = "w1:p1" if index < 5 else "w1:p2"
-                sid = "sid-a" if index < 5 else "sid-b"
-                return SimpleNamespace(state="pending", reason="bound-registered-work-pending",
-                    identity=(("server", "server-a"), ("pane", pane), ("harness", "claude"),
-                              ("session_id", sid), ("pid_birth", f"{os.getpid()}:{start}")))
-            snapshot = {"watch_root": watch_root, "watches": tuple(arms)}
-            selected_env = {"AGENT_HOME": str(_HERE.parent),
-                            "AGENT_DISPATCH_JOBS": str(jobs),
-                            "AGENT_PEER_LEDGER_ROOT": str(state_root)}
-            with mock.patch.dict(os.environ, selected_env), \
-                    mock.patch.object(peer_steward.herdr_observation,
-                                   "socket_path_for_endpoint", return_value="/tmp/herdr.sock"), \
-                    mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                      return_value=transport), \
-                    mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                        "shell_pid": os.getpid(), "foreground_processes": []}), \
-                    mock.patch.object(peer_steward, "_pane_readiness", side_effect=readiness) as heavy_read, \
-                    mock.patch.object(peer_steward, "_wake_current_watch_observer",
-                                      return_value=True) as wake:
-                self.assertTrue(peer_steward._publish_watch_readiness(
-                    store, snapshot, read_context=read_context, incarnation=incarnation))
-            transport.observe.assert_called_once()
-            self.assertGreater(read_context.registry_view.call_count, 0)
-            self.assertLess(read_context.registry_view.call_count, len(arms),
-                            "runner must not retain/build a RegistryView per watch")
-            self.assertTrue(all(call.args == (jobs,) and call.kwargs == {"append_only": True}
-                                for call in read_context.registry_view.call_args_list))
-            self.assertNotEqual(store.root.parents[1], jobs.parent,
-                                "peer obligation storage stays separate from dispatch jobs")
-            self.assertEqual(heavy_read.call_count, 2)
-            self.assertEqual(wake.call_count, 6)
-            with mock.patch.dict(os.environ, selected_env), \
-                    mock.patch.object(peer_steward.herdr_observation,
-                                   "socket_path_for_endpoint", return_value="/tmp/herdr.sock"):
-                for _watch_id, arm in arms:
-                    identity = peer_steward._watch_readiness_identity(arm, "idle")
-                    projection = peer_steward.shared_readiness._read_json(
-                        peer_steward.shared_readiness._target_path(store.root, identity))
-                    self.assertEqual(projection["generation"]["path"], str(jobs))
-                    self.assertEqual(peer_steward.shared_readiness.target_result(
-                        store.root, identity)["state"], "pending")
+                pane="%1" if index<5 else "%2"
+                sid="sid-a" if index<5 else "sid-b"
+                watch_id=f"watch-{index}"
+                arm={"watch_id":watch_id,"target":f"agent-{index}","server":"server-a",
+                     "observer_protocol":3,"readiness_endpoint":"native:server-a",
+                     "until":["idle"],"initial_state":"working",
+                     "agent":{"pane":pane,"harness":"claude","session_id":sid,
+                              "name":f"agent-{index}","pid":pid,"pid_start":start,
+                              "pid_namespace":namespace},
+                     "pane_identity":{"native_pid":pid,"native_start":start,
+                                      "pid_namespace":namespace},
+                     "steward":{"harness":"claude","session_id":f"steward-{index}"}}
+                arms.append((watch_id,arm))
+                paths=peer_steward._watch_paths(watch_id,watch_root)
+                peer_steward._write_json_atomic(paths.arm,arm)
+            payloads={sid:{"result":{"agent":{"agent":"claude","agent_status":"idle",
+                "agent_session":{"value":sid},"pane_id":pane,"pid":pid,"pid_start":start,
+                "pid_namespace":namespace}}} for sid,pane in (("sid-a","%1"),("sid-b","%2"))}
+            def classify(_target,_state,*,expected_harness,expected_sid,expected_pane,**_kwargs):
+                return SimpleNamespace(state="pending",reason="bound-registered-work-pending",
+                    identity=(("server","server-a"),("pane",expected_pane),
+                              ("harness",expected_harness),("session_id",expected_sid),
+                              ("pid_birth",f"{pid}:{start}")))
+            with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs)}), \
+                 mock.patch.object(peer_steward,"_watch_selected_jobs_path",return_value=jobs), \
+                 mock.patch.object(peer_steward,"native_agent",
+                    side_effect=lambda h,sid,**kw:payloads[sid]) as read, \
+                 mock.patch.object(peer_steward,"_pane_readiness",side_effect=classify) as heavy:
+                result=peer_steward._publish_watch_readiness(
+                    store,{"watch_root":watch_root,"watches":tuple(arms)},
+                    read_context=None,incarnation="runner")
+                self.assertTrue(result)
+                self.assertEqual(read.call_count,2)
+                self.assertEqual(heavy.call_count,2)
+            for watch_id,arm in arms:
+                identity=peer_steward._watch_readiness_identity(arm,"idle")
+                projection=peer_steward.shared_readiness._read_json(
+                    peer_steward.shared_readiness._target_path(store.root,identity))
+                self.assertEqual(projection["result"]["state"],"pending")
 
-    def test_cached_ready_projection_revalidates_claim_handover_and_cleanup_gate(self):
+    def test_cached_readiness_response_is_bound_to_exact_native_birth_and_authority(self):
         from dispatch_contract import process_start_ticks
-        from dispatch_registry_cache import registry_view
-
-        for name, expected_state, changed_reason in (
-                ("claim-handover", "pending", "bound-registered-work-pending"),
-                ("cleanup-gate", "pending", "owner-completion-cleanup-pending"),
-                ("unchanged", "ready", "native-turn-ready")):
-            with self.subTest(authority=name), tempfile.TemporaryDirectory() as temporary:
-                state_root = Path(temporary)
-                watch_root = state_root / "peer-watches"
-                watch_root.mkdir()
-                jobs = state_root / "jobs.log"
-                jobs.write_text("", encoding="utf-8")
-                selected_env = {"AGENT_HOME": str(_HERE.parent),
-                                "AGENT_DISPATCH_JOBS": str(jobs),
-                                "AGENT_PEER_LEDGER_ROOT": str(state_root)}
-                jobs_before = jobs.read_bytes()
-                store = peer_steward.peer_obligations.ObligationStore(state_root)
-                self.assertTrue(store.ensure_directory())
-                start = str(process_start_ticks(os.getpid()))
-                watch_id = f"watch-{name}"
-                arm = {
-                    "watch_id": watch_id, "server": "server-a", "target": "agent-a",
-                    "agent": {"pane": "w1:p1", "harness": "claude",
-                              "session_id": "sid-a", "name": "agent-a"},
-                    "pane_identity": {"shell_pid": os.getpid(), "shell_start": start},
-                }
-                paths = peer_steward._watch_paths(watch_id, watch_root)
-                native_wait = {"state": "result", "agent_state": "idle",
-                               "agent": arm["agent"]}
-                endpoint = "/tmp/herdr-transition.sock"
-                identity = peer_steward.shared_readiness.target_identity(
-                    server="server-a", endpoint=endpoint, pane="w1:p1",
-                    harness="claude", session_id="sid-a", shell_pid=os.getpid(),
-                    shell_start=start, native_state="idle")
-                old_request = ({"token": "previous-observer-token", "identity": identity,
-                                "consumer": {"pid": 2 ** 22, "pid_start": "1"},
-                                "requested_at": time.time()}
-                               if name == "cleanup-gate" else None)
-                peer_steward._write_json_atomic(paths.arm, arm)
-                observation = {
-                    "state": "pending", "native_wait": native_wait,
-                }
-                if old_request:
-                    observation["readiness_transition"] = old_request
-                peer_steward._write_json_atomic(paths.observation, observation)
-                producer_start = str(process_start_ticks(os.getpid()))
-                incarnation = f"transition-{name}"
+        for label,state in (("bound-work","pending"),("cleanup","pending"),("clear","ready")):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                base=Path(temporary); state_root=base/"peer-state"; state_root.mkdir()
+                watch_root=state_root/"peer-watches"; watch_root.mkdir()
+                jobs=base/"dispatch"/"jobs.log"; jobs.parent.mkdir(); jobs.write_text("")
+                store=peer_steward.peer_obligations.ObligationStore(state_root); store.ensure_directory()
+                pid=os.getpid(); start=str(process_start_ticks(pid)); namespace=os.readlink(f"/proc/{pid}/ns/pid")
+                watch_id=f"watch-{label}"
+                arm={"watch_id":watch_id,"server":"server-a","target":"agent-a",
+                     "observer_protocol":3,"readiness_endpoint":"native:server-a",
+                     "until":["idle"],"initial_state":"working",
+                     "agent":{"pane":"%1","harness":"claude","session_id":"sid-a",
+                              "name":"agent-a","pid":pid,"pid_start":start,
+                              "pid_namespace":namespace},
+                     "pane_identity":{"native_pid":pid,"native_start":start,
+                                      "pid_namespace":namespace}}
+                paths=peer_steward._watch_paths(watch_id,watch_root)
+                peer_steward._write_json_atomic(paths.arm,arm)
+                identity=peer_steward._watch_readiness_identity(arm,"idle")
+                token="native-transition-"+label
+                peer_steward._write_json_atomic(paths.observation,{"watch_id":watch_id,
+                    "state":"pending","native_wait":{"state":"result","agent_state":"idle",
+                    "agent":{"harness":"claude","session_id":"sid-a","pane":"%1",
+                             "agent_state":"idle","pid":pid,"pid_start":start,
+                             "pid_namespace":namespace}},
+                    "readiness_transition":{"token":token,"identity":identity,
+                        "consumer":{"pid":pid,"pid_start":start},"requested_at":time.time()}})
+                incarnation="native-runner-"+label
                 peer_steward.shared_readiness.publish_runner_incarnation(
-                    store.root, os.getpid(), producer_start, incarnation)
-                peer_steward.shared_readiness.publish_target_projection(
-                    store.root, identity, {"state": "ready", "reason": "cached-ready"},
-                    producer_pid=os.getpid(), producer_start=producer_start,
-                    incarnation=incarnation,
-                    generation=peer_steward.shared_readiness.registry_generation(
-                        jobs, registry_view(jobs), selected=True), lineage={
-                        "shell_pid": os.getpid(), "shell_start": start})
+                    store.root,pid,start,incarnation)
+                payload={"result":{"agent":{"agent":"claude","agent_status":"idle",
+                    "agent_session":{"value":"sid-a"},"pane_id":"%1","pid":pid,
+                    "pid_start":start,"pid_namespace":namespace}}}
+                projection=SimpleNamespace(state=state,reason=label,
+                    identity=(("server","server-a"),("pane","%1"),("harness","claude"),
+                              ("session_id","sid-a"),("pid_birth",f"{pid}:{start}")))
+                with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs)}), \
+                     mock.patch.object(peer_steward,"native_agent",return_value=payload), \
+                     mock.patch.object(peer_steward,"_pane_readiness",return_value=projection), \
+                     mock.patch.object(peer_steward,"_wake_watch_observer",return_value=True):
+                    changed=peer_steward._publish_watch_readiness(
+                        store,{"watch_root":watch_root,"watches":[(watch_id,arm)]},
+                        read_context=None,incarnation=incarnation)
+                    self.assertTrue(changed)
+                    response=peer_steward.shared_readiness.target_result(store.root,identity)
+                    self.assertIsNotNone(response)
+                    self.assertEqual(response["state"],state)
+                    self.assertEqual(peer_steward.shared_readiness._read_json(
+                        peer_steward.shared_readiness._target_path(store.root,identity))["identity"],identity)
 
-                with mock.patch.object(peer_steward.peer_obligations,
-                                       "ObligationStore", return_value=store), \
-                        mock.patch.dict(os.environ, {**selected_env,
-                                                     "XDG_STATE_HOME": str(state_root / "xdg")}), \
-                        mock.patch.object(peer_steward.herdr_observation,
-                                          "socket_path_for_endpoint", return_value=endpoint), \
-                        mock.patch.object(peer_steward, "_retire_target", return_value=(
-                            "idle", {"pane": "w1:p1", "harness": "claude",
-                                     "session_id": "sid-a"}, 0, "")), \
-                        mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                            "shell_pid": os.getpid()}), \
-                        mock.patch.object(peer_steward.shared_readiness, "wake_runner",
-                                          return_value=True), \
-                        mock.patch.object(peer_steward.peer_obligations,
-                                          "ensure_normal_runner"):
-                    requested = peer_steward._watch_transition_readiness(
-                        "agent-a", "idle", arm, arm["agent"], "server-a", watch_id, paths)
-                self.assertEqual((requested.state, requested.reason),
-                                 ("pending", "shared-readiness-revalidating"))
-                request = json.loads(paths.observation.read_text(encoding="utf-8"))[
-                    "readiness_transition"]
-                self.assertEqual(request["identity"], identity)
-                self.assertEqual(request["consumer"]["pid"], os.getpid())
-                self.assertNotEqual(request["token"], "previous-observer-token")
-                self.assertEqual(json.loads(paths.observation.read_text(encoding="utf-8"))[
-                    "native_wait"], native_wait)
-
-                identity_rows = (
-                    ("server", "server-a"), ("pane", "w1:p1"),
-                    ("harness", "claude"), ("session_id", "sid-a"),
-                    ("pid_birth", f"{os.getpid()}:{start}"),
-                )
-                fresh_authority = SimpleNamespace(state=expected_state,
-                    reason=changed_reason, identity=identity_rows)
-                jobs_info = jobs.stat()
-                read_context = SimpleNamespace(registry_view=mock.Mock(return_value=
-                    SimpleNamespace(
-                        signature=(jobs_info.st_dev, jobs_info.st_ino, jobs_info.st_size,
-                                   jobs_info.st_mtime_ns, jobs_info.st_ctime_ns),
-                        resolved_path=str(jobs.resolve()))))
-                transport = mock.Mock()
-                transport.observe.return_value = object()
-                snapshot = {"watch_root": watch_root, "watches": ((watch_id, arm),)}
-                with mock.patch.dict(os.environ, selected_env), \
-                        mock.patch.object(peer_steward.herdr_observation,
-                                       "socket_path_for_endpoint", return_value=endpoint), \
-                        mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                          return_value=transport), \
-                        mock.patch.object(peer_steward, "_target_from_readiness_view",
-                                          return_value=("idle", arm["agent"], 0, "")), \
-                        mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                            "shell_pid": os.getpid(), "foreground_processes": []}), \
-                        mock.patch.object(peer_steward, "_pane_readiness",
-                                          return_value=fresh_authority) as fresh_check, \
-                        patch_split(peer_steward, "_wake_watch_observer",
-                                          return_value=True):
-                    peer_steward._publish_watch_readiness(
-                        store, snapshot, read_context=read_context, incarnation=incarnation)
-
-                self.assertEqual(fresh_check.call_count, 2,
-                                 "one shared projection and one request-bound refresh classify the target")
-                with mock.patch.object(peer_steward.peer_obligations,
-                                       "ObligationStore", return_value=store), \
-                        mock.patch.dict(os.environ, {**selected_env,
-                                                     "XDG_STATE_HOME": str(state_root / "xdg")}), \
-                        mock.patch.object(peer_steward.herdr_observation,
-                                          "socket_path_for_endpoint", return_value=endpoint), \
-                        mock.patch.object(peer_steward, "_retire_target", return_value=(
-                            "idle", arm["agent"], 0, "")), \
-                        mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                            "shell_pid": os.getpid()}):
-                    observed = peer_steward._watch_transition_readiness(
-                        "agent-a", "idle", arm, arm["agent"], "server-a", watch_id, paths)
-                self.assertEqual((observed.state, observed.reason),
-                                 (expected_state, changed_reason))
-                self.assertEqual(jobs.read_bytes(), jobs_before)
-                self.assertFalse(paths.receipt.exists())
-
-    def test_mutation_between_runner_checks_cannot_publish_ready_transition(self):
+    def test_native_identity_change_between_runner_and_receipt_blocks_ready(self):
         from dispatch_contract import process_start_ticks
-        from dispatch_registry_cache import registry_view
-
         with tempfile.TemporaryDirectory() as temporary:
-            state_root = Path(temporary)
-            watch_root = state_root / "peer-watches"
-            watch_root.mkdir()
-            jobs = state_root / "jobs.log"
-            jobs.write_text("", encoding="utf-8")
-            selected_env = {"AGENT_HOME": str(_HERE.parent),
-                            "AGENT_DISPATCH_JOBS": str(jobs),
-                            "AGENT_PEER_LEDGER_ROOT": str(state_root)}
-            store = peer_steward.peer_obligations.ObligationStore(state_root)
-            self.assertTrue(store.ensure_directory())
-            start = str(process_start_ticks(os.getpid()))
-            watch_id = "watch-boundary-race"
-            endpoint = "/tmp/herdr-transition.sock"
-            arm = {
-                "watch_id": watch_id, "server": "server-a", "target": "agent-a",
-                "agent": {"pane": "w1:p1", "harness": "claude",
-                          "session_id": "sid-a", "name": "agent-a"},
-                "pane_identity": {"shell_pid": os.getpid(), "shell_start": start},
-            }
-            paths = peer_steward._watch_paths(watch_id, watch_root)
-            peer_steward._write_json_atomic(paths.arm, arm)
-            peer_steward._write_json_atomic(paths.observation, {
-                "native_wait": {"state": "result", "agent_state": "idle",
-                                "agent": arm["agent"]},
-            })
-            identity = peer_steward.shared_readiness.target_identity(
-                server="server-a", endpoint=endpoint, pane="w1:p1", harness="claude",
-                session_id="sid-a", shell_pid=os.getpid(), shell_start=start,
-                native_state="idle")
-            producer_start = str(process_start_ticks(os.getpid()))
-            incarnation = "transition-race"
-            peer_steward.shared_readiness.publish_runner_incarnation(
-                store.root, os.getpid(), producer_start, incarnation)
-            peer_steward.shared_readiness.publish_target_projection(
-                store.root, identity, {"state": "ready", "reason": "cached-ready"},
-                producer_pid=os.getpid(), producer_start=producer_start,
-                incarnation=incarnation,
-                generation=peer_steward.shared_readiness.registry_generation(
-                    jobs, registry_view(jobs), selected=True),
-                lineage={"shell_pid": os.getpid(), "shell_start": start})
-            ready = SimpleNamespace(state="ready", reason="first-read-clear",
-                identity=(("server", "server-a"), ("pane", "w1:p1"),
-                          ("harness", "claude"), ("session_id", "sid-a"),
-                          ("pid_birth", f"{os.getpid()}:{start}")))
-            pending = SimpleNamespace(state="pending", reason="claim-arrived-between-checks",
-                identity=ready.identity)
-
-            with mock.patch.object(peer_steward.peer_obligations,
-                                   "ObligationStore", return_value=store), \
-                    mock.patch.dict(os.environ, selected_env), \
-                    mock.patch.object(peer_steward.herdr_observation,
-                                      "socket_path_for_endpoint", return_value=endpoint), \
-                    mock.patch.object(peer_steward, "_retire_target", return_value=(
-                        "idle", arm["agent"], 0, "")), \
-                    mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                        "shell_pid": os.getpid()}), \
-                    mock.patch.object(peer_steward.shared_readiness, "wake_runner",
-                                      return_value=True), \
-                    mock.patch.object(peer_steward.peer_obligations,
-                                      "ensure_normal_runner"):
-                peer_steward._watch_transition_readiness(
-                    "agent-a", "idle", arm, arm["agent"], "server-a", watch_id, paths)
-
-            read_context = SimpleNamespace(registry_view=mock.Mock(side_effect=lambda path, **kwargs:
-                registry_view(path, append_only=kwargs.get("append_only", False))))
-            transport = mock.Mock()
-            transport.observe.return_value = object()
-            with mock.patch.dict(os.environ, selected_env), \
-                    mock.patch.object(peer_steward.herdr_observation,
-                                   "socket_path_for_endpoint", return_value=endpoint), \
-                    mock.patch.object(peer_steward, "_runner_readiness_transport",
-                                      return_value=transport), \
-                    mock.patch.object(peer_steward, "_target_from_readiness_view",
-                                      return_value=("idle", arm["agent"], 0, "")), \
-                    mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                        "shell_pid": os.getpid(), "foreground_processes": []}), \
-                    mock.patch.object(peer_steward, "_pane_readiness",
-                                      side_effect=(ready, pending)) as check, \
-                    patch_split(peer_steward, "_wake_watch_observer",
-                                      return_value=True):
-                peer_steward._publish_watch_readiness(
-                    store, {"watch_root": watch_root, "watches": ((watch_id, arm),)},
-                    read_context=read_context, incarnation=incarnation)
-
-            self.assertEqual(check.call_count, 2)
-            with mock.patch.dict(os.environ, selected_env):
-                response = peer_steward.shared_readiness.watch_transition_result(
-                    store.root, watch_id, identity,
-                    json.loads(paths.observation.read_text(encoding="utf-8"))[
-                        "readiness_transition"]["token"])
-            self.assertEqual((response["state"], response["reason"]),
-                             ("pending", "claim-arrived-between-checks"))
+            base=Path(temporary); state_root=base/"peer-state"; state_root.mkdir()
+            watch_root=state_root/"peer-watches"; watch_root.mkdir()
+            jobs=base/"jobs.log"; jobs.write_text("")
+            store=peer_steward.peer_obligations.ObligationStore(state_root); store.ensure_directory()
+            pid=os.getpid(); start=str(process_start_ticks(pid)); namespace=os.readlink(f"/proc/{pid}/ns/pid")
+            arm={"watch_id":"watch-boundary","server":"default","target":"agent-a",
+                 "observer_protocol":3,"readiness_endpoint":"native:default",
+                 "until":["idle"],"initial_state":"working",
+                 "agent":{"pane":"%1","harness":"claude","session_id":"sid-a","name":"agent-a",
+                          "pid":pid,"pid_start":start,"pid_namespace":namespace},
+                 "pane_identity":{"native_pid":pid,"native_start":start,"pid_namespace":namespace}}
+            paths=peer_steward._watch_paths(arm["watch_id"],watch_root)
+            peer_steward._write_json_atomic(paths.arm,arm)
+            identity=peer_steward._watch_readiness_identity(arm,"idle")
+            consumer={"pid":pid,"pid_start":start}; token="receipt-boundary"
+            peer_steward._write_json_atomic(paths.observation,{"watch_id":arm["watch_id"],
+                "native_wait":{"state":"armed"},"readiness_transition":{"token":token,
+                "identity":identity,"consumer":consumer,"requested_at":time.time()}})
+            incarnation="runner-native-boundary"
+            peer_steward.shared_readiness.publish_runner_incarnation(store.root,pid,start,incarnation)
+            payload={"result":{"agent":{"agent":"claude","agent_status":"idle",
+                "agent_session":{"value":"sid-a"},"pane_id":"%1","pid":pid,
+                "pid_start":start,"pid_namespace":namespace}}}
+            ready=SimpleNamespace(state="ready",reason="native-ready",
+                identity=(("server","default"),("pane","%1"),("harness","claude"),
+                          ("session_id","sid-a"),("pid_birth",f"{pid}:{start}")))
+            with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs)}), \
+                 mock.patch.object(peer_steward,"native_agent",return_value=payload), \
+                 mock.patch.object(peer_steward,"_pane_readiness",return_value=ready), \
+                 mock.patch.object(peer_steward,"_wake_watch_observer",return_value=True):
+                self.assertTrue(peer_steward._publish_watch_readiness(
+                    store,{"watch_root":watch_root,"watches":[(arm["watch_id"],arm)]},
+                    read_context=None,incarnation=incarnation))
+                response=peer_steward.shared_readiness.target_result(store.root,identity)
+                self.assertEqual(response["state"],"ready")
+            changed={"result":{"agent":{"agent":"claude","agent_status":"working",
+                "agent_session":{"value":"sid-a"},"pane_id":"%1","pid":pid,
+                "pid_start":"1","pid_namespace":namespace}}}
+            with mock.patch.object(peer_steward,"native_agent",return_value=changed), \
+                 mock.patch.object(peer_steward,"_pane_readiness",side_effect=AssertionError("stale birth")):
+                observed=peer_steward._watch_readiness_result(
+                    "agent-a","idle",identity,response,"default")
+            self.assertEqual(observed.state,"unknown")
+            self.assertEqual(observed.reason,"shared-readiness-native-identity-changed")
+            self.assertFalse(paths.receipt.exists())
 
     def test_selected_authority_accepts_more_than_64_related_registry_rows(self):
         from dispatch_contract import parse_registry_metadata
@@ -7716,10 +7140,13 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                         stream.write("\n".join(related_lines) + "\n")
 
                     start = str(process_start_ticks(os.getpid()))
-                    server, socket_path = "server-watch-authority", "/tmp/watch-authority.sock"
+                    pid = os.getpid()
+                    namespace = os.readlink(f"/proc/{pid}/ns/pid")
+                    server, socket_path = "server-watch-authority", ""
                     watch_id = "watch-real-authority-boundary"
                     agent = {"pane": "w1:p7", "harness": "claude",
-                             "session_id": "sid-a", "name": "agent-a"}
+                             "session_id": "sid-a", "name": "agent-a", "pid": pid,
+                             "pid_start": start, "pid_namespace": namespace}
                     import session_tidy
                     steward_sid = "steward-large-envelope"
                     steward_seat = session_tidy.Seat(
@@ -7727,19 +7154,22 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                         sid=steward_sid, endpoint="fixture").as_dict()
                     arm = {
                         "watch_id": watch_id, "server": server, "target": "agent-a",
-                        "agent": agent,
+                        "observer_protocol": 3, "readiness_endpoint": "native:" + server,
+                        "until": ["idle"], "initial_state": "working", "agent": agent,
                         "steward": {"harness": "claude", "session_id": steward_sid,
                                     "project": str(base)},
                         "steward_seat": steward_seat,
-                        "pane_identity": {"shell_pid": os.getpid(), "shell_start": start},
+                        "pane_identity": {"native_pid": pid, "native_start": start,
+                                          "pid_namespace": namespace},
                     }
                     paths = peer_steward._watch_paths(watch_id, watch_root)
                     peer_steward._write_json_atomic(paths.arm, arm)
-                    native_wait = {"state": "result", "agent_state": "idle", "agent": agent}
-                    identity = peer_steward.shared_readiness.target_identity(
-                        server=server, endpoint=socket_path, pane=agent["pane"],
-                        harness=agent["harness"], session_id=agent["session_id"],
-                        shell_pid=os.getpid(), shell_start=start, native_state="idle")
+                    native_wait = {"state": "result", "agent_state": "idle",
+                                   "agent": {"harness": agent["harness"],
+                                             "session_id": agent["session_id"],
+                                             "pane": agent["pane"], "pid": pid,
+                                             "pid_start": start, "pid_namespace": namespace}}
+                    identity = peer_steward._watch_readiness_identity(arm, "idle")
                     token = "receipt-boundary-token"
                     peer_steward._write_json_atomic(paths.observation, {
                         "watch_id": watch_id, "state": "pending", "native_wait": native_wait,
@@ -7755,19 +7185,13 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     jobs_before = jobs.read_bytes()
                     snapshot = {"watch_root": watch_root, "watches": ((watch_id, arm),)}
 
+                    native_payload = {"result": {"agent": {
+                        "agent": "claude", "agent_status": "idle",
+                        "agent_session": {"value": "sid-a"}, "pane_id": "w1:p7",
+                        "pid": pid, "pid_start": start, "pid_namespace": namespace}}}
                     def publish_ready_response(expected_state="ready"):
-                        transport = mock.Mock()
-                        transport.observe.return_value = object()
-                        with mock.patch.object(
-                                peer_steward.herdr_observation,
-                                "socket_path_for_endpoint", return_value=socket_path), \
-                                mock.patch.object(peer_steward,
-                                    "_runner_readiness_transport", return_value=transport), \
-                                mock.patch.object(peer_steward,
-                                    "_target_from_readiness_view", return_value=(
-                                        "idle", agent, 0, "")), \
-                                mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                                    "shell_pid": os.getpid(), "foreground_processes": []}), \
+                        with mock.patch.object(peer_steward, "native_agent",
+                                               return_value=native_payload), \
                                 mock.patch.object(peer_steward.peer_obligations,
                                     "execution_attempts_for_processes", return_value=(owner,)), \
                                 patch_split(peer_steward,
@@ -7791,8 +7215,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     # existing seat lock and ledger writer. Registry bytes stay fixed.
                     import dispatch_seat_handover as handover
                     import session_tidy
-                    scope_env = {"AGENT_HERDR_SESSION": server,
-                                 "HERDR_SOCKET_PATH": socket_path}
+                    scope_env = {"AGENT_HERDR_SESSION": server}
                     endpoint_scope = session_tidy._endpoint_scope(scope_env)
                     seat_key = session_tidy._digest("pane", endpoint_scope, agent["pane"])
                     seat = session_tidy.Seat(
@@ -7823,12 +7246,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     with mock.patch.dict(os.environ, {
                             "AGENT_DISPATCH_JOBS": str(jobs),
                             "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
-                            mock.patch.object(peer_steward.herdr_observation,
-                                "socket_path_for_endpoint", return_value=socket_path), \
-                            mock.patch.object(peer_steward, "_retire_target", return_value=(
-                                "idle", agent, 0, "")), \
-                            mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                                "shell_pid": os.getpid(), "foreground_processes": []}), \
+                            mock.patch.object(peer_steward, "native_agent", return_value=native_payload), \
                             mock.patch.object(peer_steward.peer_obligations,
                                 "execution_attempts_for_processes", return_value=(owner,)):
                         accepted = peer_steward._watch_publish_ready_receipt(
@@ -7885,12 +7303,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     with mock.patch.dict(os.environ, {
                             "AGENT_DISPATCH_JOBS": str(jobs),
                             "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
-                            mock.patch.object(peer_steward.herdr_observation,
-                                "socket_path_for_endpoint", return_value=socket_path), \
-                            mock.patch.object(peer_steward, "_retire_target", return_value=(
-                                "idle", agent, 0, "")), \
-                            mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                                "shell_pid": os.getpid(), "foreground_processes": []}), \
+                            mock.patch.object(peer_steward, "native_agent", return_value=native_payload), \
                             mock.patch.object(peer_steward.peer_obligations,
                                 "execution_attempts_for_processes", return_value=(owner,)):
                         self.assertFalse(peer_steward._watch_publish_ready_receipt(
@@ -7912,12 +7325,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     with mock.patch.dict(os.environ, {
                             "AGENT_DISPATCH_JOBS": str(jobs),
                             "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
-                            mock.patch.object(peer_steward.herdr_observation,
-                                "socket_path_for_endpoint", return_value=socket_path), \
-                            mock.patch.object(peer_steward, "_retire_target", return_value=(
-                                "idle", agent, 0, "")), \
-                            mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                                "shell_pid": os.getpid(), "foreground_processes": []}), \
+                            mock.patch.object(peer_steward, "native_agent", return_value=native_payload), \
                             mock.patch.object(peer_steward.peer_obligations,
                                 "execution_attempts_for_processes", return_value=(owner,)):
                         self.assertEqual(peer_steward._WATCH_RECEIPT_PENDING,
@@ -7998,12 +7406,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     with mock.patch.dict(os.environ, {
                             "AGENT_DISPATCH_JOBS": str(jobs),
                             "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
-                            mock.patch.object(peer_steward.herdr_observation,
-                                "socket_path_for_endpoint", return_value=socket_path), \
-                            mock.patch.object(peer_steward, "_retire_target", return_value=(
-                                "idle", agent, 0, "")), \
-                            mock.patch.object(peer_steward, "_retire_pane_info", return_value={
-                                "shell_pid": os.getpid(), "foreground_processes": []}), \
+                            mock.patch.object(peer_steward, "native_agent", return_value=native_payload), \
                             mock.patch.object(peer_steward.peer_obligations,
                                 "execution_attempts_for_processes", return_value=(owner,)), \
                             patch_split(peer_steward, "_write_json_atomic",

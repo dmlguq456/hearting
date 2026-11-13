@@ -41,6 +41,7 @@ _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from fleet import config, titles  # noqa: E402
+from fleet.token_budget import opencode_context_tokens  # noqa: E402
 _UTILITIES = Path(__file__).resolve().parents[2] / "utilities"
 if str(_UTILITIES) not in sys.path:
     sys.path.insert(0, str(_UTILITIES))
@@ -838,11 +839,28 @@ def _opencode_text(value):
     return ""
 
 
+def _opencode_last_context(assistants):
+    """The newest assistant request's prompt size, newest-first ``(tokens, finished)``.
+
+    The interactive collector's rule (``collectors.opencode._last_request_context``):
+    a just-created row starts at zero and is not a reading.
+    """
+    for tokens, finished in assistants:
+        context = opencode_context_tokens(tokens)
+        if context == 0 and not finished:
+            continue
+        if context is not None:
+            return context
+    return None
+
+
 def read_opencode_activity(connection, session_id):
     """Bounded public text and unfinished tool state from one exact native session.
 
     The caller supplies a private snapshot. Message metadata proves assistant
     authorship; tool outputs, reasoning and neighbouring sessions are excluded.
+    ``context_tokens`` is the newest request's prompt size: V2 ``run`` never logs a
+    turn's last step, so the attempt log alone reads one step low once a turn ends.
     """
     try:
         db_path = connection.execute("PRAGMA database_list").fetchone()[2]
@@ -853,7 +871,10 @@ def read_opencode_activity(connection, session_id):
         messages = observation.get("messages") or []
         assistants = [row for row in messages if row.get("type") == "assistant"]
         latest = assistants[-1] if assistants else None
-        result = {"summary": None, "summary_ts": None, "tool": None}
+        result = {"summary": None, "summary_ts": None, "tool": None,
+                  "context_tokens": _opencode_last_context(
+                      (row.get("tokens"), bool(row.get("finish") or row.get("completed")))
+                      for row in reversed(assistants))}
         if latest:
             text = latest.get("text") or ""
             if not latest.get("completed"):
@@ -892,7 +913,12 @@ def read_opencode_activity(connection, session_id):
         "SELECT message_id, substr(data,1,16384), time_updated FROM part "
         "WHERE session_id=? ORDER BY time_updated DESC, rowid DESC LIMIT 64",
         (session_id,)).fetchall()
-    result = {"summary": None, "summary_ts": None, "tool": None}
+    newest_first = [assistants[mid][0] for mid, _raw, _stamp in messages if mid in assistants]
+    result = {"summary": None, "summary_ts": None, "tool": None,
+              "context_tokens": _opencode_last_context(
+                  (value.get("tokens"), bool(value.get("finish") or (
+                      isinstance(value.get("time"), dict) and value["time"].get("completed"))))
+                  for value in newest_first)}
     for mid, raw, stamp in rows:
         if mid not in assistants:
             continue

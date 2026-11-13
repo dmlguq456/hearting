@@ -5,6 +5,9 @@ Runs the real script as a subprocess against synthetic fixture roots so the
 tests exercise the actual CLI contract, not internals.
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import contextlib
@@ -328,6 +331,154 @@ class IsolatedEnvDropsTheLivePane(unittest.TestCase):
                 self.assertFalse([k for k in env if k.startswith("HERDR_")], profile)
             for key in ambient:
                 self.assertIn(key, runner._EXPLICIT_UNSET_KEYS)
+
+
+class DirectRunEntersIsolation(unittest.TestCase):
+    """A suite started by hand runs under the runner's isolation, not the caller's session."""
+
+    PROBE = textwrap.dedent("""\
+        import json, os, subprocess, sys
+        pidfile = sys.argv[1]
+        sleeper = subprocess.Popen(["sleep", "300"], cwd=os.environ["TMPDIR"], start_new_session=True)
+        open(pidfile, "w").write(str(sleeper.pid))
+        print(json.dumps({"env": dict(os.environ), "tmpdir_exists": os.path.isdir(os.environ["TMPDIR"])}))
+        sys.exit(3)
+        """)
+
+    def setUp(self):
+        import pwd
+        self.account_home = pwd.getpwuid(os.getuid()).pw_dir
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "parent").mkdir()
+        self.caller = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": self.account_home,
+            "RUN_TESTS_TMP_ROOT": str(self.root / "parent"),
+            "TMPDIR": str(self.root / "gone"),
+            "AGENT_ARTIFACT_ROOT": "/real/artifacts",
+            "AGENT_DISPATCH_JOBS": "/real/jobs.log",
+            "HERDR_SOCKET_PATH": "/real/herdr.sock",
+            "TMUX": "/tmp/tmux-0/default,1,0",
+            "HEARTING_REQUIRE_PIDNS": "1",
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _alive(self, pid):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            return False
+        return state != "Z"
+
+    def _run(self, command, env):
+        return subprocess.run(command, cwd=str(self.root), env=env, capture_output=True,
+                              text=True, timeout=60)
+
+    def _assert_isolated(self, result, pidfile):
+        self.assertEqual(result.returncode, 3, result.stderr)
+        seen = json.loads(result.stdout.strip().splitlines()[-1])
+        env = seen["env"]
+        private = Path(env["HOME"]).parent
+        self.assertNotEqual(env["HOME"], self.account_home)
+        self.assertEqual(private.parent, self.root / "parent")
+        self.assertTrue(seen["tmpdir_exists"])
+        self.assertEqual(env["HEARTING_TEST_ISOLATED"], "1")
+        self.assertEqual(env["HEARTING_REQUIRE_PIDNS"], "1")
+        self.assertFalse([k for k in env if k.startswith(("AGENT_", "HERDR_")) or k in ("TMUX", "TMUX_PANE")])
+        self.assertIn("direct-test-isolated:", result.stderr)
+        self.assertFalse(private.exists(), "the private root outlived the run")
+        self.assertFalse(self._alive(int(Path(pidfile).read_text())), "a suite process outlived the run")
+
+    def test_the_runner_entry_isolates_a_hand_started_command(self):
+        probe = self.root / "probe.py"
+        probe.write_text(self.PROBE, encoding="utf-8")
+        pidfile = self.root / "sleeper.pid"
+        result = self._run([sys.executable, str(RUNNER), "--direct-run", sys.executable, str(probe), str(pidfile)],
+                           self.caller)
+        self._assert_isolated(result, pidfile)
+
+    def test_python_and_shell_suites_reenter_through_their_first_lines(self):
+        mod = load_runner_module()
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "run-tests.py").symlink_to(RUNNER)
+        (self.root / "utilities").mkdir()
+        lines = (ROOT / "utilities" / "worktree_residue.test.py").read_text(encoding="utf-8").split("\n")
+        start = next(i for i, line in enumerate(lines) if line.startswith("import os, sys  # noqa: E401"))
+        entry = lines[start:start + 3]
+        self.assertIn("--direct-run", entry[2])
+        suite = self.root / "utilities" / "probe.test.py"
+        suite.write_text("\n".join(entry) + "\n" + self.PROBE, encoding="utf-8")
+        pidfile = self.root / "py.pid"
+        self._assert_isolated(self._run([sys.executable, str(suite), str(pidfile)], self.caller), pidfile)
+
+        shell_entry = (ROOT / "utilities" / "usage-check.test.sh").read_text(encoding="utf-8").split("\n")[1:3]
+        self.assertIn("--direct-run", shell_entry[1])
+        shell = self.root / "utilities" / "probe.test.sh"
+        probe = self.root / "probe.py"
+        probe.write_text(self.PROBE, encoding="utf-8")
+        shell.write_text("#!/usr/bin/env bash\n" + "\n".join(shell_entry)
+                         + f"\nexec {sys.executable} {probe} \"$1\"\n", encoding="utf-8")
+        pidfile = self.root / "sh.pid"
+        self._assert_isolated(self._run(["bash", str(shell), str(pidfile)], self.caller), pidfile)
+        self.assertTrue(mod.DIRECT_RUN_MARKER == "HEARTING_TEST_ISOLATED")
+
+    def test_a_worker_shaped_caller_passes_no_path_outside_the_private_root(self):
+        # The caller looks like a real dispatched worker's pane (every state-path
+        # key a worker carries, plus exported XDG homes); any HOME it chose, with
+        # or without a usable TMPDIR, still gets only the private root.
+        real = self.root / "real"
+        worker = {key: str(real / key.lower()) for key in (
+            "AGENT_RUNTIME_DIR", "AGENT_ARTIFACT_OUTPUT_DIR", "AGENT_MODEL_GOVERNOR_ROOT",
+            "AGENT_DISPATCH_COMPLETION_STATE_FILE", "AGENT_DISPATCH_SUPERVISOR_LEASE_FILE",
+            "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERDR_BIN_PATH", "XDG_RUNTIME_DIR",
+            "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMUX_TMPDIR")}
+        worker.update(AGENT_DISPATCH_ATTEMPT_ID="att-real", AGENT_DISPATCH_PARENT_ATTEMPT_ID="att-parent",
+                      HERDR_AGENT="claude", HERDR_TAB_ID="tab-real", HERDR_WORKSPACE_ID="ws-real",
+                      TMUX_PANE="%0")
+        (self.root / "fixture-tmp").mkdir()
+        homes = ((self.account_home, str(self.root / "gone")),
+                 (str(self.root / "fixture-home"), str(self.root / "gone")),
+                 (str(self.root / "fixture-home"), str(self.root / "fixture-tmp")))
+        probe = self.root / "probe.py"
+        probe.write_text(self.PROBE, encoding="utf-8")
+        for index, (home, tmpdir) in enumerate(homes):
+            with self.subTest(home=home, tmpdir=tmpdir):
+                pidfile = self.root / f"worker-{index}.pid"
+                env = dict(self.caller, **worker, HOME=home, TMPDIR=tmpdir)
+                result = self._run([sys.executable, str(RUNNER), "--direct-run", sys.executable, str(probe),
+                                    str(pidfile)], env)
+                seen = json.loads(result.stdout.strip().splitlines()[-1])["env"]
+                private = Path(seen["HOME"]).parent
+                self._assert_isolated(result, pidfile)
+                outside = {key: value for key, value in seen.items() if key not in ("PATH", "PYTHONPATH")
+                           for part in value.split(os.pathsep)
+                           if part.startswith("/") and not Path(part).is_relative_to(private)}
+                self.assertEqual(outside, {})
+                self.assertEqual(seen["PYTHONPATH"], str(ROOT))
+                self.assertFalse([key for key, value in seen.items()
+                                  if str(real) in value or value in ("att-real", "tab-real", "%0")])
+
+    def test_no_private_root_refuses_in_one_line_and_runs_nothing(self):
+        mod = load_runner_module()
+        marker = self.root / "ran"
+        err = io.StringIO()
+        with mock.patch.object(mod, "choose_suite_temp_parent", side_effect=SystemExit(70)), \
+                mock.patch.dict(os.environ, {"HOME": self.account_home}), contextlib.redirect_stderr(err):
+            rc = mod.direct_run(["touch", str(marker)])
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+        self.assertIn("direct-test-refused:", err.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_every_collected_suite_starts_through_the_direct_run_entry(self):
+        mod = load_runner_module()
+        missing = [mod.suite_relpath(ROOT, suite) for suite in mod.collect_suites(ROOT)
+                   if "--direct-run" not in suite.read_text(encoding="utf-8", errors="replace")[:4000]]
+        self.assertEqual(missing, [], "copy the direct-run lines from the top of a sibling suite "
+                         "(after the docstring and __future__ imports, or after the shebang)")
 
 
 class ArtifactRootsAreNotTestCorpus(unittest.TestCase):

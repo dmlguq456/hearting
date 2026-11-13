@@ -4,6 +4,9 @@
 Sessions, repositories and registry records are injected or built in a temporary
 home; the periodic-check module is replaced by a recording fake.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import fcntl
 import importlib.util
@@ -100,6 +103,8 @@ class GrantFixture(unittest.TestCase):
         _git("-C", str(self.primary), "worktree", "add", "-q", "-b", "linked", str(self.linked))
         self.rows = []
         for patcher in (mock.patch.object(fleet_steward, "_projection_sessions",
+                                          side_effect=lambda: list(self.rows)),
+                        mock.patch.object(fleet_steward, "_registry_sessions",
                                           side_effect=lambda: list(self.rows)),
                         mock.patch("fleet.collectors.herdr.list_agents", return_value=[])):
             patcher.start()

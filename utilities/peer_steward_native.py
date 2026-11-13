@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 
-import herdr_observation
 
 from peer_steward_base import (
     _interpret_payload, _UTILITIES_DIR,
@@ -24,26 +23,116 @@ def _message_obligation_id(ref):
     return "message-" + ref
 
 
-def _census_session_presence(census, session_id, server):
-    """Return True/False only for a complete, well-shaped exact-endpoint census."""
-    if (census is None or census.complete is not True
-            or census.endpoint != herdr_observation.endpoint_name(server)
-            or not isinstance(session_id, str) or not session_id):
+def native_agent(harness, session_id, *, pane=None, server=None):
+    """Return the existing agent-info shape from one exact native session.
+
+    A shell attachment is preferred because it binds native PID birth and SID.
+    The process census fallback must yield exactly one matching runtime process.
+    Missing, conflicting, or unreadable evidence is unknown, never absent.
+    """
+    if (harness not in {"claude", "codex", "opencode"}
+            or not isinstance(session_id, str) or not session_id or session_id == "-"):
         return None
-    for pane in census.panes:
-        session = pane.get("agent_session")
-        if session is None:
-            continue
-        if not isinstance(session, dict):
+    try:
+        import session_shell
+        import peer_address
+        binding, binding_reason = session_shell.exact_binding(harness, session_id)
+        if binding_reason == "attachment-ambiguous":
             return None
-        value = session.get("value")
-        if value is None:
-            continue
-        if not isinstance(value, str):
+        rows = peer_address.native_sessions()
+        if binding is not None:
+            pid = int(binding["native_pid"])
+            birth = str(binding["native_start"])
+            row = next((item for item in rows if item.get("pid") == pid
+                        and item.get("harness") == harness and item.get("sid") == session_id), None)
+            if row is None:
+                return None
+            pane = pane or row.get("env", {}).get("TMUX_PANE")
+        else:
+            matches = [item for item in rows if item.get("harness") == harness
+                       and item.get("sid") == session_id]
+            if len(matches) != 1:
+                return None
+            row = matches[0]
+            pid = int(row["pid"])
+            import pane_ownership
+            proc = pane_ownership._process(pid)
+            if not proc:
+                return None
+            birth = str(proc[5])
+            pane = pane or row.get("env", {}).get("HERDR_PANE_ID") or row.get("env", {}).get("TMUX_PANE")
+        import pane_ownership
+        live = pane_ownership._process(pid)
+        if not live or str(live[5]) != birth:
             return None
-        if value == session_id:
-            return True
-    return False
+        namespace = os.readlink(f"/proc/{pid}/ns/pid")
+        if namespace != os.readlink("/proc/self/ns/pid"):
+            return None
+        from terminal_surface import native_turn
+        state = native_turn(harness, pid, session_id)
+        name = None
+        try:
+            from peer_steward_base import _from_name
+            name = _from_name(harness, session_id)
+        except Exception:
+            pass
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = None
+        agent = {"agent": harness, "agent_status": state, "agent_session": {"value": session_id},
+                 "name": name or session_id[:8], "pane_id": pane or "-", "pid": pid,
+                 "pid_start": birth, "pid_namespace": namespace, "cwd": cwd}
+        return {"result": {"type": "agent_info", "agent": agent}}
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, ImportError):
+        return None
+
+
+def end_observation():
+    """A fresh per-pass reading of the live session holders for ``native_lifetime``.
+
+    The reading is lazy and taken at most once per harness, so a pass that asks about
+    many sessions scans the process table once instead of once per session. ``None``
+    (collector unavailable) leaves each call to take its own reading.
+    """
+    try:
+        tools = str(_UTILITIES_DIR.parent / "tools")
+        if tools not in os.sys.path:
+            os.sys.path.insert(0, tools)
+        from fleet.collectors.steward import end_observation as fresh
+        return fresh()
+    except Exception:
+        return None
+
+
+def native_lifetime(harness, session_id, *, pid=None, pid_start=None, pid_namespace=None,
+                    observation=None):
+    """Return live/ended/unknown using exact process birth or complete native proof.
+
+    ``observation`` is one pass's shared ``end_observation()``; without it the call
+    takes its own reading.
+    """
+    if pid is not None and pid_start and pid_namespace:
+        try:
+            if pid_namespace != os.readlink("/proc/self/ns/pid"):
+                return "unknown"
+            from dispatch_contract import process_identity_disposition
+            disposition = process_identity_disposition(int(pid), str(pid_start))
+            return {"live": "live", "dead": "ended"}.get(disposition, "unknown")
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return "unknown"
+    if harness not in {"claude", "codex", "opencode"} or not session_id:
+        return "unknown"
+    try:
+        tools = str(_UTILITIES_DIR.parent / "tools")
+        if tools not in os.sys.path:
+            os.sys.path.insert(0, tools)
+        from fleet.collectors.steward import session_liveness
+        options = {} if observation is None else {"observation": observation}
+        state = session_liveness(harness, session_id, agents=(), **options)
+        return state if state in {"live", "ended", "unknown"} else "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _resume_native_receiving_turn(duty, store, row, record, recipient_sid, storage_recipient):
@@ -444,12 +533,15 @@ def _closed_registered_route_outcome(row, jobs):
         return None
 
 
+
+
 def _target_from_readiness_view(view, target):
+    """Compatibility parser for old in-memory views; new watches do not call it."""
     if view is None or not isinstance(target, str) or not target:
         return "unknown", {"harness": "-", "session_id": "-", "name": target or "-",
                             "pane": "-"}, 4, "target-census-unavailable"
     matches = []
-    for agent in view.agents:
+    for agent in getattr(view, "agents", ()):
         sid = (agent.get("agent_session") or {}).get("value")
         if target in {agent.get("name"), sid, agent.get("pane_id")}:
             matches.append(agent)

@@ -3470,7 +3470,11 @@ _OPENCODE_ACTIVITY_BYTES = 32 * 1024 * 1024
 
 
 def _enrich_opencode_native_activity(job, session_id, fast_first=False):
-    """Observe only the attempt-private DB; first publication remains log-only."""
+    """Observe only the attempt-private DB; first publication remains log-only.
+
+    The same snapshot gives ``_native_context_tokens``, the newest request's prompt
+    size, which includes the turn's last step the attempt log never receives."""
+    job._native_context_tokens = None
     if fast_first:
         job.shell_jobs = []
         job.shell_job_observation = {"state": "unobserved", "reason": "detail-refresh-deferred"}
@@ -3534,6 +3538,7 @@ def _enrich_opencode_native_activity(job, session_id, fast_first=False):
             _OPENCODE_ACTIVITY_CACHE[key] = (signatures, activity, shell_observation)
             if len(_OPENCODE_ACTIVITY_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
                 _OPENCODE_ACTIVITY_CACHE.pop(next(iter(_OPENCODE_ACTIVITY_CACHE)))
+        job._native_context_tokens = activity.get("context_tokens")
         tool = activity.get("tool")
         label = _tool_label(tool.get("name"), tool.get("input")) if tool else None
         _job_activity(job, _tool_call(label, tool.get("name"), tool.get("input")) if label else None,
@@ -3582,9 +3587,11 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
         job.association_ambiguity = "opencode-announcement-identity-mismatch"
         return
     job._dispatch_context_owned = True
+    native_context = None
     if parsed.get("session_id"):
         job._runtime_session_id = parsed["session_id"]
         _enrich_opencode_native_activity(job, parsed["session_id"], fast_first=fast_first)
+        native_context = getattr(job, "_native_context_tokens", None)
     metadata = getattr(job, "_registry_metadata", None) or {}
     raw_window = _opencode_job_context_window(job)
     record = None
@@ -3634,7 +3641,8 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
             reason="native-chat-params-policy-not-found-or-stale")
     telemetry = telemetry_from_explicit(
         adapter="opencode", session_id=parsed.get("session_id"),
-        active_context_tokens=parsed.get("active_context_tokens"),
+        active_context_tokens=(parsed.get("active_context_tokens") if native_context is None
+                               else native_context),
         context_window_tokens=raw_window)
     for field_name in ("active_context_tokens", "context_window_tokens"):
         setattr(job, field_name, getattr(telemetry, field_name))

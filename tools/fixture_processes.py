@@ -19,9 +19,12 @@ Used as a cleanup registered AFTER the TemporaryDirectory cleanup, so it runs fi
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
+import subprocess
 import time
+from pathlib import Path
 
 
 def _start_ticks(pid: int) -> str | None:
@@ -144,3 +147,58 @@ def reap(marker: str, *, fifo: str | None = None, timeout: float = 10.0) -> list
                 pass
             os.close(fd)
     return sorted(killed)
+
+
+class NativeSession:
+    """A real native Claude session a fixture can watch, with no Herdr.
+
+    One process whose argv[0] is ``claude`` plus the runtime's own registry record
+    (``<home>/.claude/sessions/<pid>.json``): exactly what the production readers
+    (``peer_address.native_sessions``, ``terminal_surface.native_turn``) read. ``set``
+    rewrites the record's status the way the runtime does and ``stop`` is a confirmed
+    end. The fixture must point ``HOME`` and ``CLAUDE_CONFIG_DIR`` of the process under
+    test at ``home`` / ``home/.claude``.
+    """
+
+    STATUS = {"idle": "idle", "working": "busy", "blocked": "waiting"}
+
+    def __init__(self, test, *, sid, home, pane="w1:p9", name=None):
+        self.sid, self.name = sid, name
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("AGENT_", "HERDR_", "TMUX"))}
+        env["HOME"] = str(home)
+        env["CLAUDE_CONFIG_DIR"] = str(Path(home) / ".claude")
+        env["HERDR_PANE_ID"] = pane
+        self.proc = subprocess.Popen(
+            ["bash", "-c", "exec -a /usr/bin/claude sleep 3600"], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        test.addCleanup(self.stop)
+        self.pid = self.proc.pid
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                argv = Path(f"/proc/{self.pid}/cmdline").read_bytes()
+            except OSError:
+                argv = b""
+            if b"claude" in argv:
+                break
+            time.sleep(0.01)
+        self.birth = _start_ticks(self.pid)
+        self.path = Path(home) / ".claude" / "sessions" / f"{self.pid}.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.set("idle")
+
+    def set(self, status):
+        record = {"sessionId": self.sid, "procStart": self.birth,
+                  "status": self.STATUS.get(status, status)}
+        if self.name:
+            record["name"] = self.name
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, self.path)
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(timeout=5)
