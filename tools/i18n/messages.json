@@ -358,6 +358,270 @@
    "en": "Campaigns: {campaigns} · cycles: {cycles} · running: {open}",
    "ko": "캠페인 {campaigns}개 · 사이클 {cycles}개 · 진행 중 {open}개"
   },
+  "experiment.age_hours": {
+   "en": "{n} h ago",
+   "ko": "{n}시간 전"
+  },
+  "experiment.age_minutes": {
+   "en": "{n} min ago",
+   "ko": "{n}분 전"
+  },
+  "experiment.age_seconds": {
+   "en": "{n} s ago",
+   "ko": "{n}초 전"
+  },
+  "experiment.and_more": {
+   "en": " and {n} more",
+   "ko": " 외 {n}건"
+  },
+  "experiment.anomalies": {
+   "en": "check: {items}",
+   "ko": "확인 필요: {items}"
+  },
+  "experiment.anomaly.nonfinite": {
+   "en": "a value is not a finite number",
+   "ko": "값이 유한한 숫자가 아님"
+  },
+  "experiment.anomaly.observation-stale": {
+   "en": "observation is stale",
+   "ko": "관측이 오래됨"
+  },
+  "experiment.anomaly.record-missing": {
+   "en": "run record missing",
+   "ko": "실행 기록 없음"
+  },
+  "experiment.anomaly.record-unreadable": {
+   "en": "run record unreadable",
+   "ko": "실행 기록을 읽을 수 없음"
+  },
+  "experiment.anomaly.row-missing": {
+   "en": "linked row missing",
+   "ko": "연결된 행이 기록에 없음"
+  },
+  "experiment.anomaly.stagnant": {
+   "en": "no progress for a long time",
+   "ko": "오래 진행이 없음"
+  },
+  "experiment.anomaly.stagnation-unknown": {
+   "en": "stagnation unknown",
+   "ko": "정체 여부 미확인"
+  },
+  "experiment.anomaly.status-failed": {
+   "en": "run failed",
+   "ko": "실행 실패"
+  },
+  "experiment.baseline": {
+   "en": "baseline",
+   "ko": "비교 기준"
+  },
+  "experiment.direction.max": {
+   "en": "higher is better",
+   "ko": "높을수록 좋음"
+  },
+  "experiment.direction.min": {
+   "en": "lower is better",
+   "ko": "낮을수록 좋음"
+  },
+  "experiment.expected": {
+   "en": "expected {time}",
+   "ko": "예상 {time}"
+  },
+  "experiment.expected_unknown": {
+   "en": "expected time unknown",
+   "ko": "예상 시각 미확인"
+  },
+  "experiment.goal": {
+   "en": "goal: {goal}",
+   "ko": "목표: {goal}"
+  },
+  "experiment.header": {
+   "en": "Experiments · catalog {path} (rev {revision}, updated {updated})",
+   "ko": "실험 현황 · 정본 {path} (rev {revision}, {updated} 갱신)"
+  },
+  "experiment.header_invalid": {
+   "en": "Experiments · catalog {path} cannot be read ({code}); runs are shown by id only",
+   "ko": "실험 현황 · 정본 {path}을 읽을 수 없음 ({code}); 실행은 run id로만 보임"
+  },
+  "experiment.header_missing": {
+   "en": "Experiments · no catalog yet at {path}; runs are shown by id only",
+   "ko": "실험 현황 · 정본 {path} 아직 없음; 실행은 run id로만 보임"
+  },
+  "experiment.latest": {
+   "en": "latest {value}@{epoch}",
+   "ko": "최근 {value}@{epoch}"
+  },
+  "experiment.latest_none": {
+   "en": "no latest value yet",
+   "ko": "최근 값 아직 없음"
+  },
+  "experiment.latest_nonfinite": {
+   "en": "latest value @{epoch} is not a finite number",
+   "ko": "최근 값@{epoch}이 유한한 숫자가 아님"
+  },
+  "experiment.metric": {
+   "en": "({key}, {unit}, {direction})",
+   "ko": "({key}, {unit}, {direction})"
+  },
+  "experiment.no_group": {
+   "en": "no group",
+   "ko": "묶음 없음"
+  },
+  "experiment.not_comparable": {
+   "en": "not comparable: {reason}",
+   "ko": "비교 불가: {reason}"
+  },
+  "experiment.observed": {
+   "en": "observed {age}",
+   "ko": "관측 {age}"
+  },
+  "experiment.observed_unknown": {
+   "en": "observation time unknown",
+   "ko": "관측 시각 미확인"
+  },
+  "experiment.progress": {
+   "en": "progress {reached}/{total} {unit}",
+   "ko": "진행 {reached}/{total} {unit}"
+  },
+  "experiment.reason.control-no-observation": {
+   "en": "the comparison condition has no value yet",
+   "ko": "비교 기준 조건의 값이 아직 없음"
+  },
+  "experiment.reason.epoch-mismatch": {
+   "en": "the two values are from different epochs",
+   "ko": "두 값의 epoch가 달라 차이를 내지 않음"
+  },
+  "experiment.reason.epoch-unverified": {
+   "en": "the epoch of a value is unknown",
+   "ko": "값의 epoch를 확인할 수 없음"
+  },
+  "experiment.reason.is-control": {
+   "en": "this is the comparison condition",
+   "ko": "비교 기준 조건"
+  },
+  "experiment.reason.metric-mismatch": {
+   "en": "the observed metric is not the declared metric",
+   "ko": "관측된 지표가 선언한 지표와 다름"
+  },
+  "experiment.reason.metric-undeclared": {
+   "en": "no metric declared for this group",
+   "ko": "묶음의 판정 지표가 선언되지 않음"
+  },
+  "experiment.reason.nonfinite": {
+   "en": "a value is not a finite number",
+   "ko": "값이 유한한 숫자가 아님"
+  },
+  "experiment.reason.scoring-mismatch": {
+   "en": "the baseline was scored differently",
+   "ko": "비교 기준의 채점 방식이 다름"
+  },
+  "experiment.reason.split-mismatch": {
+   "en": "the baseline is from a different split",
+   "ko": "비교 기준의 평가 데이터 구분이 다름"
+  },
+  "experiment.reason.split-not-observed": {
+   "en": "the declared split is not observed in run records",
+   "ko": "선언한 평가 데이터 구분은 실행 기록에서 관측되지 않음"
+  },
+  "experiment.reason.split-or-scoring-unverified": {
+   "en": "the baseline's evaluation conditions are not confirmed",
+   "ko": "비교 기준의 평가 조건이 확인되지 않음"
+  },
+  "experiment.reason.target-undeclared": {
+   "en": "no comparison target declared",
+   "ko": "비교 기준이 선언되지 않음"
+  },
+  "experiment.relative": {
+   "en": ", relative {value}%",
+   "ko": "(상대 {value}%)"
+  },
+  "experiment.show_aliases": {
+   "en": "aliases: {items}",
+   "ko": "별칭: {items}"
+  },
+  "experiment.show_compared": {
+   "en": "compared with {name}",
+   "ko": "{name}와 비교"
+  },
+  "experiment.show_runs": {
+   "en": "runs: {items}",
+   "ko": "실행: {items}"
+  },
+  "experiment.show_term": {
+   "en": "term {term}: {meaning}",
+   "ko": "용어 {term}: {meaning}"
+  },
+  "experiment.unlinked": {
+   "en": "{count} unnamed run(s): {ids} (register in the catalog)",
+   "ko": "이름 없는 실행 {count}건: {ids} (정본에 등록 필요)"
+  },
+  "experiment.unnamed": {
+   "en": "(unnamed)",
+   "ko": "(이름 없음)"
+  },
+  "experiment.vs_ok": {
+   "en": "{label} {base} → {delta}{relative}",
+   "ko": "{label} {base} 대비 {delta}{relative}"
+  },
+  "experiment.warning": {
+   "en": "warning {code} @ {where}: {detail}",
+   "ko": "경고 {code} @ {where}: {detail}"
+  },
+  "experiment.warning.alias-duplicate": {
+   "en": "alias used twice",
+   "ko": "별칭 중복"
+  },
+  "experiment.warning.catalog-invalid": {
+   "en": "catalog invalid",
+   "ko": "정본이 올바르지 않음"
+  },
+  "experiment.warning.catalog-missing": {
+   "en": "catalog missing",
+   "ko": "정본 없음"
+  },
+  "experiment.warning.compared-to-missing": {
+   "en": "compared-with condition missing",
+   "ko": "비교 조건이 정본에 없음"
+  },
+  "experiment.warning.condition-missing": {
+   "en": "condition not in the catalog",
+   "ko": "정본에 없는 조건"
+  },
+  "experiment.warning.display-name-duplicate": {
+   "en": "same display name twice",
+   "ko": "표시 이름 중복"
+  },
+  "experiment.warning.display-name-is-identifier": {
+   "en": "display name is an identifier",
+   "ko": "표시 이름이 식별자와 같음"
+  },
+  "experiment.warning.display-name-missing": {
+   "en": "display name missing",
+   "ko": "표시 이름 없음"
+  },
+  "experiment.warning.group-goal-missing": {
+   "en": "group goal missing",
+   "ko": "묶음 목표 없음"
+  },
+  "experiment.warning.history-publish-failed": {
+   "en": "change history not recorded",
+   "ko": "변경 이력을 남기지 못함"
+  },
+  "experiment.warning.metric-undeclared": {
+   "en": "metric not declared",
+   "ko": "판정 지표 미선언"
+  },
+  "experiment.warning.metric-unit-missing": {
+   "en": "metric unit missing",
+   "ko": "지표 단위 없음"
+  },
+  "experiment.warning.target-undeclared": {
+   "en": "comparison target not declared",
+   "ko": "비교 기준 미선언"
+  },
+  "experiment.warning.term-conflict": {
+   "en": "name collides with a vocabulary term",
+   "ko": "용어집의 용어와 이름이 겹침"
+  },
   "fleet.context.compaction_imminent": {
    "en": "compaction imminent",
    "ko": "압축 임박"

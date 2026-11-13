@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+"""Tests for `experiment_catalog.py`: the project experiment catalog and the read-only status.
+
+Every fixture lives in a `TemporaryDirectory` with its own HOME and without `AGENT_ARTIFACT_ROOT`;
+no real artifact root is read.  Public run records are produced by the real `resource_progress`
+writer so a change to their shape breaks these tests rather than the status.  The model, tmux, and
+the network are never used.
+"""
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import artifact_admission as admission  # noqa: E402
+import artifact_history as H  # noqa: E402
+import experiment_catalog as E  # noqa: E402
+import resource_progress as rp  # noqa: E402
+
+SCRIPT = Path(E.__file__).resolve()
+NOW = 1_790_000_000.0
+METRIC = {"key": "wer", "unit": "%", "direction": "min", "split": "validation", "scoring": "AMI Dev, oracle VAD"}
+FIXED = {"kind": "fixed", "label": "fix", "value": 19.99, "split": "validation", "scoring": "AMI Dev, oracle VAD"}
+
+
+def group_spec(**over):
+    spec = {"display_name": "AMI 가변 화자 개선", "goal": "AMI Dev에서 var WER이 fix 19.99%보다 낮은가",
+            "metric": dict(METRIC), "target": dict(FIXED), "status": "running"}
+    spec.update(over)
+    return spec
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def tree_digests(folder):
+    return {p.name: digest(p) for p in sorted(Path(folder).glob("*.json"))}
+
+
+def clean_env(home, **extra):
+    env = {k: v for k, v in os.environ.items() if k != "AGENT_ARTIFACT_ROOT"}
+    env["HOME"] = str(home)
+    env.update(extra)
+    return env
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.home = self.base / "home"
+        self.home.mkdir()
+        old = {k: os.environ.get(k) for k in ("HOME", "AGENT_ARTIFACT_ROOT")}
+        os.environ["HOME"] = str(self.home)
+        os.environ.pop("AGENT_ARTIFACT_ROOT", None)
+
+        def restore():
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        self.addCleanup(restore)
+
+    def make_root(self, name="proj", parent="a", identity=True):
+        root = self.base / parent / name / ".agent_reports"
+        root.mkdir(parents=True)
+        if identity:
+            admission.ensure_root_identity(root)
+        return root
+
+    def register(self, root, spec, now=NOW):
+        return E.run_write(root, lambda ctx: E.op_register(ctx, spec), now=now)
+
+    def write_run(self, root, run_id, *, status="running", started=NOW - 3600, at=NOW - 180, eta=1800.0,
+                  reached=12, total=40, unit="epoch", series=None, key="wer", stagnation=None,
+                  split="validation", rows=None):
+        series = {"wer": [(10, 21.0), (12, 20.4)]} if series is None else series
+        samples = [{"split": split, "epoch": epoch, "metrics": {name: value}}
+                   for name, points in series.items() for epoch, value in points]
+        summary = rp.metric_summary(samples, decision_metric=key, direction="min")
+        observation = {"reached": reached, "total": total, "unit": unit, "eta_seconds": eta, "at": at,
+                       "summary": summary, "stagnation": stagnation}
+        run = {"run_id": run_id, "status": status, "started_at": started, "decision_metric": key}
+        record = rp.public_run_record(run, status=status, observation=observation, metrics=[], started_at=started)
+        if rows is not None:
+            record["rows"] = rows
+        self.assertIsNotNone(rp.write_public_run_record(root, run_id, record))
+
+    def cond(self, status_doc, name):
+        for group in status_doc["groups"]:
+            for row in group["conditions"]:
+                if row["display_name"] == name:
+                    return row
+        raise AssertionError(f"condition {name!r} not in status")
+
+    def ids(self, result):
+        return [row["id"] for row in result["result"]["conditions"]]
+
+    def two_conditions(self, root, **group_over):
+        spec = {"groups": [group_spec(**group_over)],
+                "conditions": [
+                    {"display_name": "0.3초 이하 짧은 발화 유지", "group": "AMI 가변 화자 개선",
+                     "refs": {"runs": [{"run_id": "run-a"}]}},
+                    {"display_name": "짧은 발화 제외", "group": "AMI 가변 화자 개선",
+                     "refs": {"runs": [{"run_id": "run-b"}]}}]}
+        return self.register(root, spec)
+
+
+class RenameFollows(Base):
+    def test_t1_rename_reaches_status_describe_and_resolve_without_touching_run_records(self):
+        root = self.make_root()
+        result = self.two_conditions(root)
+        self.write_run(root, "run-a")
+        self.write_run(root, "run-b", series={"wer": [(12, 22.0)]})
+        before_files = tree_digests(root / "resource-runs")
+        first = E.status(root, now=NOW)
+        self.assertEqual(self.cond(first, "0.3초 이하 짧은 발화 유지")["latest"]["value"], 20.4)
+        cond_a = self.ids(result)[0]
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "0.3초 이하 짧은 발화 유지", "짧은 발화 유지, 최대 10명"), now=NOW + 5)
+        doc = E.load(root).doc
+        after = E.status(root, now=NOW)
+        self.assertEqual(self.cond(after, "짧은 발화 유지, 최대 10명")["id"], cond_a)
+        self.assertNotIn("0.3초 이하 짧은 발화 유지", json.dumps(after["groups"], ensure_ascii=False))
+        self.assertIn("짧은 발화 유지, 최대 10명", E.render_status(after, "ko"))
+        self.assertEqual(E.resolve(doc, "0.3초 이하 짧은 발화 유지")["id"], cond_a)  # the old name still finds it
+        self.assertEqual(E.describe_run(doc, "run-a")["name"], "짧은 발화 유지, 최대 10명")
+        self.assertEqual(tree_digests(root / "resource-runs"), before_files)
+
+    def test_t2_merge_moves_runs_and_names_and_repoints_comparisons(self):
+        root = self.make_root()
+        spec = {"groups": [group_spec()],
+                "conditions": [
+                    {"display_name": "A 조건", "group": "AMI 가변 화자 개선", "aliases": ["a-short"],
+                     "refs": {"runs": [{"run_id": "run-a"}]}},
+                    {"display_name": "B 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-b"}]}},
+                    {"display_name": "C 조건", "group": "AMI 가변 화자 개선", "compared_to": "A 조건"}]}
+        ids = self.ids(self.register(root, spec))
+        self.write_run(root, "run-a", started=NOW - 7200)
+        self.write_run(root, "run-b", started=NOW - 600)
+        E.run_write(root, lambda ctx: E.op_merge(ctx, "A 조건", "B 조건", NOW), now=NOW)
+        doc = E.load(root).doc
+        self.assertEqual([c["id"] for c in doc["conditions"]], [ids[1], ids[2]])
+        for token in (ids[0], "A 조건", "a-short"):
+            self.assertEqual(E.resolve(doc, token)["id"], ids[1], token)
+        self.assertEqual(next(c for c in doc["conditions"] if c["id"] == ids[2])["compared_to"], ids[1])
+        row = self.cond(E.status(root, now=NOW), "B 조건")
+        self.assertEqual(row["current_run"]["run_id"], "run-b")  # the later start is the current run
+        self.assertEqual(row["other_runs"], {"count": 1, "run_ids": ["run-a"]})
+        self.assertEqual(doc["merged"][0]["from"], ids[0])
+
+
+class NothingToShow(Base):
+    def run_cli(self, *args, **env):
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=60,
+                              env=clean_env(self.home, **env))
+
+    def test_t3_no_catalog_names_nothing_and_never_fails(self):
+        root = self.make_root()
+        self.write_run(root, "mpwav-20261111-aaa")
+        self.write_run(root, "mpwav-20261111-bbb")
+        report = E.status(root, now=NOW)
+        self.assertEqual(report["catalog"]["status"], "missing")
+        self.assertEqual(report["groups"], [])
+        self.assertEqual(sorted(report["unlinked_runs"]["run_ids"]), ["mpwav-20261111-aaa", "mpwav-20261111-bbb"])
+        self.assertIn("catalog-missing", {w["code"] for w in report["warnings"]})
+        for command in ("status", "lint", "show"):
+            done = self.run_cli(command, "--artifact-root", str(root), "--json")
+            self.assertEqual(done.returncode, 0, (command, done.stderr))
+            json.loads(done.stdout)
+        text = E.render_status(report, "ko")
+        self.assertIn("mpwav-20261111-aaa", text)
+        self.assertFalse(E.catalog_path(root).exists())  # reading creates nothing
+        self.assertFalse((root / H.HISTORY_REL).exists())
+
+    def test_t3_a_root_that_does_not_exist_is_still_exit_zero(self):
+        done = self.run_cli("status", "--artifact-root", str(self.base / "nowhere" / ".agent_reports"), "--json")
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(json.loads(done.stdout)["catalog"]["status"], "missing")
+        self.assertFalse((self.base / "nowhere").exists())
+
+
+class Warnings(Base):
+    def test_t4_lint_names_each_gap_by_code_and_place_and_blocks_nothing(self):
+        root = self.make_root()
+        spec = {"terms": [{"term": "기준 var", "meaning": "원고의 기준"}],
+                "groups": [group_spec(), {"display_name": "목표 없는 묶음"},
+                           {"display_name": "단위 없는 묶음", "goal": "g",
+                            "metric": {"key": "loss", "direction": "min"}, "target": dict(FIXED)}],
+                "conditions": [
+                    {"display_name": "mpwav-run-1", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "mpwav-run-1"}]}},
+                    {"display_name": "uniform-retain030-n10", "group": "AMI 가변 화자 개선",
+                     "refs": {"configs": ["/x/uniform-retain030-n10.yaml"]}},
+                    {"display_name": "같은 이름", "group": "AMI 가변 화자 개선", "aliases": ["별칭"]},
+                    {"display_name": "같은 이름", "group": "AMI 가변 화자 개선", "aliases": ["별칭"]},
+                    {"display_name": "기준 var", "group": "AMI 가변 화자 개선"},
+                    {"display_name": "", "group": "AMI 가변 화자 개선"}]}
+        written = self.register(root, spec)
+        self.assertEqual(written["status"], "applied")  # warnings never stop the write
+        doc = E.load(root).doc
+        found = {}
+        for warning in E.lint(doc, expect=["아직 없는 이름"], unlinked=["orphan-run"]):
+            found.setdefault(warning["code"], []).append(warning["where"])
+        ids = {c["display_name"]: c["id"] for c in doc["conditions"]}
+        groups = {g["display_name"]: g["id"] for g in doc["groups"]}
+        self.assertIn(f"conditions[{ids['mpwav-run-1']}].display_name", found["display-name-is-identifier"])
+        self.assertIn(f"conditions[{ids['uniform-retain030-n10']}].display_name", found["display-name-is-identifier"])
+        duplicate = next(w for w in found["display-name-duplicate"] if "," in w)
+        self.assertEqual(duplicate.count("conditions["), 2)
+        self.assertTrue(found["alias-duplicate"])
+        self.assertIn(f"conditions[{ids['기준 var']}].display_name", found["term-conflict"])
+        self.assertTrue(found["display-name-missing"])
+        self.assertIn(f"groups[{groups['목표 없는 묶음']}].goal", found["group-goal-missing"])
+        self.assertIn(f"groups[{groups['목표 없는 묶음']}].metric", found["metric-undeclared"])
+        self.assertIn(f"groups[{groups['단위 없는 묶음']}].metric.unit", found["metric-unit-missing"])
+        self.assertIn(f"groups[{groups['목표 없는 묶음']}].target", found["target-undeclared"])
+        self.assertIn("expect[0]", found["condition-missing"])
+        self.assertIn("resource-runs/orphan-run.json", found["condition-missing"])
+        done = subprocess.run([sys.executable, str(SCRIPT), "lint", "--artifact-root", str(root), "--expect", "x"],
+                              capture_output=True, text=True, timeout=60, env=clean_env(self.home))
+        self.assertEqual(done.returncode, 0)
+
+    def test_t4_a_broken_reference_is_the_one_thing_a_write_refuses(self):
+        root = self.make_root()
+        with self.assertRaises(E.CatalogError) as ctx:
+            self.register(root, {"conditions": [{"display_name": "x", "group": "없는 묶음"}]})
+        self.assertEqual(ctx.exception.code, "group-unknown")
+        self.assertFalse(E.catalog_path(root).exists())
+
+
+class Comparison(Base):
+    def point(self, value=20.4, epoch=12, key="wer", nonfinite=False):
+        return {"key": key, "epoch": epoch, "value": value, "nonfinite": nonfinite}
+
+    def test_t5_compare_gives_a_difference_only_for_values_measured_alike(self):
+        group = group_spec()
+        ok = E.compare(group, self.point(20.4), None)
+        self.assertEqual(ok["state"], "ok")
+        self.assertAlmostEqual(ok["delta"], 0.41)
+        self.assertEqual(ok["delta_unit"], "pp")  # percent values subtract into percentage points
+        self.assertAlmostEqual(ok["relative_percent"], 0.41 / 19.99 * 100, places=4)
+        self.assertIs(ok["better"], False)
+        self.assertIs(E.compare(group, self.point(19.0), None)["better"], True)
+        # (c) a fixed baseline whose evaluation conditions are not declared
+        bare = group_spec(target={"kind": "fixed", "label": "fix", "value": 19.99})
+        self.assertEqual(E.compare(bare, self.point(), None)["reason"], "split-or-scoring-unverified")
+        # (d) scored differently
+        other = group_spec(target={**FIXED, "scoring": "AMI Dev, system VAD"})
+        self.assertEqual(E.compare(other, self.point(), None)["reason"], "scoring-mismatch")
+        # (e) a split the run records do not carry
+        dev = group_spec(metric={**METRIC, "split": "AMI Dev"}, target={**FIXED, "split": "AMI Dev"})
+        result = E.compare(dev, self.point(), None)
+        self.assertEqual((result["state"], result["reason"], result["delta"]), ("not-comparable", "split-not-observed", None))
+        # (f) not a finite number
+        self.assertEqual(E.compare(group, self.point(None, nonfinite=True), None)["reason"], "nonfinite")
+        # (g) only a best value exists: no latest, no difference
+        result = E.compare(group, {"key": "wer", "epoch": None, "value": None, "nonfinite": False, "best": {"value": 18.0}}, None)
+        self.assertEqual((result["state"], result["reason"], result["delta"]), ("no-data", "no-observation", None))
+        self.assertEqual(E.compare(group, None, None)["state"], "no-data")
+        # (h) another metric
+        self.assertEqual(E.compare(group, self.point(key="loss"), None)["reason"], "metric-mismatch")
+        # (i) direction max flips `better`
+        top = group_spec(metric={**METRIC, "direction": "max", "key": "acc", "unit": ""}, target={**FIXED, "value": 0.5})
+        self.assertIs(E.compare(top, self.point(0.6, key="acc"), None)["better"], True)
+        self.assertIsNone(E.compare(top, self.point(0.6, key="acc"), None)["delta_unit"])
+        # undeclared metric / target
+        self.assertEqual(E.compare(group_spec(metric=None), self.point(), None)["reason"], "metric-undeclared")
+        self.assertEqual(E.compare(group_spec(target=None), self.point(), None)["reason"], "target-undeclared")
+
+    def condition_target_group(self, root):
+        spec = {"groups": [group_spec(target={"kind": "condition", "condition": "기준 조건"}, metric={**METRIC, "scoring": None})],
+                "conditions": [
+                    {"display_name": "기준 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-ctl"}]}},
+                    {"display_name": "실험 조건", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-exp"}]}}]}
+        return self.register(root, spec)
+
+    def test_t5_same_epoch_compares_and_different_epochs_do_not(self):
+        root = self.make_root()
+        self.condition_target_group(root)
+        self.write_run(root, "run-ctl", series={"wer": [(12, 20.0)]})
+        self.write_run(root, "run-exp", series={"wer": [(12, 20.5)]})
+        row = self.cond(E.status(root, now=NOW), "실험 조건")
+        self.assertEqual(row["comparison"]["state"], "ok")
+        self.assertAlmostEqual(row["comparison"]["delta"], 0.5)
+        self.assertEqual(row["comparison"]["delta_unit"], "pp")
+        self.assertAlmostEqual(row["comparison"]["relative_percent"], 2.5)
+        self.assertEqual(row["comparison"]["baseline"]["label"], "기준 조건")
+        self.assertEqual(self.cond(E.status(root, now=NOW), "기준 조건")["comparison"]["reason"], "is-control")
+        self.write_run(root, "run-exp", series={"wer": [(10, 20.5)]})  # (b) the control is further along
+        row = self.cond(E.status(root, now=NOW), "실험 조건")
+        self.assertEqual((row["comparison"]["state"], row["comparison"]["reason"]), ("not-comparable", "epoch-mismatch"))
+        self.assertIsNone(row["comparison"]["delta"])
+        self.assertEqual((row["comparison"]["value"]["epoch"], row["comparison"]["baseline"]["epoch"]), (10, 12))
+        self.assertIn("비교 불가", E.render_status(E.status(root, now=NOW), "ko"))
+
+
+class UnknownValues(Base):
+    def test_t6_unknown_stays_unknown(self):
+        root = self.make_root()
+        spec = {"groups": [group_spec()], "conditions": [
+            {"display_name": "eta 없음", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-noeta"}]}},
+            {"display_name": "깨진 기록", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-broken"}]}},
+            {"display_name": "기록 없음", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-gone"}]}},
+            {"display_name": "실행 없음", "group": "AMI 가변 화자 개선"}]}
+        self.register(root, spec)
+        self.write_run(root, "run-noeta", eta=None, series={})
+        (root / "resource-runs" / "run-broken.json").write_text("{not json", encoding="utf-8")
+        report = E.status(root, now=NOW)
+        row = self.cond(report, "eta 없음")
+        self.assertIsNone(row["expected_at"])
+        self.assertEqual(row["unknown"]["expected_at"], "eta-unknown")
+        self.assertIsNone(row["since_last_progress_seconds"])
+        self.assertIn("stagnation-unknown", row["anomalies"])
+        self.assertIsNone(row["latest"])  # no value is not zero
+        self.assertEqual((row["comparison"]["state"], row["comparison"]["reason"]), ("no-data", "no-observation"))
+        broken = self.cond(report, "깨진 기록")
+        self.assertIn("record-unreadable", broken["anomalies"])
+        self.assertIsNone(broken["latest"])
+        self.assertIsNone(broken["progress"])
+        self.assertIn("record-missing", self.cond(report, "기록 없음")["anomalies"])
+        self.assertEqual(self.cond(report, "실행 없음")["unknown"]["run"], "no-run-linked")
+        waiting = {w["display_name"] for w in report["waiting"]}
+        self.assertEqual(waiting, {"eta 없음"})
+
+    def test_t7_stale_observation_boundary_failed_and_stagnant(self):
+        root = self.make_root()
+        names = {"run-899": NOW - 899, "run-900": NOW - 900, "run-901": NOW - 901}
+        spec = {"groups": [group_spec()], "conditions": [
+            {"display_name": run_id, "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": run_id}]}}
+            for run_id in (*names, "run-failed", "run-stagnant")]}
+        self.register(root, spec)
+        for run_id, at in names.items():
+            self.write_run(root, run_id, at=at)
+        self.write_run(root, "run-failed", status="failed")
+        self.write_run(root, "run-stagnant", stagnation={"state": "stagnant", "seconds_since_anchor": 7300.0})
+        report = E.status(root, now=NOW)
+        self.assertIn("observation-stale", self.cond(report, "run-901")["anomalies"])
+        self.assertNotIn("observation-stale", self.cond(report, "run-900")["anomalies"])
+        self.assertNotIn("observation-stale", self.cond(report, "run-899")["anomalies"])
+        self.assertEqual(self.cond(report, "run-901")["observed_age_seconds"], 901)
+        self.assertIn("status-failed", self.cond(report, "run-failed")["anomalies"])
+        stagnant = self.cond(report, "run-stagnant")
+        self.assertIn("stagnant", stagnant["anomalies"])
+        self.assertEqual(stagnant["since_last_progress_seconds"], 7300)
+        self.assertIsNotNone(self.cond(report, "run-899")["expected_at"])  # observed + eta
+
+
+class ProjectBoundary(Base):
+    def cli(self, *args, **env):
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=60,
+                              env=clean_env(self.home, **env))
+
+    def test_t8_a_copied_catalog_is_foreign_and_never_written(self):
+        root_a = self.make_root("proj", "a")
+        root_b = self.make_root("proj", "b")  # same folder name, another parent
+        self.register(root_a, {"groups": [group_spec(display_name="A 프로젝트 묶음")],
+                               "conditions": [{"display_name": "A 전용 이름", "group": "A 프로젝트 묶음"}]})
+        self.write_run(root_b, "b-run-1")
+        target = E.catalog_path(root_b)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(E.catalog_path(root_a), target)
+        before = target.read_bytes()
+        read = E.load(root_b)
+        self.assertEqual((read.status, read.code), ("invalid", "foreign-root"))
+        report = E.status(root_b, now=NOW)
+        self.assertNotIn("A 전용 이름", json.dumps(report, ensure_ascii=False))
+        self.assertEqual(report["unlinked_runs"]["run_ids"], ["b-run-1"])
+        with self.assertRaises(E.CatalogError) as ctx:
+            E.run_write(root_b, lambda c: E.op_rename(c, "A 전용 이름", "x"))
+        self.assertEqual((ctx.exception.code, ctx.exception.detail), ("catalog-invalid", "foreign-root"))
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_t8_a_path_asks_about_that_project_even_when_a_root_is_set(self):
+        root_a = self.make_root("proj", "a")
+        root_b = self.make_root("proj", "b")
+        self.register(root_b, {"groups": [group_spec(display_name="B 묶음")]})
+        done = self.cli("status", "--path", str(root_b.parent), "--json", AGENT_ARTIFACT_ROOT=str(root_a))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(Path(json.loads(done.stdout)["artifact_root"]), root_b)
+        old = os.environ.get("AGENT_ARTIFACT_ROOT")
+        os.environ["AGENT_ARTIFACT_ROOT"] = str(root_a)
+        try:
+            self.assertEqual(E.resolve_root(str(root_b.parent)), root_b)
+            self.assertEqual(E.resolve_root(None), root_a)  # no path: the session's own root
+        finally:
+            os.environ.pop("AGENT_ARTIFACT_ROOT", None) if old is None else os.environ.update(AGENT_ARTIFACT_ROOT=old)
+
+    def test_t9_a_linked_worktree_reads_the_primary_catalog(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is not available")
+        primary, linked = self.base / "repo", self.base / "repo-wt"
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        env = clean_env(self.home, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+        for command in (["init", "-q", str(primary)],):
+            subprocess.run(git + command, check=True, env=env, capture_output=True)
+        subprocess.run(git + ["-C", str(primary), "commit", "-q", "--allow-empty", "-m", "x"], check=True, env=env,
+                       capture_output=True)
+        subprocess.run(git + ["-C", str(primary), "worktree", "add", "-q", str(linked)], check=True, env=env,
+                       capture_output=True)
+        (primary / ".agent_reports").mkdir()
+        root = E.resolve_root(str(primary))
+        admission.ensure_root_identity(root)
+        self.register(root, {"groups": [group_spec()]})
+        seen = []
+        for path in (primary, linked):
+            done = self.cli("status", "--path", str(path), "--json")
+            self.assertEqual(done.returncode, 0, done.stderr)
+            report = json.loads(done.stdout)
+            seen.append((report["artifact_root"], report["catalog"]["revision"], report["catalog"]["status"]))
+        self.assertEqual(seen[0], seen[1])
+        self.assertEqual(seen[0][1:], (1, "ok"))
+        self.assertEqual(Path(seen[0][0]), root)
+
+
+class Writing(Base):
+    def spawn(self, root, *args):
+        return subprocess.Popen([sys.executable, str(SCRIPT), *args, "--artifact-root", str(root)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=clean_env(self.home))
+
+    def test_t10_concurrent_registers_all_survive(self):
+        root = self.make_root()
+        procs = [self.spawn(root, "register", "--condition-name", f"조건 {i}") for i in range(8)]
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            self.assertEqual(proc.returncode, 0, (out, err))
+        doc = E.load(root).doc
+        self.assertEqual(sorted(c["display_name"] for c in doc["conditions"]), sorted(f"조건 {i}" for i in range(8)))
+        self.assertEqual(doc["revision"], 8)
+        json.loads(E.catalog_path(root).read_text(encoding="utf-8"))
+
+    def test_t10_a_rename_and_a_register_at_the_same_time_both_land(self):
+        root = self.make_root()
+        self.register(root, {"conditions": [{"display_name": "옛 이름"}]})
+        procs = [self.spawn(root, "rename", "옛 이름", "--name", "새 이름"),
+                 self.spawn(root, "register", "--condition-name", "다른 조건")]
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            self.assertEqual(proc.returncode, 0, (out, err))
+        doc = E.load(root).doc
+        self.assertEqual(sorted(c["display_name"] for c in doc["conditions"]), ["다른 조건", "새 이름"])
+        self.assertEqual(doc["revision"], 3)
+        self.assertEqual(E.resolve(doc, "옛 이름")["display_name"], "새 이름")
+
+    def test_t11_a_broken_file_refuses_every_write_and_stays_as_it_was(self):
+        root = self.make_root()
+        self.write_run(root, "r-1")
+        path = E.catalog_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{not json")
+        self.assertEqual(E.load(root).code, "json-invalid")
+        for mutate in (lambda c: E.op_register(c, {"conditions": [{"display_name": "x"}]}),
+                       lambda c: E.op_rename(c, "x", "y"), lambda c: E.op_add_term(c, "t", "m")):
+            with self.assertRaises(E.CatalogError) as ctx:
+                E.run_write(root, mutate)
+            self.assertEqual(ctx.exception.code, "catalog-invalid")
+        self.assertEqual(path.read_bytes(), b"{not json")
+        report = E.status(root, now=NOW)
+        self.assertEqual(report["unlinked_runs"]["run_ids"], ["r-1"])
+        self.assertIn("catalog-invalid", {w["code"] for w in report["warnings"]})
+
+    def test_t11_fields_this_version_does_not_know_are_kept(self):
+        root = self.make_root()
+        self.register(root, {"conditions": [{"display_name": "원래 이름"}]})
+        path = E.catalog_path(root)
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["future_top"] = {"a": 1}
+        doc["conditions"][0]["future_field"] = "keep"
+        path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        E.run_write(root, lambda c: E.op_rename(c, "원래 이름", "바뀐 이름"))
+        after = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(after["future_top"], {"a": 1})
+        self.assertEqual(after["conditions"][0]["future_field"], "keep")
+        self.assertEqual(after["conditions"][0]["display_name"], "바뀐 이름")
+
+    def test_t12_a_write_is_recorded_and_a_dry_run_leaves_nothing(self):
+        root = self.make_root()
+        result = self.register(root, {"groups": [group_spec()], "conditions": [{"display_name": "이력 조건"}]})
+        self.assertEqual((result["status"], result["events"]), ("applied", 2))
+        lines = [json.loads(line) for path in sorted((root / H.HISTORY_REL).glob("*/*.jsonl"))
+                 for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 2)
+        for event in lines:
+            self.assertEqual((event["kind"], event["target"]["type"], event["target"]["path"]),
+                             ("meta", "project", E.CATALOG_REL))
+            self.assertTrue(event["field"].startswith("experiments."))
+        E.run_write(root, lambda c: E.op_rename(c, "이력 조건", "이력 조건 v2"), now=NOW + 1)
+        fields = {json.loads(line)["field"] for path in (root / H.HISTORY_REL).glob("*/*.jsonl")
+                  for line in path.read_text(encoding="utf-8").splitlines()}
+        self.assertTrue(any(f.endswith(".display_name") and ".conditions." in f for f in fields))
+        fresh = self.base / "fresh" / ".agent_reports"
+        fresh.mkdir(parents=True)
+        dry = E.run_write(fresh, lambda c: E.op_register(c, {"groups": [group_spec()]}), dry_run=True)
+        self.assertEqual(dry["status"], "dry-run")
+        self.assertEqual(list(fresh.iterdir()), [])  # not even a directory
+        done = subprocess.run([sys.executable, str(SCRIPT), "register", "--artifact-root", str(root), "--dry-run",
+                               "--condition-name", "쓰지 않는 조건"], capture_output=True, text=True, timeout=60,
+                              env=clean_env(self.home))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("쓰지 않는 조건", E.catalog_path(root).read_text(encoding="utf-8"))
+        self.assertEqual(E.load(root).revision, 2)
+
+    def test_t14_retry_runs_and_a_run_claimed_by_another_condition(self):
+        root = self.make_root()
+        result = self.register(root, {"groups": [group_spec()], "conditions": [
+            {"display_name": "재시도 조건", "group": "AMI 가변 화자 개선",
+             "refs": {"runs": [{"run_id": "try-1"}, {"run_id": "try-2"}]}},
+            {"display_name": "다른 조건", "group": "AMI 가변 화자 개선"}]})
+        self.write_run(root, "try-1", started=NOW - 9000, series={"wer": [(5, 25.0)]})
+        self.write_run(root, "try-2", started=NOW - 1000, series={"wer": [(3, 24.0)]})
+        row = self.cond(E.status(root, now=NOW), "재시도 조건")
+        self.assertEqual(row["current_run"]["run_id"], "try-2")
+        self.assertEqual(row["other_runs"], {"count": 1, "run_ids": ["try-1"]})
+        self.assertEqual(row["latest"]["epoch"], 3)
+        other = self.ids(result)[1]
+        before = E.catalog_path(root).read_bytes()
+        with self.assertRaises(E.CatalogError) as ctx:
+            E.run_write(root, lambda c: E.op_link(c, other, "try-1"))
+        self.assertEqual(ctx.exception.code, "run-linked-elsewhere")
+        self.assertEqual(E.catalog_path(root).read_bytes(), before)
+        self.write_run(root, "run-rows", rows=[
+            {"row_id": "arm-1", "started_at": NOW - 500, "metric_summary": {"metric": "wer", "latest": {"epoch": 7, "value": 22.2, "nonfinite": False},
+                                                                            "latest_metrics": {"wer": {"epoch": 7, "value": 22.2, "nonfinite": False}}},
+             "last_checkpoint": {"at": NOW - 60}, "eta": 600.0}])
+        E.run_write(root, lambda c: E.op_link(c, "다른 조건", "run-rows", "arm-1"))
+        row = self.cond(E.status(root, now=NOW), "다른 조건")
+        self.assertEqual(row["latest"]["value"], 22.2)  # the linked row, not the run as a whole
+        self.assertEqual(E.describe_run(E.load(root).doc, "run-rows", "arm-1")["name"], "다른 조건")
+        E.run_write(root, lambda c: E.op_link(c, "다른 조건", "run-rows", "arm-9"))
+        self.assertIn("row-missing", self.cond(E.status(root, now=NOW), "다른 조건")["anomalies"])
+
+
+class Text(Base):
+    def test_t13_the_text_names_the_goal_the_condition_and_the_reason(self):
+        root = self.make_root()
+        self.two_conditions(root)
+        self.write_run(root, "run-a")
+        self.write_run(root, "mpwav-20261111-unregistered")
+        text = E.render_status(E.status(root, now=NOW), "ko")
+        self.assertIn("목표: AMI Dev에서 var WER이 fix 19.99%보다 낮은가", text)
+        self.assertIn("0.3초 이하 짧은 발화 유지", text)
+        self.assertIn("%p", text)
+        self.assertIn("fix 19.99% 대비", text)
+        self.assertIn("(상대 +", text)
+        self.assertIn("짧은 발화 제외 — 최근 값 아직 없음", text)
+        self.assertIn("이름 없는 실행 1건: mpwav-20261111-unregistered", text)
+        self.assertNotIn("run-a", text)  # a registered run is called by its name
+        self.assertIn("Experiments", E.render_status(E.status(root, now=NOW), "en"))  # English exists too
+        bad = self.make_root("bad", "c")
+        self.register(bad, {"groups": [group_spec(target={**FIXED, "scoring": None, "split": None})],
+                            "conditions": [{"display_name": "평가 조건 미확인", "group": "AMI 가변 화자 개선",
+                                            "refs": {"runs": [{"run_id": "bad-run"}]}}]})
+        self.write_run(bad, "bad-run")
+        unverified = E.render_status(E.status(bad, now=NOW), "ko")
+        self.assertIn("비교 불가: 비교 기준의 평가 조건이 확인되지 않음", unverified)
+        self.assertNotIn("%p", unverified)
+
+
+class NoLeftovers(Base):
+    def test_zz_no_child_process_is_left(self):
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(-1, os.WNOHANG)
+
+
+if __name__ == "__main__":
+    unittest.main()

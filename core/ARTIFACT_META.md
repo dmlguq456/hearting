@@ -129,6 +129,66 @@ cap is reached, the writer replaces a proposed new code by `ETC`. The writer lim
 label to 40 and a note to 120 characters (stricter than the contract, which only needs
 strings). Without a project file the default display name is the project folder name.
 
+### `.runtime/artifact-producer/v1/experiment-catalog.json` — `experiment-catalog/v1`
+
+What each experiment condition is called, what it changes, what it is compared with, and what
+the goal and deciding metric are. One file per project root, next to `project-meta.json`.
+
+```json
+{
+  "schema_version": 1,
+  "contract": "experiment-catalog/v1",
+  "artifact_root_id": "root_11111111111111111111111111111111",
+  "revision": 3,
+  "updated_at": "2026-11-13T10:00:00Z",
+  "terms": [{"term": "fix", "meaning": "화자 수 2명 고정 모델(원고의 기준)", "note": ""}],
+  "groups": [{"id": "grp_0123456789ab", "display_name": "AMI 가변 화자 개선",
+              "goal": "AMI Dev에서 var WER이 fix 19.99%보다 낮은가",
+              "metric": {"key": "wer", "unit": "%", "direction": "min", "split": "validation",
+                         "scoring": "AMI Dev, oracle VAD"},
+              "target": {"kind": "fixed", "label": "fix", "value": 19.99, "split": "validation",
+                         "scoring": "AMI Dev, oracle VAD"},
+              "status": "running"}],
+  "conditions": [{"id": "cnd_0123456789ab", "group": "grp_0123456789ab",
+                  "display_name": "0.3초 이하 짧은 발화 유지, 최대 10명", "aliases": ["retain030"],
+                  "former_names": [], "changes": "short_speech.mode=retain, max_n_spks=10",
+                  "compared_to": null, "problem": "짧은 발화에서 화자 누락",
+                  "refs": {"runs": [{"run_id": "mpwav-…-retain030-n10", "row_id": null}],
+                           "output_dirs": [], "configs": []}}],
+  "merged": []
+}
+```
+
+- **Owns names, goals, and comparison meaning only.** Progress, ETA, metric points, and
+  stagnation stay in the public run record (`resource-runs/<run_id>.json`); the catalog never
+  copies them. A run joins a condition through `refs.runs` (`run_id`, optional `row_id`).
+- **Not `project-meta.json`.** The branch vocabulary classifies work and is closed at five
+  fields; condition names change during a run. **Not `shared/`.** That folder holds admitted,
+  immutable revisions and is protected by the locator and metadata amendments, so a file that
+  changes while a condition is renamed does not belong under it.
+- **One write path**: `utilities/experiment_catalog.py` under the root admission lock, one
+  atomic replace, and one `kind=meta` history event (`target.type=project`) per changed place.
+  Two writers at once both land (each mutation runs on the latest file inside the lock). A
+  rename keeps the old name in `former_names`, so notices and cards written earlier still
+  resolve; earlier notices are not rewritten.
+- **Project boundary.** The file carries `artifact_root_id`. A file whose id is not this root's
+  (copied from another project, or the root has no identity) reads as invalid
+  (`foreign-root` / `root-identity-missing`): it is never used for names and never written.
+  A broken file is never overwritten to "repair" it. Readers ignore unknown fields and a
+  writer keeps the ones it finds.
+- **A gap is a warning, never a gate.** `lint` and `status` report a missing name, a name equal
+  to a run id or file name, a duplicate name, a missing goal, metric, unit, or target, with the
+  place in the file (`conditions[<id>].display_name`) and exit 0. Nothing here stops a run, a
+  write, or an answer.
+- **Comparison.** `status` gives a difference only when both values are the condition's latest
+  value of the declared metric on a comparable basis: a fixed baseline must declare the same
+  split and scoring as the metric; a condition baseline must be at the same epoch. A percent
+  difference is in points (`%p`) with the relative change kept separate. A best value is never
+  mixed into a latest comparison. Anything else is `no-data` or `not-comparable` with the
+  reason; no number is invented.
+- Commands: `python3 utilities/experiment_catalog.py show|status|lint|register|rename|merge|link|add-term`
+  (`--artifact-root ROOT` or `--path PROJECT`; writes take `--dry-run`).
+
 ### `현황.md` / `STATUS.md` — the project status document
 
 One short page a person reads first to see where a project stands. Fleet puts its one
@@ -437,6 +497,9 @@ selector; a short ID or alias works when it names one owner.
 
 `--by`, `--reason`, and `--session` are optional. The command has no way to move a cycle,
 edit a manifest, or change a route.
+
+Experiment condition names and their comparison basis have their own command,
+`python3 utilities/experiment_catalog.py` (see the `experiment-catalog/v1` section above).
 
 ## The one background review
 
