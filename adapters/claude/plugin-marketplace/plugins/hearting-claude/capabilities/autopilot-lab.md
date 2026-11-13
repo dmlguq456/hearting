@@ -433,6 +433,12 @@ hash-named snapshot with mismatched content fails closed.
 
 ### Smoke binding
 
+A current, verified smoke PASS is reused without launching another reviewer or
+spending another verdict round. If a deterministic recheck is needed after the
+reviewer budget is spent, replay the recorded smoke command on the current
+inputs through the existing verification runner; keep owner-run independence
+degraded and require fresh passing evidence before proceeding.
+
 The hash-bound smoke attestation binds *both* the config snapshot and its
 source: `config_sha256`/`config_source_sha256`/`config_source_path` are
 top-level fields, and `verify()` requires an input row whose path matches

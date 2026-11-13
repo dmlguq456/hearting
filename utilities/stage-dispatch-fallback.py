@@ -2477,6 +2477,11 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
             args.review_source_subject_digest = node_round_admission.source_subject_digest
         except (DispatchContractError, ValueError) as exc:
             return fail(getattr(exc, "reason", str(exc)), 65, child_spawned="0")
+        reused = DISPATCH_NODE.REVIEW_ROUND_CAP.reuse_deterministic_pass(route, node, args.jobs, node_round_budget)
+        if reused:
+            for key, value in reused.items():
+                print(f"{key}={value}")
+            return 0
         choice = decide_continuation(route, action="round", node=node, facts={"budget": node_round_budget})
         if not choice.allowed:
             fields = {"next_action": choice.next_action, "retry_when": choice.retry_when}
