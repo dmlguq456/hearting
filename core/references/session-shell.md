@@ -556,8 +556,9 @@ and leaves focus, `empty` and the native input frontier as they were.
 Put each answer choice on
 its own line, wrapping within that choice; every choice row leads with a
 two-cell column for the mark. In a focused question box ↑↓ move the chosen
-choice: its rows (each row of a wrapped one) carry `▸` in this session's
-harness color, bold, and their words bold in the bright body color, while every
+choice: its first row carries `▸` in this session's harness color, bold, and
+every row of it (each row of a wrapped one) has its words bold in the bright
+body color, while every
 other choice keeps the mark's column blank and reads dim grey (without color
 the mark and the weight alone tell them apart). Enter
 sends it, as Claude's own question does; it starts on the recommended choice,

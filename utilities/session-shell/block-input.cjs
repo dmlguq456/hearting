@@ -133,10 +133,10 @@ module.exports=function({changed,answer,action,page}) {
   }
   // The option rows of one choice start with its number (`2 `); its wrapped rows
   // with spaces. Spec E9 rule 53: every option row leads with a two-cell column for the
-  // mark (blank, so focusing shifts nothing). While ↑↓ choose, the chosen choice's rows
-  // (each row of a wrapped one) carry `▸` in this session's harness color, bold, and their
-  // words bold in the bright body color; every other choice reads dim grey. Without color
-  // the mark and the weight alone tell them apart.
+  // mark (blank, so focusing shifts nothing). While ↑↓ choose, the chosen choice's first row
+  // carries `▸` in this session's harness color, bold, and every row of it (each row of a
+  // wrapped one) has its words bold in the bright body color; every other choice reads dim
+  // grey. Without color the mark and the weight alone tell them apart.
   function highlight(options,at,choosing){
     let n=-1;
     return options.map(parts=>{
@@ -144,7 +144,8 @@ module.exports=function({changed,answer,action,page}) {
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
       if(!choosing||at<0)return [span('  ',''),...parts];
       if(n!==at)return [span('  ',''),...parts.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
-      return [{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...parts.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}))];
+      const words=parts.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
+      return number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...words]:[span('  ',''),...words];
     });
   }
   async function submit(){

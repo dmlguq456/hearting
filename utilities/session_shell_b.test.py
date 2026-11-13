@@ -68,7 +68,8 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
         # Spec E9 rule 53: while ↑↓ choose, the chosen choice's row leads with `▸` (this session's
         # harness color, bold) and its words are bold in the bright body color; every other
         # choice keeps the mark's column blank and reads dim grey. A choice wrapped over several
-        # rows takes the same form on each. Without color (NO_COLOR, mono) the mark and the
+        # rows has its words in the same form on each (the mark on its first row only, so it
+        # never reads as two choices). Without color (NO_COLOR, mono) the mark and the
         # weight alone tell them apart. Unfocused, the mark's column stays blank (no shift).
         # The panel keeps the mark's harness color (it is not the question's rose accent).
         self.node(r"""
@@ -94,9 +95,11 @@ for(const [styles,colored] of [[color,true],[plain,false]]){
  rows.forEach((row,i)=>{
   const chosen=i>=1&&i<=3;
   if(chosen){
-   // (a) `▸` in the harness color, bold; the words bold in the bright body color. (d) On every row of a wrapped choice.
-   assert.equal(row[0].text,'▸',JSON.stringify(row));assert.equal(row[0].bold,true);assert.equal(row[1].text,' ');
-   if(colored)assert.equal(row[0].foreground,173);
+   // (a) `▸` in the harness color, bold, on the choice's first row; the words bold in the bright
+   // body color. (d) The same words on every row of a wrapped choice.
+   if(i===1){assert.equal(row[0].text,'▸',JSON.stringify(row));assert.equal(row[0].bold,true);assert.equal(row[1].text,' ');
+    if(colored)assert.equal(row[0].foreground,173);}
+   else{assert.equal(row[0].text,'  ',JSON.stringify(row));assert(!row.some(p=>p.text==='▸'));}
    assert(words(row).every(p=>p.bold===true&&!p.dim&&(colored?p.foreground===253:true)),JSON.stringify(row));
   }else{
    // (b) The mark's place blank, the words dim grey and not bold. (c) Without color: not bold.
