@@ -940,8 +940,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // context), then the kind row goes, then the route takes one row.
     // Spec rule 43: a backend that sends `workers_live` names the owner and each stage worker
     // running now apart. The owner leads the route (its values in `owner_paint` while a worker
-    // leads the row). The route's time stands at the end of the title, and the context rows
-    // start with a dim `CTX` in the role column, the gauge under the harness. Spec rule 48: the
+    // leads the row). The context rows start with a dim `CTX` in the role column, the gauge
+    // under the harness, and (spec rule 57) the route's time follows the percent. Spec rule 48: the
     // owner's live workers stand in one rounded box under it (below). An older backend's row
     // keeps its one doer and the rows as they were.
     const treeOf=r=>side&&Array.isArray(r.workers_live);
@@ -1020,56 +1020,66 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Spec rule 43 (d): `CTX` in the role column (one space after it with no role column); an
     // unknown context draws no row.
     const ctxLabel=()=>roleWidth?[text('CTX'.padEnd(roleWidth),'dim'),text(' ')]:[text('CTX','dim'),text(' ')];
-    const gaugeCells=p=>{const {bar,pct}=gaugeOfPaint(p);
-      return pct.length?[...ctxLabel(),...(bar.length?bar:[pad(barWidth)]),...(barWidth?[text(' ')]:[]),pad(pctWidth-size(pct)),...pct]:null;};
-    // Spec rule 43 (c): the time at the right end of the title's last row; the title folds and
-    // ends in `…` within the cells left beside it.
-    function timedTitle(title,E){
-      const room=Math.max(1,inner-2-(E.length?size(E)+1:0));
-      let rows=wrapAll(title,room);if(rows.length>2)rows=[rows[0],ellipsis(rows[1],room)];
-      const end=row=>E.length?[...row,pad(inner-2-size(row)-size(E)),...E]:row;
-      return {rows:rows.map((row,i)=>i===rows.length-1?end(row):row),one:[end(cut(title,room))]};
+    // Spec rule 57 (a), (d): the `CTX` row as before (label, bar, percent) with the time right
+    // after the percent (` · `, dim), not at the right edge. Short of cells the bar shortens
+    // (four cells at least), then goes, then the time; the percent stays. An unknown context
+    // with a time keeps the time in the value column; with neither, no row.
+    function ctxTimed(p,E,room){
+      const {bar,pct}=gaugeOfPaint(p),label=ctxLabel(),time=E.length?[text(' · ','dim'),...E]:[];
+      if(!pct.length)return E.length?[pad(size(label)),...E]:null;
+      const full=bar.length?size(bar):barWidth;
+      const cells=n=>{
+        if(!bar.length||n>=full)return bar.length?bar:[pad(n)];
+        const on=measure(clean(bar[0].text)),f=full?Math.round(on*n/full):0;
+        return [{...bar[0],text:'━'.repeat(f)},...(bar[1]?[{...bar[1],text:'─'.repeat(n-f)}]:[])];
+      };
+      const row=(n,t)=>[...label,...(n?[...cells(n),text(' '),pad(pctWidth-size(pct))]:[]),...pct,...t];
+      for(let n=full;n>=Math.min(4,full);n--){if(!n)break;const r=row(n,time);if(size(r)<=room)return r;}
+      const bare=row(0,time);
+      return size(bare)<=room?bare:row(0,[]);
     }
     // Spec rule 48 (a-1), (b), (d): a worker's rows read as the owner's: who (its own mark,
     // role, harness, model, effort) stands in the top line of the workers' box (`╭─ … ─╮`, a
-    // later worker's in the line between, `├─ … ─┤`); inside the box, four cells narrower,
-    // `CTX` under the role word with the gauge under the harness, then the stage, the open tool
-    // and its target (the path, the file name, the tool, then none) with the worker's time at
-    // the right. Short of cells the who loses its effort, then its harness, and `─` fills.
-    // Short of rows (rule 48 (c)) the worker takes the owner's one-row form, two cells in.
+    // later worker's in the line between, `├─ … ─┤`); inside the box, `CTX` under the role word
+    // with the gauge under the harness and the worker's time after its percent (spec rule 57),
+    // then the stage, the open tool and its target (the path, the file name, the tool, then
+    // none). Spec rule 57 (c): the box stands two cells further in (its left line under the
+    // owner's text, its right line where it was), six cells narrower inside than the route's
+    // rows. Short of cells the who loses its effort, then its harness, and `─` fills. Short of
+    // rows (rule 48 (c)) the worker takes the owner's one-row form, two cells in.
     const boxLine=s=>({...text(s,'dim'),role:'messages'});
     function workerBlock(w){
       const p=w.paint||{},glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
-      const lead=[glyph,text(' '),...roleCell(w.role)],body=[],room=inner-4;
+      const lead=[glyph,text(' '),...roleCell(w.role)],body=[],room=inner-6;
       // (At least one `─` after the who while its model fits so; the narrowest panel gives that up first.)
-      let who=whoOf(lead,p,w.role,[],inner-6)||cut(lead,inner-6);
-      if(size(who)<=size(lead))who=whoOf(lead,p,w.role,[],inner-5)||cut(lead,inner-5);
+      let who=whoOf(lead,p,w.role,[],inner-8)||cut(lead,inner-8);
+      // (A value kept is worth more than the `─`: the who may run up to the corner, as rule 57 draws it.)
+      const wide=whoOf(lead,p,w.role,[],inner-6);if(wide&&size(wide)>size(who))who=wide;
+      if(size(who)<=size(lead))who=whoOf(lead,p,w.role,[],inner-7)||cut(lead,inner-7);
       // A model name longer than the line itself is cut with `…` rather than left out.
-      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-5);
-      // Short of cells (a four-cell percent at the narrowest panel) the bar goes and `CTX` and the
-      // percent stay, as the owner's row gives way (#1583 review follow-up (가)).
-      const g=gaugeCells(p),fit=g&&3+size(g)>room?[...ctxLabel(),...gaugeOfPaint(p).pct]:g;
-      if(fit)body.push([text('   '),...fit]);
+      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-7);
+      const c=ctxTimed(p,E,room-3);
+      if(c)body.push([text('   '),...c]);
       const stage=w.stage?[text(w.stage,'loc_repo')]:[],tool=w.tool?[text(w.tool,'loc_repo')]:[];
-      const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3-(E.length?size(E)+1:0);
+      const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3;
       for(const t of [[...tool,...(w.target?[text(' '+w.target,'loc_repo')]:[])],[...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool,[]]){
         const row=[...stage,...(stage.length&&t.length?[text(' · ','dim')]:[]),...t];
         if(t.length&&size(row)>what)continue;
-        const kept=cut(row,Math.max(0,what));
-        if(row.length||E.length)body.push([text('   '),...kept,...(E.length?[pad(room-3-size(kept)-size(E)),...E]:[])]);
+        if(row.length)body.push([text('   '),...cut(row,Math.max(0,what))]);
         break;
       }
       const lead1=[text('  '),glyph,text(' '),...roleCell(w.role)];
       return {who,body,one:foldRow(lead1,p,w.role,E)||cut(lead1,inner)};
     }
     function workerBox(blocks){
-      const out=[];
+      const out=[],indent=text('  ');
       blocks.forEach((b,i)=>{
         const [l,r]=i?['├','┤']:['╭','╮'];
-        out.push([boxLine(l+'─ '),...b.who,boxLine(' '+'─'.repeat(Math.max(0,inner-5-size(b.who)))+r)]);
-        for(const row of b.body)out.push([boxLine('│'),text(' '),...row,pad(inner-4-size(row)),text(' '),boxLine('│')]);
+        const dashes=inner-7-size(b.who);
+        out.push([indent,boxLine(l+'─ '),...b.who,boxLine(dashes>=0?' '+'─'.repeat(dashes)+r:r)]);
+        for(const row of b.body)out.push([indent,boxLine('│'),text(' '),...row,pad(inner-6-size(row)),text(' '),boxLine('│')]);
       });
-      out.push([boxLine('╰'+'─'.repeat(Math.max(0,inner-2))+'╯')]);
+      out.push([indent,boxLine('╰'+'─'.repeat(Math.max(0,inner-4))+'╯')]);
       return out;
     }
     // Spec rule 24 (11-12), 36 (b): the third row says which kind of route it is and where it
@@ -1129,7 +1139,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const tree=treeOf(r),workers=tree?workersOf(r).map(workerBlock):[];
         routeRows.push({parts:folded(r),two:side,who:side?whoRow(r):null,lead:side?leadRow(r):null,ctx:side?ctxRow(r):null,
           names,name:[cut(title,inner-2)],glyph,place:side?placeRow(r):null,action:key,kind:r.kind,
-          ...(tree?{tree,workers,box:workers.length?workerBox(workers):[],timed:timedTitle(title,r.elapsed?[text(r.elapsed)]:[]),gauge:gaugeCells(leadPaint(r)),
+          ...(tree?{tree,workers,box:workers.length?workerBox(workers):[],gauge:ctxTimed(leadPaint(r),r.elapsed?[text(r.elapsed)]:[],inner-2),
             counted:workers.length?placeRow(r,workers.length):null}:{})});
         if(open.has(key))for(const d of details(r))detailRows.push({...d,action:key,after:r.id});
       }
@@ -1254,7 +1264,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the owner and its workers fold to one row together (rule 48 (c)), never one without the other.
     function treeForm(x){
       const workers=keepWorkers?x.workers:[],bar=[text('  ')],out=[];
-      const head=keepCtx?x.who:x.lead,names=keepCtx?(keepMulti?x.timed.rows:x.timed.one):(keepMulti?x.names:x.name);
+      // Spec rule 57 (b): the title takes its rows whole; the time is on the `CTX` row (or, folded, the first row).
+      const head=keepCtx?x.who:x.lead,names=keepMulti?x.names:x.name;
       if(head){out.push(head);if(keepCtx&&x.gauge)out.push([...bar,...x.gauge]);out.push(...names.map(row=>[...bar,...row]));}
       else{out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[...bar,...row]));if(keepCtx&&x.gauge)out.push([...bar,...x.gauge]);}
       const place=!keepWorkers&&x.counted?x.counted:x.place;

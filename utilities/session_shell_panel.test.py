@@ -1279,12 +1279,14 @@ assert.deepEqual(bottom({model:{context_side:undefined}}),bottom());
         self.node(script, "panel-view.cjs")
 
     def test_a_route_shows_its_owner_first_and_its_live_workers_in_a_box_under_it(self):
-        # Spec E9 rules 43, 48: beside the native area a route's first row is its owner (no branch,
-        # no `│` guide); its stage workers running now stand in one rounded box under it, each
+        # Spec E9 rules 43, 48, 57: beside the native area a route's first row is its owner (no
+        # branch, no `│` guide); its stage workers running now stand in one rounded box under it,
+        # two cells in (its left line under the owner's text, its right line where it was), each
         # worker's who in the box's top line (`╭─ … ─╮`, a later one's in the line between,
         # `├─ … ─┤`; N workers take 3N+1 rows), then `CTX` under the role word with the gauge
-        # under the harness, then its stage and tool with its own time at the right. The route's
-        # time ends the title. An older backend's row (no `workers_live`) keeps its one doer.
+        # under the harness and its own time right after the percent, then its stage and tool. The
+        # route's time follows the owner's percent (` · `), never at the right edge; the title
+        # takes its rows whole. An older backend's row (no `workers_live`) keeps its one doer.
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
@@ -1298,18 +1300,21 @@ const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:fals
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m'})]};
 const box=rows=>rows.slice(rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s)),rows.findIndex(s=>s.startsWith('│ ╰'))+1);
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-// No worker: owner / CTX / title with the route's time at its end / kind; no inner box.
+// No worker: owner / CTX with the route's time after its percent / title / kind; no inner box.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │   CTX   ━━━───── 38% +│ │$/.test(b[at+1])&&/^│ │   셸 상태·표시 고치기 +41m │ │$/.test(b[at+2])&&b[at+3].includes('│   code · one-shot · Edit'),b.join('\n'));
+assert(at>0&&/^│ │   CTX   ━━━───── 38% · 41m +│ │$/.test(b[at+1])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at+2])&&b[at+3].includes('│   code · one-shot · Edit'),b.join('\n'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+1],'━'),col(b[at],'claude'));
-assert(!/[└├]─|╭─ [⠋●]/.test(b.join('\n'))&&!b.some(s=>/^│ │ │/.test(s))&&!b[at+1].includes('41m'),b.join('\n'));
-// One worker: the owner's four rows (no guide), then the box: who in its top line, CTX, stage and time, bottom line.
+assert(!/[└├]─|╭─ [⠋●]/.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at+2].includes('41m'),b.join('\n'));
+// One worker: the owner's four rows (no guide), then the box two cells in: who in its top line
+// (up to the corner rather than giving up a value), CTX with its time, stage and tool, bottom line.
 b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh'));
-for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% +│ │$/],[2,/^│ │   속도 3단계 +2h 10m │ │$/],[3,/^│ │   code · staged 3\/7 · execute ● +│ │$/],
- [4,/^│ │ ╭─ ⠋ worker claude Sonnet 5\.5 ─+╮ │ │$/],[5,/^│ │ │    CTX    ━━────── 22% +│ │ │$/],[6,/^│ │ │    execute · Edit +12m │ │ │$/],[7,/^│ │ ╰─+╯ │ │$/]])
+for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   속도 3단계 +│ │$/],[3,/^│ │   code · staged 3\/7 · execute ● +│ │$/],
+ [4,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[5,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[6,/^│ │   │    execute · Edit panel\.py │ │ │$/],[7,/^│ │   ╰─+╯ │ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
-// (Four cells narrower inside the box: the tool's target shows where it fits, its file name first.)
-assert(box(draw([one],46,60)).some(s=>/│    execute · Edit panel\.py +12m │ │ │$/.test(s)),box(draw([one],46,60)).join('\n'));
+// Spec rule 57 (c): the box's left line under the owner's text, its right line where the route's rows end.
+assert.equal(col(b[at+4],'╭'),col(b[at+1],'CTX'));assert.equal(b[at+4].lastIndexOf('╮'),b[at+5].lastIndexOf('│ │ │')+0);
+// (Six cells narrower inside the box: the tool's target shows where it fits, its file name first.)
+assert(box(draw([one],52,60)).some(s=>/│    execute · Edit utilities\/panel\.py +│ │ │$/.test(s)),box(draw([one],52,60)).join('\n'));
 assert.equal(col(b[at+5],'CTX'),col(b[at+4],'worker'));assert.equal(col(b[at+5],'━'),col(b[at+4],'claude'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert(!b.join('').includes('owner Opus'),b.join('\n'));
 const v1=view.render({width:40,height:60,side:true,model:{...head,routes:[one],route_count:1},configuration:{},questions:()=>[]});
@@ -1322,28 +1327,30 @@ const area=v1.hits.filter(h=>h.action==='route:w').map(h=>h.row),boxRows=v1.rows
 for(const i of boxRows)assert(area.includes(i),i+' '+JSON.stringify(area));
 // Two workers: one box, the second's who in the line between; 3N+1 rows.
 b=box(draw([two],40,60));const top=b.findIndex(s=>/╭─ ⠋ worker codex gpt-5\.5 ─+╮/.test(s));
-assert(top>0&&/^│ │ │    CTX    ━━/.test(b[top+1])&&/^│ │ │    execute · Bash +12m │ │ │$/.test(b[top+2])&&/^│ │ ├─ ● worker opencode glm-5\.2 ─+┤ │ │$/.test(b[top+3])
- &&/^│ │ │    CTX    ━━━━━/.test(b[top+4])&&/^│ │ │    execute +8m │ │ │$/.test(b[top+5])&&/^│ │ ╰─+╯ │ │$/.test(b[top+6])&&b[top+7].startsWith('│ ╰'),b.join('\n'));
+assert(top>0&&/^│ │   │    CTX    ━━.* 34% · 12m +│ │ │$/.test(b[top+1])&&/^│ │   │    execute · Bash +│ │ │$/.test(b[top+2])&&/^│ │   ├─ ● worker opencode glm-5\.2 ┤ │ │$/.test(b[top+3])
+ &&/^│ │   │    CTX    ━━━━.* 71% · 8m +│ │ │$/.test(b[top+4])&&/^│ │   │    execute +│ │ │$/.test(b[top+5])&&/^│ │   ╰─+╯ │ │$/.test(b[top+6])&&b[top+7].startsWith('│ ╰'),b.join('\n'));
 // No role recorded anywhere: no role column, `CTX` and one space.
 b=box(draw([{...solo,role:undefined}],40,60));
-assert(b.some(s=>s.includes('│ ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │   CTX ━━━───── 38%/.test(s)),b.join('\n'));
-// An unknown context: no CTX row (owner or worker); the times stay.
+assert(b.some(s=>s.includes('│ ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │   CTX ━━━───── 38% · 41m/.test(s)),b.join('\n'));
+// An unknown context: no CTX label (owner or worker); the times stay in the value column.
 b=box(draw([{...one,owner_paint:{harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')},workers_live:[{...worker('claude','Sonnet 5.5','high','22%','━━'),paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5')}}]}],40,60));
-assert(!b.join('').includes('CTX')&&b.some(s=>/속도 3단계 +2h 10m │ │$/.test(s))&&b.some(s=>/│    execute +12m │ │ │$/.test(s)),b.join('\n'));
-// A title on two rows: the time at the right end of the second.
+assert(!b.join('').includes('CTX')&&b.some(s=>/^│ │ {10}2h 10m +│ │$/.test(s))&&b.some(s=>/^│ │   │ {11}12m +│ │ │$/.test(s))&&!b.some(s=>/속도 3단계 +2h/.test(s)),b.join('\n'));
+// A title on two rows: both rows the title's; the time on the CTX row.
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&/ 41m │ │$/.test(b[at+1])&&b[at+2].includes('code · one-shot'),b.join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at-1].includes('38% · 41m')&&b[at+2].includes('code · one-shot'),b.join('\n'));
 // Hangul in the owner's title and the worker's target: every line keeps its cells.
 for(const width of [32,34,38,40,44])for(const s of draw([{...one,title:'한글 제목이 길게 이어지는 경우',workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'문서/한글 파일.md'})]},two],width,60))
  assert.equal(cells(s),width,width+' '+s);
 // Short of cells (rule 48 (d)): in the box's top line the effort goes, then the harness; role and model stay.
 assert(box(draw([one],48,60)).some(s=>/╭─ ⠋ worker claude Sonnet 5\.5 high ─+╮/.test(s)),box(draw([one],48,60)).join('\n'));
 assert(box(draw([one],44,60)).some(s=>/╭─ ⠋ worker claude Sonnet 5\.5 ─+╮/.test(s)));
-assert(box(draw([one],34,60)).some(s=>/╭─ ⠋ worker Sonnet 5\.5 ─+╮/.test(s)),box(draw([one],34,60)).join('\n'));
-assert(box(draw([one],32,60)).some(s=>/╭─ ⠋ worker Sonnet 5\.5 ╮/.test(s)),box(draw([one],32,60)).join('\n'));
+assert(box(draw([one],36,60)).some(s=>/╭─ ⠋ worker Sonnet 5\.5 ─+╮/.test(s)),box(draw([one],36,60)).join('\n'));
+assert(box(draw([one],34,60)).some(s=>/╭─ ⠋ worker Sonnet 5\.5 ╮/.test(s)),box(draw([one],34,60)).join('\n'));
+assert(box(draw([one],32,60)).some(s=>/╭─ ⠋ worker Sonnet …/.test(s)),box(draw([one],32,60)).join('\n'));
 b=box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],40,60));
 assert(b.some(s=>/╭─ ⠋ worker deepseek-v4\.1-\S*… ─*╮/.test(s))&&b.some(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh')),b.join('\n'));
 assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],48,60)).some(s=>/╭─ ⠋ worker deepseek-v4\.1-flash ─+╮/.test(s)));
+assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],52,60)).some(s=>/╭─ ⠋ worker opencode deepseek-v4\.1-flash ╮/.test(s)));
 // An older backend's row: one doer, its context row keeps the time, no CTX, no box.
 const older={...one,owner_paint:undefined,workers_live:undefined};
 b=box(draw([older],60,60));
@@ -1351,6 +1358,52 @@ assert(!/CTX|╭─ [⠋●]|└─/.test(b.join(''))&&b.some(s=>/⠋ worker cla
  &&b.some(s=>s.includes('owner Opus 5.5')),b.join('\n'));
 // The bottom layout keeps its rows whatever the route carries.
 assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},older,{...two,workers_live:undefined}],120,20,{side:false}));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_a_route_box_carries_its_time_on_the_ctx_row_and_its_workers_two_cells_further_in(self):
+        # Spec E9 rule 57: owners and workers keep their `CTX` row (label, bar, percent) with the
+        # time right after the percent (` · `, dim), not at the right edge; the title and the
+        # worker's stage row carry no time. The workers' box stands two cells further in. Short of
+        # cells the bar shortens, then goes, then the time; the percent stays. Widths 32-48 with the
+        # rows running short: every row keeps the panel's width, the steps of rule 48 (c) hold
+        # (owners and workers fold together; folded, percent and time end the first row).
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
+const worker=(h,m,pct,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',tool:'Edit',...o,paint:{glyph:P('⠋'),...doer(h,m,'high',pct,'━━')}});
+const solo={id:'s',title:'셸 상태·표시 고치기',kind:'working',state:'working',elapsed:'41m',shape:'one-shot-owner',kind_word:'code',role:'owner',tool:'Edit',
+ stages:[{name:'one-shot',current:true,mark:'●'}],paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','38%','━━━')},workers_live:[]};
+const one={id:'w',title:'한글 제목 — 속도 3단계의 남은 재계산',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
+ paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','52%','━━━━')},workers_live:[worker('claude','Sonnet 5.5','22%',{target:'문서/한글 파일.md'})]};
+const two={...one,id:'t',title:'검토 두 갈래',workers_live:[worker('codex','gpt-5.5','34%'),worker('opencode','glm-5.2','71%',{elapsed:'8m'})]};
+const text=r=>r.map(p=>p.text).join('');
+for(let width=32;width<=48;width++){
+ for(let h=60;h>=12;h--){
+  const v=view.render({width,height:h,side:true,fill:true,model:{...head,routes:[solo,one,two],route_count:3},state:'working',configuration:{},questions:()=>[]});
+  const rows=v.rows.map(text),where=width+'x'+h+'\n'+rows.join('\n');
+  for(const s of rows)assert.equal(cells(s),width,where);
+  // (a), (b) The time follows a percent on a CTX row, never ends a title or a stage row.
+  for(const s of rows.filter(s=>/^│ │ +(│ +)?CTX /.test(s))){if(/ · \d/.test(s))assert(/\d+% · (\d+h )?\d+m +(│ )?│ │$/.test(s),where);}
+  assert(!rows.some(s=>/(고치기|재계산|두 갈래|execute · Edit|execute · Bash|execute) +(\d+h )?\d+m +(│ )?│ │$/.test(s)),where);
+  // (c) The box two cells in: its left line under the owner's CTX label, its right line at the route's edge.
+  const tops=rows.map((s,i)=>/^│ │   [╭├]─ /.test(s)?i:-1).filter(i=>i>=0);
+  for(const i of tops)assert(/[╮┤] │ │$/.test(rows[i]),where);
+  if(tops.length)assert(!rows.some(s=>/^│ │ [╭├]─ [⠋●]/.test(s)),where);
+ }
+}
+// At 40 cells, the picture of rule 57.
+const b=draw([one],40,60),at=b.findIndex(s=>s.includes('⠋ owner'));
+for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[3,/^│ │   재계산 +│ │$/],
+ [4,/^│ │   code · staged 3\/7 · execute ● +│ │$/],[5,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[6,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[7,/^│ │   │    execute · Edit +│ │ │$/],[8,/^│ │   ╰─+╯ │ │$/]])
+ assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
+// (d) Short of cells: the bar shortens, then goes; then the time; the percent stays.
+const at32=draw([one],32,60);
+assert(at32.some(s=>/^│ │   CTX    52% · 2h 10m +│ │$/.test(s))&&at32.some(s=>/^│ │   │    CTX    22% +│ │ │$/.test(s)),at32.join('\n'));
+assert(draw([solo],32,60).some(s=>/^│ │   CTX   ━+─+ 38% · 41m │ │$/.test(s)&&s.replace(/[^━─]/g,'').length<8),draw([solo],32,60).join('\n'));
+// Folded (rule 48 (c)): percent and time end the first row together, as before.
+const folded=view.render({width:40,height:22,side:true,fill:true,model:{...head,routes:[one,two],route_count:2},state:'working',configuration:{},questions:()=>[]}).rows.map(text);
+assert(folded.some(s=>/^│ │ ⠋ owner .* 52% +2h 10m │ │$/.test(s))&&!folded.some(s=>/^│ │ .*CTX/.test(s)),folded.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
@@ -1371,9 +1424,9 @@ for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
    paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P(pct),gauge_row:gauge(width,pct)}}]};
  const rows=draw([route],width,60),seen=width+' '+pct+'\n'+rows.join('\n');
  for(const s of rows)assert.equal(cells(s),width,seen);
- const top=rows.findIndex(s=>/^│ │ ╭─ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ │ ╰─+╯ │ │$/.test(s));
+ const top=rows.findIndex(s=>/^│ │   ╭─ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ │   ╰─+╯ │ │$/.test(s));
  assert(top>0&&bottom>top+1,seen);
- for(const s of rows.slice(top+1,bottom))assert(/^│ │ │ .* │ │ │$/.test(s),seen);
+ for(const s of rows.slice(top+1,bottom))assert(/^│ │   │ .* │ │ │$/.test(s),seen);
  const ctx=rows.slice(top+1,bottom).find(s=>s.includes('CTX'));
  assert(ctx&&ctx.includes(pct),seen);
 }
@@ -1722,7 +1775,7 @@ for(const [width,routes,model] of [[38,reviewer,{}],[38,reviewer,{messages:[],wa
  for(let h=40;h>=12;h--){
   const rows=view.render({width,height:h,side:true,fill:true,model:{...head,...model,routes,route_count:routes.length},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
   const all=rows.join('\n'),ctx=rows.filter(s=>/^│ │   CTX /.test(s)).length,owners=rows.filter(s=>/^│ │ [⠋●] owner /.test(s)).length;
-  const inBox=rows.some(s=>/^│ │ [╭├]─ [⠋●] worker/.test(s)),oneRow=rows.filter(s=>/^│ │   [⠋●] worker /.test(s)),counted=/· worker \d/.test(all);
+  const inBox=rows.some(s=>/^│ │   [╭├]─ [⠋●] worker/.test(s)),oneRow=rows.filter(s=>/^│ │   [⠋●] worker /.test(s)),counted=/· worker \d/.test(all);
   const state=inBox?'box':oneRow.length?'one':counted?'gone':owners?'':'flat';
   const where=width+'x'+h+'\n'+all;
   // Never a middle form: the box only with every owner's context row, the one-row workers only without any.

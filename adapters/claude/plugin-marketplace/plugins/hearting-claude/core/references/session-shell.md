@@ -369,19 +369,24 @@ row is always the owner's (or a frame leg's with no owner; a worker leading a
 route whose owner is not one known attempt sends no `workers_live`, so the row
 keeps its one doer), the context row
 starts with a dim `CTX` in the role column with the gauge under the harness
-(`CTX    ━━━━──── 52%`; no row for an unknown context), the route's time ends
-the title's last row (the title folds and ends in `…` within the cells left
-beside it), and no `owner <model>` word follows the stage. The owner's live
+and the route's time right after the percent (`CTX    ━━━━──── 52% · 2h 10m`,
+the ` · ` and the time dim; never at the right edge; an unknown context keeps
+the time alone in the value column, and with neither no row), the title takes
+its rows whole, and no `owner <model>` word follows the stage. Short of cells
+the `CTX` row's bar shortens (four cells at least), then goes, then the time;
+the percent stays. The owner's live
 workers stand in one rounded box under its rows (dim lines, no branch and no
-guide beside the owner): each worker's first row, its own mark, `worker` (or
-`frame`), harness, model and effort, stands in the box's top line (`╭─ ⠸ worker
-claude Sonnet 5.5 ─╮`; a later worker's in the line between, `├─ … ─┤`; the
-bottom line once, so N workers take 3N+1 rows), then inside the box, four
-cells narrower, its `CTX` row (`CTX` under the role word, the gauge under the
-harness) and its stage, open tool and target (the path, the file name, the
-tool, then none) with its own time at the right. Short of cells the top line
-lets the effort go, then the harness (`─` fills; a model longer than the line
-is cut with `…`); a finished stage's worker is not drawn. Short of rows the
+guide beside the owner), two cells further in: its left line under the owner's
+`CTX` and title, its right line where the route's rows end. Each worker's first
+row, its own mark, `worker` (or `frame`), harness, model and effort, stands in
+the box's top line (`╭─ ⠸ worker claude Sonnet 5.5 ─╮`, or up to the corner
+rather than giving up a value; a later worker's in the line between,
+`├─ … ─┤`; the bottom line once, so N workers take 3N+1 rows), then inside the
+box its `CTX` row (`CTX` under the role word, the gauge under the harness, its
+own time after its percent) and its stage, open tool and target (the path, the
+file name, the tool, then none). Short of cells the top line lets the effort
+go, then the harness (`─` fills; a model longer than the line is cut with
+`…`); a finished stage's worker is not drawn. Short of rows the
 owners and their workers fold together, every route at the same step: every
 owner's context folds into its first row and, in the same step, each worker
 takes one row two cells in (no box; its percent and time in the owners'
