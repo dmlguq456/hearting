@@ -1521,11 +1521,37 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                     count += self.alarms(self.t0 + 7472 + 299)
                 self.assertEqual(count, 0)
 
+    def host_run(self, *, running=True, own_process=True, owner=None):
+        """Arm the owner route's resource node on one run its runner records."""
+        import resource_run_registry as RR
+        from workflow_state import WorkflowLedger
+        identity = RR.proc_identity(os.getpid()) if own_process else {
+            "pid": 99999997, "starttime": "1", "command_hash": "0" * 64}
+        registry = self.root / "cycle" / "resource-runs.json"
+        registry.parent.mkdir(exist_ok=True)
+        registry.write_text(json.dumps({"runs": {"host-run-r1": {
+            "run_id": "host-run-r1", "resource_policy": "supervised-owner",
+            "status": "running" if running else "succeeded",
+            "pid": identity["pid"], "starttime": identity["starttime"],
+            "command_hash": identity["command_hash"], "jobs": str(self.jobs.resolve()),
+            "route": self.owner_meta["owner_route_file"], "node": "host-run",
+            "parent_attempt_id": owner or self.aid,
+            "owner_wait": {"parent_attempt_id": owner or self.aid}}}}), encoding="utf-8")
+        armed = WorkflowLedger(self.owner_meta["owner_route_id"], self.owner_meta["owner_route_hash"],
+                               jobs=self.jobs).root / "armed"
+        armed.mkdir(parents=True, exist_ok=True)
+        (armed / "host-run.json").write_text(json.dumps({
+            "node": "host-run", "predecessor_kind": "resource", "predecessor_id": "host-run-r1",
+            "resource_registry": str(registry), "route_file": self.owner_meta["owner_route_file"],
+            "jobs": str(self.jobs.resolve())}), encoding="utf-8")
+
     def test_a_one_turn_owner_whose_long_call_hides_behind_a_sibling_result_gets_no_alarm(self):
+        # The long call's own tool command, started for it, still runs: exact execution.
         for harness in self.DELIVERY:
             with self.subTest(harness=harness):
                 self.owner(harness)
-                with self.lease():
+                with self.lease(), mock.patch.object(supervision, "_running_tool_command",
+                                                     return_value=(self.t0 + 1, "sleep")):
                     self.phase("running-turn")
                     self.runtime("active", "runtime-command-live")
                     # Two parallel calls of one model message; the quick one returns first.
@@ -1533,6 +1559,41 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                                              ("call-quick", "end", "m1")])
                     count = sum(self.alarms(self.t0 + window * 300) for window in range(0, 25))
                 self.assertEqual(count, 0)
+
+    def test_r2_a_call_whose_result_never_comes_alarms_after_the_quiet_windows(self):
+        # RV-PR1592 R2: the long call's result never arrives and nothing else moves; the
+        # runtime alone stays live. Before the fix the stale start record exempted it for days.
+        for harness in self.DELIVERY:
+            for running in (None, (self.t0 - 3600, "sleep")):
+                with self.subTest(harness=harness, resident_shell=bool(running)):
+                    self.owner(harness, "-resident" if running else "")
+                    # A resident shell older than the call does not back the call either.
+                    with self.lease(), mock.patch.object(supervision, "_running_tool_command",
+                                                         return_value=running):
+                        self.phase("running-turn")
+                        self.runtime("active", "runtime-command-live")
+                        self.tool_rows(harness, [("call-long", "start", "m1"), ("call-quick", "start", "m1"),
+                                                 ("call-quick", "end", "m1")])
+                        counts = [self.alarms(self.t0 + offset) for offset in (0, 601, 3600, 86400, 604800)]
+                        observation = self.state(self.t0 + 604800)
+                    self.assertEqual(counts, [0, 1, 1, 1, 1])
+                    self.assertEqual((observation["state"], observation["reason"]),
+                                     ("stalled", "no-comparable-progress"))
+            # The runtime unseen and only an unclassified process (a supervisor wrapper) left:
+            # the pinned record backs nothing past the windows; the existing unknown alarm follows.
+            with self.subTest(harness=harness, execution="unclassified-only"):
+                self.owner(harness, "-unclassified")
+                with self.lease():
+                    self.phase("running-turn")
+                    self.executions[self.aid] = contract.AttemptExecutionObservation(
+                        "unknown", "attempt-process-role-unclassified", (("4242", "1", "unclassified:sh"),))
+                    self.tool_rows(harness, [("call-long", "start", "m1"), ("call-quick", "start", "m1"),
+                                             ("call-quick", "end", "m1")])
+                    counts = [self.alarms(self.t0 + offset) for offset in (0, 601, 3600, 86400, 604800)]
+                    observation = self.state(self.t0 + 604800)
+                self.assertEqual(counts, [0, 0, 1, 1, 1])
+                self.assertEqual((observation["state"], observation["reason"]),
+                                 ("unknown", "attempt-process-role-unclassified"))
 
     def test_b_owner_waiting_on_its_own_host_run_gets_no_alarm(self):
         for harness in self.DELIVERY:
@@ -1545,6 +1606,7 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                         self.tool_rows(harness, [("call-launch", "start", "m1"), ("call-launch", "end", "m1")])
                         count = self.alarms(self.t0)
                         # The resource runner owns the 2,400 s host run; the owner is parked on it.
+                        self.host_run()
                         self.phase("parked")
                         self.runtime(*execution)
                         count += sum(self.alarms(self.t0 + window * 300) for window in range(1, 9))
@@ -1552,6 +1614,36 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                     self.assertEqual(count, 0)
                     self.assertEqual((observation["state"], observation["reason"]),
                                      ("active", "supervised-owner-parked"))
+
+    def test_r1_parked_owner_with_nothing_running_and_a_stuck_supervisor_alarms(self):
+        # RV-PR1592 R1: an old parked phase file and an exactly held lease, but the supervisor
+        # sleeps and nothing it could wait on runs. Before the fix: no alarm, ever.
+        cases = [("parked", "none"), ("deliverable", "none"), ("recovery", "none"),
+                 ("parked", "child-not-executing"), ("parked", "run-process-gone"),
+                 ("parked", "run-finished"), ("parked", "run-of-another-owner")]
+        for harness in self.DELIVERY:
+            for phase, target in cases:
+                for execution in (("unknown", "attempt-process-role-unclassified"), ("absent", "carrier-only")):
+                    with self.subTest(harness=harness, phase=phase, target=target, execution=execution[1]):
+                        self.owner(harness, f"-{phase}-{target}-{execution[1]}")
+                        if target == "child-not-executing":
+                            self.rows(child_status="open")
+                            self.executions["att-alarm-child"] = contract.AttemptExecutionObservation(
+                                "absent", "attempt-tag-census-empty", ())
+                        elif target.startswith("run-"):
+                            self.host_run(own_process=target != "run-process-gone",
+                                          running=target != "run-finished",
+                                          owner="att-someone-else" if target == "run-of-another-owner" else None)
+                        with self.lease():
+                            self.phase(phase)
+                            path = contract.dispatch_state_root(self.jobs) / "supervisor-state" / f"{self.aid}.json"
+                            os.utime(path, (1, 1))
+                            self.runtime(*execution)
+                            counts = [self.alarms(self.t0 + offset) for offset in (0, 601, 3600, 86400, 604800)]
+                            observation = self.state(self.t0 + 604800)
+                        self.assertEqual(counts, [0, 1, 1, 1, 1])
+                        self.assertIn(observation["state"], {"stalled", "unknown"})
+                        self.assertNotEqual(observation["reason"], "supervised-owner-parked")
 
     def test_c_live_owner_without_any_trace_still_raises_the_alarm(self):
         for harness in self.DELIVERY:
@@ -1610,6 +1702,37 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                             "id": f"m{window}" if kind == "assistant" else None, "content": [block]}}) + "\n")
                 count += self.alarms(self.t0 + window * 300)
         self.assertEqual(count, 0)
+
+    def test_r3_a_damaged_announcement_never_reads_another_sessions_tools(self):
+        # RV-PR1592 R3: another process's valid announcement B landed first, then this owner's
+        # own announcement A arrived damaged. Before the fix B's transcript became the source.
+        from claude_project_dir import encode_project_dir
+        self.owner("claude")
+        cwd, home = self.root / "work", self.root / "home"
+        cwd.mkdir()
+        self.owner_meta["runtime_home"] = str(home)
+        folder = home / "projects" / encode_project_dir(str(cwd))
+        folder.mkdir(parents=True)
+        for sid in ("sid-a", "sid-b"):
+            (folder / f"{sid}.jsonl").write_text(json.dumps({"type": "assistant", "message": {
+                "id": "m-" + sid, "content": [{"type": "tool_use", "id": "call-" + sid}]}}) + "\n",
+                encoding="utf-8")
+        other = json.dumps({"type": "dispatch.supervisor.session", "session_id": "sid-b", "cwd": str(cwd)})
+        for damaged in ('stderr {"type":"dispatch.supervisor.session","session_id":"sid-a"}',
+                        "dispatch.supervisor.session sid-a " + str(cwd),
+                        '"session_id":"sid-a","cwd":"' + str(cwd) + '"'):
+            with self.subTest(damaged=damaged):
+                self.log.write_text(other + "\n" + damaged + "\n", encoding="utf-8")
+                metadata = {**self.owner_meta, "log_file": str(self.log)}
+                self.assertEqual(supervision._tool_event_source(metadata, self.log), self.log)
+                self.assertIsNone(supervision.runtime_tool_progress(metadata))
+        # A plain CLI warning after the exact announcement still keeps its own transcript.
+        warning = ('Ignoring 7 permissions.allow entries from .claude/settings.json: this workspace has '
+                   'not been trusted. Run Claude Code interactively here once and accept the trust '
+                   'dialog, or set projects["/x"].hasTrustDialogAccepted: true in /h/.claude.json.')
+        self.log.write_text(other + "\n" + warning + "\n", encoding="utf-8")
+        self.assertEqual(supervision.runtime_tool_progress({**self.owner_meta, "log_file": str(self.log)}),
+                         ["claude", "call-sid-b", "tool_use"])
 
     def test_a_new_model_message_settles_the_calls_of_the_previous_one(self):
         self.owner("claude")

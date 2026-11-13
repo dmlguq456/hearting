@@ -117,6 +117,27 @@ class CodexDispatchSummaryTest(unittest.TestCase):
         self.log.write_bytes(line(session) + warning + line(session))
         self.assertEqual(S.announced_session(self.log)[1], {"invalid": "multiple-supervisor-session-events"})
 
+    def test_a_damaged_announcement_after_another_sessions_stays_malformed(self):
+        # RV-PR1592 R3: a damaged complete row that looks like protocol or names a session is
+        # not a CLI warning; it must not leave another session's announcement as the source.
+        other = {"type": "dispatch.supervisor.session", "session_id": "sid-b", "cwd": "/work"}
+        for damaged in (b'stderr {"type":"dispatch.supervisor.session","session_id":"sid-a"}\n',
+                        b"dispatch.supervisor.session sid-a /work\n",
+                        b'"session_id":"sid-a","cwd":"/work"\n',
+                        b'["dispatch", "sid-a"\n', b"\xff\xfeA\n", b"warning\x00sid-a\n"):
+            with self.subTest(damaged=damaged):
+                self.log.write_bytes(line(other) + damaged)
+                self.assertEqual(S.announced_session(self.log)[1], {"invalid": "malformed-supervisor-log"})
+        # Plain warnings (the real Claude CLI lines carry brackets and quotes) keep it, and a
+        # partial live tail is not evidence either way.
+        for plain in (b'Ignoring 7 permissions.allow entries from .claude/settings.json: set '
+                      b'projects["/work"].hasTrustDialogAccepted: true in /h/.claude.json.\n',
+                      b"Error: Claude Code could not save all of this session's transcript (ENOSPC).\n",
+                      b'stderr {"type":"dispatch.supervisor.session"'):
+            with self.subTest(plain=plain):
+                self.log.write_bytes(line(other) + plain)
+                self.assertEqual(S.announced_session(self.log), (True, {"session_id": "sid-b", "cwd": "/work"}))
+
     def test_claude_terminal_receipt_still_requires_session_announcement(self):
         self.write(control(), {"type": "result", "subtype": "success", "result": "PASS"})
         self.assertEqual(S.announced_session(self.log), (True, {

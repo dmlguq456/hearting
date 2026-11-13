@@ -567,6 +567,12 @@ def _running_tool_text(metadata):
             f"is still running: {program}")
 
 
+def _call_command_running(metadata, since):
+    """The attempt's live tool command started at or after ``since`` (epoch seconds)."""
+    running = _running_tool_command(metadata)
+    return bool(running) and running[0] >= since
+
+
 def _runtime_tool_active(event):
     if not isinstance(event, list) or len(event) != 3:
         return False
@@ -593,25 +599,71 @@ def _owned_child_executing(jobs, attempt_id, metadata, now) -> bool:
     return False
 
 
-def _supervised_owner_parked(jobs, attempt_id, metadata) -> bool:
-    """True while the owner's runtime holds it parked on its registered work.
+def _owner_resource_working(jobs, attempt_id, metadata) -> bool:
+    """True while a resource run armed for this owner runs under its exact process identity.
 
-    The same exact verdict the orphan watch uses: a parked, deliverable, or
-    recovery phase under the held outer supervisor lease. Every harness's owner
-    supervisor records it. The children and resource runs it waits on carry
-    their own observation, so the owner's own quiet is not missing progress.
+    The owner route's armed watches name the exact runs it waits on (the records the
+    resource wait and parent close read); the run registry's exact identity says whether
+    one still runs. A missing, finished, foreign, or unreadable run is not running.
+    """
+    route_id = metadata.get("owner_route_id") or ""
+    if not route_id:
+        return False
+    try:
+        from workflow_state import WorkflowLedger
+        from resource_run_registry import classify_identity
+        armed = WorkflowLedger(route_id, metadata.get("owner_route_hash") or "", jobs=jobs).root / "armed"
+        registries = {}
+        for watch_file in sorted([*armed.glob("*.json"), *armed.glob("resource-runs/**/*.json")])[:64]:
+            watch = json.loads(watch_file.read_text(encoding="utf-8"))
+            if not isinstance(watch, dict) or watch.get("predecessor_kind") != "resource":
+                continue
+            registry = Path(str(watch.get("resource_registry") or ""))
+            if not registry.is_absolute() or registry.is_symlink():
+                continue
+            if registry not in registries:
+                registries[registry] = json.loads(registry.read_text(encoding="utf-8")).get("runs")
+            runs = registries[registry]
+            run = runs.get(str(watch.get("predecessor_id") or "")) if isinstance(runs, dict) else None
+            if not isinstance(run, dict):
+                continue
+            owner = run.get("owner_wait") if isinstance(run.get("owner_wait"), dict) else {}
+            if (run.get("resource_policy") == "supervised-owner" and run.get("status") == "running"
+                    and not run.get("cancel_requested") and run.get("jobs") in {None, "", str(jobs)}
+                    and attempt_id in {run.get("parent_attempt_id"), owner.get("parent_attempt_id")}
+                    and classify_identity(run)[0] == "working"):
+                return True
+    except (ImportError, OSError, ValueError, TypeError, AttributeError):
+        return False
+    return False
+
+
+def _supervised_owner_wait(jobs, attempt_id, metadata, now) -> str:
+    """How the owner's own runtime holds it between turns; "" when it does not.
+
+    ``supervisor-live``: a parked, deliverable, or recovery phase under the held outer
+    supervisor lease (the verdict the orphan watch uses). The lease shows only that the
+    supervisor lives, not that anything progresses. ``target-running``: parked, and the
+    exact work it waits on runs now -- a direct child whose own observation reads
+    active, or a resource run armed for it whose exact process is live. A wait on
+    nothing, a pending settlement, or unconfirmed work keeps the owner's quiet windows.
     """
     if metadata.get("worker_type") != "owner":
-        return False
+        return ""
     try:
         from dispatch_completion_join import read_supervisor_phase_state
         from dispatch_contract import dispatch_state_root, supervisor_lease_is_held
         state = read_supervisor_phase_state(
             dispatch_state_root(jobs) / "supervisor-state" / f"{attempt_id}.json", attempt_id)
-        return (state is not None and state.phase in {"parked", "deliverable", "recovery"}
-                and supervisor_lease_is_held(jobs, metadata))
+        if (state is None or state.phase not in {"parked", "deliverable", "recovery"}
+                or not supervisor_lease_is_held(jobs, metadata)):
+            return ""
     except (ImportError, OSError, ValueError, TypeError, KeyError):
-        return False
+        return ""
+    if state.phase == "parked" and (_owned_child_executing(jobs, attempt_id, metadata, now)
+                                    or _owner_resource_working(jobs, attempt_id, metadata)):
+        return "target-running"
+    return "supervisor-live"
 
 
 def _execution_confirmed(jobs, aid, status, metadata, *, now=None, decision=None) -> bool:
@@ -729,6 +781,15 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             if elapsed_windows:
                 quiet += elapsed_windows
                 last_window += elapsed_windows * max(1.0, progress_window_seconds)
+        # When this exact tool event was first seen: an unfinished call is backed only by
+        # a command that started for it, never by an older resident shell.
+        try:
+            tool_since = (float(state.get("runtime_tool_since", last_progress))
+                          if same_binding and state.get("runtime_tool_event") == tool_event else now)
+            if not math.isfinite(tool_since):
+                tool_since = now
+        except (TypeError, ValueError, OverflowError):
+            tool_since = now
         if lease:
             last_progress = last_window = now
             quiet = 0
@@ -740,6 +801,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                          or metadata.get("resource_run_id")
                          or metadata.get("resource_id"))
         tool_active = _runtime_tool_active(tool_event)
+        supervised = _supervised_owner_wait(jobs, attempt_id, metadata, now)
         if human_wait is None:
             observation_state, reason = "unknown", "human-gate-observation-unverifiable"
         elif human_wait:
@@ -750,12 +812,13 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "waiting", "resource-watch-owns-progress"
         elif lease:
             observation_state, reason = "active", "exact-verification-lease"
-        elif _supervised_owner_parked(jobs, attempt_id, metadata):
-            # Parked by its own runtime on children or a resource run under the held
-            # supervisor lease: the work it waits on owns the progress. A dead owner
-            # holds no lease and keeps the branches below.
+        elif supervised == "target-running":
+            # Parked by its own runtime on a child or resource run that runs now: that
+            # work owns the progress. A dead owner holds no lease and keeps the branches below.
             observation_state, reason = "active", "supervised-owner-parked"
-        elif execution.state == "absent":
+        elif execution.state == "absent" and supervised != "supervisor-live":
+            # A held supervisor lease is a live supervisor between turns, not an absent
+            # owner; its unconfirmed wait falls to the quiet windows below.
             if tool_active:
                 observation_state, reason = "unknown", "runtime-tool-active-process-absent"
             else:
@@ -764,7 +827,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                     observation_state, reason = "stalled", "settlement-unresolved"
                 else:
                     observation_state, reason = "stalled", "execution-absent"
-        elif (execution.state == "unknown" and tool_active
+        elif (execution.state == "unknown" and tool_active and quiet < max_quiet_windows
               and any(len(identity) >= 3 and str(identity[2]).startswith("unclassified:")
                       for identity in execution.identities)):
             observation_state, reason = "active", "native-tool-process-live"
@@ -777,7 +840,10 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
         elif execution.state == "present" and _transient_retry_wait_active(metadata, attempt_id):
             observation_state, reason = "waiting", "registered-transient-capacity-backoff"
-        elif tool_active:
+        elif tool_active and (quiet < max_quiet_windows or _call_command_running(
+                metadata, tool_since - max(1.0, progress_window_seconds))):
+            # An unfinished call record is not progress by itself: it counts inside the
+            # quiet windows, or while the exact tool command started for it still runs.
             observation_state, reason = "active", "native-tool-active"
         elif quiet >= max_quiet_windows:
             observation_state, reason = "stalled", "no-comparable-progress"
@@ -832,6 +898,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                       "route_id": route_id, "route_node": route_node,
                       "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
                       "fingerprint": fingerprint, "runtime_tool_event": tool_event,
+                      "runtime_tool_since": tool_since,
                       "last_progress_at": last_progress, "last_window_at": last_window,
                       "quiet_windows": quiet, "warning": int(quiet >= 1),
                       "observed_at": now, "stall_observation": observation})
