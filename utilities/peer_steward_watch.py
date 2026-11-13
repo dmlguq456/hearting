@@ -1051,17 +1051,11 @@ def _already_armed_line(watch_id, arm, paths):
     return (
         f"watch_id={watch_id} state=already-armed target={target} until={until} "
         f"wake={wake} pid={pid} pid_start={pid_start} receipt={paths.receipt}\n"
-        # The hook arms only from a `watch` command printing `state=armed`.
-        # This line is `already-armed` (or `alive`, from `rearm`), so it arms
-        # nothing -- and it cannot prove the *earlier* arm succeeded either.
-        # That earlier arm failing is exactly why a caller re-runs `watch`, so
-        # answering `end-turn` here would hand back the most dangerous reply at
-        # the moment the caller is trying to recover. A redundant wake is
-        # absorbed by at-least-once ack; a missed one is lost work.
+        # Repeated watch/rearm output is accepted by the same exact-recipient hook.
         + steward_fields(
             wake if wake != "-" else None, watch_id,
             agent_home=Path(__file__).resolve().parents[1],
-            arms_hook=False,
+            arms_hook=isinstance(arm, dict),
             timeout_ms=arm.get("timeout") if isinstance(arm, dict) else None,
         )
     )
