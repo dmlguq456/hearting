@@ -525,6 +525,77 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         # The one failed execution is told to the owner exactly once.
         self.assertEqual(sum(k == "resource" for k in turns),1)
 
+    def test_a_resource_row_rewritten_between_pieces_stays_out_of_the_model_childs_receipt(self):
+        """Mixed: looking at the held resource settles (rewrites) its row between join pieces.
+        The resource receipt binds the row as rewritten, comes once, and the model child's
+        own receipt arrives once afterwards with the same child set and no resource content."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        module = supervisor
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        route_value = seal_route({"schema_version":2,"cwd":str(self.base),
+            "nodes":[{"id":"full-run","kind":"resource-runner","continuation":{"kind":"supervised"}},
+                     {"id":"verify"}]})
+        route_path = self.base / "mixed-rewrite-route.json"
+        route_path.write_text(json.dumps(route_value))
+        route_args = ["--route-file",str(route_path),"--route-id",route_value["route_id"],"--route-hash",route_value["route_hash"]]
+        rows = [{"run_id":"rewritten-resource","pid":556,"starttime":"202","command":["approved"],
+                 "node":"full-run","status":"running","sentinel":"/fixture-exit"}]
+        armed = {"node":"full-run","successors":["verify"]}
+        stage = {"state":"FAILED_RETRYABLE"}
+        looks = []
+        def evidence(_):
+            # The first look settles the row it read: the evidence describes the rewritten row.
+            if not looks:
+                rows[0] = {**rows[0], "status":"failed", "exit_code":4}
+            looks.append(1)
+            return {"terminal":True,"quiescent":True,"succeeded":False,"liveness":"exited",
+                    "exit_code":4,"resource_sha256":RESOURCE.RESUME.row_digest(rows[0])}
+        sup = SimpleNamespace(poll_once=mock.Mock(),read_resource_watches=lambda *_: [armed],
+            resource_evidence=evidence,
+            artifact_evidence=lambda _: {"checked":True,"missing":[]},runner=lambda:SimpleNamespace(read_sentinel=lambda _:4))
+        ledger = SimpleNamespace(state=lambda:{"nodes":{"full-run":stage}})
+        turns, prompts, states = [], [], []
+        def turn(*a,**k):
+            prompt = a[2]
+            kind = "resource" if "Runtime resource receipt" in prompt else "model"
+            turns.append(kind)
+            prompts.append(prompt)
+            states.append(join.read_supervisor_phase_state(self.state,PARENT))
+            text = ("runtime_wait: registered-children" if len(turns) <= 2
+                    else "artifact: -\nverdict: PASS\nblocker: none")
+            return {"type":"result","subtype":"success","is_error":False,"result":text},0
+        join_script = self._timeout_then_ready_join(timeouts=2)
+        command = self.command_with_join(join_script)[2:]
+        with mock.patch.object(RESOURCE,"context",side_effect=lambda *_a, **_k: (sup,route_value,ledger,[(armed,rows[0])])), \
+             mock.patch.object(RESOURCE.RESUME,"supervisor_alive",return_value=True), \
+             mock.patch.dict(os.environ,{"FAKE_TRACE":str(self.trace)}), \
+             mock.patch.object(module,"run_turn",side_effect=turn), \
+             mock.patch.object(module,"reconcile",return_value=True), \
+             mock.patch.object(sys,"stdin",io.StringIO("initial assignment")), \
+             mock.patch.object(module,"emit"), \
+             mock.patch.object(module,"resolved_turn_transport",return_value="resume-process"):
+            self.assertEqual(module.main(command+route_args),0)
+        # The stale first look waited; the next piece delivered the rewritten row once.
+        self.assertEqual(turns,["model","resource","model"])
+        resource_prompt = prompts[1]
+        self.assertIn('"exit_code":4',resource_prompt)
+        self.assertIn(RESOURCE.RESUME.row_digest(rows[0]),resource_prompt)
+        # The model child's own receipt: once, the same child, nothing of the resource in it.
+        self.assertIn("att-child",prompts[2])
+        self.assertNotIn("Runtime resource receipt",prompts[2])
+        self.assertNotIn("rewritten-resource",prompts[2])
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual(len([t for t in trace if t["event"] == "join-call"]),3)
+        # The resource turn did not deliver the child; the child's turn sees the resource
+        # receipt acknowledged once and no resource outbox left to mix into it.
+        self.assertEqual(set(states[1].delivered_attempt_ids),set())
+        self.assertEqual(len(states[2].resource["delivered"]),1)
+        self.assertIsNone(states[2].resource["outbox"])
+        if states[2].outbox is not None:
+            self.assertEqual(set(states[2].outbox.attempt_ids),{"att-child"})
+
     def test_progress_carrying_resource_settlements_do_not_spend_the_continuation_budget(self):
         # Phase F d6 (F-1): `--max-continuations 2` makes ordinary=2 with the
         # one reserved terminal-handoff turn. Under the old gross accounting
