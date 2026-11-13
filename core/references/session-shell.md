@@ -205,7 +205,8 @@ fable 70%`, the model word in its model color), and that row stays however
 short rows run; short of cells it gives way whole value by whole value: the
 reset times, then 5h, then the model values, then 7d. Claude's statusline
 callback carries only its 5h and 7d windows: the same credential-bound account
-cache's model windows stay beside them (a callback that carries its own wins). The state shown is the host's
+cache's model windows stay beside them while that cache is fresh, never an older
+reading shown as now (a callback that carries its own wins). The state shown is the host's
 own observation; hook events confirm and correct it, and input readiness and
 every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
 into its session record as it paints (`busy` while it shows progress, `waiting`

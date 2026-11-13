@@ -181,15 +181,17 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
     title = session_handle.current_session_subject(names.get("runtime_name"), titles.last_title(sid, harness=harness))
     # Fleet's NOW (`summary.now`): the same fresh one-line summary from the same sidecar.
     now_line = titles.fresh_summary_with_ts(sid, harness=harness)[0]
-    quota = dict(usage_cache.read(harness).get("payload") or {})
+    cached = usage_cache.read(harness)
+    quota = dict(cached.get("payload") or {})
     if callback:
         native_quota = claude_quota(callback)
         if native_quota:
             # This terminal mirrors its exact native callback; Fleet account
             # quota admission remains credential-bound and unchanged. Claude's
             # callback carries no model windows today: the same credential-bound
-            # cache's (`rl_ms`, Fable's) stay beside its 5h/7d windows.
-            if "rl_ms" not in native_quota and quota.get("rl_ms"):
+            # cache's (`rl_ms`, Fable's) stay beside its 5h/7d windows while that
+            # cache calls itself fresh; an older one is not shown as now (review 1597-2).
+            if "rl_ms" not in native_quota and quota.get("rl_ms") and cached.get("freshness") == "fresh":
                 native_quota = {**native_quota, "rl_ms": quota["rl_ms"]}
             quota = native_quota
     values.update(harness=harness, title=title or None, now=now_line or None, native_turn=turn, git=observed_git,
