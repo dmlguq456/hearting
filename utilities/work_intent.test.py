@@ -777,6 +777,19 @@ class CompletionCostLineTest(unittest.TestCase):
         self.assertEqual(lines[3], "Cost: unknown elapsed · session tokens unknown")
         self.assertNotIn("Cost:", WI.completion_summary(self.route, self.report))   # no observation, no line
 
+    def test_an_unpublished_shared_spec_is_one_line_after_the_result(self):
+        pending = {"status": "pending", "reason": "shared-base-invalid",
+                   "detail": "shared-base-invalid: incomplete seed"}
+        lines = WI.completion_summary(self.route, self.report, publication=pending).splitlines()
+        result = next(i for i, line in enumerate(lines) if line.startswith("Result: "))
+        self.assertEqual(lines[result + 1], "Shared spec not published: shared-base-invalid: incomplete seed"
+                         " · the cycle keeps its spec; the next start of this route retries")
+        for quiet in (None, {"status": "admitted"}, {"status": "not-applicable"}):
+            self.assertNotIn("Shared spec", WI.completion_summary(self.route, self.report, publication=quiet))
+        declared_language(self, "ko")
+        self.assertIn("공유 명세 게시 안 됨: shared-base-invalid: incomplete seed",
+                      WI.completion_summary(self.route, self.report, publication=pending))
+
 
 def WI_epoch(stamp):
     from datetime import datetime
