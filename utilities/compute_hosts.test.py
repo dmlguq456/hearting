@@ -3632,12 +3632,16 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         log = run_dir / "log"
         log.write_text("epoch 1\n")
         os.utime(log, (5000.0, 5000.0))
-        self.assertTrue(module._run_recently_active(run_dir, 5000.0 + 600))
-        self.assertTrue(module._run_recently_active(run_dir, 5000.0 + 900))
-        self.assertFalse(module._run_recently_active(run_dir, 5000.0 + 901))
+        # The evidence is the moment the run's own file changed, not the moment the watcher looked.
+        self.assertEqual(module._run_alive_at(run_dir, 5000.0 + 600), 5000.0)
+        self.assertEqual(module._run_alive_at(run_dir, 5000.0 + 900), 5000.0)
+        self.assertIsNone(module._run_alive_at(run_dir, 5000.0 + 901))
         (run_dir / ".observation-watch.lock").write_text("")   # the observer's own file is not the run's
-        self.assertFalse(module._run_recently_active(run_dir, 5000.0 + 901))
-        self.assertFalse(module._run_recently_active(Path(self.tmp.name) / "missing", 5000.0))
+        (run_dir / "meta.json").write_text("{}")               # nor is the launch record a claim rewrites
+        for name in (".observation-watch.lock", "meta.json"):
+            os.utime(run_dir / name, (5000.0 + 901, 5000.0 + 901))
+        self.assertIsNone(module._run_alive_at(run_dir, 5000.0 + 901))
+        self.assertIsNone(module._run_alive_at(Path(self.tmp.name) / "missing", 5000.0))
 
     def test_a_launch_note_names_a_missing_declaration_once(self):
         module = self.module

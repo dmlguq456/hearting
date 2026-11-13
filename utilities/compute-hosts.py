@@ -3145,15 +3145,15 @@ QUIET_RUN_MARKER = ".observation-unknown"
 QUIET_PROBE_SECONDS = 3600
 
 
-def _run_last_activity(run_dir):
-    """Newest change among the run's own top-level files, never the observer's."""
+def _run_last_activity(run_dir, exclude=frozenset()):
+    """Newest change among the run's own top-level files, never the observer's (nor `exclude`)."""
     newest = None
     try:
         entries = list(os.scandir(run_dir))
     except OSError:
         return None
     for entry in entries:
-        if entry.name.startswith(".observation-"):
+        if entry.name.startswith(".observation-") or entry.name in exclude:
             continue
         try:
             changed = entry.stat(follow_symlinks=False).st_mtime
@@ -3163,18 +3163,27 @@ def _run_last_activity(run_dir):
     return newest
 
 
-def _run_recently_active(run_dir, now):
-    """The run's own files (its log, under the shared run root) changed within the window the
-    LAB board allows an observation (`experiment_catalog.STALE_OBSERVATION_SECONDS`): this
-    watcher sees the run alive and its host still writing. A run silent for longer, or one
-    whose files cannot be read, is not vouched for."""
-    last = _run_last_activity(run_dir)
+# Files in a run directory that Hearting itself writes (the launch record, which a later claim or
+# completion rewrites): their change is not the run's own sign of life.
+_RUN_METADATA_FILES = frozenset({"meta.json"})
+
+
+def _run_alive_at(run_dir, now):
+    """When the run's own files (its log, under the shared run root) last changed, if within the
+    window the LAB board allows an observation (`experiment_catalog.STALE_OBSERVATION_SECONDS`),
+    else None. This is the evidence the watcher vouches with: the public record is refreshed up to
+    this moment, never to "now", so a host that stopped writing turns stale 900 s after its last
+    write, as it did before refreshing existed (RV-PR1619-1114). Hearting's own files (the
+    observer's `.observation-*`, the launch record `meta.json`) are not the run's."""
+    newest = _run_last_activity(run_dir, exclude=_RUN_METADATA_FILES)
     try:
         import experiment_catalog
         window = experiment_catalog.STALE_OBSERVATION_SECONDS
     except Exception:  # noqa: BLE001 -- without the window nothing is vouched for
-        return False
-    return last is not None and 0 <= float(now) - float(last) <= window
+        return None
+    if newest is None or not 0 <= float(now) - float(newest) <= window:
+        return None
+    return float(newest)
 
 
 def _run_quiet_since(run_dir, now):
@@ -3300,6 +3309,7 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
     }
     if not artifact_root:
         return None
+    alive_at = None if final else _run_alive_at(run_dir, now)
     try:
         import resource_progress
         return resource_progress.observe_experiment(record, Path(run_dir) / "meta.json", now,
@@ -3307,7 +3317,7 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
             row_scoped=bool(record.get("row_id")), started_at=started,
             planned_seconds=record["planned_seconds"], final=final,
             status=record["status"], notify_events=not final,
-            alive=not final and _run_recently_active(run_dir, now))
+            alive=alive_at is not None, alive_at=alive_at)
     except Exception:  # noqa: BLE001 -- observation must never change run completion
         return None
 

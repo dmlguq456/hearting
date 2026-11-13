@@ -1762,6 +1762,42 @@ class ExperimentObservationTest(unittest.TestCase):
             with mock.patch.object(progress, "discover_output_binding", side_effect=RuntimeError("x")):
                 self.assertIsNone(progress.declaration_note(bare))
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_a_declared_progress_file_is_a_declaration_however_old_its_value(self):
+        # RV-PR1619-1114 required fix 3: a readable progress file 25 minutes old was told
+        # "진행 파일 선언 없음". Declared is not the same as fresh: the old value and its age are shown.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, now = Path(tmp), 1_800_000_000.0
+            counter = base / "counter.json"
+            run = {"run_id": "counter-run", "node": "train", "status": "running",
+                   "progress_file": str(counter), "started_at": now - 3600}
+            counter.write_text(json.dumps({"schema_version": 1, "run_id": "counter-run", "node": "train",
+                                           "updated_at": now - 1500, "completed": 12, "total": 60,
+                                           "unit": "epoch"}))
+            read = progress.read_progress(run, now)
+            self.assertEqual((read["completed"], read["age_s"]), (12, 1500.0))
+            self.assertIsNone(progress.declaration_note(run))
+            with mock.patch.object(progress, "_observation_state_path", return_value=base / "state.json"):
+                result = progress.observe_experiment(run, base / "registry.json", now, progress=read,
+                                                     alive=True, status="running", notify_events=False)
+            observation = result["observation"]
+            self.assertIsNone(observation["undeclared"])
+            self.assertEqual((observation["reached"], observation["total"], observation["unit"]), (12, 60, "epoch"))
+            self.assertIsNone(observation["rate_per_second"])            # an old value gives no rate or ETA
+            text = "; ".join(progress._notice_texts(run, "checkpoint", observation, None, result["metrics"]))
+            self.assertIn("진행 12/60 epoch", text)
+            self.assertIn("마지막 갱신 25m 전", text)
+            self.assertNotIn("선언 없음", text)
+            self.assertNotIn("stagnation=unknown", text)
+            # Nothing declared at all is still said in one phrase.
+            bare = {"run_id": "bare-run", "status": "running", "started_at": now - 3600}
+            with mock.patch.object(progress, "_observation_state_path", return_value=base / "bare.json"):
+                nothing = progress.observe_experiment(bare, base / "registry.json", now, alive=True,
+                                                      status="running", notify_events=False)
+            self.assertEqual(nothing["observation"]["undeclared"], "not-declared")
+            self.assertIn("진행 파일 선언 없음", "; ".join(progress._notice_texts(
+                bare, "checkpoint", nothing["observation"], None, nothing["metrics"])))
+
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},
