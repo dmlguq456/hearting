@@ -1576,7 +1576,8 @@ def _name_warning_fields(route, question):
     """Advice for the registered question before the agent shows it: `{"name_warnings": [...]}` or `{}`.
 
     Internal names the project's experiment catalog knows (run ids, aliases, former names) that the
-    understanding sentence, a question, or an option says without the condition's catalog name.  This
+    understanding sentence, a question, or an option says without the condition's catalog name anywhere
+    in the question; ordinary words, numbers, code, paths, and commands stay quiet (`scan_fields`).  This
     is the one moment a Hearting-written question has not yet reached the person, so it is where the
     check can come early.  Advice only: nothing here changes `state`, `required_action`, the errors,
     or what `frame_interview.validate` decides, and any trouble gives `{}`."""
@@ -1594,11 +1595,9 @@ def _name_warning_fields(route, question):
             for o_index, option in enumerate(item.get("options") or []):
                 for part in ("label", "means"):
                     fields.append((f"questions[{q_index}].options[{o_index}].{part}", option.get(part)))
-        found = []
-        for field, text in fields:
-            for hit in EC.scan_text(text if isinstance(text, str) else "", read.doc):
-                found.append({"field": field, "token": hit["token"], "kind": hit["kind"], "name": hit["name"]})
-        found = found[:8]
+        # One lookup table for the whole question; a catalog name in any field counts for all of them.
+        found = [{"field": hit["field"], "token": hit["token"], "kind": hit["kind"], "name": hit["name"]}
+                 for hit in EC.scan_fields(fields, read.doc)][:8]
         return {"name_warnings": found} if found else {}
     except Exception:  # noqa: BLE001 -- advice never holds a question back
         return {}

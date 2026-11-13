@@ -731,10 +731,89 @@ class Scan(Base):
         self.assertEqual(self.kinds("잔향 줄임(run-1)과 run-2", doc), [("run-2", "run-id", "잡음 섞기", 1, 15)])
         self.assertEqual(self.kinds("잔향 줄임(run-1)과 잡음 섞기(run-2)", doc), [])
 
-    def test_a_one_letter_word_is_caught_only_as_a_registered_alias_and_only_as_a_whole_token(self):
+    def test_a_one_letter_alias_is_too_common_to_judge_and_a_token_counts_only_whole(self):
         _root, doc = self.setup_root()
-        self.assertEqual([row[0] for row in self.kinds("E는 좋고 E1과 base-E 와 Eagle 은 아니다", doc)], ["E"])
+        self.assertEqual(self.kinds("E는 좋고 E1과 base-E 와 Eagle 은 아니다", doc), [])   # `E` is registered, yet only a letter
         self.assertEqual(self.kinds("A와 B와 F는 정본에 없다", doc), [])        # nothing is guessed for unregistered letters
+        self.assertEqual([row[0] for row in self.kinds("rev-ab 와 xrev-a 는 다르고 (rev-a)는 같다", doc)], ["rev-a"])
+
+    # --- a wrong warning is worse than a missed one (review RV-PR1608-1113, finding 2) ---------------------
+
+    def common_alias_root(self):
+        """The review's catalog: one condition answering to `base`, `v2`, `0.3`, `E`, `oldname`, and `retain030`."""
+        root = self.make_root("common")
+        self.register(root, {"groups": [{"display_name": "소리 실험", "goal": "기준보다 낮은가"}], "conditions": [
+            {"display_name": "잔향 감소", "group": "소리 실험", "aliases": ["E", "v2", "base", "0.3", "oldname", "retain030"],
+             "refs": {"runs": [{"run_id": "run-rev-1", "row_id": "arm-1"}]}}]})
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "잔향 감소", "잔향 더 감소"), now=NOW + 1)   # `잔향 감소` is a former name now
+        return E.load(root).doc
+
+    def test_the_reviews_seven_ordinary_phrases_get_no_warning(self):
+        doc = self.common_alias_root()
+        for text in ("base.py 파일을 연다", "/tmp/base/output", "https://example.org/base", "`base = 1`",
+                     "git rebase base", "버전 v2를 설치한다", "오차는 0.3이다"):
+            with self.subTest(text=text):
+                self.assertEqual(E.scan_text(text, doc), [])
+
+    def test_a_clear_name_is_quiet_inside_code_quotes_paths_files_commands_and_options(self):
+        doc = self.common_alias_root()
+        for text in ("```\nrun-rev-1\n```", "    run-rev-1 = 1", "\trun-rev-1", "> run-rev-1 로 가자",
+                     '"run-rev-1은 바꾸지 마"', "“run-rev-1은 그대로”", "`run-rev-1`", "/tmp/run-rev-1/log",
+                     r"C:\work\run-rev-1\out", "run-rev-1.log 를 본다", "./run-rev-1", "https://x.example/run-rev-1",
+                     "$ python3 train.py run-rev-1", "그다음 git log run-rev-1 를 본다", "--run run-rev-1", "run=run-rev-1",
+                     "run-rev-1=좋음", "@run-rev-1", "#run-rev-1", "오차 0.3 과 1e-3, 2026-11-13, v2.1, E 와 base"):
+            with self.subTest(text=text):
+                self.assertEqual(E.scan_text(text, doc), [])
+
+    def test_a_real_run_id_a_former_name_and_an_identifier_alias_still_warn(self):
+        doc = self.common_alias_root()
+        self.assertEqual(self.kinds("run-rev-1은 진행 중이고 잔향 감소는 예전 이름이다.\n(retain030)을 확인", doc), [
+            ("run-rev-1", "run-id", "잔향 더 감소", 1, 1),
+            ("잔향 감소", "former-name", "잔향 더 감소", 1, 19),
+            ("retain030", "alias", "잔향 더 감소", 2, 2)])
+        self.assertEqual([row[0] for row in self.kinds("- run-rev-1:arm-1 결과\n    - run-rev-1 다시", doc)],
+                         ["run-rev-1:arm-1", "run-rev-1"])                 # a nested list item is prose, not code
+        self.assertEqual([row[0] for row in self.kinds("run-rev-1. 끝", doc)], ["run-rev-1"])   # a full stop is not a file name
+        self.assertEqual(self.kinds("예전 이름 oldname을 정리", doc), [])     # a plain-word alias is not clear enough
+
+    # --- one lookup table, not one catalog walk per token (review RV-PR1608-1113, finding 1) --------------
+
+    def big_doc(self, n, parent="a"):
+        root = self.make_root(f"big{n}", parent)
+        self.register(root, {"groups": [{"display_name": "규모 시험"}], "conditions": [
+            {"display_name": f"조건 {i}", "group": "규모 시험", "aliases": [f"alias{i}x{j}" for j in range(4)],
+             "refs": {"runs": [{"run_id": f"run-{i}-a"}]}} for i in range(n)]})
+        return E.load(root).doc
+
+    def test_fields_share_one_table_and_the_lookups_do_not_grow_with_the_catalog(self):
+        from unittest import mock
+        fields = [("understanding", "일반적인 질문입니다"), ("q", "어떤 작업을 할까요"), ("l0", "그대로 진행"),
+                  ("m0", "추가 변경 없이 진행"), ("l1", "나중에 진행"), ("m1", "run-3-a 와 alias7x2 는 대기")]
+        counts = {}
+        for n in (32, 256):
+            doc = self.big_doc(n)
+            calls = {"index": 0, "claims": 0, "resolve": 0, "fold": 0}
+            real_index, real_claims, real_resolve, real_fold = E.scan_index, E._claims, E.resolve_ex, E._fold
+
+            def counted(key, real):
+                def call(*args, **kwargs):
+                    calls[key] += 1
+                    return real(*args, **kwargs)
+                return call
+            with mock.patch.object(E, "scan_index", counted("index", real_index)), \
+                    mock.patch.object(E, "_claims", counted("claims", real_claims)), \
+                    mock.patch.object(E, "resolve_ex", counted("resolve", real_resolve)):
+                hits = E.scan_fields(fields, doc)
+                index = real_index(doc)
+                with mock.patch.object(E, "_fold", counted("fold", real_fold)):
+                    self.assertEqual(E.scan_fields(fields, doc, index=index), hits)
+            self.assertEqual([(h["field"], h["token"]) for h in hits], [("m1", "run-3-a"), ("m1", "alias7x2")])
+            self.assertEqual((calls["index"], calls["claims"], calls["resolve"]), (1, 0, 0))   # one table per question
+            counts[n] = calls["fold"]
+        self.assertEqual(counts[32], counts[256])                         # scanning texts never walks the catalog
+        self.assertEqual(counts[256], 1)                                  # one fold of the question for the names
+        named = E.scan_fields([("understanding", "조건 3 을 다룬다"), ("m1", "run-3-a 와 alias7x2")], self.big_doc(32, "again"))
+        self.assertEqual([h["token"] for h in named], ["alias7x2"])        # a name in one field counts for all
 
     def test_unlinked_runs_are_reported_with_no_name_and_the_longest_token_wins_an_overlap(self):
         _root, doc = self.setup_root()
