@@ -167,7 +167,7 @@ def build(*, history_rows: int | None = None, row_bytes: int = ROW_BYTES, open_r
         "env": child_env({**stub, "jobs": base["jobs"]}),
         "sessions": base["e2e_sessions"], "routes": base["e2e_routes"],
         "streams": base["e2e_streams"], "baseline": baseline, "base_fixture": base,
-        "rows": rows, "open_routes": routes,
+        "rows": rows, "open_routes": routes, "history_shape": base.get("history_shape"),
     }
     fixture.update(recent_rows_6h=None, recent_rows_24h=None)
     try:

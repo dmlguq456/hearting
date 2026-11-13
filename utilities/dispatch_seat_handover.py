@@ -1876,6 +1876,62 @@ def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness
                                    "handover-unreadable:" + str(exc))
 
 
+# Who holds each owner row's job now is a pure function of the row and one lineage graph. A graph
+# is one object for as long as the ledgers keep their incarnation, so the answers are kept on it
+# (this one slot) and a row that did not change, under a lineage that did not change, is not
+# resolved again. The lineage observation itself is made every pass (``_pass_lineage_graph``).
+_HOLDER_LOCK = threading.Lock()
+_HOLDER_MEMO = {"graph": None, "answers": {}}
+_HOLDER_METRICS = {"holder_resolves": 0, "holder_memo_hits": 0}
+
+
+def holder_metrics() -> dict:
+    return dict(_HOLDER_METRICS)
+
+
+def job_holders(records, jobs, *, read_context=None) -> list:
+    """``resolve_recipient("job-holder", ...)`` of each registry record, in order.
+
+    Same answers as asking one by one; a record object the previous pass already resolved, while
+    the lineage graph is still the same object and the registry path resolves to the same key,
+    answers from memory. An unreadable lineage is not kept. The memory is dropped when the lineage
+    changes, and thinned to the records asked about when it holds many that nobody asks about any
+    more (a registry rewrite replaces record objects).
+    """
+    def direct(record):
+        return resolve_recipient("job-holder", metadata=record.handover_metadata(), jobs=jobs,
+                                 read_context=read_context)
+    try:
+        graph = _pass_lineage_graph(read_context)
+        jobs_key = read_context.jobs_key(jobs) if read_context is not None else _jobs_key(jobs)
+    except (OSError, ValueError, TypeError):
+        return [direct(record) for record in records]
+    with _HOLDER_LOCK:
+        if _HOLDER_MEMO["graph"] is not graph:
+            _HOLDER_MEMO["graph"], _HOLDER_MEMO["answers"] = graph, {}
+        answers = _HOLDER_MEMO["answers"]
+    out = []
+    for record in records:
+        key = (jobs_key, id(record))
+        hit = answers.get(key)
+        if hit is not None and hit[0] is record:
+            _HOLDER_METRICS["holder_memo_hits"] += 1
+            out.append(hit[1])
+            continue
+        _HOLDER_METRICS["holder_resolves"] += 1
+        answer = direct(record)
+        if answer.state != "unreadable":
+            answers[key] = (record, answer)
+        out.append(answer)
+    if len(answers) > 2 * len(records) + 64:
+        live = {(jobs_key, id(record)) for record in records}
+        with _HOLDER_LOCK:
+            if _HOLDER_MEMO["answers"] is answers:
+                for key in [key for key in answers if key not in live]:
+                    answers.pop(key, None)
+    return out
+
+
 def resolve_attempt_recipient(jobs, attempt, registered, harness="", *, read_context=None):
     """Missing exact rows still consult ledger bindings; damaged input waits."""
     from dispatch_registry_cache import registry_snapshot
