@@ -84,7 +84,7 @@ class Base(unittest.TestCase):
 
     def write_run(self, root, run_id, *, status="running", started=NOW - 3600, at=NOW - 180, eta=1800.0,
                   reached=12, total=40, unit="epoch", series=None, key="wer", stagnation=None,
-                  split="validation", rows=None):
+                  split="validation", rows=None, ended=None):
         series = {"wer": [(10, 21.0), (12, 20.4)]} if series is None else series
         samples = [{"split": split, "epoch": epoch, "metrics": {name: value}}
                    for name, points in series.items() for epoch, value in points]
@@ -92,7 +92,8 @@ class Base(unittest.TestCase):
         observation = {"reached": reached, "total": total, "unit": unit, "eta_seconds": eta, "at": at,
                        "summary": summary, "stagnation": stagnation}
         run = {"run_id": run_id, "status": status, "started_at": started, "decision_metric": key}
-        record = rp.public_run_record(run, status=status, observation=observation, metrics=[], started_at=started)
+        record = rp.public_run_record(run, status=status, observation=observation, metrics=[], started_at=started,
+                                      ended_at=ended)
         if rows is not None:
             record["rows"] = rows
         self.assertIsNotNone(rp.write_public_run_record(root, run_id, record))
@@ -538,6 +539,140 @@ class Writing(Base):
         self.assertEqual(E.describe_run(E.load(root).doc, "run-rows", "arm-1")["name"], "다른 조건")
         E.run_write(root, lambda c: E.op_link(c, "다른 조건", "run-rows", "arm-9"))
         self.assertIn("row-missing", self.cond(E.status(root, now=NOW), "다른 조건")["anomalies"])
+
+
+class ReviewFindings(Base):
+    """The three paths the PR #1596 review reproduced; each failed before its fix."""
+
+    def control_in_another_group(self, root, control_metric):
+        spec = {"groups": [group_spec(display_name="실험 묶음",
+                                      metric={**METRIC, "scoring": "oracle"},
+                                      target={"kind": "condition", "condition": "대조"}),
+                           {"display_name": "대조 묶음", "goal": "대조", "metric": control_metric}],
+                "conditions": [{"display_name": "대조", "group": "대조 묶음", "refs": {"runs": [{"run_id": "run-ctl"}]}},
+                               {"display_name": "실험", "group": "실험 묶음", "refs": {"runs": [{"run_id": "run-exp"}]}}]}
+        self.register(root, spec)
+
+    def test_t15_a_control_declared_with_another_unit_split_or_scoring_is_not_subtracted(self):
+        same = {**METRIC, "scoring": "oracle"}
+        cases = (("fraction", {**same, "unit": "fraction"}, "unit-mismatch"),
+                 ("test", {**same, "split": "test"}, "split-mismatch"),
+                 ("system", {**same, "scoring": "system"}, "scoring-mismatch"),
+                 ("max", {**same, "direction": "max"}, "metric-mismatch"),
+                 ("unscored", {**same, "scoring": None}, "split-or-scoring-unverified"),
+                 ("same", dict(same), None))
+        for index, (label, control_metric, reason) in enumerate(cases):
+            with self.subTest(label):
+                root = self.make_root(label, f"t15-{index}")
+                self.control_in_another_group(root, control_metric)
+                self.write_run(root, "run-ctl", series={"wer": [(12, 0.2 if label == "fraction" else 20.0)]})
+                self.write_run(root, "run-exp", series={"wer": [(12, 20.0 if label == "fraction" else 20.5)]})
+                report = E.status(root, now=NOW)
+                comparison = self.cond(report, "실험")["comparison"]
+                if reason is None:  # the same declaration in another group still compares
+                    self.assertEqual(comparison["state"], "ok")
+                    self.assertAlmostEqual(comparison["delta"], 0.5)
+                    continue
+                self.assertEqual((comparison["state"], comparison["reason"]), ("not-comparable", reason))
+                self.assertIsNone(comparison["delta"])
+                self.assertIsNone(comparison["relative_percent"])
+                self.assertEqual((comparison["value"]["value"], comparison["baseline"]["value"]),
+                                 (20.0 if label == "fraction" else 20.5, 0.2 if label == "fraction" else 20.0))
+                text = E.render_status(report, "ko")
+                self.assertIn("비교 불가", text)
+                self.assertNotIn("%p", text)
+                self.assertNotIn("0.2%", text)  # a fraction is never retold as a percent
+        loose = self.make_root("loose", "t15-loose")  # a control in no group has no declaration to check
+        self.register(loose, {"groups": [group_spec(target={"kind": "condition", "condition": "그룹 없는 대조"})],
+                              "conditions": [{"display_name": "그룹 없는 대조", "refs": {"runs": [{"run_id": "run-ctl"}]}},
+                                             {"display_name": "실험", "group": "AMI 가변 화자 개선",
+                                              "refs": {"runs": [{"run_id": "run-exp"}]}}]})
+        self.write_run(loose, "run-ctl", series={"wer": [(12, 20.0)]})
+        self.write_run(loose, "run-exp", series={"wer": [(12, 20.5)]})
+        comparison = self.cond(E.status(loose, now=NOW), "실험")["comparison"]
+        self.assertEqual((comparison["state"], comparison["reason"]), ("not-comparable", "split-or-scoring-unverified"))
+        self.assertIn("unit-mismatch", json.dumps(E.compare(
+            group_spec(target={"kind": "condition", "condition": "cnd_000000000000"}),
+            {"key": "wer", "epoch": 12, "value": 20.0, "nonfinite": False},
+            {"key": "wer", "epoch": 12, "value": 0.2, "nonfinite": False}, {**METRIC, "unit": "fraction"})))
+
+    def test_t16_a_former_name_or_run_id_another_condition_answers_to_picks_neither(self):
+        root = self.make_root()
+        ids = self.ids(self.register(root, {"conditions": [
+            {"display_name": "old", "refs": {"runs": [{"run_id": "run-a"}]}}, {"display_name": "second"}]}))
+        cond_a, cond_b = ids
+        E.run_write(root, lambda c: E.op_rename(c, "old", "new"), now=NOW + 1)
+        renamed = E.run_write(root, lambda c: E.op_rename(c, "second", "old"), now=NOW + 2)
+        self.assertEqual(renamed["status"], "applied")  # the rename itself is not blocked ...
+        overlap = [w for w in renamed["warnings"] if w["code"] == "name-overlap"]
+        self.assertEqual(len(overlap), 1, renamed["warnings"])  # ... but lint names both places
+        self.assertIn(f"conditions[{cond_a}].former_names", overlap[0]["where"])
+        self.assertIn(f"conditions[{cond_b}].display_name", overlap[0]["where"])
+        doc = E.load(root).doc
+        self.assertEqual(E.resolve_ex(doc, "old"), (None, "ambiguous"))
+        before = E.catalog_path(root).read_bytes()
+        with self.assertRaises(E.CatalogError) as ctx:
+            E.run_write(root, lambda c: E.op_link(c, "old", "late-run"))
+        self.assertEqual(ctx.exception.code, "condition-ambiguous")
+        self.assertIn(cond_a, ctx.exception.detail)
+        self.assertIn(cond_b, ctx.exception.detail)
+        self.assertEqual(E.catalog_path(root).read_bytes(), before)
+        done = subprocess.run([sys.executable, str(SCRIPT), "link", "old", "--run", "late-run", "--artifact-root",
+                               str(root)], capture_output=True, text=True, timeout=60, env=clean_env(self.home))
+        self.assertEqual(json.loads(done.stdout)["error"], "condition-ambiguous")
+        self.assertEqual(E.catalog_path(root).read_bytes(), before)
+        E.run_write(root, lambda c: E.op_link(c, cond_b, "late-run"), now=NOW + 3)  # the id always works
+        self.assertEqual(E.describe_run(E.load(root).doc, "late-run")["condition_id"], cond_b)
+        # a current name equal to another condition's run id: resolve and describe_run agree on "neither"
+        E.run_write(root, lambda c: E.op_rename(c, cond_b, "run-a"), now=NOW + 4)
+        doc = E.load(root).doc
+        self.assertEqual(E.resolve_ex(doc, "run-a"), (None, "ambiguous"))
+        self.assertIsNone(E.describe_run(doc, "run-a"))
+        found = [w for w in E.lint(doc, expect=["run-a"]) if w["code"] == "name-overlap"]
+        self.assertTrue(any(f"conditions[{cond_a}].refs.runs" in w["where"] and
+                            f"conditions[{cond_b}].display_name" in w["where"] for w in found), found)
+        self.assertIn("expect[0]", [w["where"] for w in found])  # ambiguous is not reported as missing
+        self.assertEqual(E.resolve(doc, "new")["id"], cond_a)
+        self.assertEqual(E.resolve(doc, cond_a)["id"], cond_a)
+
+    def test_t17_an_ended_row_is_not_shown_as_its_running_parent(self):
+        root = self.make_root()
+        self.register(root, {"groups": [group_spec()], "conditions": [
+            {"display_name": "끝난 행", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-rows", "row_id": "arm-1"}]}},
+            {"display_name": "진행 중 행", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-rows", "row_id": "arm-2"}]}},
+            {"display_name": "함께 끝난 행", "group": "AMI 가변 화자 개선", "refs": {"runs": [{"run_id": "run-done", "row_id": "only"}]}}]})
+        summary = {"metric": "wer", "latest": {"epoch": 7, "value": 22.2, "nonfinite": False},
+                   "latest_metrics": {"wer": {"epoch": 7, "value": 22.2, "nonfinite": False}}}
+        self.write_run(root, "run-rows", status="running", at=NOW - 30, eta=1800.0, rows=[
+            {"row_id": "arm-1", "started_at": NOW - 4000, "ended_at": NOW - 100, "metric_summary": summary,
+             "last_checkpoint": {"at": NOW - 100}, "eta": 600.0},
+            {"row_id": "arm-2", "started_at": NOW - 90, "metric_summary": summary,
+             "last_checkpoint": {"at": NOW - 60}, "eta": 600.0}])
+        self.write_run(root, "run-done", status="done", ended=NOW - 50, rows=[
+            {"row_id": "only", "started_at": NOW - 3600, "ended_at": NOW - 50, "metric_summary": summary,
+             "last_checkpoint": {"at": NOW - 50}, "eta": 0.0}])
+        report = E.status(root, now=NOW)
+        ended = self.cond(report, "끝난 행")
+        self.assertIsNone(ended["run_status"])
+        self.assertIsNone(ended["current_run"]["status"])
+        self.assertEqual(ended["unknown"]["run_status"], "row-ended")
+        self.assertIsNone(ended["expected_at"])
+        self.assertEqual(ended["unknown"]["expected_at"], "not-running")
+        self.assertEqual(ended["current_run"]["started_at"], NOW - 4000)
+        self.assertIsNone(ended["progress"])  # the parent's 12/40 is not this row's progress
+        self.assertEqual(ended["observed_age_seconds"], 100)
+        self.assertEqual(ended["latest"]["value"], 22.2)
+        self.assertEqual(ended["anomalies"], [])
+        live = self.cond(report, "진행 중 행")
+        self.assertEqual(live["run_status"], "running")
+        self.assertEqual(live["expected_at"], E._rfc3339(NOW - 60 + 600))  # the row's own ETA, not the run's
+        self.assertIsNone(live["progress"])
+        together = self.cond(report, "함께 끝난 행")
+        self.assertEqual(together["run_status"], "done")  # the row's end is the run's end
+        self.assertNotIn("run_status", together["unknown"])
+        self.assertNotIn("끝난 행", [w["display_name"] for w in report["waiting"]])
+        line = next(line for line in E.render_status(report, "ko").splitlines() if line.startswith("- 끝난 행"))
+        self.assertNotIn("예상", line)
 
 
 class Text(Base):

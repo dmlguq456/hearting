@@ -530,6 +530,10 @@
    "en": "no comparison target declared",
    "ko": "비교 기준이 선언되지 않음"
   },
+  "experiment.reason.unit-mismatch": {
+   "en": "the baseline is in a different unit",
+   "ko": "비교 기준의 단위가 다름"
+  },
   "experiment.relative": {
    "en": ", relative {value}%",
    "ko": "(상대 {value}%)"
@@ -613,6 +617,10 @@
   "experiment.warning.metric-unit-missing": {
    "en": "metric unit missing",
    "ko": "지표 단위 없음"
+  },
+  "experiment.warning.name-overlap": {
+   "en": "two conditions answer to this name; use the condition id",
+   "ko": "두 조건이 같은 이름으로 불림, 조건 ID로 지정"
   },
   "experiment.warning.target-undeclared": {
    "en": "comparison target not declared",

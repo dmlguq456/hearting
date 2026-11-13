@@ -377,30 +377,49 @@ def _run_ref_keys(cond: Mapping[str, Any]) -> List[Tuple[str, Optional[str]]]:
     return [(ref["run_id"], ref.get("row_id")) for ref in (cond.get("refs") or {}).get("runs", [])]
 
 
+def _claims(doc: Mapping[str, Any], token: str) -> List[Tuple[Dict[str, Any], str]]:
+    """Every (condition, place) that answers to a token other than its stable id: display name,
+    alias, former name (all folded), run id, or `run:row`."""
+    folded = _fold(token)
+    run_id, colon, row_id = token.partition(":")
+    out: List[Tuple[Dict[str, Any], str]] = []
+    for cond in doc.get("conditions", []):
+        if cond.get("display_name") and _fold(cond["display_name"]) == folded:
+            out.append((cond, "display_name"))
+        for place in ("aliases", "former_names"):
+            if any(_fold(name) == folded for name in cond.get(place, [])):
+                out.append((cond, place))
+        keys = _run_ref_keys(cond)
+        if (any(key[0] == token for key in keys) if not colon
+                else any(key in ((run_id, row_id), (run_id, None)) for key in keys)):
+            out.append((cond, "refs.runs"))
+    return out
+
+
+def _ambiguity_detail(doc: Mapping[str, Any], token: Any) -> str:
+    """`token → cnd_a(former_names), cnd_b(display_name)`: what a refused write overlaps with."""
+    places = ", ".join(f"{cond['id']}({place})" for cond, place in _claims(doc, str(token)))
+    return f"{str(token)[:80]} → {places}"[:400]
+
+
 def resolve_ex(doc: Optional[Mapping[str, Any]], token: Any) -> Tuple[Optional[Dict[str, Any]], str]:
     """Find one condition by id, display name, alias, former name, run id, `run:row`, or merged id.
 
-    The first stage with a match decides; a stage with two different conditions is `ambiguous` and
-    nothing is picked.  Returns `(condition, "ok" | "unknown" | "ambiguous")`."""
+    A stable id decides alone.  Every other kind of name is gathered together, so a former name or
+    a run id is never hidden behind another condition's current name: two different conditions
+    answering to the token is `ambiguous` and nothing is picked (the condition id still works).
+    Returns `(condition, "ok" | "unknown" | "ambiguous")`."""
     if not doc or not isinstance(token, str) or not token:
         return None, "unknown"
-    conditions = doc.get("conditions", [])
     by_id = _conditions_by_id(doc)
-    stages: List[List[Dict[str, Any]]] = []
-    stages.append([by_id[token]] if token in by_id else [])
-    folded = _fold(token)
-    stages.append([c for c in conditions if c.get("display_name") and _fold(c["display_name"]) == folded])
-    stages.append([c for c in conditions if any(_fold(a) == folded for a in c.get("aliases", []))])
-    stages.append([c for c in conditions if any(_fold(a) == folded for a in c.get("former_names", []))])
-    run_id, colon, row_id = token.partition(":")
-    stages.append([c for c in conditions if not colon and any(key[0] == token for key in _run_ref_keys(c))])
-    stages.append([c for c in conditions if colon and any(key in ((run_id, row_id), (run_id, None))
-                                                           for key in _run_ref_keys(c))])
-    for found in stages:
-        if len(found) == 1:
-            return found[0], "ok"
-        if len(found) > 1:
-            return None, "ambiguous"
+    if token in by_id:
+        return by_id[token], "ok"
+    claims = _claims(doc, token)
+    owners = {cond["id"] for cond, _place in claims}
+    if len(owners) == 1:
+        return claims[0][0], "ok"
+    if len(owners) > 1:
+        return None, "ambiguous"
     current = token
     for _ in range(64):  # a merged id follows its chain to a condition that still exists
         hop = next((row["into"] for row in doc.get("merged", []) if row.get("from") == current), None)
@@ -428,7 +447,8 @@ def _resolve_group(doc: Mapping[str, Any], token: Any) -> Optional[Dict[str, Any
 
 def describe_run(doc: Optional[Mapping[str, Any]], run_id: str, row_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """The catalog name for a run (and row): what notices, cards, and tables call it.  None when
-    the run is not linked, or when two conditions claim it (nothing is guessed)."""
+    the run is not linked, when two conditions claim it, or when another condition answers to the
+    run id by name — the same judgment `resolve_ex` makes for that token (nothing is guessed)."""
     if not doc or not isinstance(run_id, str):
         return None
     found = []
@@ -440,6 +460,9 @@ def describe_run(doc: Optional[Mapping[str, Any]], run_id: str, row_id: Optional
     if len(found) != 1:
         return None
     cond = found[0]
+    for token in [run_id] + ([f"{run_id}:{row_id}"] if row_id else []):
+        if any(other["id"] != cond["id"] for other, place in _claims(doc, token) if place != "refs.runs"):
+            return None
     group = _groups_by_id(doc).get(cond.get("group"))
     return {"name": cond.get("display_name") or None, "condition_id": cond["id"],
             "group_id": group["id"] if group else None,
@@ -482,13 +505,37 @@ def _point_view(point: Optional[Mapping[str, Any]], label: Optional[str] = None)
     return {"value": point.get("value"), "epoch": point.get("epoch"), "label": label}
 
 
+def _declaration_mismatch(metric: Mapping[str, Any], other: Any) -> Optional[str]:
+    """Why a control measured under the declaration `other` cannot be subtracted from a value
+    measured under `metric`; None when the two agree.  A control without a declaration (no group,
+    or a group without a metric) cannot be checked, so it is unverified, never assumed alike."""
+    if not isinstance(other, Mapping) or not other.get("key"):
+        return "split-or-scoring-unverified"
+    if other["key"] != metric["key"] or other.get("direction") != metric.get("direction"):
+        return "metric-mismatch"
+    if _fold(other.get("unit") or "").strip() != _fold(metric.get("unit") or "").strip():
+        return "unit-mismatch"
+    for name, normal in (("split", _split_name), ("scoring", _fold)):
+        mine, theirs = metric.get(name) or None, other.get(name) or None
+        if mine is None and theirs is None:
+            continue  # neither side declares it: the same (silent) declaration, as within one group
+        if mine is None or theirs is None:
+            return "split-or-scoring-unverified"
+        if normal(mine) != normal(theirs):
+            return f"{name}-mismatch"
+    return None
+
+
 def compare(group: Optional[Mapping[str, Any]], cond_point: Optional[Mapping[str, Any]],
-            target_point: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+            target_point: Optional[Mapping[str, Any]] = None,
+            target_metric: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The only place that decides whether two values may be subtracted.
 
     `cond_point` is `{"key", "epoch", "value", "nonfinite"}` for the condition's LATEST value (a
     best value is never mixed in).  A `fixed` target comes from the group; a `condition` target
-    comes in as `target_point` (the control's latest point).  The first rule that applies wins."""
+    comes in as `target_point` (the control's latest point) with `target_metric`, the metric
+    declaration of the control's own group: key, unit, direction, split, and scoring must agree
+    with this group's before an epoch is looked at.  The first rule that applies wins."""
     group = group or {}
     metric = group.get("metric") if isinstance(group.get("metric"), dict) else None
     target = group.get("target") if isinstance(group.get("target"), dict) else None
@@ -527,6 +574,10 @@ def compare(group: Optional[Mapping[str, Any]], cond_point: Optional[Mapping[str
             return result("not-comparable", "split-mismatch", baseline=baseline)
         if _fold(target["scoring"]) != _fold(metric["scoring"]):
             return result("not-comparable", "scoring-mismatch", baseline=baseline)
+    else:
+        mismatch = _declaration_mismatch(metric, target_metric)
+        if mismatch:
+            return result("not-comparable", mismatch, baseline=baseline)
     if declared_split and _split_name(declared_split) != "validation":
         return result("not-comparable", "split-not-observed", baseline=baseline)
     if not fixed:
@@ -564,13 +615,47 @@ def _identifiers(cond: Mapping[str, Any]) -> List[str]:
     return [_fold(name) for name in names if name]
 
 
+def _name_overlaps(conditions: Sequence[Mapping[str, Any]]) -> List[Dict[str, str]]:
+    """`name-overlap`: one name that two conditions answer to, so `resolve` picks neither.
+
+    A rename or register that reuses another condition's former name or run id lands; this says
+    where.  Same-kind pairs already have their own code (`display-name-duplicate`,
+    `alias-duplicate`), and one run split into rows across conditions is ordinary."""
+    claims: Dict[str, Dict[str, List[str]]] = {}
+    spelled: Dict[str, str] = {}
+    for cond in conditions:
+        names = [("display_name", cond.get("display_name") or "")]
+        names += [(place, name) for place in ("aliases", "former_names") for name in cond.get(place, [])]
+        for run_id, row_id in _run_ref_keys(cond):
+            names.append(("refs.runs", run_id))
+            if row_id:
+                names.append(("refs.runs", f"{run_id}:{row_id}"))
+        for place, name in names:
+            if not name:
+                continue
+            folded = _fold(name)
+            spelled.setdefault(folded, name)
+            places = claims.setdefault(folded, {}).setdefault(cond["id"], [])
+            if place not in places:
+                places.append(place)
+    out = []
+    for folded, owners in claims.items():
+        kinds = {place for places in owners.values() for place in places}
+        if len(owners) < 2 or any(kinds <= {same} for same in ("display_name", "aliases", "refs.runs")):
+            continue
+        where = ", ".join(f"conditions[{cid}].{place}" for cid, places in owners.items() for place in places)
+        out.append(_warn("name-overlap", where, spelled[folded]))
+    return out
+
+
 def lint(doc: Optional[Mapping[str, Any]], expect: Sequence[str] = (),
          unlinked: Sequence[str] = ()) -> List[Dict[str, str]]:
     """Warnings with the place they are about.  Always a list; callers never fail on it."""
     out: List[Dict[str, str]] = []
     for index, name in enumerate(expect):
-        if resolve_ex(doc, name)[0] is None:
-            out.append(_warn("condition-missing", f"expect[{index}]", str(name)))
+        found, why = resolve_ex(doc, name)
+        if found is None:
+            out.append(_warn("name-overlap" if why == "ambiguous" else "condition-missing", f"expect[{index}]", str(name)))
     for run_id in unlinked:
         out.append(_warn("condition-missing", f"resource-runs/{run_id}.json", run_id))
     if not doc:
@@ -604,6 +689,7 @@ def lint(doc: Optional[Mapping[str, Any]], expect: Sequence[str] = (),
                 out.append(_warn("term-conflict", f"conditions[{cond['id']}].aliases", alias))
         if cond.get("compared_to") is not None and cond["compared_to"] not in ids:
             out.append(_warn("compared-to-missing", f"conditions[{cond['id']}].compared_to", str(cond["compared_to"])))
+    out.extend(_name_overlaps(conditions))
     for group in doc.get("groups", []):
         gid = f"groups[{group['id']}]"
         if not group.get("goal"):
@@ -629,11 +715,13 @@ class Ctx:
     def __init__(self, doc: Dict[str, Any]) -> None:
         self.doc = doc
 
-    def condition(self, token: Any) -> Dict[str, Any]:
+    def condition(self, token: Any, unknown: str = "condition-unknown") -> Dict[str, Any]:
+        """The one condition a write names; an ambiguous name is refused with what it overlaps."""
         cond, why = resolve_ex(self.doc, token)
         if cond is None:
-            raise CatalogError("condition-ambiguous" if why == "ambiguous" else "condition-unknown",
-                               str(token)[:80])
+            if why == "ambiguous":
+                raise CatalogError("condition-ambiguous", _ambiguity_detail(self.doc, token))
+            raise CatalogError(unknown, str(token)[:80])
         return cond
 
     def linked_elsewhere(self, run_id: str, row_id: Optional[str], owner: Optional[str]) -> Optional[str]:
@@ -850,16 +938,11 @@ def op_register(ctx: Ctx, spec: Mapping[str, Any]) -> Dict[str, Any]:
         if token is None:
             cond["compared_to"] = None
             continue
-        other, _why = resolve_ex(ctx.doc, token)
-        if other is None:
-            raise CatalogError("compared-to-unknown", str(token)[:80])
-        cond["compared_to"] = other["id"]
+        cond["compared_to"] = ctx.condition(token, "compared-to-unknown")["id"]
     for row, spec_group in zip(out["groups"], spec.get("groups", [])):
         target = spec_group.get("target") if isinstance(spec_group, dict) else None
         if isinstance(target, dict) and target.get("kind") == "condition":
-            other, _why = resolve_ex(ctx.doc, target.get("condition"))
-            if other is None:
-                raise CatalogError("compared-to-unknown", str(target.get("condition"))[:80])
+            other = ctx.condition(target.get("condition"), "compared-to-unknown")
             _groups_by_id(ctx.doc)[row["id"]]["target"]["condition"] = other["id"]
     return out
 
@@ -978,18 +1061,27 @@ def _record_view(root: Path, ref: Mapping[str, Any], now: float, key: Optional[s
             view["anomalies"].append("row-missing")
             return view
         source = rows[0]
+        # A row is read on its own.  The run's start, progress, and ETA belong to the run as a
+        # whole (often a later row), so none of them stands in for a value the row lacks.
+        view["started_at"] = _ts(source.get("started_at"))
+        ended = _ts(source.get("ended_at"))
+        if ended is not None and (view["status"] in (None, "running") or _ts(record.get("ended_at")) != ended):
+            # The row ended and the public row records no outcome: not running, and not a guess.
+            # Only a row that ended together with a finished run carries that run's status.
+            view["status"] = None
+            view["unknown"]["run_status"] = "row-ended"
     summary = source.get("metric_summary") if isinstance(source.get("metric_summary"), dict) else {}
     checkpoint = source.get("last_checkpoint") if isinstance(source.get("last_checkpoint"), dict) else {}
     view["latest"], view["best"] = _observed(summary, key)
     view["nonfinite"] = bool(summary.get("nonfinite")) or bool(view["latest"] and view["latest"].get("nonfinite"))
-    progress = record.get("progress") if isinstance(record.get("progress"), dict) else {}
+    progress = source.get("progress") if isinstance(source.get("progress"), dict) else {}
     view["progress"] = ({"reached": progress.get("reached"), "total": progress.get("total"),
                          "unit": progress.get("unit")}
                         if any(progress.get(k) is not None for k in ("reached", "total")) else None)
     if view["progress"] is None:
         view["unknown"]["progress"] = "progress-unknown"
     running = view["status"] == "running"
-    observed_at, eta = _ts(checkpoint.get("at")), _num(source.get("eta", record.get("eta")))
+    observed_at, eta = _ts(checkpoint.get("at")), _num(source.get("eta"))
     view["observed_at"] = _rfc3339(observed_at) if observed_at is not None else None
     age = None if observed_at is None else now - observed_at
     if age is not None and age < 0:
@@ -1097,6 +1189,7 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
     views: Dict[str, Any] = {}
     if doc is not None:
         by_id = _conditions_by_id(doc)
+        groups_by_id = _groups_by_id(doc)
         group_rows: List[Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]] = [
             (g, []) for g in doc.get("groups", [])]
         loose: List[Dict[str, Any]] = []
@@ -1116,6 +1209,9 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
             target = (group or {}).get("target") if isinstance((group or {}).get("target"), dict) else None
             control_id = target.get("condition") if target and target.get("kind") == "condition" else None
             control = statuses.get(control_id) if control_id else None
+            # The control's value was measured under its own group's declaration, not this one's.
+            control_group = groups_by_id.get((by_id.get(control_id) or {}).get("group")) if control_id else None
+            control_metric = (control_group or {}).get("metric")
             for cond in conds:
                 row = statuses[cond["id"]]
                 if control_id == cond["id"]:
@@ -1123,7 +1219,8 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
                                          "delta": None, "delta_unit": None, "relative_percent": None, "better": None}
                 else:
                     control_point = control.get("latest") if control else None
-                    comparison = compare(group, row.get("latest"), control_point)
+                    comparison = compare(group, row.get("latest"), control_point,
+                                         control_metric if isinstance(control_metric, dict) else None)
                     if comparison["baseline"] and control_id and by_id.get(control_id):
                         comparison["baseline"]["label"] = by_id[control_id].get("display_name") or None
                     row["comparison"] = comparison

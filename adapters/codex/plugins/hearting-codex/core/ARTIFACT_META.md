@@ -179,13 +179,17 @@ the goal and deciding metric are. One file per project root, next to `project-me
 - **A gap is a warning, never a gate.** `lint` and `status` report a missing name, a name equal
   to a run id or file name, a duplicate name, a missing goal, metric, unit, or target, with the
   place in the file (`conditions[<id>].display_name`) and exit 0. Nothing here stops a run, a
-  write, or an answer.
+  write, or an answer. A name, alias, former name, or run id that two conditions answer to
+  resolves to neither (`name-overlap`): a write by it is refused naming both places, and the
+  condition id always works.
 - **Comparison.** `status` gives a difference only when both values are the condition's latest
   value of the declared metric on a comparable basis: a fixed baseline must declare the same
-  split and scoring as the metric; a condition baseline must be at the same epoch. A percent
+  split and scoring as the metric; a condition baseline must be declared by its own group with
+  the same metric key, unit, direction, split, and scoring, and be at the same epoch. A percent
   difference is in points (`%p`) with the relative change kept separate. A best value is never
   mixed into a latest comparison. Anything else is `no-data` or `not-comparable` with the
-  reason; no number is invented.
+  reason; no number is invented. A linked row is read on its own: a row that has ended is not
+  running and has no expected time, and the run's progress or ETA never stands in for the row's.
 - Commands: `python3 utilities/experiment_catalog.py show|status|lint|register|rename|merge|link|add-term`
   (`--artifact-root ROOT` or `--path PROJECT`; writes take `--dry-run`).
 
