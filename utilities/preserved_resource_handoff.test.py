@@ -563,6 +563,48 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
         self._inherit()
         self._finish_payload_and_deliver()
 
+    def _stall_notices(self, t0, offsets):
+        """Run the existing observer pass at each offset; 1 where it raised this owner's notice."""
+        import dispatch_supervision as SUPERVISION
+        result = []
+        for offset in offsets:
+            raised = []
+            with mock.patch.object(SUPERVISION.time, "time", return_value=t0 + offset), \
+                 mock.patch.object(SUPERVISION, "materialize",
+                                   side_effect=lambda _jobs, ids, reason: raised.extend(ids) or []):
+                SUPERVISION.update_open_attempt_stall_observations(self.jobs)
+            result.append(int(REPLACEMENT in raised))
+        return result
+
+    def test_successor_owner_parked_on_the_inherited_live_run_gets_no_stall_notice(self):
+        # RV-PR1592-R2: the replacement owner parks on the live run its predecessor launched
+        # and the proven pin handoff moved to its route. The run and owner records keep the
+        # predecessor; before the fix the successor read as "no progress" from 601 s on.
+        import dispatch_supervision as SUPERVISION
+        self.owner_meta.update(DC.process_launch_identity(self.owner_process.process.pid))
+        fields = self.owner_row.split("\t")
+        fields[5] = ",".join(f"{key}={value}" for key, value in self.owner_meta.items())
+        self.owner_row = "\t".join(fields)
+        self.jobs.write_text("\n".join([self.old_owner_row, self.r1_owner_row, self.owner_row]) + "\n",
+                             encoding="utf-8")
+        self._inherit()
+        JOIN.write_supervisor_state(self.state_path, REPLACEMENT, set(), phase="parked")
+        self.assertEqual(self.registry_rows[VAR_RUN]["parent_attempt_id"], OLD_OWNER)
+        t0 = time.time()
+        self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 0, 0, 0])
+        observation = SUPERVISION.update_attempt_stall_observation(
+            self.jobs, REPLACEMENT, persist=False, now=t0 + 7200)
+        self.assertEqual((observation["state"], observation["reason"]),
+                         ("active", "supervised-owner-parked"))
+        # Without the proven handoff the same live run and copied watch stay the predecessor's
+        # route's: the owner's quiet windows run out as before (R1's foreign-run case).
+        outcome = json.loads(self._outcome_path().read_text())
+        outcome["summary"] = "cancelled"
+        self._outcome_path().write_text(json.dumps(outcome), encoding="utf-8")
+        self._assert_identity(self._var_holder())
+        (DC.dispatch_state_root(self.jobs) / "watchdog" / f"{REPLACEMENT}.json").unlink()
+        self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 1, 1, 1])
+
     def _finish_payload_and_deliver(self):
         """Finish the payload, deliver the receipt, then admit the follow-up start.
 

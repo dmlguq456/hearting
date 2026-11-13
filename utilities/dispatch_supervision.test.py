@@ -1539,7 +1539,15 @@ class OwnerProgressAlarmTest(unittest.TestCase):
             "command_hash": identity["command_hash"], "jobs": str(self.jobs.resolve()),
             "route": self.owner_meta["owner_route_file"], "node": "host-run",
             "parent_attempt_id": owner or self.aid,
-            "owner_wait": {"parent_attempt_id": owner or self.aid}}}}), encoding="utf-8")
+            "owner_wait": {"parent_attempt_id": owner or self.aid, **({
+                # Another owner's complete record on the same route: only a handoff could move it.
+                "route_id": self.owner_meta["owner_route_id"],
+                "route_hash": self.owner_meta["owner_route_hash"], "jobs": str(self.jobs.resolve()),
+                "session_id": "sid-" + owner, "owner_pid": 99999996, "owner_start": "1"}
+                if owner else {})}}}}), encoding="utf-8")
+        if owner:
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(row(owner, status="done", **{**self.owner_meta, "pid": "99999996"}))
         armed = WorkflowLedger(self.owner_meta["owner_route_id"], self.owner_meta["owner_route_hash"],
                                jobs=self.jobs).root / "armed"
         armed.mkdir(parents=True, exist_ok=True)

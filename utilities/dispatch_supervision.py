@@ -599,12 +599,31 @@ def _owned_child_executing(jobs, attempt_id, metadata, now) -> bool:
     return False
 
 
+def _resource_handed_to(jobs, attempt_id, metadata, run) -> bool:
+    """The run's launching owner was replaced and this owner is its verified consumer.
+
+    A normal handoff leaves the run and owner records naming the predecessor; the
+    resource wait's own reader answers it from the lineage: a proven pin handoff to
+    this owner's route, or the replacement claim on the same route. A run of an
+    unrelated owner, or a holder that cannot be read, is not this owner's.
+    """
+    try:
+        from dispatch_resource_wait import current_responsibility
+        route = {"route_id": metadata.get("owner_route_id") or "",
+                 "route_hash": metadata.get("owner_route_hash") or ""}
+        return current_responsibility(run, route=route, owner_attempt_id=attempt_id,
+                                      session_id=None, jobs=str(jobs)) is not None
+    except Exception:  # an unread lineage is unconfirmed, never a crash of the pass
+        return False
+
+
 def _owner_resource_working(jobs, attempt_id, metadata) -> bool:
     """True while a resource run armed for this owner runs under its exact process identity.
 
     The owner route's armed watches name the exact runs it waits on (the records the
     resource wait and parent close read); the run registry's exact identity says whether
-    one still runs. A missing, finished, foreign, or unreadable run is not running.
+    one still runs. The run is this owner's when it launched it or a verified handoff
+    moved it here. A missing, finished, foreign, or unreadable run is not running.
     """
     route_id = metadata.get("owner_route_id") or ""
     if not route_id:
@@ -630,8 +649,9 @@ def _owner_resource_working(jobs, attempt_id, metadata) -> bool:
             owner = run.get("owner_wait") if isinstance(run.get("owner_wait"), dict) else {}
             if (run.get("resource_policy") == "supervised-owner" and run.get("status") == "running"
                     and not run.get("cancel_requested") and run.get("jobs") in {None, "", str(jobs)}
-                    and attempt_id in {run.get("parent_attempt_id"), owner.get("parent_attempt_id")}
-                    and classify_identity(run)[0] == "working"):
+                    and classify_identity(run)[0] == "working"
+                    and (attempt_id in {run.get("parent_attempt_id"), owner.get("parent_attempt_id")}
+                         or _resource_handed_to(jobs, attempt_id, metadata, run))):
                 return True
     except (ImportError, OSError, ValueError, TypeError, AttributeError):
         return False
@@ -645,8 +665,9 @@ def _supervised_owner_wait(jobs, attempt_id, metadata, now) -> str:
     supervisor lease (the verdict the orphan watch uses). The lease shows only that the
     supervisor lives, not that anything progresses. ``target-running``: parked, and the
     exact work it waits on runs now -- a direct child whose own observation reads
-    active, or a resource run armed for it whose exact process is live. A wait on
-    nothing, a pending settlement, or unconfirmed work keeps the owner's quiet windows.
+    active, or a resource run armed for it (launched by it or handed to it) whose
+    exact process is live. A wait on nothing, a pending settlement, or unconfirmed
+    work keeps the owner's quiet windows.
     """
     if metadata.get("worker_type") != "owner":
         return ""
