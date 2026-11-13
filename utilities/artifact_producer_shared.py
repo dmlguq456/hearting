@@ -605,7 +605,13 @@ def _code_cycle_publication_decision(root: Path, record: Mapping[str, Any],
 
 def _code_spec_tree_changed(root: Path, record: Mapping[str, Any], source_rel: str,
                             source_path: Path, seed: Mapping[str, Any]) -> bool:
-    """Compare only seeded authoring content to its pinned base, not seed metadata/history."""
+    """Compare only seeded authoring content to its pinned base, not seed metadata/history.
+
+    `seed_complete` is the one completion fact every seed writer records. A
+    whole-tree receipt (`spec-transaction` on the bucket top) carries no
+    `component_seeds`; it is as complete as a component receipt, so it is not
+    asked for one (a whole-tree code cycle stayed unpublished on that question).
+    """
     if seed.get("seed_complete") is not True:
         raise ProducerError("shared-base-invalid", "incomplete seed")
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
@@ -615,13 +621,6 @@ def _code_spec_tree_changed(root: Path, record: Mapping[str, Any], source_rel: s
                        for row in _spec_inventory(source_tree)]:
         raise ProducerError("source-manifest-mismatch", source_rel)
     components = _spec_seed_components(source_tree)
-    if components is None:
-        states = seed.get("component_seeds")
-        if (not isinstance(states, dict)
-                or any(not isinstance(name, str)
-                       or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", name)
-                       or value is not True for name, value in states.items())):
-            raise ProducerError("shared-base-invalid", "incomplete seed")
     reference_id = seed.get("reference_id")
     base_id = _spec_admission_base(root, source_path, reference_id, None)
     base_tree: Mapping[str, bytes] = {}

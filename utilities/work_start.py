@@ -2473,18 +2473,11 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                     aid == owner or route["route_id"] in {meta.get("route_id"), meta.get("owner_route_id")}):
                 # An owner with nothing to settle (`not-applicable`: replaced, stopped at a gate or not
                 # passed) does not hold the closed route back; every other unfinished settlement does.
-                from dispatch_terminal_commit import owner_completion_state, settle_owner_completion
+                from dispatch_terminal_commit import owner_completion_state
                 completion = owner_completion_state(jobs, status, meta)
-                if completion.reason == "shared-spec-publication-pending":
-                    # Only the post-seal publication obligation uses this normal
-                    # retry. All earlier identity/gate/closure refusals stay put.
-                    retry = settle_owner_completion(jobs, status, meta)
-                    publication = retry.shared_publication if retry is not None else None
-                    completion = owner_completion_state(jobs, status, meta)
                 if completion.state not in {"complete", "not-applicable"}:
                     return {**result, "state": "needs-attention", "reason": "workflow-completion-pending",
-                            "required_action": "inspect-recovery", "outcome": closed,
-                            **({"shared_publication": publication} if publication is not None else {})}
+                            "required_action": "inspect-recovery", "outcome": closed}
                 if completion.state == "complete" and meta.get("parent_completion_reason"):
                     delivery.append({"attempt_id": aid,
                                      "carrier": meta.get("parent_completion_delivery"),
@@ -2492,16 +2485,14 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 if completion.state == "complete" and publication is None:
                     from dispatch_terminal_commit import completed_owner_publication
                     publication = completed_owner_publication(jobs, status, meta)
-        if publication is None:
+        if publication is None or publication.get("status") == "pending":
+            # Shared-spec publication is not a terminal gate. This normal start
+            # retries it once from the original source/base and reports the
+            # result beside the completion; it never holds the next leg.
             import artifact_producer
             publication = artifact_producer.completed_route_spec_publication(route, settle=True)
             if publication.get("status") == "not-applicable":
                 publication = None
-        if publication is not None and publication["status"] == "pending":
-            return {**result, "state": "needs-attention", "reason": "shared-spec-publication-pending",
-                    "required_action": "inspect-recovery", "outcome": closed, "shared_publication": publication,
-                    "next_step": "Preserve the completed work and inspect the publication reason. "
-                    "The same normal completion retry keeps the original source/base; no model restarts."}
         return _with_next_leg(route, {**result, "state": "completed", "required_action": "advance-completed",
                                       "outcome": closed,
                                       **({"completion_delivery": delivery} if delivery else {}),
@@ -3026,8 +3017,11 @@ def _advance_plan(route, jobs, result, *, run, sleep, clock):
                 "next_step": "This leg finished. The plan's next leg did not start: " + str(exc)[:160]
                     + ". Run next_leg.compose_command to start it, or report the reason."}
     started = start_work(leg_route, leg_path, jobs, run=run, sleep=sleep, clock=clock)
+    # The finished leg's shared-spec publication stays visible on the new leg's receipt.
+    published = ({"shared_publication": result["shared_publication"]}
+                 if isinstance(result.get("shared_publication"), dict) else {})
     return {**started, "plan_advanced": {"leg": following["index"], "after_route_id": route["route_id"],
-                                         "route_file": str(leg_path)}}
+                                         "route_file": str(leg_path), **published}}
 
 
 def _compose_again(route) -> str:

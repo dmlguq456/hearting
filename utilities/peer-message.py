@@ -4725,14 +4725,28 @@ def _has_explicit_self_entry(marker):
         return False
 
 
+def format_steward_census(result):
+    lines = [f"steward-count={result.get('counted', 0)} limit={result.get('limit')} policy=new-grants-limited"]
+    for holder in result.get("holders") or ():
+        lines.append(f"holder={holder.get('harness')}:{holder.get('session_id')} "
+                     f"liveness={holder.get('liveness', 'unknown')} "
+                     f"reason={holder.get('count_reason', 'unknown')} "
+                     f"last_activity={holder.get('last_activity') or '-'} activity_basis=role-marker")
+    return "\n".join(lines)
+
+
 def format_steward_limited(result):
     """One line for a refused grant: ``steward=limited repo=<name> holders=<a,b> limit=<n>``."""
     names = []
     for holder in result.get("holders") or ():
+        if not holder.get("counted"):
+            continue
         names.append(holder.get("name") or
                      f"{holder.get('harness') or 'unknown'}:{str(holder.get('session_id') or '-')[:8]}")
     return (f"steward=limited repo={result.get('repository') or '-'} "
-            f"holders={','.join(names) or '-'} limit={result.get('limit')}")
+            f"holders={','.join(names) or '-'} limit={result.get('limit')}\n"
+            + format_steward_census(result)
+            + "\nRelease in the holder session with `steward off`; the next normal check releases proven-ended sessions.")
 
 
 def mark_steward(harness, session_id, to, kind, ts, source=None):
@@ -4752,10 +4766,8 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
     nothing, so no send path can raise the flag by accident again. Every entry carries
     its ``source`` so the reader can show the grounds.
 
-    A session that is not yet a supervisor of its repository is granted only while the
-    repository has fewer than ``steward.max_supervisors_per_repo`` counted supervisors;
-    the census and the write run under one grant lock so concurrent grants cannot pass
-    the limit together. ``steward_seat`` is the caller's already-proven seat (a dict with
+    New holders are limited by the repository census; unknown holders count.
+    The existing grant lock serializes the census and marker write. ``steward_seat`` is the caller's already-proven seat (a dict with
     its ``key``, or None for none) when the caller proved it itself, as `watch` and `wait`
     do without asking Herdr about other panes; left out, the shared resolver proves it.
     Returns ``{"status": granted|extended|limited|refused|
@@ -4779,7 +4791,7 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     "since": ts, "generation": os.urandom(16).hex(), "targets": {}}
         data.setdefault("generation", os.urandom(16).hex())
         if seat is not None:
-            data["seat_key"] = seat.key
+            data["seat_key"] = seat.get("key") if isinstance(seat, dict) else seat.key
         if repository:
             data["repository"] = repository
         targets = data.get("targets")
@@ -4850,6 +4862,7 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                 if fleet is None:
                     result.update(status="unavailable", reason="census-unavailable")
                     return
+                repository = None
                 try:
                     # Native registry rows only: a grant made while arming a watch or
                     # wait must not ask Herdr for its agent list.
@@ -4871,15 +4884,19 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     result.update(status="unavailable", reason=f"census-failed:{type(exc).__name__}")
                     return
                 result["limit"] = supervision["limit"]
+                result["holders"] = supervision["holders"]
+                result["counted"] = supervision["counted"]
                 held = [h for h in supervision["holders"]
                         if (h["harness"], h["session_id"]) == (str(harness).lower(), session_id)]
+                # A proven same-seat successor replaces its non-live predecessor.
+                key = seat.get("key") if isinstance(seat, dict) else getattr(seat, "key", None)
+                counted = supervision["counted"] - sum(
+                    1 for h in supervision["holders"] if h.get("counted")
+                    and key and h.get("seat_key") == key and h.get("liveness") != "live")
                 if held:
                     result["status"] = "extended"
-                elif supervision["counted"] >= supervision["limit"]:
+                elif counted >= supervision["limit"]:
                     result["status"] = "limited"
-                    result["holders"] = [{"harness": h["harness"], "session_id": h["session_id"],
-                                          "name": h.get("name")}
-                                         for h in supervision["holders"] if h["counted"]]
                     return
                 else:
                     result["status"] = "granted"
@@ -4894,6 +4911,8 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
         proof = (handover.pane_seat(os.environ, harness, session_id)
                  if steward_seat is _SEAT_UNRESOLVED else steward_seat)
         seat_key = proof.get("key") if isinstance(proof, dict) else getattr(proof, "key", None)
+        if seat_key:
+            seat = proof
         if not seat_key:
             decide_and_write()
         else:
@@ -4904,6 +4923,7 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                       reason=result["reason"] or f"error:{type(exc).__name__}")
         return result
     if result["status"] in ("granted", "extended") and result["written"]:
+        observe_steward_resume(harness, session_id)
         _steward_check("register", harness, session_id, ensure_runner=False)
     return result
 
@@ -5245,7 +5265,8 @@ def cmd_release(args):
 
         try:
             # destructive-ok: reason=caller-requested release after exact generation tombstone; boundary=<dispatch-state-root>/peer-steward/<harness>/<sid>.json
-            path.unlink()
+            with _steward_grant_lock():
+                path.unlink()
             result = "released"
         except FileNotFoundError:
             result = "released" if selected else "not-marked"
@@ -5261,8 +5282,205 @@ def cmd_release(args):
     return 0
 
 
+def _steward_process_context():
+    """Local host/boot/namespace fence for a previously proven session process."""
+    return {"host": hashlib.sha256(Path("/etc/machine-id").read_bytes()).hexdigest(),
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "pid_namespace": os.readlink("/proc/self/ns/pid")}
+
+
+def _steward_process_evidence(harness, session_id):
+    """Keep this session's proven frontend birth without a global process/pane scan."""
+    try:
+        import session_shell
+        import pane_ownership
+        binding, reason = session_shell.exact_binding(harness, session_id)
+        if reason == "attachment-ambiguous":
+            return None
+        if binding:
+            pid, birth = int(binding["native_pid"]), str(binding["native_start"])
+        else:
+            fleet = _fleet_steward()
+            record = fleet._registry_record(harness, session_id) if fleet else None
+            if not record or not record.get("procStart"):
+                return None
+            pid, birth = int(record["pid"]), str(record["procStart"])
+            if not pane_ownership._native_user_tui(pid, harness):
+                return None
+        before = pane_ownership._process(pid)
+        if not before or str(before[5]) != birth:
+            return None
+        context = _steward_process_context()
+        if os.readlink(f"/proc/{pid}/ns/pid") != context["pid_namespace"]:
+            return None
+        after = pane_ownership._process(pid)
+        if not after or after[5] != before[5]:
+            return None
+        return dict(context, pid=pid, pid_start=birth)
+    except Exception:
+        return None
+
+
+def _steward_ending_process(harness, session_id):
+    """Bind an end hook to its own runtime, never another window's registry row."""
+    try:
+        import pane_ownership
+        import session_shell
+        context = _steward_process_context()
+        pid = os.getppid()
+        for _ in range(16):
+            before = pane_ownership._process(pid)
+            if not before:
+                break
+            if pane_ownership._native_user_tui(pid, harness):
+                if (os.readlink(f"/proc/{pid}/ns/pid") == context["pid_namespace"]
+                        and pane_ownership._process(pid) == before):
+                    return dict(context, pid=pid, pid_start=str(before[5]))
+                return None
+            pid = before[1]
+        binding, _reason = session_shell.exact_binding(harness, session_id)
+        if binding:
+            pid, birth = int(binding["native_pid"]), str(binding["native_start"])
+            before = pane_ownership._process(pid)
+            if (before and str(before[5]) == birth
+                    and os.readlink(f"/proc/{pid}/ns/pid") == context["pid_namespace"]
+                    and pane_ownership._process(pid) == before):
+                return dict(context, pid=pid, pid_start=birth)
+    except Exception:
+        pass
+    return None
+
+
+def _steward_marker(harness, session_id):
+    try:
+        marker = json.loads(steward_marker_path(harness, session_id).read_text())
+        if (isinstance(marker, dict) and marker.get("harness") == harness
+                and marker.get("session_id") == session_id):
+            return marker
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _steward_lifetime_marker(harness, session_id):
+    marker = _steward_marker(harness, session_id)
+    if marker is not None:
+        return marker
+    # A clear successor can hold the origin's role without its own marker.
+    # One exact existing duty read suffices; this receipt grants no role.
+    try:
+        import peer_obligations
+        identity = {"harness": harness, "session_id": session_id}
+        key = peer_obligations.stable_duty_id("steward-check", identity)
+        duty = peer_obligations.ObligationStore(peer_state_root(),
+                    allow_state_root_creation=False).get(key)
+        if duty and duty.get("state") not in {"complete", "cancelled"}:
+            return dict(identity, schema_version=2, targets={})
+    except Exception:
+        pass
+    return None
+
+
+def _write_steward_lifetime(harness, session_id, *, ended=None, process=None):
+    """Update an existing holder's receipt under the same lock as grants."""
+    with _steward_grant_lock(wait=1.0):
+        marker = _steward_lifetime_marker(harness, session_id)
+        if marker is None:
+            return
+        if ended is not None:
+            marker["session_end"] = {"reason": ended, "at": time.time()}
+            if process:
+                marker["session_end"]["process"] = process
+        else:
+            marker.pop("session_end", None)
+            # An old dead process must never stand for a resumed instance.
+            marker.pop("session_process", None)
+            if process:
+                marker["session_process"] = process
+        path = steward_marker_path(harness, session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(marker, ensure_ascii=False))
+        os.replace(tmp, path)
+
+
+def observe_steward_end(harness, session_id, *, reason):
+    """Short lifecycle receipt; the normal check settles watches and duty.
+
+    Clear/compact keep their existing seat succession. No census, model call,
+    role scan or watch walk belongs in a ten-second native end hook.
+    """
+    if (harness not in {"claude", "codex", "opencode"} or not usable_session_id(session_id)
+            or reason in {"clear", "cleared", "compact", "compaction"}):
+        return
+    try:
+        _write_steward_lifetime(harness, session_id, ended=reason,
+                                process=_steward_ending_process(harness, session_id)
+                                if harness != "codex" else None)
+    except Exception:
+        pass  # End hooks never prevent exit; the normal check retries observation.
+
+
+def observe_steward_resume(harness, session_id):
+    """Called only by this session's lifecycle or a successful role grant."""
+    marker = _steward_lifetime_marker(harness, session_id)
+    if marker is None:
+        return
+    if not marker.get("session_end") and marker.get("session_process"):
+        try:
+            context = _steward_process_context()
+            same_context = all(marker["session_process"].get(k) == v for k, v in context.items())
+            if same_context and steward_session_end_proof(harness, session_id) != "ended":
+                return
+        except OSError:
+            pass
+    try:
+        _write_steward_lifetime(harness, session_id,
+                               process=_steward_process_evidence(harness, session_id))
+    except Exception:
+        pass
+
+
+def steward_session_end_proof(harness, session_id, *, observation=None):
+    """Ended only from native SessionEnd or an exact, locally fenced process birth."""
+    marker = _steward_marker(harness, session_id) or {}
+    receipt = marker.get("session_end")
+    process = receipt.get("process") if isinstance(receipt, dict) else marker.get("session_process")
+
+    def ended_unless_other_holder():
+        # A census can refute exit; it adds nothing when this birth is still live.
+        if harness != "codex":
+            fleet = _fleet_steward()
+            if fleet and fleet.other_session_process_live(harness, session_id, process,
+                                                          observation=observation):
+                return "live"
+        return "ended"
+
+    if receipt:
+        return ended_unless_other_holder()
+    if (not isinstance(process, dict) or not all(process.get(key) for key in
+            ("host", "boot_id", "pid_namespace", "pid", "pid_start"))
+            or type(process.get("pid")) is not int or process["pid"] <= 1):
+        return "unknown"
+    try:
+        context = _steward_process_context()
+        if process.get("host") != context["host"]:
+            return "unknown"
+        if process.get("boot_id") != context["boot_id"]:
+            return ended_unless_other_holder()
+        if process.get("pid_namespace") != context["pid_namespace"]:
+            return "unknown"
+        from dispatch_contract import process_identity_disposition
+        verdict = process_identity_disposition(int(process["pid"]), str(process["pid_start"]))
+        return ended_unless_other_holder() if verdict == "dead" else "unknown"
+    except (OSError, KeyError, TypeError, ValueError):
+        return "unknown"
+
+
 def release_closed_session(harness, session_id, *, reason, settle_watch=None):
-    """Let go of everything a closed session still held: the roles it is the holder of,
+    """Settle a closed holder; natural exit retains resumable role history.
+
+    Explicit retire/clear let go of the roles it is the holder of,
     its marker when no role of it remains, its steward-check duty, and the watches it
     supervised. One routine for retire, a confirmed ``/clear`` and a confirmed lost window.
 
@@ -5273,28 +5491,33 @@ def release_closed_session(harness, session_id, *, reason, settle_watch=None):
     import dispatch_seat_handover as handover
 
     summary = {"roles": 0, "marker": "absent", "watches": 0, "skipped": 0}
-    try:
-        selected, fresh = _release_role_relations(harness, session_id, holder_only=True)
-        summary["roles"] = selected
-    except RuntimeError:
-        selected, fresh = 0, 0
-        summary["roles"] = "unresolved"
-    path = steward_marker_path(harness, session_id)
-    if path.exists():
-        remaining = [
-            row for row in handover.resolved_steward_relations(include_released=False)
-            if any((row.get(field) or {}) == {"harness": harness, "sid": session_id}
-                   for field in ("origin", "holder"))]
-        if remaining or summary["roles"] == "unresolved":
-            summary["marker"] = "kept"
-        else:
-            try:
-                # destructive-ok: reason=closed session released every role it held; boundary=<dispatch-state-root>/peer-steward/<harness>/<sid>.json
-                path.unlink()
-                summary["marker"] = "removed"
-            except FileNotFoundError:
-                summary["marker"] = "absent"
-    if selected:
+    natural_end = reason == "session-ended"
+    selected = 0
+    if natural_end:
+        summary["marker"] = "retained"
+    else:
+        try:
+            selected, fresh = _release_role_relations(harness, session_id, holder_only=True)
+            summary["roles"] = selected
+        except RuntimeError:
+            selected, fresh = 0, 0
+            summary["roles"] = "unresolved"
+        path = steward_marker_path(harness, session_id)
+        if path.exists():
+            remaining = [
+                row for row in handover.resolved_steward_relations(include_released=False)
+                if any((row.get(field) or {}) == {"harness": harness, "sid": session_id}
+                       for field in ("origin", "holder"))]
+            if remaining or summary["roles"] == "unresolved":
+                summary["marker"] = "kept"
+            else:
+                try:
+                    # destructive-ok: reason=closed session released every role it held; boundary=<dispatch-state-root>/peer-steward/<harness>/<sid>.json
+                    path.unlink()
+                    summary["marker"] = "removed"
+                except FileNotFoundError:
+                    summary["marker"] = "absent"
+    if selected or natural_end:
         _steward_check("settle_session", harness, session_id, reason=reason)
     state_root = str(peer_state_root())
     for watch in handover.resolved_watch_references(harness=harness, sid=session_id):

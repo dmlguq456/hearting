@@ -437,7 +437,7 @@ def _draw_supervisors(grid, census, limit, x, y, right):
         repo = _dict(repo)
         shown = repo.get("limit") if repo.get("limit") is not None else limit
         holders = [str(holder.get("name") or str(holder.get("session_id") or "?")[:8])
-                   + ("" if holder.get("counted", True) else " (ended)")
+                   + ("" if holder.get("counted", True) else " (" + str(holder.get("count_reason") or holder.get("liveness") or "unknown") + ")")
                    for holder in repo.get("holders") or () if isinstance(holder, Mapping)]
         text = (f"{repo.get('repository') or '?'} · {repo.get('counted', 0)} / {shown} supervising"
                 + (" · " + ", ".join(holders) if holders else ""))
@@ -445,6 +445,14 @@ def _draw_supervisors(grid, census, limit, x, y, right):
         grid.put(x + 20, y, text + (" · over limit" if over else ""), "g_blocked" if over else "soft",
                  limit=right)
         y += 1
+        for holder in repo.get("holders") or ():
+            if not isinstance(holder, Mapping):
+                continue
+            name = holder.get("name") or str(holder.get("session_id") or "?")[:8]
+            detail = (f"{name}: {holder.get('liveness', 'unknown')} · {holder.get('count_reason', 'unknown')} "
+                      f"· activity {holder.get('last_activity') or '?'} (role marker)")
+            grid.put(x + 22, y, detail, "dim", limit=right)
+            y += 1
     if len(census) > 4:
         grid.put(x + 20, y, f"+{len(census) - 4} more repositories", "dim", limit=right)
         y += 1
@@ -456,7 +464,7 @@ def _draw_steward_editor(grid, steward, state, x, y, right):
     folds = state.fold_map()
     values = _dict(steward.get("values"))
     notes = {"check_interval_seconds": "a supervising session checks its targets this often without a notice",
-             "max_supervisors_per_repo": "sessions that may hold the supervisor flag in one repo"}
+             "max_supervisors_per_repo": "new supervisors allowed per repo; ended holders free their seats"}
     for name, choices in _STEWARD_CHOICES.items():
         current = values.get(name)
         if current is None:

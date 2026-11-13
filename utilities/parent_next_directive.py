@@ -209,9 +209,8 @@ def steward_next(
     Two things must both hold before this line may say `end-turn`:
 
     * `arms_hook` -- *this line* is one the rewake hook arms from. The hook only
-      arms on a `watch` command printing `state=armed`; a line the session
-      prints from `rearm` reaches no hook even when the watch behind it is
-      perfectly healthy, so it must not claim a carrier.
+      accepts the initial and repeated `watch`/`rearm` states and validates
+      the exact current recipient before arming.
     * `wake` names a carrier: Claude's rewake hook (`hook`) or a Codex
       steward's native thread queue (`queue`). A watch armed with `wake=none`
       (or `auto` resolved where neither exists) leaves its receipt on disk with

@@ -85,6 +85,16 @@ def main():
             interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"))
             if resumed:
                 _shell_state("working", session_id)
+            try:
+                if payload.get("hook_event_name") == "SessionEnd":
+                    utilities = str(ROOT / "utilities")
+                    if utilities not in sys.path:
+                        sys.path.insert(0, utilities)
+                    from peer_steward_base import peer_message
+                    peer_message.observe_steward_end(harness, session_id,
+                                                    reason=payload.get("reason") or "session-end")
+            except Exception:
+                pass
             return 0
         if action != "set" or "--kind" not in sys.argv:
             return 0

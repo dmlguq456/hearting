@@ -514,8 +514,36 @@ def role_targets(harness, session_id, *, aliases=(), markers=None, cwd=None, ses
     return _owner_targets(winners, harness, session_id)
 
 
+def unresolved_role_targets(harness, session_id, *, sessions=None):
+    """Keep the holder's unjoined evidence visible as uncertainty, never a winning edge."""
+    rows = _registry_sessions() if sessions is None else list(sessions)
+    keys = {key for row in rows for key in _session_keys(row)}
+    names = {(row.harness, getattr(row, "runtime_name", None)) for row in rows}
+    targets = []
+    seen = set()
+    for relation in read_relations():
+        holder = relation.get("holder") or {}
+        if relation.get("released") or (holder.get("harness"), holder.get("sid")) != (harness, session_id):
+            continue
+        for target in relation.get("targets") or ():
+            h, sid, name = target.get("harness"), target.get("session_id"), target.get("name")
+            if target.get("source") not in {"start", "watch"}:
+                continue
+            if (sid and (h, sid) in keys) or (name and (h, name) in names):
+                continue
+            # Known native metadata may put it in a foreign repository: exclude
+            # that communication edge rather than labelling it unresolved.
+            if sid and _native_role_sessions({(h, sid): {}}, rows):
+                continue
+            key = (h, sid, name, target.get("pane"))
+            if key not in seen:
+                seen.add(key)
+                targets.append(dict(target, unresolved=True))
+    return targets
+
+
 def role_flag(harness, session_id, *, aliases=(), markers=None, cwd=None, sessions=None,
-              _targets=None, _relations=None):
+              _targets=None, _relations=None, observation=None):
     """One display decision: exact self-role evidence or same-repository targets.
 
     The CLI's unknown/- sentinel is a flag on the current session, never a
@@ -532,6 +560,9 @@ def role_flag(harness, session_id, *, aliases=(), markers=None, cwd=None, sessio
     if evidence is None:
         return False
     harness = str(harness or "").lower()
+    end_proof = getattr(mod, "steward_session_end_proof", None)
+    if end_proof is not None and end_proof(harness, session_id, observation=observation) == "ended":
+        return False
     for sid in (session_id, *aliases):
         marker = markers.get((harness, sid))
         if (not isinstance(marker, dict) or marker.get("session_id") != sid
@@ -696,6 +727,76 @@ def _process_proof(harness, session_id, observation):
     return "unknown"
 
 
+def other_session_process_live(harness, session_id, ended_process, *, observation=None):
+    """Positive ownership outside the process named by a lifetime receipt.
+
+    A stale claim from the exiting process (including a /resume elsewhere) is
+    not a second holder. The native census implementations remain unchanged.
+    """
+    from . import liveness, procscan
+    observation = end_observation() if observation is None else observation
+    ended_process = ended_process if isinstance(ended_process, dict) else {}
+    try:
+        mod = _peer_message_module()
+        context = mod._steward_process_context()
+        same_context = all(ended_process.get(key) == value for key, value in context.items())
+    except (OSError, AttributeError):
+        same_context = False
+
+    def other(pid, birth):
+        return not (same_context and pid == ended_process.get("pid")
+                    and str(birth) == ended_process.get("pid_start"))
+
+    # Read every record: the first SID match may be the exiting process itself.
+    for record in _registry_records(harness) or ():
+        pid, birth = record.get("pid"), record.get("procStart")
+        if (record.get("sessionId") == session_id and record.get("status") != "exited"
+                and type(pid) is int and birth and other(pid, birth)):
+            alive, match = liveness._proc_evidence(pid, birth)
+            if alive and match is True:
+                return True
+    if _process_proof(harness, session_id, observation) != "live":
+        return False
+    # An unbound/legacy receipt cannot disprove a current native holder.
+    if not same_context:
+        return True
+    alive, match = liveness._proc_evidence(ended_process.get("pid"), ended_process.get("pid_start"))
+    if not alive or match is False:
+        return True
+    pids = procscan._visible_pids()
+    if pids is None:
+        return False
+    if harness == "opencode":
+        from . import opencode
+        seen = opencode.session_visibility(pids=[pid for pid in pids
+            if other(pid, procscan.read_proc_start(pid))])
+        return bool(seen and session_id in seen["visible"])
+    if harness == "claude":
+        import claude_process_identity as identity
+        # The census supplies session-level evidence. Resolve its other process
+        # claims with the same native/argv/tap readers, excluding this birth.
+        for pid in pids:
+            process = identity.observe_process(pid)
+            if not process or process["kind"] != "runtime" or not other(pid, process["proc_start"]):
+                continue
+            env = procscan.read_environ(pid)
+            home = env.get("CLAUDE_CONFIG_DIR") or str(Path(env.get("HOME", "")) / ".claude")
+            if not Path(home).is_absolute():
+                continue
+            try:
+                native, valid = identity._native_session_claim(Path(home), str(pid), process["proc_start"])
+                claims = identity._argument_sessions(process["argv"])
+                if valid:
+                    claims.update(identity.tap_sids_by_pid(home, pid, process["proc_start"]))
+                    if native:
+                        claims.add(native)
+                if session_id in claims and identity.observe_process(pid) == process:
+                    return True
+            except (OSError, ValueError):
+                continue
+    return False
+
+
 def session_liveness(harness, session_id, *, agents=None, observation=None):
     """``"live"`` | ``"ended"`` | ``"unknown"``. Only proof of exit says ``ended``:
     a herdr row means live; Claude, Codex and OpenCode then answer from the processes that
@@ -705,6 +806,12 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
     harness = str(harness or "").lower()
     if not session_id:
         return "unknown"
+    mod = _peer_message_module()
+    end_proof = getattr(mod, "steward_session_end_proof", None)
+    if end_proof is not None:
+        proof = end_proof(harness, session_id, observation=observation)
+        if proof in {"live", "ended"}:
+            return proof
     if agents is None:
         try:
             from . import herdr
@@ -858,9 +965,27 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
             continue
         seen.add((harness, sid))
         liveness = session_liveness(harness, sid, agents=agents, observation=observation)
+        origin = relation.get("origin") or {}
+        marker = (markers.get((harness, sid)) or
+                  markers.get((str(origin.get("harness") or "").lower(), origin.get("sid"))) or {})
         out.append({"harness": harness, "session_id": sid,
                     "name": _holder_name(harness, sid, rows), "liveness": liveness,
-                    "basis": basis, "counted": liveness != "ended"})
+                    "basis": basis, "counted": liveness != "ended",
+                    "seat_key": relation.get("seat_key") or marker.get("seat_key"),
+                    "last_activity": marker.get("updated") or marker.get("since"),
+                    "activity_basis": "role-marker",
+                    "count_reason": "end-unproven" if liveness == "unknown" else liveness})
+    # A new holder at the same physical seat does not consume two places.
+    # Keep uncertainty and history; this is counting, never authority to end work.
+    for holder in out:
+        seat_key = holder["seat_key"]
+        if not seat_key or holder["liveness"] == "live":
+            continue
+        if any(other is not holder and other["seat_key"] == seat_key
+               and other["liveness"] != "ended"
+               and other["last_activity"] and holder["last_activity"]
+               and other["last_activity"] > holder["last_activity"] for other in out):
+            holder.update(counted=False, count_reason="same-seat-successor")
     return out
 
 
@@ -942,7 +1067,7 @@ def last_supervision():
     return _last_supervision
 
 
-def _record_supervision(context, markers, relations):
+def _record_supervision(context, markers, relations, *, observation=None):
     global _last_supervision
     if not relations:
         _last_supervision = {}
@@ -955,7 +1080,7 @@ def _record_supervision(context, markers, relations):
     try:
         _last_supervision = supervision_by_repository(
             context, limit=_steward_limit(), markers=markers, relations=relations, agents=agents,
-            observation=end_observation())
+            observation=end_observation() if observation is None else observation)
     except Exception:
         _last_supervision = None
 
@@ -975,7 +1100,8 @@ def enrich(sessions, markers=None):
     context = list(sessions) + [s for s in _registry_sessions()
                                 if not current_keys.intersection(_session_keys(s))]
     context += _native_role_sessions(markers, context, relations)
-    _record_supervision(context, markers, relations)
+    observation = end_observation()
+    _record_supervision(context, markers, relations, observation=observation)
     mod = _peer_message_module()
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     if evidence is None:
@@ -993,7 +1119,7 @@ def enrich(sessions, markers=None):
                                _relations=relations)
         s.steward = role_flag(s.harness, s.session_id, markers=markers,
                               aliases=[sid for _harness, sid in keys[1:]], _targets=targets,
-                              _relations=relations)
+                              _relations=relations, observation=observation)
         if not targets:
             continue
         # `steward_evidence_targets` returns oldest-first — the stable order the
