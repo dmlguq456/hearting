@@ -437,6 +437,22 @@ def _frame_question_detail(route, jobs, gate_id):
     return None, [], None
 
 
+def _note_gate_reads(sink, question_path, artifact_root=None):
+    """Add a frame-review artifact, its two answer files and (when given) the root it must lie
+    in to ``sink`` with their identities, each once; a missing one is kept as missing."""
+    if sink is None:
+        return
+    known = {read for read, _identity in sink}
+    paths = [question_path, question_path.parent / "answers.native.json",
+             question_path.parent / "answers.json"]
+    if artifact_root is not None:
+        paths.append(Path(artifact_root))
+    for read in paths:
+        if read not in known:
+            known.add(read)
+            sink.append((read, _stamp(read)))
+
+
 def pending_human_waits(route, *, jobs, outcome=None):
     """Return unresolved raised gates as private route/gate ids and public-safe fields.
 
@@ -444,7 +460,8 @@ def pending_human_waits(route, *, jobs, outcome=None):
     frame-review, answer files beside the artifact named by the latest raise.
     It never repairs ledger state or changes gate state. A caller that keeps the result can
     name what it depends on: ``_WAIT_READS`` collects ``(path, identity)`` of every file besides
-    the journal this call looked at (a frame-review artifact and its two answer files).
+    the journal this call looked at (a frame-review artifact and its two answer files, as named
+    and as resolved, and the artifact root), including one that was missing or refused.
     """
     if not isinstance(route, dict) or not route.get("route_id") or not route.get("route_hash"):
         return []
@@ -490,15 +507,16 @@ def pending_human_waits(route, *, jobs, outcome=None):
         if gate == "frame-review":
             artifact = resolution.get("artifact")
             artifact_root = route.get("artifact_root")
+            sink = _WAIT_READS.get()
+            if artifact and artifact_root:
+                # Identified before the path check, so a gate file that is missing or refused now
+                # is an input too: its appearance (an archived interview restored) is seen next time.
+                _note_gate_reads(sink, Path(artifact), artifact_root)
             if artifact and artifact_root and _inside(artifact, artifact_root):
                 try:
                     question_path = Path(artifact).resolve(strict=True)
-                    sink = _WAIT_READS.get()
-                    if sink is not None:
-                        # Identified before they are read, so a change after the read is seen next time.
-                        sink.extend((read, _stamp(read)) for read in (
-                            question_path, question_path.parent / "answers.native.json",
-                            question_path.parent / "answers.json"))
+                    # Identified before they are read, so a change after the read is seen next time.
+                    _note_gate_reads(sink, question_path)
                     digest = resolution.get("artifact_sha256")
                     current = not digest or hashlib.sha256(question_path.read_bytes()).hexdigest() == digest
                     if current and FI.is_interview(_json_file(question_path)):
@@ -537,12 +555,21 @@ def _route_file_paths(route_file, record, route_id):
     return (str(route_path), str(route_path.with_name(route_path.stem + ".outcome.json")), finish)
 
 
+def _journal_file(route_key, ledger_root):
+    """The workflow journal this pass's registry selects for the route (None without a ledger root)."""
+    return str(Path(ledger_root) / str(route_key[0]) / "journal.jsonl") if ledger_root is not None else None
+
+
 def _kept_waits(route_key, path, ledger_root):
     """The kept judgment of this route when every input is the file it was made from, else None."""
     entry = _WAIT_MEMO.get(route_key)
     if entry is None or ledger_root is None or entry[0] != str(path):
         return None
     _jobs_key, files, stamps, journal, journal_stamp, reads, waits = entry
+    # The same registry path can select another ledger (its directory now links elsewhere): the
+    # journal the judgment was made from must still be the one this pass selects.
+    if journal != _journal_file(route_key, ledger_root):
+        return None
     if (_stamp(files[0]) != stamps[0] or _stamp(files[1]) != stamps[1]
             or (files[2] is not None and _stamp(files[2]) != stamps[2])
             or _stamp(journal) != journal_stamp
@@ -555,7 +582,7 @@ def _kept_waits(route_key, path, ledger_root):
 def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_root):
     """``pending_human_waits`` for one route, kept with the identity of every file it read."""
     _METRICS["route_wait_recomputes"] += 1
-    journal = str(Path(ledger_root) / str(route_key[0]) / "journal.jsonl") if ledger_root is not None else None
+    journal = _journal_file(route_key, ledger_root)
     files = _route_file_paths(route_key[2], raw_record, route_key[0])
     # The identities the record and outcome were loaded under (taken before they were read), so a
     # change after that load is seen on the next pass; stamped now only when they are not at hand.
