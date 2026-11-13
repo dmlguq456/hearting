@@ -7193,6 +7193,13 @@ def _runner_maintenance_pass(store):
                     "removed": counts["removed"],
                     "locks_removed": counts.get("locks_removed", 0)},
                 expected_root_identity=identity)
+            # Peer requests closed (or never sealed) for 14 days go on the same
+            # due pass; an open request is never removed for its age.
+            try:
+                import peer_request
+                result["peer_requests_pruned"] = len(peer_request.prune())
+            except (OSError, ValueError, ImportError):
+                pass
     except (OSError, ValueError, RuntimeError):
         pass
     try:

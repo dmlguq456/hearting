@@ -3510,6 +3510,20 @@ a refusal, unresolved address or identity mismatch exits non-zero.
 `hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
 the send path; reply text addressed to another session reaches nobody.
 
+**Peer requests.** A request for work is `peer-steward.py request <address> --body-file
+<file>` (a new `--rev` label supersedes the revision; `request <rq-id> --cancel` withdraws
+it); its answer is `report [<rq-id>] [--partial | --reject <why>] --result <line>`, and
+`show [<rq-id>]` prints the sealed body (no id: this session's open requests). The line
+that reaches a conversation names the request; the body stays sealed and the model opens
+it with `show`. Delivery and work are separate: a receipt does not change a request's state;
+only a final or reject report, or the requester's cancel, closes it, and a partial report
+keeps it open. A report belongs to the revision it answers; for a superseded one it is
+kept there as late and closes nothing. A revision superseded or cancelled before delivery
+is not sent; a delivered one is not recalled, and the cancel notice reaches the receiver
+at its next boundary. A request follows only a successor that Hearting's lineage confirms,
+and an unconfirmed same-name session neither inherits nor may report it. A report is not
+approval, release or a user answer.
+
 A lost native response is reconciled from exact persisted history before continuing
 the same ref. Duplicate or ambiguous matches are left pending without resubmitting
 the body. OpenCode additionally requires the exact selected root SID, native idle

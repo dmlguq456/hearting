@@ -324,6 +324,8 @@ utility-deferred	peer_steward_status.py
 utility-deferred	peer_steward_watch.py
 utility-deferred	peer_obligations.py
 utility-deferred	peer_read_context.py
+utility-deferred	peer_request.py
+utility-deferred	peer_request_cmd.py
 utility-deferred	registered_parent_park.test.py
 utility-deferred	replica_batch_contract.py
 utility-deferred	resource-observers.py
