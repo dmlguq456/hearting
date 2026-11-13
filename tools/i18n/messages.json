@@ -654,6 +654,10 @@
    "en": " · {count} with no session to receive",
    "ko": " · 받을 세션 없음 {count}"
   },
+  "fleet.details_wait": {
+   "en": "details wait",
+   "ko": "세부 아직"
+  },
   "fleet.gpu.unattributed": {
    "en": "unattributed",
    "ko": "미귀속"

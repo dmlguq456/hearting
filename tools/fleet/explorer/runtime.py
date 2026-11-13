@@ -810,9 +810,15 @@ class ExplorerRuntime:
                             if isinstance(item.get("observed_at"), (int, float))
                             and not isinstance(item.get("observed_at"), bool)
                             and math.isfinite(item["observed_at"])]
+                # ``observed``: the basic collection is in. It is not ``ready``: the late sources
+                # are still pending, so such a model is never kept as the last complete one
+                # (``mark_published`` and the persistence below read ``ready``/``all_new`` only).
+                observed_basic = ("basic" not in incomplete and basic_identity is not None)
                 readiness = {"ready": ready, "fully_fresh": ready,
                              "all_new": all_new, "generation": generation,
                              "generation_identity": generation_identity,
+                             "observed": observed_basic,
+                             "details_pending": tuple(name for name in pending if name != "basic"),
                              "pending": pending, "sources": source_states,
                              "observed_at": max(observed) if observed else
                              (now if now is not None else time.time())}
@@ -824,6 +830,12 @@ class ExplorerRuntime:
                              "pending": pending, "sources": source_states,
                              "observed_at": now if now is not None else time.time()}
         return model, readiness
+
+    @staticmethod
+    def observed_only(readiness):
+        """Basic is in and a late source is not: a frame to show with its late cells marked."""
+        return (isinstance(readiness, Mapping) and readiness.get("observed") is True
+                and readiness.get("ready") is not True)
 
     def mark_published(self, readiness):
         if self.publication_ready(readiness):

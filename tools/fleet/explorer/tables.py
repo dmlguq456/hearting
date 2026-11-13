@@ -216,6 +216,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()),
                           *(([(c["now"], "NOW")] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
+        if label == "TITLE" and isinstance(vm.system, Mapping) and vm.system.get("details_wait"):
+            waiting = "TITLE · " + ui_text("fleet.details_wait")    # basic frame: the late cells are not in yet
+            label = waiting if _seg_width(waiting) <= c["title_w"] else _clip(ui_text("fleet.details_wait"), c["title_w"])
         if label == "MODEL" and harn_end is None or label == "CTX" and not c.get("ctx_w", 1):
             continue                      # a table this narrow has no room for the harness cell
         grid.put(x + offset, y, label, "head", tint=234, limit=right)
@@ -314,7 +317,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                                     narrow=c["narrow"], bare=c["bare"])
             title_whole = False
             if c["title_w"]:
-                title = str(session.get("title") or "·")
+                title = str(session.get("title") or (ui_text("fleet.details_wait") if session.get("title_wait") else "·"))
                 # The checkout follows the title in parentheses (12 cells at most); the title gives way
                 # first, and a row whose branch is unknown draws no parentheses at all.
                 branch = session.get("branch")
@@ -341,8 +344,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 title_whole = (_seg_width(title) <= room and (
                     not branch_tail or tail.startswith(branch_tail) and branch_tail == " (%s)" % branch))
                 title_text = _clip(title, room)
-                bold_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
-                            "opencode": ("l", 1, 0)}.get(harness, "unknown")
+                bold_key = ("dim" if session.get("title_wait") and not session.get("title") else
+                            {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
+                             "opencode": ("l", 1, 0)}.get(harness, "unknown"))
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:

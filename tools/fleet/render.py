@@ -6300,6 +6300,14 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                 frame = _explorer_frame_from_model(live_model, state, w, h,
                                                    beat=1 if _EXPLORER_REPLAY_ACTIVE else int(_BLINK_ON))
                 _EXPLORER_SHOWN = True
+            elif runtime.observed_only(readiness) and candidate_model is not None:
+                # Nothing saved to replay, the basic collection is in and the required details
+                # are not: show what is observed with its late cells marked "details wait". This
+                # frame is shown only; it is never published or kept as the last complete model.
+                from .explorer.live import mark_details_wait
+                _EXPLORER_MODEL = mark_details_wait(candidate_model, readiness)
+                frame = runtime.draw_frame(_EXPLORER_MODEL, state, w, h, beat=int(_BLINK_ON))
+                _EXPLORER_SHOWN = True
             else:
                 _EXPLORER_MODEL = None
                 frame = runtime.loading_frame(w, h)

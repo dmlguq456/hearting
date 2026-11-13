@@ -2293,6 +2293,25 @@ def current_session_activity(model, candidate, snapshot):
 _UNOBSERVED_CELL_GROUPS = (("model", "effort"), ("context", "window", "context_detail"), ("title",))
 
 
+def mark_details_wait(model, readiness):
+    """A frame shown on the basic collection alone: say which cells are still to come.
+
+    The required details are not in yet, so a cell they fill is marked, never left looking
+    empty (or filled). Session rows with no title carry ``title_wait`` and the TITLE header
+    says "details wait" while any required source is pending. Nothing else changes, and the
+    model is not the last complete one (``mark_published`` and persistence never see it).
+    """
+    pending = (tuple(readiness.get("details_pending") or ())
+               if isinstance(readiness, Mapping) else ())
+    if model is None or not pending:
+        return model
+    rows = [dict(row, title_wait=True) if row.get("title") is None
+            and row.get("state") not in {"dead", "stale"} else row for row in model.sessions]
+    system = dict(model.system) if isinstance(model.system, Mapping) else {}
+    system["details_wait"] = True
+    return model.with_updates(sessions=rows, system=system)
+
+
 def retain_unobserved_cells(candidate, published):
     """Keep a same-process row's shown cells when the new ready pass did not observe them.
 
