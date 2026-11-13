@@ -78,6 +78,44 @@ def transient_retry_delay(error_info: object, failures: int, *, registered: bool
     return TRANSIENT_RETRY_DELAYS[failures] if failures < len(TRANSIENT_RETRY_DELAYS) else None
 
 
+EDGE_BLOCK_CONTINUE_PROMPT = (
+    "The previous turn stopped on a transient service block (an HTTP 403 edge page, not an "
+    "account or key rejection). Continue the same work from where it stopped; preserve active "
+    "children.")
+
+
+def edge_block_retry_delay(terminal: object, failures: int) -> int | None:
+    """The next bounded retry delay for a turn the edge network blocked, or None.
+
+    The classifier names the block page (`EDGE_BLOCK_REASON`); every other
+    terminal keeps its existing handling. Same schedule as the structured
+    overload retry above."""
+    from dispatch_supervisor_terminal import EDGE_BLOCK_REASON
+    if (getattr(terminal, "reconcile_reason", None) != EDGE_BLOCK_REASON
+            or not isinstance(failures, int) or isinstance(failures, bool) or failures < 0):
+        return None
+    return TRANSIENT_RETRY_DELAYS[failures] if failures < len(TRANSIENT_RETRY_DELAYS) else None
+
+
+def wait_transient_retry(delay: float, *, control, emit: Callable[[dict], None], common: dict,
+                         clock: Callable[[], float] = time.monotonic,
+                         sleep: Callable[[float], None] = time.sleep) -> str:
+    """Wait out one retry delay; a pending owner correction ends it early.
+
+    Returns "owner-input" or "deadline"."""
+    deadline = clock() + delay
+    emit({"type": "dispatch.supervisor.transient-wait.started", **common,
+          "deadline_monotonic": deadline})
+    outcome = "deadline"
+    while clock() < deadline:
+        if control is not None and control.pending():
+            outcome = "owner-input"
+            break
+        sleep(min(0.25, max(0.0, deadline - clock())))
+    emit({"type": "dispatch.supervisor.transient-wait.ended", **common, "outcome": outcome})
+    return outcome
+
+
 class SupervisorError(RuntimeError):
     """A session supervisor could not preserve its completion contract."""
 
@@ -396,24 +434,41 @@ class ResourceAttentionReady(StopWaiting):
         self.prompt = prompt
 
 
+PARKED_CORRECTION_PROMPT = (
+    "Continue the same work using the pending user correction; preserve active children. "
+    "Your registered children are still running and were not delivered: after applying the "
+    "correction, end the turn with `runtime_wait: registered-children` to keep waiting for them.")
+
+
+class CorrectionReady(ResourceAttentionReady):
+    """A user correction waits for this owner while its model children are still parked.
+
+    Caught where a resource receipt is: the children stay undelivered and are parked
+    again after the owner's turn, and the loop's own `control.prepare` attaches the
+    correction text. No resource outbox exists, so no continuation is spent on it."""
+
+    def __init__(self):
+        super().__init__(PARKED_CORRECTION_PROMPT)
+
+
 def join_with_resource_attention(
     args, state_path, control, delivered: set[str],
     join: Callable[[Any, set[str]], dict], *,
     check_seconds: float = RESOURCE_ATTENTION_CHECK_SECONDS,
     clock: Callable[[], float] = time.monotonic,
 ) -> Callable[[set[str]], dict]:
-    """Wrap `join(args, attempts)` so a resource's attention is not held behind model children.
+    """Wrap `join(args, attempts)` so a correction or a resource's attention is not held
+    behind model children.
 
-    An owner that holds no resource gets the same one join call as before. One that does
-    gets the same total wait (`args.join_timeout`) in `check_seconds` pieces, and between
-    pieces one look at its resources (`dispatch_resource_wait.observe_once`). A receipt
-    raises `ResourceAttentionReady`; the model children are not delivered, so the next
-    loop parks them again. A pending user correction is the next thing a later change
-    returns from these same checkpoints; this one does not.
+    The same total wait (`args.join_timeout`) runs in `check_seconds` pieces. Between
+    pieces a pending user correction (`control.pending()`) raises `CorrectionReady`, and an
+    owner holding resources gets one look at them (`dispatch_resource_wait.observe_once`);
+    a receipt raises `ResourceAttentionReady`. Either way the model children are not
+    delivered and keep running, so the next loop parks them again.
 
     Holding nothing and not having read it yet differ: a holder that could not be read
-    (`HolderUnobserved`) keeps the short pieces and is read again at each checkpoint;
-    once it reads as holding nothing, the rest of the same wait is one join as before.
+    (`HolderUnobserved`) is read again at each checkpoint; once it reads as holding
+    nothing, the checkpoints only look for a correction.
     """
     def holds_resources() -> bool | None:
         try:
@@ -423,11 +478,17 @@ def join_with_resource_attention(
         except Exception:  # the old behavior: no look at all, never a new failure here
             return False
 
+    def correction_pending() -> bool:
+        try:
+            return bool(control is not None and control.pending())
+        except Exception:  # an unreadable channel is looked at again at the next checkpoint
+            return False
+
     def run(attempts: set[str]) -> dict:
         total = float(args.join_timeout)
-        holds = holds_resources() if total > 0 else False
-        if holds is False:
+        if total <= 0:
             return join(args, attempts)
+        holds = holds_resources()
         deadline = clock() + total
         while True:
             step = max(min(check_seconds, deadline - clock()), 1.0)
@@ -436,18 +497,14 @@ def join_with_resource_attention(
             receipt = join(piece, attempts)
             if receipt.get("state") != "timeout":
                 return receipt
+            if correction_pending():
+                raise CorrectionReady()
             if holds is None:
                 holds = holds_resources()
-                if holds is None:
-                    if clock() >= deadline:
-                        return receipt
-                    continue
-                if holds is False:
-                    if clock() >= deadline:
-                        return receipt
-                    rest = copy.copy(args)
-                    rest.join_timeout = max(deadline - clock(), 1.0)
-                    return join(rest, attempts)
+            if not holds:
+                if clock() >= deadline:
+                    return receipt
+                continue
             state = completion_join.read_supervisor_phase_state(state_path, args.parent_attempt_id)
             resource = dict(state.resource) if state and state.resource else {
                 "session_id": control.thread_id, "delivered": [], "outbox": None}

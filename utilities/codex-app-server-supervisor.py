@@ -1067,6 +1067,12 @@ def run_turn(server: AppServer, *, thread_id: str, prompt: str,
             else:
                 retry_index = failures
             delay = DECISIONS.transient_retry_delay(info, retry_index, registered=True)
+            reason_code = "transient-capacity"
+            if delay is None:
+                # The same edge block page the Claude/OpenCode supervisor retries.
+                delay = DECISIONS.edge_block_retry_delay(
+                    codex_turn_failure_terminal(exc.payload), retry_index)
+                reason_code = "transient-edge-block"
             if delay is None:
                 raise
             turn_id = str(exc.payload.get("turn_id") or "")
@@ -1076,7 +1082,7 @@ def run_turn(server: AppServer, *, thread_id: str, prompt: str,
             deadline = started + delay
             common = {"parent_attempt_id": getattr(args, "parent_attempt_id", ""),
                       "thread_id": thread_id, "turn_id": turn_id,
-                      "reason_code": "transient-capacity", "ordinal": retry_index + 1,
+                      "reason_code": reason_code, "ordinal": retry_index + 1,
                       "deadline_monotonic": deadline}
             emit({"type": "dispatch.supervisor.transient-wait.started", **common})
             while clock() < deadline:
