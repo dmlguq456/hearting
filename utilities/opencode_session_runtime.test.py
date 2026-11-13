@@ -113,6 +113,33 @@ class NativeSessionTest(unittest.TestCase):
             result, _code = runtime.run_turn(self.args, "question", emit=self.events.append)
         self.assertNotIn("usage", result)   # no counts reported: none invented
 
+    def test_each_finished_step_leaves_its_counters_in_the_log_for_the_context_gauge(self):
+        # A supervised owner's route row reads its context from these rows (Fleet's
+        # OpenCode attempt parser); before them the log had no per-step counts at all.
+        self.program("event('step_start', part={})\n"
+                     "event('tool_use', part={'tool':'read','id':'p1','state':{'status':'completed',"
+                     "'output':'secret file body'}})\n"
+                     "event('step_finish', part={'reason':'tool-calls','tokens':{'input':100,'output':20,"
+                     "'reasoning':5,'cache':{'read':1000,'write':7},'note':'x'}})\n"
+                     "event('step_start', part={})\n"
+                     "event('text', part={'text':'answer'})\n"
+                     "event('step_finish', part={'reason':'stop','tokens':{'total':1200}})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertEqual(code, 0)
+        steps = [event for event in self.events if event.get("type") == "dispatch.supervisor.step_tokens"]
+        self.assertEqual(steps, [
+            {"type": "dispatch.supervisor.step_tokens", "runtime": "opencode", "sessionID": "ses_native",
+             "tokens": {"input": 100, "output": 20, "reasoning": 5, "cache": {"read": 1000, "write": 7}}},
+            {"type": "dispatch.supervisor.step_tokens", "runtime": "opencode", "sessionID": "ses_native",
+             "tokens": {"total": 1200}}])
+        # Counters only: no stop reason, no text, and never a `step_finish` row (other
+        # readers take that word as terminal evidence).
+        self.assertFalse(any(event.get("type") == "step_finish" for event in self.events))
+        self.assertNotIn("secret", json.dumps(self.events))
+        self.assertNotIn("answer", json.dumps(self.events))
+        self.assertEqual(result["result"], "answer")
+
     def test_v2_identityless_provider_rejection_is_preserved_without_secret(self):
         self.program("print(json.dumps({'type':'error','sessionID':'','error':{"
                      "'type':'provider.auth','code':'api_key_expired','status':401,"

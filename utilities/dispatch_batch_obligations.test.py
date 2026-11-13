@@ -1065,7 +1065,6 @@ class BatchObligationTest(unittest.TestCase):
         context = obligations.OwnerSettlementReadContext()
         self.addCleanup(context.close)
         view = registry_cache.registry_view(self.jobs, append_only=True)
-        self.assertFalse(view.append_only_generation, "a first read is a full read")
         self.assertEqual(context.owner_candidate_floor(self.jobs, view), -1)
         context.remember_owner_cursor(self.jobs, view)
 
@@ -1074,18 +1073,58 @@ class BatchObligationTest(unittest.TestCase):
         self.assertEqual(context.owner_candidate_floor(self.jobs, cached),
                          view.last_complete_order)
 
+        # The bytes, not the inode, are what the cursor proved: an identical
+        # replacement keeps the floor, a changed one gives it up.
         self._replace_registry(rows)
         replaced = registry_cache.registry_view(self.jobs, append_only=True)
         self.assertIsNot(replaced, view)
-        self.assertEqual(context.owner_candidate_floor(self.jobs, replaced), -1)
+        self.assertEqual(context.owner_candidate_floor(self.jobs, replaced),
+                         view.last_complete_order)
+        self._replace_registry(self._runtime_owner_row("att-one", status="running") + "\n"
+                               + self._runtime_owner_row("att-two") + "\n")
+        changed = registry_cache.registry_view(self.jobs, append_only=True)
+        self.assertEqual(context.owner_candidate_floor(self.jobs, changed), -1)
 
-        context.remember_owner_cursor(self.jobs, replaced)
+        context.remember_owner_cursor(self.jobs, changed)
         with self.jobs.open("a", encoding="utf-8") as stream:
             stream.write(self._runtime_owner_row("att-three") + "\n")
         appended = registry_cache.registry_view(self.jobs, append_only=True)
-        self.assertTrue(appended.append_only_generation)
         self.assertEqual(context.owner_candidate_floor(self.jobs, appended),
-                         replaced.last_complete_order)
+                         changed.last_complete_order)
+
+    def test_inode_reused_by_a_replacement_does_not_resume_an_older_cursor(self):
+        # gen1 (inode A) holds the cursor; gen2 (inode B) finishes an old owner
+        # row and another reader sees it; gen3 is gen2 plus one row, written by
+        # rename, and ext4 commonly hands it inode A again. gen3 keeps every
+        # cached gen2 segment, yet it is a replacement, not an append of gen1:
+        # a floor at gen1's cursor would skip the finished owner's settlement.
+        # Without inode reuse the floor holds anyway (see OwnerCandidateFloorProofTest
+        # for the same history with the inode brought back on any filesystem).
+        def rename_registry(lines):
+            fd, staged = tempfile.mkstemp(prefix=".jobs.log.claim-", dir=str(self.base))
+            with os.fdopen(fd, "wb") as stream:
+                stream.write("".join(line + "\n" for line in lines).encode())
+            os.replace(staged, self.jobs)
+
+        for trial in range(5):
+            with self.subTest(trial=trial):
+                registry_cache.clear_cache()
+                context = obligations.OwnerSettlementReadContext()
+                self.addCleanup(context.close)
+                lines = [self._runtime_owner_row(f"att-{number}") for number in range(20)]
+                lines[5] = self._runtime_owner_row("att-5", status="running")
+                rename_registry(lines)
+                first = registry_cache.registry_view(self.jobs, append_only=True)
+                context.remember_owner_cursor(self.jobs, first)
+                lines[5] = self._runtime_owner_row("att-5")
+                rename_registry(lines)
+                registry_cache.registry_view(self.jobs)
+                lines.append(self._runtime_owner_row("att-new"))
+                rename_registry(lines)
+                third = registry_cache.registry_view(self.jobs, append_only=True)
+                same_inode = tuple(third.signature[:2]) == tuple(first.signature[:2])
+                self.assertEqual(context.owner_candidate_floor(self.jobs, third), -1,
+                                 f"inode reused: {same_inode}")
 
     def test_not_applicable_owner_is_reclassified_only_when_its_rows_change(self):
         owner = self._runtime_owner_row("att-na")
@@ -2233,6 +2272,358 @@ class OwnerProofBudgetFairnessTest(unittest.TestCase):
         for cell in cells:
             with self.subTest(**cell):
                 self._probe_cell(**cell)
+
+
+
+class OwnerCandidateFloorProofTest(unittest.TestCase):
+    """The owner candidate floor skips only rows its cursor generation proved.
+
+    The registry is replaced by rename, and ext4 hands a freed inode number out
+    again at once (A -> B -> A); a rewrite in place keeps the number. A later
+    append in place then made an older cursor's ``(dev, ino)`` look like the
+    file it had read, and the floor skipped rows that changed in between: a
+    finished owner's settlement was missed. Every judgment here is made against
+    the registry bytes, through each read path, with and without the inode
+    coming back (a held hard link brings it back on any filesystem).
+    """
+
+    READS = ("window", "gap", "plain-first", "scope", "cold")
+    WARM_READS = ("window", "gap", "plain-first", "scope")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self._case("setup")
+        registry_cache.clear_cache()
+        self.addCleanup(registry_cache.clear_cache)
+
+    def _case(self, name):
+        registry_cache.clear_cache()
+        self.base = self.root / name
+        self.base.mkdir()
+        self.jobs = self.base / "jobs.log"
+
+    @staticmethod
+    def _owner(attempt, status="done", extra=""):
+        return ("2026-10-18T00:00:00Z\t" + status + "\t/repo\t/wt\towner\t"
+                "attempt_schema_version=2,worker_type=owner,launch_started=1,"
+                "supervisor_lease=flock-v1,attempt_id=" + attempt + extra).encode()
+
+    @staticmethod
+    def _data(lines, tail=b""):
+        return b"".join(line + b"\n" for line in lines) + tail
+
+    def _rename(self, data, onto=None):
+        """Replace the registry by rename; ``onto`` brings back that path's inode."""
+        if onto is None:
+            fd, staged = tempfile.mkstemp(prefix=".jobs.log.claim-", dir=str(self.base))
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+        else:
+            staged = onto
+            with open(staged, "r+b") as stream:
+                stream.truncate(0)
+                stream.write(data)
+        os.replace(staged, self.jobs)
+        if os.path.lexists(staged):
+            # rename(2) leaves both names when they already link one inode.
+            os.unlink(staged)
+
+    def _hold_inode(self):
+        """A hard link to the current registry inode for a later ``_rename(onto=...)``."""
+        held = self.base / (".held-" + str(os.stat(self.jobs).st_ino))
+        os.link(self.jobs, held)
+        return held
+
+    def _append(self, data):
+        with self.jobs.open("ab") as stream:
+            stream.write(data)
+
+    def _rewrite_in_place(self, data):
+        """Same inode, new bytes, and the old mtime restored."""
+        info = os.stat(self.jobs)
+        with self.jobs.open("r+b") as stream:
+            stream.truncate(0)
+            stream.write(data)
+        os.utime(self.jobs, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+    def _read(self, how):
+        if how == "cold":
+            registry_cache.clear_cache()
+        elif how == "scope":
+            with registry_cache.registry_read_scope():
+                return registry_cache.current_registry_view(self.jobs)
+        elif how == "plain-first":
+            registry_cache.registry_view(self.jobs)
+        elif how == "gap":
+            # A supervisor pass later than the retained-descriptor window.
+            with mock.patch.object(registry_cache, "_APPEND_OBSERVATION_GAP_SECONDS", -1.0):
+                return registry_cache.registry_view(self.jobs, append_only=True)
+        return registry_cache.registry_view(self.jobs, append_only=True)
+
+    @staticmethod
+    def _truth(raw):
+        """Complete rows and owner candidates of ``raw``, parsed without the cache."""
+        view = registry_cache.RegistryView("truth", "truth", (0, 0, len(raw), 0, 0), raw)
+        rows = view.lines[:view.line_count - (1 if view.has_partial_tail else 0)]
+        return rows, {(row.order, row.raw) for row in view.settlement_owner_candidates()}
+
+    def _remember(self, context, view):
+        context.remember_owner_cursor(self.jobs, view)
+        info = os.stat(self.jobs)
+        return self._truth(self.jobs.read_bytes()) + ((info.st_dev, info.st_ino),)
+
+    def _judge(self, context, view, cursor, label=""):
+        """The floor and the first wrong thing it would skip, if any."""
+        raw = self.jobs.read_bytes()
+        rows, candidates = self._truth(raw)
+        self.assertEqual(view.lines, self._truth_lines(raw), f"the view itself is exact {label}")
+        floor = context.owner_candidate_floor(self.jobs, view)
+        proven_rows, proven, _identity = cursor
+        if floor >= len(proven_rows):
+            return floor, f"floor {floor} beyond the {len(proven_rows)} proven rows"
+        if rows[:floor + 1] != proven_rows[:floor + 1]:
+            changed = next(order for order, (old, new) in enumerate(zip(proven_rows, rows))
+                           if old != new)
+            return floor, f"floor {floor} skips changed row {changed}"
+        floored = ({item for item in proven if item[0] <= floor}
+                   | {(row.order, row.raw)
+                      for row in view.settlement_owner_candidates_since(floor)})
+        if floored != candidates:
+            return floor, "floored candidates differ from a full scan"
+        return floor, None
+
+    @staticmethod
+    def _proves_rows(view):
+        """Whether ``view`` has complete rows its LF segment digests describe."""
+        return view.last_complete_order >= 0 and view._prefix_reuse_eligible
+
+    @staticmethod
+    def _truth_lines(raw):
+        view = registry_cache.RegistryView("truth", "truth", (0, 0, len(raw), 0, 0), raw)
+        return view.lines
+
+    def test_a_row_changed_since_the_cursor_is_never_below_the_floor(self):
+        # The reviewer probes inode_reuse.py, inode_reuse2.py (and its read
+        # paths), and a same-size rewrite in place, each followed by the read
+        # the supervisor makes. Row 5 changes after the cursor generation.
+        def replaced_then_appended_by_rename(lines, onto):
+            lines[5] = self._owner("att-5")
+            self._rename(self._data(lines))
+            registry_cache.registry_view(self.jobs)
+            lines.append(self._owner("att-new"))
+            self._rename(self._data(lines), onto=onto)
+
+        def replaced_twice_then_appended(lines, onto):
+            lines[5] = self._owner("att-5", status="open")
+            self._rename(self._data(lines))
+            registry_cache.registry_view(self.jobs)
+            lines[19] = self._owner("att-19", extra=",x=1")
+            self._rename(self._data(lines), onto=onto)
+            registry_cache.registry_view(self.jobs)
+            lines.append(self._owner("att-new"))
+            self._append(lines[-1] + b"\n")
+
+        def rewritten_in_place_then_appended(lines, _onto):
+            lines[5] = self._owner("att-5", status="dead")     # same length as "done"
+            self._rewrite_in_place(self._data(lines))
+            registry_cache.registry_view(self.jobs)
+            lines.append(self._owner("att-new"))
+            self._append(lines[-1] + b"\n")
+
+        shapes = (
+            ("replaced, then appended by rename", replaced_then_appended_by_rename, "running",
+             (False, True)),
+            ("replaced twice, then appended in place", replaced_twice_then_appended, "done",
+             (False, True)),
+            ("rewritten in place, then appended in place", rewritten_in_place_then_appended,
+             "done", (False,)),
+        )
+        for name, change, first_status, holds in shapes:
+            for hold in holds:
+                for how in self.READS:
+                    with self.subTest(shape=name, inode_back=hold, read=how):
+                        self._case(f"{len(holds)}-{hold}-{how}-{name.replace(' ', '_')}")
+                        context = obligations.OwnerSettlementReadContext()
+                        self.addCleanup(context.close)
+                        lines = [self._owner(f"att-{number}") for number in range(20)]
+                        lines[5] = self._owner("att-5", status=first_status)
+                        self._rename(self._data(lines))
+                        first = registry_cache.registry_view(self.jobs, append_only=True)
+                        cursor = self._remember(context, first)
+                        held = self._hold_inode() if hold else None
+                        change(lines, held)
+                        view = self._read(how)
+                        info = os.stat(self.jobs)
+                        if hold or "in place" in name.split(",")[0]:
+                            # The judged case really has the cursor's inode number.
+                            self.assertEqual((info.st_dev, info.st_ino), cursor[2])
+                        floor, wrong = self._judge(context, view, cursor)
+                        self.assertIsNone(wrong)
+                        self.assertLess(floor, 5)
+                        self.assertIn((5, lines[5].decode()),
+                                      {(row.order, row.raw)
+                                       for row in view.settlement_owner_candidates_since(floor)})
+
+    def test_floor_skips_only_rows_the_cursor_generation_proved(self):
+        # Random histories: appends in place, rename replacements (some bringing
+        # an older generation's inode back), rewrites in place, lagging cursors
+        # and every read path. Floor-skipped plus floor-scanned candidates must
+        # be a full scan's candidates at every step. A rewrite in place keeps or
+        # shrinks the size: same-inode growth is the append the append_only
+        # caller asserts, and no registry writer rewrites in place at all.
+        separators = (b"\rX", b"\xe2\x80\xa8Y", b"\xff\xfe")
+        totals = {"steps": 0, "floors": 0, "inode_back_changed": 0, "append_only_warm": 0}
+        wrong, narrowed = [], []
+        for seed in (1113, 2026, 7):
+            rng = random.Random(seed)
+            self._case(f"fuzz-{seed}")
+            context = obligations.OwnerSettlementReadContext()
+            self.addCleanup(context.close)
+            serial = [0]
+
+            def row():
+                serial[0] += 1
+                pick = rng.random()
+                if pick < 0.03:
+                    return b""
+                if pick < 0.06:
+                    return b"a\tb\tc"
+                status = rng.choice(("open", "running", "done", "failed"))
+                attempt = f"att-{rng.randrange(40)}" if rng.random() < 0.3 else f"att-u{serial[0]}"
+                if pick < 0.6:
+                    return self._owner(attempt, status=status)
+                return (f"2026-10-18T00:00:00Z\t{status}\t/repo\t/wt\tchild\t"
+                        f"attempt_id={attempt},parent_attempt_id=att-{rng.randrange(40)}").encode()
+
+            lines = [row() for _ in range(rng.choice((0, 3, 300, 511, 512, 513, 1100)))]
+            tail = b""
+            self._rename(self._data(lines))
+            view = self._read("window")
+            cursor = self._remember(context, view)
+            whole, appends_only = view.last_complete_order, self._proves_rows(view)
+            held = None
+            for step in range(150):
+                op = rng.choices(
+                    ("append", "append-many", "append-partial", "change", "same-length",
+                     "append-by-rename", "identical", "delete-front", "swap", "insert",
+                     "shorter", "boundary", "inode-back", "in-place-same-size",
+                     "in-place-shrink", "separator", "clean"),
+                    (10, 5, 2, 5, 4, 5, 3, 2, 2, 2, 2, 3, 6, 3, 2, 1, 1))[0]
+                if op.startswith("append") and op != "append-by-rename":
+                    if op == "append-partial":
+                        piece = row()[:rng.randrange(1, 20)]
+                        tail += piece
+                        self._append(piece)
+                    else:
+                        new = [row() for _ in range(1 if op == "append" else rng.randrange(2, 30))]
+                        self._append(self._data(new))
+                        new[0] = tail + new[0]
+                        tail = b""
+                        lines.extend(new)
+                else:
+                    if op in ("change", "inode-back") and lines:
+                        lines[rng.randrange(len(lines))] = row()
+                    elif op in ("same-length", "in-place-same-size", "boundary") and lines:
+                        index = rng.randrange(len(lines))
+                        if op == "boundary" and len(lines) > 520:
+                            index = rng.choice((510, 511, 512, 513, len(lines) - 1))
+                        text = bytearray(lines[index])
+                        if text:
+                            spot = rng.randrange(len(text))
+                            if text[spot:spot + 1] not in (b"\t",):
+                                text[spot] = ord("q") if text[spot] != ord("q") else ord("r")
+                        lines[index] = bytes(text)
+                    elif op == "append-by-rename":
+                        lines.extend(row() for _ in range(rng.randrange(1, 4)))
+                    elif op == "delete-front" and lines:
+                        del lines[:rng.randrange(1, min(len(lines), 4) + 1)]
+                    elif op == "swap" and len(lines) > 1:
+                        first, second = rng.randrange(len(lines)), rng.randrange(len(lines))
+                        lines[first], lines[second] = lines[second], lines[first]
+                    elif op == "insert":
+                        lines.insert(rng.randrange(len(lines) + 1), row())
+                    elif op in ("shorter", "in-place-shrink") and lines:
+                        del lines[max(0, len(lines) - rng.randrange(1, 30)):]
+                    elif op == "separator" and lines:
+                        index = rng.randrange(len(lines))
+                        lines[index] += rng.choice(separators)
+                    elif op == "clean":
+                        for separator in separators:
+                            lines = [line.replace(separator, b"") for line in lines]
+                    data = self._data(lines, tail)
+                    if op.startswith("in-place"):
+                        self._rewrite_in_place(data)
+                    elif (op == "inode-back" and held is not None
+                          and os.stat(held).st_ino != os.stat(self.jobs).st_ino):
+                        # Like a freed number handed out again: the cache has
+                        # moved on to another inode, so nothing holds it open.
+                        self._rename(data, onto=held)
+                        held = None
+                    else:
+                        self._rename(data)
+                how = rng.choice(self.READS)
+                view = self._read(how)
+                info = os.stat(self.jobs)
+                floor, problem = self._judge(context, view, cursor, (seed, step, op, how))
+                totals["steps"] += 1
+                totals["floors"] += floor >= 0
+                current_rows = self._truth(self.jobs.read_bytes())[0]
+                if ((info.st_dev, info.st_ino) == cursor[2]
+                        and current_rows[:len(cursor[0])] != cursor[0]):
+                    totals["inode_back_changed"] += 1
+                if problem is not None:
+                    wrong.append((seed, step, op, how, problem))
+                # A cold read starts the cache over with new segment boundaries;
+                # from then until the next cursor the floor may only narrow.
+                appends_only = (appends_only and how in self.WARM_READS
+                                and op in ("append", "append-many", "append-partial"))
+                if appends_only:
+                    totals["append_only_warm"] += 1
+                    if floor != whole:
+                        narrowed.append((seed, step, op, how, floor, whole))
+                if rng.random() < 0.4:
+                    cursor = self._remember(context, view)
+                    whole, appends_only = view.last_complete_order, self._proves_rows(view)
+                    if held is not None and rng.random() < 0.5:
+                        os.unlink(held)
+                        held = None
+                    if held is None:
+                        held = self._hold_inode()
+        self.assertEqual(wrong, [], f"{len(wrong)} wrong floors in {totals}")
+        # Only appends since the cursor, every read warm: the whole floor is kept.
+        self.assertEqual(narrowed, [], f"{len(narrowed)} narrowed floors in {totals}")
+        # The histories reached the hole (the cursor's inode number holding other
+        # bytes) and the append-only steps the floor exists for.
+        self.assertGreater(totals["inode_back_changed"], 10, totals)
+        self.assertGreater(totals["append_only_warm"], 30, totals)
+
+    def test_an_append_only_history_keeps_the_whole_floor_across_compaction(self):
+        # A lagging cursor over in-place appends keeps its whole floor through
+        # every warm read path, also once old segments are compacted together.
+        lines = [self._owner(f"att-{number}") for number in range(600)]
+        self._rename(self._data(lines))
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        view = self._read("window")
+        cursor = self._remember(context, view)
+        whole = view.last_complete_order
+        registry_cache.reset_metrics()
+        for step in range(400):
+            lines.append(self._owner(f"att-new-{step}"))
+            self._append(lines[-1] + b"\n")
+            how = self.WARM_READS[step % len(self.WARM_READS)]
+            view = self._read(how)
+            floor, wrong = self._judge(context, view, cursor)
+            self.assertIsNone(wrong, f"step {step} via {how}")
+            self.assertEqual(floor, whole, f"step {step} via {how}")
+            if step % 3 == 2:
+                cursor = self._remember(context, view)
+                whole = view.last_complete_order
+        metrics = registry_cache.metrics_snapshot()
+        self.assertGreaterEqual(metrics["segment_compactions"], 1)
+        self.assertEqual(metrics["full_metadata_parses"], 0, "every read stayed incremental")
 
 
 if __name__ == "__main__":

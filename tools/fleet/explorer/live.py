@@ -91,15 +91,18 @@ def _clock(epoch):
         return None
 
 
-def _model_pair(model):
-    """``[text, colour key]`` for a runtime model name, or None when it is unknown."""
+def _model_pair(model, harness=None):
+    """``[text, colour key]`` for a runtime model name, or None when it is unknown.
+
+    ``harness`` is the runtime running it: a model without a family colour wears that
+    harness's hue (``render._model_key``)."""
     name = _text(model)
     if name is None:
         return None
     try:
         from .. import render
         text = render._clean_model(render._dispatch_display_model(name)) or name
-        key = render._model_key(name)
+        key = render._model_key(name, harness=_text(harness))
     except Exception:
         text = name.split(" (", 1)[0]
         key = "fam_other"
@@ -118,7 +121,7 @@ def _session_model_effort(session, state):
     dead row has no live telemetry (bare harness); the runtime's own default effort is ``default``."""
     if state in ("stale", "dead"):
         return None, None
-    model = _model_pair(_get(session, "model", "m"))
+    model = _model_pair(_get(session, "model", "m"), _get(session, "harness", "h"))
     effort = _effort(_get(session, "effort", "e"))
     if effort is None and model is not None and _get(session, "effort_default"):
         effort = "default"
@@ -527,14 +530,14 @@ def _stage_state(node):
     return _NODE_STAGE.get(node.get("state"), "todo")
 
 
-def _stage_model(model):
+def _stage_model(model, harness=None):
     """A stage's model as the route record names it (``opus`` stays ``opus``): ``[name, colour key]``."""
     name = _text(model)
     if name is None:
         return None
     try:
         from .. import render
-        return [name, render._model_key(name)]
+        return [name, render._model_key(name, harness=_text(harness))]
     except Exception:
         return [name, "fam_other"]
 
@@ -544,7 +547,7 @@ def _stage_record(node):
     stage = {
         "name": _text(node.get("id")) or "·", "st": _stage_state(node),
         "el": _dur(node.get("elapsed_min")), "h": harness,
-        "m": _stage_model(node.get("model")), "e": _effort(node.get("effort")),
+        "m": _stage_model(node.get("model"), harness), "e": _effort(node.get("effort")),
         "gate": bool(node.get("gate_passed")),
     }
     rounds = _num(node.get("route_attempt_round")) or _num(node.get("attempt_round"))
@@ -607,8 +610,8 @@ def _worker_segments(node, resources, state_text=None, owner=None):
         return None
     # The session shell reads these segments too; Fleet draws them in its MODEL cell words.
     segs = [[harness, "hb_" + harness]]
-    pair = _model_pair(node.get("model")) or (
-        _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+    pair = _model_pair(node.get("model"), harness) or (
+        _model_pair(_get(owner, "resolved_model", "model"), _get(owner, "harness")) if owner is not None else None)
     effort = _effort(node.get("effort")) or (_effort(_get(owner, "effort")) if owner is not None else None)
     if pair:
         segs += [[" (", _SEG_DIM], [pair[0], pair[1]]]
@@ -927,7 +930,7 @@ def _frame_leg_displays(jobs):
         rank = _frame_leg_job_rank(job)
         if key not in found or rank > found[key][0]:
             found[key] = (rank, {"harness": _text(_get(job, "harness")),
-                                 "model": _model_pair(_get(job, "resolved_model", "model")),
+                                 "model": _model_pair(_get(job, "resolved_model", "model"), _get(job, "harness")),
                                  "effort": _effort(_get(job, "effort")),
                                  "rank": rank})
     return {key: value for key, (_rank, value) in found.items()}
@@ -972,7 +975,7 @@ def _route_doer(worker, owner, dead, now=None):
         return None
     harness = _text(_get(job, "harness"))
     if dead:
-        return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+        return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
                 "effort": _effort(_get(job, "effort")), "context": None,
                 "window": None, "tokens": None, "tool": None, "agents": 0}
     pct, window = _context_gauge(job)
@@ -981,7 +984,7 @@ def _route_doer(worker, owner, dead, now=None):
     live = _get(job, "liveness") == "working"
     agents = sum(1 for item in (_get(job, "subagents") or ())
                  if _get(item, "active") is True)
-    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
             # Spec E9 rule 24: a stage worker (not the owner) does the work now.
             **({"worker": True} if worker is not None and worker is not owner else {}),
@@ -1123,7 +1126,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         dead = state in ("dead", "stale")
         # Spec rule 27: the owner's harness, model and effort are what its attempt
         # recorded when the route started; they stay when nothing of it runs now.
-        owner_model = _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None
+        owner_model = (_model_pair(_get(owner, "resolved_model", "model"), _get(owner, "harness"))
+                       if owner is not None else None)
         owner_harness = _text(_get(owner, "harness")) if owner is not None else None
         owner_effort = _effort(_get(owner, "effort")) if owner is not None else None
         worktree = None
@@ -1185,7 +1189,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 worker_context_index = len(worker_contexts)
             context_jobs.append(job)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
-                                    "model": _model_pair(_get(job, "resolved_model", "model")),
+                                    "model": _model_pair(_get(job, "resolved_model", "model"), _get(job, "harness")),
                                     "context": pct, "window": window})
         resume = None
         if state == "dead":
@@ -1280,7 +1284,7 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
             line = [[short_id + "  ", "dim"]]
             harness = _text(node.get("harness"))
             if harness:
-                model = _stage_model(node.get("model"))
+                model = _stage_model(node.get("model"), harness)
                 effort = _effort(node.get("effort"))
                 line += _model_segments(harness, model or None, effort if model else None)
             lines.append(line)
