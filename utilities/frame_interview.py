@@ -935,7 +935,7 @@ def _explicit_fields(text):
     fields = {}
     for clause in re.split(r"[;\n]", str(text or "")):
         match = re.fullmatch(r"\s*([\w.-]+)\s*[:=]\s*(\S.*?)\s*", clause)
-        if match:
+        if match and not match[1].isdigit() and not match[2].startswith("//"):
             fields[match[1]] = match[2]
     return fields
 
@@ -960,12 +960,12 @@ def _proposal_conflicts(text, fields):
     return [f"Conflict for `{_inline(key)}`: proposal `{_inline(value)}`; "
             f"user `{_inline(fields[key])}`. The user's answer takes precedence."
             for key, value in _explicit_fields(text).items()
-            if key in fields and fields[key] != value]
+            if key in fields and fields[key].rstrip(".!?。！？").rstrip() != value.rstrip(".!?。！？").rstrip()]
 
 
 def render_intent(interview: dict, answers: dict, *, now: str | None = None, approval_scope=None) -> str:
     """The agreed intent document `plan` reads first. Plain sections in the
-    order intent.md uses (Decisions before proposal context), every decision
+    order intent.md uses (human decisions before proposal context), every decision
     traceable to its question."""
 
     stamp = now or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -998,6 +998,17 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
     ]
     if not confirmed:
         lines += ["", f"**{speaker}'s correction:** " + (_inline(answers.get("correction")) or "-")]
+    section = {
+        "problem": "Problem", "outcome": "Proposed Outcome",
+        "affected": "Affected Users / Systems", "constraints": "Constraints",
+    }
+    proposal_lines = []
+    for field, title in section.items():
+        proposal_lines += ["", f"## {title}", "", _inline(brief.get(field)) or "-"]
+        if human:
+            proposal_lines += _proposal_conflicts(brief.get(field), _answer_fields(interview, answers))
+    if not human:
+        lines += proposal_lines
     lines += ["", "## Decisions", ""]
     questions = [q for q in interview.get("questions", []) if isinstance(q, dict)]
     if not questions:
@@ -1027,13 +1038,8 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
         note = _inline(entry.get("note"))
         if note:
             lines.append(f"  - {speaker}'s note: {note}")
-    section = {
-        "problem": "Problem", "outcome": "Proposed Outcome",
-        "affected": "Affected Users / Systems", "constraints": "Constraints",
-    }
-    for field, title in section.items():
-        lines += ["", f"## {title}", "", _inline(brief.get(field)) or "-"]
-        lines += _proposal_conflicts(brief.get(field), _answer_fields(interview, answers))
+    if human:
+        lines += proposal_lines
     if "route_proposals" in interview:
         lines += _route_lines(interview, answers, approval_scope or {})
     lines += ["", "## Open Questions", "", _inline(brief.get("open")) or "None recorded."]

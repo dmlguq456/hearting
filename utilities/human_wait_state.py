@@ -281,23 +281,18 @@ def closed_question(item_id):
     if not isinstance(item_id, str):
         return None
     projection = _read_cache_file() or {}
+    source_closed = None
     if item_id.startswith("S4:"):
         for path in state_root().glob("*.json"):
             if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
                 continue
             signal = _read(path)
-            if (signal or {}).get("id") == item_id and signal.get("lifecycle") == "answered":
-                return {"status": "answered", "at": (signal.get("completion") or {}).get("at")}
-    overlay = projection.get("selected_responses", {})
-    if _valid_selected_overlay(overlay):
-        entries = [entry for entry in overlay.values() if entry.get("selected_id") == item_id]
-        for entry in sorted(entries, key=lambda row: row["updated_at"], reverse=True):
-            result = entry.get("result") or {}
-            status = {"applied": "answered", "cancelled": "cancelled", "expired": "expired"}.get(entry["state"])
-            if result.get("status") == "replaced":
-                status = "replaced"
-            if status:
-                return {"status": status, "at": entry["updated_at"], "observed": True}
+            if (signal or {}).get("id") != item_id:
+                continue
+            if signal.get("lifecycle") == "open":
+                return None
+            if signal.get("lifecycle") == "answered":
+                source_closed = {"status": "answered", "at": (signal.get("completion") or {}).get("at")}
     if item_id.startswith("S1:"):
         from tools.fleet import interaction
         parts = item_id.split(":")
@@ -305,6 +300,23 @@ def closed_question(item_id):
             current = interaction.read_wait(parts[2], parts[1])
             if current and str(int(current["waiting_since"] * 1000)) == parts[3]:
                 return None  # the same display id can be open again; diagnostics grant no authority
+    overlay = projection.get("selected_responses", {})
+    if _valid_selected_overlay(overlay):
+        entries = [entry for entry in overlay.values() if entry.get("selected_id") == item_id]
+        latest = max(entries, key=lambda row: row["updated_at"], default=None)
+        if latest and latest["state"] == "open":
+            return None
+        if source_closed:
+            return source_closed
+        if latest:
+            result = latest.get("result") or {}
+            status = {"applied": "answered", "cancelled": "cancelled", "expired": "expired"}.get(latest["state"])
+            if result.get("status") == "replaced":
+                status = "replaced"
+            if status:
+                return {"status": status, "at": latest["updated_at"], "observed": True}
+    if source_closed:
+        return source_closed
     return (projection.get("closed_questions") or {}).get(item_id)
 
 

@@ -164,7 +164,8 @@ def _route_task_first_line(route_text: Optional[str]) -> Optional[str]:
     if not isinstance(route_text, str):
         return None
     line = None
-    for raw_line in route_text.splitlines():
+    from work_intent import original_work_request
+    for raw_line in original_work_request(route_text).splitlines():
         stripped = raw_line.strip()
         if stripped:
             line = stripped

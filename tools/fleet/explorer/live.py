@@ -720,7 +720,14 @@ def _route_subject(rid, record, view, owner, result, chain_nodes):
     if isinstance(request, str):
         # A sealed request's own first line is a literal fallback, not a model
         # summary or an extraction from accumulated session conversation.
-        first = next((line.strip() for line in request.splitlines() if line.strip()), "")
+        # Fleet starts with tools/ alone on sys.path (also in installed layouts).
+        import sys
+        from pathlib import Path
+        utilities = str(Path(__file__).resolve().parents[3] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        from work_intent import original_work_request
+        first = next((line.strip() for line in original_work_request(request).splitlines() if line.strip()), "")
         return subject(re.sub(r"^#{1,6}\s+", "", first))
     return None
 

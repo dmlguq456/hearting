@@ -1659,14 +1659,17 @@ def _recorded_interview(route, jobs):
     return FI.load_json_file(artifact), answers
 
 
-def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None):
+def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None, *, actor_kind=None):
     """The work request of every leg of an approved route: the original request, the agreed intent,
     the brief paths with their digests (the one whose route the person chose marked), and the
     approvals actually given."""
-    lines = ["## Agreed intent", "",
-             (output / "shards/frame/intent.md").read_text(encoding="utf-8").rstrip(), "",
-             "## Original work request", "", route["work_request"]["text"].rstrip(), "",
-             "## Frame briefs (read-only input)", ""]
+    agreed = (output / "shards/frame/intent.md").read_text(encoding="utf-8").rstrip()
+    request = route["work_request"]["text"].rstrip()
+    if actor_kind == "user":
+        lines = ["## Agreed intent", "", agreed, "", "## Original work request", "", request, ""]
+    else:
+        lines = [request, "", "## Agreed intent", "", agreed, ""]
+    lines += ["## Frame briefs (read-only input)", ""]
     lines += [f"- {root / row['path']} (sha256 {row['sha256']})"
               + (" — adopted direction: the person chose this brief's route" if row["path"] == adopted else "")
               for row in briefs]
@@ -1733,7 +1736,8 @@ def _decide(route, jobs, root, record, output, briefs, intent):
     approvals = {"given": given, "execution_scope": execution_scope}
     prompt = _decision_home(root) / f"{route['route_id']}.leg-task.md"
     task = _keep_first(prompt, _leg_task_text(route, root, output, briefs, intent, approvals,
-                                              adopted=match.get("brief_path")).encode("utf-8"))
+                                              adopted=match.get("brief_path"),
+                                              actor_kind=FI.answer_actor_kind(answers)).encode("utf-8"))
     leg = match["proposal"]["legs"][0]
     projected_leg = module.project_entry_execution_scope(leg, execution_scope)
     execution_graph = list(projected_leg.get("graph") or [])

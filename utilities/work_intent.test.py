@@ -48,7 +48,7 @@ class DraftTest(unittest.TestCase):
                 route = {"route_id": "rt-intent-fixture", "artifact_root": str(root),
                          "work_request": {"text": request}}
                 task = work_start._leg_task_text(route, root, root, [], {},
-                                                {"given": [], "execution_scope": "complete"})
+                                                {"given": [], "execution_scope": "complete"}, actor_kind="user")
                 self.assertTrue(task.startswith("## Agreed intent"))
                 self.assertLess(task.index("Only train E"), task.index("## Original work request"))
                 self.assertEqual(WI.draft(task), WI.draft(request))

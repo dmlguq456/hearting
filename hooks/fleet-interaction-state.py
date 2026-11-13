@@ -89,7 +89,9 @@ def main():
                     reason = "answered"
                 elif (payload.get("hook_event_name") == "PostToolUseFailure"
                         and payload.get("tool_name") == "AskUserQuestion"):
-                    reason = "cancelled"
+                    reason = "closed"
+            if reason not in ("answered", "cancelled", "expired", "replaced", "closed"):
+                reason = "closed"
             interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"), reason=reason)
             if resumed:
                 _shell_state("working", session_id)

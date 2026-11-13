@@ -311,12 +311,11 @@ def build_response(envelope, *, choices=(), text=None, decision=None, answers=No
 
 def _answer(args):
     board = load_board()
-    if board is None and (closed := HWS.closed_question(args.id)):
-        print("questions: " + _closed_text(args.id, closed), file=sys.stderr)
-        return 2
     if board is None:
         print("questions: unknown · the shared answer-wait observation is not available yet",
               file=sys.stderr)
+        if closed := HWS.closed_question(args.id):
+            print("questions: retained history · " + _closed_text(args.id, closed), file=sys.stderr)
         return 3
     item, error = _find(board, args.id)
     if item is None:

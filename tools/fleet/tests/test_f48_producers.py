@@ -71,7 +71,7 @@ class ProducerTest(unittest.TestCase):
         import human_wait_state
         for harness, source, event, reason in (
             ("claude", "claude-asktool", "PostToolUse", "answered"),
-            ("claude", "claude-asktool", "PostToolUseFailure", "cancelled"),
+            ("claude", "claude-asktool", "PostToolUseFailure", "closed"),
             ("opencode", "opencode-question", "question.replied", "answered"),
             ("opencode", "opencode-form", "question.rejected", "cancelled"),
         ):
@@ -84,6 +84,16 @@ class ProducerTest(unittest.TestCase):
             self.assertEqual(record["status"], reason)
             self.assertEqual(set(record), {"status", "at"})
             self.assertIsNone(interaction.read_wait(sid, harness))
+
+    def test_unknown_opencode_closure_reason_is_retained_as_closed(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import human_wait_state
+        interaction.set_wait("unknown-close", "opencode", "decision", "opencode-question", now=123, request_id="r1")
+        self.run_hook(CLAUDE, {"session_id": "unknown-close", "request_id": "r1",
+            "closure_reason": "unexpected-error"}, "clear", "--harness", "opencode")
+        record = human_wait_state.closed_question("S1:opencode:unknown-close:123000")
+        self.assertEqual(record["status"], "closed")
+        self.assertEqual(set(record), {"status", "at"})
 
     def test_claude_decision_permission_and_release(self):
         payload = {"session_id": "claude-sid", "hook_event_name": "PreToolUse"}
