@@ -1352,7 +1352,12 @@ function buildSeed() {
   }
   return json;
 }
+// The host's own display work (a panel rebuild, a scratch VT, a model or selection read) ends by
+// itself within milliseconds: a freeze that meets it waits for it (inside the owner's freeze limit)
+// instead of ending the attempt as unsafe, which would spend a successor on no person's activity.
+function displayBusy(){return rebuilding||displayVTs.size>0||checkingNativeSelection||modelReading;}
 async function freeze() {
+  for(let waited=0;displayBusy()&&waited<200;waited++)await new Promise(resolve=>setTimeout(resolve,5));
   if(!successionSafe())return {ok:false,reason:'unsafe'};
   succeeding=true;
   try{
