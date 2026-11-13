@@ -359,12 +359,14 @@ def _publish_runtime_marker(marker: Path) -> None:
     except FileExistsError:
         pass  # Another launcher published it first; the caller reads it back.
     except OSError:
-        # A filesystem without hard links falls back to the earlier direct write.
-        try:
-            with marker.open("xb") as handle:
-                handle.write(b"*\n")
-        except FileExistsError:
-            pass
+        # Without hard links (EXDEV, EPERM, ENOTSUP...) a rename still makes
+        # the whole file appear at once; a direct write would show the second
+        # launcher an empty marker again. A rename replaces the name, so look
+        # once more just before it: a marker published meanwhile stays, and
+        # the caller reads it back. In the instant between the two, the only
+        # expected writer is a concurrent launcher with the same `*\n`.
+        if not marker.exists() and not marker.is_symlink():
+            os.rename(temporary, marker)
     finally:
         temporary.unlink(missing_ok=True)
 

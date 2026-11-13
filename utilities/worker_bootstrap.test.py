@@ -3,6 +3,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import errno
 import importlib.util
 import hashlib
 import json
@@ -223,6 +224,50 @@ class WorkerBootstrapTest(unittest.TestCase):
                 first = W.prepare_runtime_dir(str(runtime))
             self.assertEqual([first, *concurrent], [str(runtime), str(runtime)])
             self.assertEqual((runtime / ".gitignore").read_bytes(), b"*\n")
+            self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_root_survives_a_launcher_preparing_it_without_hard_links(self):
+        # PR #1605 review: where `link` fails (EXDEV, EPERM, ENOTSUP), the
+        # fallback created the marker and then filled it; a second start
+        # arriving the moment it appeared still read it empty and got "".
+        # The second start runs at the first instant the marker exists.
+        for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
+            with self.subTest(errno=errno.errorcode[code]), tempfile.TemporaryDirectory() as tmp:
+                runtime = Path(tmp) / "project" / ".agent_runtime"
+                marker = runtime / ".gitignore"
+                concurrent = []
+
+                def then_second_start(call):
+                    def wrapper(*args, **kwargs):
+                        result = call(*args, **kwargs)
+                        if not concurrent and (marker.exists() or marker.is_symlink()):
+                            concurrent.append(None)
+                            concurrent[0] = W.prepare_runtime_dir(str(runtime))
+                        return result
+                    return wrapper
+
+                with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                     mock.patch.object(Path, "open", then_second_start(Path.open)), \
+                     mock.patch.object(W.os, "rename", then_second_start(os.rename)), \
+                     mock.patch.object(W.os, "replace", then_second_start(os.replace)):
+                    first = W.prepare_runtime_dir(str(runtime))
+                self.assertEqual([first, *concurrent], [str(runtime), str(runtime)])
+                self.assertEqual(marker.read_bytes(), b"*\n")
+                self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_marker_fallback_never_replaces_a_marker_that_appeared(self):
+        # The fallback rename would replace a name; a foreign marker that
+        # appears after the first look stays, and the root is refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / ".agent_runtime"
+
+            def foreign_appears_then_no_links(*_args):
+                (runtime / ".gitignore").write_bytes(b"foreign\n")
+                raise OSError(errno.EPERM, "no links")
+
+            with mock.patch.object(W.os, "link", side_effect=foreign_appears_then_no_links):
+                self.assertEqual(W.prepare_runtime_dir(str(runtime)), "")
+            self.assertEqual((runtime / ".gitignore").read_bytes(), b"foreign\n")
             self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
 
     def test_non_git_runtime_uses_stable_state_and_exact_inheritance(self):
