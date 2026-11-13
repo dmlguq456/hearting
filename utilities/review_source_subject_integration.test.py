@@ -41,6 +41,77 @@ DISPATCH_NODE = _load("dispatch_node_source_subject_fixture", "utilities/dispatc
 
 
 class SourceSubjectIntegrationTest(unittest.TestCase):
+    def test_smoke_pass_reuse_preserves_budget_and_aba_fail_history(self):
+        import hashlib
+        smoke_tool = _load("ami_smoke_integration", "tools/smoke-attestation.py")
+        producer = {"id": "scaffold", "kind": "pipeline-stage", "dispatch_depth": 2,
+                    "completion_gate": "experiment-scaffold", "depends_on": [],
+                    "write_scope": ["experiment-scaffold/**", "config/**"]}
+        node = {"id": "smoke", "kind": "review-worker", "unit": "qa/ml-debug", "dispatch_depth": 2,
+                "completion_gate": "hash-bound-smoke", "depends_on": ["scaffold"],
+                "inputs": ["experiment-scaffold", "config"],
+                "write_scope": ["reviews/smoke-attestation.json"]}
+        self.route["nodes"] = [producer, node, {"id": "full-run", "kind": "resource-runner",
+            "completion_gate": "resource-exit", "dispatch_depth": 2, "depends_on": ["smoke"]}]
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.route_file.write_text(json.dumps(self.route))
+        source = self.artifact_root / "experiment-scaffold/batch.py"
+        source.parent.mkdir()
+        source.write_text("value = 'A'\n")
+        config = self.artifact_root / "config/run.yaml"
+        config.parent.mkdir()
+        config.write_text("steps: 1\n")
+        self.complete_node("scaffold", "att-scaffold", "prepared")
+        evidence = self.artifact_root / "reviews/smoke-attestation.json"
+        evidence.parent.mkdir()
+        payload = smoke_tool.payload([source.parent, config.parent], [sys.executable, str(source)], str(self.repo))
+        payload.update(status="passed", exit_code=0)
+        payload["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        evidence.write_text(json.dumps(payload))
+        aid = "att-inline-smoke"
+        metadata = {**self._metadata(node, aid, "review"), "registered_worker": "0",
+                    "execution_surface": "inline", "transport": "interactive", "fallback_hop": "inline"}
+        marker = ROUTE_WRITER._publish_completion_locked(self.route, node, node["id"], evidence,
+            jobs=self.jobs, attempt_id=aid, attempt_metadata=metadata)
+        before = self.jobs.read_bytes()
+        budget = DISPATCH_NODE.admit_round(self.route, node, self.jobs).budget
+        for _ in range(3):
+            reused = CAP.reuse_deterministic_pass(self.route, node, self.jobs, budget)
+            self.assertIsNotNone(reused)
+            self.assertEqual(reused["attempt_id"], aid)
+            self.assertEqual(reused["review_independence"], "degraded")
+        self.assertEqual(self.jobs.read_bytes(), before)
+        self.assertEqual(DISPATCH_NODE.admit_round(self.route, node, self.jobs).budget.verdict_rounds,
+                         budget.verdict_rounds)
+        # Observe B as a failed review, then return to A. Neither the old PASS
+        # nor its unchanged attestation file can erase that lineage.
+        source.write_text("value = 'B'\n")
+        self.review_node = node
+        self.prepare_review("att-smoke-B", note="completed-review-blocking", extra={"failure_class": "fail"})
+        source.write_text("value = 'A'\n")
+        returned = DISPATCH_NODE.admit_round(self.route, node, self.jobs).budget
+        self.assertIsNone(CAP.reuse_deterministic_pass(self.route, node, self.jobs, returned))
+        # Consume the actual recovery command, publish through the existing
+        # inline completion writer, and admit the existing resource successor.
+        import shlex
+        fields = CAP.recovery_fields("review-worker", "exhausted", route=self.route,
+            node=node, jobs=self.jobs, route_file=self.route_file)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_")}
+        executed = subprocess.run(shlex.split(fields["recovery_run_command"]), env=env,
+                                  capture_output=True, text=True, timeout=30)
+        self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+        evidence = Path(shlex.split(fields["recovery_check_command"])[-1])
+        fresh_payload = json.loads(evidence.read_text())
+        self.assertTrue(smoke_tool.verify(fresh_payload))
+        self.assertIn("executed_at", fresh_payload)
+        aid = "att-inline-smoke-after-aba"
+        fresh = ROUTE_WRITER._publish_completion_locked(self.route, node, node["id"], evidence,
+            jobs=self.jobs, attempt_id=aid, attempt_metadata={**metadata, "attempt_id": aid})
+        self.assertEqual(fresh["review_independence"], "degraded")
+        DC.completion_marker_gate(str(self.route_file), "full-run", "start", self.agent_home, self.jobs)
+
     def test_native_fallback_without_a_proven_reviewer_completes_degraded(self):
         node = self.review_node
         for surface in ("claude-subagent", "codex-native-subagent"):

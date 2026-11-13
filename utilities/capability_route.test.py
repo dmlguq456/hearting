@@ -11282,17 +11282,25 @@ class DeterministicSmokeOwnerRunTest(unittest.TestCase):
   fields=R.REVIEW_ROUND_CAP.recovery_fields("review-worker","exhausted",route=route,node=node,
                                             jobs=self.jobs,route_file=str(route_file))
   self.assertEqual(fields["required_action"],"run-deterministic-check")
+  self.assertEqual(fields["recovery_unavailable"],"recorded-smoke-command-unavailable")
+  self.assertNotIn("recovery_run_command",fields)
   config=self.base/"config.yaml"; config.write_text("seed: 0\n",encoding="utf-8")
   attestation=self.base/"artifacts"/"reviews"/"smoke-attestation.json"
   env={k:v for k,v in os.environ.items() if not k.startswith("AGENT_")}
   smoke=Path(R.ROOT)/"tools"/"smoke-attestation.py"
-  subprocess.run([sys.executable,str(smoke),"attest","--input",str(config),"--cwd",str(self.base),
+  subprocess.run([sys.executable,str(smoke),"attest","--input",str(config),"--cwd",route["cwd"],
                   "--output",str(attestation),"--",sys.executable,"-c","pass"],env=env,check=True)
-  placeholder=shlex.quote("<current-cycle reviews/smoke-attestation.json>")
-  check=shlex.split(fields["recovery_check_command"].replace(placeholder,shlex.quote(str(attestation))))
-  self.assertIn("smoke_attestation=valid",subprocess.run(check,env=env,check=True,
-                capture_output=True,text=True).stdout)
-  complete=shlex.split(fields["recovery_complete_command"].replace(placeholder,shlex.quote(str(attestation))))
+  R.complete_node(route,node,"smoke",attestation,attempt_id="att-owner-smoke-before",
+    explicit_attempt_metadata=InlineStageCompletionRecipeTest._axes(self))
+  config.write_text("seed: 1\n",encoding="utf-8")
+  fields=R.REVIEW_ROUND_CAP.recovery_fields("review-worker","exhausted",route=route,node=node,
+                                            jobs=self.jobs,route_file=str(route_file))
+  self.assertNotIn("<",fields["recovery_run_command"])
+  subprocess.run(shlex.split(fields["recovery_run_command"]),env=env,check=True,
+                 capture_output=True,text=True)
+  self.assertIn("smoke_attestation=valid",subprocess.run(shlex.split(fields["recovery_check_command"]),
+                env=env,check=True,capture_output=True,text=True).stdout)
+  complete=shlex.split(fields["recovery_complete_command"])
   result=subprocess.run(complete+["--attempt-id","att-owner-smoke-inline"],env=env,
                         capture_output=True,text=True)
   self.assertEqual(result.returncode,0,result.stderr)
