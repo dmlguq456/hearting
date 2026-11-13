@@ -983,7 +983,8 @@ function panelMouse(code,x,y,release){
   // The wheel over the route box scrolls it in place (spec rule 23); elsewhere in the panel it does nothing.
   if((code&0xc3)===64||(code&0xc3)===65){if(!release&&!routeDetail&&!settings&&routeArea&&row>=routeArea.top&&row<=routeArea.bottom)scrollRoutes((code&1)?1:-1);return true;}
   if(release||code>=32||(code&3)!==0)return true;
-  if(layoutQueued||panelHitsPlacement!==placement())return true;
+  // The targets drawn for this very placement are what the person pressed, a queued layout or not.
+  if(panelHitsPlacement!==placement())return true;
   const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
   if(hit){
     if(hit.action==='settings-buttons')panelAction(local<panelColumns()/3?'apply':local<panelColumns()*2/3?'cancel':'defaults');

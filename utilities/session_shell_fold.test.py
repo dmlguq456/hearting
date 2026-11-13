@@ -188,6 +188,28 @@ for(const extra of [{},{position:'left'},{layout:'bottom'}])for(const expanded o
  }
 """)
 
+    def test_a_press_on_the_targets_drawn_for_this_placement_counts_while_a_layout_is_queued(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+// Review 1597 follow-up (11-13): a press made while a layout was queued was dropped even when the
+// targets on screen were drawn for the very placement it was made in. The placement decides alone:
+// the same placement counts; a press on targets drawn for another placement is still dropped.
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const code=text.slice(text.indexOf('function panelMouse('),text.indexOf('function displayReporter('));
+const g={side:true,folded:false,left:false,panelColumn:90,panelCols:40},place='true:true:false:false:40:130:30:false';
+let calls=[];
+const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,routeDetail:false,routeArea:null,
+  geometry:()=>g,panelColumns:()=>40,panelRow:()=>0,height:()=>30,terminal:{modes:{mouseTrackingMode:'none'}},
+  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,
+  panelHits:[{row:1,left:9,right:14,action:'question'}],panelAction:action=>calls.push(action)};
+vm.createContext(c);vm.runInContext(code,c);
+for(const [queued,stamp,expected] of [[false,place,['question']],[true,place,['question']],[false,'old',[]],[true,'old',[]]]){
+  c.layoutQueued=queued;c.panelHitsPlacement=stamp;calls=[];
+  assert.equal(c.panelMouse(0,101,2,false),true);
+  assert.deepEqual(calls,expected,JSON.stringify({queued,stamp}));
+}
+""")
+
 
 if __name__ == "__main__":
     unittest.main()
