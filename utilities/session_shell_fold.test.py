@@ -50,6 +50,27 @@ assert(bottom.at(-2).endsWith('▾   ⚙ │'),bottom.join('\n'));
 assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('«   ⚙ │'));
 """)
 
+    def test_the_last_row_keeps_the_model_quota_and_gives_way_in_order(self):
+        # Correction 7 (2026-11-13): the last row reads `5h … │ 7d … │ fable 70%` (the model word in
+        # its model color). Short of cells it gives way in this order: the reset times `(↻ …)`,
+        # then 5h, then the model values, then 7d. The folded strip carries none of it.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
+const P=(t,o={})=>({text:t,...o}),sep=P(' │ ',{dim:true});
+const quota=[P('5h ',{dim:true}),P('12%',{foreground:150}),P('(↻ 2h)',{dim:true}),sep,P('7d ',{dim:true}),P('66%',{foreground:186}),P('(↻ 5d)',{dim:true}),
+ sep,P('fable ',{foreground:176}),P('70%',{foreground:186})];
+const model={tag:'[e9]',repo:[P('hearting/')],quota};
+const last=w=>{const r=v.render({width:w,height:20,side:true,model,state:'idle',harness:'claude',questions:()=>[]});return r.rows.at(-2);};
+const text=row=>row.map(x=>x.text).join('');
+const want=[[60,'5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 70%'],[40,'5h 12% │ 7d 66% │ fable 70%'],[32,'7d 66% │ fable 70%'],[26,'7d 66%'],[15,'']];
+for(const [w,s] of want){const t=text(last(w));assert(t.startsWith('│ '+s+(s?' ':''))&&t.endsWith('»   ⚙ │')&&!t.includes('…'),w+' '+t);}
+// The model word keeps its model color; nothing of the row is cut mid-value.
+assert.equal(last(40).find(x=>x.text==='fable ').foreground,176);
+// The folded strip has no quota.
+const strip=v.render({width:8,height:20,side:true,folded:true,model:{...model,route_total:2},state:'idle',questions:()=>[]}).rows.map(text).join('\n');
+assert(!/fable|7d|5h/.test(strip),strip);
+""")
+
     def test_the_folded_strip_carries_the_core_values_only(self):
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
@@ -115,6 +136,13 @@ assert.equal(d.NATIVE_MIN,80);
 assert.equal(fold(122).folded,false);assert.equal(fold(121).folded,true);
 for(const width of [32,60,80])assert.equal(d.fold({cols:width+82,configuration:{...configuration,side_width:width}}).folded,false),
  assert.equal(d.fold({cols:width+81,configuration:{...configuration,side_width:width}}).folded,true);
+// #1586 review follow-up 2: a panel folded by itself opens again only three columns past the
+// threshold (83 native columns), so a window dragged across it does not jump back and forth; an
+// open panel still folds under 80.
+const now=(cols,expanded)=>d.fold({cols,configuration,expanded}).folded;
+assert.equal(d.REOPEN_MARGIN,3);
+assert.deepEqual([121,122,123,124,125].map(c=>now(c,false)),[true,true,true,true,false]);
+assert.deepEqual([125,122,121].map(c=>now(c,true)),[false,false,true]);
 // The old `side_min_columns` does not take part.
 assert.equal(d.fold({cols:130,configuration:{...configuration,side_min_columns:1000}}).folded,false);
 // A hand fold stays folded however wide; a hand unfold stays open at its width and lapses with the next.
@@ -158,6 +186,28 @@ for(const extra of [{},{position:'left'},{layout:'bottom'}])for(const expanded o
   assert.equal(g.side?g.nativeCols+g.gap+g.panelCols:g.nativeCols,cols,seen);
   assert.equal(g.nativeRows,g.side?rows:Math.max(1,rows-(panelRows??1)),seen);
  }
+""")
+
+    def test_a_press_on_the_targets_drawn_for_this_placement_counts_while_a_layout_is_queued(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+// Review 1597 follow-up (11-13): a press made while a layout was queued was dropped even when the
+// targets on screen were drawn for the very placement it was made in. The placement decides alone:
+// the same placement counts; a press on targets drawn for another placement is still dropped.
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const code=text.slice(text.indexOf('function panelMouse('),text.indexOf('function displayReporter('));
+const g={side:true,folded:false,left:false,panelColumn:90,panelCols:40},place='true:true:false:false:40:130:30:false';
+let calls=[];
+const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,routeDetail:false,routeArea:null,
+  geometry:()=>g,panelColumns:()=>40,panelRow:()=>0,height:()=>30,terminal:{modes:{mouseTrackingMode:'none'}},
+  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,
+  panelHits:[{row:1,left:9,right:14,action:'question'}],panelAction:action=>calls.push(action)};
+vm.createContext(c);vm.runInContext(code,c);
+for(const [queued,stamp,expected] of [[false,place,['question']],[true,place,['question']],[false,'old',[]],[true,'old',[]]]){
+  c.layoutQueued=queued;c.panelHitsPlacement=stamp;calls=[];
+  assert.equal(c.panelMouse(0,101,2,false),true);
+  assert.deepEqual(calls,expected,JSON.stringify({queued,stamp}));
+}
 """)
 
 

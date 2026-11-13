@@ -147,6 +147,67 @@ class SessionViewTest(unittest.TestCase):
         self.assertEqual(values["model_quotas"],[("opus",57),("fable",42)])
         self.assertEqual(values["weekly_pct"],62)
 
+    def test_a_callback_without_model_windows_keeps_the_cached_model_quota(self):
+        # Correction 7 (2026-11-13): Claude's statusline callback carries only `five_hour` and
+        # `seven_day`; the account cache's model windows (`rl_ms`, Fable's) stay beside them.
+        # A callback that carries model windows wins; no cache, no model value.
+        path = self.root / "claude/.statusline" / (self.sid + ".json")
+        windows = {"five_hour": {"used_percentage": 31, "resets_at": 1800000000},
+                   "seven_day": {"used_percentage": 62, "resets_at": 1800200000}}
+        self.write(path, {"session_id": self.sid, "rate_limits": windows})
+        with patch.object(usage_cache, "read", return_value={"payload": {"rl_7d": 60, "rl_ms": [["fable", 70]]},
+                                                            "freshness": "fresh"}):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertEqual(values["quota_windows"], [("5h", 31, 1800000000), ("7d", 62, 1800200000)])
+        self.assertEqual([tuple(row) for row in values["model_quotas"]], [("fable", 70)])
+        self.assertEqual(values["weekly_pct"], 62)
+        self.write(path, {"session_id": self.sid, "rate_limits": {**windows, "model_scoped": [
+            {"display_name": "Fable 5", "utilization": .42}]}})
+        with patch.object(usage_cache, "read", return_value={"payload": {"rl_ms": [["fable", 70]]},
+                                                            "freshness": "fresh"}):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertEqual([tuple(row) for row in values["model_quotas"]], [("fable", 42)])
+        self.write(path, {"session_id": self.sid, "rate_limits": windows})
+        with patch.object(usage_cache, "read", return_value={}):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertEqual(values["model_quotas"], [])
+
+    def test_the_cached_model_quota_beside_a_callback_is_only_a_fresh_one(self):
+        # Review 1597-2 (11-13): the callback's 5h/7d took the cache's model windows without the
+        # cache's age, so a 600-second-old `fable 70%` read as now. They stay beside the callback
+        # only while the account cache calls itself fresh (180 s, the rule Fleet shows it by).
+        import time
+        from tools.fleet import session_panel
+        from tools.fleet.collectors import usage_api
+        self.quota.stop()
+        credential = self.root / "claude/.credentials.json"
+        credential.parent.mkdir(parents=True, exist_ok=True)
+        credential.write_text(json.dumps({"claudeAiOauth": {"accessToken": "synthetic-A"}}))
+        self.write(self.root / "claude/.statusline" / (self.sid + ".json"),
+                   {"session_id": self.sid, "pid": os.getpid(), "proc_start": self.start,
+                    "rate_limits": {"five_hour": {"used_percentage": 11},
+                                    "seven_day": {"used_percentage": 22}}})
+        with patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(self.root / "usage")}):
+            generation = usage_api._credential().generation
+            rows = {}
+            for age in (0, 181, 600, 899, 901):
+                now = time.time()
+                usage_cache._write("claude", {"rl_5h": 99, "rl_7d": 99, "rl_ms": [["fable", 70]]},
+                                   now - age, now - age, credential_generation=generation)
+                self.assertEqual(usage_cache.read("claude")["freshness"],
+                                 "fresh" if age <= 180 else "stale" if age <= 900 else "unknown")
+                values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+                rows[age] = "".join(text for text, _key in session_panel.quota_row(values))
+            self.assertEqual(rows, {0: "5h 11% │ 7d 22% │ fable 70%", 181: "5h 11% │ 7d 22%",
+                                    600: "5h 11% │ 7d 22%", 899: "5h 11% │ 7d 22%",
+                                    901: "5h 11% │ 7d 22%"})
+            # Another credential's cache stays out, fresh or not.
+            now = time.time()
+            usage_cache._write("claude", {"rl_ms": [["fable", 70]]}, now, now, credential_generation=generation)
+            credential.write_text(json.dumps({"claudeAiOauth": {"accessToken": "synthetic-B"}}))
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+            self.assertEqual(values["model_quotas"], [])
+
     def test_changed_process_birth_yields_no_other_session_values(self):
         self.assertEqual(view.observe("claude", os.getpid(), self.start + "0", self.sid), ({}, []))
 

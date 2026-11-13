@@ -292,6 +292,31 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertNotIn("workers_live", led); self.assertNotIn("owner_doer", led)
         self.assertEqual(session_line.route_tree({}, [], None, {"worker": True}, get, live, 0.0), {})
 
+    def test_an_old_row_without_an_attempt_never_takes_the_job_an_attempt_names(self):
+        # #1583 review follow-up (나): on one stage an older producer's item (no attempt, matched by
+        # its values) comes before an item that names its attempt. The value match must not take
+        # the named attempt's job, or that worker drops out of the panel.
+        from types import SimpleNamespace
+        from unittest import mock
+        from tools.fleet import session_line
+        from tools.fleet.explorer import live
+        job = lambda **kw: SimpleNamespace(key=kw.get("attempt_id"), **kw)
+        owner = job(attempt_id="o", depth=1, worker_type="owner", liveness="idle", harness="claude", model="opus", ctx_pct=52, elapsed_min=130.0)
+        named = job(attempt_id="w-named", depth=2, route_node="execute", liveness="working", harness="claude", model="sonnet",
+                    ctx_pct=22, elapsed_min=12.0)
+        other = job(attempt_id="w-other", depth=2, route_node="execute", liveness="idle", harness="claude", model="sonnet",
+                    ctx_pct=40, elapsed_min=30.0)
+        context = {"stage": "execute", "harness": "claude", "model": live._model_pair("sonnet")[0]}
+        route = {"id": "rt", "state": "working", "activity": "running", "current": True, "worker_stage": "execute"}
+        # The id-less item's values fit the named job exactly; the named item is listed second.
+        items = [{**context, "ctx_pct": 22.0}, {**context, "ctx_pct": 22.0, "attempt": "w-named"}]
+        panels = {"claude\0s": [{"id": "rt", "state": "working", "worker_stage": "execute", "worker_contexts": items}]}
+        with mock.patch.object(live, "_collect_routes", return_value={"rt": {"jobs": [owner, named, other], "record": {}}}):
+            session_line.route_details(object(), panels, {"rt": route}, now=10_000.0)
+        workers = panels["claude\0s"][0]["workers_live"]
+        self.assertEqual(len(workers), 2, workers)
+        self.assertEqual(sorted(w["since"] for w in workers), [10_000.0 - 30 * 60, 10_000.0 - 12 * 60])
+
     def test_a_doer_reads_its_recorded_role_word(self):
         # Spec E9 rule 36 (a): Fleet's own words. Fleet's shared doer names a stage worker;
         # its route body line says whether that worker is a frame leg. Without a shared doer
