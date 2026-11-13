@@ -1241,6 +1241,155 @@ def status(root: Path, now: Optional[float] = None, expect: Sequence[str] = ()) 
     return out
 
 
+# ---------------------------------------------------------------------------
+# cards: the catalog's names for a session card, its writing guide, and its start context
+# ---------------------------------------------------------------------------
+
+_PROJECT_STATUS: Any = None
+
+
+def _bounded_token(token: str) -> "re.Pattern[str]":
+    # Left: not inside a longer word or identifier.  Right: only ASCII identifier characters continue a
+    # token, so a Korean particle after a name (`잔향 줄임을`) still counts as the token.
+    return re.compile(r"(?<![\w-])" + re.escape(token) + r"(?![A-Za-z0-9_-])", re.IGNORECASE)
+
+
+def root_for_cwd(cwd: Any) -> Optional[Path]:
+    """The artifact root for a work folder, from file reads only (Fleet's `project_status.artifact_root`)."""
+    global _PROJECT_STATUS
+    try:
+        if not cwd:
+            return None
+        if _PROJECT_STATUS is None:
+            import importlib.util
+            path = Path(__file__).resolve().parents[1] / "tools" / "fleet" / "collectors" / "project_status.py"
+            spec = importlib.util.spec_from_file_location("experiment_catalog_project_status", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PROJECT_STATUS = module
+        root = _PROJECT_STATUS.artifact_root(str(cwd))
+        return Path(root) if root else None
+    except Exception:  # noqa: BLE001 -- a card or a start never waits on this
+        return None
+
+
+def card_context(cwd: Any) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    """`(root, catalog doc)` for a folder whose catalog reads ok and names at least one condition, else None."""
+    root = root_for_cwd(cwd)
+    if root is None:
+        return None
+    try:
+        read = load(root)
+        if read.status != "ok" or not read.doc or not any(c.get("display_name") for c in read.doc.get("conditions", [])):
+            return None
+        return root, read.doc
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def catalog_brief(doc: Mapping[str, Any], path: str, limit: int, lang: Optional[str] = None) -> str:
+    """The catalog's location, each group's goal and its condition names, in at most `limit` bytes.
+
+    Tries the whole thing, then without goals, then fewer names with "… and N more", and at the end only
+    the location line; "" when no group has a named condition."""
+    t = _translator(lang)
+    groups = []
+    for group in doc.get("groups", []):
+        names = [c["display_name"] for c in doc.get("conditions", []) if c.get("group") == group.get("id") and c.get("display_name")]
+        if names:
+            groups.append((group, names))
+    if not groups:
+        return ""
+
+    def build(goals: bool, keep: int) -> str:
+        lines = [t("experiment.card.catalog", path=path)]
+        for group, names in groups:
+            head = f"[{group.get('display_name') or t('experiment.no_group')}]"
+            if goals and group.get("goal"):
+                head += " " + t("experiment.goal", goal=group["goal"])
+            shown = names[:keep]
+            lines += [head, t("experiment.card.conditions", names=", ".join(shown) + (
+                t("experiment.card.more", n=len(names) - len(shown)) if len(names) > len(shown) else ""))]
+        return "\n".join(lines + [t("experiment.card.rule")])
+
+    for goals, keep in ((True, 99), (False, 99), (False, 6), (False, 3), (False, 1)):
+        text = build(goals, keep)
+        if len(text.encode("utf-8")) <= limit:
+            return text
+    only = t("experiment.card.catalog", path=path)
+    return only if len(only.encode("utf-8")) <= limit else ""
+
+
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+_PROTECTED = re.compile(r"`[^`\n]*`|https?://\S+|\S*/\S*")
+
+
+def expand_refs(text: str, doc: Optional[Mapping[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    """Put the catalog name beside a bare run id, `run:row`, row id, former name, or alias of 3+ characters.
+
+    `잔향 줄임(run-1)` replaces a bare `run-1` (the original token stays in the parentheses).  Left alone:
+    fenced and inline code, `>` quote lines, paths and URLs (anything with a `/`), a token two conditions
+    answer to, and every token of a condition whose catalog name is already on that line.  Aliases,
+    former names and row ids shorter than 3 characters are never expanded (a short alias such as `E`
+    is also an ordinary letter).  Returns `(text, [{token, name, condition_id, line}])`; never raises."""
+    try:
+        if not text or not doc:
+            return text, []
+        candidates: List[Tuple[str, Dict[str, Any]]] = []
+        for cond in doc.get("conditions", []):
+            if not cond.get("display_name"):
+                continue
+            for run_id, row_id in _run_ref_keys(cond):
+                candidates.append((run_id, cond))
+                if row_id:
+                    candidates.append((f"{run_id}:{row_id}", cond))
+                    if len(row_id) >= 3:
+                        candidates.append((row_id, cond))
+            candidates += [(old, cond) for old in cond.get("former_names", []) if len(old) >= 3]
+            candidates += [(alias, cond) for alias in cond.get("aliases", []) if len(alias) >= 3]
+        candidates = [(tok, c) for tok, c in candidates
+                      if tok and _fold(tok) != _fold(c["display_name"]) and resolve_ex(doc, tok)[1] != "ambiguous"]
+        candidates.sort(key=lambda item: -len(item[0]))
+        changes: List[Dict[str, Any]] = []
+        fenced = ""
+        out: List[str] = []
+        for number, line in enumerate(text.split("\n"), start=1):
+            marker = _FENCE.match(line)
+            if marker:
+                if not fenced:
+                    fenced = marker.group(1)
+                elif marker.group(1)[0] == fenced[0] and len(marker.group(1)) >= len(fenced):
+                    fenced = ""
+                out.append(line)
+                continue
+            if fenced or line.lstrip().startswith(">"):
+                out.append(line)
+                continue
+            folded_line = _fold(line)
+            protected = [m.span() for m in _PROTECTED.finditer(line)]
+            taken: List[Tuple[int, int]] = list(protected)
+            edits: List[Tuple[int, int, str]] = []
+            line_changes: List[Tuple[int, Dict[str, Any]]] = []
+            for token, cond in candidates:
+                if _fold(cond["display_name"]) in folded_line:
+                    continue
+                for match in _bounded_token(token).finditer(line):
+                    span = match.span()
+                    if any(span[0] < end and begin < span[1] for begin, end in taken):
+                        continue
+                    taken.append(span)
+                    edits.append((span[0], span[1], f"{cond['display_name']}({match.group(0)})"))
+                    line_changes.append((span[0], {"token": match.group(0), "name": cond["display_name"],
+                                                   "condition_id": cond["id"], "line": number}))
+            changes += [row for _pos, row in sorted(line_changes, key=lambda item: item[0])]   # text order
+            for begin, end, replacement in sorted(edits, reverse=True):
+                line = line[:begin] + replacement + line[end:]
+            out.append(line)
+        return "\n".join(out), changes
+    except Exception:  # noqa: BLE001 -- a card is written even when its names cannot be expanded
+        return text, []
+
+
 def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[str] = ()) -> List[Dict[str, str]]:
     head: List[Dict[str, str]] = []
     if read.status == "missing":

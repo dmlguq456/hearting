@@ -505,6 +505,109 @@ class CardWriteTest(TidyCase):
         self.assertIn("파일 본문", next((self.state / "cards").glob("*.md")).read_text(encoding="utf-8"))
 
 
+class ExperimentNamesTest(TidyCase):
+    """The experiment catalog's names reach the card, the writing guide, and the start context."""
+    RUN = "run-rev-1"
+
+    def lab_project(self, extra_conditions=0):
+        import artifact_admission as admission
+        import experiment_catalog as E
+        root = self.cwd / ".agent_reports"
+        root.mkdir()
+        conditions = [{"display_name": "잔향 줄임", "group": "소리 분리 개선", "aliases": ["rev-a", "E"],
+                       "refs": {"runs": [{"run_id": self.RUN, "row_id": "arm-1"}]}}]
+        conditions += [{"display_name": f"추가 조건 {i:02d}", "group": "소리 분리 개선"} for i in range(extra_conditions)]
+        with self.library():
+            admission.ensure_root_identity(root)
+            E.run_write(root, lambda ctx: E.op_register(ctx, {
+                "groups": [{"display_name": "소리 분리 개선", "goal": "잔향에서 기준보다 높은가"}],
+                "conditions": conditions}), now=1_790_000_000.0)
+        return root
+
+    def body_of_card(self):
+        return json.loads(next((self.state / "cards").glob("*.json")).read_text(encoding="utf-8"))["body"]
+
+    def test_the_saved_card_names_a_bare_run_id_alias_and_arm_and_leaves_code_quotes_paths_and_short_aliases(self):
+        self.lab_project()
+        text = (f"{self.RUN} 결과가 좋았다. rev-a 와 arm-1 도 본다.\n"
+                "단독 E 는 한 글자라 그대로.\n"
+                f"```\n{self.RUN}\n```\n"
+                f"> 사용자: {self.RUN} 로 가자\n"
+                f"경로 /tmp/{self.RUN}/log 와 `{self.RUN}` 코드\n"
+                f"잔향 줄임 은 이미 이름이 있는 줄: {self.RUN}")
+        self.card("sid-A", text)
+        lines = self.body_of_card().splitlines()
+        self.assertEqual(lines[0], f"잔향 줄임({self.RUN}) 결과가 좋았다. 잔향 줄임(rev-a) 와 잔향 줄임(arm-1) 도 본다.")
+        self.assertEqual(lines[1], "단독 E 는 한 글자라 그대로.")
+        self.assertEqual(lines[2:5], ["```", self.RUN, "```"])
+        self.assertEqual(lines[5], f"> 사용자: {self.RUN} 로 가자")
+        self.assertEqual(lines[6], f"경로 /tmp/{self.RUN}/log 와 `{self.RUN}` 코드")
+        self.assertEqual(lines[7], f"잔향 줄임 은 이미 이름이 있는 줄: {self.RUN}")
+
+    def test_a_folder_without_a_catalog_keeps_the_body_as_written(self):
+        self.card("sid-A", f"{self.RUN} 그대로")
+        self.assertEqual(self.body_of_card(), f"{self.RUN} 그대로")
+
+    def test_a_broken_catalog_changes_nothing_and_the_card_is_still_written(self):
+        import experiment_catalog as E
+        root = self.lab_project()
+        E.catalog_path(root).write_text("{no", encoding="utf-8")
+        self.assertTrue(self.card("sid-A", f"{self.RUN} 그대로").startswith("card="))
+        self.assertEqual(self.body_of_card(), f"{self.RUN} 그대로")
+
+    def test_a_native_compact_summary_is_not_expanded(self):
+        self.lab_project()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            seat = st.resolve_seat("claude", str(self.cwd))
+            caller = self.logical_seat(seat, "claude", "sid-C")
+            with st.session_state_lock(caller):
+                st.write_card(caller, "claude", "sid-C", f"{self.RUN} 요약", cwd=str(self.cwd), origin="runtime-compact",
+                              compact_context={"identity": "compact-1"})
+            card = st.read_latest_card(caller)
+        self.assertEqual(card["compact"]["summary"], f"{self.RUN} 요약")
+
+    def test_the_start_context_carries_a_small_catalog_block_inside_the_budget(self):
+        self.lab_project()
+        got = self.hook("claude", "start", "sid-B")
+        self.assertIn("실험 정본:", got)
+        self.assertIn("[소리 분리 개선] 목표: 잔향에서 기준보다 높은가", got)
+        self.assertIn("조건: 잔향 줄임", got)
+        self.assertIn("조건은 이 이름으로 부른다", got)
+        block = got[got.index("실험 정본:"):]
+        self.assertLessEqual(len(block.encode("utf-8")), st.LAB_BLOCK_BYTES)
+        self.assertLessEqual(len(got.encode("utf-8")), st.INJECTION_MAX_BYTES)
+        self.assertNotIn("실험 정본:", self.hook("claude", "start", "sid-B", cwd=self.iso.root))   # a folder without one: none
+
+    def test_the_first_prompt_after_a_start_gets_the_block_once_and_later_prompts_do_not(self):
+        self.lab_project()
+        first = self.hook("claude", "prompt", "sid-P")
+        self.assertIn("실험 정본:", first)
+        self.assertNotIn("실험 정본:", self.hook("claude", "prompt", "sid-P"))
+
+    def test_a_big_catalog_shrinks_to_names_and_a_full_card_still_fits_2400_bytes(self):
+        self.lab_project(extra_conditions=30)
+        got = self.hook("claude", "start", "sid-B")
+        block = got[got.index("실험 정본:"):]
+        self.assertLessEqual(len(block.encode("utf-8")), st.LAB_BLOCK_BYTES)
+        self.assertIn("외", block)                                       # "… 외 N개": the rest are counted, not dropped silently
+        self.card("sid-A", "가나다라 " * 900)
+        self.confirmed_handover("claude", "sid-A", "sid-D")
+        full = self.hook("claude", "start", "sid-D")
+        self.assertLessEqual(len(full.encode("utf-8")), st.INJECTION_MAX_BYTES)
+        self.assertTrue("이하 생략" in full or "원문 참조:" in full)        # the card keeps its place: the block is after it
+
+    def test_the_writing_guide_names_the_conditions_within_600_bytes(self):
+        self.lab_project(extra_conditions=40)
+        with self.library():
+            guide = st.card_format.writing_guide(cwd=str(self.cwd))
+        self.assertIn("Experiment catalog", guide)
+        tail = guide[guide.index("Experiment catalog"):]
+        self.assertIn("잔향 줄임", tail)
+        self.assertLessEqual(len(tail.encode("utf-8")), st.card_format.CATALOG_GUIDE_BYTES + 160)   # the lead-in words are not counted in the 600
+        with self.library():
+            self.assertNotIn("Experiment catalog", st.card_format.writing_guide(cwd=str(self.iso.root)))
+
+
 class CardConsumeTest(TidyCase):
 
     def test_lifecycle_only_start_defers_the_same_card_until_first_prompt(self):

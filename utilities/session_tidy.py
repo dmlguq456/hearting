@@ -2557,6 +2557,36 @@ def _write_card_pair(seat: Seat, card: dict, *, rollback_on_error: bool = False)
         raise
 
 
+def _expand_experiment_names(body: str, cwd: str) -> str:
+    """Catalog names beside the bare run ids and aliases in a card body (never in a native compact summary).
+
+    Deterministic and local: no model call, no question.  A folder without a readable catalog, or any
+    failure, leaves the body as written."""
+    try:
+        import experiment_catalog
+        context = experiment_catalog.card_context(cwd)
+        return experiment_catalog.expand_refs(body, context[1])[0] if context else body
+    except Exception:  # noqa: BLE001
+        return body
+
+
+LAB_BLOCK_BYTES = 360
+
+
+def _lab_block(cwd: str, room: int) -> str:
+    """The folder's experiment catalog names for the start context: at most 360 bytes and never more than `room`."""
+    try:
+        import experiment_catalog
+        context = experiment_catalog.card_context(cwd)
+        if context is None:
+            return ""
+        root, doc = context
+        return experiment_catalog.catalog_brief(doc, str(experiment_catalog.catalog_path(root)),
+                                                max(0, min(LAB_BLOCK_BYTES, room)))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def write_card(seat: Seat, harness: str, sid: str, body: str, *, cwd: str = "",
                now: Optional[float] = None, prompt_seq: Optional[int] = None,
                origin: Optional[str] = None, compact_context: Optional[dict] = None) -> dict:
@@ -2589,7 +2619,7 @@ def write_card(seat: Seat, harness: str, sid: str, body: str, *, cwd: str = "",
         compact["source"] = compact.get("transcript") or ""
         body = _compact_body(compact)
     else:
-        body = _normalize_body(body)
+        body = _expand_experiment_names(_normalize_body(body), cwd)
     summary = session_summary(seat).get((harness, sid))
     previous = read_latest_card(seat)
     generation = int(previous.get("generation", 0)) + 1 if previous else 1
@@ -3895,6 +3925,11 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if resume_text:
                 parts.append(resume_text)
         parts.extend(answer_wait_lines)
+        if card_due or event == "start" or (event == "prompt" and (startup_context or {}).get("due")):
+            # The experiment catalog's names, after everything else and inside the same 2400-byte budget.
+            lab = _lab_block(cwd, INJECTION_MAX_BYTES - 1 - len("\n".join(parts).encode("utf-8")) - 1)
+            if lab:
+                parts.append(lab)
         text = "\n".join(parts)
         # The person-only "previous conversation" line needs the whole shared
         # lineage (every seat ledger, about half of a 1 s start). Past

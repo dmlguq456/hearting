@@ -414,6 +414,22 @@
    "en": "baseline",
    "ko": "비교 기준"
   },
+  "experiment.card.catalog": {
+   "en": "experiment catalog: {path}",
+   "ko": "실험 정본: {path}"
+  },
+  "experiment.card.conditions": {
+   "en": "conditions: {names}",
+   "ko": "조건: {names}"
+  },
+  "experiment.card.more": {
+   "en": ", … and {n} more",
+   "ko": ", … 외 {n}개"
+  },
+  "experiment.card.rule": {
+   "en": "call each condition by this catalog name",
+   "ko": "조건은 이 이름으로 부른다"
+  },
   "experiment.direction.max": {
    "en": "higher is better",
    "ko": "높을수록 좋음"
