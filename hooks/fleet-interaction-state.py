@@ -82,7 +82,17 @@ def main():
             resumed = (harness == "claude"
                        and payload.get("hook_event_name") in ("PostToolUse", "PostToolUseFailure")
                        and interaction.read_wait(session_id, harness) is not None)
-            interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"))
+            reason = payload.get("closure_reason", "closed")
+            if harness == "claude":
+                if (payload.get("hook_event_name") == "PostToolUse"
+                        and payload.get("tool_name") == "AskUserQuestion"):
+                    reason = "answered"
+                elif (payload.get("hook_event_name") == "PostToolUseFailure"
+                        and payload.get("tool_name") == "AskUserQuestion"):
+                    reason = "closed"
+            if reason not in ("answered", "cancelled", "expired", "replaced", "closed"):
+                reason = "closed"
+            interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"), reason=reason)
             if resumed:
                 _shell_state("working", session_id)
             try:

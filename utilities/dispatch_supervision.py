@@ -1749,9 +1749,10 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     try:
         utility = _printed("dispatch_terminal_commit.py")
     except Exception:  # noqa: BLE001 -- a read-only path fallback keeps the pending notice useful
-        utility = str(Path(__file__).resolve().parents[1] / "utilities" / "dispatch_terminal_commit.py")
+        utility = ""
     clean = lambda value: re.sub(r"[\x00-\x1f\x7f]", "", str(value))[:2048]
-    command = shlex.join(["python3", str(utility), "inspect",
+    command = shlex.join((["python3", str(utility)] if utility else
+                          ["hearting", "run", "dispatch_terminal_commit"]) + ["inspect",
                           "--jobs", clean(receipt["job_registry"]),
                           "--attempt", clean(receipt["owner_attempt_id"])])
     diagnosis = _exact_notice_diagnosis(receipt, notice_context)
@@ -2049,8 +2050,7 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
             next_command += "The route's existing authority and gate checks still apply."
         else:
             aid = receipt["monitored_attempt_ids"][0]
-            command = shlex.join(["python3", str(Path(__file__).resolve().parents[1]
-                                                    / "utilities/dispatch-registry.py"),
+            command = shlex.join(["python3", _printed("dispatch-registry.py"),
                                   "reconcile", "--jobs", receipt["job_registry"],
                                   "--attempt", aid])
             next_command = "Read-only next command: " + command + "."

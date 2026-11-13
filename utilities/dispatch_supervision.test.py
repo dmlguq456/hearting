@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 import time
 from unittest import mock
 
@@ -2038,6 +2039,18 @@ class StallNoticeRunningToolTest(unittest.TestCase):
                 return supervision.context(receipt, "delivery-stall")["additionalContext"][
                     "hearting-supervision"]["value"]
             return supervision.render_text(receipt)
+
+    def test_attention_command_survives_a_release_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "releases/old"
+            current = root / "current"
+            (current / "core").mkdir(parents=True)
+            (current / "core/CORE.md").touch()
+            with mock.patch.object(supervision, "__file__", str(old / "utilities/dispatch_supervision.py")):
+                text = self.notice({"attempt_id": "att-" + uuid.uuid4().hex, "harness": "codex"})
+            self.assertIn(str(current / "utilities/dispatch-registry.py"), text)
+            self.assertNotIn(str(old), text)
 
     def test_live_tool_command_is_named_with_its_start_time_on_every_harness(self):
         for harness, script in (("claude", self.CLAUDE), ("codex", "sleep 60; grep ITER log"),
