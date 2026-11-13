@@ -285,12 +285,14 @@ def unreadable(root: Path, now: float, why: str = "") -> Dict[str, Any]:
             "unlinked": {"count": 0, "run_ids": []}, "warnings": [], "strip": "?1LB"}
 
 
-def _stat(path: str) -> Optional[Tuple[int, int, int]]:
+def _stat(path: str) -> Optional[Tuple[int, int, int, int, int]]:
     try:
         info = os.stat(path)
     except OSError:
         return None
-    return (info.st_mtime_ns, info.st_size, info.st_ino)  # an atomic replace changes the inode
+    # Same identity `tools/fleet/route.py` uses: a rewrite that restores the size and the mtime
+    # (a copy with `touch -r`, a same-length edit) still moves the inode or the ctime.
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _watch_paths(root: Path, doc: Mapping[str, Any]) -> List[str]:

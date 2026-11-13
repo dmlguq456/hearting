@@ -83,9 +83,21 @@ def _delta_cell(row):
     return "·", "dim"
 
 
+def _minute(now):
+    """`now` rounded down to its minute.
+
+    The explorer redraws only when the displayed `HH:MM` changes (`runtime.draw_frame`), so an age
+    counted from a finer `now` would move inside a minute with nothing to repaint it.  Counting
+    from the minute makes every draw in the same `HH:MM` the same cells, and the age steps exactly
+    when the clock does.
+    """
+    return None if now is None else int(now // 60 * 60)
+
+
 def cells(row, group, now):
     """``{column: (text, key)}`` for one row; a missing value is a word, never a zero."""
     board = _board()
+    now = _minute(now)
     metric = _metric(group)
     status = _g(row, "status")
     latest = _g(row, "latest")
@@ -229,7 +241,7 @@ def summary(lab, now=None):
 def draw_lab(grid, lab, x, right, y, now=None):
     """Draw the LAB body below its section title; returns the next free row."""
     board = _board()
-    now = time.time() if now is None else now
+    now = _minute(time.time() if now is None else now)
     x += INDENT
     catalog = _g(lab, "catalog") or {}
     status = catalog.get("status")

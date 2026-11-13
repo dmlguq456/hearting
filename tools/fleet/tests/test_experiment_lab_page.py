@@ -176,6 +176,54 @@ class LabPageTest(T.Base):
         for value in ("GOAL", "METRIC", "BASE", "CONDITION", "9.10@5", "+1.10 dB", "잔향 줄임"):
             self.assertIn(value, text)
 
+    # --- #1595 relatives: redraw memo, saved-view replay, first pass ---------------------------
+
+    def page_at(self, lab, clock):
+        saved = self.vm
+        self.vm = replace(saved, clock=clock)
+        try:
+            return self.page(lab)
+        finally:
+            self.vm = saved
+
+    def test_ages_count_from_the_minute_so_a_redraw_inside_one_hhmm_is_the_same_page(self):
+        # `runtime.draw_frame` repaints only when the shown HH:MM changes; an age counted from a
+        # finer clock would move without a repaint (up to a minute stale).
+        minute = int(NOW_EPOCH // 60 * 60)
+        lab = self.board()
+        early, late = self.page_at(lab, minute + 1), self.page_at(lab, minute + 59.9)
+        self.assertEqual(early, late)                    # across the second boundary: same cells
+        later = self.page_at(lab, minute + 60)           # the clock changed: the age steps with it
+        self.assertNotEqual(early, later)
+        self.assertEqual(self.page_at(lab, minute + 60), self.page_at(lab, minute + 119.5))
+
+    def test_a_board_shown_later_ages_from_the_clock_not_from_when_it_was_read(self):
+        lab = self.board()                              # observed 3 minutes before NOW_EPOCH
+        now_text = self.page_at(lab, NOW_EPOCH)
+        two_days = self.page_at(lab, NOW_EPOCH + 2 * 86400)
+        self.assertIn("3m", now_text)
+        self.assertNotEqual(now_text, two_days)
+        self.assertIn("2d", two_days)                    # the age follows the draw clock
+        self.assertRegex(two_days, r"\d\d-\d\d \d\d:\d\d")   # the read time carries its date, not "just now"
+
+    def test_a_saved_view_never_replays_a_board(self):
+        from tools.fleet.explorer.view_model import persistable_view_model, restore_persisted_view_model
+        repo = dict(self.vm.repos[0], lab=self.board())
+        saved = persistable_view_model(replace(self.vm, repos=(repo,)))
+        self.assertNotIn("lab", saved["repos"][0])      # the board is not in the saved allowlist
+        restored = restore_persisted_view_model(saved)
+        self.assertNotIn("── LAB", pane(draw(restored, self.state, 168, 70, beat=1)))  # no stale table as fresh
+
+    def test_the_first_pass_after_a_start_reads_the_catalog_again(self):
+        from tools.fleet.collectors import experiment_status
+        experiment_status.clear_cache()
+        self.addCleanup(experiment_status.clear_cache)
+        with mock.patch.object(experiment_status.project_status, "artifact_root", return_value=str(self.root)):
+            found = experiment_status.collect(["/somewhere/in/the/project"], now=NOW_EPOCH)
+        board = found["/somewhere/in/the/project"]
+        self.assertTrue(board["visible"])
+        self.assertEqual(board["groups"][0]["rows"][1]["name"], "잔향 줄임")
+
 
 NOW_EPOCH = T.NOW
 

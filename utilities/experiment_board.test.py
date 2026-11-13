@@ -188,6 +188,27 @@ class ReadCache(T.Base):
         self.assertEqual(second["groups"][0]["rows"][0]["name"], "아주 길게 바꾼 새 이름")
         self.assertIn(str(E.catalog_path(root)), watch)
 
+    def test_b7c_a_rewrite_that_restores_size_and_mtime_is_still_seen(self):
+        # The same defect `route.py` fixed in #1595: a key of (mtime, size) misses an in-place edit
+        # whose length and mtime were put back, so the screen would keep the old name for a TTL.
+        root = self.setup_root()
+        cache = {}
+        first, _ = B.read(root, now=NOW, cache=cache)
+        self.assertEqual(first["groups"][0]["rows"][0]["name"], "짧은 발화 유지")
+        path = E.catalog_path(root)
+        before = os.stat(path)
+        data = path.read_bytes()
+        edited = data.replace("짧은 발화 유지".encode(), "짧은 발화 보존".encode())
+        self.assertEqual(len(edited), len(data))
+        self.assertNotEqual(edited, data)
+        with open(path, "r+b") as handle:      # in place: same inode, same size
+            handle.write(edited)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))  # and the same mtime
+        after = os.stat(path)
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns), (before.st_ino, before.st_size, before.st_mtime_ns))
+        second, _ = B.read(root, now=NOW + 2, cache=cache)  # inside the TTL
+        self.assertEqual(second["groups"][0]["rows"][0]["name"], "짧은 발화 보존")
+
     def test_b7b_an_unchanged_redraw_reads_the_status_once(self):
         root = self.setup_root()
         cache = {}
