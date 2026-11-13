@@ -3510,6 +3510,123 @@ class MessageCompletionTests(unittest.TestCase):
                 self.assertTrue(state.publish_cache(seen))
                 self.assertEqual([row["id"] for row in state._read_cache_file()["items"]], [b["id"]])
 
+    def test_the_publication_table_for_each_question_state_read_and_collection(self):
+        # Review 1597-r3 (11-13), the third finding at this spot (r1: a late publication brought an
+        # answered question back; r2: a failed read hid an unanswered one; r3: a failed read brought
+        # an answered one back). The whole table is fixed here instead of one cell at a time: the
+        # question's real state x the publication's re-read of its source x what is published (a
+        # collection read before the change, published late, or a new collection). B, an
+        # unanswered question of another session, is read normally and always stays.
+        import session_shell
+        LOAD, DROP = "load", "drop"
+        # state -> {read: (late publication of the earlier collection, new collection)}
+        table = {
+            "open":            {"ok": (LOAD, LOAD), "fail": (LOAD, LOAD)},
+            "answered":        {"ok": (DROP, DROP), "fail": (DROP, DROP)},
+            "source-answered": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-expired":  {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-cancelled": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-gone":     {"ok": (DROP, DROP), "fail": (DROP, DROP)},
+            "replaced":        {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+        }
+        def collect():
+            with mock.patch.object(observation, "_session_liveness_probe",
+                                   return_value=lambda *args: "live"), \
+                 mock.patch.object(observation, "_codex_rollout_waits",
+                                   return_value={"complete": True, "pending": {}}):
+                return observation.read_answer_waits(jobs_paths=[self.f.jobs])
+        cell = 0
+        for harness in ("claude", "codex", "opencode"):
+            for change, reads in table.items():
+                for read, expected in reads.items():
+                    for collection, want in zip(("late", "new"), expected):
+                        cell += 1
+                        with self.subTest(harness=harness, state=change, read=read, collection=collection):
+                            for path in state.state_root().glob("*.json"):
+                                path.unlink()
+                            sid = "session-a-%d" % cell
+                            a, ea = self.f.ask(harness, sid, "question A %d" % cell)
+                            b, _ = self.f.ask(harness, "session-b-%d" % cell, "question B %d" % cell)
+                            earlier = collect()
+                            self.assertTrue(state.publish_cache(earlier))
+                            source = state._signal_path(a)
+                            if change == "answered":
+                                self.f.submit(ea, "answer A")
+                                wire, _, _ = self.f.prepare(a)
+                                self.f.consume(a, wire)
+                                self.assertEqual(self.source(a)["lifecycle"], "answered")
+                                self.assertNotIn(a["id"], [row["id"] for row in state._read_cache_file()["items"]])
+                            elif change.startswith("source-") and change != "source-gone":
+                                # Reflected in the source only; its completion has not settled yet.
+                                signal = self.source(a)
+                                signal["lifecycle"] = change.split("-", 1)[1]
+                                state._write_signal_source(signal)
+                            elif change == "source-gone":
+                                source.unlink()
+                            elif change == "replaced":
+                                replacement, _ = self.f.ask(harness, sid, "next question %d" % cell)
+                                self.assertNotEqual(replacement["id"], a["id"])
+                                self.assertEqual(state._signal_path(replacement), source)
+                            published = earlier if collection == "late" else collect()
+                            original = Path.read_text
+                            def unreadable(path, *args, **kwargs):
+                                if path == source:
+                                    raise OSError(5, "synthetic I/O failure")
+                                return original(path, *args, **kwargs)
+                            with mock.patch.object(Path, "read_text",
+                                                   unreadable if read == "fail" else original):
+                                self.assertTrue(state.publish_cache(published))
+                            shared = state._read_cache_file()
+                            fleet = json.loads(state._fleet_cache_path().read_text())
+                            panel = session_shell.session_questions(
+                                harness, sid, view=state.cached_view(request=False))
+                            seen = {"shared": a["id"] in [row["id"] for row in shared["items"]],
+                                    "by_session": a["id"] in shared["by_session"].get(harness + "\0" + sid, ()),
+                                    "fleet": a["id"] in [row["id"] for row in fleet["items"]],
+                                    "panel": a["id"] in [item["id"] for item in panel]}
+                            self.assertEqual(seen, dict.fromkeys(seen, want == LOAD))
+                            for view in (shared, fleet):
+                                self.assertIn(b["id"], [row["id"] for row in view["items"]])
+                                self.assertEqual(view["total"], len(view["items"]))
+                            if change == "open" and read == "fail":
+                                for view in (shared, fleet):
+                                    self.assertIs(view["complete"], False)
+                                    self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+
+    def test_settled_waits_leave_once_a_later_collection_is_published(self):
+        # Review 1597-r3: the remembered completions do not grow. Many answers between two
+        # collections are all remembered; the next collection that started after them clears them.
+        def collect():
+            with mock.patch.object(observation, "_session_liveness_probe",
+                                   return_value=lambda *args: "live"), \
+                 mock.patch.object(observation, "_codex_rollout_waits",
+                                   return_value={"complete": True, "pending": {}}):
+                return observation.read_answer_waits(jobs_paths=[self.f.jobs])
+        asked = [self.f.ask("claude", "session-%d" % n, "question %d" % n) for n in range(5)]
+        earlier = collect()
+        self.assertTrue(state.publish_cache(earlier))
+        for signal, envelope in asked:
+            self.f.direct(signal, "answer")
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+        ids = [signal["id"] for signal, _ in asked]
+        self.assertEqual([row["id"] for row in state._read_cache_file()["settled_waits"]], ids)
+        # The same answer settled twice is remembered once.
+        state._settle_published_wait(ids[-1])
+        self.assertEqual([row["id"] for row in state._read_cache_file()["settled_waits"]], ids)
+        # Late publications of the earlier collection publish none of them and keep the list.
+        for _ in range(3):
+            self.assertTrue(state.publish_cache(earlier))
+            value = state._read_cache_file()
+            self.assertEqual(value["items"], [])
+            self.assertEqual(len(value["settled_waits"]), len(ids))
+        # A collection that started after the answers clears the list.
+        self.assertTrue(state.publish_cache(collect()))
+        self.assertNotIn("settled_waits", state._read_cache_file())
+        # The bound holds even if no later collection ever comes.
+        for n in range(state._SETTLED_WAITS_MAX + 10):
+            state._settle_published_wait("S4:%064x" % n)
+        self.assertEqual(len(state._read_cache_file()["settled_waits"]), state._SETTLED_WAITS_MAX)
+
     def test_legacy_question_keeps_its_address_when_another_session_registers(self):
         import session_tidy as tidy
         a, envelope = self.f.ask("codex", "session-a", "legacy question")

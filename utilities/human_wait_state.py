@@ -48,6 +48,10 @@ _ROUTE_DEMAND_MAX_BYTES = 32 * 1024
 _ROUTE_DEMAND_TTL = 600.0
 _SELECTED_DRAFT_MAX = 4096
 _SELECTED_RESPONSE_MAX = 256
+# Exact waits whose completion already took them out of the published views. A row leaves
+# once a collection that started after it is published; the bound only guards a clock
+# that went back.
+_SETTLED_WAITS_MAX = 256
 _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
@@ -576,17 +580,30 @@ def message_answer_submission_current(binding):
                 and _answer_attachment_current(entry.get("answer_attachment"), envelope))
 
 
+def _settled_waits(value):
+    """The waits a completion settled, as the shared cache records them (``id`` and ``at``)."""
+    rows = value.get("settled_waits") if isinstance(value, dict) else None
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+            and isinstance(row.get("at"), (int, float)) and not isinstance(row.get("at"), bool)
+            and math.isfinite(row["at"])] if isinstance(rows, list) else []
+
+
 def _settle_published_wait(wait_id):
     """Drop one answered wait from the published views at once (correction 3, 11-13).
 
     The collection leaves an answered message question out (``read_signals``); until it runs
     again the cache kept the wait, so the panel and Fleet still counted and showed it. Only
-    that exact id goes; every other row and count stays as published. Best effort: a later
-    collection writes the same result.
+    that exact id goes; every other row and count stays as published. The id and the time
+    are kept in the shared cache, so a collection read before this completion never
+    publishes it again, even when its source cannot be read then (review 1597-r3). Best
+    effort: a later collection writes the same result.
     """
     try:
         with _cache_write_lock():
             value = _read_cache_file()
+            if value:
+                settled = [row for row in _settled_waits(value) if row["id"] != wait_id]
+                value["settled_waits"] = [*settled, {"id": wait_id, "at": time.time()}][-_SETTLED_WAITS_MAX:]
             if value and any(row.get("id") == wait_id for row in value.get("items", ()) if isinstance(row, dict)):
                 value["items"] = [row for row in value["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
                 by_session = value.get("by_session") if isinstance(value.get("by_session"), dict) else {}
@@ -597,6 +614,7 @@ def _settle_published_wait(wait_id):
                 value.update(total=counts["total"], older=counts["older"], stale_total=counts["older"],
                              ownerless=counts["ownerless"],
                              unattributed=[ref for ref in value.get("unattributed", ()) if ref != wait_id])
+            if value:
                 _write_cache_value(value)
             path = _fleet_cache_path()
             meta = os.lstat(path) if path.exists() else None
@@ -1123,6 +1141,16 @@ def publish_cache(result: dict) -> bool:
                             and all(identity.get(key) == row.get(key)
                                     for key in ("turn_id", "item_id")))
                 removed = {row["id"] for row in items if answered(row)}
+            # A wait whose completion already settled it never comes back, whatever this pass
+            # read and whether or not its source can be read now (review 1597-r3). Its row
+            # leaves once a pass that started after the completion is published: that pass
+            # read the source after it.
+            settled_waits = _settled_waits(previous)
+            settled_ids = {row["id"] for row in settled_waits}
+            removed |= {row["id"] for row in items if row["id"] in settled_ids}
+            kept_settled = [row for row in settled_waits if row["at"] >= observed_at]
+            if kept_settled:
+                value["settled_waits"] = kept_settled[-_SETTLED_WAITS_MAX:]
             # A registered question read by this pass may have been answered (or replaced by its
             # session's next one) before this write; its exact source decides, under this same
             # lock that its completion takes to settle the published waits (review 1597-1).
@@ -1130,7 +1158,8 @@ def publish_cache(result: dict) -> bool:
             # collection read, and the publication says it is incomplete (review 1597-r2).
             unread = False
             for item in result["items"]:
-                if isinstance(item, dict) and item.get("source") == "S4" and item.get("id"):
+                if (isinstance(item, dict) and item.get("source") == "S4" and item.get("id")
+                        and item["id"] not in settled_ids):
                     source_state = _message_source_state(item)
                     if source_state == "ended":
                         removed.add(item["id"])

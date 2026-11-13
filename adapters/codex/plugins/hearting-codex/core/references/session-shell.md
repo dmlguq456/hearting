@@ -663,9 +663,14 @@ A settled question (answered, expired, cancelled) stays to show its receipt
 while the editor is focused; once focus returns to the native it is let go and
 no longer asked for, and an answered registered question leaves the shared
 answer-wait view the moment it completes, so the panel's count and question
-follow the answer at once; a collection read before the answer does not bring
-it back, and a question whose source could not be read just then stays, with the
-publication marked incomplete.
+follow the answer at once. Publishing re-reads each registered question's
+source. A question that completion took out never comes back, even from a
+collection read before the answer and even when its source cannot be read then;
+an open question stays even when its source cannot be read just then, with the
+publication marked incomplete; one that ended only in its source (answered,
+expired, cancelled, removed, or replaced by its session's next question) leaves
+when that source is read, and if the read fails it stays as the collection read
+it until the next collection.
 Collect every current form draft at that one submit; moving with Tab does not
 require Enter in each field and an edited draft supersedes its earlier value.
 Secret answers remain masked while selected, submitted, unfocused or consumed;
