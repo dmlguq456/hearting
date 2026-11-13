@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as D
 from split_module_fixture import patch_split
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 WATCH = ROOT / "utilities" / "dispatch-reap-watch.py"
 CURRENT = (
@@ -50,16 +52,16 @@ def _registry_with_parent_and_leg(
     repo, worktree, slug = "/repo", "/wt", "owner"
 
     parent_meta = dict(parent_identity)
-    parent_meta["attempt_id"] = "att-parent"
+    parent_meta["attempt_id"] = unique_attempt_id("att-parent")
     parent_meta["launch_lifecycle"] = "registered"
     if foreign == "pid_start":
         parent_meta["pid_start"] = "1"
 
     leg_meta = dict(leg_identity)
-    leg_meta["attempt_id"] = "att-leg"
+    leg_meta["attempt_id"] = unique_attempt_id("att-leg")
     leg_meta["launch_lifecycle"] = "detached"
     leg_meta["parent"] = slug
-    leg_meta["parent_attempt_id"] = "att-parent"
+    leg_meta["parent_attempt_id"] = unique_attempt_id("att-parent")
     leg_meta["log_file"] = str(base / "missing.jsonl")
 
     parent_worktree = "/wt-foreign" if foreign == "worktree" else worktree
@@ -148,7 +150,7 @@ class DispatchReapWatchTest(unittest.TestCase):
 
     def test_governance_environment_copies_parent_or_service_environment(self):
         with mock.patch.dict(os.environ, {
-            D.ATTEMPT_DESCENDANT_ENV: "att-parent", "HEARTING_FIXTURE_KEEP": "parent",
+            D.ATTEMPT_DESCENDANT_ENV: unique_attempt_id("att-parent"), "HEARTING_FIXTURE_KEEP": "parent",
         }, clear=True):
             parent_before = dict(os.environ)
             parent_env = D.governance_environment()
@@ -209,7 +211,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-detached-reap-watch"
+            attempt = unique_attempt_id("att-detached-reap-watch")
             script = (
                 "import os,subprocess,sys,time\n"
                 "env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=sys.argv[1])\n"
@@ -307,7 +309,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-tagged-residue-terminal"
+            attempt = unique_attempt_id("att-tagged-residue-terminal")
             identity = self._tagged_residue_worker(attempt, ignore_term=True)
             metadata = ",".join(
                 f"{key}={value}"
@@ -400,9 +402,9 @@ class DispatchReapWatchTest(unittest.TestCase):
     def test_applied_terminal_cleanup_reaps_old_residue_preserves_result_and_other_attempt(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / 'jobs.log'
-            attempt = 'att-snapshot-cleanup'
+            attempt = unique_attempt_id('att-snapshot-cleanup')
             identity = self._tagged_residue_worker(attempt)
-            other = self._tagged_residue_worker('att-unrelated-cleanup')
+            other = self._tagged_residue_worker(unique_attempt_id('att-unrelated-cleanup'))
             metadata = ','.join(f'{key}={value}' for key, value in {
                 **identity, 'attempt_id': attempt, 'launch_lifecycle': 'detached',
                 'pid_scope': 'namespace-local', 'note': 'completed-supervisor',
@@ -414,7 +416,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertEqual(jobs.read_bytes(), before)
             self.assertTrue(D.resolve_attempt_cleanup(jobs, attempt, apply=True)['settled'])
             self.assertEqual(D.attempt_tagged_descendants(self._row_metadata(jobs)).state, 'empty')
-            self.assertEqual(D.attempt_tagged_descendants({'attempt_id': 'att-unrelated-cleanup', **other}).state, 'populated')
+            self.assertEqual(D.attempt_tagged_descendants({'attempt_id': unique_attempt_id('att-unrelated-cleanup'), **other}).state, 'populated')
             self.assertEqual(self._row_metadata(jobs)['failure_class'], 'pass')
             self.assertEqual(self._row_metadata(jobs)['note'], 'completed-supervisor')
 
@@ -423,11 +425,11 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / 'jobs.log'
             proc = subprocess.Popen(['sleep', '30'], start_new_session=True,
-                                    env=dict(os.environ, AGENT_DISPATCH_ATTEMPT_ID='att-live-owner'))
+                                    env=dict(os.environ, AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id('att-live-owner')))
             self.addCleanup(lambda: (proc.kill(), proc.wait()) if proc.poll() is None else None)
             identity = D.process_launch_identity(proc.pid)
             metadata = ','.join(f'{key}={value}' for key, value in {
-                **identity, 'attempt_id': 'att-live-owner', 'launch_lifecycle': 'detached',
+                **identity, 'attempt_id': unique_attempt_id('att-live-owner'), 'launch_lifecycle': 'detached',
                 'pid_scope': 'namespace-local',
             }.items())
             fields = ['2026-10-09T00:00:00Z', 'done', '/repo', '/wt', 'worker', f'{CURRENT},{metadata}']
@@ -449,7 +451,7 @@ class DispatchReapWatchTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
-            attempt = "att-residue-later-exits"
+            attempt = unique_attempt_id("att-residue-later-exits")
             # Leave a wide observation window after the watcher starts. A
             # short-lived survivor can exit during procfs scanning and turn
             # the intended residue fixture into a first-observation-empty
@@ -509,7 +511,7 @@ class DispatchReapWatchTest(unittest.TestCase):
     def test_live_residue_is_reported_not_upgraded(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
-            attempt = "att-residue-still-live"
+            attempt = unique_attempt_id("att-residue-still-live")
             jobs = self._open_residue_row(base, attempt, "30")
             meta = self._row_metadata(jobs)
             live = D.attempt_tagged_descendants(meta)
@@ -528,7 +530,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-tagged-residue-ingroup"
+            attempt = unique_attempt_id("att-tagged-residue-ingroup")
             script = (
                 "import os,subprocess,sys,time\n"
                 "env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=sys.argv[1])\n"
@@ -582,7 +584,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-tagged-residue-open"
+            attempt = unique_attempt_id("att-tagged-residue-open")
             identity = self._tagged_residue_worker(attempt, residue_seconds="1.2")
             metadata = ",".join(
                 f"{key}={value}"
@@ -623,7 +625,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-detached-missing-result"
+            attempt = unique_attempt_id("att-detached-missing-result")
             worker = subprocess.Popen(
                 ["sleep", "0.08"],
                 env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
@@ -712,7 +714,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-opencode-capacity"
+            attempt = unique_attempt_id("att-opencode-capacity")
             attempt_log = base / f"{attempt}.opencode.jsonl"
             attempt_log.write_text(
                 json.dumps({"type": "step_start", "sessionID": "ses_cap111"}) + "\n",
@@ -780,7 +782,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-closed-owner"
+            attempt = unique_attempt_id("att-closed-owner")
             worker = subprocess.Popen(
                 ["sleep", "0.08"],
                 env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
@@ -833,7 +835,7 @@ class DispatchReapWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
-            attempt = "att-degradation-write-failure"
+            attempt = unique_attempt_id("att-degradation-write-failure")
             worker = subprocess.Popen(
                 ["sleep", "0.08"],
                 env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
@@ -890,7 +892,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             parent = subprocess.Popen(["sleep", "5"])
             leg = subprocess.Popen(
                 ["sleep", "0.08"],
-                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: unique_attempt_id("att-leg")},
                 start_new_session=True,
             )
             try:
@@ -901,7 +903,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                         sys.executable,
                         str(WATCH),
                         "--jobs", str(jobs),
-                        "--attempt-id", "att-leg",
+                        "--attempt-id", unique_attempt_id("att-leg"),
                         "--pid", str(leg.pid),
                         "--pid-start", leg_identity["pid_start"],
                         "--pgid", leg_identity["pgid"],
@@ -918,16 +920,16 @@ class DispatchReapWatchTest(unittest.TestCase):
                         break
                     time.sleep(0.05)
                 self.assertIn("reap_close_deferred=parent-live:process", row)
-                self.assertIn("att-leg", row.splitlines()[1])
+                self.assertIn(unique_attempt_id("att-leg"), row.splitlines()[1])
                 self.assertEqual(row.splitlines()[1].split("\t")[1], "open")
 
                 self.assertTrue(
-                    D.close_attempt_row(jobs, "att-leg", "completed-marker")
+                    D.close_attempt_row(jobs, unique_attempt_id("att-leg"), "completed-marker")
                 )
                 self.assertEqual(watcher.wait(timeout=5), 0)
                 row = jobs.read_text(encoding="utf-8")
                 leg_row = next(
-                    line for line in row.splitlines() if "att-leg" in line
+                    line for line in row.splitlines() if unique_attempt_id("att-leg") in line
                 )
                 self.assertEqual(leg_row.split("\t")[1], "done")
                 self.assertIn("note=completed-marker", leg_row)
@@ -942,7 +944,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             parent = subprocess.Popen(["sleep", "5"])
             leg = subprocess.Popen(
                 ["sleep", "0.08"],
-                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: unique_attempt_id("att-leg")},
                 start_new_session=True,
             )
             jobs = _registry_with_parent_and_leg(base, parent, leg)
@@ -955,7 +957,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                     sys.executable,
                     str(WATCH),
                     "--jobs", str(jobs),
-                    "--attempt-id", "att-leg",
+                    "--attempt-id", unique_attempt_id("att-leg"),
                     "--pid", str(leg.pid),
                     "--pid-start", leg_identity["pid_start"],
                     "--pgid", leg_identity["pgid"],
@@ -965,7 +967,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             )
             self.assertEqual(watcher.wait(timeout=5), 0)
             row = jobs.read_text(encoding="utf-8")
-            leg_row = next(line for line in row.splitlines() if "att-leg" in line)
+            leg_row = next(line for line in row.splitlines() if unique_attempt_id("att-leg") in line)
             self.assertEqual(leg_row.split("\t")[1], "done")
             self.assertIn("note=dead-missing-result", leg_row)
             self.assertIn("terminal_event=dispatch-reap-missing-result", leg_row)
@@ -983,7 +985,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                     parent = subprocess.Popen(["sleep", "5"])
                     leg = subprocess.Popen(
                         ["sleep", "0.08"],
-                        env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+                        env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: unique_attempt_id("att-leg")},
                         start_new_session=True,
                     )
                     try:
@@ -994,7 +996,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                                 sys.executable,
                                 str(WATCH),
                                 "--jobs", str(jobs),
-                                "--attempt-id", "att-leg",
+                                "--attempt-id", unique_attempt_id("att-leg"),
                                 "--pid", str(leg.pid),
                                 "--pid-start", leg_identity["pid_start"],
                                 "--pgid", leg_identity["pgid"],
@@ -1006,7 +1008,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                         self.assertEqual(watcher.wait(timeout=5), 0)
                         row = jobs.read_text(encoding="utf-8")
                         leg_row = next(
-                            line for line in row.splitlines() if "att-leg" in line
+                            line for line in row.splitlines() if unique_attempt_id("att-leg") in line
                         )
                         self.assertEqual(leg_row.split("\t")[1], "done")
                         self.assertIn("note=dead-missing-result", leg_row)
@@ -1133,7 +1135,7 @@ class WorkerHomeRetentionCarrierTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td).resolve()
             jobs = base / "jobs.log"
-            attempt = "att-reaper-carrier"
+            attempt = unique_attempt_id("att-reaper-carrier")
             worker = subprocess.Popen(
                 ["sleep", "0.05"], env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
                 start_new_session=True)
@@ -1217,7 +1219,7 @@ class DeliveryPruneCarrierTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td).resolve()
             jobs = base / "jobs.log"
-            attempt = "att-reaper-prune"
+            attempt = unique_attempt_id("att-reaper-prune")
             (base / "homes" / "workers").mkdir(parents=True, mode=0o700)
             old = self.record(base, "1", "acked", 8)
             recent = self.record(base, "2", "acked", 1)
