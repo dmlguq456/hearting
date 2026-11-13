@@ -217,6 +217,12 @@ and time budgets are optional. Missing sources or ETA stay explicit and do not
 interrupt a run or change exit, sentinel, verification, or approval state. Notices
 carry the run id and stable public run-record path when available.
 
+Call an experiment condition by the name in the project catalog
+(`python3 utilities/experiment_catalog.py status` or `show`), not by a run id, a config name,
+or a private label. A condition the catalog does not list is registered first
+(`experiment_catalog.py register`); a missing goal or baseline there is a warning and does not
+stop the run. Run ids stay as references next to the name.
+
 Admission is another optional observation axis, independent of metric progress.
 The shared observer can use bounded records tied to exact run provenance when
 the output root is absent; evidence must also match an exact row when it is
