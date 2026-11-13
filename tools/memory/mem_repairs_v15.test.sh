@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../run-tests.py" --direct-run bash "$0" "$@"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
 hearting_test_isolate
 # Regressions for the 2026-07-22 memory-audit repairs:
@@ -119,7 +121,7 @@ type: lesson
 ---
 absorb path regression: auto-memory record must carry the canonical project key
 EOF
-( cd "$TMP" && MEM_STORE="$STORE2" MEM_PROJECTS="$PROJECTS" \
+( cd "${TMP:?}" && MEM_STORE="$STORE2" MEM_PROJECTS="$PROJECTS" \
     python3 "$MEM" migrate --apply --all-projects >/dev/null 2>&1 )
 DB2="$STORE2/memory.db"
 [ "$(q "$DB2" "SELECT cwd_origin FROM records WHERE source LIKE 'auto-memory:%'")" = "$CANON" ] \
