@@ -44,6 +44,13 @@ class HumanWaitStateTests(unittest.TestCase):
                                      return_value={"complete": True, "pending": {}})
         rollouts.start()
         self.addCleanup(rollouts.stop)
+        # Tests with an injected clock wait by stat beat; the kernel-notification wake has
+        # its own tests (WakeSourceTests), which turn it back on.
+        for name, value in (("_WAKE_FAILED", True), ("_WAKE_EVENTS", None), ("_NEXT_WAKE", None),
+                            ("_WATCH_STAT", ())):
+            patch = mock.patch.object(state, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.addCleanup(self.tmp.cleanup)
 
     def test_only_explicit_first_line_markers_open_private_signal(self):
@@ -3222,6 +3229,11 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, XDG_STATE_HOME=self.tmp.name)
         env.start()
         self.addCleanup(env.stop)
+        for name, value in (("_WAKE_FAILED", True), ("_WAKE_EVENTS", None), ("_NEXT_WAKE", None),
+                            ("_WATCH_STAT", ())):
+            patch = mock.patch.object(state, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def test_wait_and_route_badges_share_one_read_and_keep_exact_sessions(self):
         now = time.time()
@@ -3879,6 +3891,262 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.submit(envelope)
         self.assertIsNone(self.f.record(signal))
         self.assertEqual(self.source(signal)["lifecycle"], "open")
+
+
+class WakeSourceTests(unittest.TestCase):
+    """The producer wakes on sources outside the registry, and never on its own writes.
+
+    Real descriptors and real time (kernel notifications, pidfd, a real producer loop);
+    every wait is bounded far below the 30 second cadence it replaces.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        env = mock.patch.dict(os.environ, {
+            "XDG_STATE_HOME": str(self.base / "state"),
+            "FLEET_INTERACTION_STATE_DIR": str(self.base / "interactions"),
+            "PATH": str(self.base / "empty-bin")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.root = state.state_root()
+        self.root.mkdir(parents=True, mode=0o700)
+        (self.root / ".demand").touch()
+        self.registry = self.base / "reg" / "jobs.log"
+        self.registry.parent.mkdir()
+        self.registry.write_text("open\n", encoding="utf-8")
+        self.stream = self.base / "reg" / "logs" / "e2e.claude.jsonl"
+        self.stream.parent.mkdir()
+        self.stream.write_text("{}\n", encoding="utf-8")
+        interactions = self.base / "interactions" / "claude"
+        interactions.mkdir(parents=True)
+        self.interactions = interactions
+        import tools.fleet.collectors.dispatch as dispatch
+        for patch in (
+                mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(self.registry)]),
+                mock.patch.object(observation, "_codex_rollout_waits",
+                                  return_value={"complete": True, "pending": {}}),
+                mock.patch.object(state, "_request_producer"),
+                mock.patch.object(state, "_WAKE_FAILED", False),
+                mock.patch.object(state, "_WAKE_EVENTS", None),
+                mock.patch.object(state, "_NEXT_WAKE", None),
+                mock.patch.object(state, "_WATCH_STAT", ())):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.addCleanup(state._stop_wake_events)
+        self.sleepers = []
+        self.addCleanup(self._reap)
+
+    def _reap(self):
+        for process in self.sleepers:
+            process.kill()
+            process.wait()
+
+    def sleeper(self):
+        from tools.fleet.collectors.procscan import read_proc_start
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.sleepers.append(process)
+        return process, read_proc_start(process.pid)
+
+    def snapshot(self, *, pid=None, start=None):
+        job = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.stream),
+                              pid=pid, proc_start=start)
+        return SimpleNamespace(jobs=[job], sessions=[])
+
+    def arm(self, snapshot=None):
+        state._remember_wake_sources(snapshot)
+        state._arm_wake_events()
+        events = state._wake_events()
+        self.assertIsNotNone(events)
+        return events
+
+    def slept(self, cause, *, delay=30.0):
+        """Seconds `_sleep_until_registry_change` took when `cause` ran 0.3 s into it."""
+        generation = state._source_generation()
+        timer = threading.Timer(0.3, cause)
+        timer.start()
+        began = time.monotonic()
+        state._sleep_until_registry_change(delay, generation, 0.0)
+        timer.join()
+        return time.monotonic() - began
+
+    def test_a_worker_stream_append_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_s4_signal_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        def signal():
+            value = state.signal_value("claude", "sid-wake", "seat-wake", "[답변 필요] 깨움?", sequence=1)
+            self.assertTrue(state.write_signal(value))
+        self.assertLess(self.slept(signal), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_s1_state_file_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        self.assertLess(self.slept(lambda: (self.interactions / "sid-s1.json").write_text("{}")), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_owner_process_ending_wakes_the_producer(self):
+        process, start = self.sleeper()
+        self.arm(self.snapshot(pid=process.pid, start=start))
+        self.assertIn((process.pid, start), state._NEXT_WAKE[2])
+        self.assertLess(self.slept(process.terminate), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_a_network_file_is_stat_watched_not_notification_watched(self):
+        import claude_process_identity as identity
+        remote = str(self.base / "reg" / "logs")
+        real = identity.is_local_path
+        with mock.patch.object(identity, "is_local_path",
+                               side_effect=lambda path, **kw: not str(path).startswith(remote) and real(path, **kw)):
+            events = self.arm(self.snapshot())
+        self.assertIn(str(self.stream), state._NEXT_WAKE[3])
+        self.assertNotIn(str(self.stream), state._NEXT_WAKE[0])
+        self.assertIn(str(self.stream), state._WATCH_STAT)
+        self.assertNotIn(str(self.stream), events._sources[0])
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "stat")
+
+    def test_the_producers_own_writes_do_not_wake_it(self):
+        events = self.arm(self.snapshot())
+        self.assertFalse(events.wait_changed(0.3))
+        now = time.time()
+        for index in range(3):
+            self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now + index,
+                                                 "route_sessions": {}, "route_status": {}}))
+            state._write(self.root / ".demand", {"claude\0sid": now})   # a display's demand
+            (self.root / ".demand").touch()
+            with state._cache_write_lock():
+                pass
+        self.assertTrue((self.root / "fleet.json").exists() or (self.root / "projection.json").exists())
+        self.assertFalse(events.wait_changed(1.0), "a cache write, demand update or lock woke the producer")
+
+    def test_without_a_notification_the_whole_delay_is_slept(self):
+        self.arm(self.snapshot())
+        self.assertGreaterEqual(self.slept(lambda: None, delay=2.0), 1.9)
+        self.assertEqual(state._LAST_WAKE_REASON, "cadence")
+
+    def test_a_missing_kernel_notification_falls_back_to_the_stat_beat(self):
+        from tools.fleet import native_events
+        with mock.patch.object(native_events.ctypes, "CDLL", side_effect=OSError("no inotify")):
+            events = self.arm(self.snapshot())
+            self.assertFalse(events.available)
+            state._remember_wake_sources(self.snapshot())
+        self.assertIn(str(self.stream), state._WATCH_STAT)
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "stat")
+
+    def test_stopping_leaves_no_thread_or_descriptor(self):
+        process, start = self.sleeper()
+        before = len(os.listdir("/proc/self/fd"))
+        self.arm(self.snapshot(pid=process.pid, start=start))
+        self.assertTrue(any(t.name == "fleet-native-events" for t in threading.enumerate()))
+        state._stop_wake_events()
+        self.assertFalse(any(t.name == "fleet-native-events" and t.is_alive() for t in threading.enumerate()))
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    # (S-d) the source list is a pure, stable function of what the pass read
+    def test_wake_sources_are_stable_sorted_and_keep_missing_streams(self):
+        process, start = self.sleeper()
+        dead = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.base / "gone" / "x.jsonl"),
+                               pid=process.pid, proc_start="not-its-start")
+        live = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.stream),
+                               pid=process.pid, proc_start=start)
+        ended = SimpleNamespace(status="done", harness="claude", _transcript_path=str(self.base / "old.jsonl"),
+                                pid=None, proc_start=None)
+        first = state._wake_sources(SimpleNamespace(jobs=[dead, live, ended], sessions=[]))
+        again = state._wake_sources(SimpleNamespace(jobs=[ended, live, dead], sessions=[]))
+        self.assertEqual(first, again)
+        self.assertEqual(first[2], ((process.pid, start),))              # the process that is no longer the one is left out
+        self.assertIn(str(self.base / "gone" / "x.jsonl"), first[0])     # a stream not there yet stays listed
+        self.assertNotIn(str(self.base / "old.jsonl"), first[0])         # a finished job is not watched
+        for part in first:
+            self.assertEqual(list(part), sorted(part))
+        self.assertEqual(state._wake_sources(None), state._wake_sources(None))
+
+    # the producer's own passes: the number of passes is the cadence's, not the wakes'
+    def _run_producer(self, seconds, *, delay=None, vary=False, snapshot=None):
+        """Run the real producer loop (real passes, real listener) for `seconds`.
+
+        Returns (pass start times, rebuild times). `delay` replaces the sleep length; `vary`
+        makes the next pass's wake sources differ from the last one's every time."""
+        lock = os.open(self.base / "producer.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        began = time.monotonic()
+        passes, rebuilds = [], []
+        original_refresh, original_sleep = state._timed_refresh, state._sleep_until_registry_change
+        original_remember = state._remember_wake_sources
+        from tools.fleet import native_events
+        original_rebuild = native_events.NativeDisplayEvents._rebuild
+        counter = [0]
+
+        def timed():
+            passes.append(time.monotonic() - began)
+            return original_refresh()
+
+        def sleep(wait, generation, ready_at):
+            return original_sleep(wait if delay is None else delay, generation, ready_at)
+
+        def remember(snap=None):
+            original_remember(snapshot if snapshot is not None else snap)
+            if vary:
+                counter[0] += 1
+                local = state._NEXT_WAKE[0] + (str(self.base / ("varying-%d" % counter[0])),)
+                state._NEXT_WAKE = (tuple(sorted(local)),) + state._NEXT_WAKE[1:]
+
+        def rebuild(this, *args):
+            rebuilds.append(time.monotonic() - began)
+            return original_rebuild(this, *args)
+
+        def run():
+            state._producer_loop(lock)
+        with mock.patch.object(state, "_timed_refresh", timed), \
+             mock.patch.object(state, "_sleep_until_registry_change", sleep), \
+             mock.patch.object(state, "_remember_wake_sources", remember), \
+             mock.patch.object(native_events.NativeDisplayEvents, "_rebuild", rebuild):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            time.sleep(seconds)
+            kept = (list(passes), list(rebuilds))   # before the teardown below rebuilds too
+            shutil.rmtree(self.root)          # the producer ends when its root is gone
+            thread.join(65)
+            self.assertFalse(thread.is_alive())
+        return kept
+
+    def test_S_b_the_first_listener_setup_starts_no_extra_pass(self):
+        process, start = self.sleeper()
+        passes, _ = self._run_producer(5.0, snapshot=self.snapshot(pid=process.pid, start=start))
+        self.assertEqual(len(passes), 1, passes)
+
+    def test_S_c_changing_sources_do_not_make_wakes_chain(self):
+        # Every pass hands the listener a different source list (a rebuild each time). The pass
+        # count stays the cadence's: 1 + floor(15 / 3).
+        passes, rebuilds = self._run_producer(15.0, delay=3.0, vary=True)
+        self.assertGreaterEqual(len(rebuilds), len(passes) - 1)   # it did rebuild on the passes
+        self.assertLessEqual(len(passes), 1 + 15 // 3, passes)
+
+    def test_S_a_a_resting_producer_runs_only_its_cadence(self):
+        # 59 seconds with nothing changing: passes at t~0 and t~30, the real publish writes
+        # (projection, fleet cache, locks, demand) wake nothing, and the listener is built for the
+        # first pass's sources, then once more when that pass added the stream and the process
+        # (the sources differ); after the second pass's setup it is never rebuilt.
+        process, start = self.sleeper()
+        passes, rebuilds = self._run_producer(59.0, snapshot=self.snapshot(pid=process.pid, start=start))
+        self.assertEqual(len(passes), 2, passes)
+        self.assertLessEqual(len(rebuilds), 2, rebuilds)
+        self.assertEqual([t for t in rebuilds if t > passes[1] + 0.5], [])
+        self.assertLessEqual(len([t for t in rebuilds if t > 1.0]), 1)
 
 
 if __name__ == "__main__":

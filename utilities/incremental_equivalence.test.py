@@ -912,11 +912,30 @@ def observe_holders(fx: Fixture) -> dict:
             "routes": sorted(scope["routes"])}
 
 
+# E44: the warm pass is run the way a woken producer runs it (listener armed, wake sources kept).
+WAKE_PASS = [False]
+
+
 def observe_producer() -> dict:
     """One producer pass; the published cache is the output."""
     import human_wait_state as producer
     with mock.patch.object(producer, "_notify_result", lambda _result: None):
-        ok = producer._refresh_cache()
+        if WAKE_PASS[0]:
+            # What a producer does after an early wake: arm the listener from the sources the last
+            # pass kept, then the same full pass. The wake changes when a pass runs, never its inputs.
+            real, ok = producer._refresh_cache, []
+            try:
+                with mock.patch.object(producer, "_producer_root", producer.state_root()), \
+                        mock.patch.object(producer, "_WAKE_FAILED", False), \
+                        mock.patch.object(producer, "_refresh_cache",
+                                          lambda: ok.append(real()) or ok[-1]):
+                    producer._timed_refresh()
+                    producer._timed_refresh()      # the second pass arms from what the first one kept
+            finally:
+                producer._stop_wake_events()
+            ok = bool(ok and ok[-1])
+        else:
+            ok = producer._refresh_cache()
     out = {"ok": bool(ok)}
     for label, path in (("projection", producer._cache_path()),
                         ("fleet", producer._fleet_cache_path())):
@@ -1731,6 +1750,16 @@ def e38_gone(run):  # the processes of the sessions end: liveness only, no regis
     run.fx.write_liveness(value, run.clock.now - 1)
 
 
+def e44a(run):  # a worker stream grows outside the registry; the producer is woken by it
+    WAKE_PASS[0] = True
+    e16a(run)
+
+
+def e44b(run):  # the owner processes end (liveness only); the producer is woken by the exit
+    WAKE_PASS[0] = True
+    e38_gone(run)
+
+
 def e39_other_session(run):  # the registry is replaced (new inode) with one more owner row, of another session
     rows = run.fx.current_rows()
     rows.append(attempt_row(CLOCK_BASE - 90, "open", "other-session-owner", {
@@ -1908,6 +1937,9 @@ EVENTS = [
     # E39: a registry replaced with one more owner row of another session reads the bytes as they are
     # and asks only the new row who holds its job; writing the same rows again as another inode
     # changes no answer and asks nobody.
+    ("E44", "a pass run after an early wake (stream growth, owner exit) equals a new process's full pass",
+     [Step("stream grew, woken", e44a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("owners ended, woken", e44b, expect={**REG_STILL, **CODEX_STILL})]),
     ("E39", "registry replaced: another session's owner row appears, then the same rows again",
      [Step("another session's owner row", e39_other_session,
            expect={"holder_resolves": 1, "holder_memo_hits": "+", **CODEX_STILL}),
@@ -2068,8 +2100,11 @@ class IncrementalEquivalenceTests(unittest.TestCase):
 
     def run_event(self, eid: str, steps: list[Step]) -> None:
         run, fresh = self.prime(eid)
-        for step in steps:
-            fresh = self.check_step(run, step, fresh)
+        try:
+            for step in steps:
+                fresh = self.check_step(run, step, fresh)
+        finally:
+            WAKE_PASS[0] = False
 
     # -- the events -------------------------------------------------------
     def test_events(self):

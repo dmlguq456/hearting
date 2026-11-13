@@ -26,6 +26,9 @@ class NativeDisplayEvents:
         self._dirty = threading.Event()
         self._stopped = threading.Event()
         self.ready = threading.Event()
+        # True once the last rebuild installed an inotify descriptor; a caller
+        # that must not miss a local write keeps its own stat beat while False.
+        self.available = False
         self._sources = None
         self._thread = None
         self._read = self._write = None
@@ -62,6 +65,13 @@ class NativeDisplayEvents:
         if changed:
             self._dirty.clear()
         return changed
+
+    def wait_changed(self, timeout):
+        """Block until a source event (or the timeout); True and clear on an event."""
+        if self._dirty.wait(timeout):
+            self._dirty.clear()
+            return True
+        return False
 
     def _wake(self):
         with self._lock:
@@ -159,6 +169,7 @@ class NativeDisplayEvents:
             except (AttributeError, OSError, ValueError):
                 if fd is not None:
                     os.close(fd)
+        self.available = event_fd is not None
         # A write between the preceding read and watch installation is covered
         # by one post-registration read, without a registration-gap timer.
         self._dirty.set()
@@ -232,6 +243,7 @@ class NativeDisplayEvents:
         except (OSError, ValueError):
             # Event delivery is optional. The normal complete snapshot still
             # causes its existing display read; never substitute a new timer.
+            self.available = False
             self.ready.set()
         finally:
             if selector is not None:

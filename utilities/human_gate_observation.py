@@ -541,6 +541,12 @@ def pending_human_waits(route, *, jobs, outcome=None):
 # Time, process liveness and lineage are not inputs; the caller still computes them every pass.
 # One entry per route triple; entries the latest full pass did not see are dropped.
 _WAIT_MEMO = {}
+# The route files the latest *full* pass read for the routes it saw, for waking only: the producer
+# watches them (a NAS file by stat) so a route write starts the next pass early. It is never used
+# to skip a judgment. ``_WAIT_MEMO`` is not this: it can hold routes the pass did not see (an
+# ``only_id`` pass, or a pass that ended before its cleanup keeps older entries), so it is rebuilt
+# from ``seen_routes`` at the cleanup point and emptied by a full pass that did not reach it.
+_LAST_PASS_ROUTE_PATHS = ()
 _WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
 _METRICS["route_wait_recomputes"] = 0
 _METRICS["route_wait_reuses"] = 0
@@ -553,6 +559,25 @@ def _route_file_paths(route_file, record, route_id):
     finish = (str(Path(artifact_root) / ".runtime" / "inline-finish" / "v1" / str(route_id) / "finish.json")
               if artifact_root else None)
     return (str(route_path), str(route_path.with_name(route_path.stem + ".outcome.json")), finish)
+
+
+def last_pass_route_paths():
+    """Sorted route record/outcome/finish/journal paths the latest full pass read (wake only)."""
+    return _LAST_PASS_ROUTE_PATHS
+
+
+def _seen_route_paths(seen_routes):
+    paths = set()
+    for key in seen_routes:
+        if key[2]:
+            paths.add(str(key[2]))
+        entry = _WAIT_MEMO.get(key)
+        if entry is not None:
+            paths.update(str(item) for item in entry[1] if item)
+            if entry[3]:
+                paths.add(str(entry[3]))
+            paths.update(str(read[0]) for read in entry[5])
+    return paths
 
 
 def _journal_file(route_key, ledger_root):
@@ -855,8 +880,10 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
     except Exception as exc:
         health.append({"source": "S4", "state": "unknown", "reason": type(exc).__name__})
 
+    pass_paths, pass_total, pass_reached = set(), 0, 0
     for jobs in jobs_paths:
         path = Path(jobs)
+        pass_total += 1
         try:
             with registry_read_scope(), contextlib.ExitStack() as lineage_pin:
                 snapshot = registry_snapshot(path)
@@ -1038,9 +1065,16 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 if only_id is None:
                     for stale in [key for key in _WAIT_MEMO if key not in seen_routes]:
                         del _WAIT_MEMO[stale]
+                    pass_paths.update(_seen_route_paths(seen_routes))
+                    pass_reached += 1
         except (OSError, ValueError, UnicodeError) as exc:
             health.append({"source": "registry", "path": str(path),
                            "state": "unknown", "reason": type(exc).__name__})
+
+    if only_id is None:
+        global _LAST_PASS_ROUTE_PATHS
+        _LAST_PASS_ROUTE_PATHS = (tuple(sorted(pass_paths))
+                                  if pass_total and pass_reached == pass_total else ())
 
     retained = []
     for item in items:

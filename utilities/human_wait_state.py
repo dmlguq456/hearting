@@ -38,11 +38,16 @@ _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
-# While a display wants routes, the producer checks the dispatch registries this
-# often between passes and starts the next pass at most once per pass duration
-# (never sooner than _REGISTRY_MIN_GAP after the previous one ended).
+# While a display wants routes the producer starts its next pass early on a change instead of
+# waiting out the 30 second cadence (a fallback that always remains; a wake never removes a pass,
+# it only shortens the sleep before one). Local sources wake it by kernel notification
+# (tools.fleet.native_events: the registry, a worker's stream, an S4 signal, an S1 state file, a
+# process ending). A file on a network mount raises no notification for another host's write, so
+# the registry and the route files are stat'ed every _REGISTRY_WAKE_SECONDS. A wake starts the pass
+# no sooner than _REGISTRY_MIN_GAP after the previous one ended, and never sooner than that pass
+# took, so busy sources cost at most half of one core.
 _REGISTRY_WAKE_SECONDS = 1.0
-_REGISTRY_MIN_GAP = 2.0
+_REGISTRY_MIN_GAP = 0.5
 _ROUTE_DEMAND_LIMIT = 64
 _ROUTE_DEMAND_MAX_BYTES = 32 * 1024
 _ROUTE_DEMAND_TTL = 600.0
@@ -120,6 +125,21 @@ def _make_private_dir(path: Path) -> None:
     if _producer_root is not None and not _producer_root.is_dir():
         raise FileNotFoundError("answer-wait state root is gone")
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def _chmod_private(path, mode: int = 0o700, meta=None) -> None:
+    """``chmod`` only when the mode differs.
+
+    The producer watches this directory by kernel notification; a ``chmod`` raises an
+    attribute event on it even when the mode is already right, so every cache write or
+    display demand would wake the producer for its own bookkeeping.
+    """
+    try:
+        current = stat.S_IMODE((meta if meta is not None else os.lstat(path)).st_mode)
+    except OSError:
+        current = None
+    if current != mode:
+        os.chmod(path, mode)
 
 
 def _path(seat_key: str) -> Path:
@@ -210,7 +230,7 @@ def _cache_write_lock():
     meta = os.lstat(root)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError("answer-wait directory is not private owner state")
-    os.chmod(root, 0o700)
+    _chmod_private(root, 0o700, meta)
     # The producer holds .projection.lock for its whole lifetime. Cache writes
     # and selected-action claims need a separate short transaction lock.
     fd = os.open(root / ".cache-write.lock", os.O_CREAT | os.O_RDWR |
@@ -308,7 +328,7 @@ def _write(path: Path, value: dict) -> None:
     meta = os.lstat(path.parent)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError("answer-wait directory is not private owner state")
-    os.chmod(path.parent, 0o700)
+    _chmod_private(path.parent, 0o700, meta)
     fd, name = tempfile.mkstemp(prefix=".wait-", suffix=".tmp", dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
@@ -4240,7 +4260,7 @@ def _request_producer(harness=None, session_id=None):
         root_meta = os.lstat(root)
         if not stat.S_ISDIR(root_meta.st_mode) or root_meta.st_uid != os.getuid():
             return
-        os.chmod(root, 0o700)
+        _chmod_private(root, 0o700, root_meta)
         marker = root / ".demand"
         demand_lock = os.open(root / ".demand.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
@@ -4280,7 +4300,7 @@ def _ensure_producer():
     root_meta = os.lstat(root)
     if not stat.S_ISDIR(root_meta.st_mode) or root_meta.st_uid != os.getuid():
         return False
-    os.chmod(root, 0o700)
+    _chmod_private(root, 0o700, root_meta)
     fd = os.open(root / ".projection.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     os.fchmod(fd, 0o600)
     try:
@@ -4434,6 +4454,7 @@ def _refresh_cache() -> bool:
         result["route_sessions"] = demands
         result["route_status"] = {}
         result["route_panels"] = {}
+        wake_snapshot = None
         if demands:
             try:
                 # Share registry generations with the answer-wait pass, and interpret
@@ -4445,6 +4466,7 @@ def _refresh_cache() -> bool:
                 requested = [tuple(key.split("\0", 1)) for key in demands]
                 snapshot = collect_all(harness_filter={h for h, _ in requested},
                                        route_sessions=requested, include_report_verification=False)
+                wake_snapshot = snapshot
                 if snapshot.observations.get("basic", {}).get("all_new") is True:
                     labels, panels = session_route_status(snapshot, include_details=True)
                     result["route_status"] = {key: label for key, label in labels.items() if key in demands}
@@ -4457,6 +4479,8 @@ def _refresh_cache() -> bool:
             publish_cache(failure)
             return False
         _notify_result(result)
+        if _producer_root is not None:
+            _remember_wake_sources(wake_snapshot)
         return True
     except Exception:
         publish_cache({"items": [], "complete": False, "observed_at": time.time(),
@@ -4670,56 +4694,257 @@ def _notification_delay(items, now, *, enabled):
     return min(deadlines) if deadlines else None
 
 
-def _registry_generation():
-    """The dispatch registries' (inode, size, mtime): a route start, stage or close writes them."""
+def _registry_paths():
     try:
         project_root = str(Path(__file__).resolve().parents[1])
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
         from tools.fleet.collectors import dispatch
-        paths = dispatch.human_gate_registry_paths()
+        return tuple(dispatch.human_gate_registry_paths())
     except Exception:
         return None
-    generation = []
-    for path in paths:
+
+
+def _stat_row(path):
+    try:
+        info = os.stat(path)
+        return (str(path), info.st_ino, info.st_size, info.st_mtime_ns)
+    except OSError:
+        return (str(path), None)
+
+
+def _registry_generation():
+    """The dispatch registries' (inode, size, mtime): a route start, stage or close writes them."""
+    paths = _registry_paths()
+    if paths is None:
+        return None
+    return tuple(_stat_row(path) for path in paths)
+
+
+# Wake sources (the producer process only). _NEXT_WAKE is what the last pass learned to watch;
+# _WATCH_STAT is the part of it a stat beat must cover (network files, and local ones while the
+# kernel notification is unavailable). _WAKE_EVENTS is one NativeDisplayEvents for the producer's
+# life; it has no timer, only descriptors.
+_WAKE_EVENTS = None
+_WAKE_FAILED = False
+_NEXT_WAKE = None
+_WATCH_STAT = ()
+_LAST_WAKE_REASON = None
+_S4_PREFIXES = tuple("0123456789abcde") + tuple("f" + c for c in "0123456789abcdef")
+_JOB_ENDED = frozenset(("done", "failed", "cancelled", "canceled", "error", "closed"))
+_WAKE_PROCESS_LIMIT = 256
+
+
+def _wake_events():
+    """The producer's one kernel-notification listener, or None when it cannot be had."""
+    global _WAKE_EVENTS, _WAKE_FAILED
+    if _WAKE_EVENTS is None and not _WAKE_FAILED:
         try:
-            info = os.stat(path)
-            generation.append((str(path), info.st_ino, info.st_size, info.st_mtime_ns))
-        except OSError:
-            generation.append((str(path), None))
-    return tuple(generation)
+            project_root = str(Path(__file__).resolve().parents[1])
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            from tools.fleet.native_events import NativeDisplayEvents
+            _WAKE_EVENTS = NativeDisplayEvents()
+        except Exception:
+            _WAKE_FAILED = True
+    return _WAKE_EVENTS
+
+
+def _stop_wake_events():
+    global _WAKE_EVENTS, _NEXT_WAKE, _WATCH_STAT
+    events, _WAKE_EVENTS, _NEXT_WAKE, _WATCH_STAT = _WAKE_EVENTS, None, None, ()
+    if events is not None:
+        try:
+            events.stop()
+        except Exception:
+            pass
+
+
+def _existing_directory(path):
+    directory = os.path.dirname(os.path.abspath(str(path)))
+    while directory and not os.path.isdir(directory):
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    return directory
+
+
+def _wake_sources(snapshot=None, *, registry_paths=None, route_paths=None):
+    """What the next pass should wake on, from what this pass read.
+
+    Returns ``(local_paths, local_patterns, processes, remote_paths)``: sorted tuples that are a
+    pure function of the inputs (no time, order or counter), so an idle producer computes the
+    same value every pass and the listener is never rebuilt. A path that does not exist yet stays
+    in the list (the listener watches its nearest existing parent); only a process that is no
+    longer the one recorded is left out. ``remote_paths`` are files on a network mount, which are
+    stat'ed instead of watched. Without a snapshot only the registry, the S4 signal directory
+    and the S1 state directories are named.
+    """
+    from claude_process_identity import is_local_path
+    paths = set(registry_paths if registry_paths is not None else (_registry_paths() or ()))
+    if route_paths is None:
+        try:
+            import human_gate_observation
+            route_paths = human_gate_observation.last_pass_route_paths()
+        except Exception:
+            route_paths = ()
+    paths.update(route_paths)
+    patterns = {(str(state_root()), prefix) for prefix in _S4_PREFIXES}
+    try:
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet import interaction
+        root = interaction.state_root()
+        patterns.update((os.path.join(root, harness), "") for harness in ("claude", "codex", "opencode"))
+    except Exception:
+        pass
+    processes = set()
+    if snapshot is not None:
+        from tools.fleet.collectors.procscan import read_proc_start
+        opencode = False
+        for job in tuple(getattr(snapshot, "jobs", ()) or ()):
+            if str(getattr(job, "status", "") or "").lower() in _JOB_ENDED:
+                continue
+            stream = getattr(job, "_transcript_path", None)
+            if stream:
+                paths.add(os.path.abspath(str(stream)))
+            opencode = opencode or getattr(job, "harness", None) == "opencode"
+        if opencode:
+            try:
+                from tools.fleet.collectors import opencode as opencode_collector
+                database = opencode_collector._db()
+                paths.update((database, database + "-wal"))
+            except Exception:
+                pass
+        for item in (*tuple(getattr(snapshot, "jobs", ()) or ()),
+                     *tuple(getattr(snapshot, "sessions", ()) or ())):
+            pid, start = getattr(item, "pid", None), getattr(item, "proc_start", None)
+            if isinstance(pid, int) and pid > 0 and start and read_proc_start(pid) == str(start):
+                processes.add((pid, str(start)))
+        processes = set(sorted(processes)[:_WAKE_PROCESS_LIMIT])
+    local, local_patterns, remote = set(), set(), set()
+    kinds = {}
+
+    def is_local(directory):
+        if directory not in kinds:
+            try:
+                kinds[directory] = bool(is_local_path(directory))
+            except Exception:
+                kinds[directory] = False
+        return kinds[directory]
+
+    for path in paths:
+        text = str(path)
+        (local if is_local(_existing_directory(text)) else remote).add(text)
+    for directory, prefix in patterns:
+        if is_local(_existing_directory(os.path.join(directory, "x"))):
+            local_patterns.add((directory, prefix))
+        else:
+            remote.add(directory)
+    return (tuple(sorted(local)), tuple(sorted(local_patterns)),
+            tuple(sorted(processes)), tuple(sorted(remote)))
+
+
+def _remember_wake_sources(snapshot=None):
+    """Keep what the pass just read as the next pass's wake sources (never raises)."""
+    global _NEXT_WAKE, _WATCH_STAT
+    try:
+        _NEXT_WAKE = _wake_sources(snapshot)
+        events = _WAKE_EVENTS
+        stat_paths = set(_NEXT_WAKE[3])
+        if events is not None and not events.available:
+            stat_paths.update(_NEXT_WAKE[0])
+            stat_paths.update(directory for directory, _prefix in _NEXT_WAKE[1])
+        _WATCH_STAT = tuple(sorted(stat_paths))
+    except Exception:
+        pass
+
+
+def _arm_wake_events():
+    """Install the wake sources the last pass chose, before the next pass reads anything.
+
+    The listener's setup raises one post-registration "changed" for a write that landed
+    between the last read and the watch. This pass reads after the setup, so that write is read
+    anyway; the flag is cleared here so the setup itself never starts another pass (an idle
+    producer would otherwise run one every gap). The same sources need no setup at all.
+    """
+    global _LAST_WAKE_REASON
+    events = _wake_events()
+    if events is None:
+        return
+    try:
+        local_paths, local_patterns, processes, _remote = _NEXT_WAKE or _wake_sources(None)
+        events.configure(local_paths, local_patterns, processes)
+        if events.ready.wait(1.0):
+            events.take_changed()
+        else:
+            _LAST_WAKE_REASON = "rebuild-late"
+    except Exception:
+        pass
+
+
+def _source_generation():
+    """Registry generation plus the stat'ed wake files (network, or all while unwatched)."""
+    registry = _registry_generation()
+    return tuple(registry or ()) + tuple(_stat_row(path) for path in _WATCH_STAT)
 
 
 def _sleep_until_registry_change(delay, generation, ready_at):
-    """Sleep `delay` seconds, or less once a registry changed since `generation`.
+    """Sleep `delay` seconds, or less once a watched source changed.
 
-    A route's start, stage change and close are registry writes, so the session
-    panels see them on the next pass instead of on the 30 second cadence. A
-    change is honoured no earlier than `ready_at`, so a registry that keeps
-    changing gets at most one pass per pass duration.
+    A route's start, stage change and close, a worker's tool call, an answer-wait
+    signal and an owner's exit all end the sleep: local sources by kernel notification
+    (no timer), the registry and network files by a stat every second compared with
+    `generation`. The pass that follows still reads everything; the 30 second cadence
+    stays as the fallback. A change is honoured no earlier than `ready_at`, so a source
+    that keeps changing gets at most one pass per pass duration.
     """
-    if not generation or all(len(row) == 2 for row in generation):
-        time.sleep(delay)   # no registry to watch yet: the cadence alone
+    global _LAST_WAKE_REASON
+    events = _wake_events()
+    if events is None and (not generation or all(len(row) == 2 for row in generation)):
+        time.sleep(delay)   # nothing to watch yet: the cadence alone
+        _LAST_WAKE_REASON = "cadence"
         return
     deadline = time.monotonic() + delay
     while True:
         now = time.monotonic()
         if now >= deadline:
+            _LAST_WAKE_REASON = "cadence"
             return
-        time.sleep(min(_REGISTRY_WAKE_SECONDS, deadline - now))
-        if _registry_generation() != generation:
-            remaining = ready_at - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(remaining, max(0.0, deadline - time.monotonic())))
-            return
+        step = min(_REGISTRY_WAKE_SECONDS, deadline - now)
+        woke = False
+        if events is not None:
+            woke = events.wait_changed(step)
+        else:
+            time.sleep(step)
+        if woke:
+            _LAST_WAKE_REASON = "event"
+        elif generation and _source_generation() != generation:
+            _LAST_WAKE_REASON = "stat"
+        else:
+            continue
+        remaining = ready_at - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(remaining, max(0.0, deadline - time.monotonic())))
+        return
 
 
 def _timed_refresh():
-    """Run one pass; return the registry generation it read and its duration."""
-    generation = _registry_generation()
+    """Run one pass; return the source generation it read and its duration."""
+    _arm_wake_events()
+    previous = _WATCH_STAT
+    registry = _registry_generation()
+    before = {row[0]: row for row in map(_stat_row, previous)}
     began = time.monotonic()
     _refresh_cache()
-    return generation, time.monotonic() - began
+    duration = time.monotonic() - began
+    # A file the pass newly learned of is stamped now; every other keeps the stamp taken before
+    # the pass read it, so a write during the pass is still a change.
+    rows = tuple(before.get(path) or _stat_row(path) for path in _WATCH_STAT)
+    generation = tuple(registry or ()) + rows
+    return (generation or None), duration
 
 
 def _producer_loop(fd: int) -> None:
@@ -4777,6 +5002,7 @@ def _producer_loop(fd: int) -> None:
         return
     finally:
         _producer_root = None
+        _stop_wake_events()
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
