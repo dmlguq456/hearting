@@ -1493,24 +1493,30 @@ class OwnerSettlementReadContext:
         return affected
 
     def owner_candidate_floor(self, jobs: Path, view):
+        """The last row the remembered cursor already proved, or -1 for a full scan.
+
+        Only bytes the cursor generation itself had may be skipped: the floor is
+        the last row boundary where this view's leading-byte digest equals one
+        of the cursor generation's. The inode is not asked: a replacement can
+        get an older generation's inode number back, a rewrite in place keeps
+        it, and a cursor stays behind while a scan is unfinished. A changed row
+        moves the floor to a boundary before it; an append keeps the whole floor.
+        """
         key = str(jobs.resolve(strict=False))
         prior = self._cursors.get(key)
-        # The same full signature is the registry cache's own proof of an
-        # unchanged generation; an append needs the append-only chain instead.
-        if (prior is not None
-                and view.path_identity == prior[0] and view.resolved_path == prior[1]
-                and (tuple(view.signature) == prior[4]
-                     or (view.append_only_generation
-                         and tuple(view.signature[:2]) == prior[2]))
-                and view.last_complete_order >= prior[3]):
-            return prior[3]
+        if prior is None or (view.path_identity, view.resolved_path) != prior[:2]:
+            return -1
+        _identity, _resolved, proven_order, proofs = prior
+        for byte_end, digest, rows in reversed(view.prefix_proofs()):
+            if proofs.get(byte_end) == digest:
+                return min(proven_order, rows - 1)
         return -1
 
     def remember_owner_cursor(self, jobs: Path, view):
         key = str(jobs.resolve(strict=False))
-        self._cursors[key] = (view.path_identity, view.resolved_path,
-                              tuple(view.signature[:2]), view.last_complete_order,
-                              tuple(view.signature))
+        self._cursors[key] = (view.path_identity, view.resolved_path, view.last_complete_order,
+                              {byte_end: digest
+                               for byte_end, digest, _rows in view.prefix_proofs()})
 
     def limit_owner_scan(self, seconds):
         """Bound each pass's historical owner proof; the next pass resumes."""

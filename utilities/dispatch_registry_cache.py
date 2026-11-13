@@ -316,7 +316,8 @@ class _RegistrySegment:
                  "handover_latest", "handover_by_parent", "handover_by_binding",
                  "headless_owner_rows", "selection_by_parent", "selection_by_slug",
                  "selection_by_attempt", "selection_by_parent_slug",
-                 "byte_end", "prefix_sha256", "order_end", "replacement_rows")
+                 "byte_end", "prefix_sha256", "order_end", "replacement_rows",
+                 "inner_proofs")
 
     def __init__(self, lines, order_base: int, *, hint=None, byte_end=None,
                  prefix_sha256=None):
@@ -327,6 +328,9 @@ class _RegistrySegment:
         # of parsing them again. Records themselves are always rebuilt (new order).
         self.byte_end = byte_end
         self.prefix_sha256 = prefix_sha256
+        # ``(byte_end, prefix_sha256, order_end)`` of member boundaries a compaction
+        # merged away (see ``compact``); a plain segment has none.
+        self.inner_proofs = ()
         demand = _REPLACEMENT_ROWS_DEMAND
         replacement = {}
         replacement_orders = {}
@@ -481,10 +485,19 @@ class _RegistrySegment:
         result = cls.__new__(cls)
         # The merged run ends where its last member ends, and that member's digest
         # already covers every byte before it. The boundaries inside are gone, so
-        # a later replacement can only reuse this run as a whole.
+        # a later replacement can only reuse this run as a whole. Their digests
+        # stay as proofs of the leading bytes (``RegistryView.prefix_proofs``): a
+        # cursor taken at one of them keeps its floor. The latest run of them is
+        # enough for a cursor a few generations behind and bounds the list.
         result.byte_end = segments[-1].byte_end
         result.prefix_sha256 = segments[-1].prefix_sha256
         result.order_end = segments[-1].order_end
+        inner = []
+        for segment in segments:
+            inner.extend(segment.inner_proofs)
+            if segment is not segments[-1] and segment.byte_end is not None:
+                inner.append((segment.byte_end, segment.prefix_sha256, segment.order_end))
+        result.inner_proofs = tuple(inner[-_COMPACT_SEGMENTS:])
         result.replacement_rows = None
         result.records = tuple(record for segment in segments for record in segment.records)
         result.malformed_lines = tuple(line for segment in segments for line in segment.malformed_lines)
@@ -556,17 +569,16 @@ def _iter_lf_chunks(raw: bytes, boundary: int, chunk_lines: int):
         yield rows, position
 
 
-def _reusable_prefix(cached, raw: bytes, resolved: str, signature: tuple):
+def _reusable_prefix(cached, raw: bytes, resolved: str):
     """What of the cached parse the new bytes ``raw`` still prove unchanged.
 
-    Returns ``(segments, byte_end, hasher, hint, whole, same_file)`` or None.
-    ``segments`` are the leading cached segments whose cumulative digest equals the
-    digest of the same byte range of ``raw`` (the first mismatch stops the walk; the
-    inode is not asked, the digest proves the bytes). ``hasher`` has consumed
-    ``raw[:byte_end]`` for the new view to continue. ``hint`` maps the fields of
-    every discarded cached row to its record (no row text is copied); ``whole``
-    says every cached segment was kept. ``same_file`` says ``signature`` names the
-    cached generation's ``(dev, ino)``.
+    Returns ``(segments, byte_end, hasher, hint, whole)`` or None. ``segments`` are the
+    leading cached segments whose cumulative digest equals the digest of the same
+    byte range of ``raw`` (the first mismatch stops the walk; the inode is not
+    asked, the digest proves the bytes). ``hasher`` has consumed ``raw[:byte_end]``
+    for the new view to continue. ``hint`` maps the fields of every discarded
+    cached row to its record (no row text is copied); ``whole`` says every cached
+    segment was kept.
     None means a plain full parse.
     """
     if (cached is None or not cached._prefix_reuse_eligible
@@ -591,8 +603,7 @@ def _reusable_prefix(cached, raw: bytes, resolved: str, signature: tuple):
         return None
     discarded = cached._segments[kept:]
     hint = {record.fields: record for segment in discarded for record in segment.records} or None
-    return (cached._segments[:kept], position, good, hint, kept == len(cached._segments),
-            tuple(cached.signature[:2]) == tuple(signature[:2]))
+    return cached._segments[:kept], position, good, hint, kept == len(cached._segments)
 
 
 def demand_replacement_rows() -> None:
@@ -625,7 +636,7 @@ class RegistryView:
                  "line_count", "record_count", "malformed_rows", "has_partial_tail",
                  "last_observed_at", "_has_duplicate_attempts", "_invalid_utf8_prefix",
                  "has_invalid_utf8", "_raw_digest", "_prefix_reuse_eligible",
-                 "_append_only_generation", "_asserted_suffix", "_settled",
+                 "_asserted_suffix", "_settled",
                  "_parent_sessions", "_complete_digest")
 
     def __init__(self, path_identity: str, resolved_path: str, signature: tuple,
@@ -635,14 +646,6 @@ class RegistryView:
         self.resolved_path = resolved_path
         self.signature = signature
         self._fd = fd
-        # A reuse that kept every (at least one) cached segment of the same file
-        # is the same continuation of an observed prefix, now proven by digest
-        # instead of asserted. A replacement file is never an append generation,
-        # even when it holds the old rows: a later inode reuse could otherwise
-        # pass as the continuation of an older cursor's file.
-        self._append_only_generation = bool(
-            previous is not None
-            or (reuse is not None and reuse[4] and reuse[0] and reuse[5]))
         # True while any part of this generation rests on a caller's append-only
         # assertion instead of bytes whose prefix digest was compared here.
         self._asserted_suffix = bool(
@@ -960,10 +963,22 @@ class RegistryView:
                       if candidate.completion_metadata().get("attempt_id") == attempt_id]
         return max(candidates, key=lambda candidate: candidate.order, default=None)
 
-    @property
-    def append_only_generation(self):
-        """Whether this view was derived from a continuously observed prefix."""
-        return self._append_only_generation
+    def prefix_proofs(self):
+        """``(byte length, SHA-256 of those leading bytes, rows inside)`` per row boundary.
+
+        Every digest covers the file from offset 0, so an equal digest at an equal
+        length proves the same leading rows, whichever inode, read path, or
+        rename produced either view. Ascending; empty for a registry the LF
+        segmentation does not describe.
+        """
+        if not self._prefix_reuse_eligible:
+            return ()
+        proofs = []
+        for segment in self._segments:
+            proofs.extend(segment.inner_proofs)
+            if segment.byte_end is not None:
+                proofs.append((segment.byte_end, segment.prefix_sha256, segment.order_end))
+        return tuple(proofs)
 
     @property
     def last_complete_order(self):
@@ -1394,7 +1409,7 @@ def _observe_generation(path: Path) -> list:
             cached._settled = cached._settled or settled
             view = cached
         else:
-            reuse = _reusable_prefix(cached, raw, resolved, signature)
+            reuse = _reusable_prefix(cached, raw, resolved)
             _drop(identity, keep_parse=bool(reuse and reuse[0]))
             _METRICS["invalidations"] += 1
             cached = None  # the old generation is not held while the new one parses
@@ -1533,7 +1548,7 @@ def _registry_view_fresh(jobs: Path, *, append_only: bool = False) -> RegistryVi
                 if _drop(identity) is not None:
                     _METRICS["invalidations"] += 1
                 raise
-            reuse = _reusable_prefix(stale, raw, resolved, signature)
+            reuse = _reusable_prefix(stale, raw, resolved)
             if stale is not None:
                 _drop(identity, keep_parse=bool(reuse and reuse[0]))
                 _METRICS["invalidations"] += 1
