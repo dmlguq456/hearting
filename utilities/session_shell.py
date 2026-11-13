@@ -1013,6 +1013,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
+    # The LAB section (the chosen draft A): this project's experiment board, read through the
+    # board's own cache (`stat` calls only while nothing changed) and worded by Fleet's LAB table
+    # helpers; no board to show leaves no LAB row. Its files join the watch last (below).
+    from fleet import session_lab
+    lab_now = time.time()
+    lab_board, lab_paths = session_lab.read(values.get("cwd"), now=lab_now)
+    panel["lab"] = session_lab.view(lab_board, lab_now, paint=styled)
     # The model name the host reads off the native's own screen, painted by the rule route rows
     # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
     # panel keeps no family table of its own. Display only.
@@ -1028,6 +1035,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
+    # Last, so the host's bounded watch (64 paths) keeps every path above: the catalog, the run
+    # folder and the linked run records (a renamed condition redraws with its new name).
+    watched.extend(lab_paths)
     # Spec rule 26 and the 11-12 rule 6: the runtime's own turn record, read with the
     # session above (its files are watched), for the host's own display of this session's
     # state. Display only: it never stands for input readiness.

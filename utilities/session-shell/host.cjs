@@ -917,7 +917,8 @@ async function applySettings(){
 }
 function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
 function panelAction(action){
-  if(/^(?:route|message):/.test(action)&&!settings){
+  // A route, a message, or the LAB section (`lab:<group>`, draft A) opens in place and closes again.
+  if(/^(?:route|message|lab):/.test(action)&&!settings){
     if(panelOpen.has(action))panelOpen.delete(action);else{if(panelOpen.size>=16)panelOpen.clear();panelOpen.add(action);}
     queueLayout();return;
   }

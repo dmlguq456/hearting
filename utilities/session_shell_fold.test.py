@@ -211,5 +211,63 @@ for(const [queued,stamp,expected] of [[false,place,['question']],[true,place,['q
 """)
 
 
+    def test_the_strip_carries_the_lab_token_under_the_route_count(self):
+        # Draft A: `5 LB` (conditions), `!1LB` (failed or stuck), `?1LB` (unconfirmed or unnamed),
+        # `9+LB`, as the board words them, under `N RT`. Short of rows a plain count goes before
+        # the route count, a `!`/`?` after it, the answer wait last; `!9+LB` keeps `!9+`. The
+        # border stays the session's own color.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
+const styles={dim:{dim:true},loc_repo:{foreground:252},lvl_r:{foreground:217},lvl_y:{foreground:186},g_spin:{foreground:230}};
+const T=(t,k)=>({text:t,...(styles[k]||{})});
+const token=s=>{const m=/^([!?]?)(\d+\+?)( ?LB)$/.exec(s);return {strip:[T(m[1]+m[2],m[1]==='!'?'lvl_r':m[1]==='?'?'lvl_y':'loc_repo'),T(m[3],'dim')],strip_attention:!!m[1]};};
+const strip=(model={},o={})=>v.render({width:8,height:12,side:true,folded:true,model:{tag:'[e9]',styles,...model},state:'idle',harness:'claude',questions:()=>[],...o});
+const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
+assert.deepEqual(text(strip({route_total:1,lab:token('5 LB')})).slice(1,6),['│ ● e9 │','│      │','│ 1 RT │','│ 5 LB │','│      │']);
+for(const [s,row] of [['!1LB','│ !1LB │'],['?1LB','│ ?1LB │'],['9+LB','│ 9+LB │'],['!9+LB','│ !9+  │'],['?9+LB','│ ?9+  │']])
+ assert.deepEqual(text(strip({lab:token(s)})).slice(1,4),['│ ● e9 │','│      │',row],s);
+// With a wait: route count, LAB, wait, in that order.
+assert.deepEqual(text(strip({route_total:2,wait:'◑답 대기 1',lab:token('!1LB')})).slice(1,6),['│ ● e9 │','│      │','│ 2 RT │','│ !1LB │','│ ◑ 1  │']);
+// The mark takes the board's color, `LB` the label's dim.
+const row=strip({lab:token('!1LB')}).rows[3];assert(row.find(x=>x.text==='!1').foreground===217&&row.find(x=>x.text==='LB').dim);
+// Short of rows: blank, then `5 LB`, then `2 RT`, then the wait; a `!` outlasts the route count.
+const rows=(lab,h)=>text(strip({route_total:2,wait:'◑답 대기 1',lab:token(lab)},{height:h})).slice(1,-1);
+assert.deepEqual(rows('5 LB',7),['│ ● e9 │','│ 2 RT │','│ 5 LB │','│ ◑ 1  │','│  «   │']);
+assert.deepEqual(rows('5 LB',6),['│ ● e9 │','│ 2 RT │','│ ◑ 1  │','│  «   │']);
+assert.deepEqual(rows('!1LB',6),['│ ● e9 │','│ !1LB │','│ ◑ 1  │','│  «   │']);
+assert.deepEqual(rows('?1LB',5),['│ ● e9 │','│ ◑ 1  │','│  «   │']);
+// No board, no row; the border is the session's own whatever the board says.
+assert.deepEqual(text(strip({lab:null})).slice(1,3),['│ ● e9 │','│      │']);
+for(const state of ['idle','working','blocked'])
+ assert.deepEqual(strip({lab:token('!3LB')},{state,frame:2}).rows.map(r=>[r[0],r.at(-1)]),strip({},{state,frame:2}).rows.map(r=>[r[0],r.at(-1)]),state);
+// Every harness gets the same strip.
+for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({lab:token('?2LB')},{harness})),text(strip({lab:token('?2LB')})));
+""")
+
+    def test_a_press_on_the_lab_rows_opens_and_closes_them_where_they_were_drawn(self):
+        # Draft A: a press on the LAB rows opens the condition table in place and closes it again,
+        # by the host's own open set (as a route or a message); a press on targets drawn for another
+        # placement is dropped (review 1597 follow-up).
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const code=text.slice(text.indexOf('function panelMouse('),text.indexOf('function displayReporter('))
+ +text.slice(text.indexOf('function panelAction('),text.indexOf('// Scroll the route box'));
+const g={side:true,folded:false,left:false,panelColumn:90,panelCols:40},place='true:true:false:false:40:130:30:false';
+const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,routeDetail:false,routeArea:null,epoch:0,empty:true,
+  geometry:()=>g,panelColumns:()=>40,panelRow:()=>0,height:()=>30,terminal:{modes:{mouseTrackingMode:'none'}},
+  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,panelOpen:new Set(),layouts:0,queueLayout(){c.layouts++;},queueDisplay(){},
+  panelHits:[{row:16,left:2,right:37,action:'lab:grp_1'},{row:17,left:2,right:37,action:'lab:grp_1'}]};
+vm.createContext(c);vm.runInContext(code,c);
+assert.equal(c.panelMouse(0,101,17,false),true);assert.deepEqual([...c.panelOpen],['lab:grp_1']);
+assert.equal(c.panelMouse(0,101,18,false),true);assert.deepEqual([...c.panelOpen],[]);
+// A row with no LAB target: nothing opens.
+c.panelMouse(0,101,20,false);assert.deepEqual([...c.panelOpen],[]);
+// Targets drawn for another placement: dropped.
+c.panelHitsPlacement='old';c.panelMouse(0,101,17,false);assert.deepEqual([...c.panelOpen],[]);
+assert.equal(c.layouts,2);
+""")
+
+
 if __name__ == "__main__":
     unittest.main()
