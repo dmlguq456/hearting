@@ -94,6 +94,11 @@ class SessionRouteStatusTests(unittest.TestCase):
         self.assertEqual(row["legs"], len(route["legs"]))
         boxes = {item["n"]: item for group in nodes[route["id"]] for item in group.get("detail") or ()}
         self.assertEqual(execute.get("verdict"), boxes["execute"]["verdict"])
+        # Each live worker keeps the attempt Fleet chose (the shell finds that job again by it).
+        self.assertTrue(route["worker_contexts"])
+        self.assertEqual([item.get("attempt") for item in row["worker_contexts"]],
+                         [item["attempt"] for item in route["worker_contexts"]])
+        self.assertTrue(all(isinstance(item.get("attempt"), str) for item in row["worker_contexts"]))
         from tools.fleet import session_panel
         shown = session_panel.presentation({}, {"route_panels": panels}, "claude", "sid-current", 40)["routes"][0]
         self.assertEqual(shown["kind_text"], "code(dev·std)")

@@ -50,9 +50,15 @@ runs each TUI through Hearting's session shell.
 
 ``-between``: the child completes right after the tidy turn, before the booked
 ``/compact`` runs (a completion that arrives while the tidy is pending).
+
+``-queued-start`` (PG-9): a queued notice turn starts after the booking's last look
+and before its ``/compact`` keys in every run (``TidyCompactQueuedStart``); the
+session still compacts once, ``/compact`` never reaches the model as a message,
+and ``race`` keeps what the keys met and became.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -487,10 +493,7 @@ class TidyCompact(Scenario):
                 run.note("tidy did not book the same-session compaction: " + word)
                 return "fail"
             return self._manual(run, ev, split, sid, word)
-        completed_at = None
-        if self.between:
-            completed_at = time.time()
-            ev["complete"] = ca._helper(run, "complete")
+        completed_at = self.between_completion(run, ev)
 
         def conversation():
             return [r for r in run.main_requests()[split:] if not _is_memory_worker(r)]
@@ -575,6 +578,13 @@ class TidyCompact(Scenario):
                  f"{(booking.get('continued') or {}).get('reason')}")
         return "pass" if ok else "fail"
 
+    def between_completion(self, run, ev):
+        """``-between``: the child completes right after the tidy turn; its time, else None."""
+        if not self.between:
+            return None
+        completed_at = time.time()
+        ev["complete"] = ca._helper(run, "complete")
+        return completed_at
 
     def _manual(self, run, ev, split, sid, word):
         """No provable pane seat: the person types the printed /compact, then one prompt."""
@@ -606,6 +616,184 @@ class TidyCompactBetween(TidyCompact):
     name = "tidy-compact-between"
     summary = "tidy-compact with the child's completion arriving before the booked /compact."
     between = True
+
+
+# The steward the booking's helper runs in ``tidy-compact-queued-start``: the stock
+# peer-steward, changed only where the booked /compact is typed.  The first time it is
+# about to type it, it asks the driver for a queued notice turn and holds the keys until
+# that turn has reached the model, so the turn starts after the last look and before the
+# keys in every run; it then records the screen and the App Server's latest turn and queue.
+QUEUED_START_STEWARD = r'''#!{python} -B
+import importlib.util, json, subprocess, sys, time
+from pathlib import Path
+UTIL, MARKS = {util!r}, Path({marks!r})
+sys.path[:0] = [UTIL, str(Path(UTIL).parent / "tools")]
+spec = importlib.util.spec_from_file_location("peer_steward_queued_start", UTIL + "/peer-steward.py")
+steward = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(steward)
+typed = steward._herdr_prompt
+
+
+def screen(target):
+    pane, _, socket = target.partition("@")
+    done = subprocess.run(["tmux", "-S", socket, "capture-pane", "-p", "-t", pane],
+                          capture_output=True, text=True, timeout=10)
+    return [line.rstrip() for line in done.stdout.splitlines() if line.strip()][-14:]
+
+
+def server():
+    try:
+        sid = json.loads(Path(sys.argv[sys.argv.index("--request") + 1]).read_text())["sid"]
+        import codex_queue_delivery as queue
+        from codex_queue_dispatch import resolve_queue_socket
+        endpoint = resolve_queue_socket()
+        turn = queue._latest_turn(endpoint, sid, timeout=2.0) or {{}}
+        return {{"turn": {{"id": turn.get("id"), "status": turn.get("status"),
+                         "items": [json.dumps(item, ensure_ascii=False)[:160]
+                                   for item in turn.get("items") or []]}},
+                "queue": [json.dumps(item, ensure_ascii=False)[:300]
+                          for item in queue.list_queue(endpoint, sid, timeout=2.0)]}}
+    except Exception as exc:
+        return {{"error": type(exc).__name__ + ": " + str(exc)[:200]}}
+
+
+def look(target):
+    return {{"at": time.time(), "screen": screen(target), "server": server()}}
+
+
+def queued_start(target, text, **kwargs):
+    if text != "/compact" or (MARKS / "armed").exists():
+        return typed(target, text, **kwargs)
+    (MARKS / "armed").write_text(str(time.time()))
+    deadline = time.time() + 150
+    while not (MARKS / "running").exists() and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(1.0)            # the TUI has painted the running turn
+    record = {{"forced": (MARKS / "running").exists(), "before": look(target)}}
+    result = typed(target, text, **kwargs)
+    record["typed_at"], record["result"] = time.time(), list(result)
+    record["after"] = []
+    for pause in (0.3, 1.5):
+        time.sleep(pause)
+        record["after"].append(look(target))
+    (MARKS / "typed.json").write_text(json.dumps(record, ensure_ascii=False, default=str))
+    return result
+
+
+steward._herdr_prompt = queued_start
+sys.exit(steward.main())
+'''
+
+
+class TidyCompactQueuedStart(TidyCompactBetween):
+    """A queued notice turn starts after the booking's last look and before its keys.
+
+    The helper's steward (``QUEUED_START_STEWARD``, a test-root injection) holds the
+    first ``/compact`` until the driver has completed the child and the notice's turn has
+    reached the model; that reply is held until the keys were typed, so the order is the
+    same in every run.  The oracle is ``tidy-compact``'s: the booking still compacts the
+    same session once and continues.  ``race`` keeps what the keys met and became.
+    """
+    name = "tidy-compact-queued-start"
+    summary = ("tidy-compact with a queued notice turn forced to start between the booking's "
+               "last look and its /compact keys (private tmux).")
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self.release = threading.Event()
+        self.held = False
+
+    @staticmethod
+    def marks(run) -> Path:
+        return cc.state_home(run) / "hb-queued-start"
+
+    def prepare(self, run):
+        super().prepare(run)
+        marks = self.marks(run)
+        marks.mkdir(parents=True, exist_ok=True)
+        wrapper = cc.state_home(run) / "hb-queued-start-steward.py"
+        wrapper.write_text(QUEUED_START_STEWARD.format(
+            python=sys.executable, util=str(cc._source(run) / "utilities"), marks=str(marks)),
+            encoding="utf-8")
+        wrapper.chmod(0o755)
+        run.home.env["HEARTING_TIDY_TEST_ROOT"] = str(cc.state_home(run))
+        run.home.env["HEARTING_TIDY_PEER_STEWARD"] = str(wrapper)
+
+    def script(self, run):
+        first = super().script(run)
+
+        def answer(record, earlier):
+            reply = first(record, earlier)
+            if (not self.held and (self.marks(run) / "armed").exists()
+                    and record["last_kind"] != "tool" and not _is_compaction(record)):
+                # The first turn after the keys were held: it stays running until they are typed.
+                self.held = True
+                reply.gate = self.release
+                (self.marks(run) / "running").write_text(str(time.time()))
+            return reply
+        return answer
+
+    def between_completion(self, run, ev):
+        marks = self.marks(run)
+        try:
+            if not wait_for(lambda: (marks / "armed").exists(), 240, 0.2):
+                run.note("the booked /compact was never about to be typed")
+                return None
+            completed_at = time.time()
+            ev["complete"] = ca._helper(run, "complete")
+            wait_for(lambda: (marks / "typed.json").exists(), 180, 0.2)
+            time.sleep(1.5)
+        finally:
+            self.release.set()
+        with contextlib.suppress(OSError, ValueError):
+            ev["race"] = json.loads((marks / "typed.json").read_text(encoding="utf-8"))
+        forced = bool((ev.get("race") or {}).get("forced"))
+        run.note(f"queued_start={'forced' if forced else 'not-forced'}")
+        return completed_at
+
+    def drive(self, run):
+        verdict = super().drive(run)
+        ev = run.evidence
+        if run.harness == "codex":
+            ev["rollout_after_tidy"] = _codex_rollout_after(run, "FX-TIDY-RC")
+        with run.fixture.lock:
+            recorded = list(run.fixture.requests)
+        # The keys are never a message to the model, and the session compacts once.
+        ev["slash_reached_model"] = any(
+            (item.get("text") or "").strip() == "/compact"
+            for r in recorded for item in r.get("user_inputs") or ())
+        if verdict == "pass" and (ev["slash_reached_model"] or ev.get("compaction_requests") != 1):
+            run.note(f"slash_to_model={ev['slash_reached_model']} "
+                     f"compactions={ev.get('compaction_requests')}")
+            verdict = "fail"
+        if verdict in ("pass", "fail") and not (ev.get("race") or {}).get("forced"):
+            return "inconclusive"
+        return verdict
+
+
+def _codex_rollout_after(run, mark: str, limit: int = 120) -> list:
+    """The newest Codex rollout's rows after the first one carrying ``mark``, abridged."""
+    files = sorted(Path(run.home.env["CODEX_HOME"]).glob("sessions/**/rollout-*.jsonl"),
+                   key=lambda p: p.stat().st_mtime)
+    if not files:
+        return []
+    rows, seen = [], False
+    for raw in files[-1].read_text(encoding="utf-8", errors="replace").splitlines():
+        seen = seen or mark in raw
+        if not seen:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        text = json.dumps(payload.get("content") or payload.get("message") or "",
+                          ensure_ascii=False)
+        rows.append({"ts": row.get("timestamp"), "type": row.get("type"),
+                     "kind": payload.get("type"), "role": payload.get("role"),
+                     "turn": payload.get("turn_id"), "text": text[:120]})
+    return rows[-limit:]
 
 
 class TidyCompactHerdr(TidyCompact):
@@ -709,8 +897,8 @@ class TidyCompactGuardForm(TidyCompactGuard):
     guard = "form"
 
 
-SCENARIOS = [TidyCompact, TidyCompactBetween, TidyCompactHerdr, TidyCompactHerdrBetween,
-             TidyCompactGuard, TidyCompactGuardForm]
+SCENARIOS = [TidyCompact, TidyCompactBetween, TidyCompactQueuedStart, TidyCompactHerdr,
+             TidyCompactHerdrBetween, TidyCompactGuard, TidyCompactGuardForm]
 
 
 def replay(results_path) -> list[dict]:

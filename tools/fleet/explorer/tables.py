@@ -1608,8 +1608,10 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 if harness:
                     # The session row's MODEL cell words; a narrow table keeps harness and effort.
                     segments = model_cell_parts(harness, None if cols["narrow"] else model, effort)
-            for text, style in segments:
-                if isinstance(style, str) and style.startswith("hb_"):
+            for index, (text, style) in enumerate(segments):
+                # The harness word (always first) recedes; a model in its harness's hue keeps
+                # the weight every family-coloured model name has here.
+                if index == 0 and isinstance(style, str) and style.startswith("hb_"):
                     style = {"hb_claude": "h_claude", "hb_codex": "h_codex",
                              "hb_opencode": "version_release"}.get(style, style)
                 elif style == "eff_medium":

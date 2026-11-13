@@ -152,7 +152,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
         words("thread", values["native_sid"], "dim", 256, 0)
     effort = effort_label(values.get("effort"))
     suffix = [(" ", "dim"), (effort, _eff_key(values.get("effort"), False))] if effort else []
-    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
+    words("model", _clean_model(values.get("model")), _model_key(values.get("model"), harness=values.get("harness")),
+          48 if complete else 24, 4, after=suffix)
     percent = values.get("ctx_pct")
     unreported = reported_only and _percent(percent) == "?"
     if not unreported:
@@ -679,7 +680,7 @@ def route_doer(route, jobs, get, live):
     if job is None:
         return None
     harness = get(job, "harness")
-    pair = live._model_pair(get(job, "resolved_model", "model"))
+    pair = live._model_pair(get(job, "resolved_model", "model"), harness)
     # Spec E9 rule 36 (a): the attempt's recorded role (a frame leg names itself by its node
     # or worker type, as Fleet's ``_is_frame_leg`` reads it).
     role = "owner" if job is owner else (
@@ -719,20 +720,31 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
     """Spec E9 rule 43: the owner and each stage worker running now, apart.
 
     The workers are Fleet's own (the row's ``worker_contexts``, the live workers its route
-    record selected), each matched back to its job in the same pass, read with the same
-    ``route_doer`` and nothing collected again. ``owner_doer`` carries the owner's values when
-    a worker leads the row; with a worker leading and no single owner, no worker is listed
-    (the row keeps its one doer). A finished stage's worker is not live, so not listed.
+    record selected), each found again among the jobs of the same pass by the attempt id Fleet
+    recorded with it, read with the same ``route_doer`` and nothing collected again.
+    ``owner_doer`` carries the owner's values when a worker leads the row; with a worker leading
+    and no single owner, nothing is returned: the row keeps its one doer and the panel its
+    earlier form. A finished stage's worker is not live, so not listed.
     """
     lead_works = bool(doer) and (doer.get("worker") is True or doer.get("role") in ("frame", "worker"))
+    if lead_works and owner is None:
+        return {}
     tree = {"workers_live": []}
-    if lead_works and owner is not None:
+    if lead_works:
         values = route_doer({"state": state}, [owner], get, live)
         if values:
             tree["owner_doer"] = _doer_values(values)
-    if lead_works and owner is None:
-        return tree
     used = list(live._owner_jobs(jobs))
+    # An older producer's row names no attempt: its worker is matched by its values, each
+    # job's model and context read once (the model name may ask the model catalog).
+    shown = {}
+
+    def values_of(job):
+        if id(job) not in shown:
+            pair = live._model_pair(get(job, "resolved_model", "model"), get(job, "harness"))
+            percent = job_context(job, get)[0]
+            shown[id(job)] = ((pair[0][:64] if pair else None), (None if percent is None else round(percent, 1)))
+        return shown[id(job)]
     for item in (row.get("worker_contexts") or ())[:8]:
         if not isinstance(item, dict) or not item.get("stage"):
             continue
@@ -742,13 +754,11 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
                     or get(job, "liveness") not in ("working", "idle", "blocked")
                     or item.get("harness") and get(job, "harness") != item["harness"]):
                 return False
-            if not exact:
-                return True
-            pair = live._model_pair(get(job, "resolved_model", "model"))
-            percent = job_context(job, get)[0]
-            return ((pair[0][:64] if pair else None) == item.get("model")
-                    and (None if percent is None else round(percent, 1)) == item.get("ctx_pct"))
-        job = next((job for job in jobs if fits(job, True)), None) or next((job for job in jobs if fits(job, False)), None)
+            if item.get("attempt"):
+                return get(job, "attempt_id") == item["attempt"]
+            return not exact or values_of(job) == (item.get("model"), item.get("ctx_pct"))
+        job = next((job for job in jobs if fits(job, True)), None) or (
+            None if item.get("attempt") else next((job for job in jobs if fits(job, False)), None))
         if job is None:
             continue
         used.append(job)

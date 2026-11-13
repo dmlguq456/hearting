@@ -150,7 +150,7 @@ console.log(JSON.stringify(out));'''
             self.assertTrue(any("owner" in who and "codex" in who and "5m" in title for who, title in rows), side)
             # The staged route: its owner first, its live worker under it.
             self.assertIn("owner  claude Opus 5.5 high", side)
-            self.assertIn("└─⠋ worker codex", side)
+            self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)
             self.assertNotIn("hb_", side + bottom)

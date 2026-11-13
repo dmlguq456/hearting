@@ -240,6 +240,55 @@ class CommonSessionLineTest(unittest.TestCase):
         # A row from an older producer has neither, and its painted row neither.
         self.assertNotIn("workers_live", route_row({"id": "rt", "state": "working"}, now=10_000.0))
 
+    def test_a_worker_is_found_again_by_its_attempt_and_no_owner_keeps_the_one_doer(self):
+        # #1579 review follow-ups: (나) a worker leads a route whose owner is not one known
+        # attempt (a replacement owner, the record's owner `-`): no ``workers_live`` at all, so the
+        # panel keeps the one-doer rows; (다) each live worker is the job of the attempt Fleet
+        # recorded, not one that only shares its stage, harness, model and context (an older
+        # retry still alive); (라) a job's model name is read once, not once per comparison.
+        from types import SimpleNamespace
+        from unittest import mock
+        from tools.fleet import session_line
+        from tools.fleet.explorer import live
+        job = lambda **kw: SimpleNamespace(key=kw.get("attempt_id"), **kw)
+        owner = job(attempt_id="o", depth=1, worker_type="owner", liveness="idle", harness="claude", model="opus", ctx_pct=52, elapsed_min=130.0)
+        retry = job(attempt_id="w-old", depth=2, route_node="execute", liveness="idle", harness="claude", model="sonnet", ctx_pct=22,
+                    elapsed_min=40.0)
+        current = job(attempt_id="w-new", depth=2, route_node="execute", liveness="working", harness="claude", model="sonnet", ctx_pct=22,
+                      exec_tool={"name": "Edit", "target": "tools/x.py"}, elapsed_min=12.0)
+        get = live._get
+        context = {"stage": "execute", "harness": "claude", "model": live._model_pair("sonnet")[0], "ctx_pct": 22.0}
+
+        def rows(jobs, item, record=None):
+            route = {"id": "rt", "state": "working", "activity": "running", "current": True, "worker_stage": "execute"}
+            panels = {"claude\0s": [{"id": "rt", "state": "working", "worker_stage": "execute", "worker_contexts": [item]}]}
+            with mock.patch.object(live, "_collect_routes", return_value={"rt": {"jobs": jobs, "record": record or {}}}):
+                session_line.route_details(object(), panels, {"rt": route}, now=10_000.0)
+            return panels["claude\0s"][0]
+        # (다) The older retry comes first among the jobs and has the same values; the recorded attempt wins.
+        found = rows([owner, retry, current], {**context, "attempt": "w-new"})
+        self.assertEqual([(w["marker"], w.get("tool"), w["since"]) for w in found["workers_live"]],
+                         [("working", "Edit", 10_000.0 - 12 * 60)])
+        # An attempt no live job carries lists nothing; a row from an older producer (no attempt) matches by values.
+        self.assertEqual(rows([owner, retry, current], {**context, "attempt": "w-gone"})["workers_live"], [])
+        self.assertEqual(len(rows([owner, current], context)["workers_live"]), 1)
+        # (라) The recorded attempt reads no model name to match; the older row's path reads each job's once.
+        pairs = mock.Mock(wraps=live._model_pair)
+        with mock.patch.object(live, "_model_pair", pairs):
+            rows([owner, retry, current], {**context, "attempt": "w-new"})
+        by_attempt = pairs.call_count
+        pairs.reset_mock()
+        with mock.patch.object(live, "_model_pair", pairs):
+            rows([owner, retry, current], {**context, "ctx_pct": 99.0})   # no exact match: each job compared once
+        self.assertLessEqual(by_attempt, 2)              # the lead's own and the worker's own values
+        self.assertLessEqual(pairs.call_count, by_attempt + 2)
+        # (나) Two owner attempts, the record's owner `-`, a worker leading: no workers_live, no owner_doer.
+        second = job(attempt_id="o2", depth=1, worker_type="owner", liveness="idle", harness="claude", model="opus", elapsed_min=20.0)
+        led = rows([owner, second, current], {**context, "attempt": "w-new"}, {"owner_attempt_id": "-"})
+        self.assertEqual((led.get("role"), led.get("harness")), ("worker", "claude"))
+        self.assertNotIn("workers_live", led); self.assertNotIn("owner_doer", led)
+        self.assertEqual(session_line.route_tree({}, [], None, {"worker": True}, get, live, 0.0), {})
+
     def test_a_doer_reads_its_recorded_role_word(self):
         # Spec E9 rule 36 (a): Fleet's own words. Fleet's shared doer names a stage worker;
         # its route body line says whether that worker is a frame leg. Without a shared doer
@@ -320,6 +369,19 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(session_panel.session_memory({"memory_latest": {**row, "headline": ""}}, now)[-1], ("body line", "loc_repo"))
         self.assertEqual(session_panel.session_memory({"memory_latest": {**row, "headline": "", "snippet": "superseded_by=x"}}, now), [])
         self.assertEqual(session_panel.session_memory({}, now), [])
+        # 46 (b), (c): the MEM section's records, two at most: the type's short word, the age and
+        # the headline (else the snippet's start); a row without a text is left out.
+        recent = [{**row, "type": "user-correction"}, {**row, "ts": "2026-11-12T08:00:00", "type": "completion", "headline": ""},
+                  {**row, "type": "decision"}]
+        self.assertEqual(session_panel.session_memory_items({"memory_recent": recent}, now),
+                         [{"kind": "correction", "age": "3m", "text": "route rows read who first"},
+                          {"kind": "done", "age": "2h 3m", "text": "body line"}])
+        self.assertEqual([session_panel.memory_kind(kind) for kind in ("decision", "lesson", "feedback", "fact", "an-unlisted-type")],
+                         ["decision", "lesson", "feedback", "fact", "an-unlisted…"])
+        self.assertEqual(session_panel.session_memory_items({"memory_recent": [{**row, "headline": "", "snippet": "superseded_by=x"}]}, now), [])
+        self.assertEqual(session_panel.session_memory_items({}, now), [])
+        self.assertEqual(session_panel.presentation({"memory_recent": recent[:1]}, {}, "claude", "s", 40)["memory_items"][0]["kind"],
+                         "correction")
         # 36 (a), (b), 38: a route row's recorded role only, Fleet's kind word, the gauge at the panel's width.
         painted = session_panel.route_row({"role": "owner", "capability": "autopilot-code", "ctx_pct": 38}, cells=8)
         self.assertEqual((painted["role"], painted["kind_word"]), ("owner", "code"))

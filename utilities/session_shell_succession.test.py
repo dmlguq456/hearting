@@ -638,8 +638,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.until('ROUTE_PAGE'); window.pump(.5)
         point = None
         for y, line in enumerate(window.screen()['lines']):
-            if '╭─ route' in line:
-                point = (line.index('╭─ r')+4, y+1)
+            if '╭─ 1 ROUTE' in line:
+                point = (line.index('╭─ 1')+4, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
         window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('PgUp/PgDn')
 
