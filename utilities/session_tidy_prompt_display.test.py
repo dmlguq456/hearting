@@ -72,8 +72,8 @@ class PromptDisplayTests(unittest.TestCase):
     def seat(self, harness="claude", sid="prompt-session"):
         return st.session_seat(st.Seat("native", "", harness=harness, sid=sid), harness, sid)
 
-    def prompt(self, text, harness="claude", sid="prompt-session", now=1000, origin=None):
-        seat = self.seat(harness, sid)
+    def prompt(self, text, harness="claude", sid="prompt-session", now=1000, origin=None, seat=None):
+        seat = seat or self.seat(harness, sid)
         with mock.patch.object(st, "resolve_seat", return_value=seat), \
                 mock.patch.object(st, "_current_request_origin", return_value=origin):
             st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), prompt_text=text, now=now)
@@ -96,6 +96,82 @@ class PromptDisplayTests(unittest.TestCase):
                     self.assertEqual(st.real_prompt_frontier(seat, harness, "prompt-session"), frontier)
                 self.assertEqual([row["source"] for row in result["received"]],
                                  ["notification", "peer", "runtime"])
+
+    def _queued_notice(self, root, sid, key):
+        """A notice stored for ``sid`` and the exact text its native queue item carries."""
+        import dispatch_notice_receipt as notice_receipt
+        import dispatch_pending_delivery as pending
+        import dispatch_recipient_receipt as receipt
+        body = {"schema_version": 1, "kind": "notice", "subject": "Remote run",
+                "text": "run 7 ended exit=0", "required_action": "report-to-user", "key": key}
+        record = pending.create(
+            root, recipient_kind="codex-native-queue", recipient_key=sid,
+            delivery_id="delivery-" + key * 32, session_generation="",
+            session_generation_supported="0", attempt_ids=["att-" + "c" * 28],
+            parent_attempt_id="att-" + "c" * 28, route_id="route-test",
+            route_node="one-shot", receipt=body,
+            receipt_digest=pending._canonical_receipt_digest(body),
+            row_revisions={"att-" + "c" * 28: "rev-1"})
+        return notice_receipt.native_text(body) + "\n" + receipt.receipt_marker(record, sid)
+
+    def test_a_hearting_delivery_bound_to_this_session_is_not_the_persons_prompt(self):
+        # PG-9: a Codex native-queue notice arrives as a user message carrying its marker; it
+        # is the delivery, so a manual tidy booked before it still holds (no "new-input").
+        import dispatch_contract
+        root = self.iso.root / "dispatch"
+        for harness in st.HARNESSES:
+            with self.subTest(harness=harness):
+                sid = "queued-" + harness
+                text = self._queued_notice(root, sid, harness[0])
+                original = self.prompt("내가 쓴 요청", harness, sid, now=1000)
+                seat = self.seat(harness, sid)
+                human = st.last_human_prompt_seq(seat)
+                with mock.patch.object(dispatch_contract, "dispatch_state_roots",
+                                       return_value=(root,)):
+                    shown = self.prompt(text, harness, sid, now=1010)
+                    other = self.seat(harness, sid + "-other")
+                    self.prompt(text, harness, sid + "-other", now=1020)
+                self.assertEqual(st.read_prompt_seq(seat), human + 1)
+                self.assertEqual(st.last_human_prompt_seq(seat), human)
+                self.assertEqual(shown["human"], original["human"])
+                self.assertEqual(shown["received"][-1]["source"], "runtime")
+                # The same text addressed to another session is that session's own prompt.
+                self.assertEqual(st.last_human_prompt_seq(other), st.read_prompt_seq(other))
+
+    def test_a_person_who_pastes_a_bound_notice_with_their_own_words_is_the_person(self):
+        # The marker is visible and its record outlives the ACK, so a person can copy a notice
+        # through its marker line and add an instruction.  The whole prompt decides, like
+        # runtime_turn_source: the booked tidy ends with "new-input" and the open question
+        # closes on this answer, while the notice alone still holds both.
+        import dispatch_contract
+        import human_wait_state
+        root = self.iso.root / "dispatch"
+        for index, harness in enumerate(st.HARNESSES):
+            with self.subTest(harness=harness):
+                sid = "pasted-" + harness
+                notice = self._queued_notice(root, sid, "pqr"[index])
+                # A keyed native seat, so the open question and the booking have their own slots.
+                seat = st.session_seat(clear._peer_seat(harness, sid), harness, sid)
+                self.prompt("내가 쓴 요청", harness, sid, now=1000, seat=seat)
+                clear._write_reservation({
+                    "schema": clear.SCHEMA, "nonce": "n-" + harness, "seat": {"key": seat.key},
+                    "status": "reserved", "origin": "compact", "harness": harness, "sid": sid})
+                self.assertTrue(human_wait_state.open_signal(
+                    harness, sid, seat.key, "[결정 필요] X 또는 Y",
+                    sequence=st.read_prompt_seq(seat), now=1001))
+                with mock.patch.object(dispatch_contract, "dispatch_state_roots",
+                                       return_value=(root,)):
+                    alone = self.prompt(notice, harness, sid, now=1010, seat=seat)
+                    self.assertEqual(alone["received"][-1]["source"], "runtime")
+                    self.assertEqual(clear.read_reservation(seat.key)["status"], "reserved")
+                    self.assertEqual(len(human_wait_state.read_signals(now=1011)), 1)
+                    shown = self.prompt("이 알림 보고 X 말고 Y로 가 줘\n" + notice,
+                                        harness, sid, now=1020, seat=seat)
+                self.assertEqual(st.last_human_prompt_seq(seat), st.read_prompt_seq(seat))
+                self.assertEqual(shown["human"]["text"], "이 알림 보고 X 말고 Y로 가 줘")
+                held = clear.read_reservation(seat.key)
+                self.assertEqual((held["status"], held["reason"]), ("cancelled", "new-input"))
+                self.assertEqual(human_wait_state.read_signals(now=1021), [])
 
     RUNTIME_NOTICES = (
         ("claude", "<task-notification>\n실제 알림 본문\n</task-notification>", "실제 알림 본문"),
