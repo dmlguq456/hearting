@@ -4675,8 +4675,8 @@ def cmd_rearm(args):
     if paths.receipt.exists():
         print(f"watch_id={watch_id} state=already-done receipt={paths.receipt}")
         return 0
-    _restore_watch_role(watch_id, arm)
     if _watcher_present(arm):
+        _restore_watch_role(watch_id, arm)
         print(_already_armed_line(watch_id, arm, paths).replace("state=already-armed", "state=alive"))
         return 0
     if arm is None:
@@ -4694,6 +4694,9 @@ def cmd_rearm(args):
                 and observation.get("reason") == "steward-exited"):
             print(f"watch_id={watch_id} state=pending reason=steward-exited receipt={paths.receipt}")
             return 0
+        # Restore execution first; relation bookkeeping must not delay recovery.
+        arm = _read_json(paths.arm) or arm
+        _restore_watch_role(watch_id, arm)
         print(_already_armed_line(watch_id, arm, paths).replace("state=already-armed", "state=rearmed"))
         return 0
     print(f"watch_id={watch_id} state=pending reason=observer-restart-unavailable receipt={paths.receipt}")

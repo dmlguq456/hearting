@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Stale supervisor regression; entirely synthetic homes and registry rows."""
+import contextlib
+import io
 import importlib.util
 import json
 from pathlib import Path
@@ -62,6 +64,31 @@ class StaleHolderTest(fixture.GrantFixture):
         text = fixture.peer_steward._already_armed_line(arm['watch_id'], arm, paths)
         self.assertIn('parent_next=end-turn', text)
         self.assertNotIn('steward-line-does-not-arm', text)
+
+    def test_rearm_restores_observer_before_role_and_reports_current_identity(self):
+        ps = fixture.peer_steward
+        watch_id = '0123456789abcdef'
+        paths = ps._watch_paths(watch_id, ps._watch_root())
+        paths.arm.parent.mkdir(parents=True, exist_ok=True)
+        arm = {'watch_id':watch_id, 'target':'child', 'wake':'hook',
+               'watcher':{'pid':123,'pid_start':'old'}}
+        paths.arm.write_text(json.dumps(arm))
+        events=[]
+        def spawn(*args):
+            events.append('spawn')
+            paths.arm.write_text(json.dumps(dict(arm,watcher={'pid':456,'pid_start':'new'})))
+            return True
+        def restore(wid,current):
+            events.append('restore')
+            self.assertEqual(current['watcher']['pid'],456)
+        out=io.StringIO()
+        with mock.patch.object(ps,'_watcher_present',return_value=False), \
+             mock.patch.object(ps,'_spawn_watch_observer',side_effect=spawn), \
+             mock.patch.object(ps,'_restore_watch_role',side_effect=restore), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(ps.cmd_rearm(SimpleNamespace(watch_id=watch_id)),0)
+        self.assertEqual(events,['spawn','restore'])
+        self.assertIn('pid=456 pid_start=new',out.getvalue())
 
     def test_taking_role_recovers_existing_watch_targets(self):
         ps = fixture.peer_steward

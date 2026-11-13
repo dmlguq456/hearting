@@ -4857,8 +4857,10 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     return
                 fleet = _fleet_steward()
                 if fleet is None:
-                    result.update(status="unavailable", reason="census-unavailable")
+                    result.update(status="granted", reason="census-unavailable")
+                    result["written"] = write_locked()
                     return
+                repository = None
                 try:
                     # Native registry rows only: a grant made while arming a watch or
                     # wait must not ask Herdr for its agent list.
@@ -4877,7 +4879,9 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                             return
                     supervision = fleet.repo_supervision(repository_key=repository, sessions=rows, agents=())
                 except Exception as exc:
-                    result.update(status="unavailable", reason=f"census-failed:{type(exc).__name__}")
+                    # The census describes the role; it no longer admits it.
+                    result.update(status="granted", reason=f"census-failed:{type(exc).__name__}")
+                    result["written"] = write_locked(repository)
                     return
                 result["limit"] = supervision["limit"]
                 result["holders"] = supervision["holders"]

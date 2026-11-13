@@ -227,12 +227,13 @@ class GrantLimitTest(GrantFixture):
         data = json.loads(peer_message.steward_marker_path("claude", "s1").read_text())
         self.assertEqual(data["repository"], fleet_steward._repository_key(str(self.primary)))
 
-    def test_unavailable_census_refuses_a_new_holder_without_writing(self):
+    def test_unavailable_advisory_census_preserves_the_requested_role(self):
         self.session("s1", self.primary)
         with mock.patch.object(fleet_steward, "repo_supervision", side_effect=RuntimeError("boom")):
             result = self.grant("s1")
-        self.assertEqual((result["status"], result["written"]), ("unavailable", False))
-        self.assertFalse(self.marker_exists("s1"))
+        self.assertEqual((result["status"], result["written"]), ("granted", True))
+        self.assertEqual(result["reason"], "census-failed:RuntimeError")
+        self.assertTrue(self.marker_exists("s1"))
 
     def test_mark_steward_keeps_its_bool_contract(self):
         self.fill("s1", "s2")
