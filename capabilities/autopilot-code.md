@@ -116,7 +116,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    Interrupted close retains PASS and its recovery duty; a later begin cannot
    be closed again by an older goal judgment. No new confirmation or required
    report field is introduced.
-5. **shared admission.** Code plans, logs, and `final_report.md` remain cycle-local. When the route's existing spec transaction produces a seeded spec authoring change, normal completion publishes that spec through the existing shared admission and revision/CAS checks. An unused or unchanged spec transaction creates no publication obligation; the code report remains the primary artifact.
+5. **shared admission.** Code plans, logs, and `final_report.md` remain cycle-local. When the route's existing spec transaction produces a seeded spec authoring change, normal completion publishes that spec through the existing shared admission and revision/CAS checks. An unused or unchanged spec transaction creates no publication obligation; the code report remains the primary artifact. Whole-tree and component seeds are judged by the same `seed_complete` receipt. A publication that cannot be made (a conflict, an invalid base) does not hold the route: the completion is delivered once with one line naming it, the cycle keeps its spec, and the next normal `start` of the same route retries it.
 
 ## Role Requirements
 

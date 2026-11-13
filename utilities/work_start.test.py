@@ -1827,7 +1827,9 @@ class WorkStartTest(unittest.TestCase):
              patch_split(artifact_producer, "route_cycle_for", return_value={"cycle_id": "cyc-original"}), \
              patch_split(artifact_producer, "completed_spec_publication", side_effect=[pending, admitted]) as publish:
             first = self.start()
-            self.assertEqual((first["state"], first["reason"]), ("needs-attention", "shared-spec-publication-pending"))
+            # The gap rides on the completed receipt; it does not hold the route.
+            self.assertEqual(first["state"], "completed")
+            self.assertEqual(first["required_action"], "advance-completed")
             self.assertEqual(first["shared_publication"], pending)
             second = self.start()
             self.assertEqual(second["state"], "completed")
@@ -1856,8 +1858,7 @@ class WorkStartTest(unittest.TestCase):
                     self.route["artifact_root"] = root
                 self.path.write_text(json.dumps(self.route))
                 receipt = self.start()
-                self.assertEqual((receipt["state"], receipt["reason"]),
-                                 ("needs-attention", "shared-spec-publication-pending"))
+                self.assertEqual(receipt["state"], "completed")
                 self.assertEqual(receipt["shared_publication"],
                                  {"status": "pending", "reason": "spec-artifact-root-unavailable"})
                 self.assertEqual(receipt["launches"], [])
@@ -1895,19 +1896,59 @@ class WorkStartTest(unittest.TestCase):
             "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
             "terminal_gate_proven": True, "terminal_owner_attempt_id": "att-original"}))
         meta = {"workflow_completion": "runtime-v1", "owner_route_id": self.route["route_id"]}
+        pending = {"status": "pending", "reason": "shared-spec-conflict"}
         publication = {"status": "admitted", "shared_reference_revision_id": "rrev-original"}
         with mock.patch.object(W, "_rows", return_value={"att-original": ("done", meta)}), \
-             mock.patch.object(terminal, "owner_completion_state", side_effect=[
-                 terminal.CompletionState("pending", "shared-spec-publication-pending"), terminal.CompletionState("complete")]), \
-             mock.patch.object(terminal, "settle_owner_completion", return_value=terminal.TerminalCommitResult(
-                 "completed", shared_publication=publication)) as settle, \
-             patch_split(artifact_producer, "completed_spec_publication") as duplicate, \
+             mock.patch.object(terminal, "owner_completion_state", return_value=terminal.CompletionState("complete")), \
+             mock.patch.object(terminal, "completed_owner_publication", return_value=pending), \
+             mock.patch.object(terminal, "settle_owner_completion",
+                               side_effect=AssertionError("the sealed owner is not settled again")), \
+             patch_split(artifact_producer, "completed_route_spec_publication",
+                         return_value=publication) as retry, \
              mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")):
             result = self.start()
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["shared_publication"], publication)
-        settle.assert_called_once_with(self.jobs, "done", meta)
-        duplicate.assert_not_called()
+        retry.assert_called_once_with(self.route, settle=True)
+        self.assertEqual(self.calls, [])
+
+    def test_plan_advance_keeps_the_finished_legs_publication_on_the_new_receipt(self):
+        pending = {"cycle_id": "cyc-leg0", "status": "pending", "reason": "shared-spec-conflict"}
+        finished = {"state": "completed", "required_action": "advance-completed",
+                    "next_leg": {"index": 1}, "shared_publication": pending}
+        route = {"route_id": "rt-leg0", "artifact_root": self.tmp.name, "route_plan": {"index": 0}}
+        record = {"record": {"decision": {"approvals": {"execution_scope": "complete"}}}}
+        with mock.patch.object(W.RP, "validate_sealed", return_value={"decision": "d.json", "index": 0}), \
+             mock.patch.object(W.RP, "read_route_plan", return_value=record), \
+             mock.patch.object(W, "_plan_leg", return_value=({"route_id": "rt-leg1"}, Path("leg1.json"))), \
+             mock.patch.object(W, "start_work", return_value={"state": "running"}):
+            advanced = W._advance_plan(route, self.jobs, finished, run=None, sleep=None, clock=None)
+            self.assertEqual(advanced["state"], "running")
+            self.assertEqual(advanced["plan_advanced"]["shared_publication"], pending)
+            quiet = W._advance_plan(route, self.jobs, {**finished, "shared_publication": None},
+                                    run=None, sleep=None, clock=None)
+        self.assertNotIn("shared_publication", quiet["plan_advanced"])
+
+    def test_closed_runtime_owner_with_unpublishable_spec_completes_and_reports_the_gap(self):
+        import artifact_producer
+        import dispatch_terminal_commit as terminal
+        self.route["capability"] = "autopilot-code"
+        self.path.with_suffix(".outcome.json").write_text(json.dumps({
+            "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+            "terminal_gate_proven": True, "terminal_owner_attempt_id": "att-original"}))
+        meta = {"workflow_completion": "runtime-v1", "owner_route_id": self.route["route_id"]}
+        pending = {"cycle_id": "cyc-original", "status": "pending", "reason": "shared-spec-conflict"}
+        with mock.patch.object(W, "_rows", return_value={"att-original": ("done", meta)}), \
+             mock.patch.object(terminal, "owner_completion_state", return_value=terminal.CompletionState("complete")), \
+             mock.patch.object(terminal, "completed_owner_publication", return_value=pending), \
+             patch_split(artifact_producer, "completed_route_spec_publication", return_value=pending) as retry, \
+             mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")):
+            first = self.start()
+            again = self.start()
+        for receipt in (first, again):
+            self.assertEqual((receipt["state"], receipt["required_action"]), ("completed", "advance-completed"))
+            self.assertEqual(receipt["shared_publication"], pending)
+        self.assertEqual(retry.call_count, 2)  # one normal retry per start, no loop
         self.assertEqual(self.calls, [])
 
     def test_direct_start_replay_is_fenced_while_inline_finish_is_pending(self):

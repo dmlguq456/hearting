@@ -2630,8 +2630,13 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
             request = terminal._completion_request(jobs, "done", meta)
             outcome = ROUTE.outcome_path(path).read_bytes()
             envelope = (terminal._commit_state_path(request).parent / "owner-envelope.txt").read_bytes()
-            self.assertEqual(terminal.owner_completion_state(jobs, "done", meta).state, "pending")
+            # Publication is not a terminal gate: the completion is whole, and the
+            # sealed summary carries the publication that did not happen.
+            self.assertEqual(terminal.owner_completion_state(jobs, "done", meta).state, "complete")
+            import work_intent
+            self.assertIn("shared-spec-conflict", work_intent.sealed_summary(meta, owner))
             diagnosis = terminal.inspect_owner_completion(jobs, "done", meta)
+            self.assertEqual(diagnosis["state"], "completed")
             self.assertEqual(diagnosis["shared_publication"]["status"], "pending")
             self.assertIn("--attempt", diagnosis["recovery_command"])
             import workflow_state
@@ -2757,6 +2762,91 @@ class CodeRouteSpecPublicationIntegrationTest(unittest.TestCase):
         reference = artifact_producer._read_json(
             artifact_producer._reference_path(fixture.root, "spec", reference_id))
         self.assertEqual(reference["revisions"], [base_publication["shared_reference_revision_id"], revision_id])
+
+    def _whole_tree_code_cycle(self, harness="claude"):
+        """A code cycle whose spec transaction ran on the bucket top (whole-tree seed)
+        and added a component, as rt-13e7f2fe8bdea383 did; returns the settled pieces."""
+        fixture = self._fixture()
+        fixture.activate()
+        base_route, base_file, base_cycle = fixture.begin("direct", "autopilot-spec", "update")
+        fixture.write_output(base_cycle, rel="spec/prd.md", data=b"# Root\nBefore\n")
+        fixture.write_output(base_cycle, rel="spec/c/prd.md", data=b"# Component\nKept\n")
+        fixture.close(base_route, base_file)
+        artifact_producer.finalize(fixture.root, cycle_id=base_cycle["cycle_id"])
+        base = artifact_producer.completed_spec_publication(
+            fixture.root, cycle_id=base_cycle["cycle_id"], settle=True)
+        self.assertEqual(base["status"], "admitted", base)
+        worktree = self._git_worktree(fixture)
+        route, route_file, jobs, owner, cycle, report, _request = fixture._prepare_fixture(
+            harness, "autopilot-code", worktree=worktree)
+        edit = ("import os; from pathlib import Path; s=Path(os.environ['AGENT_SPEC_ROOT']); "
+                "p=s/'prd.md'; p.write_bytes(p.read_bytes()+b'After\\n'); "
+                "(s/'peer').mkdir(); (s/'peer'/'prd.md').write_bytes(b'# Peer\\nR1\\n')")
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("AGENT_ARTIFACT_", "AGENT_ROUTE_", "AGENT_REVIEW_",
+                                      "AGENT_DISPATCH_", "AGENT_OWNER_"))}
+        env.update({"AGENT_ARTIFACT_ROOT": str(fixture.root), "AGENT_ROUTE_FILE": str(route_file),
+                    "AGENT_ROUTE_ID": route["route_id"], "AGENT_ROUTE_NODE": "execute"})
+        transaction = Path(__file__).resolve().parents[1] / "utilities/spec-transaction.py"
+        done = subprocess.run([sys.executable, str(transaction), "run", "--artifact-root", str(fixture.root),
+                               "--worktree", str(worktree), "--route", str(route_file), "--node", "execute",
+                               "--", sys.executable, "-c", edit],
+                              cwd=worktree, env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        spec = Path(cycle["cycle_dir"]) / "artifacts/spec"
+        receipt = json.loads((spec / artifact_producer.SPEC_BASE_RECEIPT).read_text())
+        # The production shape: complete, whole-tree, no per-component states.
+        self.assertIs(receipt["seed_complete"], True)
+        self.assertNotIn("components", receipt)
+        self.assertNotIn("component_seeds", receipt)
+        metadata = self._owner_metadata(fixture, jobs, owner, report)
+        return fixture, jobs, owner, metadata, spec
+
+    def test_whole_tree_seeded_code_cycle_publishes_and_closes(self):
+        fixture, jobs, owner, metadata, spec = self._whole_tree_code_cycle()
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
+                                          "AGENT_ARTIFACT_ROOT": str(fixture.root)}):
+            settled = T.settle_owner_completion(jobs, "done", metadata)
+            self.assertEqual(settled.result, "completed", settled)
+            self.assertEqual(settled.shared_publication["status"], "admitted", settled)
+            self.assertEqual(T.owner_completion_state(jobs, "done", metadata).state, "complete")
+        tree, _ = artifact_producer._verified_shared_spec(
+            fixture.root, settled.shared_publication["shared_reference_id"],
+            settled.shared_publication["shared_reference_revision_id"])
+        self.assertEqual(tree["peer/prd.md"], (spec / "peer/prd.md").read_bytes())
+        self.assertEqual(tree["prd.md"], b"# Root\nBefore\nAfter\n")
+        self.assertEqual(tree["c/prd.md"], b"# Component\nKept\n")
+
+    def test_unpublishable_spec_completes_once_and_names_the_publication_for_every_owner_harness(self):
+        import dispatch_completion_join as JOIN
+        import dispatch_supervision
+        import work_intent
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                fixture, jobs, owner, metadata, spec = self._whole_tree_code_cycle(harness)
+                prd = (spec / "peer/prd.md").read_bytes()
+                with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
+                                                  "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
+                        mock.patch.object(T, "_parent_has_notice_carrier", return_value=True), \
+                        mock.patch.object(dispatch_supervision, "materialize") as notice, \
+                        patch_split(artifact_producer, "admit_shared", side_effect=artifact_producer.ProducerError(
+                            "shared-spec-conflict", "prd.md same-unit-changed")):
+                    settled = T.settle_owner_completion(jobs, "done", metadata)
+                    self.assertEqual(settled.result, "completed", settled)
+                    self.assertEqual((settled.shared_publication["status"], settled.shared_publication["reason"]),
+                                     ("pending", "shared-spec-conflict"))
+                    # The route closes and the completion is deliverable: no pending closure notice.
+                    notice.assert_not_called()
+                    self.assertEqual(T.owner_completion_state(jobs, "done", metadata).state, "complete")
+                summary = work_intent.sealed_summary(metadata, owner)
+                self.assertIn("shared-spec-conflict", summary)
+                self.assertEqual(sum("shared-spec-conflict" in line for line in summary.splitlines()), 1)
+                followup = JOIN.completion_followup_text(
+                    {"children": [{"attempt_id": owner, "required_action": "advance-completed"}]}, jobs=str(jobs))
+                self.assertIn(summary, followup)
+                # The registered PRD stays in the cycle; nothing was published or removed.
+                self.assertEqual((spec / "peer/prd.md").read_bytes(), prd)
+                self.assertEqual(len(artifact_producer.list_references(fixture.root, "spec")[0]["revisions"]), 1)
 
     def test_standard_code_terminal_without_spec_transaction_remains_completed_noop(self):
         fixture = self._fixture()
