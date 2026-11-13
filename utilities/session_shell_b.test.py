@@ -41,7 +41,7 @@ b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.len
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
 const item=(id,extra={})=>({id,revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one','two','three'],...extra}]});
-const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='›').map(row=>row.slice(2).map(p=>p.text).join(''));
+const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='▸').map(row=>row.slice(2).map(p=>p.text).join('').replace(/^\d+ /,''));
 for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\r','two'],['\r','one'],['\x1b[A\x1b[A\r','one'],['\x1b[B\x1b[B\x1b[B\x1b[B\r','three']]){
  let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([item('id')]);b.enter();
@@ -66,6 +66,116 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
  b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,0);
  b.input(Buffer.from('\x1b[B\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'d',revision:'r',decision:'reject'}]);}
 })().catch(e=>{console.error(e);process.exit(1);});''')
+
+    def test_the_chosen_choice_stands_out_by_its_mark_weight_and_brightness(self):
+        # Spec E9 rule 53: while ↑↓ choose, the chosen choice's row leads with `▸` (this session's
+        # harness color, bold) and its words are bold in the bright body color; every other
+        # choice keeps the mark's column blank and reads dim grey. A choice wrapped over several
+        # rows has its words in the same form on each (the mark on its first row only, so it
+        # never reads as two choices). Without color (NO_COLOR, mono) the mark and the
+        # weight alone tell them apart. Unfocused, the mark's column stays blank (no shift).
+        # The panel keeps the mark's harness color (it is not the question's rose accent).
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const view=require(require('node:path').join(require('node:path').dirname(process.argv[1]),'panel-view.cjs'));
+const color={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150},lvl_r:{foreground:210},harness:{foreground:173}};
+const plain={dim:{foreground:null,dim:false},loc_repo:{foreground:null},g_blocked:{foreground:null},lvl_g:{foreground:null},lvl_r:{foreground:null},harness:{foreground:null}};
+const S=(t,st,styles)=>({text:t,...styles[st]});
+const long='a choice whose words run past one row';
+const display=styles=>({head:[S('◑ ','g_blocked',styles),S('questions 1','dim',styles),S(' · 1/1 · ','dim',styles),S('answer needed','g_blocked',styles)],
+ body:[[S('Which?','loc_repo',styles)]],source:[],
+ options:[[S('1 ','dim',styles),S('one','loc_repo',styles)],[S('2 ','dim',styles),S('a choice whose','loc_repo',styles)],[S('  ','dim',styles),S('words run past','loc_repo',styles)],[S('  ','dim',styles),S('one row','loc_repo',styles)],[S('3 ','dim',styles),S('three','loc_repo',styles)]]});
+const make=styles=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([{id:'id',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one',long,'three'],display:display(styles)}]}],'',{styles,labels:{}});return b;};
+const options=b=>b.detail({budget:20,columns:40}).filter(row=>row.some(p=>/^(one|a choice whose|words run past|one row|three)$/.test(p.text)));
+const words=row=>row.filter(p=>/[a-z]/.test(p.text));
+// Unfocused: the mark's column is blank and the words keep their own paint.
+{const rows=options(make(color));assert.equal(rows.length,5);
+ for(const row of rows){assert.equal(row[0].text,'  ');assert(!row.some(p=>p.text==='▸'));assert(words(row).every(p=>p.foreground===253&&!p.dim&&!p.bold),JSON.stringify(row));}}
+for(const [styles,colored] of [[color,true],[plain,false]]){
+ const b=make(styles);b.enter();b.input(Buffer.from('\x1b[B'));
+ const rows=options(b);assert.equal(rows.length,5);
+ rows.forEach((row,i)=>{
+  const chosen=i>=1&&i<=3;
+  if(chosen){
+   // (a) `▸` in the harness color, bold, on the choice's first row; the words bold in the bright
+   // body color. (d) The same words on every row of a wrapped choice.
+   if(i===1){assert.equal(row[0].text,'▸',JSON.stringify(row));assert.equal(row[0].bold,true);assert.equal(row[1].text,' ');
+    if(colored)assert.equal(row[0].foreground,173);}
+   else{assert.equal(row[0].text,'  ',JSON.stringify(row));assert(!row.some(p=>p.text==='▸'));}
+   assert(words(row).every(p=>p.bold===true&&!p.dim&&(colored?p.foreground===253:true)),JSON.stringify(row));
+  }else{
+   // (b) The mark's place blank, the words dim grey and not bold. (c) Without color: not bold.
+   assert.equal(row[0].text,'  ',JSON.stringify(row));assert(!row.some(p=>p.text==='▸'));
+   assert(words(row).every(p=>!p.bold&&(colored?p.dim===true&&p.foreground!==253:true)),JSON.stringify(row));
+  }
+ });
+ // The chosen choice moves with the arrows, the form with it.
+ b.input(Buffer.from('\x1b[B'));const moved=options(b);assert.equal(moved[4][0].text,'▸');assert.equal(moved[1][0].text,'  ');
+}
+// The panel: `▸` keeps the harness color on the terminal's own background and on a known face; it is not rose.
+{const b=make(color);b.enter();b.input(Buffer.from('\x1b[B'));const q=o=>b.detail(o);
+ for(const [cfg,background] of [[{},''],[{},'dark'],[{shade:'medium'},'dark']]){
+  const r=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:cfg,background,questions:q});
+  const mark=r.rows.flat().find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
+  assert.notEqual(mark.foreground,view.FACES.dark.accent,JSON.stringify(cfg));assert.equal(mark.foreground,173,JSON.stringify(cfg));assert.equal(mark.bold,true);}
+ const mono=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:{theme:'mono'},questions:q}).rows.flat();
+ assert.equal(mono.find(p=>p.text==='▸').bold,true);
+}
+""")
+
+    def test_a_wait_not_answerable_here_names_where_to_answer_and_never_its_machine_reason(self):
+        # Spec E9 rule 54: the editor's head word and its notice on Enter are the backend's
+        # phrase for the reason (the five `answer_*` words); the body row is the backend's whole
+        # phrase; the machine reason never shows. A local send state still wins while it lasts.
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const labels={answer_below:'BELOW',answer_there:'THERE',answer_parent:'PARENT',answer_sending:'SENDING',answer_closed:'CLOSED',submitted:'SUBMITTED'};
+const item=(state,reason,extra={})=>({id:'w-'+state,revision:'r',answerable:false,reason,...(state?{answer_state:state}:{}),...extra,
+ questions:[{id:'q',question:'Which?',choices:['a','b'],display:{head:[{text:'◑ '},{text:'questions 1'},{text:' · 1/1 · '},{text:'x'}],body:[[{text:'Which?'}]],source:[],options:[[{text:'WHOLE '+state}]]}}]});
+const flat=b=>b.detail({budget:12,columns:40}).map(r=>r.map(p=>p.text).join('')).join('\n');
+for(const [state,reason,word] of [['answer_below','marker-has-no-bound-native-response-surface','BELOW'],['answer_parent','owner-correction-lineage-unverified','PARENT'],
+  ['answer_sending','action-pending','SENDING'],['answer_closed','codex-native-request-not-current','CLOSED'],['answer_there','no exact owner session binding','THERE'],[null,'unknown-reason','BELOW']]){
+ let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
+ b.update([item(state,reason)],'',{labels});
+ let text=flat(b);
+ assert(text.split('\n')[0].endsWith(word),text);assert(!text.includes(reason),text);
+ if(state)assert(text.includes('WHOLE '+state),text);
+ assert(!/unavailable/.test(text),text);
+ b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,0);
+ text=flat(b);assert(!text.includes(reason),text);assert(text.split('\n').some(l=>l.trim()===word),text);
+}
+// A local send state wins over the backend's phrase while it lasts.
+{const b=create({changed(){},answer:async()=>new Promise(()=>{}),action(){}});
+ b.update([{id:'o',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['a']}]}],'',{labels});b.enter();b.input(Buffer.from('\r'));
+ await new Promise(setImmediate);b.update([{id:'o',revision:'r',answerable:false,reason:'action-pending',answer_state:'answer_sending',questions:[{id:'q',question:'Which?',choices:['a']}]}],'',{labels});
+ assert(flat(b).split('\n')[0].includes('SUBMITTED'),flat(b));}
+})().catch(e=>{console.error(e);process.exit(1);});""")
+
+    def test_an_answered_question_leaves_the_panel_once_focus_returns(self):
+        # Correction 3 (11-13): after a panel answer the question stayed in the panel for good
+        # (`✓ consumed`): the editor held it, so the backend kept returning it as a retained
+        # reference. While focused the receipt stays readable; leaving focus, or a settled one
+        # arriving while unfocused, lets it go, and it is no longer asked for.
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const open={id:'S4:q',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['a','b']}]};
+const done={...open,answerable:false,request_state:'applied'};
+const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+b.update([open]);b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);
+b.update([done]);
+assert(JSON.stringify(b.detail()).includes('applied'),'the receipt reads while focused');
+assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);
+b.leave();
+assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
+// The backend no longer asks for it; were it still sent while unfocused, it stays out.
+b.update([done]);assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
+// An open question beside it stays, and so does one only sent (not settled).
+const other={...open,id:'S4:o'},sent={...open,id:'S4:s',answerable:false,request_state:'submitted'};
+b.update([done,other,sent]);assert.deepEqual(b.references().map(x=>x.id),['S4:o','S4:s']);
+})().catch(e=>{console.error(e);process.exit(1);});""")
 
     def test_decision_enter_cannot_submit_before_an_explicit_selection(self):
         self.node(r"""
