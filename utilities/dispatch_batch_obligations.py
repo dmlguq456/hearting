@@ -802,12 +802,28 @@ _UNOBSERVED = object()
 RUNNER_OWNER_SCAN_BUDGET_S = 5.0
 
 
+def _prefix_digests(view):
+    """``{byte_end: digest}`` of ``view``'s leading bytes at each row boundary."""
+    return {byte_end: digest for byte_end, digest, _rows in view.prefix_proofs()}
+
+
+def _rows_proven_by(view, digests):
+    """The last row of ``view`` inside its latest boundary whose leading bytes
+    have one of ``digests`` (from ``_prefix_digests`` of an earlier view), or
+    -1 when no boundary matches: only those rows are the bytes it described."""
+    for byte_end, digest, rows in reversed(view.prefix_proofs()):
+        if digests.get(byte_end) == digest:
+            return rows - 1
+    return -1
+
+
 class OwnerSettlementReadContext:
     """Reuse exact settled-owner observations while rechecking their dependencies."""
 
     def __init__(self):
         self._owner_scan_budget_s = None
-        # jobs key -> (view path identity, resolved path, last proven order)
+        # jobs key -> (view path identity, resolved path, last proven order,
+        #             {byte_end: digest} of the view it was proven in)
         self._owner_scan_resume = {}
         self._seen = {}
         self._settled = {}
@@ -1507,16 +1523,12 @@ class OwnerSettlementReadContext:
         if prior is None or (view.path_identity, view.resolved_path) != prior[:2]:
             return -1
         _identity, _resolved, proven_order, proofs = prior
-        for byte_end, digest, rows in reversed(view.prefix_proofs()):
-            if proofs.get(byte_end) == digest:
-                return min(proven_order, rows - 1)
-        return -1
+        return min(proven_order, _rows_proven_by(view, proofs))
 
     def remember_owner_cursor(self, jobs: Path, view):
         key = str(jobs.resolve(strict=False))
         self._cursors[key] = (view.path_identity, view.resolved_path, view.last_complete_order,
-                              {byte_end: digest
-                               for byte_end, digest, _rows in view.prefix_proofs()})
+                              _prefix_digests(view))
 
     def limit_owner_scan(self, seconds):
         """Bound each pass's historical owner proof; the next pass resumes."""
@@ -1528,15 +1540,24 @@ class OwnerSettlementReadContext:
         return self._clock() + max(0.0, float(self._owner_scan_budget_s))
 
     def owner_scan_resume_order(self, jobs: Path, view):
-        """The last owner row an unfinished historical scan already proved."""
+        """The last owner row an unfinished historical scan already proved.
+
+        Like the candidate floor, it holds only over the leading bytes this view
+        shares with the view the scan proved them in: a row that changed or moved
+        before it (a registration that has since finished, a row an archive
+        pulled forward) is due again. With no shared boundary the walk starts
+        over; owners it already proved keep their cached proof and spend no
+        budget.
+        """
         prior = self._owner_scan_resume.get(str(jobs.resolve(strict=False)))
         if prior is None or prior[:2] != (view.path_identity, view.resolved_path):
             return None
-        return prior[2]
+        proven = _rows_proven_by(view, prior[3])
+        return None if proven < 0 else min(prior[2], proven)
 
     def continue_owner_scan(self, jobs: Path, view, order):
         self._owner_scan_resume[str(jobs.resolve(strict=False))] = (
-            view.path_identity, view.resolved_path, order)
+            view.path_identity, view.resolved_path, order, _prefix_digests(view))
 
     def finish_owner_scan(self, jobs: Path):
         self._owner_scan_resume.pop(str(jobs.resolve(strict=False)), None)
@@ -1779,6 +1800,7 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
                 attempt_id = record.completion_metadata().get("attempt_id")
                 if attempt_id:
                     selected[attempt_id] = record
+            # Partial floor assumes no writer edits or drops a related row so it stops naming its owner.
             changed_rows = view.records_since(floor) if floor >= 0 else ()
             impacted = set(context.affected_settled_owner_ids(jobs, changed_rows))
             reselected = context.take_invalidated_owner_ids(jobs)
