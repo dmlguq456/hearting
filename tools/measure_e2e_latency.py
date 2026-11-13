@@ -347,12 +347,17 @@ def _md_launches(report: dict) -> list[str]:
     if not launches:
         return []
     out = ["## T3 launch별 (새 실행 → 화면)", "",
-           "| 조건 | # | 첫 byte s | 첫 비-loading s | 첫 관측 화면 s | 상세 완료 s | paints | 저장 |",
-           "|---|---|---|---|---|---|---|---|"]
+           "`첫 관측 화면 s`: 전 열(`observed` 기록이 없는 트리)은 옛 정의 = `첫 준비 s`(모든 필수 원천 준비), "
+           "후 열은 새 정의(basic 관측 + 늦은 칸 'details wait' 표지가 화면에 보임; 표지가 없으면 `첫 준비 s`와 "
+           "같다). 전·후를 같은 정의로 견줄 칸은 `첫 준비 s`·`replay`·`상세 완료 s`다.", "",
+           "| 조건 | # | 첫 byte s | 첫 비-loading s | 첫 관측 화면 s | 첫 준비 s | replay s | 상세 완료 s | 관측 근거 | paints | 저장 |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
     for p in launches:
         out.append(f"| {p.get('condition')} | {p.get('rep')} | {_fmt(p.get('first_byte_s'))} | "
                    f"{_fmt(p.get('first_nonloading_s'))} | {_fmt(p.get('first_observed_s'))} | "
-                   f"{_fmt(p.get('details_complete_s'))} | {p.get('paints')} | {p.get('persisted')} |")
+                   f"{_fmt(p.get('first_ready_s'))} | {_fmt(p.get('replay_s'))} | "
+                   f"{_fmt(p.get('details_complete_s'))} | {p.get('observed_by') or '-'} | "
+                   f"{p.get('paints')} | {p.get('persisted')} |")
     return out + [""]
 
 
