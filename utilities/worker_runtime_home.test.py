@@ -238,6 +238,40 @@ class WorkerHomes(unittest.TestCase):
         with self.assertRaises(builder._dispatch_defaults_module().DefaultsConfigError):
             builder._worker_account_selection('codex', env)
 
+    def test_v1_opencode_worker_pins_the_users_state_root_and_every_home_records_what_it_replaced(self):
+        # #1576 review follow-ups: a masked XDG_STATE_HOME moved the state root, and a worker
+        # built under another worker lost the user's own home.
+        root, builder = self._minimal_packaged_builder()
+        home = self.base / 'pin-user-home'
+        claude_parent = self.base / 'pin-claude-profile'
+        opencode_parent = self.base / 'pin-opencode'
+        for path in (home, claude_parent, opencode_parent):
+            path.mkdir(parents=True)
+        (claude_parent / '.claude.json').write_text(json.dumps(
+            {'oauthAccount': {'accountUuid': 'a', 'organizationUuid': 'a'}}))
+        (opencode_parent / 'opencode.json').write_text('{}')
+        env = {**self.env, 'HOME': str(home), 'CLAUDE_CONFIG_DIR': str(claude_parent),
+               'OPENCODE_CONFIG_DIR': str(opencode_parent)}
+        opencode = builder.build_worker_home(root, 'opencode', 'stage', 'pin-opencode',
+                                              env=env, destination=self.base / 'pin-opencode-home')
+        self.assertEqual(opencode['HARNESS_STATE_ROOT'], str(home / '.local/state/hearting'))
+        self.assertTrue(opencode['XDG_STATE_HOME'].startswith(str(self.base / 'pin-opencode-home')))
+        env['HARNESS_STATE_ROOT'] = str(self.base / 'chosen-state')
+        again = builder.build_worker_home(root, 'opencode', 'stage', 'pin-opencode-2',
+                                           env=env, destination=self.base / 'pin-opencode-home-2')
+        self.assertNotIn('HARNESS_STATE_ROOT', again)  # the inherited value already is the user's
+        first = builder.build_worker_home(root, 'claude', 'stage', 'pin-claude-1', env=env,
+                                           destination=self.base / 'pin-claude-home-1')
+        second = builder.build_worker_home(
+            root, 'claude', 'stage', 'pin-claude-2',
+            env={**env, 'CLAUDE_CONFIG_DIR': first['CLAUDE_CONFIG_DIR']},
+            destination=self.base / 'pin-claude-home-2')
+        recorded = json.loads((Path(first['CLAUDE_CONFIG_DIR']) / 'worker-home.json').read_text())
+        self.assertEqual(recorded['model_config_home'], str(claude_parent))
+        import peer_obligations
+        self.assertEqual(peer_obligations._original_home(second['CLAUDE_CONFIG_DIR']),
+                         str(claude_parent))
+
     def test_reused_homes_remove_only_stale_explicit_auth_links(self):
         root, builder = self._minimal_packaged_builder()
         parent = self.base / 'reuse-parent-codex'

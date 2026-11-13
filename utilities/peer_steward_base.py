@@ -225,7 +225,11 @@ def _herdr_missing():
 
 
 def _unavailable(reason):
-    print(f"herdr-unavailable reason={reason} fallback={_fallback()}")
+    """A refused observation or arm. The word names the cause's source: a Herdr call that
+    failed (`herdr-*` reasons) keeps `herdr-unavailable`; a native-record failure, which is
+    every other reason, is `native-unavailable`. Exit 4 for both."""
+    word = "herdr-unavailable" if str(reason).startswith("herdr-") else "native-unavailable"
+    print(f"{word} reason={reason} fallback={_fallback()}")
     return 4
 
 

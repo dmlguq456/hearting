@@ -3606,7 +3606,10 @@ by itself. Unknown observations remain pending and reconnect through the same wa
 A target with no session id cannot arm a new watch (`target-session-unresolved`). A
 protocol-2 arm without native PID birth remains unknown; the observer does not adopt the
 first session later reported in that pane. `prompt` and `retire` keep their existing
-native-turn and screen guards for a pane that has no session yet.
+native-turn and screen guards for a pane that has no session yet. A message cancelled
+because its recipient session provably ended is not delivered again if that session is
+reopened. Watch and the steward check link targets in the caller's own Claude home; a
+session under another `CLAUDE_CONFIG_DIR` is not linked.
 Watcher, lock, receipt, and available wake carriers are runtime-owned
 (`core/ADAPTATION.md §7.3`).
 
@@ -3664,7 +3667,8 @@ Herdr integration state is session-scoped corroboration. Native session identity
 and exact foreground PID birth bind sends and retire; a stale Herdr `working`
 state cannot veto retirement by itself, while live foreground work, registered
 children, native busy state, an open form, or an unreadable draft still protect
-the target. Unknown process or namespace evidence remains unresolved. Peer
+the target; a working OpenCode session, read from any writer of its native status, also
+holds retire back. Unknown process or namespace evidence remains unresolved. Peer
 receipts distinguish native acceptance (`queued`) from exact receiver
 consumption (`received`). OpenCode native status is usable for 15 seconds only
 when its session, pane, foreground PID birth, and PID namespace still match.

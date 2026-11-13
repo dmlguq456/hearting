@@ -759,7 +759,9 @@ class WaitTest(_TmpRootMixin, unittest.TestCase):
         with self.native(identity="missing"), mock.patch("builtins.print") as print_mock:
             self._wait()
         line = print_mock.call_args[0][0]
-        self.assertIn("herdr-unavailable", line)
+        # #1576 review follow-up: a native-record failure is not named after Herdr.
+        self.assertTrue(line.startswith("native-unavailable "), line)
+        self.assertNotIn("herdr-unavailable", line)
         self.assertIn("fallback=", line)
 
     def test_claude_session_env_selects_claude_native_notify_idle_fallback(self):

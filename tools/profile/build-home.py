@@ -916,6 +916,12 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             target.mkdir(parents=True, exist_ok=True, mode=0o700)
             if not v2_runtime:
                 values['XDG_' + kind.upper() + '_HOME'] = str(target)
+        if not v2_runtime and not env.get('HARNESS_STATE_ROOT'):
+            # The masked XDG_STATE_HOME below would move the per-user state root
+            # (`state_root`) under this worker's private home, so a nested runner
+            # or peer record would land in a second root. Pin the user's own.
+            user_state = Path(env.get('XDG_STATE_HOME') or Path(home_env) / '.local/state') / 'hearting'
+            values['HARNESS_STATE_ROOT'] = str(user_state.expanduser().absolute())
         if not v2_runtime:
             data = (account_source if account_source is not None else
                     Path(env.get('XDG_DATA_HOME') or Path.home() / '.local/share'))
@@ -938,7 +944,10 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     metadata = {'harness': harness, 'worker_type': worker_type,
                 'source': str(agent_home), 'profile': profile,
                 'schema': 2, 'identity': identity, 'key': key,
-                'destination': destination is not None}
+                'destination': destination is not None,
+                # The home this one replaced: the shared runner started from a
+                # worker follows it back to the user's own home.
+                'model_config_home': values['HEARTING_MODEL_CONFIG_HOME']}
     if harness == 'codex':
         metadata.update(
             codex_config_home=str(source.expanduser().absolute()),

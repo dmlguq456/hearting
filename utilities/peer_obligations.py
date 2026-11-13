@@ -335,6 +335,41 @@ def _same_directory(left, right) -> bool:
         return False
 
 
+_WORKER_IDENTITY_VARIABLES = (
+    "AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    "AGENT_CODEX_MANAGED_CONTROL_SOCKET")
+
+
+def _original_home(path, pinned=None):
+    """The user's own home behind a worker-built ``path``, or None when unknown.
+
+    Each worker home's manifest records the home it replaced
+    (``model_config_home``; Codex homes also ``codex_config_home``), so a home
+    built under another worker's home still leads back to the user's. A home
+    built before the manifest carried it falls back to the pinned value the
+    worker was started with.
+    """
+    current = path
+    for _hop in range(8):
+        if not _worker_built_home(current):
+            # A pinned home that no longer exists is no home: the default applies.
+            return str(current) if Path(current).expanduser().is_dir() else None
+        try:
+            manifest = json.loads((Path(current).expanduser() / "worker-home.json")
+                                  .read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            manifest = None
+        step = None
+        if isinstance(manifest, dict):
+            step = manifest.get("model_config_home") or manifest.get("codex_config_home")
+        if not isinstance(step, str) or not step:
+            return (pinned if pinned and not _worker_built_home(pinned)
+                    and Path(pinned).expanduser().is_dir() else None)
+        current = step
+    return None
+
+
 def _user_service_environment(environ):
     """The shared runner's environment: the user's own harness homes, whoever started it.
 
@@ -344,11 +379,14 @@ def _user_service_environment(environ):
     private home, marks it with ``HEARTING_WORKER_HOME`` and pins the home it
     replaced in ``HEARTING_MODEL_CONFIG_HOME``. A runner inheriting that mask
     would look for the user's sessions in the worker's private home and find
-    none. Here a masked value goes back to the pinned home, or to the native
-    default when the pinned home is the default or another worker's own; the
-    two worker markers stay with the worker. Any other environment, including
-    a session that chose its own ``CLAUDE_CONFIG_DIR``, is returned unchanged
-    (``None`` keeps meaning "inherit this process's environment").
+    none. Here every worker-built value goes back to the user's home it
+    replaced (followed through nested workers and mixed harnesses by each home's
+    manifest), or to the native default when that is the default; a home the
+    user chose is kept. The worker markers and the identity variables that make
+    the runner look like a worker (role, dispatch, the harness session ids and
+    the managed control socket) stay with the worker; any other environment is
+    returned unchanged (``None`` keeps meaning "inherit this process's
+    environment").
     """
     source = os.environ if environ is None else environ
     worker_home = source.get("HEARTING_WORKER_HOME")
@@ -357,6 +395,11 @@ def _user_service_environment(environ):
     child_env = dict(source)
     child_env.pop("HEARTING_WORKER_HOME", None)
     pinned = child_env.pop("HEARTING_MODEL_CONFIG_HOME", None)
+    for key in _WORKER_IDENTITY_VARIABLES:
+        child_env.pop(key, None)
+    for key in tuple(child_env):
+        if key.startswith("OPENCODE_DISPATCH"):
+            child_env.pop(key)
     home = Path(child_env.get("HOME") or Path.home()).expanduser()
     for name, default in (("CLAUDE_CONFIG_DIR", home / ".claude"),
                           ("CODEX_HOME", home / ".codex")):
@@ -364,7 +407,7 @@ def _user_service_environment(environ):
         own_mask = bool(value) and _same_directory(value, worker_home)
         if not value or not (own_mask or _worker_built_home(value)):
             continue
-        restored = pinned if own_mask and pinned and not _worker_built_home(pinned) else None
+        restored = _original_home(value, pinned if own_mask else None)
         if restored and not _same_directory(restored, default):
             child_env[name] = restored
         else:

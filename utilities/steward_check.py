@@ -200,6 +200,18 @@ def _role_flagged(harness: str, session_id: str) -> bool:
         return True
 
 
+def _role_flag_cause(harness: str, session_id: str) -> str:
+    """Why an unflagged role is unflagged, for the duty's observation: the runner could not
+    read the native records, the role has no targets, or only foreign-repository evidence."""
+    collector = _collector()
+    try:
+        rows = collector._registry_sessions()
+        targets = collector.role_targets(harness, session_id, sessions=rows, include_native=True)
+    except Exception:  # noqa: BLE001
+        return "native-records-unreadable"
+    return "foreign-repository-only" if targets else "no-targets"
+
+
 def _agents():
     """The shared steward pass intentionally has no Herdr inventory input."""
     return ()
@@ -497,10 +509,27 @@ def _observe_role(harness: str, session_id: str) -> dict:
                              if t_sid else "unknown"),
                 **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
+    _lengthen_shared_prefixes(targets)
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
     return {"targets": targets, "pending_messages": pending,
             "open_work": work, "user_decisions": decisions}
+
+
+def _lengthen_shared_prefixes(targets: list) -> None:
+    """Two targets named only by the first 8 characters of different session ids keep
+    them apart: each such name is lengthened to the shortest prefix that differs."""
+    nameless = [t for t in targets if t.get("session_id") and t["name"] == t["session_id"][:8]]
+    for target in nameless:
+        others = [o["session_id"] for o in nameless
+                  if o is not target and o["session_id"] != target["session_id"]
+                  and o["session_id"][:8] == target["session_id"][:8]]
+        if not others:
+            continue
+        sid, length = target["session_id"], 8
+        while length < len(sid) and any(other[:length] == sid[:length] for other in others):
+            length += 1
+        target["name"] = sid[:length]
 
 
 def _queued_for(target: dict) -> int:
@@ -860,7 +889,7 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         # no notice and no model turn; the duty waits for a role or a release.
         store.update(duty["id"], observation={
             **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
-            "reason": "no-steward-flag"})
+            "reason": "no-steward-flag", "cause": _role_flag_cause(harness, session_id)})
         return
     seen = _observe_role(harness, session_id)
     waiting_since = _track_waiting(observation.get("waiting_since"), seen["targets"], now)

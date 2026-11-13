@@ -1419,6 +1419,38 @@ class StewardCheckRoleFlagTest(CheckBase):
         self.step(T0 + INTERVAL * 4)
         self.assertEqual(self.notify.call_count, 0)
 
+    def _collector_with(self, **functions):
+        from types import SimpleNamespace
+        return mock.patch.object(SC, "_collector", return_value=SimpleNamespace(**functions))
+
+    def test_an_unflagged_duty_names_why_it_is_unflagged(self):
+        # #1576 review follow-up: the observation said only "no-steward-flag".
+        def unreadable():
+            raise OSError("registry unreadable")
+        with self._collector_with(_registry_sessions=unreadable):
+            self.assertEqual(SC._role_flag_cause(HARNESS, SID), "native-records-unreadable")
+        with self._collector_with(_registry_sessions=lambda: [], role_targets=lambda *a, **k: []):
+            self.assertEqual(SC._role_flag_cause(HARNESS, SID), "no-targets")
+        with self._collector_with(_registry_sessions=lambda: [],
+                                  role_targets=lambda *a, **k: [{"name": "x"}]):
+            self.assertEqual(SC._role_flag_cause(HARNESS, SID), "foreign-repository-only")
+        self.register()
+        self.flagged = False
+        with self._collector_with(_registry_sessions=lambda: [], role_targets=lambda *a, **k: []):
+            duty = self.step(T0 + INTERVAL)
+        self.assertEqual(duty["observation"]["reason"], "no-steward-flag")
+        self.assertEqual(duty["observation"]["cause"], "no-targets")
+
+    def test_targets_named_by_a_shared_session_prefix_stay_distinguishable(self):
+        targets = [{"name": "abcdefgh", "session_id": "abcdefgh-1111"},
+                   {"name": "abcdefgh", "session_id": "abcdefgh-2222"},
+                   {"name": "zzzzzzzz", "session_id": "zzzzzzzz-1"},
+                   {"name": "worker", "session_id": "abcdefgh-3333"}]
+        SC._lengthen_shared_prefixes(targets)
+        names = [t["name"] for t in targets]
+        self.assertEqual(len(set(names)), 4, names)
+        self.assertEqual(names[2:], ["zzzzzzzz", "worker"])
+
     def test_flag_raised_later_gets_one_request_at_the_next_due(self):
         self.register()
         self.flagged = False
