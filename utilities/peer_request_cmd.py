@@ -112,6 +112,14 @@ def _rows(steward, record):
     return rows
 
 
+def _received_by(row, sessions):
+    """True when the revision's transfer row was received by one of ``sessions`` (exact receipt)."""
+    if not row or row.get("state") != "received":
+        return False
+    to = row.get("to") or {}
+    return (to.get("harness"), to.get("session_id")) in sessions
+
+
 def _delivered_anywhere(steward, record):
     """True when some revision or follow-up of the request may have reached the receiver."""
     for row in _rows(steward, record).values():
@@ -312,9 +320,17 @@ def report(args, steward):
     if args.rev is not None:
         revision = args.rev
     else:
+        # N5: the newest revision this session (or its confirmed predecessor) actually
+        # received. Nothing received means nothing to guess: ask for an explicit --rev.
+        mine = [(me["harness"], me["session_id"])] + [
+            (me["harness"], sid) for sid in pr._predecessors(me["harness"], me["session_id"])]
         received = [r["n"] for r in record["revisions"]
-                    if (rows.get(r["transfer_ref"]) or {}).get("state") == "received"]
-        revision = max(received) if received else (pr.current_revision(record) or {"n": 1})["n"]
+                    if _received_by(rows.get(r["transfer_ref"]), mine)]
+        if not received:
+            return _refuse(head, "report-revision-unreceived",
+                           revisions=",".join(str(r["n"]) for r in record["revisions"]),
+                           next="report %s --rev N" % request_id)
+        revision = max(received)
     target = pr.revision_of(record, revision)
     if target is None:
         return _refuse(head, "revision-unknown")

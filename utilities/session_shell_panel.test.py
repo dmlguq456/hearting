@@ -2087,6 +2087,22 @@ const none=text(render(37,30,{},{...base,requests:[]}));
 assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
 """)
 
+    def test_a_long_status_cuts_the_title_first_and_keeps_the_other_session(self):
+        # r3: `◂ 검토 제목 1c… · partial answer` lost its `[6e]`; the title is what gives way.
+        self.node(r"""
+for(const width of [32,37,38])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9','review title 1c9036d9'])for(const [glyph,kind] of [['◂','request-in'],['✓','request-done']]){
+ const model={...base,requests:[q('rq-aaaaaa',glyph,'[6e]',title,status,kind)]};
+ const lines=text(render(width,30,{},model));
+ const row=lines.find(s=>s.includes(glyph)&&s.includes('· '+status));
+ assert(row,'the row stands: '+width+status+'\n'+lines.join('\n'));
+ assert(row.includes('[6e]'),'the other session stays: '+row);
+ if(width>=37||status==='open')assert(row.includes('…')||row.includes(title),'the title is cut with an ellipsis: '+row);
+}
+// A title that fits stays whole beside the session and the status.
+const whole=text(render(38,30,{},{...base,requests:[q('rq-aaaaaa','◂','[6e]','짧은 일','final answer','request-in')]}));
+assert(whole.some(s=>s.includes('[6e] 짧은 일 · final answer')),whole.join('\n'));
+""")
+
     def test_a_request_opens_in_place_whole_then_its_overflow_leads_to_the_read_page(self):
         self.node(r"""
 for(const width of [32,37,38]){

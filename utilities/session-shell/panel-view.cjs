@@ -1148,17 +1148,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // One folded request row: direction mark, the other session, the title and the status (a
     // sent one not yet seen says so; then the work: open, partial answer, final answer, rejected,
-    // cancelled), then how long ago. A value that does not fit goes whole: the age, then the
-    // other session, then the title is cut with `…` and the status stays (spec rules 29, 30).
+    // cancelled), then how long ago. A value that does not fit goes whole: the age; then the title
+    // is cut with `…` and, past two cells, gone (the other session and the status stay); the other
+    // session goes only after that (spec rules 29, 30).
     const requestLine=q=>{
       const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo');
       const who=q.who?[text(' '+q.who,'dim')]:[],title=text(' '+String(q.title||q.id),'loc_repo');
       const status=q.status?[text(' · ','dim'),text(String(q.status),q.kind==='request-rejected'?'lvl_r':'dim')]:[];
       const age=q.age?[text(' '+q.age,'dim')]:[];
-      for(const form of [[mark,...who,title,...status,...age],[mark,...who,title,...status],[mark,title,...status]])
+      for(const form of [[mark,...who,title,...status,...age],[mark,...who,title,...status]])
         if(size(form)<=inner)return form;
-      const rest=[...status],room=inner-size([mark,...rest]);
-      if(room>=6){const fit=cut([title],room);return [mark,...fit,...rest];}
+      // The title gives way first: cut with `…` down to two cells and `…`, and past that gone,
+      // while the other session and the status stay. Only when those two alone do not fit does
+      // the other session go, and the title comes back (cut) in its place.
+      const stay=[mark,...who,...status];
+      if(size(stay)<=inner){
+        const room=inner-size(stay);
+        return room>=4?[mark,...who,...cut([title],room),...status]:stay;
+      }
+      const room=inner-size([mark,...status]);
+      if(room>=4)return [mark,...cut([title],room),...status];
       return cut([mark,title],inner);
     };
     // An opened request: its numbers, revision, delivery, work, last change and reports in

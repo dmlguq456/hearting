@@ -134,7 +134,13 @@ class Fixture(unittest.TestCase):
     def request(self, who, target, text="please review", **kw):
         return self.run_cmd(who, peer_steward.cmd_request, target=target, text=text, **kw)
 
-    def report(self, who, rq=None, **kw):
+    def report(self, who, rq=None, received=True, **kw):
+        """`received`: the receiver took the newest revision in first (a report answers a received revision)."""
+        record = pr.load(rq) if rq else None
+        if received and record and record["revisions"] and kw.get("rev") is None and not any(
+                (peer_message._read_pending(r["transfer_ref"]) or {}).get("state") == "received"
+                for r in record["revisions"]):
+            self.ack(record["revisions"][-1]["transfer_ref"], who)
         return self.run_cmd(who, peer_steward.cmd_report, rq=rq, **kw)
 
     def show(self, who, rq=None, **kw):
@@ -235,6 +241,40 @@ class RevisionAndCancelTest(Fixture):
         rc, out = self.report(B, request_id, result="new verdict", rev=2)
         self.assertEqual(pr.load(request_id)["state"], "final")
         self.assertFalse(pr.load(request_id)["reports"][1]["late"])
+
+    def test_c2_report_without_rev_answers_the_newest_received_revision(self):
+        # Revision 1 received, revision 2 sent but only queued: the report is revision 1, late.
+        request_id, _ = self.new_request(title="t", rev="판1")
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.request(A, request_id, "new head", rev="판2")
+        ref2 = pr.load(request_id)["revisions"][1]["transfer_ref"]
+        self.assertNotEqual(peer_message._read_pending(ref2)["state"], "received")
+        rc, out = self.report(B, request_id, result="LATE-old", received=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=1 late=true", out)
+        record = pr.load(request_id)
+        self.assertEqual(record["state"], "open")
+        self.assertEqual(record["revisions"][1]["state"], "current")
+        line = peer_message._read_pending(record["reports"][0]["transfer_ref"])["text"]
+        self.assertIn("[요청 답 %s 판 1(대체됨)]" % request_id, line)
+        # Revision 2 then reaches B: the next report answers it and closes the request.
+        self.ack(ref2)
+        rc, out = self.report(B, request_id, result="FINAL-new", received=False)
+        self.assertIn("revision=2 late=false state=final", out)
+        self.assertEqual(pr.load(request_id)["state"], "final")
+
+    def test_c3_report_with_nothing_received_is_refused_and_names_rev(self):
+        request_id, _ = self.new_request(title="t", rev="판1")
+        self.request(A, request_id, "new head", rev="판2")
+        rc, out = self.report(B, request_id, result="guess", received=False)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("reason=report-revision-unreceived", out)
+        self.assertIn("--rev N", out)
+        self.assertEqual(pr.load(request_id)["reports"], [])
+        # An explicit --rev is the person's choice and stands.
+        rc, out = self.report(B, request_id, result="named", rev=2, received=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=2", out)
 
     def test_d_superseded_pending_revision_is_not_sent_anywhere(self):
         self.hold = True
@@ -414,11 +454,13 @@ class HandoffAndAddressTest(Fixture):
 
     def test_j_report_without_an_id(self):
         first, _ = self.new_request(title="one")
+        self.ack(pr.load(first)["revisions"][0]["transfer_ref"])
         rc, out = self.report(B, result="done")
         self.assertEqual(rc, 0, out)
         self.assertEqual(pr.load(first)["state"], "final")
         a, _ = self.new_request(title="two")
         b, _ = self.new_request(title="three")
+        self.ack(pr.load(a)["revisions"][0]["transfer_ref"])
         rc, out = self.report(B, result="done")
         self.assertEqual(rc, 1)
         self.assertIn("request-ambiguous", out)
