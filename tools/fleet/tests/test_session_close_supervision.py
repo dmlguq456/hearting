@@ -254,16 +254,16 @@ class OneFRetireTest(CloseSupervisionBase):
         self.unresolved_daemon()
         self.requester_row("codex", s1f)
         before = self.grant("codex", s1f)
-        self.assertEqual(before["status"], "granted", before)
-        self.assertEqual(self.supervision()["counted"], 3)
+        self.assertEqual(before["status"], "limited", before)
+        self.assertEqual(self.supervision()["counted"], 2)
 
         self.retire_followup("claude", one_f)
 
         self.assertFalse(self.holds_role("claude", one_f))
         self.assertTrue(self.holds_role("claude", other))
-        self.assertEqual(self.supervision()["counted"], 2)
+        self.assertEqual(self.supervision()["counted"], 1)
         after = self.grant("codex", s1f)
-        self.assertEqual(after["status"], "extended", after)
+        self.assertEqual(after["status"], "granted", after)
 
 
 class E72ClearTest(CloseSupervisionBase):
@@ -295,7 +295,7 @@ class E72ClearTest(CloseSupervisionBase):
     def test_without_a_confirmed_lineage_the_holder_stays_unknown_and_counted(self):
         stale, current = self.build(lineage=False)
         self.assertEqual(self.holder_state(self.supervision(), "claude", stale), ("live", True))
-        self.assertEqual(self.grant("claude", current)["status"], "granted")
+        self.assertEqual(self.grant("claude", current)["status"], "limited")
 
     def test_watch_supervised_by_the_stale_sid_ends_without_rearming(self):
         stale, _current = self.build()
@@ -376,6 +376,7 @@ class HeartingNamedTest(CloseSupervisionBase):
                             {"harness": "codex", "session_id": self.E0}, {"carrier": "x", "schema": 1})
         duty = store.update(duty["id"], state="pending", observation=SC._new_observation(1000.0))
         SC.advance(duty, store, now=1001.0)
+        return store.get(duty["id"])
 
     def test_a_lost_window_does_not_release_a_holder_the_native_proof_shows_live(self):
         # Native form of "still shown in its pane": the pane is gone from every census
@@ -393,11 +394,15 @@ class HeartingNamedTest(CloseSupervisionBase):
         self.assertTrue(self.holds_role("codex", self.E0))
         self.assertEqual(self.holder_state(self.supervision(), "codex", self.E0), ("unknown", True))
 
-    def test_a_native_ended_holder_is_released_without_any_pane_read(self):
+    def test_native_end_settles_duty_and_preserves_role_history_for_resume(self):
         self.setup_named()
-        self.lost_window_pass()
-        self.assertFalse(self.holds_role("codex", self.E0))
+        duty = self.lost_window_pass()
+        self.assertEqual((duty["state"], duty["observation"]["reason"]),
+                         ("complete", "session-ended"))
+        self.assertTrue(self.holds_role("codex", self.E0))  # resumable history, not capacity
         self.assertEqual(self.supervision()["counted"], 0)
+        self.codex_seen = {"complete": True, "open": frozenset({self.E0})}
+        self.assertEqual(self.supervision()["counted"], 1)
 
 
 class NativeRegistryCapTest(CloseSupervisionBase):
@@ -419,14 +424,14 @@ class NativeRegistryCapTest(CloseSupervisionBase):
         self.registry.write("codex", pid, {"sessionId": session, "cwd": str(self.repo),
                                            "status": "idle"})
 
-    def test_a_steward_above_reference_is_granted_from_registry_rows(self):
+    def test_a_second_steward_over_the_cap_is_limited_from_registry_rows(self):
         first, second, third = sid("c1c1c1c1"), sid("c2c2c2c2"), sid("c3c3c3c3")
         for session, pid in ((first, os.getpid()), (second, os.getppid()), (third, 1)):
             self.native(session, pid)
         self.holder("codex", first)
         self.holder("codex", second)
         result = self.grant("codex", third)
-        self.assertEqual(result["status"], "granted", result)
+        self.assertEqual(result["status"], "limited", result)
         self.assertEqual({item["session_id"] for item in result["holders"]}, {first, second})
         self.assertEqual(result["repository"], "alpha")
 
@@ -499,11 +504,11 @@ class SrModelaTest(CloseSupervisionBase):
         _complete, _holders, reasons = _REAL_CENSUS(proc_root=self.proc)
         self.assertIn("native-session-claim-unusable", reasons)
         self.assertEqual(self.liveness("claude", a), "live")
-        self.assertEqual(self.grant("claude", self.N)["status"], "granted")
+        self.assertEqual(self.grant("claude", self.N)["status"], "limited")
 
 
 class SrAmbiguousTest(CloseSupervisionBase):
-    """10-31: unexplained holders stay unknown without withholding a new role."""
+    """10-31: holders nothing explains keep counting; limited is the right answer."""
 
     N = sid("39d9cea4")
 
@@ -515,7 +520,7 @@ class SrAmbiguousTest(CloseSupervisionBase):
         self.unresolved_daemon()
         self.requester_row("claude", self.N)
         self.assertEqual(self.holder_state(self.supervision(), "claude", first), ("unknown", True))
-        self.assertEqual(self.grant("claude", self.N)["status"], "granted")
+        self.assertEqual(self.grant("claude", self.N)["status"], "limited")
 
     def test_a_holder_with_a_lineage_but_no_process_claim_stays_counted(self):
         first, second = sid("6acb557d"), sid("6acb5580")
@@ -526,7 +531,7 @@ class SrAmbiguousTest(CloseSupervisionBase):
         self.unresolved_daemon()
         self.requester_row("claude", self.N)
         self.assertEqual(self.holder_state(self.supervision(), "claude", first), ("unknown", True))
-        self.assertEqual(self.grant("claude", self.N)["status"], "granted")
+        self.assertEqual(self.grant("claude", self.N)["status"], "limited")
 
 
 class CombinedTest(CloseSupervisionBase):
@@ -552,16 +557,16 @@ class CombinedTest(CloseSupervisionBase):
                                          _gpu_session_aliases=()))
         self.requester_row("claude", current)
 
-        self.assertEqual(self.grant("claude", current)["status"], "granted")
+        self.assertEqual(self.grant("claude", current)["status"], "limited")
         self.assertGreaterEqual(self.supervision()["counted"], 2)
 
         self.retire_followup("claude", one_f)
 
         result = self.supervision()
-        self.assertEqual(result["counted"], 2)
+        self.assertEqual(result["counted"], 1)
         self.assertEqual(self.holder_state(result, "codex", named), ("live", True))
         self.assertEqual(self.holder_state(result, "codex", e0), ("ended", False))
-        self.assertEqual(self.grant("claude", current)["status"], "extended")
+        self.assertEqual(self.grant("claude", current)["status"], "granted")
 
 
 class Watch915dTest(CloseSupervisionBase):
@@ -646,7 +651,7 @@ class ClearedSeatTest(CloseSupervisionBase):
         stale, current = self.build()
         self.assertEqual(self.liveness("claude", stale), "unknown")
         self.assertEqual(self.holder_state(self.supervision(), "claude", stale), ("unknown", True))
-        self.assertEqual(self.grant("claude", self.NEWCOMER)["status"], "granted")
+        self.assertEqual(self.grant("claude", self.NEWCOMER)["status"], "limited")
 
         duty = self.runner_pass("claude", stale)
 
@@ -654,7 +659,7 @@ class ClearedSeatTest(CloseSupervisionBase):
         self.assertFalse(self.holds_role("claude", stale))
         self.assertTrue(self.holds_role("claude", current))
         self.assertIsNone(self.holder_state(self.supervision(), "claude", stale))
-        self.assertEqual(self.grant("claude", self.NEWCOMER)["status"], "extended")
+        self.assertEqual(self.grant("claude", self.NEWCOMER)["status"], "granted")
 
     def test_the_successor_in_the_same_seat_keeps_its_role(self):
         _stale, current = self.build()
