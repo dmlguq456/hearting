@@ -556,7 +556,7 @@ class FleetQuestionActionTests(unittest.TestCase):
 
         text = "\n".join(draw(vm, state, 140, 45).text_rows())
 
-        self.assertIn("answer in its pane", text)
+        self.assertIn("answer in its window", text)
         self.assertFalse(_has_hit(vm, state, ("question.submit",)))
         self.assertNotIn("approve", text)
 
@@ -2728,7 +2728,7 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
             self.assertTrue(display_detail)
             panel = "\n".join(draw(vm, state, 140, 45).text_rows())
             self.assertIn(display_detail, panel)
-            self.assertIn("answer in its pane", panel)
+            self.assertIn("answer in its window", panel)
             self.assertFalse(_has_hit(vm, state, ("question.submit",)))
 
             draft_text = "Private " + source + " response draft"

@@ -118,6 +118,35 @@ for(const [styles,colored] of [[color,true],[plain,false]]){
 }
 """)
 
+    def test_a_wait_not_answerable_here_names_where_to_answer_and_never_its_machine_reason(self):
+        # Spec E9 rule 54: the editor's head word and its notice on Enter are the backend's
+        # phrase for the reason (the five `answer_*` words); the body row is the backend's whole
+        # phrase; the machine reason never shows. A local send state still wins while it lasts.
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const labels={answer_below:'BELOW',answer_there:'THERE',answer_parent:'PARENT',answer_sending:'SENDING',answer_closed:'CLOSED',submitted:'SUBMITTED'};
+const item=(state,reason,extra={})=>({id:'w-'+state,revision:'r',answerable:false,reason,...(state?{answer_state:state}:{}),...extra,
+ questions:[{id:'q',question:'Which?',choices:['a','b'],display:{head:[{text:'◑ '},{text:'questions 1'},{text:' · 1/1 · '},{text:'x'}],body:[[{text:'Which?'}]],source:[],options:[[{text:'WHOLE '+state}]]}}]});
+const flat=b=>b.detail({budget:12,columns:40}).map(r=>r.map(p=>p.text).join('')).join('\n');
+for(const [state,reason,word] of [['answer_below','marker-has-no-bound-native-response-surface','BELOW'],['answer_parent','owner-correction-lineage-unverified','PARENT'],
+  ['answer_sending','action-pending','SENDING'],['answer_closed','codex-native-request-not-current','CLOSED'],['answer_there','no exact owner session binding','THERE'],[null,'unknown-reason','BELOW']]){
+ let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
+ b.update([item(state,reason)],'',{labels});
+ let text=flat(b);
+ assert(text.split('\n')[0].endsWith(word),text);assert(!text.includes(reason),text);
+ if(state)assert(text.includes('WHOLE '+state),text);
+ assert(!/unavailable/.test(text),text);
+ b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,0);
+ text=flat(b);assert(!text.includes(reason),text);assert(text.split('\n').some(l=>l.trim()===word),text);
+}
+// A local send state wins over the backend's phrase while it lasts.
+{const b=create({changed(){},answer:async()=>new Promise(()=>{}),action(){}});
+ b.update([{id:'o',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['a']}]}],'',{labels});b.enter();b.input(Buffer.from('\r'));
+ await new Promise(setImmediate);b.update([{id:'o',revision:'r',answerable:false,reason:'action-pending',answer_state:'answer_sending',questions:[{id:'q',question:'Which?',choices:['a']}]}],'',{labels});
+ assert(flat(b).split('\n')[0].includes('SUBMITTED'),flat(b));}
+})().catch(e=>{console.error(e);process.exit(1);});""")
+
     def test_decision_enter_cannot_submit_before_an_explicit_selection(self):
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);

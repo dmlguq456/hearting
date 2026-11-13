@@ -638,8 +638,18 @@ Collect every current form draft at that one submit; moving with Tab does not
 require Enter in each field and an edited draft supersedes its earlier value.
 Secret answers remain masked while selected, submitted, unfocused or consumed;
 only the unchanged canonical response carries their actual value.
-Pending transport and proved consumption are distinct, and unavailable, expired
-or cancelled questions offer no active choices. Long questions remain readable
+Pending transport and proved consumption are distinct, and questions not
+answerable here, expired or cancelled offer no active choices. A wait not
+answerable here never reads "answer unavailable" or its machine reason: its
+reason picks what to do, `answer below` (`아래 입력창에 답`) in this session's own
+panel or `answer in its window` (`그 창에서 답`) from Fleet or another session for
+a marker question with no bound reply surface, a missing exact session binding,
+an unsupported native request and any reason not named here; `answer in the
+parent` (`부모 창에서 답`) for a blocked worker's answer whose parent could not be
+confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
+(`닫힘`) for a request already gone (an existing state word such as expired
+stays). The head carries the short form under 64 columns and the body row the
+whole words; the `◑ N` count still counts every wait. Long questions remain readable
 with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields. The former rows/3 estimate does

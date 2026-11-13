@@ -61,6 +61,9 @@ module.exports=function({changed,answer,action,page}) {
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
+  // The backend's word for a wait not answerable here (spec E9 rule 54); without one, the
+  // session's own window below, where an answer always goes.
+  function unanswerable(row){return row.item.answerable===true?'':row.item.answer_state||'answer_below';}
   function active(row){return !stale&&row.item.answerable===true&&(!state(row.item).state||state(row.item).state==='open');}
   function waitingForReceipt(){
     const row=current();
@@ -82,12 +85,14 @@ module.exports=function({changed,answer,action,page}) {
   function preview({budget=10,columns=100}={}) {
     const row=current();if(!row)return focused?[[span(help||text('navigate','Tab next · Esc/Ctrl+] back'))]]:[];
     const local=state(row.item),id=row.question.id,view=row.question.display;
-    const status=local.state||row.item.request_state||(row.item.answerable===true?'open':'unavailable');
+    const status=local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
     let head=view?.head||[span('◑ '+(index+1)+'/'+flat().length+' · '+text(status,status),'g_blocked')];
     if(view){head=head.map((part,i)=>i===3?span(text(status,status),status==='applied'?'lvl_g':status==='open'?'g_blocked':'dim'):part);}
     if(focused)head=[span('› ','g_blocked'),...head];
     const body=view?.body||[[span(row.question.question||'?','loc_repo')]];
-    const options=status!=='open'?(row.item.reason?[[span(row.item.reason)]]:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1} `),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
+    // Spec E9 rule 54: a wait not answerable here shows the backend's whole words for its
+    // reason (never the machine reason); a send state of its own shows nothing more.
+    const options=status!=='open'?(status===unanswerable(row)&&view?.options?view.options:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1} `),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
     const marked=status==='open'&&choices(row).length?highlight(options,choosing(row)?cursorOf(row):-1,choosing(row)):options;
     const content=[...body,...marked,...(view?.source||[])];
     const tail=[];
@@ -146,7 +151,8 @@ module.exports=function({changed,answer,action,page}) {
     const row=current();if(!row)return;
     const local=state(row.item),id=row.question.id;
     if(busy){local.notice=text('busy','action pending · wait for receipt');changed();return;}
-    if(!active(row)){local.notice=stale?text('changed','question changed · Tab next'):row.item.reason||text(terminalState(row),'answer unavailable');changed();return;}
+    if(!active(row)){const word=terminalState(row)==='open'?unanswerable(row):terminalState(row);
+      local.notice=stale?text('changed','question changed · Tab next'):text(word,word);changed();return;}
     if(local.typing[id]){
       const draft=local.drafts[id]||'';
       if(!draft.trim()){local.notice=text('empty','empty answer');changed();return;}
