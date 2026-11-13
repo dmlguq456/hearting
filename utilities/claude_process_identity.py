@@ -639,6 +639,11 @@ def _bounded_json(path: Path, limit: int):
 
 
 _SUPERVISOR_JOB_LIMIT = 4096
+# Claude Code 2.1.323's jobs/ layout: one directory per job, named by eight
+# lowercase hex digits, beside its pins file. Anything else is a layout this
+# census does not know, so it proves no empty state.
+_SUPERVISOR_JOB_NAME = frozenset("0123456789abcdef")
+_SUPERVISOR_JOB_FILES = frozenset({"pins.json"})
 
 
 def _supervisor_lock_names(home: Path, pid: str, start: str) -> bool:
@@ -656,16 +661,19 @@ def _supervisor_sessions(home: Path, pid: str, start: str) -> set[str] | None:
     state reads ``stopped`` and no process or roster entry names it. Every
     session it starts or carries has ``jobs/<id>/state.json`` naming it before
     dispatch and through respawn, so all of those ids count as held while
-    ``daemon.lock`` names this pid and start. An unreadable, symlinked or
-    still-empty job record makes the result None.
+    ``daemon.lock`` names this pid and start.
+
+    An empty result is believed only in 2.1.323's own layout: ``jobs/`` exists
+    and holds nothing but job directories and its pins file, and
+    ``daemon/roster.json`` names this supervisor and only workers whose sessions
+    have a job. A missing ``jobs/``, an unknown entry, a symlink, an unreadable
+    job record or a roster worker without a job makes the result None.
     """
     if not _supervisor_lock_names(home, pid, start):
         return None
     jobs = home / "jobs"
     try:
         entries = list(os.scandir(jobs))
-    except FileNotFoundError:
-        return set()
     except OSError:
         return None
     if len(entries) > _SUPERVISOR_JOB_LIMIT or not _owner_directory(jobs):
@@ -676,14 +684,27 @@ def _supervisor_sessions(home: Path, pid: str, start: str) -> set[str] | None:
             if entry.is_symlink():
                 return None
             if not entry.is_dir(follow_symlinks=False):
-                continue
+                if entry.name in _SUPERVISOR_JOB_FILES and entry.is_file(follow_symlinks=False):
+                    continue
+                return None
         except OSError:
+            return None
+        if len(entry.name) != 8 or not set(entry.name) <= _SUPERVISOR_JOB_NAME:
             return None
         row = _bounded_json(Path(entry.path) / "state.json", 1 << 20)
         sid = row.get("sessionId") if isinstance(row, dict) else None
         if not isinstance(sid, str) or not sid:
             return None
         sessions.add(sid)
+    # Read after the jobs: a worker dispatched meanwhile names a session they lack.
+    roster = _bounded_json(home / "daemon" / "roster.json", 1 << 20)
+    workers = roster.get("workers") if isinstance(roster, dict) else None
+    if not isinstance(workers, dict) or str(roster.get("supervisorPid")) != pid:
+        return None
+    for worker in workers.values():
+        sid = worker.get("sessionId") if isinstance(worker, dict) else None
+        if not isinstance(sid, str) or sid not in sessions:
+            return None
     return sessions
 
 
@@ -691,15 +712,14 @@ def _spare_waiting(proc: Path, home: Path, pid: str, start: str, claim: str) -> 
     """A spare that has not taken a session: it still listens in its spare directory.
 
     Taking a session, a spare first removes its claim socket, then moves to the
-    session's directory and only then writes ``sessions/<pid>.json``. A session
-    still in flight to it (about a millisecond) is already held through the
-    supervisor's job records.
+    session's directory and only then writes ``sessions/<pid>.json``. The
+    evidence is read in the opposite order, the record's absence first and the
+    socket last, so all three held together when the socket was seen. A session
+    the supervisor connected before that moment already has its job record, which
+    the census reads again after this check when it closes.
     """
     own = _process_parent(proc)
-    try:
-        socket_info = os.lstat(claim)
-        cwd = os.readlink(proc / "cwd")
-    except OSError:
+    if own is None or own[1] != start:
         return False
     try:
         (home / "sessions" / (pid + ".json")).lstat()
@@ -709,8 +729,13 @@ def _spare_waiting(proc: Path, home: Path, pid: str, start: str, claim: str) -> 
         return False
     else:
         return False
-    return (own is not None and own[1] == start and stat.S_ISSOCK(socket_info.st_mode)
-            and socket_info.st_uid == os.getuid() and cwd == os.path.dirname(claim))
+    try:
+        cwd = os.readlink(proc / "cwd")
+        socket_info = os.lstat(claim)
+    except OSError:
+        return False
+    return (stat.S_ISSOCK(socket_info.st_mode) and socket_info.st_uid == os.getuid()
+            and cwd == os.path.dirname(claim))
 
 
 def _process_parent(proc: Path) -> tuple[str, str] | None:
@@ -744,9 +769,12 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
 
     Claude Code's own background processes follow the same rule. The supervisor
     (``claude daemon run``) whose ``daemon.lock`` names its pid and start holds
-    every session its ``jobs/`` records name, and nothing else. A ``--bg-spare``
-    under a ``--bg-pty-host`` of that supervisor holds nothing while its claim
-    socket and spare directory show it waiting, rechecked when the census closes.
+    every session its ``jobs/`` records name, and nothing else, while those jobs
+    and its roster keep the layout this census knows. A ``--bg-spare`` under a
+    ``--bg-pty-host`` of that supervisor holds nothing while its claim socket and
+    spare directory show it waiting. Both are checked again when the census
+    closes, the spares first and then the supervisor's jobs, which must be
+    unchanged.
     A ``--bg-pty-host`` adds no unresolved reason only while its direct child
     runs its exact command and is confirmed or such a waiting spare. Anything
     less exact stays incomplete; these rules only add holders, never remove one.
@@ -873,7 +901,8 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
     confirmed = {}
     wrappers = []
     deferred = {}
-    rechecks = []
+    spare_rechecks = []
+    supervisor_rechecks = []
     for pid in pids:
         if time.monotonic() - started > budget_seconds:
             reasons.add("census-budget-exhausted")
@@ -935,8 +964,8 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
             seen["holders"].update(carried)
             seen["claim"] = (None, frozenset(carried)) if carried else None
             seen["reasons"].discard("session-identity-unresolved")
-            rechecks.append(lambda home=home, pid=pid, start=start:
-                            _supervisor_lock_names(home, pid, start))
+            supervisor_rechecks.append(lambda home=home, pid=pid, start=start, carried=carried:
+                                       _supervisor_sessions(home, pid, start) == carried)
         commit(pid, seen)
 
     def pty_tail(argv):
@@ -964,8 +993,8 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                         and _spare_waiting(proc, home, pid, start, claim))
             if verified:
                 waiting[pid] = (seen["namespace"], start, argv)
-                rechecks.append(lambda proc=proc, home=home, pid=pid, start=start, claim=claim:
-                                _spare_waiting(proc, home, pid, start, claim))
+                spare_rechecks.append(lambda proc=proc, home=home, pid=pid, start=start, claim=claim:
+                                      _spare_waiting(proc, home, pid, start, claim))
         commit(pid, seen, repeats_child=verified)
 
     def explained_pty_host(pid, proc, start, argv, seen):
@@ -1028,8 +1057,10 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                         final_candidates[pid] = start
             if final_candidates != {pid: item[0] for pid, item in candidates.items()}:
                 reasons.add("process-inventory-changed")
-            elif not all(check() for check in rechecks):
-                # A supervisor lost its lock or a spare took a session meanwhile.
+            elif not all(check() for check in (*spare_rechecks, *supervisor_rechecks)):
+                # A spare took a session, or a supervisor lost its lock or changed its
+                # jobs meanwhile. The jobs are read after the spares: a session handed
+                # to a spare that still looked waiting has its job by then.
                 reasons.add("process-inventory-changed")
         except OSError:
             reasons.add("closing-inventory-unavailable")

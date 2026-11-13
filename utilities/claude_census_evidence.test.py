@@ -277,6 +277,23 @@ class BackgroundSupervisorTest(CensusFixture):
         if lock_pid is not False:
             (self.home / "daemon.lock").write_text(json.dumps(
                 {"pid": lock_pid or pid, "procStart": str(lock_start or pid), "version": "2.1.323"}))
+        # 2.1.323's layout: a roster naming the supervisor, and jobs/ holding one
+        # directory per job beside pins.json.
+        self.roster({}, supervisor=pid)
+        (self.home / "jobs").mkdir(exist_ok=True)
+        (self.home / "jobs" / "pins.json").write_text("{}")
+
+    def roster(self, workers, *, supervisor=10):
+        (self.home / "daemon").mkdir(exist_ok=True)
+        (self.home / "daemon" / "roster.json").write_text(json.dumps(
+            {"proto": 1, "supervisorPid": supervisor,
+             "workers": {short: {"pid": 99, "sessionId": sid} for short, sid in workers.items()}}))
+
+    def pinned_state(self, result, sid):
+        """What a recipient reads from this one census result."""
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.home)}), \
+                mock.patch.object(claude_process_identity, "claude_session_census", return_value=result):
+            return RecipientCensus().state("claude", sid)
 
     def job(self, short, sid, state="working"):
         (self.home / "jobs" / short).mkdir(parents=True)
@@ -438,6 +455,117 @@ class BackgroundSupervisorTest(CensusFixture):
         self.assertFalse(complete)
         self.assertEqual(reasons, {"process-inventory-changed"})
         self.assertIn(BG, holders)
+
+    def test_spare_taking_a_new_job_right_after_the_closing_check_read_its_directory(self):
+        # Review 1610: a job written after the jobs were read goes to the spare, and
+        # connect -> unlink -> chdir happens right after the closing check read the
+        # spare's directory, before its native record.
+        self.idle_supervisor()
+        self.history(OLD, BG, BG2)
+        claim = str(self.sockets / "aaaa1111.claim.sock")
+        cwd = self.root / "21" / "cwd"
+        real_identity, real_readlink = claude_process_identity._runtime_identity, os.readlink
+        identities, cwd_reads = [], []
+
+        def identity(proc):
+            if Path(proc).name == "21":
+                identities.append(proc)
+                if len(identities) == 2:  # the closing inventory
+                    self.job("eeee6666", BG2)
+            return real_identity(proc)
+
+        def readlink(path, *args, **kwargs):
+            value = real_readlink(path, *args, **kwargs)
+            if os.fspath(path) == str(cwd):
+                cwd_reads.append(value)
+                if len(cwd_reads) == 2:  # the closing check
+                    os.unlink(claim)
+                    os.unlink(cwd)
+                    os.symlink(str(self.home.parent), cwd)
+            return value
+
+        with mock.patch.object(claude_process_identity, "_runtime_identity", side_effect=identity), \
+                mock.patch.object(claude_process_identity.os, "readlink", side_effect=readlink):
+            result = self.census()
+        complete, holders, reasons = result
+        self.assertEqual(len(cwd_reads), 2)
+        self.assertFalse(complete, holders)
+        self.assertEqual(reasons, {"process-inventory-changed"})
+        self.assertNotEqual(self.pinned_state(result, BG2), "ended")
+
+    def test_session_handed_to_a_spare_after_the_jobs_were_read_keeps_the_census_incomplete(self):
+        # The supervisor connects to the claim socket 1-30 ms before the spare removes
+        # it, so the spare still looks waiting; the new job is caught by reading the
+        # jobs again after the spare's closing check.
+        self.idle_supervisor()
+        self.history(OLD, BG, BG2)
+        real = claude_process_identity._runtime_identity
+        calls = []
+
+        def identity(proc):
+            if Path(proc).name == "21":
+                calls.append(proc)
+                if len(calls) == 2:  # the closing inventory
+                    self.job("eeee6666", BG2)
+            return real(proc)
+
+        with mock.patch.object(claude_process_identity, "_runtime_identity", side_effect=identity):
+            result = self.census()
+        complete, holders, reasons = result
+        self.assertFalse(complete, holders)
+        self.assertEqual(reasons, {"process-inventory-changed"})
+        self.assertNotEqual(self.pinned_state(result, BG2), "ended")
+
+    def test_jobs_in_an_unknown_layout_keep_the_supervisor_unresolved(self):
+        # Review 1610: a lock naming the supervisor does not prove how this version
+        # stores its jobs. Only 2.1.323's own layout counts as a known empty state.
+        def no_jobs_directory():
+            shutil.rmtree(self.home / "jobs")
+
+        def flat_job_file():
+            (self.home / "jobs" / "job.json").write_text(json.dumps({"sessionId": BG2}))
+
+        def job_directory_named_otherwise():
+            self.job("job-0001", BG2)
+
+        def no_roster():
+            (self.home / "daemon" / "roster.json").unlink()
+
+        def roster_of_another_supervisor():
+            self.roster({}, supervisor=11)
+
+        def roster_worker_without_its_job():
+            self.roster({"eeee6666": BG2})
+
+        cases = [(no_jobs_directory, {"eeee6666": BG2}), (flat_job_file, {"eeee6666": BG2}),
+                 (no_jobs_directory, {}), (flat_job_file, {}), (job_directory_named_otherwise, {}),
+                 (no_roster, {}), (roster_of_another_supervisor, {}),
+                 (roster_worker_without_its_job, {})]
+        for make, workers in cases:
+            with self.subTest(make.__name__, roster=workers):
+                self.setUp()
+                self.supervisor()
+                self.spare(20, 21)
+                self.roster(workers)
+                self.history(OLD, BG2)
+                make()
+                complete, _holders, reasons = self.census()
+                self.assertFalse(complete)
+                self.assertIn("session-identity-unresolved", reasons)
+                self.assertNotEqual(self.state(BG2), "ended")
+                self.assertEqual(self.state(OLD), "unknown")
+
+    def test_known_layout_with_pins_and_a_roster_worker_is_complete(self):
+        self.supervisor()
+        self.spare(20, 21)
+        self.job("bbbb2222", BG)
+        self.roster({"bbbb2222": BG})
+        self.history(OLD, BG)
+        complete, holders, reasons = self.census()
+        self.assertTrue(complete, reasons)
+        self.assertEqual(holders, {BG})
+        self.assertEqual(self.state(BG), "alive")
+        self.assertEqual(self.state(OLD), "ended")
 
     def test_old_pty_host_over_a_confirmed_session_is_explained_by_its_child(self):
         tail = [NATIVE_EXE, "--session-id", LIVE, "--fork-session", "--resume",
