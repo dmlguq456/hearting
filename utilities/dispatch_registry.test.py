@@ -16,6 +16,8 @@ from dispatch_contract import (attempt_process_quiescence,  # noqa: E402
                                parse_registry_metadata,
                                post_exit_receipt_reason)
 from split_module_fixture import patch_split  # noqa: E402
+sys.path.insert(0,str(ROOT/"tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 CURRENT_ATTEMPT_CONTRACT=(
  "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
  "execution_surface=registered-headless,registered_worker=1,"
@@ -1083,7 +1085,7 @@ class RegistryTest(RegistryFixtureTestCase):
            "registered_worker=1,fallback_hop=same-harness-headless")
   owner="att-positive-child-owner"
   outer=subprocess.Popen(["sleep","60"],start_new_session=True)
-  tagged_attempt="att-tagged-survivor"
+  tagged_attempt=unique_attempt_id("att-tagged-survivor")
   tagged_env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=tagged_attempt)
   tagged=subprocess.Popen(["sleep","60"],start_new_session=True,env=tagged_env)
   observer=os.readlink("/proc/self/ns/pid")
@@ -1450,7 +1452,7 @@ class RegistryTest(RegistryFixtureTestCase):
   # See the fresh-heartbeat fixture's comment above for why the namespace is
   # declared explicitly extinct here.
   module=self.load_registry_module("manual_receiptless_live_tagged")
-  attempt="att-receiptless-live"
+  attempt=unique_attempt_id("att-receiptless-live")
   empty_log=self.base/"receiptless-live.codex.jsonl"
   empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
   child=subprocess.Popen(
@@ -2204,7 +2206,7 @@ class ArtifactProofReceiptSealTest(RegistryFixtureTestCase):
   self.artifact.write_text("final worker output\n")
   self.digest=hashlib.sha256(self.artifact.read_bytes()).hexdigest()
   self.observer=os.readlink("/proc/self/ns/pid")
-  self.attempt="att-artifact-proof-1"
+  self.attempt=unique_attempt_id("att-artifact-proof-1")
   self.log=self.base/"worker.codex.jsonl"
   self.write_log(f"artifact: {self.artifact}\nverdict: PASS\nblocker: none")
   self.write_heartbeat(phase="artifact",evidence=f"sha256:{self.digest}")
@@ -2544,7 +2546,7 @@ class DetachedResidueDrainReconcileTest(RegistryFixtureTestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
   self.base=Path(self.tmp.name);self.jobs=self.base/"jobs.log"
-  self.attempt="att-residue-reconcile"
+  self.attempt=unique_attempt_id("att-residue-reconcile")
   self.repo=self.base/"repo";self.repo.mkdir()
   root=self.repo/".agent_reports";root.mkdir()
   artifact=root/"slice.md";artifact.write_text("finished slice\n")

@@ -34,6 +34,16 @@ def load(name, path):
 
 C = load('input_codex_supervisor', ROOT / 'utilities/codex-app-server-supervisor.py')
 FIXTURE = load('input_supervisor_fixture', ROOT / 'utilities/codex_app_server_supervisor.test.py')
+sys.path.insert(0, str(ROOT / 'tools'))
+from fixture_processes import unique_attempt_id  # noqa: E402
+
+# The supervisor fixture's fixed owner id, made unique to this run: this suite starts real processes
+# that carry it, and route_parent_close signals every process on the host that carries an id.
+ATTEMPT = unique_attempt_id(FIXTURE.PARENT)
+
+
+def owner_row(lease):
+    return FIXTURE.owner_row(lease).replace('attempt_id=' + FIXTURE.PARENT, 'attempt_id=' + ATTEMPT)
 
 
 class OwnerInputTest(unittest.TestCase):
@@ -42,9 +52,9 @@ class OwnerInputTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.jobs = self.root / 'jobs.log'
-        self.attempt = FIXTURE.PARENT
+        self.attempt = ATTEMPT
         self.lease = supervisor_lease_path(self.jobs, self.attempt)
-        self.jobs.write_text(FIXTURE.owner_row(self.lease))
+        self.jobs.write_text(owner_row(self.lease))
         self.held = hold_supervisor_lease(self.jobs, self.attempt, self.lease)
         self.held.__enter__()
         self.addCleanup(self.held.__exit__, None, None, None)
@@ -130,12 +140,12 @@ class OwnerInputTest(unittest.TestCase):
                 jobs = self.root / harness / 'jobs.log'
                 jobs.parent.mkdir()
                 lease = supervisor_lease_path(jobs, self.attempt)
-                jobs.write_text(FIXTURE.owner_row(lease))
+                jobs.write_text(owner_row(lease))
                 I.initialize_owner_input(jobs, self.attempt, 'codex-active-turn')
                 with hold_supervisor_lease(jobs, self.attempt, lease):
                     I.OwnerInput(jobs, self.attempt, 'thread-1', 'codex-active-turn', lambda _e: None)
                 # The same bound channel, now on a row of another harness.
-                jobs.write_text(FIXTURE.owner_row(lease).replace(
+                jobs.write_text(owner_row(lease).replace(
                     'harness=codex', 'harness=' + harness).replace(
                     'attempt_id=' + self.attempt,
                     'launch_claimed=1,launch_started=1,launch_fence=registry-v1,'
@@ -285,7 +295,7 @@ class OwnerInputTest(unittest.TestCase):
         child_root = self.root/'dead-consumer'; child_root.mkdir()
         jobs = child_root/'jobs.log'
         lease = supervisor_lease_path(jobs, self.attempt)
-        jobs.write_text(FIXTURE.owner_row(lease).rstrip() +
+        jobs.write_text(owner_row(lease).rstrip() +
             ",parent_sid=0100000c-0000-7000-8000-000000000014,"
             "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
         script = child_root/'consumer.py'
@@ -333,7 +343,7 @@ with hold_supervisor_lease(jobs,attempt,supervisor_lease_path(jobs,attempt)):
         child_root = self.root/'release-move'; (child_root/'old/utilities').mkdir(parents=True)
         jobs = child_root/'jobs.log'
         lease = supervisor_lease_path(jobs, self.attempt)
-        jobs.write_text(FIXTURE.owner_row(lease))
+        jobs.write_text(owner_row(lease))
         I.initialize_owner_input(jobs, self.attempt, 'codex-active-turn')
         governor = child_root/'old/utilities/model-worker-governor.py'
         governor.write_text("""import subprocess,sys,time
@@ -550,9 +560,9 @@ class RegisteredOwnerInputTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.jobs = self.root / 'jobs.log'
-        self.attempt = FIXTURE.PARENT
+        self.attempt = ATTEMPT
         self.lease = supervisor_lease_path(self.jobs, self.attempt)
-        self.jobs.write_text(FIXTURE.owner_row(self.lease))
+        self.jobs.write_text(owner_row(self.lease))
         self.events = []
 
     def close_row(self):
