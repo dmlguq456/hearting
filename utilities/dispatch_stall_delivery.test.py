@@ -373,6 +373,48 @@ class StallDeliveryLoopTest(unittest.TestCase):
         self.assertEqual(first_pass, 1)              # in a pass one observation serves both questions
         self.assertEqual(both_passes, 2)             # the next pass observes again
 
+    def test_a_carried_row_across_two_passes_sees_the_stall_threshold_the_clock_crossed(self):
+        """A warm process carries one row object from pass to pass. What the first pass observed
+        (a clock before the stall threshold) is not what the second pass sees once the clock has
+        crossed it: the second pass observes again, from its own clock, exactly as a fresh call does."""
+        from fleet import pass_scope
+        _metadata, _carrier, record, _duty = self._materialize_stall("claude")
+        env = {"XDG_STATE_HOME": str(self.root / "xdg-state"),
+               "AGENT_PEER_LEDGER_ROOT": str(self.root / "peer-state")}
+        receipt = record["receipt"]
+        window = 300.0                      # update_attempt_stall_observation's progress window
+        before_threshold, past_threshold = 100.0 + 10.0, 100.0 + 2 * window + 100.0
+        with mock.patch.dict(os.environ, env), mock.patch.object(supervision, "_attempt_human_wait", return_value=False):
+            rows = supervision._rows(Path(receipt["job_registry"]),
+                                     set(receipt["monitored_attempt_ids"]) | {receipt["owner_attempt_id"]})
+            carried = rows[self.attempt]    # the one row object both passes are handed
+            seen = []
+            real = supervision.update_attempt_stall_observation
+
+            def observe(*args, **kwargs):
+                seen.append(real(*args, **kwargs))
+                return seen[-1]
+
+            with mock.patch.object(supervision, "_rows", return_value=rows), \
+                 mock.patch.object(supervision, "update_attempt_stall_observation", side_effect=observe):
+                with mock.patch.object(supervision.time, "time", return_value=before_threshold):
+                    with pass_scope.collection_pass():
+                        first = supervision._stall_observation_for_notice(self.jobs, self.attempt, carried)
+                        self.assertTrue(supervision.notice_is_current(record))
+                with mock.patch.object(supervision.time, "time", return_value=past_threshold):
+                    with pass_scope.collection_pass():
+                        second = supervision._stall_observation_for_notice(self.jobs, self.attempt, carried)
+                        still_current = supervision.notice_is_current(record)
+            fresh = real(self.jobs, self.attempt, now=past_threshold, persist=False, row=carried)
+        self.assertEqual(first["observed_at"], before_threshold)
+        self.assertEqual(first["quiet_windows"], 0)
+        self.assertEqual(fresh["quiet_windows"], 2)               # the threshold the clock crossed
+        self.assertEqual(second, fresh)                           # computed again, from the second clock
+        self.assertEqual(second["observed_at"], past_threshold)
+        self.assertEqual(second["quiet_windows"], 2)
+        self.assertTrue(still_current)
+        self.assertEqual(seen[-1]["observed_at"], past_threshold)   # notice_is_current's own question too
+
     def test_normal_observer_reentry_discovers_sidecarless_open_attempt_once(self):
         metadata, carrier = self._row("codex")
         before = self.jobs.read_bytes()
