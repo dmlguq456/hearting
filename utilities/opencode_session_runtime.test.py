@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -142,6 +143,160 @@ class NativeSessionTest(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(self.events))
         self.assertNotIn("answer", json.dumps(self.events))
         self.assertEqual(result["result"], "answer")
+
+    def native_db(self, *rows):
+        """The native DB OpenCode v2 writes under XDG_DATA_HOME; only the read columns."""
+        db = self.root / "data" / "opencode" / "opencode.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(db)
+        with connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT,"
+                " type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)")
+            for seq, (mid, session, kind, data) in enumerate(rows, 1):
+                connection.execute("INSERT INTO session_message VALUES(?,?,?,?,?,?,?)",
+                                   (mid, session, kind, seq, seq, seq,
+                                    data if isinstance(data, str) else json.dumps(data)))
+        connection.close()
+
+    def test_v2_final_step_the_stream_never_reports_is_filled_from_its_native_row(self):
+        # Real v2.0.32 (RV-PR1584 probe): a turn's last model request emits only its
+        # `text`, never `step_finish`; its counters live in the native row that text
+        # names. The turn's usage and the context gauge both missed that last step.
+        first = {"input": 4000, "output": 250, "reasoning": 50, "cache": {"read": 8000, "write": 0}}
+        final = {"input": 3000, "output": 100, "reasoning": 0, "cache": {"read": 15000, "write": 0}}
+        self.native_db(
+            ("msg_user", "ses_native", "user", {"text": "question"}),
+            ("msg_a", "ses_native", "assistant", {"time": {"created": 1, "completed": 2},
+                                                   "finish": "tool-calls", "tokens": first}),
+            ("msg_final", "ses_native", "assistant", {"time": {"created": 3, "completed": 4},
+                                                       "finish": "stop", "tokens": final,
+                                                       "content": [{"type": "text", "text": "answer"}]}))
+        self.program("event('step_start', part={'messageID':'msg_a'})\n"
+                     "event('tool_use', part={'messageID':'msg_a','tool':'read','state':{'status':'completed'}})\n"
+                     f"event('step_finish', part={{'messageID':'msg_a','reason':'tool-calls','tokens':{first!r}}})\n"
+                     "event('text', part={'messageID':'msg_final','text':'answer'})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["usage"], {"input_tokens": 7000, "output_tokens": 400,
+                                           "cache_read_input_tokens": 23000,
+                                           "cache_creation_input_tokens": 0})
+        steps = [event["tokens"] for event in self.events
+                 if event.get("type") == "dispatch.supervisor.step_tokens"]
+        self.assertEqual(steps, [first, final])     # the gauge's newest step is the last one
+        self.assertNotIn("answer", json.dumps(self.events))
+        # The completion summary's session tokens read the turn rows the supervisor writes.
+        import attempt_view
+        log = self.root / "owner.jsonl"
+        rows = [{"type": "dispatch.supervisor.turn-started", "turn_ordinal": 1}, *self.events,
+                fixture.supervisor.turn_token_usage(self.args, 1, "resume-process", result), result]
+        log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.assertEqual(attempt_view._summed_session_tokens(log, "opencode"), (30400, True))
+
+    def test_v2_turn_with_no_step_events_takes_its_usage_from_the_native_row(self):
+        # A tool-free answer emits a single `text`: before, no usage at all, so the
+        # owner's session total stayed a lower bound.
+        final = {"input": 1000, "output": 80, "reasoning": 0, "cache": {"read": 18000, "write": 0}}
+        self.native_db(("msg_only", "ses_native", "assistant",
+                        {"time": {"created": 1, "completed": 2}, "finish": "stop", "tokens": final}))
+        self.program("event('text', part={'messageID':'msg_only','text':'answer'})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["usage"], {"input_tokens": 1000, "output_tokens": 80,
+                                           "cache_read_input_tokens": 18000,
+                                           "cache_creation_input_tokens": 0})
+        self.assertEqual([event["tokens"] for event in self.events
+                          if event.get("type") == "dispatch.supervisor.step_tokens"], [final])
+
+    def test_native_rows_never_count_twice_or_borrow_a_foreign_or_unfinished_step(self):
+        counted = {"input": 100, "output": 20, "reasoning": 0, "cache": {"read": 1000, "write": 0}}
+        self.native_db(
+            ("msg_a", "ses_native", "assistant", {"time": {"completed": 2}, "tokens": counted}),
+            ("msg_open", "ses_native", "assistant", {"time": {"created": 3},
+                                                      "tokens": {"input": 9, "output": 9}}),
+            ("msg_foreign", "ses_other", "assistant", {"time": {"completed": 2},
+                                                        "tokens": {"input": 7777}}),
+            ("msg_user", "ses_native", "user", {"time": {"completed": 2}, "tokens": {"input": 5555}}))
+        self.program(f"event('step_finish', part={{'messageID':'msg_a','reason':'tool-calls','tokens':{counted!r}}})\n"
+                     "event('tool_use', part={'messageID':'msg_foreign','tool':'read','state':{}})\n"
+                     "event('tool_use', part={'messageID':'msg_user','tool':'read','state':{}})\n"
+                     "event('text', part={'messageID':'msg_open','text':'answer'})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, _code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        # Nothing borrowed; and with the turn's last step unfinished its sum is a part,
+        # so the turn reports no usage (RV-PR1591).
+        self.assertNotIn("usage", result)
+        self.assertEqual([e["tokens"] for e in self.events
+                          if e.get("type") == "dispatch.supervisor.step_tokens"], [counted])
+        # V1 reports every step itself; its turn stays exactly the stream's.
+        self.events.clear()
+        self.native_db(("msg_v1", "ses_native", "assistant", {"time": {"completed": 2},
+                                                              "tokens": {"input": 4444}}))
+        self.program("event('step_start', part={'messageID':'msg_v1'})\n"
+                     "event('text', part={'messageID':'msg_v1','text':'answer'})\n"
+                     "event('step_finish', part={'reason':'stop'})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=False):
+            result, _code = runtime.run_turn(self.args, "again", emit=self.events.append)
+        self.assertNotIn("usage", result)
+        self.assertFalse(any(e.get("type") == "dispatch.supervisor.step_tokens" for e in self.events))
+
+    def test_v2_unread_last_step_leaves_the_session_total_unknown_not_a_complete_part(self):
+        # RV-PR1591: the earlier steps streamed their counters, but the last step's
+        # native row is missing, broken, unfinished or lacks counters. The turn's sum
+        # is then a part, and must not read as a complete session total.
+        first = {"input": 100, "output": 20, "reasoning": 0, "cache": {"read": 1000, "write": 0}}
+        final = {"input": 1000, "output": 80, "reasoning": 0, "cache": {"read": 18000, "write": 0}}
+        done = {"finish": "stop", "time": {"created": 3, "completed": 4}}
+        cases = {"row-missing": None, "json-broken": "{broken", "tokens-missing": dict(done),
+                 "unfinished": {"time": {"created": 3}, "tokens": final},
+                 "counters-invalid": dict(done, tokens={"input": -1, "output": 80,
+                                                        "cache": {"read": "bad", "write": 0}}),
+                 "complete": dict(done, tokens=final)}
+        # The final text twice: a step is still counted once.
+        self.program(f"event('step_finish', part={{'messageID':'msg_a','reason':'tool-calls','tokens':{first!r}}})\n"
+                     "event('text', part={'messageID':'msg_final','text':'answer'})\n"
+                     "event('text', part={'messageID':'msg_final','text':'answer'})\n")
+        import attempt_view
+        db = self.root / "data" / "opencode" / "opencode.db"
+        earlier = fixture.supervisor.turn_token_usage(
+            self.args, 1, "resume-process", {"usage": {"input_tokens": 500}})
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                db.unlink(missing_ok=True)
+                rows = [("msg_a", "ses_native", "assistant", dict(done, tokens=first))]
+                if data is not None:
+                    rows.append(("msg_final", "ses_native", "assistant", data))
+                self.native_db(*rows)
+                self.events.clear()
+                with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+                    result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
+                self.assertEqual(code, 0)
+                steps = [event["tokens"] for event in self.events
+                         if event.get("type") == "dispatch.supervisor.step_tokens"]
+                turn = [*self.events, fixture.supervisor.turn_token_usage(
+                    self.args, 2, "resume-process", result), result]
+                turn = [row for row in turn if row]
+                only, second = self.root / f"{name}-1.jsonl", self.root / f"{name}-2.jsonl"
+                only.write_text("".join(json.dumps(row) + "\n" for row in [
+                    {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 1}, *turn]))
+                second.write_text("".join(json.dumps(row) + "\n" for row in [
+                    {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 1}, earlier,
+                    {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 2}, *turn]))
+                if name == "complete":
+                    self.assertEqual(result["usage"], {"input_tokens": 1100, "output_tokens": 100,
+                                                       "cache_read_input_tokens": 19000,
+                                                       "cache_creation_input_tokens": 0})
+                    self.assertEqual(steps, [first, final])
+                    self.assertEqual(attempt_view._summed_session_tokens(only, "opencode"), (20200, True))
+                    self.assertEqual(attempt_view._summed_session_tokens(second, "opencode"), (20700, True))
+                else:
+                    self.assertNotIn("usage", result)
+                    self.assertEqual(steps, [first])     # the context gauge keeps the logged step
+                    # Unknown alone; after a known turn, that turn is a lower bound.
+                    self.assertEqual(attempt_view._summed_session_tokens(only, "opencode"), (None, False))
+                    self.assertEqual(attempt_view._summed_session_tokens(second, "opencode"), (500, False))
 
     def test_v2_identityless_provider_rejection_is_preserved_without_secret(self):
         self.program("print(json.dumps({'type':'error','sessionID':'','error':{"
