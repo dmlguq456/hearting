@@ -318,21 +318,24 @@ def _iso(moment: float) -> str:
     return datetime.fromtimestamp(moment, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _padded_row(stamp: str, status: str, slug: str, metadata: dict, size: int) -> str:
-    """One six-column registry row of exactly ``size`` bytes (UTF-8, newline included)."""
+def _padded_row(stamp: str, status: str, slug: str, metadata: dict, size: int,
+                pad_key: str = "note") -> str:
+    """One six-column registry row of exactly ``size`` bytes (UTF-8, newline included).
+
+    The free-text pad is ``note=`` unless the row carries a real ``note`` (``pad_key``)."""
     head = _attempt_row(0, slug, metadata, status=status).split("\t", 1)[1]
     row = f"{stamp}\t{head}"
-    pad = size - len(row.encode("utf-8")) - len(",note=")
+    pad = size - len(row.encode("utf-8")) - len("," + pad_key + "=")
     if pad < 0:
         raise ValueError(f"registry row exceeds {size} bytes")
-    return row[:-1] + ",note=" + "x" * pad + "\n"
+    return row[:-1] + "," + pad_key + "=" + "x" * pad + "\n"
 
 
 def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
                     target_attempts: list[str], ledgers: int, now: float,
                     depth1_open_every: int = DEPTH1_OPEN_EVERY,
                     min_bytes: int = MIN_JOBS_BYTES, open_rows: list[str] | None = None,
-                    history_style: str = "filler") -> dict:
+                    history_style: str = "filler", shape: "_HistoryShape | None" = None) -> dict:
     """The jobs registry: target rows, unrelated depth-1 owner rows, then filler.
 
     The depth-1 rows carry every ``REGISTRY_DEPTH1_START`` stamp of
@@ -387,14 +390,28 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
             stamp = _iso(now - (300 + index if status == "open" else 86_400 + index))
             handle.write(_padded_row(stamp, status, f"perf-owner-{index:05d}", metadata, row_bytes))
             written += 1
-        # Open-route attempt rows (e2e fixtures only; the default has none).
-        for raw in open_rows or ():
-            handle.write(raw)
-            written += 1
-        history_total = max(0, rows - written)
+        # Open-route attempt rows (e2e fixtures only; the default has none). A shaped history
+        # keeps them where the live registry has its open rows: in the later part of the file
+        # (live 2026-11-13: segments 8-14 of 15), so one in-place rewrite of an open row
+        # cannot leave a long unchanged prefix behind.
+        pending_open = list(open_rows or ())
+        open_at = None
+        if shape is not None:
+            open_at = max(0, (max(0, rows - written - len(pending_open)) * 7) // 10)
+        else:
+            for raw in pending_open:
+                handle.write(raw)
+                written += 1
+            pending_open = []
+        history_total = max(0, rows - written - len(pending_open))
         for index in range(history_total):
             if history_style == "history":
-                handle.write(_history_row(index, row_bytes, now, history_total))
+                if pending_open and index == open_at:
+                    for raw in pending_open:
+                        handle.write(raw)
+                        written += 1
+                    pending_open = []
+                handle.write(_history_row(index, row_bytes, now, history_total, shape))
                 written += 1
                 continue
             metadata = {
@@ -408,6 +425,9 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
             }
             handle.write(_padded_row(str(1000 + index), "running", "perf-filler",
                                      metadata, row_bytes))
+            written += 1
+        for raw in pending_open:  # a history too short to reach the placement row
+            handle.write(raw)
             written += 1
         # Top up to the byte floor when the row target alone is smaller.
         while handle.tell() < min_bytes:
@@ -426,8 +446,26 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
             "depth1_rows": depth1, "depth1_open": depth1_open}
 
 
-HISTORY_ROWS_PER_ATTEMPT = 3  # live 2026-11-12: 7,738 rows over ~2,800 attempts
+HISTORY_ROWS_PER_ATTEMPT = 1  # live 2026-11-13: 7,684 rows, 7,684 attempts (one row each)
 HISTORY_EXTRA_KEYS = 110      # live attempt rows carry ~130 key=value fields
+
+# Live 2026-11-13 shares of the history rows (counted read-only on the operating registry):
+# 6,775 of 7,684 rows carry a route triple over 1,308 distinct routes, 1,504 are owner
+# attempts, 133 of them end BLOCKED with no successor (their routes stay open), 672 are
+# dead terminal owners. They are fractions of the history, so a doubled history doubles each.
+HISTORY_ROUTED_IN_25 = 22        # 88% of the rows carry a route triple
+HISTORY_ROUTE_ROWS = (17, 88)    # distinct routes = 17 per 88 routed rows (17% of the rows)
+HISTORY_OWNER_SHARE = 0.223      # of the routed rows (19.6% of all rows)
+HISTORY_DEAD_OWNER_SHARE = 0.44  # of the owner rows that are not BLOCKED (8.7% of all rows)
+HISTORY_BLOCKED_ROUTE_MOD = 10   # every 10th route ends in a BLOCKED owner (1.7% of all rows)
+HISTORY_OPEN_ROUTE_MOD = 40      # and one in 40 other routes has not closed
+HISTORY_ANSWERED_BLOCKED = 2     # BLOCKED owners that hold a kept, unconsumed answer
+
+
+def _unit(index: int, salt: int = 0) -> float:
+    """A fixed pseudo-random value in [0, 1) per (row, salt): the same fixture every build."""
+    digest = hashlib.blake2b(f"{salt}:{index}".encode(), digest_size=4).digest()
+    return int.from_bytes(digest, "big") / 4294967296
 
 
 def _history_metadata(attempt: str, index: int) -> dict:
@@ -443,27 +481,216 @@ def _history_metadata(attempt: str, index: int) -> dict:
     return metadata
 
 
-def _history_row(index: int, row_bytes: int, now: float, total: int | None = None) -> str:
-    """One finished-attempt row: ~3 rows per attempt (open, progress, done), rich metadata.
+def _routed_ordinal(index: int) -> int:
+    """How many rows before ``index`` carry a route triple."""
+    return (index // 25) * HISTORY_ROUTED_IN_25 + min(index % 25, HISTORY_ROUTED_IN_25)
+
+
+def _route_number(ordinal: int) -> int:
+    return ordinal * HISTORY_ROUTE_ROWS[0] // HISTORY_ROUTE_ROWS[1]
+
+
+def _history_status(shape_kind: str | None, attempt_index: int, phase: int) -> str:
+    return ("open", "open", "done")[phase + 3 - HISTORY_ROWS_PER_ATTEMPT]
+
+
+_COMPILE_REAL_ROUTE = r"""
+import importlib.util, json, os, sys, tempfile
+from pathlib import Path
+repo = Path(sys.argv[1])
+tmp = tempfile.mkdtemp(prefix="route-compile-")
+(Path(tmp) / "core").mkdir()
+(Path(tmp) / "core" / "CORE.md").write_text("fixture\n")
+os.environ.update(AGENT_HOME=tmp, XDG_STATE_HOME=tmp + "/state", AGENT_DISPATCH_JOBS=tmp + "/state/jobs.log")
+Path(tmp, "state").mkdir()
+Path(tmp, "state", "jobs.log").write_text("")
+sys.path.insert(0, str(repo / "utilities"))
+spec = importlib.util.spec_from_file_location("route", repo / "utilities" / "capability-route.py")
+route = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(route)
+gate = {"spec_read": {"satisfied": True, "source": "canonical-prd-sha256"}, "drift_verdict": "within-spec",
+        "workflow_mode": "tracked", "artifact_guard": {"satisfied": True, "source": "conductor-prechecked"}}
+nested = {"parent_harness": "codex", "parent_transport": "headless",
+          "parent_sandbox": route.WRAPPER_PARENT_SANDBOXES["codex"][0], "child_harness": "codex",
+          "launch_authority": "conductor", "status": "supported", "probe_source": "fixture-probe",
+          "probe_time": "2026-07-16T00:00:00Z", "failure_class": "", "checked_worktree": str(route.ROOT.resolve()),
+          "failure_scope": "none", "codex_command": "ok", "retry_on_isolated_worktree": 0}
+evidence = {"tuples": [nested], "native_subagent": [{
+    "harness": "codex", "transport": "headless", "execution_surface": "codex-native-subagent",
+    "registered_worker": False, "status": "supported", "check_source": "fixture-native-check"}]}
+compiled = route.compile_route(
+    capability="autopilot-code", capability_mode="dev", requested_intensity="standard", cwd=route.ROOT,
+    artifact_root=route.ROOT, predicates=[], signals=[], transport="headless", inline_reason=None,
+    tracking="tracked", tracked_gate_evidence=gate, dispatch_evidence=evidence)
+import capability_route_verify
+capability_route_verify.verify_route(dict(compiled), str(route.ROOT))
+json.dump(compiled, sys.stdout, sort_keys=True)
+"""
+
+
+def compile_real_route(repo: Path | None = None) -> tuple[dict | None, str]:
+    """One route the compiler of this tree really emits, and ``verify_route`` accepts.
+
+    Run in a child with its own AGENT_HOME so nothing of the caller's environment leaks in.
+    Returns ``(route, "")`` or ``(None, reason)``: a route that cannot verify makes the
+    owner-input decision stop earlier than the live one, and the caller reports that.
+    """
+    import subprocess
+    repo = Path(repo) if repo is not None else Path(__file__).resolve().parents[1]
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": tempfile.gettempdir(), "LANG": "C.UTF-8",
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    try:
+        done = subprocess.run([sys.executable, "-I", "-c", _COMPILE_REAL_ROUTE, str(repo)],
+                              capture_output=True, text=True, env=env, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"compile-failed:{type(exc).__name__}"
+    if done.returncode != 0:
+        return None, "compile-failed:" + (done.stderr.strip().splitlines() or ["?"])[-1][:160]
+    try:
+        return json.loads(done.stdout), ""
+    except ValueError:
+        return None, "compile-output-unreadable"
+
+
+class _HistoryShape:
+    """Route, owner, BLOCKED-owner and dead-owner shape of the e2e history (live ratios).
+
+    Every route a history row names gets a real sealed record (the reader recomputes hash
+    and id), a workflow journal and, for a closed route, a ``.outcome.json`` sidecar. A BLOCKED
+    owner's route is a clone of one really compiled route (``slug`` changed, hash and id
+    recomputed) so the owner-input decision runs ``verify_route`` to its end. Files are written
+    on the first row that names the route.
+    """
+
+    def __init__(self, base: Path, dispatch_root: Path, *, now: float, real_route: dict | None):
+        self.routes_dir = _private_dir(base / "routes" / "hist")
+        self.workflow_root = _private_dir(dispatch_root / "workflow")
+        self.now = now
+        self.real_route = real_route
+        self.written: dict[int, dict] = {}
+        self.counts = {"rows": 0, "routed": 0, "owner": 0, "blocked": 0, "dead_owner": 0,
+                       "routes": 0, "routes_open": 0, "routes_real": 0}
+        self.blocked: list[dict] = []   # [{attempt_id, route_id, route_file, jobs_attempt}]
+
+    def route_record(self, number: int, *, blocked: bool) -> dict:
+        slug = f"hist-route-{number:05d}"
+        if blocked and self.real_route is not None:
+            record = dict(self.real_route)
+            record["slug"], record["slug_truncated"] = slug, False
+            identity = _route_identity()
+            digest = identity.route_hash(record)
+            record["route_hash"], record["route_id"] = digest, identity.route_id_from_hash(digest)
+            self.counts["routes_real"] += 1
+            return record
+        return e2e_route_record(number, slug=slug)
+
+    def ensure_route(self, number: int) -> dict:
+        if number in self.written:
+            return self.written[number]
+        blocked = number % HISTORY_BLOCKED_ROUTE_MOD == 3
+        closed = not blocked and number % HISTORY_OPEN_ROUTE_MOD != 7
+        record = self.route_record(number, blocked=blocked)
+        path = self.routes_dir / f"{record['route_id']}.json"
+        info = {"route_id": record["route_id"], "route_hash": record["route_hash"],
+                "route_file": str(path), "blocked": blocked, "closed": closed}
+        self.written[number] = info
+        self.counts["routes"] += 1
+        _write(path, json.dumps(record, sort_keys=True) + "\n")
+        at = _iso(self.now - 90_000 - number)
+        entry = {"route_id": record["route_id"], "route_hash": record["route_hash"],
+                 "workflow_state": "COMPLETE" if closed else "RUNNING", "at": at}
+        _write(self.workflow_root / record["route_id"] / "journal.jsonl",
+               json.dumps(entry, sort_keys=True) + "\n")
+        if closed:
+            _write(path.with_name(path.stem + ".outcome.json"), json.dumps({
+                "terminal_gate_proven": True, "closed_at": at.replace("Z", "+00:00"),
+                "route_id": record["route_id"], "route_hash": record["route_hash"]}) + "\n")
+        else:
+            self.counts["routes_open"] += 1
+        return info
+
+    def shape(self, index: int, attempt: str, status: str, metadata: dict, age: float,
+              total: int | None) -> tuple[str, dict, str]:
+        """``(status, metadata, pad_key)`` of one history row."""
+        self.counts["rows"] += 1
+        recent = total is not None and (total - 1 - index) < HISTORY_RECENT_24H_ROWS
+        for key in ("route_id", "route_hash", "route_node"):
+            metadata.pop(key, None)
+        if recent or index % 25 >= HISTORY_ROUTED_IN_25:
+            return status, metadata, "note"
+        ordinal = _routed_ordinal(index)
+        number = _route_number(ordinal)
+        last_in_route = _route_number(ordinal + 1) != number
+        route = self.ensure_route(number)
+        self.counts["routed"] += 1
+        metadata.update(route_id=route["route_id"], route_hash=route["route_hash"],
+                        route_file=route["route_file"], route_node="execute")
+        blocked = route["blocked"] and last_in_route
+        owner = blocked or _unit(index) < HISTORY_OWNER_SHARE
+        if not owner:
+            return status, metadata, "note"
+        self.counts["owner"] += 1
+        metadata.update(worker_type="owner", dispatch_depth="1", launch_claimed="1",
+                        launch_started="1", owner_route_id=route["route_id"],
+                        owner_route_hash=route["route_hash"], owner_route_file=route["route_file"])
+        if blocked:
+            self.counts["blocked"] += 1
+            metadata["note"] = "dead-worker-blocked"
+            self.blocked.append({"attempt_id": attempt, "route_id": route["route_id"],
+                                 "route_file": route["route_file"], "index": index})
+            return "done", metadata, "pad"
+        if _unit(index, 7) < HISTORY_DEAD_OWNER_SHARE:
+            self.counts["dead_owner"] += 1
+            metadata["note"] = "dead-worker-exit"
+            metadata["failure_class"] = "runtime"
+            return "done", metadata, "pad"
+        return status, metadata, "note"
+
+
+def _shape_finish(self, jobs: Path, real_route_reason: str) -> dict:
+    """Kept answers for the first BLOCKED owners, and the counts the report records."""
+    answered = []
+    for item in self.blocked[:HISTORY_ANSWERED_BLOCKED]:
+        path = Path(jobs).parent / "supervisor-state" / f"{item['attempt_id']}.input.json"
+        _write(path, json.dumps({
+            "schema_version": 1, "attempt_id": item["attempt_id"],
+            "requests": [{"id": "req-fixture-1", "digest": "sha256:fixture", "state": "retained",
+                          "text": "kept answer"}]}, sort_keys=True) + "\n")
+        answered.append(item["attempt_id"])
+    return {**self.counts, "answered_blocked": answered,
+            "blocked_attempts": [item["attempt_id"] for item in self.blocked],
+            "real_route_verified": self.real_route is not None, "real_route_reason": real_route_reason}
+
+
+_HistoryShape.finish = _shape_finish
+
+
+def _history_row(index: int, row_bytes: int, now: float, total: int | None = None,
+                 shape: "_HistoryShape | None" = None) -> str:
+    """One finished-attempt row: one row per attempt, rich metadata.
 
     ``total`` is the history row count: when it cuts the last attempt short, that attempt's
     rows are all ``done`` so history never holds an attempt that looks still open.
+    With ``shape`` the row also carries the live route/owner/BLOCKED/dead-owner share.
     """
     attempt_index, phase = divmod(index, HISTORY_ROWS_PER_ATTEMPT)
     attempt = f"att-hist-{attempt_index:06d}"
-    status = ("open", "open", "done")[phase]
+    status = _history_status(None, attempt_index, phase)
     if total is not None and attempt_index == (total - 1) // HISTORY_ROWS_PER_ATTEMPT:
         status = "done"
     age = _history_age_s(index, total)
     metadata = _history_metadata(attempt, attempt_index)
-    if age < 86_400:
+    pad_key = "note"
+    if shape is not None:
+        status, metadata, pad_key = shape.shape(index, attempt, status, metadata, age, total)
+    elif age < 86_400:
         # A first-screen row bound to a route needs that route's record (``required-details``
         # stays partial without it and Fleet never leaves loading), so the recently finished
         # attempts are standalone dispatches here: they exercise the afterglow and stall
         # windows, not the route-detail path (which the open routes cover).
         for key in ("route_id", "route_hash", "route_node"):
             metadata.pop(key, None)
-    return _padded_row(_iso(now - age), status, f"hist-{attempt_index:06d}", metadata, row_bytes)
+    return _padded_row(_iso(now - age), status, f"hist-{attempt_index:06d}", metadata, row_bytes, pad_key)
 
 
 # Live 2026-11-12: of ~7,740 registry rows, ~61 are younger than 6 h and ~161 younger than 24 h
@@ -552,6 +779,7 @@ def e2e_open_row(index: int, *, jobs_log: Path, route_file: Path, session_id: st
         "route_id": e2e_route_id(index), "route_hash": e2e_route_hash(index),
         "route_node": stage, "attempt_id": f"att-e2e-owner-{index:05d}",
         "launch_claimed": "1", "launch_started": "1",
+        "parent_completion_delivery": "claude-parent-runtime",
     }
     if pid:
         metadata["pid"] = str(pid)
@@ -652,6 +880,62 @@ def _write_transcript(path: Path, rows: int) -> None:
     os.chmod(path, 0o600)
 
 
+STALL_NOTICES = 6  # live 2026-11-13 cold profile: six stall notices checked per collection pass
+
+
+def _write_stall_shape(head: dict, jobs: Path, *, count: int = STALL_NOTICES) -> dict:
+    """A watchdog record and a stall delivery for the first ``count`` open route attempts.
+
+    Written by the real writers (``update_attempt_stall_observation`` then ``materialize``) with
+    the execution probe answering "absent" for that moment only, as the supervision tests do, so
+    every later Fleet pass finds a stall delivery on those attempts and checks ``notice_is_current``
+    for it. Returns what was written, or ``{"written": 0, "reason": ...}`` when it could not be.
+    """
+    from unittest import mock
+    root = str(Path(__file__).resolve().parents[1])
+    for entry in (root, str(Path(root) / "utilities")):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+    attempts = [f"att-e2e-owner-{index:05d}" for index in range(count)]
+    written, reason = [], ""
+    saved = {key: os.environ.get(key) for key in head["env"]}
+    os.environ.update(head["env"])
+    try:
+        import dispatch_contract
+        import dispatch_supervision as supervision
+        import peer_obligations
+        for attempt in attempts:
+            rows = supervision._rows(Path(jobs), {attempt})
+            row = rows.get(attempt)
+            if not row:
+                reason = "row-missing:" + attempt
+                continue
+            with mock.patch.object(dispatch_contract, "attempt_execution_observation",
+                                   return_value=dispatch_contract.AttemptExecutionObservation(
+                                       "absent", "carrier-only")), \
+                 mock.patch.object(supervision, "_attempt_human_wait", return_value=False), \
+                 mock.patch.object(peer_obligations, "ensure_normal_runner"):
+                observation = supervision.update_attempt_stall_observation(
+                    Path(jobs), attempt, now=time.time(), row=row, worktree=str(Path(head["base"]) / "work"))
+                if not observation or observation.get("state") != "stalled":
+                    reason = f"not-stalled:{attempt}:{(observation or {}).get('state')}"
+                    continue
+                records = supervision.materialize(Path(jobs), {attempt}, reason="attempt-stalled")
+            if records:
+                written.append(attempt)
+            else:
+                reason = "no-delivery:" + attempt
+    except Exception as exc:  # noqa: BLE001 -- the fixture reports it instead of hiding it
+        reason = f"{type(exc).__name__}:{exc}"[:200]
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return {"written": len(written), "attempts": written, "reason": reason}
+
+
 def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DEFAULT_JOBS_ROWS,
           record_size: int = JOBS_ROW_BYTES, prime: bool = True,
           prime_via: str = "hook", depth1_rows: int | None = None,
@@ -750,13 +1034,23 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
             e2e_head, open_routes=open_routes, live_sessions=live_sessions,
             worker_streams=worker_streams, session_pids=list(session_pids or []),
             jobs=jobs, home=home, work=home_work, row_bytes=record_size, now=now)
+    history_shape = None
+    real_route_reason = ""
+    if history_rows is not None:
+        real_route, real_route_reason = compile_real_route()
+        history_shape = _HistoryShape(base, dispatch_root, now=now, real_route=real_route)
     registry = _write_registry(
         jobs, rows=history_rows if history_rows is not None else jobs_rows,
         depth1=DEFAULT_DEPTH1_ROWS * scale if depth1_rows is None else depth1_rows,
         row_bytes=record_size, target_attempts=target_attempts, ledgers=ledgers, now=now,
         depth1_open_every=depth1_open_every, min_bytes=min_jobs_bytes,
         open_rows=open_rows,
-        history_style="history" if history_rows is not None else "filler")
+        history_style="history" if history_rows is not None else "filler", shape=history_shape)
+    shape_report = None
+    if history_shape is not None:
+        shape_report = history_shape.finish(jobs, real_route_reason)
+        if e2e_head.get("env") and open_routes:
+            shape_report["stall"] = _write_stall_shape(e2e_head, jobs, count=min(STALL_NOTICES, open_routes))
 
     transcript = home / ".claude" / "projects" / "-perf-work" / f"{TARGET_SESSION}.jsonl"
     _write_transcript(transcript, TRANSCRIPT_ROWS)
@@ -835,6 +1129,8 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
     for key in ("e2e_sessions", "e2e_routes", "e2e_streams"):
         if key in e2e_head:
             fixture[key] = e2e_head[key]
+    if shape_report is not None:
+        fixture["history_shape"] = shape_report
     if prime:
         prime_inbox(fixture, via_runner=prime_via == "runner")
     # The measurement tool reads this to replay the fixture's exact environment.

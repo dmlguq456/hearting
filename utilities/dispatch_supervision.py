@@ -1153,7 +1153,7 @@ def _awaiting_answers(jobs: Path, aid: str) -> list[str]:
 def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
     """A claimed replacement or linked retry owns the route's live attempt now."""
     from dispatch_replacement import (
-        _plain_retry_successor, _replacement_in_flight, registry_rows,
+        _plain_retry_successor, _replacement_in_flight, _replacement_row_of, registry_rows,
     )
     try:
         rows = registry_rows(jobs)
@@ -1163,9 +1163,7 @@ def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
         return True
     if _replacement_in_flight(jobs, rows, metadata) or _plain_retry_successor(rows, aid):
         return True
-    if any(candidate.get("replacement_original_attempt_id") == aid
-           and fields[1] in {"open", "running", "done"}
-           for fields, candidate in rows.values()):
+    if _replacement_row_of(rows, aid):
         return True
     marker_path = metadata.get("completion_marker", "")
     route_file = metadata.get("owner_route_file") or metadata.get("route_file") or ""
@@ -1214,8 +1212,7 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
             metadata = (rows.get(aid) or (None, {}))[1]
             if _attempt_stall_superseded(jobs, aid, metadata):
                 continue
-            status = update_attempt_stall_observation(jobs, aid, persist=False,
-                                                       row=rows.get(aid))
+            status = _stall_observation_for_notice(jobs, aid, rows.get(aid))
             if status and status.get("state") in {"stalled", "unknown"}:
                 return True
         return False
@@ -1262,6 +1259,24 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
     return False
 
 
+def _stall_observation_for_notice(jobs, aid, row):
+    """One read-only stall observation of ``aid`` for the two questions a notice asks about it.
+
+    ``notice_is_current`` asks twice (its obligation revision, then whether it is still pending). Inside
+    one Fleet collection pass the first observation is that pass's observation and the second reads
+    it (the observation depends on the clock and on the attempt's processes, so the next pass
+    observes again). Outside a pass (a carrier, a hook) every call observes afresh."""
+    # Fleet is imported as ``fleet`` or as ``tools.fleet``; the pass that is open is in whichever
+    # copy of the module its collectors use, so look for an open one instead of importing a new copy.
+    pass_scope = next((module for module in (sys.modules.get("fleet.pass_scope"),
+                                             sys.modules.get("tools.fleet.pass_scope"))
+                       if module is not None and module.active()), None)
+    if pass_scope is None:
+        return update_attempt_stall_observation(jobs, aid, persist=False, row=row)
+    return pass_scope.cached(("stall-observation", str(jobs), aid, id(row)),
+                             lambda: update_attempt_stall_observation(jobs, aid, persist=False, row=row))
+
+
 def _obligation_revision(rows: dict, attempts: list[str], reason: str, jobs=None) -> str:
     if reason == "owner-input-undelivered":
         from dispatch_owner_input import unresolved_revision
@@ -1273,8 +1288,7 @@ def _obligation_revision(rows: dict, attempts: list[str], reason: str, jobs=None
     if reason == "attempt-stalled":
         values = []
         for aid in attempts:
-            observation = update_attempt_stall_observation(
-                jobs, aid, persist=False, row=rows.get(aid))
+            observation = _stall_observation_for_notice(jobs, aid, rows.get(aid))
             if observation is None:
                 values.append((aid, "missing", "", ""))
             else:
