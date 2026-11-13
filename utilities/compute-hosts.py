@@ -3274,6 +3274,56 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
         return None
 
 
+def _meta_artifact_root(meta):
+    """The artifact root a run's metadata names (the run's own record, then its route's), without a subprocess."""
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
+    if not artifact_root and isinstance(route.get("route_file"), str):
+        try:
+            route_path = Path(route["route_file"])
+            if route_path.is_absolute() and not route_path.is_symlink():
+                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
+                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
+                    artifact_root = route_doc.get("artifact_root")
+        except (OSError, ValueError, TypeError):
+            pass
+    return artifact_root
+
+
+def _meta_row_id(meta):
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    return resource.get("row_id") or meta.get("row_id")
+
+
+def _catalog_identity(artifact_root, run_id, row_id=None, cache=None):
+    """`{name, condition_id, goal}` the project's experiment catalog gives this run, or None.
+
+    One read of the catalog per root when `cache` is shared; None when there is no catalog, the run is
+    not linked, two conditions claim it, or the condition has no name.  Never raises: a listing or a
+    run-ended notice is not held back for a name."""
+    if not artifact_root:
+        return None
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import experiment_catalog
+        key = str(artifact_root)
+        cache = {} if cache is None else cache
+        if key not in cache:
+            read = experiment_catalog.load(Path(key))
+            cache[key] = read.doc if read.status == "ok" else None
+        info = experiment_catalog.describe_run(cache[key], run_id, row_id)
+        if info and info.get("name"):
+            return {"name": info["name"], "condition_id": info["condition_id"], "goal": info.get("goal")}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _compute_observation_summary(result):
     # Part of the run-ended notice text; dispatch_session_sweep (this and older releases) matches the
     # no-observation form of that notice literally, so the words stay as they are.
@@ -3454,7 +3504,12 @@ def _report_run_end(run_dir, code, last_observation, now):
     if not notice_targets:
         return 0
     stop = _read_stop_reason(run_dir)
-    text = (f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
+    # The catalog name leads the notice.  A named notice no longer has the literal form
+    # `dispatch_session_sweep` folds into an anonymous "compute run summary" (three exit-0 runs of one
+    # label), which is intended: a run with a name is told one by one.  An unnamed run's text is unchanged.
+    experiment = _catalog_identity(_meta_artifact_root(meta), run_id, _meta_row_id(meta))
+    text = ((f"{experiment['name']}: " if experiment else "")
+            + f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
             + (f" ({stop})" if stop else "")
             + (f"; started by attempt {provenance.get('attempt_id')} in route {route.get('route_id')}"
                if provenance.get("notify") else "")
@@ -3526,16 +3581,7 @@ def _run_state(config, run_id):
     provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
     route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
     resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
-    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
-    if not artifact_root and isinstance(route.get("route_file"), str):
-        try:
-            route_path = Path(route["route_file"])
-            if route_path.is_absolute() and not route_path.is_symlink():
-                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
-                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
-                    artifact_root = route_doc.get("artifact_root")
-        except (OSError, ValueError, TypeError):
-            pass
+    artifact_root = _meta_artifact_root(meta)
     if artifact_root:
         try:
             import resource_progress
@@ -3548,6 +3594,7 @@ def _run_state(config, run_id):
             "launch_receipt": receipt,
             "experiment_observation": experiment_record,
             "experiment_record_path": str(experiment_record_path) if experiment_record_path else None,
+            "artifact_root": str(artifact_root) if artifact_root else None,
             "quiet_since": _iso_time(quiet_since) if quiet_since is not None else None,
             "state": state}
 
@@ -4114,6 +4161,19 @@ def _tmux_session_alive(
     return None
 
 
+def _pad_cells(text, width):
+    """`text` cut or padded to `width` terminal cells (Korean names are two cells a character)."""
+    import unicodedata
+    out, used = [], 0
+    for char in text:
+        cells = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if used + cells > width:
+            break
+        out.append(char)
+        used += cells
+    return "".join(out) + " " * (width - used)
+
+
 def cmd_runs(args):
     config = load_config()
     _refuse_namespace_self(config, "runs")
@@ -4131,7 +4191,10 @@ def cmd_runs(args):
         rows.append(state)
         if len(rows) >= args.limit:
             break
+    catalogs = {}
     for row in rows:
+        row["experiment"] = _catalog_identity(row.get("artifact_root"), row["run_id"],
+                                              _meta_row_id(row["meta"]), catalogs)
         if row["state"] == "running":
             host_name = row["meta"].get("host")
             alive = None
@@ -4155,7 +4218,7 @@ def cmd_runs(args):
             row["stale"] = False
     if args.json:
         print(json.dumps([{k: (str(v) if k == "dir" else v)
-                           for k, v in row.items() if k != "session_alive"}
+                           for k, v in row.items() if k not in ("session_alive", "artifact_root")}
                           for row in rows],
                          ensure_ascii=False, sort_keys=True))
         return 0
@@ -4173,7 +4236,8 @@ def cmd_runs(args):
         else:
             tail = row["state"]
         command = " ".join(row["meta"].get("command") or [])
-        print(f"  {row['run_id']:<34} {tail:<20} {command[:60]}")
+        name = (row.get("experiment") or {}).get("name") or "-"
+        print(f"  {row['run_id']:<34} {tail:<20} {_pad_cells(name, 24)} {command[:60]}")
     if not rows:
         print("  (none)")
     return 0

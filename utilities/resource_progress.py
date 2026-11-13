@@ -1397,7 +1397,69 @@ _TREND_TEXT = {"개선": "resource.trend.improving", "정체": "resource.trend.f
                "판정 불가": "resource.trend.undetermined"}
 
 
-def _notice_texts(run, event_kind, observation, record_path, sources):
+def _catalog_module():
+    """`experiment_catalog`, imported when a notice needs it (it imports this module at its top)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import experiment_catalog
+    return experiment_catalog
+
+
+def _experiment_context(run, identity, observation, has_decision_metric):
+    """What the project's experiment catalog says about this live row, or None when it cannot say.
+
+    `{"info", "catalog", "has_decision_metric"}`: `info` is `describe_observation`'s answer (None when the
+    run is not linked or two conditions claim it).  Any failure reading the catalog gives None: a notice is
+    never held back, and never changed, because the catalog could not be read."""
+    root = run.get("artifact_root")
+    if not root:
+        return None
+    try:
+        catalog = _catalog_module()
+        read = catalog.load(Path(root))
+        if read.status == "invalid":
+            return None
+        doc = read.doc if read.status == "ok" else None
+        info = catalog.describe_observation(Path(root), run.get("run_id"), str(identity),
+                                            observation.get("summary") or {}, doc=doc)
+        if info is not None and not info.get("name"):
+            info = None  # a condition without a name cannot give one
+        return {"info": info, "catalog": read.status, "has_decision_metric": bool(has_decision_metric)}
+    except Exception:  # noqa: BLE001 -- the catalog is read-only context for a notice
+        return None
+
+
+def _experiment_lines(context, *, first, final):
+    """The catalog name line for a notice, plus the "register this run" line on a run's first notice and its
+    final one (not on every checkpoint)."""
+    if not context:
+        return []
+    try:
+        catalog = _catalog_module()
+        if context["info"] is not None:
+            return [catalog.notice_line(context["info"])]
+        if (first or final) and (context["catalog"] == "ok" or context["has_decision_metric"]):
+            return [catalog.unregistered_line()]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def _quiet_checkpoint(context, previous):
+    """A periodic checkpoint with nothing new is not worth the conversation: when the project's catalog
+    declares the deciding metric and this run has reported it, a checkpoint is made only when that
+    metric has a new evaluation point (epoch or value) since the last one a notice carried.  Anything
+    else (no catalog, no declared metric, a metric never reported, a catalog that cannot be read) keeps
+    the existing checkpoint, so an unconfirmed run does not go quiet."""
+    info = (context or {}).get("info")
+    point = (info or {}).get("decision_point")
+    if not point:
+        return False
+    return previous.get("notified_decision_point") == point
+
+
+def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
     t = _ui_translator()
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
@@ -1490,13 +1552,13 @@ def _notice_texts(run, event_kind, observation, record_path, sources):
     if not source_lines:
         source_lines.append("source metrics unavailable")
     entries.extend(source_lines)
-    text = "; ".join(entries)
+    text = "; ".join([*name_lines, *entries])
     if len(text) <= 600:
         return [text]
     # Keep every field in immutable bounded parts; numbered chunks can be
     # concatenated in order when a path is longer than one notice.
     output = []
-    for label, value in [("run", run_line), ("record", record),
+    for label, value in [("run", "; ".join([*name_lines, run_line])), ("record", record),
                          ("metrics", "; ".join(entries[2:]))]:
         value = f"{label}: {value}"
         if len(value) <= 600:
@@ -1845,6 +1907,13 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             observation["eta_vs_plan"] = None
         artifact_root = run.get("artifact_root")
         record_locator = public_record_path(artifact_root, run_id) if artifact_root else None
+        catalog_context = []
+
+        def experiment():
+            if not catalog_context:
+                catalog_context.append(_experiment_context(run, identity, observation, bool(
+                    decision_metric.get("key") if isinstance(decision_metric, dict) else decision_metric)))
+            return catalog_context[0]
         event_specs = []
         if notify_events and final:
             event_specs.append(("final", f"final:{identity}"))
@@ -1863,17 +1932,20 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                 event_specs.append(("attention", f"attention:{identity}:{attention_digest}"))
         elif notify_events and observation["checkpoint_due"] and not final:
             slot = int(observation["due_checkpoint_at"])
-            event_specs.append(("checkpoint", f"checkpoint:{identity}:{slot}"))
+            if not _quiet_checkpoint(experiment(), previous):
+                event_specs.append(("checkpoint", f"checkpoint:{identity}:{slot}"))
         seen = set(previous.get("event_keys", []))
         outbox = list(previous.get("outbox", []))
         known = {item.get("key") for item in outbox if isinstance(item, dict)}
+        first_notice = not seen and not outbox
         new_event = False
         for event_kind, event_key in event_specs:
             if event_key in seen or event_key in known:
                 continue
             new_event = True
             notice_texts = _notice_texts({**run, "row_id": str(identity)}, event_kind,
-                observation, record_locator, sources or previous.get("sources", []))
+                observation, record_locator, sources or previous.get("sources", []),
+                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
             outbox.append({"key": event_key, "kind": event_kind,
                            "recipients": _notice_targets(run),
                            "texts": notice_texts, "text": notice_texts[0]})
@@ -1904,6 +1976,10 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                       "source_observations": source_observations,
                       "last_checkpoint_at": (float(now) if observation["checkpoint_due"]
                                              else previous.get("last_checkpoint_at")),
+                      "notified_decision_point": (
+                          ((experiment() or {}).get("info") or {}).get("decision_point") or
+                          previous.get("notified_decision_point")) if new_event
+                          else previous.get("notified_decision_point"),
                       "last_public_write_at": previous.get("last_public_write_at"),
                       "public_status": previous.get("public_status"),
                       "last_delivery_at": previous.get("last_delivery_at"),

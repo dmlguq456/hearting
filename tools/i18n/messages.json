@@ -470,6 +470,18 @@
    "en": "not comparable: {reason}",
    "ko": "비교 불가: {reason}"
   },
+  "experiment.notice.goal_missing": {
+   "en": "goal not registered",
+   "ko": "목표 미등록"
+  },
+  "experiment.notice.line": {
+   "en": "{name} — {goal}; {values}",
+   "ko": "{name} — {goal}; {values}"
+  },
+  "experiment.notice.unregistered": {
+   "en": "no catalog name for this run: register it in the experiment catalog",
+   "ko": "정본 이름 없음: run을 정본에 등록"
+  },
   "experiment.observed": {
    "en": "observed {age}",
    "ko": "관측 {age}"
