@@ -3443,6 +3443,40 @@ class ReplacementTest(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertNotIn('ended BLOCKED', text)
 
+    def test_an_owner_the_provider_refused_continues_in_its_lineage_with_the_correction(self):
+        """2026-11-13: eight owners ended `dead-auth` on a passing 403; `start` and `correct` had no
+        way on, and the supervisor wrote a new route by hand. The same route continues now."""
+        import route_authority as RA
+        meta = self._blocked_owner()
+        meta.pop('launch_outcome', None)
+        meta.update(note='dead-auth', failure_class='auth', terminal_event='claude-result',
+                    reconcile_reason='runtime-auth-envelope', api_status='403', process_exit='1',
+                    launch_started='1', supervisor_lease='flock-v1',
+                    supervisor_lease_file=str(D.supervisor_lease_path(self.jobs, meta['attempt_id'])))
+        self.write(meta)
+        self.assertTrue(RA.runtime_owner_can_resume('done', meta))
+        self.assertEqual(RA.decide_continuation(action='owner-input', status='done', metadata=meta,
+                                                facts={}).state, 'retained')
+        answer = '로그인은 고쳤습니다. 남은 평가만 이어가세요.'
+        self.assertTrue(self._answer(text=answer)['retained'])
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'invalid', 'failure_class': 'auth'}):
+            result, commands = self._launch()
+        self.assertEqual(len(commands), 1)
+        record = result['record']
+        self.assertEqual(record['route_id'], self.route['route_id'])
+        self.assertEqual(record['proof']['source_result'], 'EXITED')
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+                                       jobs_path=self.jobs, attempt_id=record['replacement_attempt_id']))
+        for expected in (answer, 'exited before settlement', 'existing route'):
+            self.assertIn(expected, text)
+        # an owner that is still open, or that finished with a result, is unchanged
+        self.assertFalse(RA.runtime_owner_can_resume('open', meta))
+        for change in ({'note': 'completed-supervisor', 'failure_class': 'pass'},
+                       {'note': 'dead-worker-fail', 'failure_class': 'fail'},
+                       {'launch_started': '0'}):
+            self.assertFalse(RA.runtime_owner_can_resume('done', {**meta, **change}), change)
+
     def test_interrupted_supervisor_accepts_answer_after_previous_replacement(self):
         import dispatch_owner_input as I
         for harness in ('claude', 'codex', 'opencode'):

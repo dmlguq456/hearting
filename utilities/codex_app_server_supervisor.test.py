@@ -685,6 +685,54 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(sum(1 for e in events if e.get("type") == "dispatch.supervisor.parked"),2)
         self.assertEqual(sum(k == "resource" for k in turns),1)
 
+    def test_a_correction_reaches_the_owner_while_its_model_child_stays_parked(self):
+        """Observation 5 (BC-AMI-CHILD-FAIL-NO-WAKE), Codex: the same checkpoint as Claude."""
+        import dispatch_resource_wait as RESOURCE
+        module = load_supervisor_module()
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        counter = self.base / "join_calls.count"
+        sent = []
+
+        class CorrectionAfterFirstPiece(module.OwnerInput):
+            def pending(self):
+                return counter.exists() and int(counter.read_text()) >= 1 and not sent
+
+            def prepare(self, prompt):
+                if self.pending():
+                    sent.append(prompt)
+                    return prompt + "\nUSER-CORRECTION: also record the seed"
+                return super().prepare(prompt)
+
+        turns, delivered_at_correction = [], []
+        def turn(*a, **k):
+            prompt = k["prompt"]
+            kind = "correction" if "USER-CORRECTION" in prompt else "model"
+            turns.append(kind)
+            if kind == "correction":
+                state = join.read_supervisor_phase_state(self.state, PARENT)
+                delivered_at_correction.append(set(state.delivered_attempt_ids))
+                self.assertIn("still running", prompt)
+            text = ("runtime_wait: registered-children" if len(turns) <= 2
+                    else "artifact: -\nverdict: PASS\nblocker: none")
+            return text, {}
+        events = []
+        command = self.command_with_join(self._timeout_once_then_ready_join())[2:]
+        with mock.patch.object(RESOURCE, "context", return_value=None), \
+             mock.patch.object(module, "OwnerInput", CorrectionAfterFirstPiece), \
+             mock.patch.object(module, "run_turn", side_effect=turn), \
+             mock.patch.object(module, "reconcile", return_value=True), \
+             mock.patch.object(sys, "stdin", io.StringIO("initial assignment")), \
+             mock.patch.object(module, "emit", side_effect=events.append), \
+             mock.patch.object(module, "AppServer") as app:
+            app.return_value.request.return_value = {"thread": {"id": "same-native"}}
+            self.assertEqual(module.main(command), 0)
+        self.assertEqual(turns, ["model", "correction", "model"])
+        self.assertEqual(delivered_at_correction, [set()])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(int(counter.read_text()), 2)
+        self.assertEqual(sum(1 for e in events if e.get("type") == "dispatch.supervisor.parked"), 2)
+
     def test_restart_with_a_running_resource_still_delivers_the_finished_model_child(self):
         """RV-PR1602 finding 3 (Codex): the recovered wait is the loop's combined one, so a
         finished model child is delivered while the primary is still training."""
