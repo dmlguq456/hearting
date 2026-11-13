@@ -139,7 +139,8 @@ class SessionNoticeTest(unittest.TestCase):
         checkpoint = record("experiment:run-1:checkpoint:ab:1:claude:sid-1", "experiment checkpoint (1/1)")
         final = record("experiment:run-1:final:ab:1:claude:sid-1", "experiment final (1/1)")
         self.assertTrue(N.wakes_resting_recipient(attention))
-        self.assertTrue(N.wakes_resting_recipient(record("experiment:run-1:attention-checkpoint:ab:7:0123:1:claude:sid-1")))
+        # The same attention re-posted at a periodic checkpoint waits for the next input (RV-PR1602 1).
+        self.assertFalse(N.wakes_resting_recipient(record("experiment:run-1:attention-checkpoint:ab:7:0123:1:claude:sid-1")))
         self.assertFalse(N.wakes_resting_recipient(checkpoint))
         for status, wakes in (("succeeded", False), ("failed", True), ("cancelled", True), (None, True)):
             with self.subTest(final=status), mock.patch.object(

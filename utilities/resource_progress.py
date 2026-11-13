@@ -1846,6 +1846,9 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
         artifact_root = run.get("artifact_root")
         record_locator = public_record_path(artifact_root, run_id) if artifact_root else None
         event_specs = []
+        seen = set(previous.get("event_keys", []))
+        outbox = list(previous.get("outbox", []))
+        known = {item.get("key") for item in outbox if isinstance(item, dict)}
         if notify_events and final:
             event_specs.append(("final", f"final:{identity}"))
         if (notify_events and observation["attention"]
@@ -1856,7 +1859,15 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                 for item in observation["attention"]]
             attention_digest = hashlib.sha256(json.dumps(attention_identity, sort_keys=True,
                 separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
-            if observation["checkpoint_due"]:
+            # A new or changed attention is `attention:` whenever it appears; the same
+            # attention again at a periodic checkpoint is `attention-checkpoint:`, which
+            # waits for the recipient's next input instead of waking it (session_notice).
+            attention_told = any(
+                key == f"attention:{identity}:{attention_digest}"
+                or (key.startswith(f"attention-checkpoint:{identity}:")
+                    and key.endswith(f":{attention_digest}"))
+                for key in (seen | known) if isinstance(key, str))
+            if observation["checkpoint_due"] and attention_told:
                 slot = int(observation["due_checkpoint_at"])
                 event_specs.append(("attention", f"attention-checkpoint:{identity}:{slot}:{attention_digest}"))
             else:
@@ -1864,9 +1875,6 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
         elif notify_events and observation["checkpoint_due"] and not final:
             slot = int(observation["due_checkpoint_at"])
             event_specs.append(("checkpoint", f"checkpoint:{identity}:{slot}"))
-        seen = set(previous.get("event_keys", []))
-        outbox = list(previous.get("outbox", []))
-        known = {item.get("key") for item in outbox if isinstance(item, dict)}
         new_event = False
         for event_kind, event_key in event_specs:
             if event_key in seen or event_key in known:

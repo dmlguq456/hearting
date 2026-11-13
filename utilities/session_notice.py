@@ -239,16 +239,20 @@ def classify(receipt: dict) -> str:
     return PROGRESS
 
 
-EXPERIMENT_ATTENTION_KEY = re.compile(r"^experiment:[^:]+:attention(?:-checkpoint)?:")
+# A new or changed attention only. The producer (`resource_progress`) posts the same
+# attention again at a periodic checkpoint as `attention-checkpoint:`, which is not this.
+EXPERIMENT_ATTENTION_KEY = re.compile(r"^experiment:[^:]+:attention:")
 
 
 def wakes_resting_recipient(record: dict) -> bool:
     """Whether a resting recipient is woken for this notice instead of waiting for its next input.
 
-    Only what needs a decision: an experiment's attention, and a final that did not
-    succeed (or whose outcome is not known). A normal finish and a periodic checkpoint
-    wait for the next input as before. This reads the same receipt `classify` reads and
-    changes none of its answers; leg 1 (alarm classification) may move this rule into it.
+    Only what needs a decision: an experiment's new or changed attention, and a final that
+    did not succeed (or whose outcome is not known). A normal finish, a periodic checkpoint
+    and the same attention re-posted at a checkpoint wait for the next input as before, so
+    an unchanged attention costs no further model turn. This reads the same receipt
+    `classify` reads and changes none of its answers; leg 1 (alarm classification) may
+    move this rule into it.
     """
     receipt = record.get("receipt") if isinstance(record, dict) else None
     try:

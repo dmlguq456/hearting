@@ -685,6 +685,58 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(sum(1 for e in events if e.get("type") == "dispatch.supervisor.parked"),2)
         self.assertEqual(sum(k == "resource" for k in turns),1)
 
+    def test_restart_with_a_running_resource_still_delivers_the_finished_model_child(self):
+        """RV-PR1602 finding 3 (Codex): the recovered wait is the loop's combined one, so a
+        finished model child is delivered while the primary is still training."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        module = load_supervisor_module()
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        route_value = seal_route({"schema_version":2,"cwd":str(self.base),
+            "nodes":[{"id":"full-run","kind":"resource-runner","continuation":{"kind":"supervised"}},
+                     {"id":"verify"}]})
+        route_path = self.base / "restart-mixed-route.json"
+        route_path.write_text(json.dumps(route_value))
+        route_args = ["--route-file",str(route_path),"--route-id",route_value["route_id"],"--route-hash",route_value["route_hash"]]
+        join.write_supervisor_state(self.state,PARENT,set(),phase="parked")
+        with join._supervisor_state_lock(self.state):
+            join._write_supervisor_state_unlocked(self.state,PARENT,set(),phase="parked",
+                resource={"session_id":"same-native","delivered":["a"*64],"outbox":None})
+        row = {"run_id":"training","pid":557,"starttime":"203","command":["approved"],
+               "node":"full-run","status":"running","sentinel":"/fixture-exit"}
+        armed = {"node":"full-run","successors":["verify"]}
+        sup = SimpleNamespace(poll_once=mock.Mock(),read_resource_watches=lambda *_: [armed],
+            resource_evidence=lambda _: {"terminal":False,"reason":"resource-still-running","liveness":"working"},
+            artifact_evidence=lambda _: {"checked":True,"missing":[]},reattach_resource_watch=lambda *_: None,
+            runner=lambda:SimpleNamespace(read_sentinel=lambda _:None))
+        ctx = (sup,route_value,SimpleNamespace(state=lambda:{"nodes":{"full-run":{"state":"RUNNING"}}}),[(armed,row)])
+        class StillTraining(Exception):
+            pass
+        turns, prompts = [], []
+        def turn(*a,**k):
+            prompt = k["prompt"]
+            prompts.append(prompt)
+            turns.append("child" if "att-child" in prompt else "resume")
+            return ("runtime_wait: registered-children" if len(turns) == 1
+                    else "artifact: -\nverdict: PASS\nblocker: none"),{}
+        def still_training(*_a, **_k):
+            raise StillTraining()  # the one-second look at the still-running primary
+        command = self.command_with_join(self._timeout_once_then_ready_join())[2:]
+        (self.base / "join_calls.count").write_text("1", encoding="utf-8")  # every join: ready
+        with mock.patch.object(RESOURCE,"context",return_value=ctx), \
+             mock.patch.object(RESOURCE,"observe_once",side_effect=still_training), \
+             mock.patch.object(RESOURCE.RESUME,"supervisor_alive",return_value=True), \
+             mock.patch.object(module,"run_turn",side_effect=turn), \
+             mock.patch.object(module,"reconcile",return_value=True), \
+             mock.patch.object(sys,"stdin",io.StringIO("initial assignment")), \
+             mock.patch.object(module,"emit"), mock.patch.object(module,"AppServer") as app:
+            app.return_value.request.return_value={"thread":{"id":"same-native"}}
+            module.main(command+route_args)
+        # Before the fix the restart waited on the primary first: no turn at all.
+        self.assertEqual(turns,["resume","child"])
+        self.assertNotIn("Runtime resource receipt",prompts[1])
+
     def test_progress_carrying_resource_settlements_do_not_spend_the_continuation_budget(self):
         # Phase F d6 (F-1), symmetric to claude_session_supervisor.test.py's
         # identically-named fixture: a series of settled supervised resources

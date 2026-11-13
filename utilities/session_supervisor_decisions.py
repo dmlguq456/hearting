@@ -410,16 +410,23 @@ def join_with_resource_attention(
     raises `ResourceAttentionReady`; the model children are not delivered, so the next
     loop parks them again. A pending user correction is the next thing a later change
     returns from these same checkpoints; this one does not.
+
+    Holding nothing and not having read it yet differ: a holder that could not be read
+    (`HolderUnobserved`) keeps the short pieces and is read again at each checkpoint;
+    once it reads as holding nothing, the rest of the same wait is one join as before.
     """
-    def has_resources() -> bool:
+    def holds_resources() -> bool | None:
         try:
             return resource_wait.context(args, control) is not None
+        except resource_wait.HolderUnobserved:
+            return None  # could not look yet: never read as "holds nothing"
         except Exception:  # the old behavior: no look at all, never a new failure here
             return False
 
     def run(attempts: set[str]) -> dict:
         total = float(args.join_timeout)
-        if not (total > 0) or not has_resources():
+        holds = holds_resources() if total > 0 else False
+        if holds is False:
             return join(args, attempts)
         deadline = clock() + total
         while True:
@@ -429,6 +436,18 @@ def join_with_resource_attention(
             receipt = join(piece, attempts)
             if receipt.get("state") != "timeout":
                 return receipt
+            if holds is None:
+                holds = holds_resources()
+                if holds is None:
+                    if clock() >= deadline:
+                        return receipt
+                    continue
+                if holds is False:
+                    if clock() >= deadline:
+                        return receipt
+                    rest = copy.copy(args)
+                    rest.join_timeout = max(deadline - clock(), 1.0)
+                    return join(rest, attempts)
             state = completion_join.read_supervisor_phase_state(state_path, args.parent_attempt_id)
             resource = dict(state.resource) if state and state.resource else {
                 "session_id": control.thread_id, "delivered": [], "outbox": None}
@@ -443,3 +462,42 @@ def join_with_resource_attention(
             if clock() >= deadline:
                 return receipt
     return run
+
+
+def recovered_resource_wait(args, state_path, control, delivered: set[str], emit,
+                            join: Callable[[Any, set[str]], dict]) -> str | None:
+    """A restarted supervisor's first wait over the resource state it recovered.
+
+    It waits where the loop would: on the held resources alone when no model child is
+    left to join, else on those children with the resources looked at between join
+    pieces (`join_with_resource_attention`, the loop's own park), so a child that already
+    finished is not held behind a long resource run. Returns the resource receipt's
+    prompt, or None (nothing outstanding, or the children are ready first); the loop
+    then continues as for any restart and delivers the children itself.
+    """
+    jobs = Path(args.jobs)
+    rows = completion_join.current_children(jobs, args.parent_attempt_id,
+                                            route_id=args.route_id, route_hash=args.route_hash)
+    undelivered = [row for row in rows if row.attempt_id not in delivered]
+    children = set(completion_join.partition_runtime_wait_children(
+        jobs, args.parent_attempt_id, undelivered, {row.attempt_id for row in undelivered}).joinable)
+    if not children:
+        return resource_wait.wait(args, state_path, control, delivered, emit)
+
+    def park():
+        from dispatch_supervision import wait_for_batch
+        from dispatch_replacement import advance_batch, adopt_receipt
+        try:
+            receipt = wait_for_batch(
+                join=join_with_resource_attention(args, state_path, control, delivered, join),
+                attempts=set(children), jobs=jobs, parent_attempt_id=args.parent_attempt_id,
+                emit=emit,
+                replacement_checkpoint=lambda selected: advance_batch(jobs, selected)
+                    if not control.pending() else (selected, [], []))
+        except ResourceAttentionReady as ready:
+            return ready.prompt
+        _joined, replaced = adopt_receipt(jobs, set(children), receipt)
+        delivered.update(replaced)
+        return None
+
+    return resource_wait.wait(args, state_path, control, delivered, emit, park=park)

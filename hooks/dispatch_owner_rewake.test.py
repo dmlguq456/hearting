@@ -4138,6 +4138,70 @@ class ResourceNoticeWakeTest(unittest.TestCase):
         self.assertFalse(rewake._open_gate_pending(self._launch()))
         self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
 
+    def _wake_and_ack(self, record):
+        """One hook look: whether it wakes, and the notice acknowledged as the sweep would."""
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        woke = rewake._open_gate_pending(self._launch())
+        announced = rewake._gate_notices(self._launch(), attempt_only=True)
+        if announced:
+            rewake.pending_delivery.ack(self.state, "session-gate", record["delivery_id"],
+                                        acked_by="session-sweep:fixture")
+        return woke, len(announced)
+
+    def test_the_same_attention_reposted_at_a_checkpoint_does_not_wake_again(self):
+        """RV-PR1602 finding 1 (direct keys): the first attention wakes once; the same digest
+        at the 2h checkpoint waits for the next input; a changed attention wakes again."""
+        first = self.notice("experiment:run-1:attention:id:0123:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(first), (True, 1))
+        repost = self.notice("experiment:run-1:attention-checkpoint:id:7200:0123:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(repost), (False, 0))
+        # Not lost: it stays pending for the recipient's next input.
+        self.assertEqual(rewake.pending_delivery.read(self.state, "session-gate", repost["delivery_id"])["state"],
+                         "pending")
+        changed = self.notice("experiment:run-1:attention:id:4567:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(changed), (True, 1))
+
+    def test_an_unchanged_attention_from_the_producer_wakes_once_across_a_checkpoint(self):
+        """RV-PR1602 finding 1 (real producer): epoch 1's NaN, unchanged, observed at 100s and
+        again at the 7201s checkpoint wakes the resting session once; a new NaN wakes again."""
+        import resource_progress as progress
+        import session_notice
+        original_notify = session_notice.notify
+        output = self.root / "training"
+        (output / "logs").mkdir(parents=True)
+        epochs = output / "logs" / "epochs.jsonl"
+        epochs.write_text('{"epoch":1,"split":"valid","losses":{"L_se":NaN}}\n')
+        artifact = self.root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        run = {"run_id": "run-1", "status": "running", "started_at": 1, "artifact_root": str(artifact),
+               "route_id": "rt-gate", "node": "full-run", "jobs": str(self.jobs)}
+        notices = []
+
+        def notify(harness, session_id, **kw):
+            with mock.patch.object(session_notice, "notify", original_notify):
+                record = self.notice(kw["key"], subject=kw["subject"])
+            woke, announced = self._wake_and_ack(record)
+            notices.append({"key": kw["key"], "wake": woke, "announced": announced})
+            return {"state": "acked"}
+
+        with mock.patch.object(progress, "_observation_state_path", return_value=self.root / "observation.json"), \
+             mock.patch.object(progress, "_notice_targets", return_value=[("claude", "session-gate")]), \
+             mock.patch("session_notice.notify", side_effect=notify):
+            due = [progress.observe_experiment(run, self.root / "runs.json", now,
+                                               root=str(output), row_key="ident", started_at=1
+                                               )["observation"]["checkpoint_due"] for now in (100, 7201)]
+            self.assertTrue(due[1])
+            self.assertEqual([n["wake"] for n in notices], [True, False], notices)
+            self.assertTrue(notices[0]["key"].startswith("experiment:run-1:attention:"))
+            self.assertTrue(notices[1]["key"].startswith("experiment:run-1:attention-checkpoint:"))
+            # A new NaN (epoch 2) at the next (12h) checkpoint is a changed attention: it wakes.
+            epochs.write_text(epochs.read_text() + '{"epoch":2,"split":"valid","losses":{"L_se":NaN}}\n')
+            changed = progress.observe_experiment(run, self.root / "runs.json", 7201 + progress.CHECKPOINT_INTERVAL,
+                                                  root=str(output), row_key="ident", started_at=1)
+            self.assertTrue(changed["observation"]["checkpoint_due"])
+        self.assertEqual([n["wake"] for n in notices], [True, False, True], notices)
+        self.assertTrue(notices[2]["key"].startswith("experiment:run-1:attention:"))
+
 
 class SupervisionWakeRearmTest(unittest.TestCase):
     """An attention wake must hand its notice to the immediate prompt sweep,

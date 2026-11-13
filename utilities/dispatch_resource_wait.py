@@ -931,8 +931,14 @@ def observe_once(args, path, control, delivered, resource, *, sleep=time.sleep):
     return WAITING
 
 
-def wait(args, path, control, delivered, emit, *, sleep=time.sleep, clock=time.monotonic):
-    """Scan every exact resource and deliver one ready receipt through the existing outbox."""
+def wait(args, path, control, delivered, emit, *, sleep=time.sleep, clock=time.monotonic,
+         park=None):
+    """Scan every exact resource and deliver one ready receipt through the existing outbox.
+
+    `park`, when given, replaces the final one-second look loop once the resources are
+    parked: a restarted supervisor that also has model children to join waits on both
+    there (`session_supervisor_decisions.recovered_resource_wait`).
+    """
     correction = "Continue the same work using the pending user correction; preserve the resource request."
 
     import ship_parent_deploy
@@ -1060,6 +1066,8 @@ def wait(args, path, control, delivered, emit, *, sleep=time.sleep, clock=time.m
           "route_id": getattr(args, "route_id", route.get("route_id")),
           "resource_count": len(candidates)})
 
+    if park is not None:
+        return park()
     while True:
         prompt = observe_once(args, path, control, delivered, resource, sleep=sleep)
         if prompt is not WAITING:

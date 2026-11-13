@@ -1549,7 +1549,10 @@ def main(argv: list[str] | None = None) -> int:
         next_prompt = prompt
         pending_notice = ""
         if recovered is not None and recovered.resource is not None and active_outbox is None:
-            resource_prompt = RESOURCE_WAIT.wait(args, state_path, control, delivered, emit)
+            # The same combined wait the loop parks on: a finished model child is not held
+            # behind a resource that is still running.
+            resource_prompt = DECISIONS.recovered_resource_wait(
+                args, state_path, control, delivered, emit, run_join)
             if resource_prompt is not None:
                 next_prompt = resource_prompt
         while True:

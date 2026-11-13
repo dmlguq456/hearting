@@ -200,6 +200,29 @@ class JoinWithResourceAttentionTest(unittest.TestCase):
             self.wrapped()({"att-child"})
         self.assertEqual(self.calls, [100.0, 100.0])
 
+    def test_a_holder_not_read_yet_keeps_the_short_pieces_until_it_is_read(self):
+        """RV-PR1602 finding 2: one transient read error is "not read yet", never "holds nothing"."""
+        unread = D.resource_wait.HolderUnobserved("registry-unobserved:JSONDecodeError")
+        self.args.join_timeout = 3600.0
+        with mock.patch.object(D.resource_wait, "context", side_effect=[unread, unread, object()]) as context, \
+             mock.patch.object(D.resource_wait, "observe_once", return_value=D.resource_wait.WAITING) as look:
+            receipt = self.wrapped(check_seconds=30.0)({"att-child"})
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertLessEqual(max(self.calls), 30.0)
+        self.assertEqual(sum(self.calls), 3600.0)
+        # Read again at each checkpoint until it reads; then the pieces look at the resources.
+        self.assertEqual(context.call_count, 3)
+        self.assertEqual(look.call_count, len(self.calls) - 1)
+
+    def test_a_holder_read_later_as_holding_nothing_finishes_with_one_join(self):
+        unread = D.resource_wait.HolderUnobserved("registry-unobserved:OSError")
+        with mock.patch.object(D.resource_wait, "context", side_effect=[unread, None]), \
+             mock.patch.object(D.resource_wait, "observe_once") as look:
+            receipt = self.wrapped(check_seconds=30.0)({"att-child"})
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(self.calls, [30.0, 70.0])
+        look.assert_not_called()
+
     def test_held_resources_are_looked_at_between_pieces_of_the_same_total_wait(self):
         with mock.patch.object(D.resource_wait, "context", return_value=object()), \
              mock.patch.object(D.resource_wait, "observe_once", return_value=D.resource_wait.WAITING) as look:

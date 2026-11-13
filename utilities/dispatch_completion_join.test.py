@@ -7147,6 +7147,44 @@ class SettlingReceiptNoticeTest(unittest.TestCase):
         self.assertIn((61.0 + ceiling - 0.1, "waiting"), observations, observations)
         self.assertIn((61.0 + ceiling, "attention"), observations, observations)
 
+    def test_a_wait_cut_into_short_joins_keeps_the_settling_clock(self):
+        """RV-PR1602 finding 4: a supervisor that looks at its resources between join pieces
+        starts a new join process every 30s. The child that ended normally and never gets its
+        post-exit receipt is still noticed once at the settling ceiling, as one long join does."""
+        self.jobs.write_text(self.owner + self.awaiting_line, encoding="utf-8")
+        rows = JOIN.current_children(self.jobs, self.parent)
+        clock = [0.0]
+
+        def piece(seconds):
+            # No observation context passed in: a fresh one, exactly as a new join process has.
+            return JOIN._join_snapshot(
+                jobs=self.jobs, initial=rows, refresh=lambda _: JOIN.current_children(self.jobs, self.parent),
+                identity={"parent_attempt_id": self.parent}, interval=2.0, timeout=seconds,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None, observation_jobs=self.jobs)
+
+        def notices():
+            return [record for record in (
+                        json.loads(path.read_text(encoding="utf-8"))
+                        for path in (self.root / "pending-delivery").glob("*/*.json"))
+                    if record.get("receipt", {}).get("reason") == "process-unverifiable"]
+
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(JOIN.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch("dispatch_supervision.materialize", wraps=__import__("dispatch_supervision").materialize) as told:
+            early = [piece(30.0) for _ in range(19)]
+            self.assertLess(clock[0], JOIN.SETTLING_NOTICE_SECONDS)
+            self.assertEqual(notices(), [])
+            later = [piece(30.0) for _ in range(5)]
+        self.assertGreaterEqual(clock[0], JOIN.SETTLING_NOTICE_SECONDS)
+        self.assertEqual({receipt["state"] for receipt in early + later}, {"timeout"})
+        self.assertEqual(len(notices()), 1)
+        self.assertEqual(notices()[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+        # The recorded notice is carried too: later pieces do not record it again.
+        self.assertEqual(told.call_count, 1)
+
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
     def _completed_delivery(self, root, attempt, pid, start):
