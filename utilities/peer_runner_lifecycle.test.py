@@ -70,6 +70,32 @@ _CENSUS_PROCESS_LIMIT = 600
 _HOST_PROCESSES = sum(1 for entry in os.listdir("/proc") if entry.isdigit())
 
 
+class RunnerWaitSignalTest(unittest.TestCase):
+    """The runner backs off only while nothing moves: an unfinished owner proof moves it."""
+
+    def test_the_proofs_of_an_unfinished_owner_scan_are_part_of_the_wait_signal(self):
+        import dispatch_batch_obligations as obligations
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        scan = (("/jobs.log", 29),)             # a drain's resume order stays put between passes
+        signals = []
+        for _ in range(3):
+            context.record_historical_check()    # one proof per pass
+            signals.append((scan, peer_steward._owner_scan_proofs(context, scan)))
+        self.assertEqual(len(set(signals)), 3, "a pass that proved an owner must change the signature")
+        # No proof made: the signature is the same again, so the wait grows as before.
+        self.assertEqual((scan, peer_steward._owner_scan_proofs(context, scan)), signals[-1])
+
+    def test_without_an_unfinished_scan_the_signal_is_unchanged(self):
+        import dispatch_batch_obligations as obligations
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        for _ in range(3):
+            context.record_historical_check()
+            self.assertIsNone(peer_steward._owner_scan_proofs(context, ()))
+        self.assertIsNone(peer_steward._owner_scan_proofs(object(), (("k", 1),)))   # no metrics: never raises
+
+
 class LifecycleBindingTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

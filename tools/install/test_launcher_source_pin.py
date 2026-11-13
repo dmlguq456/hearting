@@ -82,6 +82,149 @@ class PrimaryCheckoutTest(unittest.TestCase):
         self.assertEqual(paths.primary_checkout(absent), absent)
 
 
+def _old_primary_checkout(root):
+    """The implementation before one `git rev-parse` named the common directory (the oracle)."""
+    root = Path(root)
+    try:
+        inside = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                                capture_output=True, text=True, timeout=5)
+        if inside.returncode != 0 or (inside.stdout or "").strip() != "true":
+            return root
+        listing = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain"],
+                                 capture_output=True, text=True, timeout=5)
+        if listing.returncode != 0:
+            return root
+        for line in (listing.stdout or "").splitlines():
+            if line.startswith("worktree "):
+                primary = Path(line[len("worktree "):].strip())
+                if not primary.is_dir():
+                    return root
+                try:
+                    return primary.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return primary
+    except (OSError, subprocess.SubprocessError):
+        return root
+    return root
+
+
+class PrimaryCheckoutEquivalenceTest(unittest.TestCase):
+    """The one-call path gives what `git worktree list` gave, in every repository layout, and
+    the layouts it cannot name with certainty still ask `git worktree list`."""
+
+    def setUp(self):
+        if not subprocess.run(["git", "--version"], capture_output=True).returncode == 0:
+            self.skipTest("git unavailable")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    def repo(self, name, *init):
+        path = self.root / name
+        path.mkdir()
+        _git("init", "-q", *init, cwd=path)
+        for key, value in (("user.email", "t@example.com"), ("user.name", "t")):
+            _git("config", key, value, cwd=path)
+        (path / "seed.txt").write_text("x", encoding="utf-8")
+        _git("add", "-A", cwd=path)
+        _git("commit", "-qm", "seed", cwd=path)
+        return path
+
+    def same(self, where):
+        self.assertEqual(paths.primary_checkout(where), _old_primary_checkout(where), str(where))
+
+    def fell_back(self, where, expected):
+        """`git worktree list` was asked: the layout is one the common directory cannot settle."""
+        real = subprocess.run
+        calls = []
+
+        def spy(argv, *a, **k):
+            calls.append(list(argv))
+            return real(argv, *a, **k)
+        with mock.patch.object(paths.subprocess, "run", side_effect=spy):
+            self.assertEqual(paths.primary_checkout(where), expected)
+        return any(argv[3:5] == ["worktree", "list"] for argv in calls)
+
+    def test_plain_primary_linked_worktrees_and_a_symlinked_path_make_one_git_call(self):
+        main = self.repo("main")
+        linked = self.root / "wt" / "task"
+        _git("worktree", "add", "-q", "-b", "task", str(linked), cwd=main)
+        nested = linked / "sub" / "dir"
+        nested.mkdir(parents=True)
+        alias = self.root / "alias"
+        alias.symlink_to(linked)
+        for where in (main, linked, nested, alias):
+            self.same(where)
+            self.assertFalse(self.fell_back(where, main), where)
+        spy_calls = []
+        real = subprocess.run
+        with mock.patch.object(paths.subprocess, "run",
+                               side_effect=lambda argv, *a, **k: (spy_calls.append(argv), real(argv, *a, **k))[1]):
+            paths.primary_checkout(linked)
+        self.assertEqual(len(spy_calls), 1)
+
+    def test_non_git_and_missing_directories_are_unchanged(self):
+        plain = self.root / "plain"
+        plain.mkdir()
+        for where in (plain, self.root / "gone"):
+            self.same(where)
+            self.assertEqual(paths.primary_checkout(where), where)
+
+    def test_a_separate_git_dir_asks_git_worktree_list(self):
+        work = self.root / "sep-work"
+        work.mkdir()
+        gitdir = self.root / "sep.gitdir"
+        _git("init", "-q", "--separate-git-dir", str(gitdir), cwd=work)
+        _git("config", "user.email", "t@example.com", cwd=work)
+        _git("config", "user.name", "t", cwd=work)
+        (work / "f").write_text("x", encoding="utf-8")
+        _git("add", "-A", cwd=work)
+        _git("commit", "-qm", "seed", cwd=work)
+        linked = self.root / "sep-linked"
+        _git("worktree", "add", "-q", "-b", "t", str(linked), cwd=work)
+        for where in (work, linked):
+            self.same(where)
+            self.assertTrue(self.fell_back(where, _old_primary_checkout(where)))
+
+    def test_a_bare_repositorys_linked_worktree_asks_git_worktree_list(self):
+        source = self.repo("src")
+        bare = self.root / "bare.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(source), str(bare)], check=True,
+                       capture_output=True)
+        linked = self.root / "bare-wt"
+        added = subprocess.run(["git", "-C", str(bare), "worktree", "add", "-q", "--detach", str(linked)],
+                               capture_output=True, text=True)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.same(linked)
+        self.assertTrue(self.fell_back(linked, _old_primary_checkout(linked)))
+
+    def test_core_worktree_asks_git_worktree_list_from_both_places(self):
+        main = self.repo("cw")
+        other = self.root / "elsewhere"
+        other.mkdir()
+        _git("config", "core.worktree", str(other), cwd=main)
+        (other / ".git").write_text("gitdir: %s\n" % (main / ".git"), encoding="utf-8")
+        # Inside the configured work tree git says "true" and the common directory is `main/.git`,
+        # but `main` is no longer the checkout: the answer must come from `git worktree list`.
+        self.same(other)
+        self.assertTrue(self.fell_back(other, _old_primary_checkout(other)))
+        # From the git directory itself git says it is not inside a work tree: both give `root`.
+        self.same(main / ".git")
+        self.same(main)
+
+    def test_a_config_with_includes_or_a_bare_flag_is_not_trusted(self):
+        main = self.repo("inc")
+        config = main / ".git" / "config"
+        config.write_text(config.read_text(encoding="utf-8") + "[include]\n\tpath = other\n",
+                          encoding="utf-8")
+        self.assertIsNone(paths._checkout_of_common_dir(str(main / ".git")))
+        config.write_text(config.read_text(encoding="utf-8").replace("[include]\n\tpath = other\n", "")
+                          + "[core]\n\tbare\n", encoding="utf-8")
+        self.assertIsNone(paths._checkout_of_common_dir(str(main / ".git")))
+        self.assertEqual(paths._checkout_of_common_dir(str(self.repo("ok") / ".git")), self.root / "ok")
+        self.assertIsNone(paths._checkout_of_common_dir(str(self.root / "no-such" / ".git")))
+
+
 class LauncherSourceTest(unittest.TestCase):
     """The pin is what `install_launchers` consumes."""
 
