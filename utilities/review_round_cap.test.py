@@ -608,6 +608,7 @@ class DeterministicSmokeRecoveryTest(unittest.TestCase):
             marker_dir.mkdir()
             marker = {"route_id": r["route_id"], "route_hash": r["route_hash"],
                       "node_id": "smoke", "attempt_id": "att-smoke-pass", "registered_worker": False,
+                      "round_census": {"verdict_rounds": 1},
                       "reviewer_kind": "owner-inline", "review_independence": "degraded",
                       "evidence": {"path": str(evidence), "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest()}}
             (marker_dir / "smoke.json").write_text(json.dumps(marker))
@@ -641,6 +642,7 @@ class DeterministicSmokeRecoveryTest(unittest.TestCase):
                                       capture_output=True, text=True, timeout=30)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 self.assertEqual((root / "steps").read_text(), "2")
+                evidence = Path(shlex.split(fields["recovery_check_command"])[-1])
                 fresh = json.loads(evidence.read_text())
                 self.assertTrue(smoke.verify(fresh))
                 self.assertEqual(fresh["config_source_sha256"], smoke.digest(config))
@@ -648,6 +650,7 @@ class DeterministicSmokeRecoveryTest(unittest.TestCase):
                 self.assertIn(str(jobs), fields["recovery_complete_command"])
                 self.assertEqual(fields["review_independence_when_owner_run"], "degraded")
                 # A real failing batch remains failed; no fresh PASS can be reused.
+                marker["evidence"]["path"] = str(evidence)
                 marker["evidence"]["sha256"] = hashlib.sha256(evidence.read_bytes()).hexdigest()
                 (marker_dir / "smoke.json").write_text(json.dumps(marker))
                 script.write_text("raise SystemExit(7)\n")
@@ -657,7 +660,8 @@ class DeterministicSmokeRecoveryTest(unittest.TestCase):
                                         capture_output=True, text=True, timeout=30)
                 self.assertEqual(failed.returncode, 7, failed.stdout + failed.stderr)
                 with self.assertRaisesRegex(ValueError, "smoke did not pass"):
-                    smoke.verify(json.loads(evidence.read_text()))
+                    failed_evidence = Path(shlex.split(failing["recovery_check_command"])[-1])
+                    smoke.verify(json.loads(failed_evidence.read_text()))
                 self.assertIsNone(CAP.reuse_deterministic_pass(r, node, jobs, budget))
                 # A changed/malformed evidence file cannot be replayed as the old marker's command.
                 evidence.write_text('{}')

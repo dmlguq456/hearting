@@ -245,6 +245,12 @@ def reuse_deterministic_pass(route, node, jobs, budget):
     if recorded is None:
         return None
     marker_path, marker, evidence, data, smoke = recorded
+    # Attestation-only inputs and the execution environment are outside the
+    # node subject epoch. Returning their bytes to A must not revive a PASS
+    # over verdicts recorded since that marker (including a FAIL on B).
+    marker_rounds = (marker.get("round_census") or {}).get("verdict_rounds", 0)
+    if not isinstance(marker_rounds, int) or budget.verdict_rounds > marker_rounds:
+        return None
     try:
         if not contract.completion_marker_is_current(route, node, marker_path, marker, jobs=jobs):
             return None
@@ -291,13 +297,14 @@ def _deterministic_check_fields(fields, *, route, node, jobs, route_file):
     if recorded is None:
         result["recovery_unavailable"] = "recorded-smoke-command-unavailable"
         return result
-    _marker_path, _marker, evidence, data, smoke = recorded
+    _marker_path, marker, evidence, data, smoke = recorded
     try:
         smoke.verify_execution_environment(data, data["command"], data["cwd"])
     except (OSError, ValueError, KeyError, TypeError):
         result["recovery_unavailable"] = "recorded-smoke-environment-unavailable"
         return result
     inputs = [item["path"] for item in data["inputs"]]
+    argv = list(data["command"])
     config_args = []
     if any(key in data for key in smoke.CONFIG_KEYS):
         # Existing manifests already bind source and snapshot. Locate the current
@@ -307,9 +314,13 @@ def _deterministic_check_fields(fields, *, route, node, jobs, route_file):
         for item in inputs:
             candidates.update(Path(item).parent.glob("*.manifest.json"))
         manifests = []
+        old_manifests = set()
         for candidate in sorted(candidates):
             try:
                 manifest = json.loads(candidate.read_text())
+                if (manifest.get("source_path") == source
+                        and manifest.get("snapshot_sha256") == data.get("config_sha256")):
+                    old_manifests.add(str(candidate))
                 if (manifest.get("source_path") == source
                         and manifest.get("source_sha256") == smoke.digest(source)
                         and manifest.get("snapshot_sha256") == smoke.digest(manifest["snapshot_path"])):
@@ -324,12 +335,34 @@ def _deterministic_check_fields(fields, *, route, node, jobs, route_file):
         # snapshot as an extra smoke input when config bytes have changed.
         old_snapshots = {item["path"] for item in data["inputs"]
                          if item["path"] != source and item.get("sha256") == data.get("config_sha256")}
-        inputs = [item for item in inputs if item not in old_snapshots]
+        replacements = {path: str(manifests[-1][1]["snapshot_path"]) for path in old_snapshots}
+        replacements.update({path: str(manifests[-1][0]) for path in old_manifests})
+        replacements = {old: new for old, new in replacements.items() if old != new}
+        rebound = []
+        for arg in argv:
+            # Only replace a whole path operand (also --config=path). Shell
+            # snippets/embedded paths have no safe argv-level rewrite.
+            prefix, sep, value = arg.partition("=") if arg.startswith("-") else ("", "", arg)
+            operand = value if sep else arg
+            resolved = str((Path(data["cwd"]) / operand).resolve())
+            if resolved in replacements:
+                rebound.append((prefix + sep if sep else "") + replacements[resolved])
+            elif any(Path(old).name in arg for old in replacements):
+                result["recovery_unavailable"] = "recorded-smoke-command-binds-old-config"
+                return result
+            else:
+                rebound.append(arg)
+        argv = rebound
+        inputs = [replacements.get(item, item) for item in inputs if item not in old_snapshots]
+    # Never overwrite the marker's immutable command/evidence on a failed
+    # replay. Binding the sibling name to that evidence also protects a PASS
+    # produced by an earlier recheck when the next recheck fails.
+    evidence = evidence.with_name(f"{node['id']}-recheck-{marker['evidence']['sha256']}.json")
     command = ["python3", str(utilities / "verification-background-lease.py"), "--timeout", "600", "--",
                "python3", str(smoke_tool), "attest"]
     for item in inputs:
         command.extend(["--input", item])
-    command.extend([*config_args, "--cwd", data["cwd"], "--output", str(evidence), "--", *data["command"]])
+    command.extend([*config_args, "--cwd", data["cwd"], "--output", str(evidence), "--", *argv])
     if not route_file:
         from route_lineage import canonical_route_path
         route_file = canonical_route_path(route["artifact_root"], route["route_id"])

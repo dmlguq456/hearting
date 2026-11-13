@@ -102,6 +102,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         executed = subprocess.run(shlex.split(fields["recovery_run_command"]), env=env,
                                   capture_output=True, text=True, timeout=30)
         self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+        evidence = Path(shlex.split(fields["recovery_check_command"])[-1])
         fresh_payload = json.loads(evidence.read_text())
         self.assertTrue(smoke_tool.verify(fresh_payload))
         self.assertIn("executed_at", fresh_payload)
