@@ -58,6 +58,19 @@ model/
 
 Choose the latter when `experiment_conventions.md` defines a model-directory variation prefix; choose the former when it defines a separate experiment folder. Project conventions take priority.
 
+## Leaderboard
+
+`python3 utilities/experiment_catalog.py leaderboard [--group <id|name>] [--format md|tsv]` prints one table per
+catalog group; it never fails the caller (exit 0, also for a missing or broken catalog).
+
+- Columns: condition (catalog name) / run (for tracing) / latest@epoch / best@epoch / baseline (label value@epoch) /
+  diff (`%p` for percent values, else the metric's unit) / relative % / state or reason.
+- Order: rows compared to the target, the better latest value first (the group's `metric.direction`; ties keep the
+  catalog order); rows with no value or no valid comparison below them, in catalog order, each with its reason.
+  Groups are never mixed and the table is not a final winner or a pass/fail call.
+- Every number comes from the catalog's one comparison; nothing is recomputed here. A tracking evaluation table
+  (`tracking/summary.csv`) takes the catalog name as its first column.
+
 ## Pipeline state
 
 `experiments/{date}_{slug}/pipeline_state.yaml`:

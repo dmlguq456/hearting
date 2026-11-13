@@ -1495,6 +1495,31 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
         repo["status"] = status
 
 
+def _repo_lab(repos, snapshot, session_rows, session_index):
+    """Attach the project's experiment board (``collectors.experiment_status``) as ``lab``.
+
+    The board is the shared summary from ``utilities/experiment_board``; nothing is judged
+    here.  A project whose boards are all hidden (no experiments yet) gets no ``lab``; a
+    broken or unread catalog is a visible board, never an empty one.  Of several sessions'
+    boards (they normally share one root) the first visible one is used.
+    """
+    boards = _get(snapshot, "experiment_status")
+    boards = boards if isinstance(boards, Mapping) else {}
+    cwds = {}
+    for row in session_rows:
+        cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
+        if cwd:
+            cwds.setdefault(row["repo_id"], []).append(cwd)
+    for repo in repos:
+        if repo["id"] == UNKNOWN_REPO:
+            continue
+        for cwd in cwds.get(repo["id"], ()):
+            found = boards.get(cwd)
+            if isinstance(found, Mapping) and found.get("visible"):
+                repo["lab"] = found
+                break
+
+
 _OWNER_STATES = frozenset(("live", "successor", "none", "unknown"))
 
 
@@ -3585,6 +3610,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     questions, answer_wait_summary = _question_records(snapshot, session_rows, session_index, clock,
                                                        routes=routes, resolver=resolver)
     _repo_status(repos, snapshot, session_rows, session_index, routes, questions, results, clock)
+    _repo_lab(repos, snapshot, session_rows, session_index)
     peer_nodes, peer_edges = _peer_records(session_rows, session_index, clock, snapshot)
     hosts, compute = _host_records(snapshot, session_index)
     gpu_lines = _session_gpu_lines(snapshot, session_index)

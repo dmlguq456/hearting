@@ -338,14 +338,69 @@ def prepare_runtime_dir(candidate: str) -> str:
         if not path.is_dir():
             return ""
         marker = path / ".gitignore"
-        if marker.exists() or marker.is_symlink():
-            if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"*\n":
-                return ""
-        else:
-            marker.write_bytes(b"*\n")
+        if not marker.exists() and not marker.is_symlink():
+            _publish_runtime_marker(marker)
+        if _read_runtime_marker(marker) != _RUNTIME_MARKER:
+            return ""
         return str(path)
     except (OSError, RuntimeError, TypeError, ValueError):
         return ""
+
+
+_RUNTIME_MARKER = b"*\n"
+# Without hard links the marker is visible empty between its exclusive create
+# and its fill; a reader re-reads such a prefix for at most this long.
+_RUNTIME_MARKER_SETTLE_SECONDS = 0.5
+
+
+def _publish_runtime_marker(marker: Path) -> None:
+    """Publish the marker, never over an existing file.
+
+    `write_bytes` creates the file before it fills it. A second launcher
+    preparing the same root at that moment read an empty marker, took it for
+    a foreign one and launched without its runtime root. A hard link makes
+    the whole file appear at once.
+    """
+    temporary = marker.with_name(f".gitignore.{os.getpid()}.{os.urandom(6).hex()}.tmp")
+    temporary.write_bytes(_RUNTIME_MARKER)
+    try:
+        os.link(temporary, marker)
+    except FileExistsError:
+        pass  # Another launcher published it first; the caller reads it back.
+    except OSError:
+        # Without hard links (EXDEV, EPERM, ENOTSUP...) an exclusive create is
+        # the only portable step that never replaces a marker another
+        # launcher published after the last look (a rename did, and took that
+        # root as its own). It is filled right after; `_read_runtime_marker`
+        # waits out the instant it is still empty.
+        try:
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(_RUNTIME_MARKER)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_runtime_marker(marker: Path) -> bytes | None:
+    """Read the marker; a prefix of `*\\n` is re-read briefly, never rewritten.
+
+    A launcher still filling the marker shows it empty (or `*`) for an
+    instant; that is not a foreign marker. One left that way past the bound
+    (its writer died between create and fill) is returned as is, so the root
+    is refused and the marker stays for whoever made it.
+    """
+    deadline = time.monotonic() + _RUNTIME_MARKER_SETTLE_SECONDS
+    while True:
+        if marker.is_symlink() or not marker.is_file():
+            return None
+        content = marker.read_bytes()
+        if (content == _RUNTIME_MARKER or not _RUNTIME_MARKER.startswith(content)
+                or time.monotonic() >= deadline):
+            return content
+        time.sleep(0.005)
 
 
 def artifact_context_prompt(environ) -> str:

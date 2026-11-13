@@ -1025,6 +1025,7 @@ def merge(basic, detail):
     return replace(basic, sessions=sessions, jobs=jobs, resources=resources,
                    memory=value.memory, governor=value.governor,
                    project_status=getattr(value, "project_status", None),
+                   experiment_status=getattr(value, "experiment_status", None),
                    hearting=value.hearting or basic.hearting,
                    display_snapshot=display_snapshot, observations=observations, **evidence)
 
@@ -1064,6 +1065,8 @@ def retain_optional_last_good(previous, current):
 
     if getattr(new, "project_status", None) is None:      # read once a minute; a pass without it keeps the last
         new.project_status = getattr(old, "project_status", None)
+    if getattr(new, "experiment_status", None) is None:   # the board read keeps its own cache; an absent pass keeps the last
+        new.experiment_status = getattr(old, "experiment_status", None)
 
     old_rows = {}
     for row in old.sessions:
