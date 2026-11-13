@@ -153,6 +153,30 @@ for(const [state,reason,word] of [['answer_below','marker-has-no-bound-native-re
  assert(flat(b).split('\n')[0].includes('SUBMITTED'),flat(b));}
 })().catch(e=>{console.error(e);process.exit(1);});""")
 
+    def test_an_answered_question_leaves_the_panel_once_focus_returns(self):
+        # Correction 3 (11-13): after a panel answer the question stayed in the panel for good
+        # (`✓ consumed`): the editor held it, so the backend kept returning it as a retained
+        # reference. While focused the receipt stays readable; leaving focus, or a settled one
+        # arriving while unfocused, lets it go, and it is no longer asked for.
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const open={id:'S4:q',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['a','b']}]};
+const done={...open,answerable:false,request_state:'applied'};
+const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+b.update([open]);b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);
+b.update([done]);
+assert(JSON.stringify(b.detail()).includes('applied'),'the receipt reads while focused');
+assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);
+b.leave();
+assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
+// The backend no longer asks for it; were it still sent while unfocused, it stays out.
+b.update([done]);assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
+// An open question beside it stays, and so does one only sent (not settled).
+const other={...open,id:'S4:o'},sent={...open,id:'S4:s',answerable:false,request_state:'submitted'};
+b.update([done,other,sent]);assert.deepEqual(b.references().map(x=>x.id),['S4:o','S4:s']);
+})().catch(e=>{console.error(e);process.exit(1);});""")
+
     def test_decision_enter_cannot_submit_before_an_explicit_selection(self):
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);

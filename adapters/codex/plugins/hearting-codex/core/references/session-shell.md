@@ -647,6 +647,11 @@ choices or free-text affordance and exact request state are readable before
 focus; an empty question section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
 Enter submits only explicit, complete answers. Keep a single active action.
+A settled question (answered, expired, cancelled) stays to show its receipt
+while the editor is focused; once focus returns to the native it is let go and
+no longer asked for, and an answered registered question leaves the shared
+answer-wait view the moment it completes, so the panel's count and question
+follow the answer at once.
 Collect every current form draft at that one submit; moving with Tab does not
 require Enter in each field and an edited draft supersedes its earlier value.
 Secret answers remain masked while selected, submitted, unfocused or consumed;

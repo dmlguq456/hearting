@@ -3381,6 +3381,36 @@ class MessageCompletionTests(unittest.TestCase):
                     "harness": harness, "session_id": b["session_id"]})
                 self.assertEqual(selected["state"], "open", selected)
 
+    def test_an_answered_message_question_leaves_the_published_waits_at_once(self):
+        # Correction 3 (11-13): answering a registered question from the panel completed it, but the
+        # published answer-wait cache kept listing it until the next collection (up to a minute), so
+        # the panel kept `◑ 1` and the question. Completion now drops that one wait from the cache
+        # and Fleet's view right away, the rule the collection applies anyway; other waits stay.
+        a, ea = self.f.ask("claude", "session-a", "question A")
+        b, eb = self.f.ask("claude", "session-b", "question B")
+        def item(signal):
+            return {"id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+                    "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+        self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+        before = state._read_cache_file()
+        self.assertEqual(before["total"], 2)
+        self.f.submit(ea, "answer A")
+        wire, _, _ = self.f.prepare(a)
+        self.f.consume(a, wire)
+        self.assertEqual(self.source(a)["lifecycle"], "answered")
+        after = state._read_cache_file()
+        self.assertEqual([row["id"] for row in after["items"]], [b["id"]])
+        self.assertEqual(after["total"], 1)
+        self.assertNotIn("claude\0session-a", after["by_session"])
+        self.assertEqual(after["by_session"]["claude\0session-b"], [b["id"]])
+        fleet = json.loads(state._fleet_cache_path().read_text())
+        self.assertEqual([row["id"] for row in fleet["items"]], [b["id"]])
+        self.assertEqual(fleet["total"], 1)
+        self.assertEqual(state.cached_statusline("claude", "session-a")[0][1], 0)
+        # A direct answer in the session settles the same way.
+        self.f.direct(b, "answer B")
+        self.assertEqual(state._read_cache_file()["items"], [])
+
     def test_legacy_question_keeps_its_address_when_another_session_registers(self):
         import session_tidy as tidy
         a, envelope = self.f.ask("codex", "session-a", "legacy question")

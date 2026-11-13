@@ -33,15 +33,21 @@ module.exports=function({changed,answer,action,page}) {
   // ↑↓ choose only while this question takes a choice; otherwise they scroll as before.
   function choosing(row){return !!row&&focused&&active(row)&&!state(row.item).typing[row.question.id]&&choices(row).length>0;}
   function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;}
+  // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
+  // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
+  // longer asked for as a retained reference and leaves the panel.
+  const settled=item=>item.answerable!==true&&(['applied','expired','cancelled'].includes(item.request_state)||state(item).state==='applied');
+  function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
     const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
-    const listed=flat();
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
       }
     }
+    release();
+    const listed=flat();
     const found=previous?listed.findIndex(row=>key(row.item)===key(previous.item)&&row.question.id===previous.question.id):-1;
     const firstOpen=listed.findIndex(row=>row.item.answerable===true&&!state(row.item).state);
     if(!focused&&previous&&state(previous.item).state&&firstOpen>=0){index=firstOpen;frozen=undefined;stale=false;scroll=0;follow=true;}
@@ -55,7 +61,7 @@ module.exports=function({changed,answer,action,page}) {
     changed();
   }
   function enter(){focused=true;scroll=0;follow=true;changed();}
-  function leave(){focused=false;resetParser();scroll=0;follow=true;changed();}
+  function leave(){focused=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();

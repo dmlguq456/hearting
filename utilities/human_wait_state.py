@@ -576,6 +576,43 @@ def message_answer_submission_current(binding):
                 and _answer_attachment_current(entry.get("answer_attachment"), envelope))
 
 
+def _settle_published_wait(wait_id):
+    """Drop one answered wait from the published views at once (correction 3, 11-13).
+
+    The collection leaves an answered message question out (``read_signals``); until it runs
+    again the cache kept the wait, so the panel and Fleet still counted and showed it. Only
+    that exact id goes; every other row and count stays as published. Best effort: a later
+    collection writes the same result.
+    """
+    try:
+        with _cache_write_lock():
+            value = _read_cache_file()
+            if value and any(row.get("id") == wait_id for row in value.get("items", ()) if isinstance(row, dict)):
+                value["items"] = [row for row in value["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
+                by_session = value.get("by_session") if isinstance(value.get("by_session"), dict) else {}
+                value["by_session"] = {key: [ref for ref in refs if ref != wait_id]
+                                       for key, refs in by_session.items()
+                                       if isinstance(refs, list) and any(ref != wait_id for ref in refs)}
+                counts = wait_counts(value["items"])
+                value.update(total=counts["total"], older=counts["older"], stale_total=counts["older"],
+                             ownerless=counts["ownerless"],
+                             unattributed=[ref for ref in value.get("unattributed", ()) if ref != wait_id])
+                _write_cache_value(value)
+            path = _fleet_cache_path()
+            meta = os.lstat(path) if path.exists() else None
+            fleet = (json.loads(path.read_text(encoding="utf-8"))
+                     if meta and stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
+                     and not stat.S_IMODE(meta.st_mode) & 0o077 and meta.st_size <= _CACHE_MAX_BYTES else None)
+            if isinstance(fleet, dict) and fleet.get("schema_version") == 1 and any(row.get("id") == wait_id for row in fleet.get("items", ()) if isinstance(row, dict)):
+                fleet["items"] = [row for row in fleet["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
+                counts = wait_counts(fleet["items"])
+                fleet.update(total=counts["total"], older=counts["older"], ownerless=counts["ownerless"],
+                             unattributed=[ref for ref in fleet.get("unattributed", ()) if ref != wait_id])
+                _write(_fleet_cache_path(), fleet)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
     """Source seat lock held; completion is independent of the transport claim."""
     if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
@@ -594,6 +631,7 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
         completion["answer"] = text
     signal.update(lifecycle="answered", completion=completion)
     _write_signal_source(signal)
+    _settle_published_wait(signal["id"])
     envelope = _message_envelope(signal)
     entry = _selected_entry(envelope) or {"draft": "", "state": "open"}
     entry["source_terminal"] = True
