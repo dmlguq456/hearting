@@ -3017,8 +3017,11 @@ def _advance_plan(route, jobs, result, *, run, sleep, clock):
                 "next_step": "This leg finished. The plan's next leg did not start: " + str(exc)[:160]
                     + ". Run next_leg.compose_command to start it, or report the reason."}
     started = start_work(leg_route, leg_path, jobs, run=run, sleep=sleep, clock=clock)
+    # The finished leg's shared-spec publication stays visible on the new leg's receipt.
+    published = ({"shared_publication": result["shared_publication"]}
+                 if isinstance(result.get("shared_publication"), dict) else {})
     return {**started, "plan_advanced": {"leg": following["index"], "after_route_id": route["route_id"],
-                                         "route_file": str(leg_path)}}
+                                         "route_file": str(leg_path), **published}}
 
 
 def _compose_again(route) -> str:

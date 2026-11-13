@@ -1887,6 +1887,23 @@ class WorkStartTest(unittest.TestCase):
         retry.assert_called_once_with(self.route, settle=True)
         self.assertEqual(self.calls, [])
 
+    def test_plan_advance_keeps_the_finished_legs_publication_on_the_new_receipt(self):
+        pending = {"cycle_id": "cyc-leg0", "status": "pending", "reason": "shared-spec-conflict"}
+        finished = {"state": "completed", "required_action": "advance-completed",
+                    "next_leg": {"index": 1}, "shared_publication": pending}
+        route = {"route_id": "rt-leg0", "artifact_root": self.tmp.name, "route_plan": {"index": 0}}
+        record = {"record": {"decision": {"approvals": {"execution_scope": "complete"}}}}
+        with mock.patch.object(W.RP, "validate_sealed", return_value={"decision": "d.json", "index": 0}), \
+             mock.patch.object(W.RP, "read_route_plan", return_value=record), \
+             mock.patch.object(W, "_plan_leg", return_value=({"route_id": "rt-leg1"}, Path("leg1.json"))), \
+             mock.patch.object(W, "start_work", return_value={"state": "running"}):
+            advanced = W._advance_plan(route, self.jobs, finished, run=None, sleep=None, clock=None)
+            self.assertEqual(advanced["state"], "running")
+            self.assertEqual(advanced["plan_advanced"]["shared_publication"], pending)
+            quiet = W._advance_plan(route, self.jobs, {**finished, "shared_publication": None},
+                                    run=None, sleep=None, clock=None)
+        self.assertNotIn("shared_publication", quiet["plan_advanced"])
+
     def test_closed_runtime_owner_with_unpublishable_spec_completes_and_reports_the_gap(self):
         import artifact_producer
         import dispatch_terminal_commit as terminal
