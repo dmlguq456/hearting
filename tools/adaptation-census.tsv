@@ -369,6 +369,7 @@ utility-deferred	stage_session_contract.py
 utility-deferred	stage_session_runtime.py
 utility-deferred	stage_session_runtime.test.py
 utility-deferred	steward_check.py
+utility-deferred	steward_session_end.test.py
 utility-deferred	subdivision_batch_admission.py
 utility-deferred	tidy_decisions.py
 utility-deferred	tidy_transcripts.py

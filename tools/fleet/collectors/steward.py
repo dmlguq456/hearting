@@ -560,6 +560,9 @@ def role_flag(harness, session_id, *, aliases=(), markers=None, cwd=None, sessio
     if evidence is None:
         return False
     harness = str(harness or "").lower()
+    end_proof = getattr(mod, "steward_session_end_proof", None)
+    if end_proof is not None and end_proof(harness, session_id) == "ended":
+        return False
     for sid in (session_id, *aliases):
         marker = markers.get((harness, sid))
         if (not isinstance(marker, dict) or marker.get("session_id") != sid
@@ -733,6 +736,10 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
     harness = str(harness or "").lower()
     if not session_id:
         return "unknown"
+    mod = _peer_message_module()
+    end_proof = getattr(mod, "steward_session_end_proof", None)
+    if end_proof is not None and end_proof(harness, session_id) == "ended":
+        return "ended"
     if agents is None:
         try:
             from . import herdr
@@ -923,7 +930,7 @@ def repo_supervision(cwd=None, *, repository_key=None, limit=None, markers=None,
     counted = sum(1 for holder in holders if holder["counted"])
     return {"repository": Path(key).parent.name if key else None, "repository_key": key,
             "holders": holders, "counted": counted, "limit": limit,
-            "over_limit": counted > limit, "advisory": True}
+            "over_limit": counted > limit}
 
 
 def supervision_by_repository(sessions=None, *, limit=None, markers=None, relations=None,

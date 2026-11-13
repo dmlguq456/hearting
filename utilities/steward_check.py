@@ -919,15 +919,22 @@ def reconcile_self(store=None, *, identity=None) -> None:
         harness, session_id = getattr(identity, "harness", ""), getattr(identity, "session_id", "")
         if not harness or not session_id:
             return
+        module = getattr(_collector(), "_peer_message_module", None)
+        peer_message = module() if module else None
+        resume = getattr(peer_message, "observe_steward_resume", None)
         st = _store(store)
         duty = st.get(duty_id(harness, session_id))
         marker = _marker_exists(st, harness, session_id)
         if not marker and not _active(duty):
             return
         if marker and _active(duty):
+            if resume:
+                resume(harness, session_id)
             return  # consistent; the runner re-verifies at each due time
         role = _role_held(harness, session_id)
         if role["held"]:
+            if resume:
+                resume(harness, session_id)
             register(harness, session_id, store=st, ensure_runner=False)
         elif _active(duty):
             _retire_for_role(duty, st, role)
@@ -958,6 +965,11 @@ def reconcile_all(store) -> None:
         try:
             if _session_liveness(harness, session_id, agents, observation) != "ended":
                 register(harness, session_id, store=store, ensure_runner=False)
+            else:
+                module = getattr(_collector(), "_peer_message_module", None)
+                peer_message = module() if module else None
+                if peer_message:
+                    peer_message.release_closed_session(harness, session_id, reason="session-ended")
         except Exception:  # noqa: BLE001
             continue
 

@@ -2790,18 +2790,30 @@ session end completes the duty and retires its undelivered notice through the ex
 retried; a later grant or a revived session reactivates the same duty as a new
 generation. This check is not a completion watch (S3).
 
-Per-repository steward count. `grant_steward` records explicit/watch/start role
+Per-repository steward limit. `grant_steward` records explicit/watch/start role
 evidence under the existing seat and grant locks. `steward.max_supervisors_per_repo`
-(default 2, range 1..8) is an advisory display reference, not admission capacity.
-Role grants proceed independently of this count, including stale and unobservable
-holders. The existing policy reader and setting remain compatible.
-`tools/fleet/collectors/steward.py::repo_supervision` owns the common count for
-Fleet and the shell. It exposes each holder's liveness, observation reason,
-marker activity timestamp and seat. Unknown remains an uncertainty. Historical
-markers remain readable; a newer holder at the same proven seat supersedes a
-non-live predecessor in the count without retiring its outstanding duties.
-An ended holder leaves the count; revival is observed normally. Repository identity
-still uses the git common directory, and foreign targets remain communication.
+(default 2, range 1..8) limits new holders. Unknown holders keep counting; proven-ended
+holders leave the count. Existing roles, resumed sessions and confirmed successors keep their
+roles even when that makes the count exceed the limit. A proven same-seat successor
+uses the non-live predecessor's place. `repo_supervision` owns this count for both
+Fleet and the shell. A limited grant shows each holder's liveness, reason, role
+marker activity and seat, and `steward off` in that holder's session or the
+next normal check for proven-ended holders. Watch/start work still proceeds.
+Repository identity uses the git common directory; foreign targets remain communication.
+
+Natural session exit preserves the marker and role generation for resume. Claude's
+SessionEnd and OpenCode's session.deleted write a short end receipt into that existing
+marker; clear/compact write none and keep seat succession. Codex's existing TUI exit
+observer records the same receipt when its proven frontend exits, without waiting for
+the shared daemon to unload the thread. The normal steward check consumes the receipt
+and uses `release_closed_session` to settle watches and duty, retaining role history.
+The calling session's existing lifecycle reconciliation clears its end receipt on resume
+and reactivates its duty. Explicit off, retire and confirmed clear retain their release
+semantics. A successful grant or self reconciliation also retains an exact native
+process birth, fenced by host, boot and PID namespace, in the marker. Its confirmed
+death or a later boot on the same host proves exit even when native session files have
+vanished. An unreadable or foreign process context stays unknown. No age threshold,
+new poller, cleanup command or setting is introduced.
 A watch whose supervisor ended or whose target was replaced ends with its receipt before it is re-armed,
 without the herdr socket: the supervisor's end comes from the same session proof or from
 its seat pane missing in a complete CLI pane census, the target's from that census or the

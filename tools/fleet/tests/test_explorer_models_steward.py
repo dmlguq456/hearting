@@ -140,8 +140,8 @@ class StewardEditor(unittest.TestCase):
         frame = draw(vm, NavState(view="MODELS", title="MODELS"), 200, 120, beat=1)
         rows = frame.text_rows()
         y, row = next((index, row) for index, row in enumerate(rows) if "hearting · 3 / 2" in row)
-        self.assertIn("alpha, bbbbbbbb, gamma (ended), delta · above reference (advisory)", row)
-        self.assertEqual(frame.cells[y][row.find("hearting · 3")][1], "loc_repo")
+        self.assertIn("alpha, bbbbbbbb, gamma (ended), delta · over limit", row)
+        self.assertEqual(frame.cells[y][row.find("hearting · 3")][1], "g_blocked")
         self.assertTrue(any("beta · 1 / 2 supervising" in row for row in rows))
         self.assertTrue(any("bbbbbbbb: unknown" in row and "seat ?" in row for row in rows))
 

@@ -71,6 +71,13 @@ def main():
             if index + 1 < len(sys.argv) and sys.argv[index + 1] in {"claude", "codex", "opencode"}:
                 harness = sys.argv[index + 1]
         if action == "clear":
+            if payload.get("hook_event_name") == "SessionEnd":
+                utilities = str(ROOT / "utilities")
+                if utilities not in sys.path:
+                    sys.path.insert(0, utilities)
+                from peer_steward_base import peer_message
+                peer_message.observe_steward_end(harness, session_id,
+                                                reason=payload.get("reason") or "session-end")
             # OpenCode clears a question or permission by its exact request id; the
             # plugin sends scope=session only for a wait without one (tool finished,
             # turn ended).

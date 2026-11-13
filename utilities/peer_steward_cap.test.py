@@ -140,23 +140,25 @@ class GrantLimitTest(GrantFixture):
             self.session(sid, cwd or self.primary)
             self.assertEqual(self.grant(sid)["status"], "granted", sid)
 
-    def test_reference_count_never_withholds_a_third_supervisor(self):
+    def test_second_supervisor_is_allowed_and_third_is_limited(self):
         self.fill("s1", "s2")
         self.session("s3", self.primary)
         result = self.grant("s3")
-        self.assertEqual((result["status"], result["written"], result["limit"]), ("granted", True, 2))
+        self.assertEqual((result["status"], result["written"], result["limit"]), ("limited", False, 2))
         self.assertEqual(sorted(h["session_id"] for h in result["holders"]), ["s1", "s2"])
-        self.assertTrue(self.marker_exists("s3"))
-        line = peer_message.format_steward_census(result)
-        self.assertIn("policy=advisory", line)
+        self.assertFalse(self.marker_exists("s3"))
+        line = peer_message.format_steward_limited(result)
+        self.assertTrue(line.startswith("steward=limited repo=alpha holders="), line)
+        self.assertIn("limit=2", line)
         self.assertIn("liveness=unknown", line)
-        self.assertIn("activity_basis=role-marker", line)
+        self.assertIn("last_activity=", line)
+        self.assertIn("steward off", line)
 
     def test_linked_worktree_session_counts_against_the_primary(self):
         self.fill("s1")
         self.fill("s2", cwd=self.linked)
         self.session("s3", self.linked)
-        self.assertEqual(self.grant("s3")["status"], "granted")
+        self.assertEqual(self.grant("s3")["status"], "limited")
         self.session("s4", self.other)
         self.assertEqual(self.grant("s4")["status"], "granted")        # another repository
 
@@ -167,9 +169,9 @@ class GrantLimitTest(GrantFixture):
                                     to={"harness": "codex", "session_id": "t1", "name": "t1"})["status"],
                          "extended")
         self.session("s3", self.primary)
-        self.assertEqual(self.grant("s3")["status"], "granted")
+        self.assertEqual(self.grant("s3")["status"], "limited")
         self.assertEqual(fleet_steward.repo_supervision(
-            repository_key=fleet_steward._repository_key(str(self.primary)))["counted"], 3)
+            repository_key=fleet_steward._repository_key(str(self.primary)))["counted"], 2)
 
     def test_confirmed_handover_successor_extends_instead_of_taking_a_slot(self):
         self.fill("s1", "s2")
@@ -205,7 +207,7 @@ class GrantLimitTest(GrantFixture):
         self.assertEqual((census["counted"], census["over_limit"]), (3, True))
         self.assertTrue(self.marker_exists("s1"))        # nothing is withdrawn
         self.session("s4", self.primary)
-        self.assertEqual(self.grant("s4")["status"], "granted")
+        self.assertEqual(self.grant("s4")["status"], "limited")
 
     def test_repository_unknown_is_granted_without_a_repository_record(self):
         result = self.grant("ghost")
@@ -223,25 +225,24 @@ class GrantLimitTest(GrantFixture):
         self.assertTrue(self.marker_exists("s3"))
         # The foreign watch made no supervisor of s3: a same-repository watch is a new grant.
         self.assertEqual(self.grant("s3", source="watch", to=to,
-                                    target_cwd=str(self.linked))["status"], "granted")
+                                    target_cwd=str(self.linked))["status"], "limited")
 
     def test_grant_records_the_repository_on_the_marker(self):
         self.fill("s1")
         data = json.loads(peer_message.steward_marker_path("claude", "s1").read_text())
         self.assertEqual(data["repository"], fleet_steward._repository_key(str(self.primary)))
 
-    def test_unavailable_advisory_census_preserves_the_requested_role(self):
+    def test_unavailable_census_refuses_a_new_holder_without_writing(self):
         self.session("s1", self.primary)
         with mock.patch.object(fleet_steward, "repo_supervision", side_effect=RuntimeError("boom")):
             result = self.grant("s1")
-        self.assertEqual((result["status"], result["written"]), ("granted", True))
-        self.assertEqual(result["reason"], "census-failed:RuntimeError")
-        self.assertTrue(self.marker_exists("s1"))
+        self.assertEqual((result["status"], result["written"]), ("unavailable", False))
+        self.assertFalse(self.marker_exists("s1"))
 
     def test_mark_steward_keeps_its_bool_contract(self):
         self.fill("s1", "s2")
         self.session("s3", self.primary)
-        self.assertTrue(peer_message.mark_steward("claude", "s3", EXPLICIT_TO, "explicit", TS,
+        self.assertFalse(peer_message.mark_steward("claude", "s3", EXPLICIT_TO, "explicit", TS,
                                                    source="explicit"))
         self.assertTrue(peer_message.mark_steward("claude", "s1", EXPLICIT_TO, "explicit", TS,
                                                   source="explicit"))
@@ -249,7 +250,7 @@ class GrantLimitTest(GrantFixture):
 
 
 class ConcurrentGrantTest(GrantFixture):
-    def test_simultaneous_grants_all_keep_the_requested_role(self):
+    def test_simultaneous_grants_never_pass_the_limit(self):
         self.session("s0", self.primary)
         self.assertEqual(self.grant("s0")["status"], "granted")
         sids = [self.session(f"c{i}", self.primary if i % 2 else self.linked) for i in range(4)]
@@ -267,9 +268,9 @@ class ConcurrentGrantTest(GrantFixture):
         with mock.patch.object(fleet_steward, "repo_supervision", side_effect=slow):
             with ThreadPoolExecutor(max_workers=len(sids)) as pool:
                 statuses = list(pool.map(run, sids))
-        self.assertEqual(statuses.count("granted"), 4, statuses)
-        self.assertEqual(statuses.count("limited"), 0, statuses)
-        self.assertEqual(sum(self.marker_exists(sid) for sid in sids), 4)
+        self.assertEqual(statuses.count("granted"), 1, statuses)
+        self.assertEqual(statuses.count("limited"), 3, statuses)
+        self.assertEqual(sum(self.marker_exists(sid) for sid in sids), 1)
 
     def test_grant_lock_timeout_is_unavailable_and_writes_nothing(self):
         self.session("s1", self.primary)
@@ -294,13 +295,13 @@ class SettingsConsumptionTest(GrantFixture):
             self.session(sid, self.primary)
             self.assertEqual(self.grant(sid)["status"], "granted", sid)
         self.session("s4", self.primary)
-        self.assertEqual(self.grant("s4")["status"], "granted")
+        self.assertEqual(self.grant("s4")["status"], "limited")
         self.settings(limit=1)                           # the next grant reads the new value
         self.session("s5", self.other)
         self.assertEqual(self.grant("s5")["status"], "granted")
         self.session("s6", self.other)
         result = self.grant("s6")
-        self.assertEqual((result["status"], result["limit"]), ("granted", 1))
+        self.assertEqual((result["status"], result["limit"]), ("limited", 1))
 
     def test_unreadable_settings_fall_back_to_the_shipped_limit(self):
         Path(os.environ["DISPATCH_DEFAULTS_CONFIG"]).write_text("not: [valid", encoding="utf-8")
@@ -318,29 +319,29 @@ class PeerStewardWiringTest(GrantFixture):
             self.assertEqual(self.grant(sid)["status"], "granted")
         self.session("s3", self.linked)
 
-    def test_steward_on_reports_role_and_advisory_census(self):
+    def test_steward_on_reports_limited_on_stdout_with_rc_1(self):
         self.prefill()
         out = io.StringIO()
         with self.identity("s3"), contextlib.redirect_stdout(out):
             rc = peer_steward.cmd_steward(SimpleNamespace(state="on"))
-        self.assertEqual(rc, 0)
-        self.assertIn("policy=advisory", out.getvalue())
-        self.assertTrue(self.marker_exists("s3"))
+        self.assertEqual(rc, 1)
+        self.assertTrue(out.getvalue().startswith("steward=limited repo=alpha "), out.getvalue())
+        self.assertFalse(self.marker_exists("s3"))
         out = io.StringIO()
         with self.identity("s1"), contextlib.redirect_stdout(out):
             self.assertEqual(peer_steward.cmd_steward(SimpleNamespace(state="on")), 0)
         self.assertIn("steward=on harness=claude session_id=s1", out.getvalue())
 
-    def test_watch_and_wait_path_keeps_the_role_above_reference(self):
+    def test_watch_and_wait_path_prints_limited_on_stderr_only(self):
         self.prefill()
         out, err = io.StringIO(), io.StringIO()
         with self.identity("s3"), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             peer_steward._mark_observed("codex", "t1", "t1", pane="w1:p1", target_cwd=str(self.primary))
         self.assertEqual(out.getvalue(), "")
-        self.assertEqual(err.getvalue(), "")
-        self.assertTrue(self.marker_exists("s3"))
+        self.assertTrue(err.getvalue().startswith("steward=limited repo=alpha "), err.getvalue())
+        self.assertFalse(self.marker_exists("s3"))
 
-    def test_start_path_keeps_the_role_above_reference(self):
+    def test_start_path_prints_limited_on_stderr_and_still_succeeds(self):
         self.prefill()
         args = SimpleNamespace(kind="codex", name="worker", pane="w1:p2", cwd=str(self.primary))
         out, err = io.StringIO(), io.StringIO()
@@ -348,8 +349,8 @@ class PeerStewardWiringTest(GrantFixture):
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             peer_steward._mark_started(args, "t2", "bypass")
         self.assertEqual(out.getvalue(), "")
-        self.assertEqual(err.getvalue(), "")
-        self.assertTrue(self.marker_exists("s3"))
+        self.assertIn("steward=limited", err.getvalue())
+        self.assertFalse(self.marker_exists("s3"))
 
     def test_grant_registers_the_check_and_release_settles_it(self):
         self.session("s1", self.primary)
@@ -359,8 +360,8 @@ class PeerStewardWiringTest(GrantFixture):
         self.assertEqual(len(self.check.calls), 2)             # extension re-registers idempotently
         self.session("s9", self.primary)
         self.settings(limit=1)
-        self.assertEqual(self.grant("s9")["status"], "granted")
-        self.assertEqual(len(self.check.calls), 3)             # above-reference grant still schedules its check
+        self.assertEqual(self.grant("s9")["status"], "limited")
+        self.assertEqual(len(self.check.calls), 2)             # a refused grant schedules nothing
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(peer_message.cmd_release(
                 SimpleNamespace(harness="claude", session_id="s1")), 0)

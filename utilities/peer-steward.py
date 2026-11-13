@@ -8796,7 +8796,7 @@ def cmd_steward(args):
                     print(peer_message.format_steward_census(fleet.repo_supervision(
                         repository_key=repository, sessions=rows, agents=())))
             except Exception:
-                print("steward-count=unknown reason=census-unavailable policy=advisory")
+                print("steward-count=unknown reason=census-unavailable policy=new-grants-limited")
         return 0 if ok else 1
     if args.state == "check":
         try:

@@ -19,24 +19,22 @@ spec.loader.exec_module(fixture)
 
 
 class StaleHolderTest(fixture.GrantFixture):
-    def test_live_or_unknown_holders_cannot_silently_withhold_the_role(self):
-        for state in ('live', 'unknown'):
-            with self.subTest(state=state), mock.patch.object(fixture.fleet_steward, 'session_liveness', return_value=state):
-                for n in range(4):
-                    sid = f'{state}-{n}'
-                    self.session(sid, self.primary)
-                    result = self.grant(sid)
-                    self.assertTrue(result['written'], result)
-                    self.assertNotEqual(result['status'], 'limited')
-
-    def test_all_three_harnesses_grant_roles_above_reference(self):
-        for harness in ('claude', 'codex', 'opencode'):
-            for n in range(3):
-                sid = f'{harness}-{n}'
-                self.session(sid, self.primary, harness=harness)
-                result = fixture.peer_message.grant_steward(harness, sid, fixture.EXPLICIT_TO,
-                    'explicit', fixture.TS, source='explicit', steward_seat=None)
-                self.assertTrue(result['written'], result)
+    def test_live_and_unknown_holders_limit_new_roles_in_all_harnesses(self):
+        for harness, state in (("claude", "live"), ("codex", "unknown"), ("opencode", "live")):
+            with self.subTest(harness=harness), mock.patch.object(fixture.fleet_steward, 'session_liveness', return_value=state):
+                # A distinct repo for each harness case.
+                repository = str(self.primary) + '/' + harness
+                with mock.patch.object(fixture.fleet_steward, 'repository_for_session', side_effect=lambda h, sid, **kw: str(self.primary) + '/' + h):
+                    for n in range(3):
+                        sid = f'{harness}-{n}'
+                        self.session(sid, self.primary, harness=harness)
+                        result = fixture.peer_message.grant_steward(harness, sid, fixture.EXPLICIT_TO,
+                            'explicit', fixture.TS, source='explicit', steward_seat=None)
+                        self.assertEqual(result['status'], 'limited' if n == 2 else 'granted')
+                        self.assertEqual(result['written'], n != 2)
+                    detail = fixture.peer_message.format_steward_limited(result)
+                    self.assertIn('liveness=' + state, detail)
+                    self.assertIn('steward off', detail)
 
     def test_proven_seat_is_saved_and_nonlive_predecessor_does_not_count_twice(self):
         for sid in ('old', 'new'):

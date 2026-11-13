@@ -431,7 +431,7 @@ def _draw_supervisors(grid, census, limit, x, y, right):
         grid.put(x + 20, y, f"· / {limit} per repo (not counted yet)", "dim", limit=right)
         return y + 1
     if not census:
-        grid.put(x + 20, y, f"none · {limit} per repo reference", "soft", limit=right)
+        grid.put(x + 20, y, f"none · {limit} per repo allowed", "soft", limit=right)
         return y + 1
     for repo in census[:4]:
         repo = _dict(repo)
@@ -442,7 +442,7 @@ def _draw_supervisors(grid, census, limit, x, y, right):
         text = (f"{repo.get('repository') or '?'} · {repo.get('counted', 0)} / {shown} supervising"
                 + (" · " + ", ".join(holders) if holders else ""))
         over = bool(repo.get("over_limit"))
-        grid.put(x + 20, y, text + (" · above reference (advisory)" if over else ""), "soft",
+        grid.put(x + 20, y, text + (" · over limit" if over else ""), "g_blocked" if over else "soft",
                  limit=right)
         y += 1
         for holder in repo.get("holders") or ():
@@ -465,7 +465,7 @@ def _draw_steward_editor(grid, steward, state, x, y, right):
     folds = state.fold_map()
     values = _dict(steward.get("values"))
     notes = {"check_interval_seconds": "a supervising session checks its targets this often without a notice",
-             "max_supervisors_per_repo": "advisory count; never blocks the supervisor flag"}
+             "max_supervisors_per_repo": "new supervisors allowed per repo; ended holders free their seats"}
     for name, choices in _STEWARD_CHOICES.items():
         current = values.get(name)
         if current is None:
