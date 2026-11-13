@@ -106,7 +106,8 @@ class NativeStewardProjectionTest(unittest.TestCase):
              mock.patch('session_notice.notify',return_value={'state':'pending'}) as notify:
             seen=check._observe_role('codex','actor')
             self.assertEqual([r['session_id'] for r in seen['targets']],['target','unknown'])
-            self.assertEqual(seen['targets'][1]['liveness'], 'unknown')
+            self.assertEqual(seen['targets'][1]['liveness'], 'live')
+            self.assertTrue(seen['targets'][1]['unresolved'])
             self.assertNotIn('foreign', [r['session_id'] for r in seen['targets']])
             self.assertEqual(check._classify(seen),'run-steward-check')
             check.register('codex','actor',store=store,ensure_runner=False)
