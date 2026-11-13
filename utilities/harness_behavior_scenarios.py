@@ -833,6 +833,11 @@ def _ids(node, key):
     return found
 
 
+# The tmux driver class itself, kept apart from the module's ``PrivateTui`` name, which
+# companion scenarios replace with a one-shot factory (``harness_behavior_cases_c.install_tui``).
+_TMUX_TUI = PrivateTui
+
+
 def private_herdr_env(root: Path, env: dict) -> str:
     """Point ``env`` at this fixture's private Herdr server; return its session name.
 
@@ -907,6 +912,17 @@ class PrivateHerdrTui:
     def _agent_start(self, name, pane):
         native = self.argv[1:]
         self.panes[name] = pane
+        if SESSION_SHELL:
+            # ``agent start --kind`` runs the kind's own executable, so the session shell's
+            # entry would become its argument: run the whole launch in the pane, then give
+            # the agent Herdr detects there (its integration reports it) the run's name.
+            launch = " ".join(shlex.quote(part) for part in self.argv)
+            ran = self.herdr("pane", "run", pane, launch, timeout=30)
+            found = ran.returncode == 0 and wait_for(
+                lambda: self.herdr("agent", "get", pane, timeout=10).returncode == 0, 120, 1)
+            named = bool(found) and self.herdr("agent", "rename", pane, name, timeout=10).returncode == 0
+            return {"ok": named, "rc": ran.returncode, "pane": pane, "shell_launch": True,
+                    "stderr": ran.stderr[-300:]}
         done = self.herdr("agent", "start", name, "--kind", self.harness, "--pane", pane,
                           "--timeout", "120000", *(["--", *native] if native else []), timeout=130)
         if done.returncode != 0 and "timeout" in done.stderr:
@@ -982,7 +998,8 @@ class PrivateHerdrTui:
         return self._send(self.name, text)
 
     def settle(self, quiet: float = 3, timeout: float = 45):
-        return PrivateTui.settle(self, quiet, timeout)
+        # The class itself: a scenario may swap the module's ``PrivateTui`` for a factory.
+        return _TMUX_TUI.settle(self, quiet, timeout)
 
     def key(self, *keys: str):
         self.herdr("pane", "send-keys", self.panes.get(self.name, self.name), *keys, timeout=10)
@@ -1160,8 +1177,10 @@ class Run:
         runtime = Path(os.environ.get("HEARTING_SCENARIO_TMP") or tempfile.gettempdir())
         runtime.mkdir(parents=True, exist_ok=True)
         # Herdr puts its sockets under XDG_CONFIG_HOME inside this root: a short
-        # name keeps them within the ~107-byte UNIX socket path limit.
-        prefix = (f"hb-{self.harness[:2]}-" if SURFACE == "herdr"
+        # name keeps them within the ~107-byte UNIX socket path limit (also for a
+        # scenario that starts its own private Herdr server, e.g. ``tidy-compact-herdr``).
+        on_herdr = SURFACE == "herdr" or getattr(self.scenario, "surface", "") == "herdr"
+        prefix = (f"hb-{self.harness[:2]}-" if on_herdr
                   else f"hb-{self.harness}-{self.scenario.name}-")
         root = Path(tempfile.mkdtemp(prefix=prefix, dir=str(runtime)))
         row["fixture_root"] = str(root)
@@ -1315,6 +1334,10 @@ class Scenario:
         if not hasattr(module, "PrivateTui"):
             module = sys.modules[__name__]
         if module.SURFACE == "herdr":
+            # A tmux-only one-shot replacement a scenario installed is not used here; the
+            # module's class comes back so the next run in this process starts clean.
+            if getattr(module, "_TMUX_TUI", None) is not None:
+                module.PrivateTui = module._TMUX_TUI
             tui = module.PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
             run.surface = tui
             return tui
