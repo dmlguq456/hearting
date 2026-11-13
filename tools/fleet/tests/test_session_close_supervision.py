@@ -376,6 +376,7 @@ class HeartingNamedTest(CloseSupervisionBase):
                             {"harness": "codex", "session_id": self.E0}, {"carrier": "x", "schema": 1})
         duty = store.update(duty["id"], state="pending", observation=SC._new_observation(1000.0))
         SC.advance(duty, store, now=1001.0)
+        return store.get(duty["id"])
 
     def test_a_lost_window_does_not_release_a_holder_the_native_proof_shows_live(self):
         # Native form of "still shown in its pane": the pane is gone from every census
@@ -393,11 +394,15 @@ class HeartingNamedTest(CloseSupervisionBase):
         self.assertTrue(self.holds_role("codex", self.E0))
         self.assertEqual(self.holder_state(self.supervision(), "codex", self.E0), ("unknown", True))
 
-    def test_a_native_ended_holder_is_released_without_any_pane_read(self):
+    def test_native_end_settles_duty_and_preserves_role_history_for_resume(self):
         self.setup_named()
-        self.lost_window_pass()
-        self.assertFalse(self.holds_role("codex", self.E0))
+        duty = self.lost_window_pass()
+        self.assertEqual((duty["state"], duty["observation"]["reason"]),
+                         ("complete", "session-ended"))
+        self.assertTrue(self.holds_role("codex", self.E0))  # resumable history, not capacity
         self.assertEqual(self.supervision()["counted"], 0)
+        self.codex_seen = {"complete": True, "open": frozenset({self.E0})}
+        self.assertEqual(self.supervision()["counted"], 1)
 
 
 class NativeRegistryCapTest(CloseSupervisionBase):

@@ -2696,12 +2696,16 @@ class U11CompletionStateTest(unittest.TestCase):
         self.assertEqual((decision.allowed, decision.state, decision.reason), (True, "complete", ""))
         self.assertNotIn("forward-recovery-not-proved", repr(decision))
 
-    def test_pending_publication_and_goal_still_hold_the_owner(self):
-        for fact, reason in (("publication_pending", "shared-spec-publication-pending"),
-                             ("goal_pending", "campaign-goal-close-pending")):
-            decision = RA.decide_continuation(action="completion-state", facts={
-                "commit_exists": True, "checkpoint": "owner-envelope-sealed", fact: True})
-            self.assertEqual((decision.state, decision.reason), ("pending", reason))
+    def test_pending_goal_still_holds_the_owner(self):
+        decision = RA.decide_continuation(action="completion-state", facts={
+            "commit_exists": True, "checkpoint": "owner-envelope-sealed", "goal_pending": True})
+        self.assertEqual((decision.state, decision.reason), ("pending", "campaign-goal-close-pending"))
+
+    def test_unpublished_shared_spec_does_not_hold_a_sealed_owner(self):
+        """Publication is not a terminal gate: a pending one rides on the completion."""
+        decision = RA.decide_continuation(action="completion-state", facts={
+            "commit_exists": True, "checkpoint": "owner-envelope-sealed", "publication_pending": True})
+        self.assertEqual((decision.allowed, decision.state, decision.reason), (True, "complete", ""))
 
     def test_terminal_conflict_stays_protected(self):
         choice = RA.decide_continuation(action="replacement", status="done",

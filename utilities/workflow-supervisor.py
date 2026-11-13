@@ -4665,6 +4665,37 @@ def _closed_terminal_projection(route, route_file, gates, node_states, claims):
     )
 
 
+def _status_owner(route, jobs):
+    """Read-only owner projection from the actual registry, including initial execution."""
+    try:
+        # A status caller can itself be an older owner; newest registered owner wins.
+        rows = _registry_rows(jobs or default_jobs_path())
+        owners = [row for row in rows if row["meta"].get("dispatch_depth") == "1"
+                  and row["meta"].get("worker_type") != "frame"
+                  and route["route_id"] in (row["meta"].get("owner_route_id"),
+                                           row["meta"].get("route_id"))]
+        if not owners:
+            return {"attempt_id": None, "liveness": "unknown", "reason": "owner-not-registered"}
+        # A late terminal row from the predecessor cannot displace its replacement.
+        attempts = {}
+        for row in owners:
+            attempt = row["meta"].get("attempt_id")
+            if attempt:
+                attempts[attempt] = row  # dict order preserves first registration
+        if not attempts:
+            return {"attempt_id": None, "liveness": "unknown", "reason": "owner-not-registered"}
+        row = next(reversed(attempts.values()))
+        meta = row["meta"]
+        from dispatch_contract import attempt_process_quiescence
+        observed = attempt_process_quiescence(meta, terminal_receipt=row["status"] not in {"open", "running"})
+        return {"attempt_id": meta.get("attempt_id"), "registry_status": row["status"],
+                "liveness": {"live": "live", "quiescent": "ended"}.get(observed.state, "unknown"),
+                "reason": observed.reason, "current_stage": meta.get("route_node"),
+                "last_activity": row.get("time")}
+    except (OSError, ValueError, SupervisorError) as exc:
+        return {"attempt_id": None, "liveness": "unknown", "reason": type(exc).__name__}
+
+
 def cmd_status(args):
     jobs = getattr(args, "jobs", None)
     try:
@@ -4691,13 +4722,26 @@ def cmd_status(args):
     if closed_complete:
         derived = "COMPLETE"
         running, next_stage = [], []
+    owner = _status_owner(route, jobs)
+    displayed_state = "COMPLETE" if closed_complete else state["workflow_state"]
+    if (not closed_complete and not failed and owner.get("liveness") == "live"
+            and owner.get("registry_status") in {"open", "running"}
+            and displayed_state in {"CREATED", "READY"}):
+        displayed_state = derived = "RUNNING"
+        if not running:
+            node = owner.get("current_stage")
+            declared = {entry["id"] for entry in route.get("nodes") or ()}
+            running = [node] if node in declared else (list(declared) if len(declared) == 1 else ["_owner"])
+            next_stage = [node for node in next_stage if node not in running]
     payload = {
         "route_id": route["route_id"],
         "route_file": str(Path(route_file).resolve()),
         "capability": route.get("capability"),
         "capability_mode": route.get("capability_mode"),
         "effective_intensity": route.get("effective_intensity"),
-        "workflow_state": "COMPLETE" if closed_complete else state["workflow_state"],
+        "workflow_state": displayed_state,
+        "owner": owner,
+        "owner_attempt_id": owner.get("attempt_id"),
         "journal_workflow_state": state["workflow_state"],
         "derived_workflow_state": derived,
         "updated_at": state["updated_at"],
@@ -4730,6 +4774,7 @@ def cmd_status(args):
         print(f"route      {payload['route_id']} ({payload['capability']}/"
               f"{payload['capability_mode']} {payload['effective_intensity']})")
         print(f"workflow   {payload['workflow_state']} (derived {derived})")
+        print(f"owner      {owner.get('attempt_id') or '-'} {owner.get('liveness')} reason={owner.get('reason')}")
         print(f"stage      current={payload['current_stage'] or '-'} "
               f"next={payload['next_stage'] or '-'}")
         print(f"terminal   {terminal_nodes} gates="

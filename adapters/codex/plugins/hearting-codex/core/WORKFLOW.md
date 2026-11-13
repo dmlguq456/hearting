@@ -1186,9 +1186,12 @@ route close → cycle finalize (the completion record) → workflow COMPLETE**. 
 work uses `finish`; legacy recovery uses complete, close and finalize in that
 order. For completed `autopilot-spec`, the same runtime completion/retry path
 admits the official spec through the producer's existing shared-admission API
-after finalize. Admission is not a terminal gate: publication failure preserves
-the closed route, sealed cycle and PASS, and is reported as publication pending
-until the existing completion retry succeeds. Status derives missing publication
+after finalize; a completed `autopilot-code` cycle whose spec transaction changed
+its seeded spec does the same. Admission is not a terminal gate: publication
+failure preserves the closed route, sealed cycle and PASS, and does not hold the
+completion either. The completion is delivered once, its sealed summary names
+the unpublished spec on one line, and the next normal `start` of the same route
+retries admission from the original source/base. Status derives missing publication
 from cycle-to-shared revision lineage, including cycles completed before this
 integration. Research promotion remains explicit; abandoned/open work is not
 published automatically.
