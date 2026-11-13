@@ -1805,6 +1805,34 @@ class OwnerProgressAlarmTest(unittest.TestCase):
         with self.log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event) + "\n")
 
+    def live_supervisor(self):
+        """Record this process, which holds the lease in these tests, as the attempt's own."""
+        self.owner_meta.update(pid=str(os.getpid()), pid_start=contract.process_start_ticks(os.getpid()))
+        self.rows()
+
+    def next_turn(self, harness, at=1960.0):
+        """The wait's end and the next turn of the same session, as each supervisor writes them."""
+        ended = {"type": "dispatch.supervisor.transient-wait.ended", "parent_attempt_id": self.aid,
+                 "reason_code": "transient-edge-block", "ordinal": 5, "deadline_monotonic": 1960.0,
+                 "outcome": "deadline" if at >= 1960.0 else "owner-input"}
+        if harness == "codex":
+            ended.update(thread_id="thread-rv", turn_id="turn-rv")
+            started = {"type": "dispatch.supervisor.turn.started", "thread_id": "thread-rv",
+                       "turn_id": "turn-next"}
+        else:
+            ended.update(turn_ordinal=6)
+            started = {"type": "dispatch.supervisor.turn-started", "parent_attempt_id": self.aid,
+                       "turn_ordinal": 7, "monotonic_ns": int(at * 1e9)}
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(ended) + "\n" + json.dumps(started) + "\n")
+
+    def observe(self, offset):
+        """One observer pass and the observation at ``t0 + offset`` (monotonic ``1000 + offset``)."""
+        with mock.patch.object(supervision.time, "monotonic", return_value=1000.0 + offset):
+            count = self.alarms(self.t0 + offset)
+            observation = self.state(self.t0 + offset)
+        return count, observation["state"], observation["reason"]
+
     def test_e_owner_waiting_out_a_retry_reads_waiting_on_every_harness(self):
         # RV-PR1615: a live owner retrying a 403 edge page, and Codex's capacity wait, read
         # `stalled / no-comparable-progress` with one attempt-stalled notice after 601 s.
@@ -1816,6 +1844,7 @@ class OwnerProgressAlarmTest(unittest.TestCase):
         for index, (harness, reason, runtime) in enumerate(cases):
             with self.subTest(harness=harness, reason=reason, runtime=runtime):
                 self.owner(harness, case=f"-wait{index}")
+                self.live_supervisor()
                 self.runtime(runtime, "runtime-command-live" if runtime == "active"
                              else "attempt-process-role-unclassified")
                 self.retry_wait(harness, reason)
@@ -1833,6 +1862,7 @@ class OwnerProgressAlarmTest(unittest.TestCase):
             with self.subTest(harness=harness, case="deadline-passed"):
                 # Observed through the whole wait, then no next turn: the windows count again.
                 self.owner(harness, case="-late")
+                self.live_supervisor()
                 self.runtime("active", "runtime-command-live")
                 self.retry_wait(harness)
                 counts = []
@@ -1850,6 +1880,7 @@ class OwnerProgressAlarmTest(unittest.TestCase):
             for case in ("other-attempt", "dead-lease"):
                 with self.subTest(harness=harness, case=case):
                     self.owner(harness, case="-" + case)
+                    self.live_supervisor()
                     self.runtime("active", "runtime-command-live")
                     self.retry_wait(harness, attempt_id="att-alarm-other" if case == "other-attempt" else None)
                     with contextlib.ExitStack() as stack:
@@ -1863,6 +1894,99 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                     self.assertEqual(count, 1)
                     self.assertEqual((observation["state"], observation["reason"]),
                                      ("stalled", "no-comparable-progress"))
+
+    @contextlib.contextmanager
+    def other_lock_holder(self, path):
+        """A real flock on the lease file, held by an unrelated untagged process."""
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1], 'r+'); "
+             "fcntl.flock(f, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read()", str(path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "ready")
+            yield holder
+        finally:
+            holder.stdin.close()
+            holder.wait(timeout=10)
+            holder.stdout.close()
+
+    def test_e_a_dead_supervisor_behind_another_lock_holder_never_reads_waiting(self):
+        # RV-PR1615-R2 (1): the supervisor exited and left its lease file with the original
+        # payload; another process then locked it. The lock probe alone reads held, and every
+        # harness read `waiting` with no alarm through 959 s.
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness, case="-foreign")
+                exited = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                          stdin=subprocess.PIPE)
+                start = contract.process_start_ticks(exited.pid)
+                exited.stdin.close()
+                exited.wait(timeout=10)
+                self.owner_meta.update(pid=str(exited.pid), pid_start=start)
+                self.rows()
+                self.runtime("unknown", "attempt-process-role-unclassified")
+                self.phase("running-turn")
+                self.retry_wait(harness)
+                with self.assertRaises(RuntimeError), self.lease():
+                    raise RuntimeError("the supervisor exited")
+                lease = Path(self.owner_meta["supervisor_lease_file"])
+                self.assertIn(self.aid, lease.read_text(encoding="ascii"))
+                with self.other_lock_holder(lease):
+                    self.assertTrue(contract.supervisor_lease_is_held(
+                        self.jobs, {**CURRENT, "attempt_id": self.aid, **self.owner_meta}))
+                    rows = [self.observe(offset) for offset in (0, 601, 959)]
+                self.assertNotIn("waiting", [state for _count, state, _reason in rows], rows)
+                # The same wait under the live supervisor holding its own lease still reads waiting.
+                self.owner(harness, case="-foreign-live")
+                self.live_supervisor()
+                self.runtime("unknown", "attempt-process-role-unclassified")
+                self.phase("running-turn")
+                self.retry_wait(harness)
+                with self.lease():
+                    rows = [self.observe(offset) for offset in (0, 601, 959)]
+                self.assertEqual(rows, [(0, "waiting", "registered-transient-retry-backoff")] * 3)
+
+    def test_e_the_next_turn_after_a_retry_gets_a_fresh_window_however_late_it_was_seen(self):
+        # RV-PR1615-R2 (2): the wait was last observed at 0/300/600/959 s; its end and the next
+        # turn came at 960 s. The first observation then read `stalled / no-comparable-progress`
+        # with an alarm, because the window counted from the last wait observation.
+        for harness in self.DELIVERY:
+            for last_seen in (0, 300, 600, 959):
+                with self.subTest(harness=harness, last_seen=last_seen):
+                    self.owner(harness, case=f"-gap{last_seen}")
+                    self.live_supervisor()
+                    self.runtime("active", "runtime-command-live")
+                    self.phase("running-turn")
+                    self.retry_wait(harness)
+                    with self.lease():
+                        seen = [self.observe(offset) for offset in (0, 300, 600, 959) if offset <= last_seen]
+                        self.assertEqual({state for _count, state, _reason in seen}, {"waiting"})
+                        self.next_turn(harness)
+                        rows = [self.observe(offset) for offset in (960, 1259, 1559, 1560)]
+                    # A fresh window from the next turn's start; no progress after it still alarms.
+                    self.assertEqual([(count, state) for count, state, _reason in rows],
+                                     [(0, "active"), (0, "active"), (0, "active"), (1, "stalled")], rows)
+                    self.assertEqual(rows[-1][2], "no-comparable-progress")
+
+    def test_e_the_next_turn_window_counts_from_its_own_start_not_the_first_sample(self):
+        # The first observation after the next turn may come late: the window still counts
+        # from the turn's own start, so a stop after it is not hidden by the observation gap.
+        for harness in ("claude", "opencode"):
+            with self.subTest(harness=harness):
+                self.owner(harness, case="-late-sample")
+                self.live_supervisor()
+                self.runtime("active", "runtime-command-live")
+                self.phase("running-turn")
+                self.retry_wait(harness)
+                with self.lease():
+                    first = self.observe(0)
+                    self.next_turn(harness, at=1900.0)  # its own start: 900 s, before the deadline
+                    rows = [self.observe(offset) for offset in (1200, 1499, 1500)]
+                self.assertEqual(first[1], "waiting")
+                self.assertEqual([(count, state) for count, state, _reason in rows],
+                                 [(0, "active"), (0, "active"), (1, "stalled")], rows)
+
 
 class StallNoticeRunningToolTest(unittest.TestCase):
     """2026-11-11 00:02: the notice for att-a9d2c7d7 read like a hang while its owner waited
