@@ -157,18 +157,45 @@ function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
   return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
 function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
+// Spec rule 49 (d): the one narrow-width judgment. Beside the native area an open panel
+// folds by itself when the native area would be left under NATIVE_MIN columns, and opens
+// again when there is room. The person's last choice wins at its width: a panel folded by
+// hand stays folded however wide the window grows; one opened by hand stays open until the
+// width changes. The bottom layout never narrows the native area, so only a hand folds it.
+// `pinned` (the settings editor or a question being answered) keeps an open panel open.
+const NATIVE_MIN=80;
+// Spec rule 49 (c): the folded strip is four cells (two borders, two inside), one blank cell
+// from the native area.
+const STRIP=4,STRIP_GAP=1;
+const sideWidth=configuration=>{const width=configuration?.side_width;return Number.isInteger(width)&&width>=32&&width<=80?width:0;};
+function fold({cols,choice=null,configuration={},pinned=false}) {
+  configuration=configuration&&typeof configuration==='object'?configuration:{};
+  // An open-by-hand choice lapses once the width it was made at changes.
+  if(choice&&choice.folded!==true&&choice.cols!==cols)choice=null;
+  if(choice)return {folded:choice.folded===true,choice};
+  const width=sideWidth(configuration);
+  const roomy=!(configuration.layout==='side'&&width)||cols-width-2>=NATIVE_MIN;
+  return {folded:!roomy&&!pinned,choice:null};
+}
 function layout({cols,rows,expanded=true,configuration={}}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
-  const width=configuration.side_width,minimum=configuration.side_min_columns;
-  const side=expanded&&configuration.layout==='side'
-    &&Number.isInteger(width)&&width>=32&&width<=80
-    &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
-    &&cols>=minimum&&cols-width-2>=48&&rows>=8;
+  const width=sideWidth(configuration),wanted=configuration.layout==='side'&&width>0;
+  // Folded beside the native area: the four-cell strip at the panel's edge; the native
+  // area takes the rest (spec rule 49 (c)).
+  if(wanted&&!expanded){
+    const left=configuration.position==='left';
+    return {side:true,folded:true,left,gap:STRIP_GAP,panelCols:STRIP,nativeCols:cols-STRIP-STRIP_GAP,
+      panelColumn:left?0:cols-STRIP,nativeColumn:left?STRIP+STRIP_GAP:0,panelRow:0};
+  }
+  // An open panel stands beside the native area when it physically fits (the native area
+  // keeps 48 columns, the window 8 rows). Short of that (only a panel opened by hand in a
+  // window narrower than the fold judgment above) it opens under the native area.
+  const side=expanded&&wanted&&cols-width-2>=48&&rows>=8;
   // The one placement rule for every harness: a side panel sits right (the
   // default) or left of the native area, two blank cells apart. Only the
   // shell's own panel moves; the native area keeps its own column count.
   const left=side&&configuration.position==='left';
-  return {side,left,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
+  return {side,folded:!expanded,left,gap:side?2:0,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
     panelColumn:side&&!left?cols-width:0,nativeColumn:left?width+2:0,panelRow:side?0:null};
 }
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
@@ -215,4 +242,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,NATIVE_MIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

@@ -101,8 +101,11 @@ function messageKeys(list){
     return n?key+'.'+n:key;
   }).reverse();
 }
-const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion','side_min_columns'];
-const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion','threshold'];
+// Spec rule 49 (d): the narrow-width judgment is one constant (native-display's NATIVE_MIN), so
+// the editor has no `threshold`; `side_min_columns` stays in `defaults` only so a saved policy
+// keeps its keys.
+const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion'];
+const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
   theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['on','off']};
 const APPEARANCE_KEYS=['position','theme','shade'];
@@ -136,8 +139,10 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
-  width=Math.max(12,width);height=Math.max(4,height);
+function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
+  // Spec rule 49: a folded panel is the four-cell strip beside the native area or one row under it.
+  folded=folded===true&&!settings;
+  width=Math.max(folded&&side?4:12,width);height=Math.max(folded?side?3:1:4,height);
   const cfg={...defaults,...configuration};
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -207,6 +212,91 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // read from the rows this paint finally shows, so a route the height dropped
   // keeps nothing turning.
   const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
+  if(folded)return foldedView();
+  // Spec rule 49 (c): folded beside the native area the panel is a strip of four cells (two
+  // borders, two inside), its border in this session's state color (the open panel's frame
+  // source). Inside, from the top: the state glyph (spinning while the session runs, `◑`
+  // waiting, `●` idle), the session number, an empty row, the route count (`2R`, from ten
+  // `9+`), the answer waits (`◑1`, from ten `◑+`), and the unfold mark on the last row, where
+  // the open panel's fold button stands. An absent value draws no row; short of rows the
+  // empty row goes first, then the route count, the waits, the number; the glyph and the
+  // unfold mark stay. No steward mark, gear or moving rule: only the state glyph turns. A
+  // press anywhere on it opens the panel. Spec rule 49 (e): folded under the native area,
+  // one row: the session's status line and `▴` at its right end.
+  function foldedView(){
+    const own=LIVE[state],color=own&&own[1]!=='g_work_off'?own[1]:'dim';
+    const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
+    const plain=model.no_color===true||cfg.theme==='mono';
+    const out=[],hits=[];
+    if(side){
+      const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
+      const two=parts=>{const fit=clip(parts,2);return [...fit.parts,text(' '.repeat(Math.max(0,2-fit.used)))];};
+      const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+      const number=tag?[model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'}]:[];
+      const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:Number.isInteger(model.route_count)&&model.route_count>0?model.route_count:0;
+      const waiting=typeof model.wait==='string'&&model.wait.trim()?/(\d+)\s*$/.exec(model.wait):null;
+      const waits=waiting?Number(waiting[1]):typeof model.wait==='string'&&model.wait.trim()?-1:0;
+      const items=[];
+      // The glyph keeps its row while the state is unknown, so nothing below it moves.
+      items.push({rank:5,parts:glyph});
+      if(number.length)items.push({rank:2,parts:number});
+      if(total||waits){
+        items.push({rank:0,parts:[]});
+        if(total)items.push({rank:3,parts:[text(total>=10?'9+':total+'R','loc_repo')]});
+        // An answer wait whose count is unknown shows its glyph alone (spec rule 12).
+        if(waits)items.push({rank:4,parts:[text('◑'+(waits<0?'':waits>=10?'+':String(waits)),'g_blocked')]});
+      }
+      const room=Math.max(0,height-3);
+      while(items.length>room){let low=0;items.forEach((item,i)=>{if(item.rank<items[low].rank)low=i;});items.splice(low,1);}
+      out.push([frameText('┌'),frameText('──'),frameText('┐')]);
+      for(let i=0;i<height-2;i++){
+        const last=i===height-3,parts=last?[text(cfg.position==='left'?'»':'«','dim')]:items[i]?.parts||[];
+        out.push([frameText('│'),...two(parts),frameText('│')]);
+      }
+      out.push([frameText('└──┘')]);
+      for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:3,action:'unfold'});
+    }else{
+      const line=(Array.isArray(segments)?segments:[]).filter(part=>part&&typeof part==='object');
+      const fit=clip(line,Math.max(0,width-2));
+      const body=fit.used<line.reduce((n,p)=>n+measure(clean(p.text)),0)?[...clip(line,Math.max(0,width-3)).parts,text('…','dim')]:fit.parts;
+      const used=body.reduce((n,p)=>n+measure(clean(p.text)),0);
+      out.push([...body,text(' '.repeat(Math.max(0,width-1-used))),text('▴','dim')]);
+      hits.push({row:0,left:0,right:width-1,action:'unfold'});
+    }
+    const painted=appearance(out,side?cfg:{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
+    const spins=out.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0);
+    return {rows:painted,hits,color,routePages:1,routeDetail,routeArea:null,groups:[],animated:spins.length>0,spins,motion:null,folded:true};
+  }
+  // Spec rule 49 (a), (b), (e): the panel's last row inside carries the gear `⚙` (dim) at its
+  // right end and, three cells left of it, the fold button: `»` beside the native area (`«`
+  // for a left panel), `▾` in the bottom layout. Their presses stay apart (the cell between
+  // them is neither's). The row stays however short rows run, so the panel can always fold;
+  // whatever shares it (5h/7d) takes the cells left of the buttons.
+  const foldMark=cfg.layout==='side'?cfg.position==='left'?'«':'»':'▾';
+  const BUTTONS=5;
+  function footRow(left=[]){
+    const at=content.length+1,room=Math.max(0,width-4-BUTTONS-1);
+    const all=left.reduce((n,p)=>n+measure(clean(p.text)),0);
+    const kept=all<=room?left:room>=4?[...clip(left,room-1).parts,{...(left.at(-1)||text('')),text:'…'}]:[];
+    const used=kept.reduce((n,p)=>n+measure(clean(p.text)),0);
+    hits.push({row:at,left:width-8,right:width-6,action:'fold'});
+    hits.push({row:at,left:width-4,right:width-2,action:'settings'});
+    return [...kept,text(' '.repeat(Math.max(0,width-4-BUTTONS-used))),text(foldMark,'dim'),text('   '),text('⚙','dim')];
+  }
+  // The last row placed; beside the native area it stands on the panel's last row inside.
+  // Rows past the panel's own give way to it: the head's last rows first (the first head row
+  // stays, and a box below keeps both its borders), then whatever runs past the end.
+  function lastRow(left,groups,head=0){
+    const rows=height-2;
+    for(let over=content.length-(rows-1);over>0&&head>1;over--){
+      const at=--head;content.splice(at,1);contentGroups.splice(at,1);
+      for(let i=hits.length-1;i>=0;i--){if(hits[i].row===at+1)hits.splice(i,1);else if(hits[i].row>at+1)hits[i].row--;}
+      if(routeArea&&routeArea.top>at+1){routeArea={...routeArea,top:routeArea.top-1,bottom:routeArea.bottom-1};}
+    }
+    if(content.length>rows-1){content.length=rows-1;contentGroups.length=rows-1;for(let i=hits.length-1;i>=0;i--)if(hits[i].row>rows-1)hits.splice(i,1);}
+    if(fill)while(content.length<rows-1)add([]);
+    add(footRow(left),undefined,groups);
+  }
   // Spec rule 47: the thin rule under the metadata follows this session's own state, the
   // frame's source (not a route's): running moves a bar along it, an answer or confirmation
   // wait blinks it red on the one-second beat, anything else is the plain rule. Rule motion
@@ -347,7 +437,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // A newer release waiting for this page to close says so in the page's head, one row under the
     // page counter (the panel's notice slot is not drawn while the page is open).
     const waiting=typeof model.upgrade_waiting==='string'?clean(model.upgrade_waiting).trim():'';
-    const detail=content.splice(start),budget=Math.max(1,height-3-start-(waiting?1:0));
+    const detail=content.splice(start),budget=Math.max(1,height-4-start-(waiting?1:0));
     routePages=Math.max(1,Math.ceil(detail.length/budget));
     const page=Math.max(0,Math.min(routePages-1,routePage));
     const counter=` ‹ ${page+1}/${routePages} › `;
@@ -356,6 +446,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     add(line(counter+' · PgUp/PgDn'));
     if(waiting)add(line(waiting));
     for(const row of detail.slice(page*budget,(page+1)*budget))add(row);
+    lastRow([],[]);
   }else{
     // Spec C3 (2026-11-11): session, model/context, the answer wait and the task
     // first; then one row per route and per message, each opened in place by a
@@ -1027,7 +1118,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
     // Running jobs keep their row beside a question: its editor pages its own content.
-    const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-(quota.length?1:0)),columns:inner-box});
+    const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-1),columns:inner-box});
     const ask=[];
     if(q.length){
       const key=tone.question;
@@ -1104,7 +1195,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // Spec rule 35 (c): beside the native area one empty row parts the route box from what
     // follows it (the question box, else the messages rule); the messages' extra rows leave it.
     const routeGap=()=>side&&keepRouteGap&&keepRoutes&&(ask.length>0||keepMessages&&messages.length>0||memShown())?1:0;
-    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+messageSection()+(keepQuota?1:0);
+    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+messageSection()+1;
     const budget=rows;
     const baseCount=messageCount;
     // Each step is taken only while rows are short; a later step that frees more rows than
@@ -1210,7 +1301,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(closing))),key),role:'messages'},...noted(closing)]});
     }
     // Each section is placed whole or not at all; the empty row under the route box goes first.
-    const tail=ask.length+messageBlock.length+(keepQuota?1:0);
+    const tail=ask.length+messageBlock.length+1;
     let gap=routeBlock.length?routeGap():0;
     if(order.length+routeBlock.length+gap+tail>budget)gap=0;
     if(order.length+routeBlock.length+tail>budget)routeBlock=[];
@@ -1225,14 +1316,16 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const item of ask)add(item.parts,item.action);
       for(const item of messageBlock)add(item.parts,item.action);
     }else for(const item of ask)add(item.parts,item.action);
-    // A reset time that does not fit goes whole, never as a cut `(↻ …`.
-    const quotaRow=size(quota)<=inner?quota:quota.filter(part=>!/^\(↻/.test(String(part.text)));
-    if(keepQuota&&content.length<rows)add(cut(quotaRow,inner),undefined,['quota']);
+    // A reset time that does not fit goes whole, never as a cut `(↻ …`. Spec rule 49 (b): 5h/7d
+    // share the last row with the fold button and the gear, which stay however short rows run.
+    const quotaRoom=inner-BUTTONS-1;
+    const quotaRow=size(quota)<=quotaRoom?quota:quota.filter(part=>!/^\(↻/.test(String(part.text)));
+    lastRow(keepQuota?quotaRow:[],keepQuota&&quota.length?['quota']:[],order.length);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17, 29 (a): the top border carries Fleet's session-row head on the
   // left: the state glyph, the session number (`[e9]`), the harness name in its Fleet
-  // hue and, for a steward, Fleet's `⚑`; only the gear `⚙` on the right. The state
+  // hue and, for a steward, Fleet's `⚑` (spec rule 49 (a): no gear there). The state
   // has no word: glyph, number and frame share its color. `HEARTING` names the
   // settings screen alone. An unknown state has no glyph; an unknown number is left out.
   const own=settings?null:LIVE[state];
@@ -1260,13 +1353,13 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // Short of cells the steward mark goes first, then the harness, then the number;
   // the glyph stays to the end.
   const headParts=pieces=>{const shown=pieces.filter(x=>x.length);return shown.length?[frameText(' '),...shown.flatMap((x,i)=>i?[text(' '),...x]:x),frameText(' ')]:[];};
-  const room=Math.max(0,width-7);
+  // Spec rule 49 (a): right of the head the top border is the line alone; the gear stands
+  // inside, at the right end of the last row.
+  const room=Math.max(0,width-3);
   const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
     [[glyphPart,tagPart,harnessPart,flagPart],[glyphPart,tagPart,harnessPart],[glyphPart,tagPart],[glyphPart]].map(headParts).find(x=>cellsOf(x)<=room)||[];
-  const label=clip(leftParts,room),right=clip([frameText(' ⚙ ')],Math.max(0,width-label.used-2));
-  rows.push([frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used-right.used))),...right.parts,frameText('┐')]);
-  // The gear's press reaches past its own cell to the rule beside it and the corner.
-  hits.push({row:0,left:Math.max(1,width-right.used-2),right:width-1,action:'settings'});
+  const label=clip(leftParts,room);
+  rows.push([frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used))),frameText('┐')]);
   const frameRow=parts=>{const fitted=clip(parts,inner);return [frameText('│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),frameText('│')];};
   for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[]));
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);

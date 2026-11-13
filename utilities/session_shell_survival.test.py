@@ -116,7 +116,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
                 +"input_owner.InputOwner.advance=gated\n"
                 +"sys.argv=["+repr(str(entry_script))+",*sys.argv[1:]]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
             entry_script=bootstrap
-        master,slave=pty.openpty();outer_attrs=termios.tcgetattr(slave);success=False;fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,100,0,0))
+        master,slave=pty.openpty();outer_attrs=termios.tcgetattr(slave);success=False;fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,130,0,0))
         entry=fixture.subprocess.Popen([sys.executable,str(entry_script),'claude',sys.executable,str(native),sid],
             env=env,cwd=self.project,stdin=slave,stdout=slave,stderr=slave,start_new_session=True,
             preexec_fn=lambda:fcntl.ioctl(0,termios.TIOCSCTTY,0))
@@ -189,7 +189,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
                 self.assertTrue(terminate_owned(victim))
             else:
                 Path(env['SURVIVAL_FAULT']).write_text('fail')
-                if mode in ('resize','scratch'):fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',32,100,0,0))
+                if mode in ('resize','scratch'):fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',32,130,0,0))
                 os.write(master,b'TRIGGER_DISPLAY_FAILURE\r')
                 if mode=='scratch':until(b'OWNED_DISPLAY_FAILURE')
             after=('AFTER_HOST_ERROR' if inflight else 'AFTER_HOST_ERROR 한글🙂').encode()
