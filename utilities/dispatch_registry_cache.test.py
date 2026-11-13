@@ -566,8 +566,13 @@ class RegistryLinesCacheTest(unittest.TestCase):
         os.replace(staged, self.jobs)
         second = CACHE.registry_view(self.jobs, append_only=True)
         self.assertIsNot(first, second)
-        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 2)
+        # The rename is not trusted as an append (no delta read, a whole read); the
+        # digest of the unchanged leading row is what lets its parse carry over.
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
         self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 0)
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+        self.assertIs(second._segments[0], first._segments[0])
+        self.assertEqual([record.order for record in second.records], [0, 1])
 
     def test_handover_candidate_index_drops_attempt_after_parent_binding_changes(self):
         self.jobs.write_text(
@@ -602,8 +607,15 @@ class RegistryLinesCacheTest(unittest.TestCase):
             stream.write("a\tb\tc\td\te\tf=2\n")
         second = CACHE.registry_view(self.jobs, append_only=True)
         self.assertIsNot(first, second)
+        # No delta read: the whole file was read again. Its leading bytes are
+        # proven by digest, not by the caller's append-only assertion, so the
+        # parse of the unchanged row is kept.
         self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 0)
-        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 2)
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
+        self.assertIs(second._segments[0], first._segments[0])
+        self.assertEqual(len(second.records), 2)
 
     def test_path_cache_retains_a_bounded_lru(self):
         for number in range(CACHE._CACHE_MAX_PATHS + 1):
@@ -724,9 +736,11 @@ class RegistryLinesCacheTest(unittest.TestCase):
         second = CACHE.registry_lines(self.jobs)
         self.assertEqual(len(second), 2)
         # This fixture rewrites the file directly; size growth alone is not
-        # writer evidence for the append-only fast path.
+        # writer evidence, so the file is read whole. Only the leading row whose
+        # bytes the digest proves unchanged keeps its parse.
         self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 0)
-        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 2)
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
         self.jobs.write_text("a\tb\tc\td\te\tf=3\n", encoding="utf-8")
         self.assertEqual(len(CACHE.registry_lines(self.jobs)), 1)
 
@@ -1194,11 +1208,25 @@ class LightRegistryViewTest(unittest.TestCase):
         self.assertGreater(CACHE._completion_metadata.cache_info().currsize, 0)
         self.assertGreater(CACHE._handover_metadata.cache_info().currsize, 0)
         staged = self.jobs.with_name("jobs.replacement")
-        staged.write_text(self._rows(["done"]), encoding="utf-8")
+        # A replacement that keeps none of the old rows is a new generation.
+        staged.write_text(self._rows(["done"]).replace("att-0", "att-other"), encoding="utf-8")
         os.replace(staged, self.jobs)
         CACHE.registry_view(self.jobs)
         self.assertEqual(CACHE._completion_metadata.cache_info().currsize, 0)
         self.assertEqual(CACHE._handover_metadata.cache_info().currsize, 0)
+
+    def test_replacement_that_keeps_leading_rows_keeps_the_lookup_cache(self):
+        patcher = mock.patch.object(CACHE, "_PARSE_CHUNK_LINES", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.jobs.write_text(self._rows(["done", "done"]), encoding="utf-8")
+        view = CACHE.registry_view(self.jobs)
+        view.records[0].completion_metadata()
+        staged = self.jobs.with_name("jobs.replacement")
+        staged.write_text(self._rows(["done"]), encoding="utf-8")
+        os.replace(staged, self.jobs)
+        CACHE.registry_view(self.jobs)
+        self.assertGreater(CACHE._completion_metadata.cache_info().currsize, 0)
 
     def test_append_reuse_keeps_the_lookup_cache(self):
         self.jobs.write_text(self._rows(["done"]), encoding="utf-8")
@@ -1249,6 +1277,298 @@ class LightRegistryViewTest(unittest.TestCase):
             self.assertEqual(view.line_count, len(expected), raw)
             self.assertEqual(view.lines, expected, raw)
             self.assertEqual(view.has_partial_tail, bool(raw) and not raw.endswith(b"\n"))
+
+
+class PrefixReuseAfterReplacementTest(unittest.TestCase):
+    """A rewritten registry keeps the parse of the leading rows its bytes prove unchanged."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        CACHE.clear_cache()
+        CACHE.reset_metrics()
+        for name, value in (("_PARSE_CHUNK_LINES", 4),):
+            patcher = mock.patch.object(CACHE, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _row(number, status="done", extra=""):
+        return (f"t\t{status}\t/repo\t/wt\tslug{number % 3}\t"
+                f"attempt_id=att-{number},attempt_schema_version=2,parent=p{number % 3}"
+                f",parent_sid=sid{number % 2}{extra}\n")
+
+    def _write(self, rows):
+        self.jobs.write_bytes("".join(rows).encode())
+
+    def _replace(self, rows):
+        staged = self.jobs.with_name("jobs.staged")
+        staged.write_bytes("".join(rows).encode())
+        os.replace(staged, self.jobs)
+
+    def _read(self, scoped):
+        if not scoped:
+            return CACHE.registry_view(self.jobs)
+        with CACHE.registry_read_scope():
+            return CACHE.current_registry_view(self.jobs)
+
+    @staticmethod
+    def _answers(view):
+        attempts = sorted({record.completion_metadata().get("attempt_id")
+                           for record in view.records} - {None})
+        return {
+            "lines": view.lines, "line_count": view.line_count,
+            "orders": [record.order for record in view.records],
+            "fields": [record.fields for record in view.records],
+            "select": view.select_rows(), "select_parent": view.select_rows(parent="p1"),
+            "latest": {attempt: (view.completion_attempt(attempt)[0].order,
+                                 view.completion_attempt(attempt)[1])
+                       for attempt in attempts},
+            "records": {attempt: [record.order for record in
+                                  view.completion_attempt_records(attempt)]
+                        for attempt in attempts},
+            "handover": view.handover_latest(),
+            "candidates": [(status, record.order) for status, record in
+                           view.handover_candidates("sid1")],
+            "owners": [record.order for record in view.settlement_owner_candidates()],
+            "duplicates": view.has_duplicate_attempts,
+            "malformed": (view.malformed_rows, tuple(line for segment in view._segments for line in segment.malformed_lines)),
+            "last": view.last_complete_order, "reason": view.completeness_reason,
+        }
+
+    def _assert_same_as_fresh_read(self, view):
+        got = self._answers(view)
+        raw = self.jobs.read_bytes()
+        CACHE.clear_cache()
+        self.assertEqual(got, self._answers(CACHE.registry_view(self.jobs)))
+        return raw
+
+    def _assert_digests(self, view):
+        raw = self.jobs.read_bytes()
+        previous_order = 0
+        for segment in view._segments:
+            self.assertEqual(segment.prefix_sha256,
+                             __import__("hashlib").sha256(raw[:segment.byte_end]).digest())
+            self.assertEqual(raw[segment.byte_end - 1:segment.byte_end], b"\n")
+            self.assertGreater(segment.order_end, previous_order)
+            previous_order = segment.order_end
+
+    def _rows(self, count=14):
+        return [self._row(number) for number in range(count)]
+
+    def test_replacement_keeping_leading_segments_reuses_them(self):
+        for scoped in (False, True):
+            with self.subTest(scoped=scoped):
+                CACHE.clear_cache()
+                CACHE.reset_metrics()
+                rows = self._rows()
+                self._write(rows)
+                first = self._read(scoped)
+                self.assertEqual(len(first._segments), 4)
+                self._assert_digests(first)
+                changed = list(rows)
+                changed[5] = self._row(5, "killed")       # second segment
+                changed.append(self._row(14))
+                self._replace(changed)
+                second = self._read(scoped)
+                self.assertIsNot(first, second)
+                self.assertIs(second._segments[0], first._segments[0])
+                self.assertIsNot(second._segments[1], first._segments[1])
+                metrics = CACHE.metrics_snapshot()
+                self.assertEqual(metrics["full_metadata_parses"], 1)
+                self.assertEqual(metrics["prefix_reuses"], 1)
+                self.assertEqual(metrics["prefix_segments_reused"], 1)
+                self.assertGreater(metrics["prefix_bytes_reused"], 0)
+                self.assertEqual(metrics["metadata_rows_parsed"], 14 + 15 - 4)
+                self.assertEqual(second.completion_attempt("att-5")[0].status, "killed")
+                self._assert_digests(second)
+                self._assert_same_as_fresh_read(second)
+
+    def test_changed_first_row_reuses_no_segment(self):
+        rows = self._rows()
+        self._write(rows)
+        self._read(False)
+        rows[0] = self._row(0, "killed")
+        self._replace(rows)
+        view = self._read(False)
+        metrics = CACHE.metrics_snapshot()
+        self.assertEqual((metrics["full_metadata_parses"], metrics["prefix_reuses"]), (2, 0))
+        # Rows with the same text are still not split and parsed twice.
+        self.assertGreater(metrics["line_parse_reuses"], 0)
+        self._assert_same_as_fresh_read(view)
+
+    def test_same_size_byte_change_reparses_from_that_segment(self):
+        rows = self._rows()
+        self._write(rows)
+        first = self._read(False)
+        raw = self.jobs.read_bytes()
+        target = raw.index(b"att-6")
+        changed = raw[:target] + b"att-X" + raw[target + 5:]
+        self.assertEqual(len(changed), len(raw))
+        staged = self.jobs.with_name("jobs.staged")
+        staged.write_bytes(changed)
+        os.replace(staged, self.jobs)
+        second = self._read(False)
+        self.assertIs(second._segments[0], first._segments[0])
+        self.assertIsNot(second._segments[1], first._segments[1])
+        self.assertIsNone(second.completion_attempt("att-6")[0])
+        self.assertIsNotNone(second.completion_attempt("att-X")[0])
+        self._assert_same_as_fresh_read(second)
+
+    def test_byte_change_inside_the_first_segment_reuses_nothing(self):
+        self._write(self._rows())
+        self._read(False)
+        raw = self.jobs.read_bytes()
+        target = raw.index(b"att-1,")
+        staged = self.jobs.with_name("jobs.staged")
+        staged.write_bytes(raw[:target] + b"att-Y" + raw[target + 5:])
+        os.replace(staged, self.jobs)
+        view = self._read(False)
+        self.assertEqual(CACHE.metrics_snapshot()["prefix_reuses"], 0)
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 2)
+        self._assert_same_as_fresh_read(view)
+
+    def test_deleted_row_shifts_later_orders_to_the_new_generation(self):
+        for scoped in (False, True):
+            with self.subTest(scoped=scoped):
+                CACHE.clear_cache()
+                CACHE.reset_metrics()
+                rows = self._rows()
+                self._write(rows)
+                first = self._read(scoped)
+                del rows[5]
+                rows.append(self._row(14))
+                self._replace(rows)
+                second = self._read(scoped)
+                self.assertIs(second._segments[0], first._segments[0])
+                self.assertEqual([record.order for record in second.records], list(range(14)))
+                # The shifted rows' text is unchanged, so their parse carries over.
+                self.assertGreater(CACHE.metrics_snapshot()["line_parse_reuses"], 0)
+                self.assertEqual(second.completion_attempt("att-6")[0].order, 5)
+                self._assert_digests(second)
+                self._assert_same_as_fresh_read(second)
+
+    def test_new_separator_or_invalid_utf8_reuses_nothing(self):
+        for extra in (b"\r", b"\xe2\x80\xa8", b"\xff"):
+            with self.subTest(extra=extra):
+                CACHE.clear_cache()
+                CACHE.reset_metrics()
+                rows = self._rows()
+                self._write(rows)
+                self._read(False)
+                data = "".join(rows).encode() + b"t\topen\t/r\t/w\ts\tattempt_id=att-z" + extra + b"\n"
+                staged = self.jobs.with_name("jobs.staged")
+                staged.write_bytes(data)
+                os.replace(staged, self.jobs)
+                view = self._read(False)
+                self.assertEqual(CACHE.metrics_snapshot()["prefix_reuses"], 0)
+                self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 2)
+                self.assertFalse(view._prefix_reuse_eligible)
+                self.assertTrue(all(segment.byte_end is None for segment in view._segments))
+                self.assertEqual(view.lines, tuple(self.jobs.read_bytes()
+                                                   .decode("utf-8", errors="replace").splitlines()))
+
+    def test_replacement_after_compaction_reuses_up_to_the_merged_run(self):
+        with mock.patch.object(CACHE, "_MAX_SEGMENTS", 4), \
+                mock.patch.object(CACHE, "_COMPACT_SEGMENTS", 2):
+            rows = self._rows(8)
+            self._write(rows)
+            view = self._read(False)
+            for number in range(8, 14):
+                rows.append(self._row(number))
+                with self.jobs.open("ab") as stream:
+                    stream.write(rows[-1].encode())
+                view = CACHE.registry_view(self.jobs, append_only=True)
+            self.assertGreaterEqual(CACHE.metrics_snapshot()["segment_compactions"], 1)
+            self._assert_digests(view)
+            rows[12] = self._row(12, "killed")
+            self._replace(rows)
+            second = self._read(False)
+            self.assertGreater(CACHE.metrics_snapshot()["prefix_segments_reused"], 0)
+            self.assertIs(second._segments[0], view._segments[0])
+            self._assert_digests(second)
+            self._assert_same_as_fresh_read(second)
+
+    def test_appended_view_keeps_the_digest_chain_for_a_later_replacement(self):
+        rows = self._rows(10)
+        self._write(rows)
+        view = self._read(False)
+        with self.jobs.open("ab") as stream:
+            stream.write(self._row(10).encode() + b"partial-tail")
+        appended = CACHE.registry_view(self.jobs, append_only=True)
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
+        self._assert_digests(appended)
+        with self.jobs.open("ab") as stream:
+            stream.write(b"\n")
+        completed = CACHE.registry_view(self.jobs, append_only=True)
+        self._assert_digests(completed)
+        rows.extend([self._row(10), "partial-tail\n", self._row(11)])
+        rows[9] = self._row(9, "killed")
+        self._replace(rows)
+        second = self._read(False)
+        self.assertIs(second._segments[0], view._segments[0])
+        self._assert_digests(second)
+        self._assert_same_as_fresh_read(second)
+
+    def test_unchanged_prefix_of_a_pure_append_stays_an_append_generation(self):
+        rows = self._rows(8)
+        self._write(rows)
+        first = self._read(True)
+        with self.jobs.open("ab") as stream:
+            stream.write(self._row(8).encode())
+        second = self._read(True)
+        self.assertTrue(second.append_only_generation)
+        self.assertIs(second._segments[0], first._segments[0])
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+        self._assert_same_as_fresh_read(second)
+
+    def test_only_the_same_file_keeping_a_segment_is_an_append_generation(self):
+        # The parse is still reused in every case; only the append marker, which
+        # owner_candidate_floor pairs with an older cursor's (dev, ino), narrows.
+        def appended_in_place(rows):
+            with self.jobs.open("ab") as stream:
+                stream.write(self._row(len(rows)).encode())
+            return rows + [self._row(len(rows))]
+
+        cases = {
+            "append by rename": (self._rows(8), lambda rows: self._replace(rows + [self._row(8)]), False),
+            "identical rewrite": (self._rows(8), lambda rows: self._replace(rows), False),
+            "replacement of an empty generation": ([], lambda rows: self._replace(self._rows(3)), False),
+            "replacement of a tail-only generation": (
+                ["t\topen\t/repo\t/wt\ts\tattempt_id=att-tail"],
+                lambda rows: self._replace(self._rows(3)), False),
+            "append in place": (self._rows(8), appended_in_place, True),
+        }
+        for scoped in (False, True):
+            for name, (rows, change, expected) in cases.items():
+                with self.subTest(case=name, scoped=scoped):
+                    CACHE.clear_cache()
+                    CACHE.reset_metrics()
+                    self._replace(rows)
+                    first = self._read(scoped)
+                    change(rows)
+                    second = self._read(scoped)
+                    self.assertIsNot(second, first)
+                    self.assertEqual(second.signature[:2] == first.signature[:2], expected)
+                    self.assertIs(second.append_only_generation, expected)
+                    if first._segments:
+                        self.assertIs(second._segments[0], first._segments[0])
+                        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+                    self._assert_same_as_fresh_read(second)
+
+    def test_chunking_does_not_change_the_answers(self):
+        rows = self._rows(30)
+        rows[7] = "malformed row\n"
+        rows[11] = self._row(3)                      # a duplicate attempt
+        self._write(rows)
+        chunked = self._answers(self._read(False))
+        CACHE.clear_cache()
+        with mock.patch.object(CACHE, "_PARSE_CHUNK_LINES", 10_000):
+            whole = self._answers(CACHE.registry_view(self.jobs))
+        self.assertEqual(chunked, whole)
+        self.assertTrue(chunked["duplicates"])
 
 
 class RegistryLineageTest(unittest.TestCase):

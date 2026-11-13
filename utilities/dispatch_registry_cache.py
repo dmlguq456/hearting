@@ -36,6 +36,9 @@ _CACHE_MAX_PATHS = 128
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 _MAX_SEGMENTS = 256
 _COMPACT_SEGMENTS = 128
+# A first read is cut into segments of this many rows, so a registry replaced
+# by a rewrite that kept its leading rows can keep the parse of those rows.
+_PARSE_CHUNK_LINES = 512
 _NON_CANONICAL_LINE_SEPARATORS = (b"\r", b"\v", b"\f", b"\x1c", b"\x1d",
                                  b"\x1e", b"\xc2\x85", b"\xe2\x80\xa8",
                                  b"\xe2\x80\xa9")
@@ -56,7 +59,15 @@ _METRICS = {
     "invalidations": 0,
     "cache_evictions": 0,
     "segment_compactions": 0,
+    "prefix_reuses": 0,
+    "prefix_segments_reused": 0,
+    "prefix_bytes_reused": 0,
+    "line_parse_reuses": 0,
+    "replacement_segment_builds": 0,
 }
+# Set once a process asks for ``replacement_rows``: segments built afterwards keep
+# the attempt index they already compute, so that request costs no second parse.
+_REPLACEMENT_ROWS_DEMAND = False
 
 
 def _stat_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -295,7 +306,7 @@ class RegistryRecord:
 
 
 class _RegistrySegment:
-    """One append batch and the indexes for rows introduced by that batch."""
+    """One run of consecutive rows (a chunk of a full read, or one append batch) and its indexes."""
 
     __slots__ = ("records", "malformed_lines", "malformed_rows", "completion_latest",
                  "completion_errors", "completion_all", "completion_children",
@@ -304,9 +315,24 @@ class _RegistrySegment:
                  "observation_owners",
                  "handover_latest", "handover_by_parent", "handover_by_binding",
                  "headless_owner_rows", "selection_by_parent", "selection_by_slug",
-                 "selection_by_attempt", "selection_by_parent_slug")
+                 "selection_by_attempt", "selection_by_parent_slug",
+                 "byte_end", "prefix_sha256", "order_end", "replacement_rows")
 
-    def __init__(self, lines, order_base: int):
+    def __init__(self, lines, order_base: int, *, hint=None, byte_end=None,
+                 prefix_sha256=None):
+        # ``byte_end``/``prefix_sha256``: where this segment's last row ends in the
+        # file and the digest of every byte up to there (None: not reusable).
+        # ``hint`` maps the fields of an earlier row to its record: an identical row
+        # shares that record's fields and, for an open row, its parsed pairs instead
+        # of parsing them again. Records themselves are always rebuilt (new order).
+        self.byte_end = byte_end
+        self.prefix_sha256 = prefix_sha256
+        demand = _REPLACEMENT_ROWS_DEMAND
+        replacement = {}
+        replacement_orders = {}
+        first_duplicate = None
+        line_reuses = 0
+        line_count = 0
         records = []
         handover_keys = {}
         malformed_lines = []
@@ -325,12 +351,18 @@ class _RegistrySegment:
         selection_by_parent_slug = {}
         self.malformed_rows = 0
         for relative_order, line in enumerate(lines):
+            line_count = relative_order + 1
             fields = tuple(line.split("\t"))
+            earlier = hint.get(fields) if hint else None
+            if earlier is not None:
+                fields = earlier.fields     # one shared tuple, and its parsed pairs below
+                line_reuses += 1
             if len(fields) != 6:
                 self.malformed_rows += 1
                 malformed_lines.append((order_base + relative_order, line))
                 continue
-            completion_pairs = _parse_completion(fields[5])
+            completion_pairs = (earlier._completion_pairs if earlier is not None else ()) \
+                or _parse_completion(fields[5])
             canonical_keys = all(key and key == key.strip() for key, _value in completion_pairs)
             handover_pairs = (completion_pairs if canonical_keys
                               else _parse_handover(fields[5]))
@@ -345,6 +377,13 @@ class _RegistrySegment:
             handover_meta = completion_meta if canonical_keys else dict(handover_pairs)
             parent = completion_meta.get("parent")
             attempt_id = completion_meta.get("attempt_id")
+            if demand and attempt_id:
+                if attempt_id in replacement:
+                    if first_duplicate is None:
+                        first_duplicate = (order_base + relative_order, attempt_id)
+                else:
+                    replacement[attempt_id] = (list(fields), completion_meta)
+                    replacement_orders[attempt_id] = order_base + relative_order
             if parent:
                 selection_by_parent.setdefault(parent, []).append(record)
             selection_by_slug.setdefault(fields[4], []).append(record)
@@ -378,6 +417,11 @@ class _RegistrySegment:
             if handover_attempt:
                 handover_latest[handover_attempt] = (fields[1], record)
                 handover_keys[handover_attempt] = _handover_keys(handover_meta)
+        self.order_end = order_base + line_count
+        self.replacement_rows = ((replacement, first_duplicate, replacement_orders)
+                                 if demand else None)
+        if line_reuses:
+            _METRICS["line_parse_reuses"] += line_reuses
         self.records = tuple(records)
         self.malformed_lines = tuple(malformed_lines)
         self.completion_latest = completion_latest
@@ -435,6 +479,13 @@ class _RegistrySegment:
     def compact(cls, segments: tuple["_RegistrySegment", ...]):
         """Merge index deltas without reparsing their registry rows."""
         result = cls.__new__(cls)
+        # The merged run ends where its last member ends, and that member's digest
+        # already covers every byte before it. The boundaries inside are gone, so
+        # a later replacement can only reuse this run as a whole.
+        result.byte_end = segments[-1].byte_end
+        result.prefix_sha256 = segments[-1].prefix_sha256
+        result.order_end = segments[-1].order_end
+        result.replacement_rows = None
         result.records = tuple(record for segment in segments for record in segment.records)
         result.malformed_lines = tuple(line for segment in segments for line in segment.malformed_lines)
         result.malformed_rows = sum(segment.malformed_rows for segment in segments)
@@ -490,14 +541,81 @@ class _RegistrySegment:
         return result
 
 
-def _iter_lf_lines(raw: bytes, boundary: int, counted: list):
-    """Yield the complete LF-terminated rows of ``raw[:boundary]`` like ``splitlines``."""
+def _iter_lf_chunks(raw: bytes, boundary: int, chunk_lines: int):
+    """Yield ``(rows, end offset)`` for the LF rows of ``raw[:boundary]``, ``chunk_lines`` at a time.
+
+    The rows equal ``splitlines`` of that text when LF is the only separator.
+    """
     position = 0
     while position < boundary:
-        end = raw.find(b"\n", position)
-        counted[0] += 1
-        yield raw[position:end].decode("utf-8", errors="replace")
-        position = end + 1
+        rows = []
+        while position < boundary and len(rows) < chunk_lines:
+            end = raw.find(b"\n", position)
+            rows.append(raw[position:end].decode("utf-8", errors="replace"))
+            position = end + 1
+        yield rows, position
+
+
+def _reusable_prefix(cached, raw: bytes, resolved: str, signature: tuple):
+    """What of the cached parse the new bytes ``raw`` still prove unchanged.
+
+    Returns ``(segments, byte_end, hasher, hint, whole, same_file)`` or None.
+    ``segments`` are the leading cached segments whose cumulative digest equals the
+    digest of the same byte range of ``raw`` (the first mismatch stops the walk; the
+    inode is not asked, the digest proves the bytes). ``hasher`` has consumed
+    ``raw[:byte_end]`` for the new view to continue. ``hint`` maps the fields of
+    every discarded cached row to its record (no row text is copied); ``whole``
+    says every cached segment was kept. ``same_file`` says ``signature`` names the
+    cached generation's ``(dev, ino)``.
+    None means a plain full parse.
+    """
+    if (cached is None or not cached._prefix_reuse_eligible
+            or cached.resolved_path != resolved):
+        return None
+    view = memoryview(raw)
+    good = hashlib.sha256()
+    kept, position = 0, 0
+    for segment in cached._segments:
+        end = segment.byte_end
+        if end is None or end > len(raw) or end < position:
+            break
+        trial = good.copy()
+        trial.update(view[position:end])
+        if trial.digest() != segment.prefix_sha256:
+            break
+        good, position, kept = trial, end, kept + 1
+    suffix = raw[position:]
+    # The reused rows were separator-free valid UTF-8; only the rest is checked.
+    if (any(separator in suffix for separator in _NON_CANONICAL_LINE_SEPARATORS)
+            or _utf8_status(suffix)[0]):
+        return None
+    discarded = cached._segments[kept:]
+    hint = {record.fields: record for segment in discarded for record in segment.records} or None
+    return (cached._segments[:kept], position, good, hint, kept == len(cached._segments),
+            tuple(cached.signature[:2]) == tuple(signature[:2]))
+
+
+def demand_replacement_rows() -> None:
+    """Keep each new segment's attempt index from now on (see ``RegistryView.replacement_rows``)."""
+    global _REPLACEMENT_ROWS_DEMAND
+    _REPLACEMENT_ROWS_DEMAND = True
+
+
+def _build_replacement_rows(segment: "_RegistrySegment"):
+    """The attempt index of one segment built from its records, outside the LRU."""
+    rows, orders, first_duplicate = {}, {}, None
+    for record in segment.records:
+        meta = dict(record._completion_pairs or _parse_completion(record.fields[5]))
+        attempt = meta.get("attempt_id")
+        if not attempt:
+            continue
+        if attempt in rows:
+            if first_duplicate is None:
+                first_duplicate = (record.order, attempt)
+        else:
+            rows[attempt] = (list(record.fields), meta)
+            orders[attempt] = record.order
+    return rows, first_duplicate, orders
 
 
 class RegistryView:
@@ -508,16 +626,23 @@ class RegistryView:
                  "last_observed_at", "_has_duplicate_attempts", "_invalid_utf8_prefix",
                  "has_invalid_utf8", "_raw_digest", "_prefix_reuse_eligible",
                  "_append_only_generation", "_asserted_suffix", "_settled",
-                 "_parent_sessions")
+                 "_parent_sessions", "_complete_digest")
 
     def __init__(self, path_identity: str, resolved_path: str, signature: tuple,
                  raw: bytes, *, previous: "RegistryView | None" = None, fd: int = -1,
-                 asserted_suffix: bool = False, settled: bool = False):
+                 asserted_suffix: bool = False, settled: bool = False, reuse=None):
         self.path_identity = path_identity
         self.resolved_path = resolved_path
         self.signature = signature
         self._fd = fd
-        self._append_only_generation = previous is not None
+        # A reuse that kept every (at least one) cached segment of the same file
+        # is the same continuation of an observed prefix, now proven by digest
+        # instead of asserted. A replacement file is never an append generation,
+        # even when it holds the old rows: a later inode reuse could otherwise
+        # pass as the continuation of an older cursor's file.
+        self._append_only_generation = bool(
+            previous is not None
+            or (reuse is not None and reuse[4] and reuse[0] and reuse[5]))
         # True while any part of this generation rests on a caller's append-only
         # assertion instead of bytes whose prefix digest was compared here.
         self._asserted_suffix = bool(
@@ -528,28 +653,53 @@ class RegistryView:
         self._parent_sessions = None
         self.last_observed_at = time.monotonic()
         self._has_duplicate_attempts = None
-        self._raw_digest = hashlib.sha256(raw)
+        self._complete_digest = None
         if previous is None:
-            invalid_utf8, incomplete_utf8 = _utf8_status(raw)
+            kept, base, hasher, hint = reuse[:4] if reuse is not None else ((), 0, None, None)
+            # ``data`` is what this view parses; the first ``base`` bytes are the
+            # already proven prefix whose segments are ``kept``.
+            data = raw[base:] if base else raw
+            invalid_utf8, incomplete_utf8 = _utf8_status(data)
             self._invalid_utf8_prefix = invalid_utf8
             self.has_invalid_utf8 = invalid_utf8 or incomplete_utf8
             self._prefix_reuse_eligible = (
                 not invalid_utf8
-                and not any(separator in raw for separator in _NON_CANONICAL_LINE_SEPARATORS)
+                and not any(separator in data for separator in _NON_CANONICAL_LINE_SEPARATORS)
             )
-            boundary = raw.rfind(b"\n") + 1
-            tail = raw[boundary:]
+            boundary = data.rfind(b"\n") + 1
+            tail = data[boundary:]
             if self._prefix_reuse_eligible:
-                # LF is the only separator: decode one row at a time so the
-                # whole text and its line list never coexist.
-                counted = [0]
-                segment = _RegistrySegment(_iter_lf_lines(raw, boundary, counted), 0)
-                complete_count = counted[0]
+                # LF is the only separator: decode a chunk of rows at a time so the
+                # whole text and its line list never coexist. One hasher walks the
+                # bytes once and leaves each chunk's cumulative digest behind.
+                hasher = hasher if hasher is not None else hashlib.sha256()
+                segments = list(kept)
+                order = kept[-1].order_end if kept else 0
+                lf_rows = data.count(b"\n", 0, boundary)
+                chunk_lines = max(_PARSE_CHUNK_LINES, -(-lf_rows // _COMPACT_SEGMENTS))
+                window, consumed = memoryview(data), 0
+                for rows, end in _iter_lf_chunks(data, boundary, chunk_lines):
+                    hasher.update(window[consumed:end])
+                    consumed = end
+                    segments.append(_RegistrySegment(
+                        rows, order, hint=hint, byte_end=base + end,
+                        prefix_sha256=hasher.copy().digest()))
+                    order += len(rows)
+                if len(segments) > _MAX_SEGMENTS:
+                    compacted = _RegistrySegment.compact(tuple(segments[-_COMPACT_SEGMENTS:]))
+                    segments = segments[:-_COMPACT_SEGMENTS] + [compacted]
+                    _METRICS["segment_compactions"] += 1
+                self._complete_digest = hasher
+                self._raw_digest = hasher.copy()
+                self._raw_digest.update(tail)
+                complete_count = order
             else:
-                complete = raw[:boundary].decode("utf-8", errors="replace").splitlines()
+                complete = data[:boundary].decode("utf-8", errors="replace").splitlines()
                 segment = _RegistrySegment(tuple(complete), 0)
+                segments = [segment] if complete else []
                 complete_count = len(complete)
-            self._segments = (segment,) if complete_count else ()
+                self._raw_digest = hashlib.sha256(raw)
+            self._segments = tuple(segments)
             self._tail = tail
             self.line_count = complete_count + (1 if tail else 0)
         else:
@@ -569,11 +719,25 @@ class RegistryView:
             complete_bytes, tail = pieces[:-1], pieces[-1]
             complete = tuple(piece.decode("utf-8", errors="replace") for piece in complete_bytes)
             old_partial = bool(previous._tail)
-            order_base = previous.line_count - 1 if old_partial and complete else previous.line_count
+            # Rows already complete before this append; a pending tail row was counted
+            # in ``previous.line_count`` and is completed by (or rejoined into) this one.
+            before = previous.line_count - (1 if old_partial else 0)
+            order_base = before
             new_segments = list(previous._segments)
             appended_segment = None
+            byte_end = prefix_digest = None
+            hasher = previous._complete_digest
+            if hasher is not None and self._prefix_reuse_eligible:
+                hasher = hasher.copy()
+                if complete:
+                    hasher.update(memoryview(combined)[:len(combined) - len(tail)])
+                    byte_end = (previous.signature[2] - len(previous._tail)
+                                + len(combined) - len(tail))
+                    prefix_digest = hasher.digest()
+                self._complete_digest = hasher
             if complete:
-                appended_segment = _RegistrySegment(complete, order_base)
+                appended_segment = _RegistrySegment(complete, order_base, byte_end=byte_end,
+                                                    prefix_sha256=prefix_digest)
                 new_segments.append(appended_segment)
             if len(new_segments) > _MAX_SEGMENTS:
                 compacted = _RegistrySegment.compact(tuple(new_segments[-_COMPACT_SEGMENTS:]))
@@ -581,8 +745,7 @@ class RegistryView:
                 _METRICS["segment_compactions"] += 1
             self._segments = tuple(new_segments)
             self._tail = tail
-            self.line_count = (previous.line_count + len(complete)
-                               - (1 if old_partial and complete else 0))
+            self.line_count = before + len(complete) + (1 if tail else 0)
         if previous is None:
             self.record_count = sum(len(segment.records) for segment in self._segments)
             self.malformed_rows = sum(segment.malformed_rows for segment in self._segments)
@@ -658,6 +821,41 @@ class RegistryView:
                    else ("legacy", fields[2], fields[3], fields[4]))
             latest[key] = (fields, metadata)
         return list(latest.values())
+
+    def replacement_rows(self):
+        """``(rows, duplicate)``: rows by attempt id, ``(fields list, metadata dict)``.
+
+        The same answer as parsing ``read_text().splitlines()`` row by row, for a
+        view whose lines equal that text (LF only, valid UTF-8); None otherwise.
+        ``duplicate`` is the attempt id whose second row comes first in the file.
+        Each segment keeps its own attempt index, so a segment carried over a
+        replacement is not parsed again.
+        """
+        if not self._prefix_reuse_eligible or self.has_invalid_utf8:
+            return None
+        merged = {}
+        for segment in self._segments:
+            built = segment.replacement_rows
+            if built is None:
+                built = segment.replacement_rows = _build_replacement_rows(segment)
+                _METRICS["replacement_segment_builds"] += 1
+            rows, first_duplicate, orders = built
+            candidates = [(orders[attempt], attempt) for attempt in rows if attempt in merged]
+            if first_duplicate is not None:
+                candidates.append(first_duplicate)
+            if candidates:
+                return merged, min(candidates)[1]
+            merged.update(rows)
+        if self._tail:
+            fields = self._tail.decode("utf-8").split("\t")
+            if len(fields) == 6:
+                meta = dict(_parse_completion(fields[5]))
+                attempt = meta.get("attempt_id")
+                if attempt:
+                    if attempt in merged:
+                        return merged, attempt
+                    merged[attempt] = (fields, meta)
+        return merged, None
 
     def require_complete_text(self) -> None:
         """Authority cannot prove absence from damaged or uncommitted text."""
@@ -1196,37 +1394,14 @@ def _observe_generation(path: Path) -> list:
             cached._settled = cached._settled or settled
             view = cached
         else:
-            reusable = bool(
-                cached is not None and cached._prefix_reuse_eligible
-                and cached.resolved_path == resolved
-                and cached.signature[:2] == signature[:2]
-                and signature[2] > cached.signature[2]
-                and len(raw) == signature[2]
-                and hashlib.sha256(memoryview(raw)[:cached.signature[2]]).digest()
-                    == cached._raw_digest.digest()
-                and not any(separator in raw for separator in _NON_CANONICAL_LINE_SEPARATORS)
-                # The digest proves the eligible (valid UTF-8) prefix unchanged, so
-                # only its pending tail plus the appended bytes need decoding.
-                and not _utf8_status(cached._tail + raw[cached.signature[2]:])[0]
-            )
-            previous = cached if reusable else None
-            if previous is not None:
-                previous._asserted_suffix = False  # its prefix digest just matched
-            suffix = raw[previous.signature[2]:] if previous is not None else raw
-            _drop(identity, keep_parse=previous is not None)
-            if previous is None:
-                cached = None
+            reuse = _reusable_prefix(cached, raw, resolved, signature)
+            _drop(identity, keep_parse=bool(reuse and reuse[0]))
             _METRICS["invalidations"] += 1
-            view = RegistryView(identity, resolved, signature, suffix,
-                                previous=previous, fd=fd, settled=settled)
-            fd = suffix = None
-            if previous is not None:
-                _METRICS["append_reuses"] += 1
-                _METRICS["metadata_rows_parsed"] += view.record_count - previous.record_count
-            else:
-                cached = previous = None
-                _METRICS["full_metadata_parses"] += 1
-                _METRICS["metadata_rows_parsed"] += view.record_count
+            cached = None  # the old generation is not held while the new one parses
+            view = RegistryView(identity, resolved, signature, raw, fd=fd,
+                                settled=settled, reuse=reuse)
+            fd = None
+            _count_generation(view, reuse)
             _remember(identity, view)
         if fd is not None:
             os.close(fd)
@@ -1346,29 +1521,53 @@ def _registry_view_fresh(jobs: Path, *, append_only: bool = False) -> RegistryVi
                 cached = None
                 _METRICS["invalidations"] += 1
                 previous = None
-        else:
-            if cached is not None:
-                _drop(identity)
-                cached = None
-                _METRICS["invalidations"] += 1
         started_ns = time.time_ns()
+        reuse = None
         if previous is None:
-            resolved, signature, raw, fd = _stable_read(path, identity)
+            # The cached generation stays until the new bytes are read: its
+            # segment digests decide how much of its parse they may keep.
+            stale, cached = cached, None
+            try:
+                resolved, signature, raw, fd = _stable_read(path, identity)
+            except OSError:
+                if _drop(identity) is not None:
+                    _METRICS["invalidations"] += 1
+                raise
+            reuse = _reusable_prefix(stale, raw, resolved, signature)
+            if stale is not None:
+                _drop(identity, keep_parse=bool(reuse and reuse[0]))
+                _METRICS["invalidations"] += 1
+            stale = None
         else:
             _drop(identity, keep_parse=True)
             cached = None
             _METRICS["invalidations"] += 1
         view = RegistryView(identity, resolved, signature, raw, previous=previous, fd=fd,
                             asserted_suffix=previous is not None,
-                            settled=previous is None and _settled_read(fd, started_ns))
+                            settled=previous is None and _settled_read(fd, started_ns),
+                            reuse=reuse)
         if previous is None:
-            _METRICS["full_metadata_parses"] += 1
-            _METRICS["metadata_rows_parsed"] += view.record_count
+            _count_generation(view, reuse)
         else:
             _METRICS["append_reuses"] += 1
             _METRICS["metadata_rows_parsed"] += view.record_count - previous.record_count
         _remember(identity, view)
         return view
+
+
+def _count_generation(view: RegistryView, reuse) -> None:
+    """Account one generation built from a full read, with or without a reused prefix."""
+    kept = len(reuse[0]) if reuse is not None else 0
+    reused_rows = sum(len(segment.records) for segment in reuse[0]) if kept else 0
+    _METRICS["metadata_rows_parsed"] += view.record_count - reused_rows
+    if not kept:
+        _METRICS["full_metadata_parses"] += 1
+    elif reuse[4]:
+        _METRICS["append_reuses"] += 1
+    else:
+        _METRICS["prefix_reuses"] += 1
+        _METRICS["prefix_segments_reused"] += kept
+        _METRICS["prefix_bytes_reused"] += reuse[1]
 
 
 def _drop(identity: str, *, keep_parse: bool = False) -> "RegistryView | None":

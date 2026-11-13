@@ -1087,6 +1087,40 @@ class BatchObligationTest(unittest.TestCase):
         self.assertEqual(context.owner_candidate_floor(self.jobs, appended),
                          replaced.last_complete_order)
 
+    def test_inode_reused_by_a_replacement_does_not_resume_an_older_cursor(self):
+        # gen1 (inode A) holds the cursor; gen2 (inode B) finishes an old owner
+        # row and another reader sees it; gen3 is gen2 plus one row, written by
+        # rename, and ext4 commonly hands it inode A again. gen3 keeps every
+        # cached gen2 segment, yet it is a replacement, not an append of gen1:
+        # a floor at gen1's cursor would skip the finished owner's settlement.
+        # Without inode reuse the floor holds anyway; the marker is checked as well.
+        def rename_registry(lines):
+            fd, staged = tempfile.mkstemp(prefix=".jobs.log.claim-", dir=str(self.base))
+            with os.fdopen(fd, "wb") as stream:
+                stream.write("".join(line + "\n" for line in lines).encode())
+            os.replace(staged, self.jobs)
+
+        for trial in range(5):
+            with self.subTest(trial=trial):
+                registry_cache.clear_cache()
+                context = obligations.OwnerSettlementReadContext()
+                self.addCleanup(context.close)
+                lines = [self._runtime_owner_row(f"att-{number}") for number in range(20)]
+                lines[5] = self._runtime_owner_row("att-5", status="running")
+                rename_registry(lines)
+                first = registry_cache.registry_view(self.jobs, append_only=True)
+                context.remember_owner_cursor(self.jobs, first)
+                lines[5] = self._runtime_owner_row("att-5")
+                rename_registry(lines)
+                registry_cache.registry_view(self.jobs)
+                lines.append(self._runtime_owner_row("att-new"))
+                rename_registry(lines)
+                third = registry_cache.registry_view(self.jobs, append_only=True)
+                same_inode = tuple(third.signature[:2]) == tuple(first.signature[:2])
+                self.assertEqual(context.owner_candidate_floor(self.jobs, third), -1,
+                                 f"inode reused: {same_inode}")
+                self.assertFalse(third.append_only_generation)
+
     def test_not_applicable_owner_is_reclassified_only_when_its_rows_change(self):
         owner = self._runtime_owner_row("att-na")
         unrelated = "t\tdone\t/repo\t/wt\tchild\tattempt_id=att-unrelated\n"

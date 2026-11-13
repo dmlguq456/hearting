@@ -66,7 +66,9 @@ else:  # Existing file-path consumers load this module without a package.
     from fleet.work_titles import readable
 
 _CACHE = {}          # {abspath: (mtime, size, record|None)}
-_OUTCOME_CACHE = {}  # {abspath: (mtime, size, outcome|None)} — F-<next> sidecar reader
+_OUTCOME_CACHE = {}  # {abspath: (identity, outcome|None)} — F-<next> sidecar reader;
+                     # identity = (dev, ino, size, mtime_ns, ctime_ns), so a rewrite that
+                     # restores size and mtime still reads again
 
 # F-30 retry rounds are display evidence, not route shape. Only these semantic
 # nodes carry the compact marker; every other opaque route node keeps its sealed
@@ -576,18 +578,18 @@ def load_outcome(route_file, expect_id=None, expect_hash=None):
     try:
         path = _outcome_path(route_file)
         st = os.stat(path)
-        key = (st.st_mtime, st.st_size)
+        key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     except (OSError, TypeError, ValueError):
         path = _outcome_path(route_file)
         key = None
         outcome = None
     else:
         cached = _OUTCOME_CACHE.get(path)
-        if cached is not None and (cached[0], cached[1]) == key:
-            outcome = cached[2]
+        if cached is not None and cached[0] == key:
+            outcome = cached[1]
         else:
             outcome = _load_outcome_uncached(path)
-            _OUTCOME_CACHE[path] = (key[0], key[1], outcome)
+            _OUTCOME_CACHE[path] = (key, outcome)
     finish_pending = None
     try:
         route_id, artifact_root, pending_route_id = _route_header(route_file)
