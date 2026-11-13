@@ -3460,6 +3460,56 @@ class MessageCompletionTests(unittest.TestCase):
                 self.assertEqual(sorted(row["id"] for row in state._read_cache_file()["items"]),
                                  sorted([b["id"], later[0]["id"]]))
 
+    def test_a_source_not_read_at_publication_keeps_its_unanswered_question(self):
+        # Review 1597-r2 (11-13): the publication's re-read turned a failed read (`_read` folds an
+        # OSError into None) into "that question ended", so one EIO on the open A's source left A
+        # out of the cache and Fleet with `complete: true` and no health, until the next collection.
+        # Not read is not ended: A stays as the collection read it, and the publication says it is
+        # incomplete through the existing health path. An ended (answered) A still leaves (above).
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, _ = self.f.ask(harness, "session-a", "unanswered A")
+                b, _ = self.f.ask(harness, "session-b", "unanswered B")
+                with mock.patch.object(observation, "_session_liveness_probe",
+                                       return_value=lambda *args: "live"), \
+                     mock.patch.object(observation, "_codex_rollout_waits",
+                                       return_value={"complete": True, "pending": {}}):
+                    seen = observation.read_answer_waits(jobs_paths=[self.f.jobs])
+                self.assertTrue(seen["complete"])
+                source = state._signal_path(a)
+                raw = source.read_bytes()
+                original, failed = Path.read_text, []
+                def transient(path, *args, **kwargs):
+                    if path == source and not failed:
+                        failed.append(path)
+                        raise OSError(5, "synthetic transient I/O failure")
+                    return original(path, *args, **kwargs)
+                with mock.patch.object(Path, "read_text", transient):
+                    self.assertTrue(state.publish_cache(seen))
+                self.assertEqual(len(failed), 1)
+                self.assertEqual(source.read_bytes(), raw)
+                self.assertEqual(self.source(a)["lifecycle"], "open")
+                shared = state._read_cache_file()
+                fleet = json.loads(state._fleet_cache_path().read_text())
+                for view in (shared, fleet):
+                    self.assertEqual(sorted(row["id"] for row in view["items"]), sorted([a["id"], b["id"]]))
+                    self.assertEqual(view["total"], 2)
+                    self.assertIs(view["complete"], False)
+                    self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+                self.assertEqual(shared["by_session"][harness + "\0session-a"], [a["id"]])
+                # The next publication that reads the source is complete again.
+                self.assertTrue(state.publish_cache(seen))
+                shared = state._read_cache_file()
+                self.assertEqual(sorted(row["id"] for row in shared["items"]), sorted([a["id"], b["id"]]))
+                self.assertIs(shared["complete"], True)
+                self.assertEqual(shared["health"], [])
+                # A source that is gone has ended: it still leaves at once.
+                source.unlink()
+                self.assertTrue(state.publish_cache(seen))
+                self.assertEqual([row["id"] for row in state._read_cache_file()["items"]], [b["id"]])
+
     def test_legacy_question_keeps_its_address_when_another_session_registers(self):
         import session_tidy as tidy
         a, envelope = self.f.ask("codex", "session-a", "legacy question")

@@ -658,7 +658,8 @@ while the editor is focused; once focus returns to the native it is let go and
 no longer asked for, and an answered registered question leaves the shared
 answer-wait view the moment it completes, so the panel's count and question
 follow the answer at once; a collection read before the answer does not bring
-it back.
+it back, and a question whose source could not be read just then stays, with the
+publication marked incomplete.
 Collect every current form draft at that one submit; moving with Tab does not
 require Enter in each field and an edited draft supersedes its earlier value.
 Secret answers remain masked while selected, submitted, unfocused or consumed;

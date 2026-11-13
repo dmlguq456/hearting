@@ -976,19 +976,34 @@ def _owner_projection(item: dict) -> dict:
     return row
 
 
-def _message_source_still_open(item: dict) -> bool:
-    """Whether the exact S4 source a collection read still holds that open question."""
+def _message_source_state(item: dict) -> str:
+    """What the exact S4 source a collection read says now: ``open`` (still that open
+    question), ``ended`` (removed, replaced by its session's next one, or no longer open) or
+    ``unread`` (not read just now — not the same as ended; the collection's reading stands)."""
     owner = item.get("owner") or {}
     if not owner.get("seat_key"):
-        return True  # Nothing exact to re-read; the next collection decides.
+        return "open"  # Nothing exact to re-read; the next collection decides.
     try:
         path = _signal_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
                              "seat_key": owner["seat_key"], "id": item.get("id")})
     except (OSError, ValueError, TypeError):
-        return True
-    signal = _read(path) if path is not None else None
-    return bool(signal and signal.get("id") == item.get("id")
-                and (signal.get("mode") != "message" or signal.get("lifecycle") == "open"))
+        return "unread"
+    if path is None:
+        return "unread"  # No single exact source to re-read; the next collection decides.
+    signal = _read(path)
+    if signal is None:
+        # `_read` folds a failed read into None; only a source that is gone has ended.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return "ended"
+        except OSError:
+            pass
+        return "unread"
+    if signal.get("id") != item.get("id") or (
+            signal.get("mode") == "message" and signal.get("lifecycle") != "open"):
+        return "ended"
+    return "open"
 
 
 def publish_cache(result: dict) -> bool:
@@ -1111,9 +1126,20 @@ def publish_cache(result: dict) -> bool:
             # A registered question read by this pass may have been answered (or replaced by its
             # session's next one) before this write; its exact source decides, under this same
             # lock that its completion takes to settle the published waits (review 1597-1).
-            removed |= {item.get("id") for item in result["items"]
-                        if isinstance(item, dict) and item.get("source") == "S4" and item.get("id")
-                        and not _message_source_still_open(item)}
+            # Only a source confirmed ended leaves; one that could not be read keeps what the
+            # collection read, and the publication says it is incomplete (review 1597-r2).
+            unread = False
+            for item in result["items"]:
+                if isinstance(item, dict) and item.get("source") == "S4" and item.get("id"):
+                    source_state = _message_source_state(item)
+                    if source_state == "ended":
+                        removed.add(item["id"])
+                    elif source_state == "unread":
+                        unread = True
+            if unread:
+                for projection in (value, fleet_value):
+                    projection["complete"] = False
+                    projection["health"] = [*projection["health"], {"source": "S4", "state": "unknown"}]
             if removed:
                 value["items"] = [row for row in items if row["id"] not in removed]
                 value["by_session"] = {key: [ref for ref in refs if ref not in removed]
