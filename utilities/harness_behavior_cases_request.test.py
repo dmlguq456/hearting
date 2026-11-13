@@ -307,6 +307,7 @@ class FlowVerdictTest(unittest.TestCase):
         try:
             return scenario.drive(run), run.notes
         finally:
+            self.last_evidence = run.evidence
             cases.wait_for, cases.time.sleep = saved
 
     def test_a_complete_flow_passes(self):
@@ -336,6 +337,19 @@ class FlowVerdictTest(unittest.TestCase):
 
     def test_a_flow_without_the_route_box_lines_is_a_gap(self):
         self.assertEqual(self.run_flow("codex", shell=True, panels=False)[0], "gap")
+
+
+    def test_s13_no_session_shell_means_no_panel_assertion(self):
+        # r5 tmux-noshim Codex: every flow assertion passed and only the (absent) panel line made it a gap.
+        for harness in ("claude", "codex", "opencode"):
+            verdict, notes = self.run_flow(harness, shell=False, panels=False)
+            self.assertEqual(verdict, "pass", (harness, notes))
+        verdict, _notes = self.run_flow("codex", shell=False, panels=False)
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(self.last_evidence["panel"], "not-applicable (no session shell)")
+        # With the shell, the panel is still asserted.
+        self.assertEqual(self.run_flow("codex", shell=True, panels=False)[0], "gap")
+        self.assertNotIn("panel", self.last_evidence)
 
 
 class RevisionCancelVerdictTest(unittest.TestCase):
@@ -409,6 +423,134 @@ class RevisionCancelVerdictTest(unittest.TestCase):
         verdict, _notes, ev = self.run_it("claude", "not-needed", rev2=False)
         self.assertEqual(verdict, "fail")
         self.assertFalse(ev["rev2_body_consumed"])
+
+
+class HostRunR5Test(unittest.TestCase):
+    """What host-run r5 showed in the scenarios themselves (S11~S13; S13 is in FlowVerdictTest)."""
+
+    RQ = "rq-94a8a6"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def context(self, harness="claude"):
+        run = SimpleNamespace(harness=harness, home=SimpleNamespace(workspace=Path(self.tmp.name), env={}))
+        scenario = cases.RequestRevisionCancelScenario()
+        scenario.target_address = "%1@/tmp/socket"
+        return scenario, scenario.make_context(run)
+
+    def test_s11_b_opens_and_reports_the_revision_2_line_it_already_received(self):
+        scenario, ctx = self.context()
+        nonce, rq = scenario.nonce, self.RQ
+        line1 = (f"[요청 {rq}] [c1] → [a0] │ 판 검토 {nonce} │ 판 1 판1-{nonce} │ 본문 1줄 │ 열기: python3 "
+                 f'"$AGENT_HOME/utilities/peer-steward.py" show {rq}\n\n(peer-from: claude [c1] ; ref=1)')
+        line2 = line1.replace("판 1 판1-", "판 2 판2-")
+        out1 = show_output(rq, 1, f"BODY-REV1-{nonce}")
+        mark = "SCENARIO-WATCH-TARGET\n"
+        # r5 Claude, in its real order. [3] revision 1's line -> show.
+        t3 = cases.answer(ctx, record(mark + line1, line1), [])
+        self.assertIn(f"show {rq}", t3.shell)
+        # [4] the show output -> the busy step.
+        text4 = mark + line1 + "\n" + out1
+        t4 = cases.answer(ctx, record(text4, "toolu\ntool_result\n" + out1, "tool"),
+                          [record(mark + line1, line1, reply={"shell": t3.shell}, turn=line1)])
+        self.assertIn("time.sleep", t4.shell)
+        earlier = [record(mark + line1, line1, reply={"shell": t3.shell}, turn=line1),
+                   record(text4, out1, "tool", reply={"shell": t4.shell}, turn=out1)]
+        # [9] `B-WORK-DONE` comes with the revision 2 line (a hook context, outside the turn's tool
+        # result): the late report on revision 1, with revision 1's own command.
+        text9 = text4 + f"\nB-WORK-DONE\nPostToolUse:Bash hook additional context: {line2}"
+        t9 = cases.answer(ctx, record(text9, "toolu\ntool_result\nB-WORK-DONE", "tool", turn="B-WORK-DONE"), earlier)
+        self.assertIn(f"report {rq} --rev 1 --result", t9.shell)
+        earlier.append(record(text9, "B-WORK-DONE", "tool", reply={"shell": t9.shell}, turn="B-WORK-DONE"))
+        # [10] the late report's result: nothing opens revision 2 yet -> now B shows the request.
+        done = f"report={rq} kind=final revision=1 late=true state=open delivery=queued-not-delivered"
+        text10 = text9 + "\n" + done
+        t10 = cases.answer(ctx, record(text10, done, "tool", turn=done), earlier)
+        self.assertEqual(t10.shell, f'{cases.STEWARD} show {rq}')
+        earlier.append(record(text10, done, "tool", reply={"shell": t10.shell}, turn=done))
+        # The show prints revision 2: B reports it with `--rev 2`.
+        out2 = show_output(rq, 2, f"BODY-REV2-{nonce}")
+        text11 = text10 + "\n" + out2
+        t11 = cases.answer(ctx, record(text11, out2, "tool", turn=out2), earlier)
+        self.assertIn(f"report {rq} --rev 2 --result", t11.shell)
+        self.assertNotIn("--rev 1", t11.shell)
+        earlier.append(record(text11, out2, "tool", reply={"shell": t11.shell}, turn=out2))
+        # Revision 2's report done: nothing is left to open, B stops.
+        done2 = f"report={rq} kind=final revision=2 late=false state=final"
+        t12 = cases.answer(ctx, record(text11 + "\n" + done2, done2, "tool", turn=done2), earlier)
+        self.assertFalse(t12.shell)
+
+    def test_s11_a_report_with_no_unopened_revision_does_not_show_again(self):
+        scenario, ctx = self.context()
+        nonce, rq = scenario.nonce, self.RQ
+        line1 = f"[요청 {rq}] [c1] → [a0] │ 판 검토 {nonce} │ 판 1 판1-{nonce} │ 본문 1줄 │ 열기: show {rq}"
+        out1 = show_output(rq, 1, f"BODY-REV1-{nonce}")
+        done = f"report={rq} kind=final revision=1 late=false state=final"
+        reply = cases.answer(ctx, record("SCENARIO-WATCH-TARGET\n" + line1 + "\n" + out1 + "\n" + done, done, "tool",
+                                         turn=done), [])
+        self.assertFalse(reply.shell)
+
+    def test_s11_the_unopened_revisions_are_read_from_the_lines_and_the_show_outputs(self):
+        line = lambda rq, n: f"[요청 {rq}] [c1] → [a0] │ 판 검토 x │ 판 {n} 판{n}-x │ 열기: show {rq}"  # noqa: E731
+        inputs = "\n".join([line("rq-aaaaaa", 1), line("rq-aaaaaa", 2), show_output("rq-aaaaaa", 1, "b"),
+                            f"[요청 rq-bbbbbb] [c1] → [a0] │ 세번째 │ 열기: show rq-bbbbbb"])
+        self.assertEqual(cases.pending_revisions(inputs), {"rq-aaaaaa": [2]})
+        self.assertEqual(cases.pending_revisions(inputs + "\n" + show_output("rq-aaaaaa", 2, "c")), {})
+
+    def test_s12_the_busy_step_of_codex_ends_before_its_shell_tool_returns(self):
+        for harness, seconds in (("claude", 25), ("opencode", 25), ("codex", 8)):
+            _scenario, ctx = self.context(harness)
+            self.assertEqual(ctx["hold"], seconds, harness)
+            out = show_output(self.RQ, 1, "BODY")
+            busy = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + out, out, "tool"), [])
+            self.assertIn(f"time.sleep({seconds})", busy.shell, harness)
+        self.assertLess(8, 10)  # Codex's shell tool answers `Process running with session ID …` at 10s
+
+    def run_busy(self, created, ended_at, *, with_times=True):
+        scenario, _ctx = self.context()
+        records = {"rq-111111": {"revisions": [{"created": 100.0}, {"created": created}]}}
+        busy = {"text": "", "last_text": "", "turn_text": "", "main_index": 4, "last_kind": "tool",
+                "reply": {"shell": "python3 -c time.sleep(25)"}, "at": 101.0}
+        end = {"text": "", "last_text": "", "turn_text": "B-WORK-DONE", "main_index": 9, "last_kind": "tool",
+               "reply": {}, "at": ended_at}
+        scenario.records = lambda run: records
+        scenario.b_requests = lambda run: [busy, end] if ended_at is not None else [busy]
+        return scenario.sent_while_busy(SimpleNamespace(), "rq-111111")
+
+    def test_s12_revision_2_after_the_busy_step_ended_is_inconclusive_not_a_failure(self):
+        self.assertTrue(self.run_busy(created=110.0, ended_at=126.0))   # sent while B worked
+        self.assertTrue(self.run_busy(created=110.0, ended_at=None))    # B still in the step
+        self.assertFalse(self.run_busy(created=130.0, ended_at=126.0))  # sent after the step ended
+
+    def drive_revision(self, created):
+        scenario = cases.RequestRevisionCancelScenario()
+        scenario.target_tui = SimpleNamespace(screen=lambda: "")
+        scenario.target_address = "%1@/tmp/socket"
+        first = "rq-111111"
+        records = {first: {"state": "open", "revisions": [{"created": 100.0}, {"created": created}]}}
+        busy = {"text": "", "last_text": "", "turn_text": "", "main_index": 4, "last_kind": "tool",
+                "reply": {"shell": "python3 -c time.sleep(8)"}, "at": 101.0}
+        end = {"text": "", "last_text": "", "turn_text": "Process running with session ID 1", "main_index": 9,
+               "last_kind": "tool", "reply": {}, "at": 111.0}
+        scenario.records = lambda run: records
+        scenario.b_requests = lambda run: [busy, end]
+        scenario.a_requests = lambda run: []
+        scenario.start_a = lambda run, text: None
+        run = SimpleNamespace(harness="codex", evidence={}, notes=[], main_requests=lambda: [],
+                              note=lambda text: run.notes.append(text))
+        saved = cases.wait_for, cases.time.sleep
+        cases.wait_for, cases.time.sleep = (lambda predicate, timeout, step=0.5: predicate()), (lambda _s: None)
+        try:
+            return scenario.drive(run), run.notes
+        finally:
+            cases.wait_for, cases.time.sleep = saved
+
+    def test_s12_drive_returns_inconclusive_with_a_note_when_revision_2_came_too_late(self):
+        verdict, notes = self.drive_revision(created=120.0)
+        self.assertEqual(verdict, "inconclusive")
+        self.assertIn("late-report path was not exercised", " ".join(notes))
 
 
 class RunExecuteOrderTest(unittest.TestCase):

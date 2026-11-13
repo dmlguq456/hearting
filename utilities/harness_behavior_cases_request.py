@@ -18,7 +18,10 @@ what the request record says, never a helper's success line:
     a revision cancelled before delivery never reaches B; a cancel after delivery reaches B
     as one read-only line that does not say "stop". Codex's native queue counts a line as delivered
     at once (PG-59), so its cancel is judged as a cancel after delivery. Revision 2's body is read by B
-    (`show`) once the line reaches it, and its final report closes the request.
+    (`show`) once the line reaches it, and its final report closes the request. B remembers every request
+line it received: after a report, a revision it was told of and has not opened is shown and reported.
+Codex's busy step is shorter than its shell tool's 10s return; a revision 2 that went out after the
+busy step ended did not test the late-report path and is ``inconclusive``.
 ``request-handoff``
     B is replaced by B' through a private session-tidy lineage row. Pass: the open request
     is B' 's and B' 's report is accepted. Counter-case: a session with no lineage row
@@ -27,7 +30,7 @@ what the request record says, never a helper's success line:
 The panel request lines (the requester's ``→`` and the receiver's ``◂``, in the route box's own
 form: mark, other session, the request's title (cut with `…` on a narrow panel), `` · ``, state) are read from both whole
 terminal screens, which are written to the output folder; a panel that does not show them is a
-``gap``. Outside the session shell, the declared limits (PG-59: a Claude receiver at rest takes no
+``gap`` (outside the session shell there is no Hearting panel, so none is asserted: `panel: not-applicable`). Outside the session shell, the declared limits (PG-59: a Claude receiver at rest takes no
 request; PG-4/33: an OpenCode requester is not woken by every report) are ``gap``, not ``fail``.
 """
 from __future__ import annotations
@@ -116,6 +119,26 @@ def shown_command(text, request_id, kind, result, *, first=False):
     return (found[0] if first else found[-1]).replace("<one line>", result)
 
 
+# The revision a request line names: `[요청 rq-…] … │ 판 N <label> │ …` (outside the bracket).
+REVISION_LINE = re.compile(r"\[요청 (rq-[0-9a-f]{6})\][^\n]*? │ 판 (\d+)(?= |│|$)", re.MULTILINE)
+# A `show` output: `request=<id> …` up to its `--- revision N (sealed body) ---`.
+OPENED_BODY = re.compile(r"request=(rq-[0-9a-f]{6}) (?:(?!request=rq-).)*?--- revision (\d+) \(sealed body\) ---",
+                         re.DOTALL)
+
+
+def pending_revisions(inputs):
+    """``{request id: [revision, …]}`` of the revisions B was told of by a request line in any input
+    it has received but has not opened with `show` (no `--- revision N (sealed body) ---` yet)."""
+    told = {}
+    for request_id, number in REVISION_LINE.findall(inputs):
+        told.setdefault(request_id, set()).add(int(number))
+    opened = {}
+    for request_id, number in OPENED_BODY.findall(inputs):
+        opened.setdefault(request_id, set()).add(int(number))
+    return {request_id: sorted(told[request_id] - opened.get(request_id, set()))
+            for request_id in told if told[request_id] - opened.get(request_id, set())}
+
+
 def _shells(records, mark):
     return [(r["reply"].get("shell") or "") for r in records if mark in r["text"]]
 
@@ -125,11 +148,13 @@ def answer(ctx, record, earlier):
     text, last, kind = record["text"], turn(record), record["last_kind"]
     nonce = ctx["nonce"]
     if B_MARK in text and A_MARK not in text:
-        return _answer_b(ctx, text, last, kind, _shells(earlier, B_MARK), nonce)
+        # Everything B has received so far: the whole conversation, this turn, and every earlier turn.
+        inputs = "\n".join([text, last] + [turn(r) for r in earlier if B_MARK in r["text"] and A_MARK not in r["text"]])
+        return _answer_b(ctx, text, last, kind, _shells(earlier, B_MARK), nonce, inputs)
     return _answer_a(ctx, text, last, kind, _shells(earlier, A_MARK), nonce)
 
 
-def _answer_b(ctx, text, last, kind, shells, nonce):
+def _answer_b(ctx, text, last, kind, shells, nonce, inputs=""):
     sent = lambda needle: any(needle in shell for shell in shells)  # noqa: E731
     if kind == "tool":
         done = re.search(r"report=(rq-[0-9a-f]{6}) kind=(\w+)", last)
@@ -154,6 +179,14 @@ def _answer_b(ctx, text, last, kind, shells, nonce):
         if done and done.group(2) == "partial" and not sent('--result "FINAL'):
             command = shown_command(text, done.group(1), "final", f'"FINAL-{nonce}"')
             return Reply(shell=f"{pause(3)}; {command}") if command else Reply("B step done.")
+        if done:
+            # B finished a report. A revision it was told of by a line while it worked, and has not
+            # opened, is its next work: `show` it (once per revision it was told of), then report with
+            # the command that `show` prints.
+            for request_id in pending_revisions(inputs):
+                told = len(set(re.findall(rf"\[요청 {request_id}\][^\n]*? │ 판 (\d+)", inputs)) | {"1"})
+                if sum(f"show {request_id}" in shell for shell in shells) < told:
+                    return Reply(shell=f"{STEWARD} show {request_id}")
         return Reply("B step done.")
     cancelled = CANCEL_LINE.search(last)
     if cancelled:
@@ -341,6 +374,10 @@ class RequestFlowScenario(_RequestScenario):
         if limited:
             run.note("PG-59 outside the session shell: " + "; ".join(limited))
             return "gap"
+        if "session_shell" not in run.evidence:
+            # No session shell, no Hearting shell panel: the route box is not asserted there.
+            ev["panel"] = "not-applicable (no session shell)"
+            return "pass"
         shown = (ev["panels_open"]["requester"] and ev["panels_open"]["receiver"]
                  and any(line.startswith("✓") for line in ev["panels_closed"]["requester"]))
         if not shown:
@@ -356,6 +393,12 @@ class RequestRevisionCancelScenario(_RequestScenario):
                "an undelivered cancelled revision never reaches B; a cancel after delivery is one "
                "read-only line.")
     HOLD = 25
+    # Codex's shell tool returns `Process running with session ID …` after ~10s (r5), before the
+    # step ends and `B-WORK-DONE` is printed: its busy step is shorter than that return.
+    HOLD_BY_HARNESS = {"codex": 8}
+
+    def hold_seconds(self, run):
+        return self.HOLD_BY_HARNESS.get(getattr(run, "harness", None), self.HOLD)
 
     def make_context(self, run):
         rev1_body = self.body_file(run, "rev-1.txt", f"BODY-REV1-{self.nonce}\n")
@@ -389,7 +432,7 @@ class RequestRevisionCancelScenario(_RequestScenario):
             return f"{STEWARD} request {_ids(text)[-1]} --cancel --reason {shlex.quote('취소 ' + self.nonce)}"
 
         # Longer markers first: "send3" and "send2" contain "send".
-        return {"nonce": self.nonce, "hold": self.HOLD, "partial": False,
+        return {"nonce": self.nonce, "hold": self.hold_seconds(run), "partial": False,
                 "a_steps": [(f"{A_MARK} send3", third), (f"{A_MARK} cancel3", cancel_third),
                             (f"{A_MARK} send2", make_and_cancel),
                             (f"{A_MARK} send", new), (f"{A_MARK} revise", revise)]}
@@ -426,6 +469,11 @@ class RequestRevisionCancelScenario(_RequestScenario):
         # cancelled by one shell line, so it is cancelled before B can take it up.
         self.start_a(run, f"revise {first}")
         wait_for(lambda: len(self.records(run).get(first, {}).get("revisions", [])) >= 2, 60)
+        ev["revision_2_sent_while_busy"] = self.sent_while_busy(run, first)
+        if ev["revision_2_sent_while_busy"] is False:
+            run.note("revision 2 went out after B's busy step had ended, so the late-report path was not "
+                     "exercised (not a failure): the busy step must outlast A's revise turn")
+            return "inconclusive"
         self.start_a(run, "send2")
         other = wait_for(lambda: next((i for i in self.records(run) if i != first), None), 60)
         cancel_output = wait_for(lambda: next((m for m in (
@@ -487,6 +535,21 @@ class RequestRevisionCancelScenario(_RequestScenario):
               and ev["cancel_notice_line"]
               and not ev["stop_word_in_notice"] and ev["third_state"] == "cancelled")
         return "pass" if ok else "fail"
+
+    def sent_while_busy(self, run, request_id):
+        """Whether revision 2 was created before B's busy step ended (B's model request that carries
+        the step's tool result). ``None`` when the times are not recorded; ``True`` while B is
+        still in the step."""
+        revisions = self.records(run).get(request_id, {}).get("revisions") or []
+        created = (revisions[1] if len(revisions) > 1 else {}).get("created")
+        turns = self.b_requests(run)
+        start = next((r for r in turns if "time.sleep" in (r["reply"].get("shell") or "")), None)
+        if created is None or start is None:
+            return None
+        after = next((r for r in turns if r["main_index"] > start["main_index"] and r["last_kind"] == "tool"), None)
+        if after is None or after.get("at") is None:
+            return True
+        return created < after["at"]
 
     def queue_took_it(self, run, ev):
         """Codex's cancel output names the delivery (`queued-not-delivered`/`delivered`) instead of
