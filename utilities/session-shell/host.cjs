@@ -917,7 +917,7 @@ async function applySettings(){
 }
 function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
 function panelAction(action){
-  if(/^(?:route|message):/.test(action)&&!settings){
+  if(/^(?:route|message|request):/.test(action)&&!settings){
     if(panelOpen.has(action))panelOpen.delete(action);else{if(panelOpen.size>=16)panelOpen.clear();panelOpen.add(action);}
     queueLayout();return;
   }
@@ -931,7 +931,7 @@ function panelAction(action){
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
   if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();if(routeDetail)readRouteRaw();}
   // A message longer than its rows reads on, from its start, on the detail pages.
-  if(action.startsWith('read:message:')){routeDetail=action.slice(5);routePage=0;block.leave();}
+  if(action.startsWith('read:message:')||action.startsWith('read:request:')){routeDetail=action.slice(5);routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
   if(action==='question'){routeDetail=false;block.enter();}
   if(action.startsWith('setting:')&&settings){

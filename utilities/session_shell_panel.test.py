@@ -891,6 +891,27 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             self.assertIs(shell._sent_peer_messages(sid)[0], sent)  # unchanged file: no reparse
             self.assertEqual(shell._sent_peer_messages("absent-session"), ([], []))
 
+    def test_requests_come_from_the_request_records_not_the_recent_message_tail(self):
+        import time
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            import peer_request
+            mine = {"harness": "claude", "session_id": "00000000-0000-4000-8000-0000000000e9", "name": "e9"}
+            theirs = {"harness": "codex", "session_id": "00000000-0000-4000-8000-0000000000e7", "name": "e7"}
+            request_id = peer_request.reserve(mine, theirs, title="검토 요청")
+            peer_request.commit_open(request_id, "a" * 32, label="판1")
+            views, watched = shell._request_views("claude", mine["session_id"], time.time())
+            self.assertEqual([(v["side"], v["record"]["id"]) for v in views], [("out", request_id)])
+            received, _ = shell._request_views("codex", theirs["session_id"], time.time())
+            self.assertEqual([(v["side"], v["record"]["id"]) for v in received], [("in", request_id)])
+            # The files whose change repaints the panel: the session's index and the record.
+            self.assertTrue(any(path.endswith(mine["session_id"] + ".json") for path in watched))
+            self.assertTrue(any(path.endswith(request_id + ".json") for path in watched))
+            # No sent-message shard exists, yet the open request is listed.
+            self.assertEqual(shell._sent_peer_messages(mine["session_id"]), ([], []))
+            # A session with no requests costs one small read and shows nothing.
+            self.assertEqual(shell._request_views("claude", "absent-session", time.time()), ([], []))
+
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''
 const assert=require('node:assert/strict'),d=require(process.argv[1]);
@@ -1968,6 +1989,115 @@ for(const position of ['top',undefined,'right'])assert.equal(d.layout({cols:133,
 assert.equal(d.layout({cols:80,rows:24,configuration:{...cfg,position:'left'}}).left,false);
 '''
         self.node(script, "native-display.cjs")
+
+
+class RequestPanelTest(unittest.TestCase):
+    """R27 in the route box: sent and received requests stand beside the routes, open in
+    place, read whole on their own page, and leave the question, messages and draft alone."""
+
+    HEAD = r"""
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const q=(id,glyph,who,title,status,kind,age='3m')=>({id,way:glyph==='◂'?'◂':'→',glyph,who,title,status,age,kind,
+ details:[['','e9 → e7 · '+id,'dim'],['판','2 head d2d92ec · 1 대체됨','loc_repo'],['전달','전달됨','dim'],['일','열림','loc_repo'],
+  ['변화','3m','dim'],['보고','1 일부 · 1(대체됨) · '+'긴결과 '.repeat(6),'dim']],
+ body:['BODY_NONCE 첫 줄','둘째 줄','https://example.com/'+'x'.repeat(60)],body_label:'본문'});
+const requests=[q('rq-aaaaaa','◂','[e7]','같은 시각 요청 A 한글 제목','열림','request-in'),
+ q('rq-bbbbbb','→','[52]','같은 시각 요청 B','전달됨','request-out'),q('rq-cccccc','✓','[e1]','끝난 일','최종 답','request-done')];
+const routes=[{id:'rt-a',title:'Actual route',state:'working',kind:'working',paint:{glyph:{text:'⠏'}}}];
+const base={route_count:1,routes,requests,messages:[{way:'←',who:'[e7]',text:'MSG_KEPT',when:'1m',kind:'steer',harness:'claude'}],styles:{dim:{dim:true}}};
+const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const render=(width,height,extra={},model=base)=>view.render({width,height,side:width<80,model,sid:'x',configuration:{},questions:()=>[],...extra});
+"""
+
+    def node(self, body):
+        result = subprocess.run(["node", "-e", self.HEAD + body, str(ROOT / "utilities/session-shell/panel-view.cjs")],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_title_counts_routes_then_requests_and_no_hourglass_stands_anywhere(self):
+        self.node(r"""
+for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
+ const lines=text(render(width,height));
+ assert(lines.some(s=>s.includes(width<80?'1 ROUTE │ 3 REQUEST':'route 1 │ request 3')),lines.join('\n'));
+ for(const mark of ['◂','→','✓'])assert(lines.some(s=>s.includes(mark)),mark+width);
+ assert(!lines.join('').includes('⏳')&&!lines.join('').includes('⌛'));
+ assert(lines.some(s=>s.includes('MSG_KEPT')),'messages stay at '+width);
+ assert(lines.length<=height);
+}
+const none=text(render(37,30,{},{...base,requests:[]}));
+assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
+""")
+
+    def test_a_request_opens_in_place_whole_then_its_overflow_leads_to_the_read_page(self):
+        self.node(r"""
+for(const width of [32,37,38]){
+ const open=render(width,40,{expandedKeys:['request:rq-aaaaaa']});
+ const lines=text(open).join('\n');
+ assert(lines.includes('rq-aaaaaa'),'the number is in the detail');
+ assert(lines.includes('+ 본문 ›'));
+ assert(open.hits.some(h=>h.action==='read:request:rq-aaaaaa'));
+ // Two requests of the same time keep distinct, whole numbers when both open.
+ const both=text(render(width,60,{expandedKeys:['request:rq-aaaaaa','request:rq-bbbbbb']})).join('\n');
+ assert(both.includes('rq-aaaaaa')&&both.includes('rq-bbbbbb'));
+ // Short of rows the detail keeps whole items and a `+N lines ›` row to the page.
+ const short=render(width,22,{expandedKeys:['request:rq-aaaaaa']});
+ assert(short.hits.some(h=>h.action==='read:request:rq-aaaaaa'));
+ assert(text(short).some(s=>s.includes('MSG_KEPT')),'the messages are kept');
+}
+""")
+
+    def test_the_read_page_carries_every_value_and_the_body_and_back_returns(self):
+        self.node(r"""
+for(const [width,height] of [[32,26],[38,26],[80,24]]){
+ const parts=[];let pages=1;
+ for(let page=0;page<pages;page++){
+  const v=render(width,height,{routeDetail:'request:rq-aaaaaa',routePage:page});
+  pages=v.routePages;parts.push(text(v).join('\n'));assert(v.rows.length<=height);
+  assert(text(v)[1].toUpperCase().includes('REQUEST')||text(v)[0].toUpperCase().includes('REQUEST'));
+ }
+ const all=parts.join('\n').replace(/[│┌┐└┘\s]/g,'');
+ for(const needle of ['rq-aaaaaa','BODY_NONCE','1(대체됨)','전달됨','둘째줄'])assert(all.includes(needle),needle+' at '+width);
+}
+// A request that no longer exists closes its page instead of showing nothing.
+const gone=render(37,24,{routeDetail:'request:rq-zzzzzz'});
+assert.equal(gone.routeDetail,false);
+""")
+
+    def test_the_question_box_and_messages_keep_their_rows_when_requests_open(self):
+        self.node(r"""
+const asking={...base,answerable:true};
+for(const [width,height] of [[37,26],[80,24]]){
+ const v=render(width,height,{expandedKeys:['request:rq-aaaaaa','request:rq-bbbbbb'],
+  questions:()=>[[{text:'◑ Where should this go?'}],[{text:'1 · Current project'}],[{text:'Ctrl+] answer'}]]},asking);
+ const lines=text(v);
+ assert(lines.some(s=>s.includes('Where should this go?')),'question at '+width);
+ assert(lines.some(s=>s.includes('Current project')));
+ assert(lines.some(s=>s.includes('MSG_KEPT')),'messages at '+width);
+ assert(lines.length<=height);
+}
+""")
+
+    def test_short_of_rows_the_box_scrolls_and_puts_work_to_answer_first(self):
+        self.node(r"""
+const many=Array.from({length:9},(_,i)=>q('rq-00000'+i,i===5?'◂':'→','[e'+i+']','일 '+i,'전달됨',i===5?'request-in':'request-out'));
+const v=render(37,16,{},{...base,requests:many});
+const lines=text(v);
+assert(lines.some(s=>s.includes('↓')||s.includes('↑')),'the border counts the rows it hides');
+assert(v.hits.some(h=>h.action==='request:rq-000005'),'the received work to answer is among the first shown');
+assert(lines.some(s=>s.includes('MSG_KEPT')));
+const wheel=render(37,16,{routeScroll:1},{...base,requests:many});
+assert.notDeepEqual(text(wheel),lines);
+""")
+
+    def test_a_request_alone_still_draws_the_box_and_a_long_url_title_is_cut_whole(self):
+        self.node(r"""
+const lone=text(render(32,24,{},{...base,routes:[],route_count:0,requests:[
+ q('rq-dddddd','→','[52]','https://example.com/'+'a'.repeat(80),'전달됨','request-out')]}));
+assert(lone.some(s=>s.includes('1 REQUEST')),lone.join('\n'));
+const row=lone.find(s=>s.includes('→'));
+assert(row.includes('…')&&row.includes('전달됨'),row);
+assert(lone.every(s=>[...s].length<=32));
+""")
 
 
 if __name__ == "__main__":

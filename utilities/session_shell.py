@@ -7,6 +7,7 @@ control call checks current process births and the connected peer again.
 from __future__ import annotations
 
 import fnmatch
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -423,13 +424,20 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     """Use the existing peer claim once; socket acceptance is not a receipt."""
     if harness not in ("claude", "opencode"):
         return {"ok": False, "reason": "native-queue-required", "not_started": True}
+    # A request revision superseded or cancelled before delivery is not sent (peer_request).
+    peer = _peer_message()
+    try:
+        row = peer._read_pending(ref)
+    except Exception:
+        row = None
+    if row and peer._request_withdrawn(row):
+        return {"ok": False, "reason": "request-withdrawn", "not_started": True}
     binding, reason = exact_binding(harness, sid)
     if binding is None:
         return {"ok": False, "reason": reason, "not_started": True}
     before = control(binding, "status")
     if not before.get("ok") or before.get("state") != "idle" or not before.get("empty"):
         return {"ok": False, "reason": "not-idle-empty", "not_started": True}
-    peer = _peer_message()
     recipient = {"harness": harness, "session_id": sid}
     reserved = peer.reserve_pending_herdr(ref, recipient, receipt="session-shell-inflight")
     if reserved is None:
@@ -770,6 +778,80 @@ def _panel_common_rows(panel, columns):
 
 
 _SENT_CACHE: dict = {}
+_REQUEST_BODIES: dict = {}  # a sealed body never changes, so its text is kept by transfer ref
+_REQUEST_BODY_BYTES = 16 * 1024
+_REQUEST_VIEWS = 24
+
+
+def _request_body(peer, ref):
+    """The sealed body of one request revision, at most 16 KiB (a read page, not a transfer)."""
+    held = _REQUEST_BODIES.get(ref)
+    if held is not None:
+        return held
+    try:
+        payload = peer.read_peer_payload(ref) or {}
+        raw = str(payload.get("body") or "").encode("utf-8")[:_REQUEST_BODY_BYTES]
+        text = raw.decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    if len(_REQUEST_BODIES) > 64:
+        _REQUEST_BODIES.clear()
+    _REQUEST_BODIES[ref] = text
+    return text
+
+
+def _request_views(harness, sid, now):
+    """``(views, watched)``: what this session sent and received as requests, read from the
+    request records through its own small index (never the recent-message tail), with the
+    delivery rows of their messages. The files read are watched so a change repaints the panel."""
+    try:
+        import peer_request
+        listing = peer_request.session_requests(harness, sid)
+    except Exception:
+        return [], []
+    if not listing["out"] and not listing["in"]:
+        return [], []
+    peer = _peer_message()
+    views, watched = [], []
+    with contextlib.suppress(Exception):
+        watched.append(str(peer_request._index_path(harness, sid)))
+    for side in ("in", "out"):
+        for record in listing[side][:_REQUEST_VIEWS]:
+            closed = record["state"] in ("final", "rejected", "cancelled")
+            if closed and now - float(record.get("updated") or 0) > 7 * 86400:
+                continue
+            refs = []
+            for revision in record["revisions"]:
+                refs.append(revision["transfer_ref"])
+            refs += [r.get("transfer_ref") for r in record["reports"]]
+            refs.append((record.get("cancel") or {}).get("notice_ref"))
+            rows = {}
+            for ref in refs:
+                if not isinstance(ref, str) or not ref:
+                    continue
+                try:
+                    rows[ref] = peer._read_pending(ref)
+                    watched.append(str(peer._pending_path(ref)))
+                except Exception:
+                    rows[ref] = None
+            with contextlib.suppress(Exception):
+                watched.append(str(peer_request._record_path(record["id"])))
+            current = next((r for r in reversed(record["revisions"]) if r.get("state") == "current"),
+                           record["revisions"][-1] if record["revisions"] else {})
+            gone = False
+            if side == "out" and not closed and current.get("transfer_ref"):
+                try:
+                    from peer_obligations import ObligationStore
+                    duty = ObligationStore().get("message-" + current["transfer_ref"]) or {}
+                    gone = (duty.get("state") == "cancelled"
+                            and (duty.get("observation") or {}).get("reason") == "recipient-session-ended")
+                except Exception:
+                    gone = False
+            body = ""
+            if not closed and current.get("transfer_ref"):
+                body = _request_body(peer, current["transfer_ref"])
+            views.append({"record": record, "side": side, "rows": rows, "gone": gone, "body": body})
+    return views, watched
 
 
 def _sent_peer_messages(sid, limit=8):
@@ -869,7 +951,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count, recent_memory
-    from fleet.session_panel import presentation
+    from fleet.session_panel import presentation, request_rows
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
@@ -1004,6 +1086,11 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     panel["messages"] = peer_message_rows(received, sent, assigned_tag, limit=8)
+    # Requests sent and received: the open work, read from the request records (not from the
+    # recent-message tail, so a request does not leave when newer messages push it out).
+    request_views, request_paths = _request_views(harness, sid, time.time())
+    watched.extend(request_paths)
+    panel["requests"] = request_rows(request_views, time.time(), assigned_tag) if request_views else []
     if harness == "claude":
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time(), upgrade_note=upgrade_note))

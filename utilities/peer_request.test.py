@@ -317,6 +317,17 @@ class RevisionAndCancelTest(Fixture):
             self.assertEqual((closed["state"], closed["observation"].get("reason")),
                              ("cancelled", "request-withdrawn"))
 
+    def test_the_session_shell_carrier_names_a_withdrawn_revision_before_anything_else(self):
+        import session_shell
+        rc, out = self.request(A, "cee", "first", title="t", rev="판1")
+        request_id = out.split()[0].split("=")[1]
+        ref1 = pr.load(request_id)["revisions"][0]["transfer_ref"]
+        self.request(A, request_id, "second", rev="판2")
+        result = session_shell.deliver_pending(ref1, C[0], C[1])
+        self.assertEqual((result["ok"], result["reason"], result["not_started"]),
+                         (False, "request-withdrawn", True))
+        self.assertEqual(peer_message._read_pending(ref1)["state"], "pending")
+
     def test_cancel_before_delivery_needs_no_notice(self):
         self.hold = True
         request_id, _ = self.new_request(title="t")
