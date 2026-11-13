@@ -159,9 +159,10 @@ input/relay ownership.
 The approved v3.3 shell opens as a right Hearting work panel (left by choice,
 or under the native area by choice). Spec E9 rule 49 folds and unfolds it: the
 fold button `»` (`«` for a left panel, `▾` in the bottom layout) on the panel's
-last row inside folds it into a four-cell strip at its edge (two borders, two
-cells: the state glyph, the session number, the route count, the answer waits
-and `«`; its border in the session's state color, only the glyph turning), and
+last row inside folds it into an eight-cell strip at its edge (two borders, a
+blank cell inside each and four content cells: the state glyph with the session
+number, the route count `2 RT`, the answer waits `◑ 1` and `«`; its border in
+the session's state color, only the glyph turning), and
 the native area takes the freed columns through the same PTY resize a window
 resize uses; folded under the native area it is one row (the status line and
 `▴`). A press anywhere on the strip or that row opens it. Where the open panel

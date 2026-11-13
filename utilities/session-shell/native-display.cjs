@@ -164,9 +164,9 @@ function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
 // width changes. The bottom layout never narrows the native area, so only a hand folds it.
 // `pinned` (the settings editor or a question being answered) keeps an open panel open.
 const NATIVE_MIN=80;
-// Spec rule 49 (c): the folded strip is four cells (two borders, two inside), one blank cell
-// from the native area.
-const STRIP=4,STRIP_GAP=1;
+// Spec rule 49 (c): the folded strip is eight cells (two borders, a blank cell inside each,
+// four content cells), one blank cell from the native area. Its width is this one constant.
+const STRIP=8,STRIP_GAP=1;
 const sideWidth=configuration=>{const width=configuration?.side_width;return Number.isInteger(width)&&width>=32&&width<=80?width:0;};
 function fold({cols,choice=null,configuration={},pinned=false}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
@@ -180,7 +180,7 @@ function fold({cols,choice=null,configuration={},pinned=false}) {
 function layout({cols,rows,expanded=true,configuration={}}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=sideWidth(configuration),wanted=configuration.layout==='side'&&width>0;
-  // Folded beside the native area: the four-cell strip at the panel's edge; the native
+  // Folded beside the native area: the eight-cell strip at the panel's edge; the native
   // area takes the rest (spec rule 49 (c)).
   if(wanted&&!expanded){
     const left=configuration.position==='left';
@@ -242,4 +242,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,NATIVE_MIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,NATIVE_MIN,STRIP,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

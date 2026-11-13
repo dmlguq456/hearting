@@ -204,7 +204,7 @@ the previous view, and Defaults previews the defaults. Drag the side boundary
 to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
 The default is a 40-column side panel. **»** beside the gear folds it into a
-four-cell strip (state, session number, route count, answer waits) and gives
+eight-cell strip (state, session number, route count, answer waits) and gives
 the native area the freed columns; a press on the strip opens it again. Where
 the open panel would leave the native area under 80 columns (a 40-column panel
 in a terminal under 122 columns) it folds by itself and opens again with room;

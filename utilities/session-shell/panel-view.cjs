@@ -168,9 +168,9 @@ function change(value,key,step){
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
 function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
-  // Spec rule 49: a folded panel is the four-cell strip beside the native area or one row under it.
+  // Spec rule 49: a folded panel is the eight-cell strip beside the native area or one row under it.
   folded=folded===true&&!settings;
-  width=Math.max(folded&&side?4:12,width);height=Math.max(folded?side?3:1:4,height);
+  width=Math.max(folded&&side?5:12,width);height=Math.max(folded?side?3:1:4,height);
   const cfg={...defaults,...configuration};
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -241,14 +241,14 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // keeps nothing turning.
   const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
   if(folded)return foldedView();
-  // Spec rule 49 (c): folded beside the native area the panel is a strip of four cells (two
-  // borders, two inside), its border in this session's state color (the open panel's frame
-  // source). Inside, from the top: the state glyph (spinning while the session runs, `◑`
-  // waiting, `●` idle), the session number, an empty row, the route count (`2R`, from ten
-  // `9+`), the answer waits (`◑1`, from ten `◑+`), and the unfold mark on the last row, where
-  // the open panel's fold button stands. An absent value draws no row; short of rows the
-  // empty row goes first, then the route count, the waits, the number; the glyph and the
-  // unfold mark stay. No steward mark, gear or moving rule: only the state glyph turns. A
+  // Spec rule 49 (c): folded beside the native area the panel is a strip of eight cells (two
+  // borders, a blank cell inside each, four content cells), its border in this session's state
+  // color (the open panel's frame source). Inside, from the top: the state glyph (spinning
+  // while the session runs, `◑` waiting, `●` idle) with the session number (`⠸ e9`), an empty
+  // row, the route count (`2 RT`, from ten `9+RT`), the answer waits (`◑ 1`, from ten `◑ 9+`),
+  // and the unfold mark on the last row, where the open panel's fold button stands. An absent
+  // value draws no row; short of rows the empty row goes first, then the route count, the
+  // waits; the glyph row and the unfold mark stay. No steward mark, gear or moving rule: only the state glyph turns. A
   // press anywhere on it opens the panel. Spec rule 49 (e): folded under the native area,
   // one row: the session's status line and `▴` at its right end.
   function foldedView(){
@@ -257,32 +257,34 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const plain=model.no_color===true||cfg.theme==='mono';
     const out=[],hits=[];
     if(side){
+      // The strip's width is native-display's STRIP (8): one blank cell inside each border and
+      // four content cells between them.
+      const content=Math.max(1,width-4);
       const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
-      const two=parts=>{const fit=clip(parts,2);return [...fit.parts,text(' '.repeat(Math.max(0,2-fit.used)))];};
-      const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
-      const number=tag?[model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'}]:[];
+      const cell=parts=>{const fit=clip(parts,content);return [text(' '),...fit.parts,text(' '.repeat(Math.max(0,content-fit.used)+1))];};
+      // The glyph keeps its cell while the state is unknown, so the number does not move.
+      const glyph=own?{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}:text(' ');
+      const number=tag?[text(' '),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'}]:[];
       const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:Number.isInteger(model.route_count)&&model.route_count>0?model.route_count:0;
       const waiting=typeof model.wait==='string'&&model.wait.trim()?/(\d+)\s*$/.exec(model.wait):null;
       const waits=waiting?Number(waiting[1]):typeof model.wait==='string'&&model.wait.trim()?-1:0;
-      const items=[];
-      // The glyph keeps its row while the state is unknown, so nothing below it moves.
-      items.push({rank:5,parts:glyph});
-      if(number.length)items.push({rank:2,parts:number});
+      const items=[{rank:5,parts:[glyph,...number]}];
       if(total||waits){
         items.push({rank:0,parts:[]});
-        if(total)items.push({rank:3,parts:[text(total>=10?'9+':total+'R','loc_repo')]});
+        if(total)items.push({rank:3,parts:total>=10?[text('9+','loc_repo'),text('RT','dim')]:[text(String(total),'loc_repo'),text(' RT','dim')]});
         // An answer wait whose count is unknown shows its glyph alone (spec rule 12).
-        if(waits)items.push({rank:4,parts:[text('◑'+(waits<0?'':waits>=10?'+':String(waits)),'g_blocked')]});
+        if(waits)items.push({rank:4,parts:[text('◑','g_blocked'),...(waits<0?[]:[text(' '+(waits>=10?'9+':String(waits)),'g_blocked')])]});
       }
       const room=Math.max(0,height-3);
       while(items.length>room){let low=0;items.forEach((item,i)=>{if(item.rank<items[low].rank)low=i;});items.splice(low,1);}
-      out.push([frameText('┌'),frameText('──'),frameText('┐')]);
+      const rule='─'.repeat(Math.max(0,width-2));
+      out.push([frameText('┌'+rule+'┐')]);
       for(let i=0;i<height-2;i++){
-        const last=i===height-3,parts=last?[text(cfg.position==='left'?'»':'«','dim')]:items[i]?.parts||[];
-        out.push([frameText('│'),...two(parts),frameText('│')]);
+        const last=i===height-3,parts=last?[text(' '),text(cfg.position==='left'?'»':'«','dim')]:items[i]?.parts||[];
+        out.push([frameText('│'),...cell(parts),frameText('│')]);
       }
-      out.push([frameText('└──┘')]);
-      for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:3,action:'unfold'});
+      out.push([frameText('└'+rule+'┘')]);
+      for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:'unfold'});
     }else{
       const line=(Array.isArray(segments)?segments:[]).filter(part=>part&&typeof part==='object');
       const fit=clip(line,Math.max(0,width-2));

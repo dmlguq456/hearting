@@ -309,22 +309,22 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
    // Spec rule 49 (d): where the open panel would leave the native under 80 columns it folds by
-   // itself into the four-cell strip (one blank cell apart) and opens again with room.
+   // itself into the eight-cell strip (one blank cell apart) and opens again with room.
    child.resize(80,24);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_75x24/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_71x24/);
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));
    await rpc(cfg.inlet,{batch:Buffer.from('geometry3\r').toString('base64')});await waitFor(/GEOMETRY_geometry3_138x40/);
    const press=async(x,y)=>{await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`).toString('base64')});await new Promise(r=>setTimeout(r,80));};
    const geometry=async(name,size)=>{await rpc(cfg.inlet,{batch:Buffer.from(name+'\r').toString('base64')});await waitFor(new RegExp('GEOMETRY_'+name+'_'+size));};
    // The fold button `»` (the last row inside, three cells left of the gear) folds by hand; a hand fold stays folded when wider.
-   await press(174,39);await geometry('geometry4','175x40');
-   child.resize(200,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry5','195x40');
+   await press(174,39);await geometry('geometry4','171x40');
+   child.resize(200,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry5','191x40');
    // Any cell of the strip opens it.
    await press(198,10);await geometry('geometry6','158x40');
-   child.resize(110,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry7','105x40');
+   child.resize(110,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry7','101x40');
    // Opened by hand where it would fold, it stays open at that width; the next width folds it again.
    await press(108,10);await geometry('geometry8','68x40');
-   child.resize(112,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry9','107x40');
+   child.resize(112,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry9','103x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);

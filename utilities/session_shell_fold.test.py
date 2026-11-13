@@ -51,36 +51,39 @@ assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('«   ⚙ �
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
 const styles={g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},dim:{dim:true},loc_repo:{foreground:252},tag_steward:{foreground:219,bold:true}};
-const strip=(model={},o={})=>v.render({width:4,height:12,side:true,folded:true,model:{tag:'[e9]',styles,...model},state:'working',frame:3,harness:'claude',questions:()=>{throw Error('no question in the strip');},...o});
+const strip=(model={},o={})=>v.render({width:8,height:12,side:true,folded:true,model:{tag:'[e9]',styles,...model},state:'working',frame:3,harness:'claude',questions:()=>{throw Error('no question in the strip');},...o});
 const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
-// (c) Four cells: two borders, two inside; the state glyph, the number, an empty row, the
-// route count, the answer waits, and the unfold mark on the last row inside.
+// (c) Eight cells: two borders, a blank cell inside each, four content cells; the state glyph
+// with the number, an empty row, the route count, the answer waits, and the unfold mark on the
+// last row inside.
 let r=strip({route_total:2,wait:'◑답 대기 1'}),rows=text(r);
-assert.deepEqual(rows,['┌──┐','│⠸ │','│e9│','│  │','│2R│','│◑1│','│  │','│  │','│  │','│  │','│« │','└──┘']);
-assert(rows.every(s=>[...s].length===4));
-// An absent value draws no row; from ten `9+` (routes) and `◑+` (waits); an unknown wait count its glyph alone.
-assert.deepEqual(text(strip({route_total:0,wait:''})).slice(1,5),['│⠸ │','│e9│','│  │','│  │']);
-assert.deepEqual(text(strip({route_total:12,wait:'◑답 대기 10'})).slice(3,6),['│  │','│9+│','│◑+│']);
-assert.deepEqual(text(strip({route_total:0,wait:'◑답 대기 ?'})).slice(3,5),['│  │','│◑ │']);
+assert.deepEqual(rows,['┌──────┐','│ ⠸ e9 │','│      │','│ 2 RT │','│ ◑ 1  │','│      │','│      │','│      │','│      │','│      │','│  «   │','└──────┘']);
+assert(rows.every(s=>[...s].length===8));
+// An absent value draws no row; from ten `9+RT` (routes) and `◑ 9+` (waits); an unknown wait count its glyph alone.
+assert.deepEqual(text(strip({route_total:0,wait:''})).slice(1,4),['│ ⠸ e9 │','│      │','│      │']);
+assert.deepEqual(text(strip({route_total:12,wait:'◑답 대기 10'})).slice(2,5),['│      │','│ 9+RT │','│ ◑ 9+ │']);
+assert.deepEqual(text(strip({route_total:0,wait:'◑답 대기 ?'})).slice(2,4),['│      │','│ ◑    │']);
+// The route count's label is dim beside its number (as the panel's labels).
+const rt=r.rows[3];assert(rt.find(x=>x.text===' RT').dim&&rt.find(x=>x.text==='2').foreground===252);
 // The border takes the session's state color (the open panel's frame), the glyph spins only
-// while it runs; waiting `◑`, idle `●` (idle and unknown: the plain line).
+// while it runs; waiting `◑`, idle `●` (idle and unknown: the plain line, the number unmoved).
 for(const [state,glyph,color] of [['working','⠸',230],['blocked','◑',217],['idle','●',undefined],['unknown',' ',undefined]]){
  const s=strip({},{state}),frame=s.rows.flatMap(row=>[row[0],row.at(-1)]);
- assert.equal(text(s)[1][1],glyph,state);
+ assert.equal(text(s)[1],'│ '+glyph+' e9 │',state);
  assert(frame.every(x=>(x.foreground??undefined)===color&&(color===undefined?x.dim===true:x.dim!==true)),state+JSON.stringify(frame[0]));
  assert.equal(s.animated,state==='working',state);assert.deepEqual(s.spins,state==='working'?[1]:[]);
 }
 // Only the glyph turns: no steward mark, gear, beat or moving rule; a steward's number keeps its pink.
 r=strip({steward:true});
 assert(!text(r).join('').match(/[⚑⚙]/)&&r.motion===null&&!r.rows.flat().some(x=>x.beat||x.scan));
-assert.equal(r.rows[2].find(x=>x.text==='e9').foreground,219);
+assert.equal(r.rows[1].find(x=>x.text==='e9').foreground,219);
 // A press on any cell opens the panel.
-assert.equal(r.hits.length,12);assert(r.hits.every((h,i)=>h.row===i&&h.left===0&&h.right===3&&h.action==='unfold'));
-// Short of rows the empty row goes first, then the route count, the waits, the number; the glyph and `«` stay.
-for(const [h,want] of [[7,['│⠸ │','│e9│','│2R│','│◑1│','│« │']],[5,['│⠸ │','│◑1│','│« │']],[4,['│⠸ │','│« │']],[3,['│« │']]])
+assert.equal(r.hits.length,12);assert(r.hits.every((h,i)=>h.row===i&&h.left===0&&h.right===7&&h.action==='unfold'));
+// Short of rows the empty row goes first, then the route count, the waits; the glyph row and `«` stay.
+for(const [h,want] of [[6,['│ ⠸ e9 │','│ 2 RT │','│ ◑ 1  │','│  «   │']],[5,['│ ⠸ e9 │','│ ◑ 1  │','│  «   │']],[4,['│ ⠸ e9 │','│  «   │']],[3,['│  «   │']]])
  assert.deepEqual(text(strip({route_total:2,wait:'◑답 대기 1'},{height:h})).slice(1,-1),want,String(h));
 // A left panel's strip unfolds with `»`; every harness gets the same strip.
-assert.equal(text(strip({},{configuration:{position:'left'}}))[10],'│» │');
+assert.equal(text(strip({},{configuration:{position:'left'}}))[10],'│  »   │');
 for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({},{harness})),text(strip()));
 // No color keeps the shapes.
 assert.deepEqual(text(strip({no_color:true,route_total:2})),text(strip({route_total:2})));
@@ -120,11 +123,11 @@ assert.deepEqual(fold(140,{folded:false,cols:100}),{folded:false,choice:null});
 assert.equal(fold(100,null,true).folded,false);
 assert.equal(d.fold({cols:40,configuration:{...configuration,layout:'bottom'}}).folded,false);
 assert.equal(d.fold({cols:40,choice:{folded:true},configuration:{...configuration,layout:'bottom'}}).folded,true);
-// The sizes the native is told: open beside (cols - width - 2), the strip (cols - 5), under (cols).
+// The sizes the native is told: open beside (cols - width - 2), the strip (cols - 8 - 1), under (cols).
 const at=(cols,expanded,extra={})=>d.layout({cols,rows:40,expanded,configuration:{...configuration,...extra}});
-assert.equal(at(180,true).nativeCols,138);assert.equal(at(180,false).nativeCols,175);
-assert.equal(at(121,false).nativeCols,116);assert.equal(at(122,true).nativeCols,80);
-assert.deepEqual([at(180,false,{position:'left'}).nativeColumn,at(180,false).panelColumn],[5,176]);
+assert.equal(at(180,true).nativeCols,138);assert.equal(at(180,false).nativeCols,171);assert.equal(at(180,false).panelCols,d.STRIP);
+assert.equal(at(121,false).nativeCols,112);assert.equal(at(122,true).nativeCols,80);
+assert.deepEqual([at(180,false,{position:'left'}).nativeColumn,at(180,false).panelColumn],[9,172]);
 assert.deepEqual([at(180,false,{layout:'bottom'}).side,at(180,false,{layout:'bottom'}).nativeCols],[false,180]);
 // Opened by hand where the panel cannot stand beside (native under 48), it opens under the native area.
 assert.deepEqual([at(80,true).side,at(80,true).nativeCols],[false,80]);

@@ -342,7 +342,7 @@ Diagnostics that V1 sent to `app.log` go to a capped per-service file,
 
 **Session shell panel.** In a shell window OpenCode gets the same right (left
 or bottom by choice) HEARTING panel as Claude and Codex, folding into the same
-four-cell strip that widens the native area (by hand, or by itself where the
+eight-cell strip that widens the native area (by hand, or by itself where the
 open panel would leave under 80 native columns; spec E9 rule 49): same
 renderer, settings (layout, position, width, theme, shade) and content order. OpenCode's own sidebar is
 hidden there through its documented CLI settings: `session.sidebar` is `auto`
@@ -360,7 +360,7 @@ footer; `tui/hearting-session-shell.js` reports the MCP server counts from
 observations, painted as `MCP connected/total` in the compact status row. No
 `sidebar.content` slot is used. OpenCode 1.x has no such variable; its sidebar
 still auto-hides below 121 native columns, which the open side panel leaves at
-terminal widths up to 162 (folded, the strip leaves them up to 125).
+terminal widths up to 162 (folded, the strip leaves them up to 129).
 
 **Measured** (real OpenCode 2.0.32 TUI in an isolated HOME, private tmux socket and
 private service port, synthetic records only):
