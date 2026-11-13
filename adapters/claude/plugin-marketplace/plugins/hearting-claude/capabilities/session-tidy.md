@@ -40,6 +40,15 @@ socket. Native card storage remains available without a physical pane.
 
 Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for tidying now. Each threshold is emitted once per native session ID; a jump across both emits the urgent notice once and consumes both. Compaction does not reset these notices. Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These are work-preservation notices, not a guarantee of remaining context or time before native compaction; they do not change the runtime's compaction policy.
 
+When the work folder has an experiment catalog (`utilities/experiment_catalog.py`), the writer
+is given its group names, goals and condition names with the writing guide and calls each
+condition by that catalog name. The card is saved exactly as written. When the saved card says a
+run id, a `run:row`, an identifier-like alias or a former name without its catalog name, `card`,
+`tidy` and `handoff` print one `names=` advice line after their own line (at most eight names).
+Dated quotes and PRD locations are not judged; ordinary words, numbers, code, quotes, paths and
+commands stay quiet. The advice changes neither the save, the exit code nor the `say=` line.
+Native compaction does none of this (below).
+
 Native runtime compaction is not a session-tidy invocation. PreCompact adds no
 card instructions; PostCompact records the exact native session's compaction
 boundary only. It creates no card, memory-tidy queue, card request or
@@ -311,10 +320,10 @@ role authority, or adapter-specific rule is introduced.
   ],
   "selection_order": ["confirmed_role", "main_route_capability", "work_folder"],
   "modules": [
-    {"id": "supervision", "label": "지휘·감독", "roles": ["supervision", "supervisor", "steward", "지휘", "감독"], "capabilities": [], "folders": [], "keep": "assignee/session, route, last verified state/time, result path, next action"},
+    {"id": "supervision", "label": "지휘·감독", "roles": ["supervision", "supervisor", "steward", "지휘", "감독"], "capabilities": [], "folders": [], "keep": "assignee/session, route, last verified state/time, result path, next action; when it supervises experiments, the experiment catalog location and each condition by its catalog name"},
     {"id": "publication", "label": "출판·릴리스", "roles": ["publication", "release", "publisher", "출판", "릴리스"], "capabilities": ["autopilot-ship"], "folders": ["releases"], "keep": "pending PR/head/CI run, dependency order, approved merge/install scope, installed version/receipt, queue path"},
     {"id": "code", "label": "코드 구현", "roles": ["code", "implementation", "developer", "코드", "구현"], "capabilities": ["autopilot-code"], "folders": [], "keep": "repo/worktree/branch/head, dirty/conflict state, change goal, verified tests/failures, PR/CI reference"},
-    {"id": "research", "label": "연구·실험", "roles": ["research", "experiment", "researcher", "연구", "실험"], "capabilities": ["autopilot-research", "autopilot-lab"], "folders": ["research", "experiments"], "keep": "run/host/GPU/state, config/checkpoint, input/truth/scoring conditions and paths, metrics/units, unknowns"},
+    {"id": "research", "label": "연구·실험", "roles": ["research", "experiment", "researcher", "연구", "실험"], "capabilities": ["autopilot-research", "autopilot-lab"], "folders": ["research", "experiments"], "keep": "run/host/GPU/state, config/checkpoint, input/truth/scoring conditions and paths, metrics/units, unknowns; experiment catalog location, one-line goal, and each condition by its catalog name (run id in parentheses)"},
     {"id": "document", "label": "문서 작성", "roles": ["document", "writer", "editor", "문서", "작성"], "capabilities": ["autopilot-draft", "autopilot-refine", "autopilot-apply"], "folders": ["documents", "papers"], "keep": "audience, current deliverable/revision/source, tracked changes, remaining sections/evidence, delivery state/time"},
     {"id": "operations", "label": "운영", "roles": ["operations", "operator", "운영"], "capabilities": [], "folders": ["ops"], "keep": "service/host/version, last run/failure/cost/usage time, next action/hold conditions, relevant backup/restore path"}
   ]

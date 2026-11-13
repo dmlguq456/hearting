@@ -2372,5 +2372,214 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertLessEqual(grown.stat().st_size, 16384)
 
 
+class CatalogNoticeTest(unittest.TestCase):
+    """The notice names the run by its experiment-catalog name, and a periodic checkpoint with nothing new is quiet.
+
+    The catalog is a real one written by `experiment_catalog` into a temporary root; the metric file is the
+    run's own epoch log, read by the real observer.  Only the delivery (`session_notice.notify`) is a stand-in.
+    """
+    SPEC = {"groups": [{"display_name": "소리 분리 개선", "goal": "SI-SNRi가 8 dB보다 높은가",
+                        "metric": {"key": "SISNRi", "unit": "dB", "direction": "max", "split": "validation", "scoring": "s"},
+                        "target": {"kind": "fixed", "label": "fix", "value": 8.0, "split": "validation", "scoring": "s"}}],
+            "conditions": [{"display_name": "잔향 줄임", "group": "소리 분리 개선", "refs": {"runs": [{"run_id": "name-run"}]}}]}
+
+    def setUp(self):
+        import artifact_admission as admission
+        import experiment_catalog as catalog
+        self.catalog = catalog
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.artifact = self.root / "artifact"
+        self.artifact.mkdir()
+        admission.ensure_root_identity(self.artifact)
+        self.output = self.root / "run"
+        (self.output / "logs").mkdir(parents=True)
+        self.state = self.root / "runtime" / "state.json"
+        self.state.parent.mkdir()
+        self.notices = []
+        self.epochs(1)
+        patches = [mock.patch.object(progress, "_observation_state_path", return_value=self.state),
+                   mock.patch("session_notice.notify", side_effect=lambda *a, **kw: self.notices.append(kw) or {"state": "pending"}),
+                   mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def register(self, spec=None):
+        self.catalog.run_write(self.artifact, lambda ctx: self.catalog.op_register(ctx, spec or self.SPEC), now=1_790_000_000.0)
+
+    def epochs(self, count):
+        (self.output / "logs" / "epochs.jsonl").write_text("".join(
+            json.dumps({"epoch": epoch, "split": "valid", "losses": {"SISNRi": 10.0 + epoch}}) + "\n"
+            for epoch in range(1, count + 1)))
+
+    def run_spec(self, run_id="name-run", declared=True):
+        run = {"run_id": run_id, "started_at": 0, "artifact_root": str(self.artifact), "route_id": "r", "node": "eval",
+               "notify": {"harness": "claude", "id": "owner"}}
+        run["observation"] = {"time_budget": {"seconds": 14400}, "keys": {"valid": ["SISNRi"]}}
+        if declared:
+            run["observation"]["decision_metric"] = {"key": "SISNRi", "direction": "max"}
+        return run
+
+    def observe(self, now, run=None, **kwargs):
+        before = len(self.notices)
+        progress.observe_experiment(run or self.run_spec(), self.root / "registry.json", now,
+                                    root=str(self.output), row_key="run", started_at=0, **kwargs)
+        return {item["key"]: item["text"] for item in self.notices[before:]}  # a redelivery shows the same key
+
+    def test_the_first_line_is_the_catalog_name_goal_and_value_against_the_target(self):
+        self.register()
+        texts = self.observe(3600)
+        (text,) = texts.values()
+        self.assertTrue(text.startswith("잔향 줄임 — SI-SNRi가 8 dB보다 높은가; 최근 11.00 dB@1; fix 8.00 dB 대비 +3.00 dB; run=name-run"), text)
+        self.assertNotIn("정본 이름 없음", text)
+
+    def test_a_new_name_reaches_the_next_event_and_the_old_text_is_not_rewritten(self):
+        self.register()
+        first = self.observe(3600)
+        self.catalog.run_write(self.artifact, lambda ctx: self.catalog.op_rename(ctx, "잔향 줄임", "잔향 제거 켬"), now=1_790_000_100.0)
+        self.epochs(2)
+        later = self.observe(7200)
+        new = [text for key, text in later.items() if key not in first]
+        self.assertEqual(len(new), 1)
+        self.assertTrue(new[0].startswith("잔향 제거 켬 — "), new[0])
+        persisted = progress._read_observation_state(self.state)
+        self.assertTrue(persisted["outbox"][0]["text"].startswith("잔향 줄임 — "))  # no retroactive rewrite
+
+    def test_an_unregistered_run_gets_the_register_line_on_its_first_event_and_final_only(self):
+        self.register()
+        other = self.run_spec("stray-run")
+        first = self.observe(3600, other)
+        (text,) = first.values()
+        self.assertIn("정본 이름 없음: run을 정본에 등록", text)
+        self.assertTrue(text.startswith("정본 이름 없음"))
+        self.epochs(2)
+        second = self.observe(7200, other)
+        newer = [t for k, t in second.items() if k not in first]
+        self.assertEqual(len(newer), 1)
+        self.assertNotIn("정본 이름 없음", newer[0])  # not repeated on every checkpoint
+        self.epochs(3)
+        final = self.observe(14400, {**other, "status": "succeeded", "ended_at": 14400}, final=True)
+        self.assertTrue(any("정본 이름 없음" in t for k, t in final.items() if k.find("final") >= 0), final)
+
+    def test_a_broken_catalog_changes_nothing_and_holds_nothing_back(self):
+        path = self.catalog.catalog_path(self.artifact)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        texts = self.observe(3600)
+        (text,) = texts.values()
+        self.assertTrue(text.startswith("run=name-run"), text)
+
+    def test_a_checkpoint_with_no_new_evaluation_point_is_quiet_but_still_published(self):
+        self.register()
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        quiet = self.observe(7200)  # 50 % slot, same epoch and value
+        self.assertEqual(set(quiet) - keys, set())
+        persisted = progress._read_observation_state(self.state)
+        self.assertEqual(persisted["last_checkpoint_at"], 7200.0)  # the schedule moved on
+        record = progress.read_public_run_record(self.artifact, "name-run")
+        self.assertEqual(record["last_checkpoint"]["at"], 7200.0)  # and the public record the board reads is current
+        told = persisted["notified_decision_point"]
+        self.assertEqual({k: told[k] for k in ("metric", "epoch", "value")}, {"metric": "SISNRi", "epoch": 1, "value": 11.0})
+        self.epochs(2)
+        news = set(self.observe(10800)) - keys
+        self.assertEqual(len(news), 1)  # a new epoch is a new decision point
+        self.epochs(2)
+        self.assertEqual(set(self.observe(14400)) - keys - news, set())  # and then quiet again
+
+    def append_point(self, epoch, value):
+        with (self.output / "logs" / "epochs.jsonl").open("a") as handle:
+            handle.write(json.dumps({"epoch": epoch, "split": "valid", "losses": {"SISNRi": value}}) + "\n")
+
+    def test_out_of_order_new_result(self):
+        """RV-PR1607-1113 #1: epochs 1 and 3 were told; epoch 2 arriving afterwards (here a new best) is news."""
+        self.register()
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        self.append_point(2, 25.0)
+        late = set(self.observe(7200)) - keys
+        self.assertEqual(len(late), 1, "a first evaluation of an earlier epoch went untold")
+        summary = progress._read_observation_state(self.state)["observation"]["summary"]
+        self.assertEqual((summary["best"]["epoch"], summary["latest"]["epoch"]), (2, 3))  # the latest point did not move
+        self.assertEqual(set(self.observe(10800)) - keys - late, set())  # and nothing new afterwards is quiet again
+
+    def test_a_corrected_earlier_epoch_is_news(self):
+        """An earlier epoch's value rewritten (not the latest one) is a new evaluation as well."""
+        self.register()
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600))
+        self.append_point(1, 12.5)  # epoch 1 corrected from 11.0; the latest (epoch 3) stays 13.0
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)
+
+    def _drop_told_digest(self):
+        """A state saved before the evaluation digest existed: the told point is `{metric, epoch, value}` only."""
+        state = json.loads(self.state.read_text())
+        told = state["notified_decision_point"]
+        told.pop("points")
+        self.assertEqual(set(told), {"metric", "epoch", "value"})
+        self.state.write_text(json.dumps(state))
+
+    def test_a_state_saved_before_the_digest_with_nothing_new_stays_quiet(self):
+        """RV-PR1607-R2-1113: right after the install, an old told point equal to the latest is not news; the
+        digest is filled in quietly, and a late earlier epoch afterwards is told as before."""
+        self.register()
+        run = self.run_spec()
+        run["observation"]["time_budget"] = {"seconds": 28800}  # slots at 2880, 7200, 14400, 21600 s
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600, run))
+        self.assertEqual(len(keys), 1)
+        self._drop_told_digest()
+        self.assertEqual(set(self.observe(7200, run)) - keys, set(), "an old state with no new evaluation was told")
+        told = progress._read_observation_state(self.state)["notified_decision_point"]
+        self.assertEqual(({k: told[k] for k in ("metric", "epoch", "value")}, len(told.get("points") or "")),
+                         ({"metric": "SISNRi", "epoch": 3, "value": 13.0}, 16))  # the digest was filled in
+        self.assertEqual(set(self.observe(14400, run)) - keys, set())  # and the next checkpoint is quiet too
+        self.append_point(2, 25.0)  # a first evaluation of an earlier epoch; the latest (epoch 3) stays
+        self.assertEqual(len(set(self.observe(21600, run)) - keys), 1)
+
+    def test_a_state_saved_before_the_digest_with_a_new_point_is_told(self):
+        self.register()
+        keys = set(self.observe(3600))
+        self._drop_told_digest()
+        self.append_point(2, 12.0)  # the latest point moved from 11.0@1
+        news = set(self.observe(7200)) - keys
+        self.assertEqual(len(news), 1)
+        told = progress._read_observation_state(self.state)["notified_decision_point"]
+        self.assertEqual((told["epoch"], told["value"], len(told.get("points") or "")), (2, 12.0, 16))
+        self.assertEqual(set(self.observe(10800)) - keys - news, set())
+
+    def test_unconfirmed_runs_keep_their_checkpoints(self):
+        # no catalog at all
+        keys = set(self.observe(3600))
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)
+        # a catalog that does not declare the metric for this run: the run's own decision metric is absent
+        self.register({"groups": [{"display_name": "G", "goal": "g"}],
+                       "conditions": [{"display_name": "미선언 조건", "group": "G", "refs": {"runs": [{"run_id": "name-run"}]}}]})
+        again = self.observe(10800)
+        self.assertEqual(len(set(again) - keys), 2)  # both new slots are told: nothing was declared, nothing goes quiet
+
+    def test_a_declared_metric_the_run_never_reported_keeps_its_checkpoints(self):
+        self.register()
+        (self.output / "logs" / "epochs.jsonl").write_text("")
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)  # no value yet is "unknown", not "nothing new"
+
+    def test_an_old_state_without_the_remembered_point_alerts_once_and_keeps_its_queue(self):
+        self.register()
+        keys = set(self.observe(3600))
+        state = json.loads(self.state.read_text())
+        state.pop("notified_decision_point")
+        self.state.write_text(json.dumps(state))
+        again = self.observe(7200)
+        self.assertEqual(len(set(again) - keys), 1)  # "nothing told yet" for the metric: the next checkpoint is told
+        persisted = progress._read_observation_state(self.state)
+        self.assertEqual([item["kind"] for item in persisted["outbox"]], ["checkpoint", "checkpoint"])
+        self.assertEqual(persisted["outbox"][0]["key"], state["outbox"][0]["key"])  # the queue was moved or rewritten by nothing
+
+
 if __name__ == "__main__":
     unittest.main()
