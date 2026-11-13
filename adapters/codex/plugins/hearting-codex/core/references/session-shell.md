@@ -548,8 +548,12 @@ new is stored.
 A press on a route or message row is display only: it opens or folds the row
 and leaves focus, `empty` and the native input frontier as they were.
 Put each answer choice on
-its own line, wrapping within that choice. In a focused question box ↑↓ move
-the highlighted choice (`›` in place of its number, bright text) and Enter
+its own line, wrapping within that choice; every choice row leads with a
+two-cell column for the mark. In a focused question box ↑↓ move the chosen
+choice: its rows (each row of a wrapped one) carry `▸` in this session's
+harness color, bold, and their words bold in the bright body color, while every
+other choice keeps the mark's column blank and reads dim grey (without color
+the mark and the weight alone tell them apart). Enter
 sends it, as Claude's own question does; it starts on the recommended choice,
 else the first. Number keys pick a choice and `t` types an answer as before;
 the guidance reads `↑↓ choose · Enter send · t text`. A decision

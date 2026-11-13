@@ -38,7 +38,7 @@ b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.len
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
 const item=(id,extra={})=>({id,revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one','two','three'],...extra}]});
-const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='›').map(row=>row.slice(2).map(p=>p.text).join(''));
+const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='▸').map(row=>row.slice(2).map(p=>p.text).join('').replace(/^\d+ /,''));
 for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\r','two'],['\r','one'],['\x1b[A\x1b[A\r','one'],['\x1b[B\x1b[B\x1b[B\x1b[B\r','three']]){
  let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([item('id')]);b.enter();
@@ -63,6 +63,60 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
  b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,0);
  b.input(Buffer.from('\x1b[B\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'d',revision:'r',decision:'reject'}]);}
 })().catch(e=>{console.error(e);process.exit(1);});''')
+
+    def test_the_chosen_choice_stands_out_by_its_mark_weight_and_brightness(self):
+        # Spec E9 rule 53: while ↑↓ choose, the chosen choice's row leads with `▸` (this session's
+        # harness color, bold) and its words are bold in the bright body color; every other
+        # choice keeps the mark's column blank and reads dim grey. A choice wrapped over several
+        # rows takes the same form on each. Without color (NO_COLOR, mono) the mark and the
+        # weight alone tell them apart. Unfocused, the mark's column stays blank (no shift).
+        # The panel keeps the mark's harness color (it is not the question's rose accent).
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const view=require(require('node:path').join(require('node:path').dirname(process.argv[1]),'panel-view.cjs'));
+const color={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150},lvl_r:{foreground:210},harness:{foreground:173}};
+const plain={dim:{foreground:null,dim:false},loc_repo:{foreground:null},g_blocked:{foreground:null},lvl_g:{foreground:null},lvl_r:{foreground:null},harness:{foreground:null}};
+const S=(t,st,styles)=>({text:t,...styles[st]});
+const long='a choice whose words run past one row';
+const display=styles=>({head:[S('◑ ','g_blocked',styles),S('questions 1','dim',styles),S(' · 1/1 · ','dim',styles),S('answer needed','g_blocked',styles)],
+ body:[[S('Which?','loc_repo',styles)]],source:[],
+ options:[[S('1 ','dim',styles),S('one','loc_repo',styles)],[S('2 ','dim',styles),S('a choice whose','loc_repo',styles)],[S('  ','dim',styles),S('words run past','loc_repo',styles)],[S('  ','dim',styles),S('one row','loc_repo',styles)],[S('3 ','dim',styles),S('three','loc_repo',styles)]]});
+const make=styles=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([{id:'id',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one',long,'three'],display:display(styles)}]}],'',{styles,labels:{}});return b;};
+const options=b=>b.detail({budget:20,columns:40}).filter(row=>row.some(p=>/^(one|a choice whose|words run past|one row|three)$/.test(p.text)));
+const words=row=>row.filter(p=>/[a-z]/.test(p.text));
+// Unfocused: the mark's column is blank and the words keep their own paint.
+{const rows=options(make(color));assert.equal(rows.length,5);
+ for(const row of rows){assert.equal(row[0].text,'  ');assert(!row.some(p=>p.text==='▸'));assert(words(row).every(p=>p.foreground===253&&!p.dim&&!p.bold),JSON.stringify(row));}}
+for(const [styles,colored] of [[color,true],[plain,false]]){
+ const b=make(styles);b.enter();b.input(Buffer.from('\x1b[B'));
+ const rows=options(b);assert.equal(rows.length,5);
+ rows.forEach((row,i)=>{
+  const chosen=i>=1&&i<=3;
+  if(chosen){
+   // (a) `▸` in the harness color, bold; the words bold in the bright body color. (d) On every row of a wrapped choice.
+   assert.equal(row[0].text,'▸',JSON.stringify(row));assert.equal(row[0].bold,true);assert.equal(row[1].text,' ');
+   if(colored)assert.equal(row[0].foreground,173);
+   assert(words(row).every(p=>p.bold===true&&!p.dim&&(colored?p.foreground===253:true)),JSON.stringify(row));
+  }else{
+   // (b) The mark's place blank, the words dim grey and not bold. (c) Without color: not bold.
+   assert.equal(row[0].text,'  ',JSON.stringify(row));assert(!row.some(p=>p.text==='▸'));
+   assert(words(row).every(p=>!p.bold&&(colored?p.dim===true&&p.foreground!==253:true)),JSON.stringify(row));
+  }
+ });
+ // The chosen choice moves with the arrows, the form with it.
+ b.input(Buffer.from('\x1b[B'));const moved=options(b);assert.equal(moved[4][0].text,'▸');assert.equal(moved[1][0].text,'  ');
+}
+// The panel: `▸` keeps the harness color on the terminal's own background and on a known face; it is not rose.
+{const b=make(color);b.enter();b.input(Buffer.from('\x1b[B'));const q=o=>b.detail(o);
+ for(const [cfg,background] of [[{},''],[{},'dark'],[{shade:'medium'},'dark']]){
+  const r=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:cfg,background,questions:q});
+  const mark=r.rows.flat().find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
+  assert.notEqual(mark.foreground,view.FACES.dark.accent,JSON.stringify(cfg));assert.equal(mark.foreground,173,JSON.stringify(cfg));assert.equal(mark.bold,true);}
+ const mono=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:{theme:'mono'},questions:q}).rows.flat();
+ assert.equal(mono.find(p=>p.text==='▸').bold,true);
+}
+""")
 
     def test_decision_enter_cannot_submit_before_an_explicit_selection(self):
         self.node(r"""

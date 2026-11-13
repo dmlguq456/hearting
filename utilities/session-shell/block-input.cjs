@@ -88,7 +88,7 @@ module.exports=function({changed,answer,action,page}) {
     if(focused)head=[span('› ','g_blocked'),...head];
     const body=view?.body||[[span(row.question.question||'?','loc_repo')]];
     const options=status!=='open'?(row.item.reason?[[span(row.item.reason)]]:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1} `),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
-    const marked=choosing(row)?highlight(options,cursorOf(row)):options;
+    const marked=status==='open'&&choices(row).length?highlight(options,choosing(row)?cursorOf(row):-1,choosing(row)):options;
     const content=[...body,...marked,...(view?.source||[])];
     const tail=[];
     const picked=local.answers[id];
@@ -117,7 +117,7 @@ module.exports=function({changed,answer,action,page}) {
     // The highlighted choice comes onto the page when it changes (↑↓, a number);
     // PgUp/PgDn then read the body from its first row to its last, and the page
     // stays where the reading left it until the choice changes again.
-    const lit=choosing(row)?body.length+marked.findIndex(parts=>parts[0]?.text==='›'):-1;
+    const lit=choosing(row)?body.length+marked.findIndex(parts=>parts[0]?.text==='▸'):-1;
     if(follow&&lit>=body.length){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
     scroll=Math.max(0,Math.min(scroll,Math.max(0,content.length-page)));
     // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
@@ -127,14 +127,19 @@ module.exports=function({changed,answer,action,page}) {
     return [head,...content.slice(scroll,scroll+page),...(space>1?[more]:[]),...footer].slice(0,limit);
   }
   // The option rows of one choice start with its number (`2 `); its wrapped rows
-  // with spaces. The highlighted choice trades its number for `›` and bright text.
-  function highlight(options,at){
+  // with spaces. Spec E9 rule 53: every option row leads with a two-cell column for the
+  // mark (blank, so focusing shifts nothing). While ↑↓ choose, the chosen choice's rows
+  // (each row of a wrapped one) carry `▸` in this session's harness color, bold, and their
+  // words bold in the bright body color; every other choice reads dim grey. Without color
+  // the mark and the weight alone tell them apart.
+  function highlight(options,at,choosing){
     let n=-1;
     return options.map(parts=>{
       const lead=String(parts[0]?.text??''),number=/^(\d+) $/.exec(lead);
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
-      if(n!==at)return parts;
-      return [...(number?[span('›','g_blocked'),span(' '.repeat(Math.max(1,[...lead].length-1)))]:[parts[0]]),...parts.slice(1).map(part=>({...part,bold:true,dim:false}))];
+      if(!choosing||at<0)return [span('  ',''),...parts];
+      if(n!==at)return [span('  ',''),...parts.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
+      return [{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...parts.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}))];
     });
   }
   async function submit(){

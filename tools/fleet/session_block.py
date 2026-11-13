@@ -36,7 +36,8 @@ def question_presentations(items, columns, *, native_wait=None):
             parts = [(str(label), "loc_repo")]
             if question.get("recommended") == number - 1:
                 parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
-            for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix)))):
+            # Two cells stay free before the number for the editor's mark column (spec E9 rule 53).
+            for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix) - 2))):
                 options.append([(prefix if line_index == 0 else " " * cell_width(prefix), "dim"), *line])
         body = []
         for source_line in str(question.get("question") or "?").splitlines():

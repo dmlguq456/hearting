@@ -1038,8 +1038,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
-                      "labels": labels, "styles": {key: style_components(key, colors=colors, no_color=no_color)
-                      for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")}},
+                      "labels": labels, "styles": {**{key: style_components(key, colors=colors, no_color=no_color)
+                      for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")},
+                      # The chosen choice's `▸` takes this session's harness color (spec E9 rule 53).
+                      "harness": style_components("hb_" + str(harness), colors=colors, no_color=no_color)}},
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
             "panel": panel, "help": ui_text("fleet.session_block.editor_help")}
