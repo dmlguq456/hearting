@@ -2856,6 +2856,7 @@ def _claim_run_recipient(run_root, identity, claim):
                 with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=run_dir,
                                                  prefix=".claim-", delete=False) as handle:
                     temporary = Path(handle.name)
+                    os.fchmod(handle.fileno(), stat.S_IMODE(meta_path.stat().st_mode))
                     json.dump(meta, handle, ensure_ascii=False, indent=1, sort_keys=True)
                     handle.write("\n")
                 os.replace(temporary, meta_path)

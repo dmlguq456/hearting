@@ -2998,6 +2998,7 @@ class ClaimRunRecipientTest(unittest.TestCase):
         return json.loads(output.getvalue()) if as_json else output.getvalue()
 
     def test_claim_moves_end_notices_and_tells_the_previous_session_once(self):
+        (self.run_dir / "meta.json").chmod(0o640)
         with mock.patch.object(self.module, "_observe_compute_experiment", return_value=None):
             self.module._report_run_end(self.run_dir, 0, None, lambda: 100)
             self.assertEqual(self.notify.call_args.args, ("claude", "old-session"))
@@ -3016,6 +3017,7 @@ class ClaimRunRecipientTest(unittest.TestCase):
             self.assertEqual(self.notify.call_args.args, ("codex", "new-session"))
         provenance = self.read_meta()["provenance"]
         self.assertEqual(provenance["session"], self.new)
+        self.assertEqual((self.run_dir / "meta.json").stat().st_mode & 0o777, 0o640)
         self.assertEqual(provenance["notify"], self.new)
         self.assertEqual(provenance["recipient_handovers"], [{
             "from": self.old, "to": self.new, "notify_from": self.old,
