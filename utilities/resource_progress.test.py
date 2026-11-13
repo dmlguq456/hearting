@@ -2514,6 +2514,43 @@ class CatalogNoticeTest(unittest.TestCase):
         self.append_point(1, 12.5)  # epoch 1 corrected from 11.0; the latest (epoch 3) stays 13.0
         self.assertEqual(len(set(self.observe(7200)) - keys), 1)
 
+    def _drop_told_digest(self):
+        """A state saved before the evaluation digest existed: the told point is `{metric, epoch, value}` only."""
+        state = json.loads(self.state.read_text())
+        told = state["notified_decision_point"]
+        told.pop("points")
+        self.assertEqual(set(told), {"metric", "epoch", "value"})
+        self.state.write_text(json.dumps(state))
+
+    def test_a_state_saved_before_the_digest_with_nothing_new_stays_quiet(self):
+        """RV-PR1607-R2-1113: right after the install, an old told point equal to the latest is not news; the
+        digest is filled in quietly, and a late earlier epoch afterwards is told as before."""
+        self.register()
+        run = self.run_spec()
+        run["observation"]["time_budget"] = {"seconds": 28800}  # slots at 2880, 7200, 14400, 21600 s
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600, run))
+        self.assertEqual(len(keys), 1)
+        self._drop_told_digest()
+        self.assertEqual(set(self.observe(7200, run)) - keys, set(), "an old state with no new evaluation was told")
+        told = progress._read_observation_state(self.state)["notified_decision_point"]
+        self.assertEqual(({k: told[k] for k in ("metric", "epoch", "value")}, len(told.get("points") or "")),
+                         ({"metric": "SISNRi", "epoch": 3, "value": 13.0}, 16))  # the digest was filled in
+        self.assertEqual(set(self.observe(14400, run)) - keys, set())  # and the next checkpoint is quiet too
+        self.append_point(2, 25.0)  # a first evaluation of an earlier epoch; the latest (epoch 3) stays
+        self.assertEqual(len(set(self.observe(21600, run)) - keys), 1)
+
+    def test_a_state_saved_before_the_digest_with_a_new_point_is_told(self):
+        self.register()
+        keys = set(self.observe(3600))
+        self._drop_told_digest()
+        self.append_point(2, 12.0)  # the latest point moved from 11.0@1
+        news = set(self.observe(7200)) - keys
+        self.assertEqual(len(news), 1)
+        told = progress._read_observation_state(self.state)["notified_decision_point"]
+        self.assertEqual((told["epoch"], told["value"], len(told.get("points") or "")), (2, 12.0, 16))
+        self.assertEqual(set(self.observe(10800)) - keys - news, set())
+
     def test_unconfirmed_runs_keep_their_checkpoints(self):
         # no catalog at all
         keys = set(self.observe(3600))

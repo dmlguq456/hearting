@@ -1470,11 +1470,16 @@ def _quiet_checkpoint(context, previous, samples):
     declares the deciding metric and this run has reported it, a checkpoint is made only when that
     metric has a new evaluation (any epoch, a late one or a corrected one included) since the last
     notice.  Anything else (no catalog, no declared metric, a metric never reported, a catalog that
-    cannot be read) keeps the existing checkpoint, so an unconfirmed run does not go quiet."""
+    cannot be read) keeps the existing checkpoint, so an unconfirmed run does not go quiet.  A told point
+    saved before the digest existed (`{metric, epoch, value}` only) is compared on those fields alone, so
+    an install does not make every running experiment speak once; the caller then stores the digest."""
     mark = _decision_mark(context, samples)
     if not mark:
         return False
-    return previous.get("notified_decision_point") == mark
+    told = previous.get("notified_decision_point")
+    if isinstance(told, dict) and "points" not in told:
+        return told == {key: value for key, value in mark.items() if key != "points"}
+    return told == mark
 
 
 def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
@@ -1933,6 +1938,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                     decision_metric.get("key") if isinstance(decision_metric, dict) else decision_metric)))
             return catalog_context[0]
         event_specs = []
+        quiet_checkpoint = False
         if notify_events and final:
             event_specs.append(("final", f"final:{identity}"))
         if (notify_events and observation["attention"]
@@ -1950,7 +1956,8 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                 event_specs.append(("attention", f"attention:{identity}:{attention_digest}"))
         elif notify_events and observation["checkpoint_due"] and not final:
             slot = int(observation["due_checkpoint_at"])
-            if not _quiet_checkpoint(experiment(), previous, samples):
+            quiet_checkpoint = _quiet_checkpoint(experiment(), previous, samples)
+            if not quiet_checkpoint:
                 event_specs.append(("checkpoint", f"checkpoint:{identity}:{slot}"))
         seen = set(previous.get("event_keys", []))
         outbox = list(previous.get("outbox", []))
@@ -1996,7 +2003,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                                              else previous.get("last_checkpoint_at")),
                       "notified_decision_point": (
                           _decision_mark(experiment(), samples) or
-                          previous.get("notified_decision_point")) if new_event
+                          previous.get("notified_decision_point")) if new_event or quiet_checkpoint
                           else previous.get("notified_decision_point"),
                       "last_public_write_at": previous.get("last_public_write_at"),
                       "public_status": previous.get("public_status"),
