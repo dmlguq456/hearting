@@ -249,9 +249,8 @@ def classify(receipt: dict) -> str:
         run = _run_state({"receipt": receipt})
         return ROUTINE if isinstance(run, dict) and run.get("status") == "succeeded" else ATTENTION
     if key.startswith("compute-run:"):
-        ended = COMPUTE_RUN_EXIT.search(receipt["text"])
-        if ended is not None:
-            return ROUTINE if ended.group("exit") == "0" else ATTENTION
+        # Only a run's own end phrase says how it ended; one that cannot be read is no normal end.
+        return ROUTINE if compute_run_exit(receipt) == 0 else ATTENTION
     if EXPERIMENT_CHECKPOINT_KEY.match(key):
         return ROUTINE
     if receipt["required_action"] in TERMINAL_ACTIONS or subject.startswith("experiment final"):
@@ -263,8 +262,27 @@ def classify(receipt: dict) -> str:
 # attention again at a periodic checkpoint as `attention-checkpoint:`, which is not this.
 EXPERIMENT_ATTENTION_KEY = re.compile(r"^experiment:[^:]+:attention:")
 EXPERIMENT_CHECKPOINT_KEY = re.compile(r"^experiment:[^:]+:checkpoint:")
-# `compute-hosts` words a run's end `run <id> on <host> ended with exit <n>`.
-COMPUTE_RUN_EXIT = re.compile(r"\bended with exit (?P<exit>[0-9]+)\b")
+# `compute-hosts` words a run's end `[<catalog name>: ]run <id> on <host> ended with exit <n>`,
+# the id being the one its key `compute-run:<id>[:…]` carries. The name in front is free text and
+# may hold the same words, so only this exact phrase of this run is read (`compute_run_exit`).
+COMPUTE_RUN_EXIT = r"(?:^|: )run {run_id} on [^\s;]+ ended with exit (?P<exit>-?[0-9]+)(?![0-9])"
+
+
+def compute_run_exit(receipt: dict) -> int | None:
+    """The exit code a compute run's end notice states for its own run, or ``None``.
+
+    ``None`` when the phrase is missing, or when the text holds it more than once with
+    different codes (a name that repeats the phrase cannot pass for the real end). A signal
+    end (`exit -9`) is read as the negative code it is.
+    """
+    parts = str(receipt.get("key") or "").split(":")
+    if len(parts) < 2 or parts[0] != "compute-run" or not parts[1]:
+        return None
+    pattern = re.compile(COMPUTE_RUN_EXIT.format(run_id=re.escape(parts[1])))
+    codes = {int(match.group("exit")) for match in pattern.finditer(str(receipt.get("text") or ""))}
+    return codes.pop() if len(codes) == 1 else None
+
+
 # A normal end of a run shorter than this, or a normal checkpoint or end that carries no
 # metric, is quiet. The observer looks every 60 s, and a run's end is seen at the next look,
 # so a run that took under about a minute is seen ending within two looks.
@@ -294,7 +312,8 @@ def wakes_resting_recipient(record: dict) -> bool:
     """Whether a resting recipient is woken for this notice instead of waiting for its next input.
 
     Exactly the `attention` class: an experiment's new or changed attention, a final that did
-    not succeed (or whose outcome is not known) and a compute run that ended with a nonzero exit.
+    not succeed (or whose outcome is not known) and a compute run whose own end phrase does not
+    say exit 0 (a nonzero or negative exit, or none it can read).
     A normal finish, a periodic checkpoint and the same attention re-posted at a checkpoint wait
     for the next input as before, so an unchanged attention costs no further model turn.
     """

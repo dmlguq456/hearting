@@ -3237,6 +3237,222 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         self.assertEqual(sent[0]["text"].count("HEARTING_RECEIPT_V1 "), 4)
         self.assertTrue(all(duty["intent"]["delivery_id"] in sent[0]["text"] for duty in duties))
 
+    def _ended_runs(self, sid, runs):
+        """The real `compute-hosts` end watch for runs `[(run id, catalog name or None, exit)]`
+        that already ended, their names registered in a real experiment catalog."""
+        import artifact_admission as admission
+        import experiment_catalog as catalog
+        import dispatch_pending_delivery as pending
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location("canonical_named_producer", _HERE / "compute-hosts.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        artifact = self.root / "named-artifacts"
+        artifact.mkdir()
+        admission.ensure_root_identity(artifact)
+        conditions = [{"display_name": name, "refs": {"runs": [{"run_id": run}]}}
+                      for run, name, _code in runs if name]
+        catalog.run_write(artifact, lambda ctx: catalog.op_register(ctx, {"conditions": conditions}),
+                          now=1_790_000_000.0)
+        with mock.patch.object(obligations, "ensure_normal_runner", return_value=False), \
+             mock.patch.object(obligations, "request_dispatch_reconciliation", return_value=False):
+            for run, _name, code in runs:
+                directory = self.root / "named-ended-runs" / run
+                directory.mkdir(parents=True)
+                (directory / "meta.json").write_text(json.dumps({
+                    "run_id": run, "host": "host", "artifact_root": str(artifact),
+                    "provenance": {"session": {"harness": "claude", "id": sid}}}))
+                (directory / "exit_code").write_text(f"{code}\n")
+                self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(directory)), now=lambda: 0,
+                    sleep=lambda _seconds: self.fail("fixture is already ended")), 0)
+        return {pending.read(self.root, sid, duty["intent"]["delivery_id"])["receipt"]["key"].split(":")[1]:
+                pending.read(self.root, sid, duty["intent"]["delivery_id"]) for duty in self.duties(sid)}
+
+    def test_a_run_named_like_a_normal_end_that_failed_is_still_a_failure(self):
+        # RV-PR1618 P1: a catalog name holding normal-end words, a signal end and a plain failure
+        # stay failures: they wake, are shown first, and are never counted as normal ends.
+        import session_notice
+        runs = [("host-20261114-120000-a", "baseline ended with exit 0", 6),
+                ("host-20261114-120100-b", "status=succeeded; exit=0", -9),
+                ("host-20261114-120200-c", None, 137),
+                ("host-20261114-120300-d", "정상 대조", 0)]
+        records = self._ended_runs("named-A", runs)
+        self.assertEqual(len(records), 4)
+        self.assertTrue(records["host-20261114-120000-a"]["receipt"]["text"].startswith(
+            "baseline ended with exit 0: run host-20261114-120000-a on host ended with exit 6"))
+        for run, _name, code in runs:
+            with self.subTest(run=run):
+                kind = session_notice.classify(records[run]["receipt"])
+                self.assertEqual(kind, session_notice.ROUTINE if code == 0 else session_notice.ATTENTION)
+                self.assertIs(session_notice.wakes_resting_recipient(records[run]), code != 0)
+        with self.courier("claude", "named-A", receive=True) as sent:
+            peer_steward._reconcile_obligations(self.store, self.duties("named-A"))
+        self.assertEqual(len(sent), 1)
+        body = sent[0]["text"]
+        self.assertIn("Needs attention (3), shown first:", body)
+        for words in ("ended with exit 6", "ended with exit -9", "ended with exit 137"):
+            self.assertLess(body.index(words), body.index("Other notices:"))
+        self.assertIn("Routine, nothing to do (1 run): 1 ended normally", body)
+        self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 4)
+        self.assertTrue(all(record["delivery_id"] in body for record in records.values()))
+
+    def test_an_experiment_named_like_a_normal_end_that_failed_is_still_a_failure(self):
+        # The same for an experiment's final: its end is read from the runner's state, not the
+        # name, and the name's look-alike `status=…; exit=…` is not rewritten as the run's state.
+        import dispatch_pending_delivery as pending
+        import resource_progress
+        import session_notice
+        name = "baseline ended with exit 0; status=succeeded; exit=0"
+        public = self.root / "named-public"
+        public.mkdir()
+        run = {"run_id": "named-final", "artifact_root": str(public), "started_at": 0,
+               "jobs": str(self.jobs), "session": {"harness": "claude", "id": "named-B"}}
+        with mock.patch.object(obligations, "ensure_normal_runner", return_value=False), \
+             mock.patch.object(obligations, "request_dispatch_reconciliation", return_value=False), \
+             mock.patch.object(resource_progress, "_experiment_lines", return_value=[name]):
+            resource_progress.observe_experiment(
+                {**run, "status": "failed", "exit_code": 6, "ended_at": 7500}, self.root / "registry.json",
+                7500, started_at=0, status="failed", final=True)
+        duty, = self.duties("named-B")
+        record = pending.read(self.root, "named-B", duty["intent"]["delivery_id"])
+        self.assertTrue(record["receipt"]["text"].startswith(name + "; run=named-final"))
+        self.assertIn("status=failed; exit=6", record["receipt"]["text"])
+        self.assertEqual(record["receipt"]["subject"], "experiment final (1/1)")
+        for state in (None, {"status": "failed", "exit_code": 6}):
+            with self.subTest(run_state=state), mock.patch.object(session_notice, "_run_state", return_value=state):
+                self.assertEqual(session_notice.classify(record["receipt"]), session_notice.ATTENTION)
+                self.assertTrue(session_notice.wakes_resting_recipient(record))
+        with self.courier("claude", "named-B", receive=True) as sent, \
+             mock.patch("dispatch_session_sweep._experiment_run_state",
+                        return_value={"status": "failed", "exit_code": 6}):
+            peer_steward._reconcile_obligations(self.store, self.duties("named-B"))
+        self.assertEqual(len(sent), 1)
+        body = sent[0]["text"]
+        self.assertLess(body.index("Needs attention (1), shown first:"), body.index("status=failed; exit=6"))
+        self.assertIn(name + "; run=named-final", body)
+        self.assertNotIn("Routine, nothing to do", body)
+
+    def _observed_failure(self, sid, run_id):
+        """The real observer: a normal checkpoint at 7200 s, then the run fails with exit 6 at 7500 s
+        before the checkpoint was delivered (RV-PR1618 `real-produced-checkpoint-then-failed`)."""
+        import dispatch_pending_delivery as pending
+        import resource_progress
+        public = self.root / ("public-" + run_id)
+        public.mkdir()
+        run = {"run_id": run_id, "artifact_root": str(public), "started_at": 0,
+               "jobs": str(self.jobs), "session": {"harness": "claude", "id": sid}}
+        with mock.patch.object(obligations, "ensure_normal_runner", return_value=False), \
+             mock.patch.object(obligations, "request_dispatch_reconciliation", return_value=False):
+            resource_progress.observe_experiment(run, self.root / (run_id + ".json"), 7200,
+                                                 started_at=0, status="running")
+            resource_progress.observe_experiment(
+                {**run, "status": "failed", "exit_code": 6, "ended_at": 7500}, self.root / (run_id + ".json"),
+                7500, started_at=0, status="failed", final=True)
+        return [pending.read(self.root, sid, duty["intent"]["delivery_id"]) for duty in self.duties(sid)]
+
+    def _notice(self, sid, key, subject, text):
+        import session_notice
+        with mock.patch.object(obligations, "ensure_normal_runner", return_value=False), \
+             mock.patch.object(obligations, "request_dispatch_reconciliation", return_value=False):
+            return session_notice.notify("claude", sid, key=key + ":1:claude:" + sid, subject=subject,
+                                         text=text, jobs=self.jobs)
+
+    def test_a_failed_run_is_not_also_counted_as_running_normally(self):
+        # RV-PR1618 P2: the failure outranks the same run's earlier normal checkpoint, in either order.
+        import dispatch_session_sweep as sweep
+        import session_notice
+        records = self._observed_failure("failed-A", "checkpoint-e662256f")
+        self.assertEqual(sorted(record["receipt"]["key"].split(":")[2] for record in records),
+                         ["checkpoint", "final"])
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "failed", "exit_code": 6}):
+            with self.courier("claude", "failed-A", receive=True) as sent:
+                peer_steward._reconcile_obligations(self.store, self.duties("failed-A"))
+            self.assertEqual(len(sent), 1)
+            body = sent[0]["text"]
+            self.assertIn("Needs attention (1), shown first:", body)
+            self.assertIn("status=failed; exit=6", body)
+            self.assertNotIn("Routine, nothing to do", body)
+            self.assertNotIn("still running normally", body)
+            self.assertNotIn("Other notices:", body)
+            self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 2)
+            self.assertTrue(all(record["delivery_id"] in body for record in records))
+            # The order the records come in does not matter.
+            rows = [{**record, sweep.STORAGE_KEY: "failed-A"} for record in records]
+            self.assertEqual(sweep.delivery_context([(self.root, rows)]),
+                             sweep.delivery_context([(self.root, list(reversed(rows)))]))
+        # The failure written first and an old checkpoint of the same run after it: the same.
+        failed = self._notice("failed-B", "experiment:late:final:late", "experiment final (1/1)",
+                              "run=late; status=failed; exit=6")
+        late = self._notice("failed-B", "experiment:late:checkpoint:late:7200", "experiment checkpoint, quiet (1/1)",
+                            "run=late; ETA unknown")
+        with self.courier("claude", "failed-B", receive=True) as sent:
+            peer_steward._reconcile_obligations(self.store, self.duties("failed-B"))
+        body = sent[0]["text"]
+        self.assertIn("Needs attention (1), shown first:", body)
+        self.assertNotIn("Routine, nothing to do", body)
+        self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 2)
+        self.assertTrue(all(record["delivery_id"] in body for record in (failed, late)))
+
+    def test_the_routine_line_counts_only_runs_without_a_failure_or_attention(self):
+        # How one delivery counts a run it holds more than once (RV-PR1618 P2):
+        #   failed end + normal checkpoint     -> not counted (the failure outranks it, any order)
+        #   attention + later normal checkpoint -> not counted in this delivery (the order of an
+        #       attention and a checkpoint cannot be told; a later delivery counts the run again)
+        #   re-posted attention + checkpoint    -> not counted
+        #   attention + normal end              -> counted once, as ended (an end is the last word)
+        #   normal checkpoint + normal end      -> counted once, as ended
+        import dispatch_session_sweep as sweep
+        sid = "mixed-A"
+        records = self._observed_failure(sid, "failed-run")
+        notices = {
+            "recovered-attention": self._notice(sid, "experiment:recovered:attention:recovered:abc",
+                                                "experiment attention (1/1)", "run=recovered; loss NaN"),
+            "recovered-checkpoint": self._notice(sid, "experiment:recovered:checkpoint:recovered:7200",
+                                                 "experiment checkpoint (1/1)", "run=recovered; loss 0.4"),
+            "reposted-attention": self._notice(sid, "experiment:reposted:attention-checkpoint:reposted:7200:abc",
+                                               "experiment attention (1/1)", "run=reposted; ETA grew"),
+            "reposted-checkpoint": self._notice(sid, "experiment:reposted:checkpoint:reposted:3600",
+                                                "experiment checkpoint (1/1)", "run=reposted; loss 0.5"),
+            "ended-attention": self._notice(sid, "experiment:ended:attention:ended:abc",
+                                            "experiment attention (1/1)", "run=ended; loss NaN"),
+            "ended-final": self._notice(sid, "experiment:ended:final:ended", "experiment final, quiet (1/1)",
+                                        "run=ended; status=succeeded; exit=0"),
+            "both-checkpoint": self._notice(sid, "experiment:both:checkpoint:both:3600",
+                                            "experiment checkpoint (1/1)", "run=both; loss 0.3"),
+            "both-final": self._notice(sid, "experiment:both:final:both", "experiment final, quiet (1/1)",
+                                       "run=both; status=succeeded; exit=0"),
+            "running": self._notice(sid, "experiment:running:checkpoint:running:3600",
+                                    "experiment checkpoint (1/1)", "run=running; loss 0.2"),
+        }
+        records += list(notices.values())
+        rows = [{**record, sweep.STORAGE_KEY: sid} for record in records]
+        layout = sweep._notice_layout([(self.root, row) for row in rows])
+        self.assertEqual(layout["routine_line"],
+                         "Routine, nothing to do (3 runs): 2 ended normally, 1 still running normally "
+                         "(2 short or without metrics) -- both, ended, running")
+        body = sweep.delivery_context([(self.root, rows)])
+        self.assertEqual(body, sweep.delivery_context([(self.root, list(reversed(rows)))]))
+        self.assertIn("Needs attention (3), shown first:", body)
+        self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), len(rows))
+        self.assertTrue(all(row["delivery_id"] in body for row in rows))
+        # An outranked notice's receipt rides right under its run's entry, never on the routine line.
+        lines = body.splitlines()
+        for host, held in (("recovered-attention", "recovered-checkpoint"),
+                           ("reposted-attention", "reposted-checkpoint")):
+            at = next(index for index, line in enumerate(lines)
+                      if line.startswith("- ") and notices[host]["receipt"]["text"] in line)
+            self.assertIn(notices[held]["delivery_id"], lines[at + 2])
+        self.assertNotIn("run=recovered; loss 0.4", body)
+        self.assertNotIn("run=reposted; loss 0.5", body)
+        # The render order keeps each held notice next to its run's entry when a delivery is split.
+        keys = sweep._render_keys([(self.root, rows)])
+        ordered = sorted(rows, key=lambda row: keys[id(row)])
+        position = {row["delivery_id"]: index for index, row in enumerate(ordered)}
+        for host, held in (("recovered-attention", "recovered-checkpoint"),
+                           ("reposted-attention", "reposted-checkpoint")):
+            self.assertEqual(position[notices[held]["delivery_id"]], position[notices[host]["delivery_id"]] + 1)
+
     def test_a_checkpoint_joins_the_routine_line_and_an_unrecognized_event_keeps_its_own(self):
         import session_notice
         records = self.notices(count=3)

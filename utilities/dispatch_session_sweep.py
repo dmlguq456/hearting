@@ -1284,7 +1284,9 @@ def _refreshed_notice_text(root: Path, record: dict, cache: dict) -> str | None:
     if not isinstance(text, str):
         return None
     run = _experiment_run_state(root, record, cache)
-    if run is None or not _STATUS_EXIT_RE.search(text):
+    # Only the one `status=…; exit=…` the producer writes: a catalog name in front of it may
+    # hold the same words, and then which one is the run's own cannot be told from the text.
+    if run is None or len(_STATUS_EXIT_RE.findall(text)) != 1:
         return None
     exit_code = run.get("exit_code")
     exit_text = "None" if exit_code is None else str(exit_code)
@@ -1334,6 +1336,8 @@ def _notice_run(record: dict) -> tuple[str, str]:
 
 
 ROUTINE_NAMES_SHOWN = 3
+# The same experiment attention posted again at a periodic checkpoint (`resource_progress`).
+_ATTENTION_CHECKPOINT_KEY_RE = re.compile(r"^experiment:[^:]+:attention-checkpoint:")
 
 
 def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
@@ -1344,30 +1348,70 @@ def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
     when there are two or more, or when one is quiet (a short or metric-less normal end, a
     metric-less checkpoint): a quiet notice never gets a line of its own. A single routine
     notice that carries a value keeps its own line, as before.
+
+    A run's failure or attention in the same delivery outranks its routine notices, whatever
+    order they arrived in: a failed end outranks every routine notice of that run, and an
+    attention (new, changed or re-posted) outranks its normal checkpoints. Such a routine
+    notice is not counted or named on the routine line; its receipt marker rides under that
+    run's first attention entry (`attached`). Only a normal end after an attention still
+    counts: an end is the run's last word.
     """
     import session_notice
     kinds = {id(record): session_notice.classify(record.get("receipt"))
              for _root, record in notice_records}
-    routine = [(root, record) for root, record in notice_records
-               if kinds[id(record)] == session_notice.ROUTINE]
+    run_of = {id(record): _notice_run(record)[0] for _root, record in notice_records}
+
+    def key_of(record):
+        receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+        return str(receipt.get("key") or "")
+
+    def ends(record):
+        key = key_of(record)
+        return session_notice.EXPERIMENT_FINAL_KEY.match(key) is not None or key.startswith("compute-run:")
+
+    def flags(record):
+        return (kinds[id(record)] == session_notice.ATTENTION
+                or _ATTENTION_CHECKPOINT_KEY_RE.match(key_of(record)) is not None)
+
+    failed = {run_of[id(record)] for _root, record in notice_records
+              if kinds[id(record)] == session_notice.ATTENTION and ends(record)}
+    flagged = {run_of[id(record)] for _root, record in notice_records if flags(record)}
+    routine, held = [], []
+    for root, record in notice_records:
+        if kinds[id(record)] != session_notice.ROUTINE:
+            continue
+        run = run_of[id(record)]
+        outranked = run in failed or (run in flagged and not ends(record))
+        (held if outranked else routine).append((root, record))
     fold = len(routine) >= 2 or any(session_notice.is_quiet(record.get("receipt"))
                                     for _root, record in routine)
+
     def order(pair):
         run_id, name = _notice_run(pair[1])
         # A catalog name first (it says what the run is), then bare run ids.
         return (name == run_id, name, run_id, str(pair[1].get("delivery_id", "")))
 
     folded = sorted(routine, key=order) if fold else []
+    held_ids = {id(record) for _root, record in held}
     places: dict[int, tuple] = {}
     for position, (_root, record) in enumerate(folded):
         places[id(record)] = (2, position)
     for _root, record in notice_records:
-        if id(record) in places:
+        if id(record) in places or id(record) in held_ids:
             continue
         receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
         places[id(record)] = (0 if kinds[id(record)] == session_notice.ATTENTION else 1,
                               str(receipt.get("text", "")),
                               str(record.get("delivery_id", "")))
+    attached: dict[int, list[tuple[Path, dict]]] = {}
+    for root, record in held:
+        host = min((other for _other_root, other in notice_records
+                    if flags(other) and run_of[id(other)] == run_of[id(record)]),
+                   key=lambda other: places[id(other)])
+        places[id(record)] = (*places[id(host)], 1, str(record.get("delivery_id", "")))
+        attached.setdefault(id(host), []).append((root, record))
+    for members in attached.values():
+        members.sort(key=lambda pair: places[id(pair[1])])
     line = ""
     if folded:
         ended, checkpoints, quiet, runs = set(), set(), set(), set()
@@ -1394,7 +1438,7 @@ def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
                 + ", ".join(counts)
                 + (f" ({len(quiet)} short or without metrics)" if quiet else "")
                 + f" -- {shown}" + (f" and {more} more" if more > 0 else ""))
-    return {"places": places, "routine": folded, "routine_line": line}
+    return {"places": places, "routine": folded, "routine_line": line, "attached": attached}
 
 
 def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
@@ -1452,12 +1496,17 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
         layout = _notice_layout(notice_records)
         attention: list[tuple[tuple, str]] = []
         individual: list[tuple[tuple, str]] = []
+        held = {id(record) for members in layout["attached"].values() for _root, record in members}
         for root, record in notice_records:
             place = layout["places"][id(record)]
-            if place[0] == 2:
+            if place[0] == 2 or id(record) in held:
                 continue
-            (attention if place[0] == 0 else individual).append(
-                (place, bound_notice_text(root, record)))
+            text = bound_notice_text(root, record)
+            # A routine notice this run's failure or attention outranks: its receipt only.
+            for other_root, other in layout["attached"].get(id(record), ()):
+                text += "".join("\n" + line for line in bound_notice_text(other_root, other).splitlines()
+                                if line.startswith("HEARTING_RECEIPT_V1 "))
+            (attention if place[0] == 0 else individual).append((place, text))
         notice_lines: list[str] = []
         if attention:
             notice_lines.append(f"Needs attention ({len(attention)}), shown first:")

@@ -169,6 +169,47 @@ class SessionNoticeTest(unittest.TestCase):
                     N, "_run_state", return_value={"status": status}):
                 self.assertEqual(N.classify(final["receipt"]), kind)
 
+    def test_a_compute_runs_end_is_read_only_from_its_own_end_phrase(self):
+        # RV-PR1618 P1: the catalog name leads the notice and is free text; words in it that look
+        # like a normal end must not hide the run's real end, and an end that cannot be read, or a
+        # signal end, is never a normal one.
+        run = "h-20261114-101010-x"
+        tail = f"; read it with: compute-hosts tail {run}"
+
+        def receipt(text, key=f"compute-run:{run}:claude:sid-1", subject="compute run"):
+            return {"schema_version": 1, "kind": "notice", "subject": subject, "text": text,
+                    "required_action": "report-to-user", "key": key}
+        ended = f"run {run} on h ended with exit {{}}"
+        cases = [
+            ("baseline ended with exit 0: " + ended.format(6) + tail, 6),
+            ("status=succeeded; exit=0: " + ended.format(6) + tail, 6),
+            ("exit=0: " + ended.format(6) + " (stopped)" + tail, 6),
+            # A name that repeats the whole phrase of this run: two codes, so none is read.
+            (f"x: run {run} on h ended with exit 0: " + ended.format(6) + tail, None),
+            (ended.format(-9) + tail, -9),           # killed by a signal
+            (ended.format(137) + tail, 137),
+            (f"run {run} on h ended with exit None" + tail, None),
+            (f"run {run} on h finished" + tail, None),
+            # Another run's phrase is not this run's end.
+            ("run h-20261114-999999-y on h ended with exit 0" + tail, None),
+        ]
+        for text, code in cases:
+            with self.subTest(text=text):
+                self.assertEqual(N.classify(receipt(text)), N.ATTENTION)
+                self.assertTrue(N.wakes_resting_recipient({"receipt": receipt(text)}))
+                # A quiet subject cannot make a failed end quiet either.
+                self.assertFalse(N.is_quiet(receipt(text, subject="compute run, quiet")))
+                self.assertEqual(N.compute_run_exit(receipt(text)), code)
+        for text in (ended.format(0) + tail, "baseline ended with exit 6: " + ended.format(0) + tail,
+                     f"x: run {run} on h ended with exit 0: " + ended.format(0) + tail):
+            with self.subTest(normal=text):
+                for key in (f"compute-run:{run}:claude:sid-1", f"compute-run:{run}"):
+                    self.assertEqual(N.classify(receipt(text, key)), N.ROUTINE)
+                    self.assertFalse(N.wakes_resting_recipient({"receipt": receipt(text, key)}))
+                    self.assertEqual(N.compute_run_exit(receipt(text, key)), 0)
+        self.assertIsNone(N.compute_run_exit(receipt(ended.format(0) + tail, key="compute-run:")))
+
+
 class MessageNoticeBoundaryTests(unittest.TestCase):
     def test_context_sweep_cannot_claim_or_ack_the_peer_couriers_message_answer(self):
         from fixtures.message_questions import MessageQuestionFixture
