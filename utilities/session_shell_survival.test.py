@@ -159,8 +159,10 @@ class SessionShellSurvivalTest(unittest.TestCase):
                     self.assertTrue(select.select([ready_fd],[],[],5)[0], 'owned Enter boundary not ready')
                     self.assertEqual(os.read(ready_fd,1),b'1')
                     held=b'HELD_HUMAN_1388'+b'x'*(65536-len(b'HELD_HUMAN_1388'))
-                    # A partial/backpressured fixture write must not hang a CI shard.
-                    os.set_blocking(master,False);position=0;deadline=time.monotonic()+5
+                    # A partial/backpressured fixture write must not hang a CI shard. The bound is a
+                    # hang guard, not a speed check: a loaded CI runner took just over 5 s to drain
+                    # these 64 KiB through the host, so it allows 20 s.
+                    os.set_blocking(master,False);position=0;deadline=time.monotonic()+20
                     try:
                         while position<len(held):
                             left=deadline-time.monotonic()
