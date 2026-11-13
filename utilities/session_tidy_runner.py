@@ -783,20 +783,43 @@ def prepare_exchange(item: dict, batch: str, bundle: Bundle) -> Path:
     return current
 
 
-def remove_exchange(path, only_conversation: bool = False) -> None:
-    """Delete a batch's worker folder (or just the conversation copy and the prompt) if it is the real one."""
+def _gone(path: Path) -> bool:
+    """True only when ``path`` is known to be absent; a path that cannot be looked at may still be there."""
+    try:
+        path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _remove_file(path: Path) -> bool:
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+    return _gone(path)
+
+
+def remove_exchange(path, only_conversation: bool = False) -> bool:
+    """Delete a batch's worker folder (or just the conversation copy and the prompt) if it is the real one.
+
+    Returns whether what was to go is gone.  An error, a folder that cannot even be looked at
+    included, never escapes: the caller still writes its status and says the removal did not finish.
+    """
     if not path:
-        return
+        return True
     folder = Path(path)
-    if folder.parent.name != EXCHANGE_PARTS[1] or folder.parent.parent.name != EXCHANGE_PARTS[0] \
-            or folder.is_symlink() or not folder.is_dir():
-        return
+    if folder.parent.name != EXCHANGE_PARTS[1] or folder.parent.parent.name != EXCHANGE_PARTS[0]:
+        return True
+    try:
+        if folder.is_symlink() or not folder.is_dir():
+            return True
+    except OSError:
+        return False
     if only_conversation:
-        for name in ("input_v1.json", "prompt.md"):
-            with contextlib.suppress(OSError):
-                os.unlink(folder / name)
-    else:
-        shutil.rmtree(folder, ignore_errors=True)
+        return all([_remove_file(folder / name) for name in ("input_v1.json", "prompt.md")])
+    shutil.rmtree(folder, ignore_errors=True)
+    return _gone(folder)
 
 
 def launch_command(item: dict, prompt: Path, slug: str) -> list:
@@ -1112,11 +1135,17 @@ def _with_coverage(line: str, note: str) -> str:
 
 def end_batch_files(item: dict, run_dir: Path, clean: bool) -> None:
     """The conversation copy and the prompt go in every case; the rest of the worker's folder goes
-    with a clean finish (a failed batch keeps its actions.json until the entry is pruned)."""
-    for name in ("input_v1.json", "prompt.md"):
-        with contextlib.suppress(OSError):
-            os.unlink(run_dir / name)
-    remove_exchange(item.get("exchange"), only_conversation=not clean)
+    with a clean finish (a failed batch keeps its actions.json until the entry is pruned).
+
+    A file that could not be removed never stops the status written next: the entry then carries
+    ``cleanup="incomplete"`` (and runner.log says so), and pruning the entry takes what is left."""
+    gone = all([_remove_file(run_dir / name) for name in ("input_v1.json", "prompt.md")])
+    gone = remove_exchange(item.get("exchange"), only_conversation=not clean) and gone
+    if gone:
+        item.pop("cleanup", None)
+    elif item.get("cleanup") != "incomplete":
+        item["cleanup"] = "incomplete"
+        _log(run_dir, "cleanup incomplete: a conversation copy could not be removed or reached")
 
 
 def process_item(item: dict) -> None:
