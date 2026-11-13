@@ -600,6 +600,91 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         creation = next(c for c in app.return_value.request.call_args_list if c.args[0]=="thread/start")
         self.assertIs(creation.args[1]["ephemeral"],False)
 
+    def _timeout_once_then_ready_join(self) -> Path:
+        """A join fake: `timeout` on its first call, then it closes the child and reports `ready`."""
+        counter = self.base / "join_calls.count"
+        counter.write_text("0", encoding="utf-8")
+        script = self.base / "fake_join_timeout_once.py"
+        script.write_text(textwrap.dedent(f"""\
+            import json, sys
+            counter = {str(counter)!r}
+            jobs = sys.argv[sys.argv.index('--jobs') + 1]
+            parent = sys.argv[sys.argv.index('--parent-attempt-id') + 1]
+            attempts = [sys.argv[i + 1] for i, value in enumerate(sys.argv) if value == '--attempt-id']
+            calls = int(open(counter).read()) + 1
+            open(counter, 'w').write(str(calls))
+            if calls == 1:
+                state, status, readiness = 'timeout', 'open', 'pending'
+            else:
+                state, status, readiness = 'ready', 'done', 'ready'
+                kept, current = [], {{}}
+                for line in open(jobs).read().splitlines():
+                    fields = line.split('\\t')
+                    meta = dict(part.split('=', 1) for part in fields[5].split(',') if '=' in part) if len(fields) == 6 else {{}}
+                    if meta.get('attempt_id') in attempts:
+                        fields[1] = 'done'
+                        fields[5] += ',failure_class=pass,note=completed-supervisor,launch_outcome=never-launched'
+                    kept.append('\\t'.join(fields))
+                open(jobs, 'w').write('\\n'.join(kept) + '\\n')
+            print(json.dumps({{'schema_version': 2, 'state': state, 'parent_attempt_id': parent,
+                'children': [{{'attempt_id': a, 'status': status, 'readiness': readiness,
+                               'reason': 'process-alive' if state == 'timeout' else 'registry-closed',
+                               'required_action': 'complete-open' if state == 'timeout' else 'advance-completed'}}
+                              for a in attempts]}}))
+            """), encoding="utf-8")
+        return script
+
+    def test_resource_attention_reaches_the_owner_while_a_model_child_stays_parked(self):
+        """Mixed: a held resource fails while a model sibling is still open (BC-AMI-CHILD-FAIL-NO-WAKE)."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        module = load_supervisor_module()
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        route_value = seal_route({"schema_version":2,"cwd":str(self.base),
+            "nodes":[{"id":"full-run","kind":"resource-runner","continuation":{"kind":"supervised"}},
+                     {"id":"verify"}]})
+        route_path = self.base / "mixed-attention-route.json"
+        route_path.write_text(json.dumps(route_value))
+        route_args = ["--route-file",str(route_path),"--route-id",route_value["route_id"],"--route-hash",route_value["route_hash"]]
+        row = {"run_id":"failing-resource","pid":555,"starttime":"201","command":["approved"],
+               "node":"full-run","status":"failed","exit_code":3,"sentinel":"/fixture-exit"}
+        armed = {"node":"full-run","successors":["verify"]}
+        stage = {"state":"FAILED_RETRYABLE"}
+        sup = SimpleNamespace(poll_once=mock.Mock(),read_resource_watches=lambda *_: [armed],
+            resource_evidence=lambda _: {"terminal":True,"quiescent":True,"succeeded":False,"liveness":"exited","exit_code":3},
+            artifact_evidence=lambda _: {"checked":True,"missing":[]},runner=lambda:SimpleNamespace(read_sentinel=lambda _:3))
+        ctx = (sup,route_value,SimpleNamespace(state=lambda:{"nodes":{"full-run":stage}}),[(armed,row)])
+        turns, events, children_at_resource_turn, events_before_resource_turn = [], [], [], []
+        def turn(*a,**k):
+            prompt = k["prompt"]
+            kind = "resource" if "Runtime resource receipt" in prompt else "model"
+            turns.append(kind)
+            if kind == "resource":
+                state = join.read_supervisor_phase_state(self.state,PARENT)
+                children_at_resource_turn.append(set(state.delivered_attempt_ids))
+                events_before_resource_turn.append(len(events))
+                self.assertIn('"state":"needs-attention"',prompt)
+            text = ("runtime_wait: registered-children" if len(turns) <= 2
+                    else "artifact: -\nverdict: PASS\nblocker: none")
+            return text,{}
+        command = self.command_with_join(self._timeout_once_then_ready_join())[2:]
+        with mock.patch.object(RESOURCE,"context",return_value=ctx), \
+             mock.patch.object(RESOURCE.RESUME,"supervisor_alive",return_value=True), \
+             mock.patch.object(module,"run_turn",side_effect=turn), \
+             mock.patch.object(module,"reconcile",return_value=True), \
+             mock.patch.object(sys,"stdin",io.StringIO("initial assignment")), \
+             mock.patch.object(module,"emit",side_effect=events.append), mock.patch.object(module,"AppServer") as app:
+            app.return_value.request.return_value={"thread":{"id":"same-native"}}
+            self.assertEqual(module.main(command+route_args),0)
+        self.assertEqual(turns[:2],["model","resource"])
+        self.assertEqual(children_at_resource_turn,[set()])
+        self.assertEqual(int((self.base / "join_calls.count").read_text()),2)
+        self.assertFalse([e for e in events[:events_before_resource_turn[0]]
+                          if "stage-advance" in str(e.get("type"))])
+        self.assertEqual(sum(1 for e in events if e.get("type") == "dispatch.supervisor.parked"),2)
+        self.assertEqual(sum(k == "resource" for k in turns),1)
+
     def test_progress_carrying_resource_settlements_do_not_spend_the_continuation_budget(self):
         # Phase F d6 (F-1), symmetric to claude_session_supervisor.test.py's
         # identically-named fixture: a series of settled supervised resources

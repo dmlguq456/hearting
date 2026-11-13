@@ -131,6 +131,28 @@ class SessionNoticeTest(unittest.TestCase):
         self.assertEqual(len(duties), 1)
 
 
+    def test_only_an_attention_or_a_failed_or_unknown_final_wakes_a_resting_recipient(self):
+        def record(key, subject="experiment attention (1/1)"):
+            return {"receipt": {"schema_version": 1, "kind": "notice", "subject": subject,
+                                "text": "run=r; loss NaN", "required_action": "read-notice", "key": key}}
+        attention = record("experiment:run-1:attention:ab:0123:1:claude:sid-1")
+        checkpoint = record("experiment:run-1:checkpoint:ab:1:claude:sid-1", "experiment checkpoint (1/1)")
+        final = record("experiment:run-1:final:ab:1:claude:sid-1", "experiment final (1/1)")
+        self.assertTrue(N.wakes_resting_recipient(attention))
+        self.assertTrue(N.wakes_resting_recipient(record("experiment:run-1:attention-checkpoint:ab:7:0123:1:claude:sid-1")))
+        self.assertFalse(N.wakes_resting_recipient(checkpoint))
+        for status, wakes in (("succeeded", False), ("failed", True), ("cancelled", True), (None, True)):
+            with self.subTest(final=status), mock.patch.object(
+                    N, "_run_state", return_value=None if status is None else {"status": status}):
+                self.assertIs(N.wakes_resting_recipient(final), wakes)
+        self.assertFalse(N.wakes_resting_recipient(record("steward-check:x")))
+        self.assertFalse(N.wakes_resting_recipient({"receipt": {"kind": "notice"}}))
+        self.assertFalse(N.wakes_resting_recipient({}))
+        # The existing classification does not move.
+        self.assertEqual(N.classify(attention["receipt"]), N.PROGRESS)
+        self.assertEqual(N.classify(checkpoint["receipt"]), N.PROGRESS)
+        self.assertEqual(N.classify(final["receipt"]), N.TERMINAL)
+
 class MessageNoticeBoundaryTests(unittest.TestCase):
     def test_context_sweep_cannot_claim_or_ack_the_peer_couriers_message_answer(self):
         from fixtures.message_questions import MessageQuestionFixture

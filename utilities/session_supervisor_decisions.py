@@ -15,12 +15,15 @@ Each supervisor passes its own `emit` so a caller that replaces the module's
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 import time
 from typing import Any, Callable
 
 import dispatch_budget_record as budget_record
+import dispatch_completion_join as completion_join
+import dispatch_resource_wait as resource_wait
 import dispatch_stage_advance as stage_advance
 import owner_route_binding
 from dispatch_continuation_budget import AdmitVerdict, ContinuationLedger
@@ -28,6 +31,8 @@ from dispatch_continuation_budget import AdmitVerdict, ContinuationLedger
 # one decision; it lives beside the observer both of them sample.
 from foreground_activity import OWNER_TURN_IDLE_SECONDS  # noqa: F401
 from foreground_activity import ActivityWindow as OwnerTurnActivity  # noqa: F401
+
+from dispatch_supervision import StopWaiting
 
 # Registered supervisors share the bounded, no-progress transient retry chain
 # used by the interactive Codex capacity continuation.
@@ -376,3 +381,65 @@ def attempt_stage_advance(
             except (OSError, ValueError):
                 advanced_record = None
     return advanced_record
+
+
+# A supervisor parked on model children looks at the resources its owner holds this
+# often. It is the existing join split into shorter timeouts, not a timer or a poller.
+RESOURCE_ATTENTION_CHECK_SECONDS = 30.0
+
+
+class ResourceAttentionReady(StopWaiting):
+    """A held resource has a receipt for this owner while its model children are still parked."""
+
+    def __init__(self, prompt: str):
+        super().__init__("resource-attention-ready")
+        self.prompt = prompt
+
+
+def join_with_resource_attention(
+    args, state_path, control, delivered: set[str],
+    join: Callable[[Any, set[str]], dict], *,
+    check_seconds: float = RESOURCE_ATTENTION_CHECK_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[set[str]], dict]:
+    """Wrap `join(args, attempts)` so a resource's attention is not held behind model children.
+
+    An owner that holds no resource gets the same one join call as before. One that does
+    gets the same total wait (`args.join_timeout`) in `check_seconds` pieces, and between
+    pieces one look at its resources (`dispatch_resource_wait.observe_once`). A receipt
+    raises `ResourceAttentionReady`; the model children are not delivered, so the next
+    loop parks them again. A pending user correction is the next thing a later change
+    returns from these same checkpoints; this one does not.
+    """
+    def has_resources() -> bool:
+        try:
+            return resource_wait.context(args, control) is not None
+        except Exception:  # the old behavior: no look at all, never a new failure here
+            return False
+
+    def run(attempts: set[str]) -> dict:
+        total = float(args.join_timeout)
+        if not (total > 0) or not has_resources():
+            return join(args, attempts)
+        deadline = clock() + total
+        while True:
+            step = max(min(check_seconds, deadline - clock()), 1.0)
+            piece = copy.copy(args)
+            piece.join_timeout = step
+            receipt = join(piece, attempts)
+            if receipt.get("state") != "timeout":
+                return receipt
+            state = completion_join.read_supervisor_phase_state(state_path, args.parent_attempt_id)
+            resource = dict(state.resource) if state and state.resource else {
+                "session_id": control.thread_id, "delivered": [], "outbox": None}
+            if resource["session_id"] == control.thread_id and not resource["outbox"]:
+                try:
+                    prompt = resource_wait.observe_once(args, state_path, control, delivered, resource)
+                except (completion_join.JoinContractError, OSError, ValueError):
+                    prompt = None  # looked at again at the next checkpoint
+                after = completion_join.read_supervisor_phase_state(state_path, args.parent_attempt_id)
+                if isinstance(prompt, str) and after is not None and (after.resource or {}).get("outbox"):
+                    raise ResourceAttentionReady(prompt)
+            if clock() >= deadline:
+                return receipt
+    return run

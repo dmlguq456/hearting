@@ -2044,6 +2044,115 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             with self.assertRaisesRegex(JOIN.JoinContractError,"resource-owner-binding-invalid"):
                 RESOURCE.context(args,control)
 
+    def _observer_fixture(self, observer_extra=None):
+        """A running supervised-owner primary plus an auxiliary observer of it, one registry."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        registry = self.root / "resources.json"
+        owner = {"parent_attempt_id": "att-parent"}
+        primary = {"run_id": "primary", "pid": 123, "starttime": "100", "command": ["train"],
+                   "route": "/exact", "node": "full-run", "jobs": str(self.jobs),
+                   "owner_wait": owner, "resource_policy": "supervised-owner", "status": "running"}
+        observer = {"run_id": "watch", "pid": 124, "starttime": "101", "command": ["watch"],
+                    "route": "/exact", "node": "full-run", "jobs": str(self.jobs),
+                    "owner_wait": owner, "resource_policy": "observer", "observer_of": "primary",
+                    "status": "running", **(observer_extra or {})}
+        registry.write_text(json.dumps({"runs": {"primary": primary, "watch": observer}}))
+        armed = {"node": "full-run", "predecessor_id": "primary", "resource_registry": str(registry)}
+        state = {"watch": {"terminal": False, "reason": "resource-still-running", "liveness": "working"},
+                 "primary": {"terminal": False, "reason": "resource-still-running", "liveness": "working"}}
+        def evidence(item):
+            value = dict(state[item["predecessor_id"]])
+            if value.get("terminal"):
+                row = json.loads(registry.read_text())["runs"][item["predecessor_id"]]
+                value["resource_sha256"] = RESOURCE.RESUME.row_digest(row)
+            return value
+        polls = []
+        sup = SimpleNamespace(poll_once=lambda *_: polls.append(1), resource_evidence=evidence,
+            read_resource_watches=lambda *_: [armed], artifact_evidence=lambda _: {"missing": []},
+            resource_predecessors=lambda *_: [(armed, primary)], reattach_resource_watch=lambda *_: None,
+            runner=lambda: SimpleNamespace(read_sentinel=lambda _: None))
+        ledger = SimpleNamespace(state=lambda: {"nodes": {"full-run": {"state": "RUNNING"}}})
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        path = self.root / "state.json"
+        JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+        return SimpleNamespace(RESOURCE=RESOURCE, registry=registry, armed=armed, primary=primary,
+                               observer=observer, state=state, sup=sup, ledger=ledger, args=args,
+                               control=control, path=path, polls=polls,
+                               ctx=(sup, {}, ledger, [(armed, primary)]))
+
+    def test_observer_failure_reaches_the_waiting_owner_once_and_leaves_the_primary_alone(self):
+        f = self._observer_fixture()
+        RESOURCE = f.RESOURCE
+        class Paused(Exception):
+            pass
+        def pause(_):
+            raise Paused()
+        primary_before = json.dumps(f.primary, sort_keys=True)
+        with mock.patch.object(RESOURCE, "context", return_value=f.ctx), \
+             mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True):
+            # A clean or unknown observer ends nobody's wait: the owner keeps waiting.
+            for observation in ({"terminal": True, "succeeded": True, "exit_code": 0, "quiescent": None},
+                                {"terminal": False, "reason": "resource-observation-unsettled", "liveness": "unknown"}):
+                f.state["watch"] = observation
+                with self.assertRaises(Paused):
+                    RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None, sleep=pause)
+                self.assertIsNone(JOIN.read_supervisor_phase_state(f.path, "att-parent").resource["outbox"])
+            f.state["watch"] = {"terminal": True, "succeeded": False, "exit_code": 6, "quiescent": None}
+            prompt = RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None,
+                                   sleep=lambda _: self.fail("an observer failure returns at once"))
+            state = JOIN.read_supervisor_phase_state(f.path, "att-parent")
+            receipt = state.resource["outbox"]["receipt"]
+            self.assertEqual((receipt["state"], receipt["reason"], receipt["exit_code"], receipt["run_id"]),
+                             ("needs-attention", "observer-failed", 6, "watch"))
+            self.assertEqual(receipt["successors"], [])
+            self.assertFalse(receipt["verification_pass"] or receipt["workflow_complete"])
+            self.assertTrue(JOIN.valid_resource_state(state.resource))
+            self.assertIn("observer-failed", prompt)
+            self.assertIn("adds no retry authorization", prompt)
+            self.assertEqual(state.delivered_attempt_ids, frozenset())
+            # The same pending receipt is returned again, never a second one.
+            self.assertEqual(RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None), prompt)
+            self.assertTrue(RESOURCE.acknowledge(f.path, "att-parent", state.resource["outbox"]["receipt_id"]))
+            # Acknowledged once: the same failed observer does not wake the owner again.
+            with self.assertRaises(Paused):
+                RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None, sleep=pause)
+            self.assertIsNone(JOIN.read_supervisor_phase_state(f.path, "att-parent").resource["outbox"])
+        self.assertEqual(json.dumps(f.primary, sort_keys=True), primary_before)
+        self.assertEqual(json.loads(f.registry.read_text())["runs"]["primary"]["status"], "running")
+
+    def test_observer_failure_survives_the_primary_ending_before_acknowledgement(self):
+        f = self._observer_fixture()
+        RESOURCE = f.RESOURCE
+        f.state["watch"] = {"terminal": True, "succeeded": False, "exit_code": 6, "quiescent": None}
+        found_primary = {**f.primary}
+        with mock.patch.object(RESOURCE, "context", return_value=f.ctx), \
+             mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True):
+            prompt = RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None)
+            # The primary's watch is gone: the receipt is still described from the observer row.
+            f.ctx = (f.sup, {}, f.ledger, [])
+            with mock.patch.object(RESOURCE, "current_responsibility", return_value={"ok": True}), \
+                 mock.patch.object(RESOURCE, "resource_holder", return_value={
+                     "origin": {"route_id": None, "route_hash": None, "route_file": None}}):
+                f.sup.resource_predecessors = lambda *_: [({**f.armed, "route_id": None, "route_hash": None,
+                    "route_file": None, "jobs": str(Path(f.args.jobs).resolve()),
+                    "successor_external": True, "successor_command": None}, found_primary)]
+                f.ctx = (f.sup, {}, f.ledger, [(f.armed, found_primary)])
+                with mock.patch.object(RESOURCE, "context", return_value=f.ctx):
+                    self.assertEqual(RESOURCE.pending_prompt(f.path, "att-parent", f.args, f.control), prompt)
+
+    def test_observer_of_another_route_or_owner_is_not_this_owners_to_hear(self):
+        for field, value in (("route", "/other"), ("node", "other-run"),
+                             ("observer_of", "someone-else"), ("owner_wait", {"parent_attempt_id": "att-other"}),
+                             ("pid", None), ("execution", {"kind": "compute-hosts"})):
+            with self.subTest(field=field):
+                f = self._observer_fixture({field: value})
+                self.assertEqual(f.RESOURCE.observer_rows([(f.armed, f.primary)]), [])
+        f = self._observer_fixture()
+        self.assertEqual([row["run_id"] for _, row in f.RESOURCE.observer_rows([(f.armed, f.primary)])], ["watch"])
+
     def test_resource_state_reader_rejects_malformed_foreign_and_false_pass(self):
         import copy
         import dispatch_resource_wait as RESOURCE

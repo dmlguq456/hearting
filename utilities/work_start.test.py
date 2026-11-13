@@ -531,6 +531,28 @@ class WorkStartTest(unittest.TestCase):
                          ("needs-attention", "parent-wait-deadline"))
         self.assertEqual(len(self.calls), 2)
 
+    def test_ended_frames_whose_settlement_is_open_name_the_bounded_wait_not_end_turn(self):
+        first = self.start()
+        original = self.jobs.read_bytes()
+        for reason in ("completion-deferred", "terminal-commit-pending"):
+            children = [{"attempt_id": aid, "status": "done", "readiness": "pending", "reason": reason}
+                        for aid in first["frame_attempts"]]
+            W.join_selected_attempts.side_effect = None
+            W.join_selected_attempts.return_value = {"state": "timeout", "children": children}
+            result = self.start()
+            self.assertEqual((result["state"], result["reason"], result["required_action"]),
+                             ("preparing", "frame-result-settling", "wait-for-frame-results"), result)
+            self.assertEqual(result["parent_next"], "bounded-wait")
+            self.assertTrue(result["parent_next_command"].endswith(" --wait"))
+            self.assertEqual(result["observation"]["children"], children)
+        self.assertEqual(self.jobs.read_bytes(), original)
+        self.assertEqual(len(self.calls), 2)
+        # A leg still running keeps the old answer: the runtime's wake brings its result.
+        children[0].update(status="open", reason="process-alive")
+        live = self.start()
+        self.assertEqual((live["state"], live["parent_next"]), ("preparing", "end-turn"))
+        self.assertNotIn("reason", live)
+
     def test_typed_budget_refusal_is_waiting_capacity_not_failure(self):
         run = self.make_run(refuse_node="frame-alternative", refuse_times=99,
                              receipt=self.refusal_receipt(retry_after_seconds=1))

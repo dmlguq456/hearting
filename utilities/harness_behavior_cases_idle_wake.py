@@ -10,6 +10,14 @@ its next action with no typed prompt, and how long that took. The plain
     The registered child is a frame leg (``worker_type=frame``), the kind a
     route's direction step waits for.
 
+``idle-wake-frame-pair``
+    A route's two frame legs end seconds apart (the shape of a framed route's direction
+    step); the resting parent must be woken for the pair.
+
+``idle-wake-child-attention``
+    The registered child stays open and the run it watches needs attention: the notice
+    stored for the resting parent (not a completion) must wake it.
+
 ``idle-wake-reinstall``
     Hearting is installed again from the same source while the session rests,
     before the child finishes (an update that leaves the running session alone).
@@ -79,6 +87,10 @@ class _IdleWake(CompletionReceiptScenario):
     """Register, end the turn, optionally disturb the resting session, then complete."""
 
     WAIT = 180  # long enough for the shared obligation runner's fallback to show up
+    FIRE = "complete"        # what the helper does while the parent rests
+    MARKER = None            # what a wake carries; the child's attempt id when None
+    SECONDS_KEY = "seconds_after_completion"
+    NEEDS_NEXT_ACTION = True
 
     def disturb(self, run):
         """What happens to the resting session between register and complete."""
@@ -121,9 +133,10 @@ class _IdleWake(CompletionReceiptScenario):
         run.evidence["probe_before_completion"] = _helper(run, "probe")
         before = len(run.main_requests())
         run.evidence["requests_before_completion"] = before
+        marker = self.MARKER or self.attempt
         completed_at = time.time()
-        run.evidence["complete"] = _helper(run, "complete")
-        woke = wait_for(lambda: _carrying(run.main_requests(), self.attempt, before), self.WAIT, 1)
+        run.evidence[self.FIRE.split()[0]] = _helper(run, *self.FIRE.split())
+        woke = wait_for(lambda: _carrying(run.main_requests(), marker, before), self.WAIT, 1)
         run.wait_idle(8, 60)
         requests = run.main_requests()
         run.evidence["probe_after_wait"] = _helper(run, "probe")
@@ -131,17 +144,23 @@ class _IdleWake(CompletionReceiptScenario):
             first = woke[0]
             run.evidence["wake_request"] = _summary(first)
             run.evidence["wake_source"] = _wake_source(first["last_text"])
-            run.evidence["seconds_after_completion"] = round(first["at"] - completed_at, 1)
-            ran = any(f"{self.NEXT}-42" in r["text"] for r in requests[first["main_index"]:])
+            run.evidence[self.SECONDS_KEY] = round(first["at"] - completed_at, 1)
+            run.evidence["turns_after_wake"] = len(requests) - first["main_index"]
+            run.evidence["marker_hits_max"] = max(
+                (r["text"].count(marker) if isinstance(marker, str) else len(marker.findall(r["text"]))
+                 for r in requests), default=0)
+            ran = (not self.NEEDS_NEXT_ACTION
+                   or any(f"{self.NEXT}-42" in r["text"] for r in requests[first["main_index"]:]))
             run.evidence["next_action_ran"] = ran
-            run.note(f"woken {run.evidence['seconds_after_completion']}s after completion "
+            run.note(f"woken {run.evidence[self.SECONDS_KEY]}s after {self.FIRE} "
                      f"by {run.evidence['wake_source']}"
-                     + ("; next action ran" if ran else "; next action did not run"))
+                     + ("" if not self.NEEDS_NEXT_ACTION else
+                        "; next action ran" if ran else "; next action did not run"))
             return "pass" if ran else "fail"
         count = len(requests)
         run.prompt(self.PROBE)
         run.wait_idle(8, 60)
-        later = _carrying(run.main_requests(), self.attempt, count)
+        later = _carrying(run.main_requests(), marker, count)
         run.evidence["fallback_next_prompt"] = bool(later)
         run.note(f"no wake within {self.WAIT}s"
                  + ("; receipt delivered at the next typed prompt" if later
@@ -155,6 +174,34 @@ class IdleWakeFrameScenario(_IdleWake):
 
     def register_args(self):
         return ("register", "frame")
+
+
+class IdleWakeFramePairScenario(_IdleWake):
+    name = "idle-wake-frame-pair"
+    summary = ("A route's two frame legs (frame, frame-alternative) finish seconds apart while the "
+               "parent rests; the parent is woken once for the pair (BC-FRAME-DONE-NO-WAKE-BCRESNET-1113).")
+    FIRE = "complete pair"
+
+    def register_args(self):
+        return ("register", "frame", "pair")
+
+
+class IdleWakeChildAttentionScenario(_IdleWake):
+    name = "idle-wake-child-attention"
+    summary = ("A registered child stays open while its run needs attention; the notice "
+               "stored for the resting parent wakes it (BC-AMI-CHILD-FAIL-NO-WAKE-1111).")
+    FIRE = "attention-notice"
+    MARKER = "HB-ATTENTION"
+    SECONDS_KEY = "seconds_after_notice"
+    NEEDS_NEXT_ACTION = False
+
+    def drive(self, run):
+        outcome = super().drive(run)
+        # The sibling is not taken down by the notice: its registry row is still open.
+        jobs = run.evidence.get("jobs")
+        rows = Path(jobs).read_text(encoding="utf-8").splitlines() if jobs and Path(jobs).exists() else []
+        run.evidence["child_still_open"] = any(self.attempt in row and "\topen\t" in row for row in rows)
+        return outcome
 
 
 class IdleWakeReinstallScenario(_IdleWake):
@@ -356,6 +403,6 @@ class IdleWakeBackgroundLaunchScenario(_IdleWake):
         return answer
 
 
-SCENARIOS = [IdleWakeFrameScenario, IdleWakeReinstallScenario, IdleWakeRestartScenario,
+SCENARIOS = [IdleWakeFrameScenario, IdleWakeFramePairScenario, IdleWakeChildAttentionScenario, IdleWakeReinstallScenario, IdleWakeRestartScenario,
              IdleWakeRestartContinueScenario, IdleWakeRestartPeerScenario,
              IdleWakeBackgroundLaunchScenario]

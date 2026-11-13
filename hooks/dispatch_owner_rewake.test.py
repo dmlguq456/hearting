@@ -4043,6 +4043,102 @@ class GateCarrierTest(unittest.TestCase):
         self.assertFalse(rewake.is_human_gate_record(record))
 
 
+def _resource_notice(state_root, jobs, *, session, key, lineage="attempt-parent", attempt="att-gate-owner",
+                     subject="experiment attention (1/1)"):
+    """The notice `resource_progress` stores for a supervising session (the runner wake is not started)."""
+    import session_notice
+    binding = {"kind": lineage, "harness": "claude", "session_id": session}
+    if lineage != "provenance":
+        binding["attempt_id"] = attempt
+    with mock.patch.object(session_notice, "_retain"):
+        return session_notice.notify("claude", session, key=key, subject=subject, text="loss is NaN",
+                                     jobs=jobs, lineage=binding)
+
+
+class ResourceNoticeWakeTest(unittest.TestCase):
+    """A resting Claude supervisor is woken, while its owner is waited on, by an experiment's
+    attention or failure (BC-AMI-CHILD-FAIL-NO-WAKE-1111, observation 2)."""
+
+    _launch = GateCarrierTest._launch
+
+    def setUp(self):
+        GateCarrierTest.setUp(self)
+        for table in (rewake._PROBE_DIRECTORY_MTIME, rewake._PROBE_NEXT_DEADLINE_NS, rewake._RECIPIENT_KEY_CACHE):
+            table.clear()
+
+    def notice(self, key="experiment:run-1:attention:id:0123:1:claude:session-gate", **kw):
+        return _resource_notice(self.state, self.jobs, session="session-gate", key=key, **kw)
+
+    def other_owner(self, attempt="att-gate-owner-b"):
+        row = self.jobs.read_text().strip().split("\t")
+        row[5] = row[5].replace("attempt_id=att-gate-owner", f"attempt_id={attempt}")
+        self.jobs.write_text(self.jobs.read_text() + "\t".join(row) + "\n")
+        return rewake.Launch(attempt_id=attempt, jobs=self.jobs, session_id="session-gate")
+
+    def test_the_hook_and_the_notice_use_the_same_recipient_directory(self):
+        record = self.notice()
+        launch = self._launch()
+        self.assertEqual(rewake._recipient_key(launch), "session-gate")
+        directory = rewake.pending_delivery.record_directory(launch.jobs.resolve(strict=False).parent,
+                                                              rewake._recipient_key(launch))
+        self.assertTrue((directory / (record["delivery_id"] + ".json")).is_file())
+
+    def test_an_attention_notice_for_this_owner_is_announced_once_and_touches_no_owner_row(self):
+        record = self.notice()
+        rows_before = self.jobs.read_bytes()
+        self.assertTrue(rewake._open_gate_pending(self._launch()))
+        claims = []
+        notices = rewake._gate_notices(self._launch(), attempt_only=True, supervision_claims=claims)
+        self.assertEqual(len(notices), 1)
+        self.assertIn("loss is NaN", notices[0])
+        self.assertEqual(rewake.pending_delivery.read(self.state, "session-gate", record["delivery_id"])["state"],
+                         "sent-ambiguous")
+        self.assertEqual([c[2] for c in claims], [record["delivery_id"]])
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+        self.assertEqual(self.jobs.read_bytes(), rows_before)
+        text = rewake.gate_wake_message(self._launch(), notices, human_gate=False, resource_notice=True)
+        self.assertIn("not the owner's completion", text)
+        self.assertIn("loss is NaN", text)
+
+    def test_only_what_needs_a_decision_wakes(self):
+        import session_notice
+        self.notice("experiment:run-2:checkpoint:id:1:claude:session-gate", subject="experiment checkpoint (1/1)")
+        self.notice("experiment:run-3:final:id:1:claude:session-gate", subject="experiment final (1/1)")
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "succeeded"}):
+            self.assertFalse(rewake._open_gate_pending(self._launch()))
+            self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "failed"}):
+            self.assertTrue(rewake._open_gate_pending(self._launch()))
+
+    def test_a_notice_whose_lineage_does_not_check_out_is_not_this_hooks_to_wake(self):
+        record = self.notice()
+        path = rewake.pending_delivery.record_path(self.state, "session-gate", record["delivery_id"])
+        value = json.loads(path.read_text())
+        value["lineage"] = []
+        path.write_text(json.dumps(value))
+        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+
+    def test_parallel_owners_wake_for_their_own_notice_and_a_shared_one_exactly_once(self):
+        other = self.other_owner()
+        self.notice()  # attempt-parent of att-gate-owner
+        self.assertFalse(rewake._open_gate_pending(other))
+        self.assertEqual(rewake._gate_notices(other, attempt_only=True), [])
+        self.assertEqual(len(rewake._gate_notices(self._launch(), attempt_only=True)), 1)
+        self.notice("experiment:run-9:attention:id:abcd:1:claude:session-gate", lineage="provenance")
+        woken = [len(rewake._gate_notices(launch, attempt_only=True)) for launch in (other, self._launch())]
+        self.assertEqual(sorted(woken), [0, 1])
+
+    def test_a_notice_another_carrier_holds_live_is_left_alone(self):
+        record = self.notice()
+        rewake.pending_delivery.claim(self.state, "session-gate", record["delivery_id"],
+                                      claim_owner="courier", lease_seconds=600)
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+
+
 class SupervisionWakeRearmTest(unittest.TestCase):
     """An attention wake must hand its notice to the immediate prompt sweep,
     so that turn can arm a second carrier for the same owner's success."""
@@ -4313,6 +4409,48 @@ class SupervisionWakeRearmTest(unittest.TestCase):
             self.assertEqual(by_event[event], by_event["PostToolUse"])
             self.assertTrue(by_event[event][0]["asyncRewake"])
 
+
+
+class ResourceNoticeRearmTest(unittest.TestCase):
+    """The wake a resource notice causes hands the notice to the prompt sweep, so that turn
+    re-arms the same owner and its own completion still wakes the session (observation 2, R5)."""
+
+    ANCESTRY = CarrierOneClaimGateTest.ANCESTRY
+    payload = CarrierOneClaimGateTest.payload
+    _run = SupervisionWakeRearmTest._run
+    _parent_call = SupervisionWakeRearmTest._parent_call
+    _dead_holder = SupervisionWakeRearmTest._dead_holder
+    _complete_owner = SupervisionWakeRearmTest._complete_owner
+
+    def setUp(self):
+        CarrierOneClaimGateTest.setUp(self)
+        CarrierOneClaimGateTest._open_row(self)
+        self.jobs.write_text(self.jobs.read_text().replace("parent_attempt_id=att-owner-parent,", ""), encoding="utf-8")
+        for table in (rewake._RECIPIENT_KEY_CACHE, rewake._PROBE_DIRECTORY_MTIME, rewake._PROBE_NEXT_DEADLINE_NS):
+            table.clear()
+        self.notice = _resource_notice(self.root, self.jobs, session="session-1", attempt="att-owner-1",
+                                       key="experiment:run-1:attention:id:0123:1:claude:session-1")
+
+    def test_a_notice_wake_then_the_owners_own_completion_wake(self):
+        from dispatch_session_sweep import sweep_deliver, ack_delivered
+        code, text = self._run("gate")
+        self.assertEqual(code, 2)
+        self.assertIn("not the owner's completion", text)
+        self.assertIn("loss is NaN", text)
+        self._dead_holder()  # the first async hook process exited with its wake
+        records, _ = sweep_deliver(self.root, "claude-parent-runtime", "session-1")
+        self.assertEqual([r["delivery_id"] for r in records], [self.notice["delivery_id"]])
+        self.assertEqual(ack_delivered(self.root, "session-1", records, acked_by="parent-prompt"), 1)
+        # The ordinary Bash call in that awakened turn arms the same owner again.
+        launch, claim = rewake.registry_launch(self._parent_call())
+        self.assertEqual((launch.attempt_id, claim.arms), ("att-owner-1", 2))
+        self.assertFalse(rewake._open_gate_pending(launch))
+        self._dead_holder()
+        completion = self._complete_owner()
+        code, text = self._run("ready", self._parent_call())
+        self.assertEqual(code, 2)
+        self.assertIn("state=success", text)
+        self.assertEqual(json.loads(completion.read_text())["state"], "sent-ambiguous")
 
 class GateCloseRearmTest(GateCarrierTest):
     """SD-129 without command parsing: the wake spent on a gate is re-armed by
