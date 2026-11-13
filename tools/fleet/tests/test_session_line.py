@@ -307,6 +307,69 @@ class CommonSessionLineTest(unittest.TestCase):
         leg = [job(attempt_id="f", depth=1, worker_type="frame", route_node="frame", liveness="working", harness="claude")]
         self.assertEqual(session_line.route_doer({"worker_stage": "frame"}, leg, get, live)["role"], "frame")
 
+    def test_the_git_ahead_and_behind_words_take_fleets_green_and_red(self):
+        # Spec E9 rule 50: `↑N` (ahead) in Fleet's `lvl_g`, `↓N` (behind) in its `lvl_r`; the
+        # branch, `✓`, a warning, `💀merged` and the worktree count stay dim, on the side panel's
+        # GIT row, the bottom layout's head and Claude's statusline alike. Only the color changes:
+        # the words, their order and their cells stay.
+        import re
+        from tools.fleet import session_panel, session_line
+        from tools.fleet.session_line import status_lines
+        values = {**self.sample(), "branch": "main", "git": {"repo": 1, "operation": "none", "extra_worktrees": 12}}
+        for git, side, head in (
+                ({"ahead": 2, "behind": 0}, [("main", "dim"), (" ↑2", "lvl_g")],
+                 [("(main", "dim"), (" ↑2", "lvl_g"), (" 🚧 12)", "dim")]),
+                ({"ahead": 0, "behind": 5}, [("main", "dim"), (" ↓5", "lvl_r")],
+                 [("(main", "dim"), (" ↓5", "lvl_r"), (" 🚧 12)", "dim")]),
+                ({"ahead": 2, "behind": 5}, [("main", "dim"), (" ↑2", "lvl_g"), (" ↓5", "lvl_r")],
+                 [("(main", "dim"), (" ↑2", "lvl_g"), (" ↓5", "lvl_r"), (" 🚧 12)", "dim")]),
+                ({"ahead": 0, "behind": 0}, [("main", "dim"), (" ✓", "dim")], [("(main ✓ 🚧 12)", "dim")]),
+                ({"ahead": None, "behind": None}, [("main", "dim")], [("(main 🚧 12)", "dim")]),
+                ({"ahead": 1, "behind": 3, "operation": "merge"},
+                 [("main", "dim"), (" ↑1", "lvl_g"), (" ↓3", "lvl_r"), (" ⚠️merge", "dim")],
+                 [("(main ⚠️merge", "dim"), (" ↑1", "lvl_g"), (" ↓3", "lvl_r"), (" 🚧 12)", "dim")]),
+                ({"ahead": 0, "behind": 4, "merged": 1}, [("main", "dim"), (" ↓4", "lvl_r"), (" 💀merged", "dim")],
+                 [("(main 💀merged", "dim"), (" ↓4", "lvl_r"), (" 🚧 12)", "dim")]),
+                ({"ahead": 2, "behind": 0, "extra_worktrees": 0}, [("main", "dim"), (" ↑2", "lvl_g")],
+                 [("(main", "dim"), (" ↑2", "lvl_g"), (")", "dim")])):
+            other = {**values, "git": {**values["git"], **git}}
+            seen = repr(git)
+            self.assertEqual(session_panel.session_git_side(other), side, seen)
+            # The bottom layout's head (the row under the repository) and the repository row apart.
+            self.assertEqual(session_panel.session_git(other), head, seen)
+            self.assertEqual(session_panel.session_head(other), [("[52] ", "tag"), ("hearting/", "loc_repo")], seen)
+            # The common line (the folded row, the session rows, Claude's statusline): the same parts in its parentheses.
+            line = line_segments(other, 240)
+            at = next(i for i, part in enumerate(line) if part[0].startswith(" ("))
+            self.assertEqual([(" " + head[0][0], head[0][1]), *head[1:]], line[at:at + len(head)], seen)
+            for rows in (status_lines(other, 100, reported_only=True), status_lines(other, 30, wrap_long=True)):
+                arrows = [(text.strip(), key) for row in rows for text, key in row if re.search("[↑↓]", text)]
+                self.assertEqual(arrows, [(text.strip(), key) for text, key in side if key != "dim"], seen)
+        # The words are the earlier ones (rule 40 (c)'s text): only the keys differ.
+        both = {**values, "git": {**values["git"], "ahead": 2, "behind": 5}}
+        self.assertEqual("".join(t for t, _k in line_segments(both, 240)).count("(main ↑2 ↓5 🚧 12)"), 1)
+        # Claude's statusline: 256 colors paint Fleet's green and red (the red bold, as Fleet's
+        # `lvl_r`); NO_COLOR and eight colors keep the words and no color, the arrows dim as the rest.
+        rows = status_lines(both, 100, reported_only=True)
+        green, red = style_components("lvl_g")["foreground"], style_components("lvl_r")["foreground"]
+        painted = session_line.statusline_ansi(rows, colors=256)
+        self.assertIn("\x1b[0;38;5;%dm ↑2" % green, painted)
+        self.assertIn("\x1b[0;1;38;5;%dm ↓5" % red, painted)
+        uncolored = session_line.statusline_ansi(rows, colors=256, no_color=True)
+        self.assertNotRegex(uncolored, r"\x1b\[0;[^m]*(38;5|3[0-7])")
+        self.assertIn("\x1b[0m ↑2", uncolored); self.assertIn("\x1b[0m ↓5", uncolored)
+        eight = session_line.statusline_ansi(rows, colors=8)
+        self.assertIn("\x1b[0;2m ↑2", eight); self.assertIn("\x1b[0;2m ↓5", eight)
+        for plain in (uncolored, eight):
+            self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", plain), re.sub(r"\x1b\[[0-9;]*m", "", painted))
+
+    def test_fleets_own_git_suffix_keeps_its_bytes(self):
+        # Spec E9 rule 50 (c): Fleet already paints `↑N` in `lvl_g` and `↓N` in `lvl_r`; its row stays as it was.
+        from tools.fleet import render
+        self.assertEqual(render._branch_suffix_segs(None, "main", ahead=2, behind=5),
+                         [(" (", "dim"), ("main", "dim"), (" ↑2", "lvl_g"), (" ↓5", "lvl_r"), (")", "dim")])
+        self.assertEqual(render._branch_suffix_segs(None, "main", ahead=0, behind=0), [(" (", "dim"), ("main", "dim"), (")", "dim")])
+
     def test_side_panel_values_for_worktrees_memory_kind_role_and_gauge(self):
         # Spec E9 rules 36-38: the values the side panel paints; the statusline keeps its words.
         import datetime
@@ -318,11 +381,12 @@ class CommonSessionLineTest(unittest.TestCase):
         line = "".join(part for part, _key in line_segments(values, 240))
         self.assertIn("hearting/ (main ↑2 🚧 12)", line)
         presented = session_panel.presentation(values, {}, "claude", "s", 40)
-        self.assertEqual(presented["git"], [("(main ↑2 🚧 12)", "dim")])
-        # 41 (a), (b): beside the native area the REPO name without `/`, `wt 12` and the GIT value, all dim.
+        # 50: `↑N` in Fleet's green (`lvl_g`), the rest dim.
+        self.assertEqual(presented["git"], [("(main", "dim"), (" ↑2", "lvl_g"), (" 🚧 12)", "dim")])
+        # 41 (a), (b): beside the native area the REPO name without `/`, `wt 12` and the GIT value (dim, 50: but `↑N`).
         side = lambda parts: ("".join(text for text, _key in parts), {key for _text, key in parts})
         self.assertEqual((presented["repo_side"], presented["worktrees"], side(presented["git_side"])),
-                         ([("hearting", "loc_repo")], [("wt 12", "dim")], ("main ↑2", {"dim"})))
+                         ([("hearting", "loc_repo")], [("wt 12", "dim")], ("main ↑2", {"dim", "lvl_g"})))
         # 42 (b): beside the native area the `CTX` label stands for the word `context`; the
         # bottom layout's fragment keeps it, and an unknown reading has neither.
         self.assertEqual(presented["context"][0], ("context ", "dim"))
@@ -333,7 +397,7 @@ class CommonSessionLineTest(unittest.TestCase):
         for count in (0, None):
             other = {**values, "git": {**values["git"], "extra_worktrees": count}}
             self.assertEqual(session_panel.session_worktrees(other), [])
-            self.assertEqual(side(session_panel.session_git_side(other)), ("main ↑2", {"dim"}))
+            self.assertEqual(side(session_panel.session_git_side(other)), ("main ↑2", {"dim", "lvl_g"}))
         # Nothing but the count in the parentheses: no Git row beside the native area.
         bare = {**values, "branch": "", "git": {"repo": 1, "operation": "none", "extra_worktrees": 3}}
         self.assertEqual((session_panel.session_git(bare), session_panel.session_git_side(bare)), ([("(🚧 3)", "dim")], []))
@@ -344,15 +408,16 @@ class CommonSessionLineTest(unittest.TestCase):
                                   ({"ahead": None, "behind": None}, "main", "(main 🚧 12)"),
                                   ({"ahead": 0, "behind": None}, "main", "(main 🚧 12)")):
             other = {**values, "git": {**values["git"], **git}}
-            self.assertEqual(side(session_panel.session_git_side(other)), (want, {"dim"}))
-            self.assertEqual(session_panel.session_git(other), [(shared, "dim")])
+            keys = {"dim"} | ({"lvl_g"} if "↑" in want else set()) | ({"lvl_r"} if "↓" in want else set())
+            self.assertEqual(side(session_panel.session_git_side(other)), (want, keys))
+            self.assertEqual(side(session_panel.session_git(other)), (shared, keys))
         # 40 (b): the branch keeps 20 cells, 32 with 60 cells inside; the status comes before a
         # warning beside the native area, the shared parentheses keep their order.
         long = {**values, "branch": "fix/fleet-opencode-dup-sid-and-more-words",
                 "git": {"repo": 1, "operation": "rebase", "ahead": 0, "behind": 3, "extra_worktrees": 2}}
         self.assertEqual(session_panel.session_git_side(long, 40),
-                         [("fix/fleet-opencode-…", "dim"), (" ↓3", "dim"), (" ⚠️rebase", "dim")])
-        self.assertEqual(side(session_panel.session_git_side(long, 80)), ("fix/fleet-opencode-dup-sid-and-… ↓3 ⚠️rebase", {"dim"}))
+                         [("fix/fleet-opencode-…", "dim"), (" ↓3", "lvl_r"), (" ⚠️rebase", "dim")])
+        self.assertEqual(side(session_panel.session_git_side(long, 80)), ("fix/fleet-opencode-dup-sid-and-… ↓3 ⚠️rebase", {"dim", "lvl_r"}))
         self.assertIn("(fix/fleet-opencode-… ⚠️rebase ↓3 🚧 2)", "".join(p for p, _k in line_segments(long, 10000, complete=True, branch_room=50)))
         self.assertIn("(fix/fleet-opencode-dup-sid-and-… ⚠️rebase ↓3 🚧 2)", "".join(p for p, _k in line_segments(long, 240)))
         # The statusline's wrapped lines take the room they are shown at.

@@ -242,7 +242,7 @@ class Window:
             entry = str(bootstrap)
         self.master, slave = pty.openpty()
         self.attrs = termios.tcgetattr(slave)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 130, 0, 0))
         self.entry = subprocess.Popen(
             [sys.executable, entry, harness, sys.executable, str(native), sid],
             env=env, cwd=case.project, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
@@ -323,7 +323,7 @@ class Window:
         data = bytes(self.raw[:upto]) if upto is not None else bytes(self.raw)
         file = self.root/'outer.raw'; file.write_bytes(data)
         env = dict(self.case.env, SUCC_XTERM=str(Path(self.case.env['NODE_PATH'])/'@xterm/headless'))
-        out = subprocess.run([self.case.node, str(self.root/'vt.cjs'), str(file), '100', '30'], env=env,
+        out = subprocess.run([self.case.node, str(self.root/'vt.cjs'), str(file), '130', '30'], env=env,
                              capture_output=True, text=True, timeout=30, check=True)
         return json.loads(out.stdout)
 

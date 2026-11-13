@@ -196,7 +196,7 @@ const draw=(messages,width,height,extra={})=>{const r=view.render({width,height,
 // Spec rule 31: a message takes a head row and a body row, both open the same message.
 const keyOf=(messages,i)=>[...new Set(draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action))][i];
 const read=(messages,key,width,height)=>{const first=draw(messages,width,height,{routeDetail:key}),out=[];
- for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/(?:messages|MESSAGES) · |‹ \d+\/\d+ ›/.test(s)));return out;};
+ for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/(?:messages|MESSAGES) · |‹ \d+\/\d+ ›|[»▾]   ⚙/.test(s)));return out;};
 // A row's text without its frame and indent: a body read across rows, end to end.
 const flat=rows=>rows.map(s=>s.slice(1,-1)).join('').replace(/\s/g,'');
 const bodies=[['url','https://example.invalid/'+'a'.repeat(290)+'END_1517','END_1517'],['cjk','한글'.repeat(150)+'끝1517','끝1517'],
@@ -451,11 +451,13 @@ const paint=(o={})=>view.render({width:40,height:o.height||30,side:true,sid:'s',
  settings:o.settings,questions:q=>(o.q||[]).slice(0,q.budget)});
 const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
 // Spec rule 29 (a): Fleet's session-row head on the left of the top border (glyph,
-// number, harness), the gear alone on the right; no state word; HEARTING only in settings.
+// number, harness); no state word; HEARTING only in settings. Spec rule 49 (a): no gear on the
+// border; it stands at the right end of the last row inside, the fold button `»` before it.
 for(const [state,want] of [['idle','┌ ● [e9] claude ─'],['working','┌ ⠙ [e9] claude ─'],['blocked','┌ ◑ [e9] claude ─'],['unknown','┌ [e9] claude ─'],[undefined,'┌ [e9] claude ─']]){
  const rows=text(paint({state,frame:1,model:{tag:'[e9]'}}));assert(rows[0].startsWith(want),state+' '+rows[0]);
  assert(!/running|idle|waiting/.test(rows[0]),rows[0]);
- assert(rows[0].endsWith(' ⚙ ┐')&&!rows.join('').includes('Settings')&&!rows.join('').includes('HEARTING'),rows[0]);
+ assert(rows[0].endsWith('─┐')&&!rows[0].includes('⚙')&&!rows.join('').includes('Settings')&&!rows.join('').includes('HEARTING'),rows[0]);
+ assert(rows.at(-2).endsWith('»   ⚙ │'),rows.at(-2));
 }
 // Spec rule 35 (a): a steward's `⚑` alone blinks in Fleet's steward pink, lit and dark on
 // the shared beat; its number keeps the lit steward color on both beats (Fleet's session row).
@@ -467,13 +469,14 @@ for(const [frame,key] of [[0,'tag_steward'],[10,'tag_steward_dim']]){
  assert(v.animated,'an idle steward still keeps the beat');
 }
 // Narrow: the steward mark goes first, then the harness, then the number; the glyph stays.
-for(const [width,want] of [[24,'┌ ● [e9] claude ⚑ ─'],[23,'┌ ● [e9] claude ─'],[21,'┌ ● [e9] ─'],[14,'┌ ● ─']]){
+for(const [width,want] of [[20,'┌ ● [e9] claude ⚑ ─'],[19,'┌ ● [e9] claude ─'],[17,'┌ ● [e9] ─']]){
  const row=text(view.render({width,height:12,side:true,sid:'s',harness:'claude',configuration:{},model:{tag:'[e9]',steward:true},state:'idle',questions:()=>[]}))[0];
  assert(row.startsWith(want),width+' '+row);
 }
 const settings=paint({settings:{index:0,value:view.defaults}});
 assert(!paint({state:'idle',model:{routes:[],route_count:0}}).animated,'an idle panel with nothing to blink keeps no beat');assert(text(settings)[0].startsWith('┌ HEARTING ─'),text(settings)[0]);
-const gear=paint({state:'idle'}).hits.find(h=>h.action==='settings');assert(gear.row===0&&gear.left<=35&&gear.right>=39,JSON.stringify(gear));
+const hits=paint({state:'idle'}).hits,gear=hits.find(h=>h.action==='settings'),fold=hits.find(h=>h.action==='fold');
+assert(gear.row===28&&gear.left<=37&&gear.right>=37&&fold.row===28&&fold.left<=33&&fold.right>=33&&fold.right<gear.left-1,JSON.stringify([gear,fold]));
 // The number takes the same color as its glyph (Fleet's state key); the harness its Fleet hue.
 const top=paint({state:'idle',model:{tag:'[e9]',styles:{...model.styles,hb_claude:{foreground:116}}}}).rows[0];
 assert.equal(top.find(x=>x.text==='●').foreground,150);
@@ -624,13 +627,13 @@ for(const rows of [time,byModel]){const i=at(rows,'셸 표기');
 const ctxRows=time.filter(s=>/│ │   (72%)? +(42m|1h 27m) │ │/.test(s));
 assert(ctxRows.length===2&&ctxRows.every(s=>s.indexOf(' │ │')===ctxRows[0].indexOf(' │ │')),ctxRows.join('\n'));
 // Short of rows the context row folds into the first row (percent and time at the right,
-// right-aligned in their columns), effort going first.
-const low=paint({},[],40,12),lowRow=low[at(low,'셸 표기')-1];
+// right-aligned in their columns), effort going first. (13 rows: spec rule 49 (b)'s last row stays.)
+const low=paint({},[],40,13),lowRow=low[at(low,'셸 표기')-1];
 assert(/⠋ codex gpt-6\.1-sol +72% +42m │/.test(lowRow)&&lowRow.indexOf('72%')+3===lowRow.indexOf('    42m'),low.join('\n'));
 assert(low.some(s=>/✕ claude +1h 27m │/.test(s)),low.join('\n'));
 // Narrower, spec rule 36 (a): the harness goes before the model; then the `route line`
 // choice keeps its value (time: elapsed, model: context) and the other goes, whole.
-const narrowTime=paint({},[],28,12),narrowModel=paint({route_line:'model'},[],28,12);
+const narrowTime=paint({},[],28,13),narrowModel=paint({route_line:'model'},[],28,13);
 const lead=rows=>rows[at(rows,'셸 표기')-1];
 assert(/⠋ gpt-6\.1-sol +42m │/.test(lead(narrowTime))&&!lead(narrowTime).includes('codex')&&!lead(narrowTime).includes('72%'),narrowTime.join('\n'));
 assert(/⠋ gpt-6\.1-sol +72% │/.test(lead(narrowModel))&&!lead(narrowModel).includes('42m'),narrowModel.join('\n'));
@@ -803,7 +806,7 @@ for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,tru
  const rows=paint(width,height,side,focused,models.short,n);
  for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB',models.short.wait,'◑ 질문 1'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
- const branch=rows.findIndex(s=>s.includes('(values-fixture*'));
+ const branch=rows.findIndex(s=>s.includes('(values-fix'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
  // The Git row sits right below the repo row and never shares it.
  // Spec rule 29: the number moves to the top border; the repo row keeps `project/`.
@@ -1348,6 +1351,58 @@ assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers
 """
         self.node(script, "panel-view.cjs")
 
+    def test_a_four_cell_context_keeps_the_worker_box_line_at_the_narrowest_panel(self):
+        # #1583 review follow-up (가): at 32 cells a four-cell percent (`100%`, or a token count
+        # `250K` with no window) made the box's `CTX` row one cell too wide and its right `│`
+        # fell off. Short of cells the row keeps `CTX` and the percent and lets the bar go, as
+        # the owner's row does; every row of the box keeps the panel's width and its right line.
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+// The gauge at the panel's width, as the backend lays it out (`max(5, min(10, (width-8)//4))` cells).
+const gauge=(width,pct)=>{const n=Math.max(5,Math.min(10,Math.floor((width-8)/4)));
+ if(!pct.endsWith('%'))return [D(pct)];const on=Math.round(n*parseInt(pct)/100);return [P('━'.repeat(on)),D('─'.repeat(n-on)),D(' '),P(pct)];};
+for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
+ const route={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
+  paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh'),ctx:P('52%'),gauge_row:gauge(width,'52%')},
+  workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',tool:'Edit',
+   paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P(pct),gauge_row:gauge(width,pct)}}]};
+ const rows=draw([route],width,60),seen=width+' '+pct+'\n'+rows.join('\n');
+ for(const s of rows)assert.equal(cells(s),width,seen);
+ const top=rows.findIndex(s=>/^│ │ ╭─ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ │ ╰─+╯ │ │$/.test(s));
+ assert(top>0&&bottom>top+1,seen);
+ for(const s of rows.slice(top+1,bottom))assert(/^│ │ │ .* │ │ │$/.test(s),seen);
+ const ctx=rows.slice(top+1,bottom).find(s=>s.includes('CTX'));
+ assert(ctx&&ctx.includes(pct),seen);
+}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_the_git_arrows_keep_fleets_green_and_red_only_where_the_panel_shows_hue(self):
+        # Spec E9 rule 50: the backend paints `↑N` in Fleet's `lvl_g` and `↓N` in its `lvl_r`
+        # (marked `git-fresh`); the GIT row beside the native area and the bottom layout's head
+        # keep those colors in 256 colors, and in mono or eight colors read as the rest of the Git
+        # words, dim with no hue (rule 50 (d)). The words and cells stay.
+        script = self.FIXTURE + r'''
+const G=114,R=174,fresh=(t,o)=>({text:t,bold:false,dim:false,reverse:false,role:'git-fresh',...o});
+const sideGit=[{text:'main',dim:true},fresh(' ↑2',{foreground:G}),fresh(' ↓5',{foreground:R,bold:true})];
+const underGit=[{text:'(main',dim:true},fresh(' ↑2',{foreground:G}),fresh(' ↓5',{foreground:R,bold:true}),{text:' 🚧 3)',dim:true}];
+const side=view.render({width:40,height:40,side:true,model:{...head,git_side:sideGit,routes:[],route_count:0},state:'idle',configuration:{},questions:()=>[]});
+const under=view.render({width:100,height:14,side:false,model:{...head,git:underGit,routes:[],route_count:0},state:'idle',configuration:{layout:'bottom'},questions:()=>[]});
+for(const [rows,re] of [[side.rows,/^│ GIT    main ↑2 ↓5 +│$/],[under.rows,/^│ \(main ↑2 ↓5 🚧 3\) +│$/]]){
+ const row=rows.find(r=>re.test(r.map(p=>p.text).join('')));assert(row,rows.map(r=>r.map(p=>p.text).join('')).join('\n'));
+ const look=(theme,colors)=>{const shown=view.appearance([row],{theme},{colors})[0];
+  assert.equal(shown.map(p=>p.text).join(''),row.map(p=>p.text).join(''));
+  return shown.filter(p=>/[↑↓]|main/.test(p.text)).map(p=>[p.text.trim(),p.foreground??null,p.bold===true,p.dim===true]);};
+ const branch=look('terminal',256)[0];assert.deepEqual(branch.slice(1),[null,false,true]);
+ assert.deepEqual(look('terminal',256).slice(1),[['↑2',G,false,false],['↓5',R,true,false]]);
+ for(const [theme,colors] of [['mono',256],['terminal',8],['mono',8],['light',8]])
+  assert.deepEqual(look(theme,colors),[branch,['↑2',null,false,true],['↓5',null,false,true]],theme+' '+colors);
+ // NO_COLOR: the backend sent no color; the panel paints the parts as they came.
+ assert.deepEqual(view.appearance([row],{},{noColor:true})[0],row);
+}
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_the_title_value_is_bold_in_the_sessions_harness_color(self):
         # Spec E9 rule 44: the TITLE row's value bold, in the session's harness color (Fleet's
         # `hb_*`), on every row it takes; the label stays dim. Without color (NO_COLOR) the weight
@@ -1667,7 +1722,8 @@ for(const harness of ['claude','codex','opencode']){
  const width=v.fields.indexOf('side_width');
  assert(r.hits.some(h=>h.action==='setting:'+width+':up'));
  for(const key of ['position','theme','shade'])assert(r.hits.some(h=>h.action==='setting:'+v.fields.indexOf(key)+':up'),key);
- assert.equal(v.fields.at(-1),'side_min_columns');
+ // Spec rule 49 (d): the fold judgment is one constant; the editor has no threshold.
+ assert(!v.fields.includes('side_min_columns')&&v.defaults.side_min_columns===100);
 }
 '''
         self.node(script, "panel-view.cjs")
