@@ -107,6 +107,16 @@ class CodexDispatchSummaryTest(unittest.TestCase):
         self.log.write_bytes(line(control()) + b"not-json\n" + line(codex_message()))
         self.assertEqual(S.announced_session(self.log)[1], {"invalid": "malformed-supervisor-log"})
 
+    def test_a_runtime_stderr_line_after_the_announcement_keeps_it(self):
+        # 2026-11-13: a Claude CLI settings warning merged into the receipt log after
+        # the announcement hid the owner's transcript, so its tool progress went unseen.
+        session = {"type": "dispatch.supervisor.session", "session_id": "sid-exact", "cwd": "/work"}
+        warning = b"Ignoring 7 permissions.allow entries from project settings\n"
+        self.log.write_bytes(line(session) + line(control()) + warning + line(control()) + warning)
+        self.assertEqual(S.announced_session(self.log), (True, {"session_id": "sid-exact", "cwd": "/work"}))
+        self.log.write_bytes(line(session) + warning + line(session))
+        self.assertEqual(S.announced_session(self.log)[1], {"invalid": "multiple-supervisor-session-events"})
+
     def test_claude_terminal_receipt_still_requires_session_announcement(self):
         self.write(control(), {"type": "result", "subtype": "success", "result": "PASS"})
         self.assertEqual(S.announced_session(self.log), (True, {

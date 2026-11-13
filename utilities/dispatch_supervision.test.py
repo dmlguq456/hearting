@@ -1397,6 +1397,239 @@ class ConfirmedExecutionNoticeTest(unittest.TestCase):
         self.assertEqual((observation["state"], observation["reason"]), ("stalled", "execution-absent"))
 
 
+class OwnerProgressAlarmTest(unittest.TestCase):
+    """2026-11-13: three live owners got a stall notice while their work moved.
+
+    08:05 an owner parked two hours on its own execute stage (commits, cycle writes)
+    resumed into 24 quiet windows; 08:34 an owner parked on its own host-run resource
+    read as unverified execution; a one-turn owner's long call hid behind a parallel
+    sibling's result. A live owner with no trace and a dead owner still raise it.
+    """
+
+    DELIVERY = {"claude": "session-resume-supervised", "codex": "app-server-supervised",
+                "opencode": "session-resume-supervised"}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.executions = {}
+        patcher = mock.patch.object(contract, "attempt_execution_observation",
+                                    side_effect=lambda metadata: self.executions[metadata["attempt_id"]])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.t0 = 1_800_000_000.0
+
+    def owner(self, harness, case=""):
+        import route_identity
+        root = Path(self.temp.name) / (harness + case)
+        root.mkdir()
+        self.root, self.jobs, self.log = root, root / "jobs.log", root / f"owner.{harness}.jsonl"
+        self.log.write_text("", encoding="utf-8")
+        route = {"route_id": "rt-alarm-" + harness, "artifact_root": str(root),
+                 "nodes": [{"id": "execute", "depends_on": []}]}
+        route["route_hash"] = route_identity.route_hash(route)
+        route_file = root / "route.json"
+        route_file.write_text(json.dumps(route), encoding="utf-8")
+        self.aid = "att-alarm-" + harness + case
+        self.owner_meta = dict(
+            dispatch_depth="1", parent_attempt_id="", route_id="", route_node="_owner",
+            parent_sid="parent-test", parent_completion_delivery="claude-parent-runtime",
+            worker_type="owner", harness=harness, completion_delivery=self.DELIVERY[harness],
+            owner_route_id=route["route_id"], owner_route_file=str(route_file),
+            owner_route_hash=route["route_hash"], log_file=str(self.log),
+            supervisor_lease="flock-v1", supervisor_lease_nonce="a" * 64,
+            supervisor_lease_file=str(contract.supervisor_lease_path(self.jobs, self.aid)),
+            pid="99999999", pid_start="1")
+        self.child_meta = dict(route_file=str(route_file), route_id=route["route_id"],
+                               route_hash=route["route_hash"], route_node="execute",
+                               parent_attempt_id=self.aid, pid="99999998", pid_start="1")
+        self.rows()
+
+    def rows(self, child_status=None):
+        text = row(self.aid, **self.owner_meta)
+        if child_status:
+            text += row("att-alarm-child", status=child_status, **self.child_meta)
+        temporary = self.jobs.with_name(".jobs.tmp")
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, self.jobs)
+
+    def phase(self, phase):
+        from dispatch_completion_join import write_supervisor_state
+        write_supervisor_state(contract.dispatch_state_root(self.jobs) / "supervisor-state"
+                               / f"{self.aid}.json", self.aid, set(), phase=phase)
+
+    def runtime(self, state, reason, pid="4242"):
+        identities = ((pid, "1", "claude"),) if state == "active" else ()
+        self.executions[self.aid] = contract.AttemptExecutionObservation(state, reason, identities)
+
+    def lease(self):
+        return contract.hold_supervisor_lease(self.jobs, self.aid, self.owner_meta["supervisor_lease_file"])
+
+    def tool_rows(self, harness, events):
+        """One native row per (call id, phase), in each runtime's own event shape."""
+        lines = []
+        for identity, phase, message in events:
+            if harness == "claude":
+                kind = "assistant" if phase == "start" else "user"
+                block = ({"type": "tool_use", "id": identity} if phase == "start"
+                         else {"type": "tool_result", "tool_use_id": identity})
+                lines.append({"type": kind, "message": {"id": message if kind == "assistant" else None,
+                                                        "content": [block]}})
+            elif harness == "codex":
+                lines.append({"type": "item.started" if phase == "start" else "item.completed",
+                              "item": {"type": "command_execution", "id": identity}})
+            else:
+                lines.append({"type": "tool_use", "part": {"type": "tool", "callID": identity,
+                              "state": {"status": "running" if phase == "start" else "completed"}}})
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.writelines(json.dumps(line) + "\n" for line in lines)
+
+    def alarms(self, now):
+        """Run the existing observer pass at ``now``; return its attempt-stalled notices."""
+        calls = []
+        with mock.patch.object(supervision.time, "time", return_value=now), \
+             mock.patch.object(supervision, "materialize",
+                               side_effect=lambda jobs, ids, reason: calls.append(reason) or []):
+            supervision.update_open_attempt_stall_observations(self.jobs)
+        return calls.count("attempt-stalled")
+
+    def state(self, now):
+        return supervision.update_attempt_stall_observation(self.jobs, self.aid, persist=False, now=now)
+
+    def test_a_owner_resuming_after_its_stage_worked_two_hours_gets_no_alarm(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                with self.lease():
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live")
+                    self.tool_rows(harness, [("call-plan", "start", "m1"), ("call-plan", "end", "m1")])
+                    count = self.alarms(self.t0)
+                    # The owner parks on its execute stage; the stage commits and writes the cycle.
+                    self.phase("parked")
+                    self.rows(child_status="open")
+                    self.runtime("unknown", "attempt-process-role-unclassified")
+                    self.executions["att-alarm-child"] = contract.AttemptExecutionObservation(
+                        "active", "runtime-command-live", (("4343", "1", "claude"),))
+                    for window in range(1, 25):
+                        count += self.alarms(self.t0 + window * 300)
+                    # The stage ends; the owner's next turn starts before its first tool row.
+                    self.rows(child_status="done")
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live", pid="4444")
+                    count += self.alarms(self.t0 + 7472)
+                    count += self.alarms(self.t0 + 7472 + 299)
+                self.assertEqual(count, 0)
+
+    def test_a_one_turn_owner_whose_long_call_hides_behind_a_sibling_result_gets_no_alarm(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                with self.lease():
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live")
+                    # Two parallel calls of one model message; the quick one returns first.
+                    self.tool_rows(harness, [("call-long", "start", "m1"), ("call-quick", "start", "m1"),
+                                             ("call-quick", "end", "m1")])
+                    count = sum(self.alarms(self.t0 + window * 300) for window in range(0, 25))
+                self.assertEqual(count, 0)
+
+    def test_b_owner_waiting_on_its_own_host_run_gets_no_alarm(self):
+        for harness in self.DELIVERY:
+            for execution in (("unknown", "attempt-process-role-unclassified"), ("absent", "carrier-only")):
+                with self.subTest(harness=harness, execution=execution[1]):
+                    self.owner(harness, "-" + execution[1])
+                    with self.lease():
+                        self.phase("running-turn")
+                        self.runtime("active", "runtime-command-live")
+                        self.tool_rows(harness, [("call-launch", "start", "m1"), ("call-launch", "end", "m1")])
+                        count = self.alarms(self.t0)
+                        # The resource runner owns the 2,400 s host run; the owner is parked on it.
+                        self.phase("parked")
+                        self.runtime(*execution)
+                        count += sum(self.alarms(self.t0 + window * 300) for window in range(1, 9))
+                        observation = self.state(self.t0 + 2400)
+                    self.assertEqual(count, 0)
+                    self.assertEqual((observation["state"], observation["reason"]),
+                                     ("active", "supervised-owner-parked"))
+
+    def test_c_live_owner_without_any_trace_still_raises_the_alarm(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                with self.lease():
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live")
+                    self.tool_rows(harness, [("call-last", "start", "m1"), ("call-last", "end", "m1")])
+                    self.assertEqual(self.alarms(self.t0), 0)
+                    self.assertEqual(self.alarms(self.t0 + 2 * 300 + 1), 1)
+                    observation = self.state(self.t0 + 2 * 300 + 1)
+                self.assertEqual((observation["state"], observation["reason"]),
+                                 ("stalled", "no-comparable-progress"))
+
+    def test_d_dead_owner_still_raises_the_alarm(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                # Its last phase was parked, but no live supervisor holds the lease any more.
+                self.phase("parked")
+                self.runtime("absent", "attempt-tag-census-empty")
+                self.assertEqual(self.alarms(self.t0), 1)
+                observation = self.state(self.t0)
+                self.assertEqual((observation["state"], observation["reason"]),
+                                 ("stalled", "execution-absent"))
+
+    def test_a_claude_owner_whose_receipt_log_caught_a_cli_warning_still_shows_its_tools(self):
+        # 12:44/13:05/13:53: each turn's "Ignoring 7 permissions.allow ..." stderr line landed in
+        # the receipt log, and the owner's own transcript stopped being the tool-progress source.
+        from claude_project_dir import encode_project_dir
+        self.owner("claude")
+        cwd, home = self.root / "work", self.root / "home"
+        cwd.mkdir()
+        self.owner_meta["runtime_home"] = str(home)
+        self.rows()
+        transcript = home / "projects" / encode_project_dir(str(cwd)) / "sid-owner.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("", encoding="utf-8")
+        warning = "Ignoring 7 permissions.allow entries from project settings\n"
+        self.log.write_text(json.dumps({"type": "dispatch.supervisor.session", "session_id": "sid-owner",
+                                        "cwd": str(cwd)}) + "\n"
+                            + json.dumps({"type": "dispatch.supervisor.turn-started"}) + "\n" + warning,
+                            encoding="utf-8")
+        count = 0
+        with self.lease():
+            self.phase("running-turn")
+            self.runtime("active", "runtime-command-live")
+            for window in range(0, 12):
+                with transcript.open("a", encoding="utf-8") as handle:
+                    for phase in ("start", "end"):
+                        kind = "assistant" if phase == "start" else "user"
+                        block = ({"type": "tool_use", "id": f"call-{window}"} if phase == "start"
+                                 else {"type": "tool_result", "tool_use_id": f"call-{window}"})
+                        handle.write(json.dumps({"type": kind, "message": {
+                            "id": f"m{window}" if kind == "assistant" else None, "content": [block]}}) + "\n")
+                count += self.alarms(self.t0 + window * 300)
+        self.assertEqual(count, 0)
+
+    def test_a_new_model_message_settles_the_calls_of_the_previous_one(self):
+        self.owner("claude")
+        self.tool_rows("claude", [("call-a", "start", "m1"), ("call-b", "start", "m1"),
+                                  ("call-b", "end", "m1")])
+        metadata = {"log_file": str(self.log)}
+        self.assertEqual(supervision.runtime_tool_progress(metadata), ["claude", "call-a", "tool_use"])
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "assistant", "message": {"id": "m2", "content": [
+                {"type": "text", "text": "x"}]}}) + "\n")
+        self.assertEqual(supervision.runtime_tool_progress(metadata), ["claude", "call-b", "tool_result"])
+        self.owner("codex")
+        self.tool_rows("codex", [("item-a", "start", ""), ("item-b", "start", ""), ("item-b", "end", "")])
+        metadata = {"log_file": str(self.log)}
+        self.assertEqual(supervision.runtime_tool_progress(metadata), ["codex", "item-a", "item.started"])
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "turn.completed"}) + "\n")
+        self.assertEqual(supervision.runtime_tool_progress(metadata), ["codex", "item-b", "item.completed"])
+
+
 class StallNoticeRunningToolTest(unittest.TestCase):
     """2026-11-11 00:02: the notice for att-a9d2c7d7 read like a hang while its owner waited
     on its own `sleep 1500; grep ITER ...` measurement window."""

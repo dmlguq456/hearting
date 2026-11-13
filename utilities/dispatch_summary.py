@@ -908,6 +908,10 @@ def announced_session(
         try:
             row = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
+            if found is not None:
+                # A runtime's stderr line (for example a CLI settings warning) after the
+                # exact announcement does not revoke it; the transcript stays the source.
+                continue
             # Malformed complete data is not converted into a successful source.
             return (True, {"invalid": "malformed-supervisor-log"}) if saw_supervisor else (False, None)
         if isinstance(row, dict) and str(row.get("type") or "").startswith("dispatch.supervisor."):

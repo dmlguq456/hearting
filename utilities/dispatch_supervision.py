@@ -190,8 +190,16 @@ def _tool_event_source(metadata, log_path):
 
 
 def runtime_tool_progress(metadata, previous=None):
-    """Read only the latest bounded native tool identity, never transcript prose."""
+    """Read only the latest bounded native tool identity, never transcript prose.
+
+    A call still in flight outranks a later sibling's result: parallel calls
+    (two subagents, or a subagent beside a quick command) write the quick
+    result last while the long call is still running. A Claude call belongs to
+    one model message; the next message starts only after every call of the
+    previous one returned, so a new message settles them.
+    """
     latest = previous or None
+    in_flight = {}
     raw_path = metadata.get("log_file", "")
     if not raw_path or not Path(raw_path).is_absolute():
         return latest
@@ -213,10 +221,20 @@ def runtime_tool_progress(metadata, previous=None):
         if not isinstance(event, dict):
             continue
         kind, item = event.get("type"), event.get("item")
+        if kind in {"turn.completed", "turn.failed"}:
+            in_flight = {key: value for key, value in in_flight.items() if key[0] != "codex"}
         if kind in {"item.started", "item.completed"} and isinstance(item, dict):
             if item.get("type") in {"command_execution", "file_change", "mcp_tool_call", "web_search"} and item.get("id"):
                 latest = ["codex", str(item["id"])[:256], kind]
+                if kind == "item.started":
+                    in_flight[("codex", latest[1])] = (latest, "")
+                else:
+                    in_flight.pop(("codex", latest[1]), None)
         if kind in {"assistant", "user"} and isinstance(event.get("message"), dict):
+            message_id = str(event["message"].get("id") or "")
+            if kind == "assistant" and not event.get("isSidechain"):
+                in_flight = {key: value for key, value in in_flight.items()
+                             if key[0] != "claude" or value[1] == message_id}
             content = event["message"].get("content")
             for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict):
@@ -225,6 +243,10 @@ def runtime_tool_progress(metadata, previous=None):
                 identity = block.get("id") if block_type == "tool_use" else block.get("tool_use_id")
                 if block_type in {"tool_use", "tool_result"} and identity:
                     latest = ["claude", str(identity)[:256], block_type]
+                    if block_type == "tool_use":
+                        in_flight[("claude", latest[1])] = (latest, message_id)
+                    else:
+                        in_flight.pop(("claude", latest[1]), None)
         part = event.get("part")
         if kind == "tool_use" and isinstance(part, dict) and part.get("type") == "tool":
             state = part.get("state")
@@ -232,6 +254,12 @@ def runtime_tool_progress(metadata, previous=None):
             identity = part.get("callID") or part.get("id")
             if identity and status in {"pending", "running", "completed", "error"}:
                 latest = ["opencode", str(identity)[:256], status]
+                if status in {"pending", "running"}:
+                    in_flight[("opencode", latest[1])] = (latest, "")
+                else:
+                    in_flight.pop(("opencode", latest[1]), None)
+    if in_flight:
+        return next(reversed(in_flight.values()))[0]
     return latest
 
 
@@ -565,6 +593,27 @@ def _owned_child_executing(jobs, attempt_id, metadata, now) -> bool:
     return False
 
 
+def _supervised_owner_parked(jobs, attempt_id, metadata) -> bool:
+    """True while the owner's runtime holds it parked on its registered work.
+
+    The same exact verdict the orphan watch uses: a parked, deliverable, or
+    recovery phase under the held outer supervisor lease. Every harness's owner
+    supervisor records it. The children and resource runs it waits on carry
+    their own observation, so the owner's own quiet is not missing progress.
+    """
+    if metadata.get("worker_type") != "owner":
+        return False
+    try:
+        from dispatch_completion_join import read_supervisor_phase_state
+        from dispatch_contract import dispatch_state_root, supervisor_lease_is_held
+        state = read_supervisor_phase_state(
+            dispatch_state_root(jobs) / "supervisor-state" / f"{attempt_id}.json", attempt_id)
+        return (state is not None and state.phase in {"parked", "deliverable", "recovery"}
+                and supervisor_lease_is_held(jobs, metadata))
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        return False
+
+
 def _execution_confirmed(jobs, aid, status, metadata, *, now=None, decision=None) -> bool:
     """대기(확인된 실행): the existing observers show the attempt running or draining.
 
@@ -701,6 +750,11 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "waiting", "resource-watch-owns-progress"
         elif lease:
             observation_state, reason = "active", "exact-verification-lease"
+        elif _supervised_owner_parked(jobs, attempt_id, metadata):
+            # Parked by its own runtime on children or a resource run under the held
+            # supervisor lease: the work it waits on owns the progress. A dead owner
+            # holds no lease and keeps the branches below.
+            observation_state, reason = "active", "supervised-owner-parked"
         elif execution.state == "absent":
             if tool_active:
                 observation_state, reason = "unknown", "runtime-tool-active-process-absent"
@@ -729,6 +783,11 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "stalled", "no-comparable-progress"
         else:
             observation_state, reason = "active", "within-progress-window"
+        if reason in {"supervised-owner-parked", "owned-child-executing"}:
+            # A wait on its own work is not quiet: the owner resumes with a fresh window
+            # instead of the windows its children or resource run spent working.
+            last_progress = last_window = now
+            quiet = 0
 
         prior = state.get("stall_observation") if isinstance(state.get("stall_observation"), dict) else {}
         unknown_since = (prior.get("unknown_since") if prior.get("state") in {"observing", "unknown"}
