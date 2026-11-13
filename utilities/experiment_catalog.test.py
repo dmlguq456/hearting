@@ -701,6 +701,79 @@ class Text(Base):
         self.assertNotIn("%p", unverified)
 
 
+class Scan(Base):
+    """`scan_text`: internal names said without their catalog name. Advice only."""
+
+    def setup_root(self):
+        root = self.make_root()
+        self.register(root, {"groups": [group_spec()], "conditions": [
+            {"display_name": "잔향 줄임", "group": "AMI 가변 화자 개선", "aliases": ["E", "rev-a"],
+             "refs": {"runs": [{"run_id": "run-1", "row_id": "arm-1"}]}},
+            {"display_name": "잡음 줄임", "group": "AMI 가변 화자 개선", "aliases": ["noise-b"],
+             "refs": {"runs": [{"run_id": "run-2"}]}}]})
+        E.run_write(root, lambda ctx: E.op_rename(ctx, "잡음 줄임", "잡음 섞기"), now=NOW + 1)   # the old name is now a former name
+        return root, E.load(root).doc
+
+    def kinds(self, text, doc, **kw):
+        return [(row["token"], row["kind"], row["name"], row["line"], row["col"]) for row in E.scan_text(text, doc, **kw)]
+
+    def test_a_run_id_an_alias_and_a_former_name_are_found_with_their_place_and_name(self):
+        _root, doc = self.setup_root()
+        text = "먼저 run-1:arm-1 을 보고,\n그다음 rev-a 와 잡음 줄임, 마지막으로 run-2 를 본다."
+        self.assertEqual(self.kinds(text, doc), [
+            ("run-1:arm-1", "run-id", "잔향 줄임", 1, 4),
+            ("rev-a", "alias", "잔향 줄임", 2, 5),
+            ("잡음 줄임", "former-name", "잡음 섞기", 2, 13),
+            ("run-2", "run-id", "잡음 섞기", 2, 26)])
+
+    def test_the_catalog_name_in_the_same_text_silences_that_conditions_tokens_only(self):
+        _root, doc = self.setup_root()
+        self.assertEqual(self.kinds("잔향 줄임(run-1)과 run-2", doc), [("run-2", "run-id", "잡음 섞기", 1, 15)])
+        self.assertEqual(self.kinds("잔향 줄임(run-1)과 잡음 섞기(run-2)", doc), [])
+
+    def test_a_one_letter_word_is_caught_only_as_a_registered_alias_and_only_as_a_whole_token(self):
+        _root, doc = self.setup_root()
+        self.assertEqual([row[0] for row in self.kinds("E는 좋고 E1과 base-E 와 Eagle 은 아니다", doc)], ["E"])
+        self.assertEqual(self.kinds("A와 B와 F는 정본에 없다", doc), [])        # nothing is guessed for unregistered letters
+
+    def test_unlinked_runs_are_reported_with_no_name_and_the_longest_token_wins_an_overlap(self):
+        _root, doc = self.setup_root()
+        self.assertEqual(self.kinds("mpwav-20261111-stray 도 보인다", doc, unlinked=["mpwav-20261111-stray"]),
+                         [("mpwav-20261111-stray", "unregistered-run", None, 1, 1)])
+        self.assertEqual(len(E.scan_text("run-1:arm-1", doc)), 1)                  # not `run-1` and `run-1:arm-1`
+
+    def test_a_token_two_conditions_answer_to_is_left_alone_and_nothing_raises(self):
+        _root, doc = self.setup_root()
+        doc["conditions"][1]["aliases"].append("rev-a")                            # now ambiguous
+        self.assertEqual([row[0] for row in self.kinds("rev-a run-2", doc)], ["run-2"])
+        self.assertEqual(E.scan_text(None, doc), [])
+        self.assertEqual(E.scan_text("run-1", None), [])
+        self.assertEqual(E.scan_text("run-1", {"conditions": "broken"}), [])
+
+    def test_the_command_reads_stdin_and_a_file_and_is_exit_zero_even_for_a_broken_catalog(self):
+        root, _doc = self.setup_root()
+        run = lambda *args, text="": subprocess.run([sys.executable, str(SCRIPT), "scan", "--artifact-root", str(root), *args],  # noqa: E731
+                                                   input=text, capture_output=True, text=True, env=clean_env(self.home))
+        result = run(text="rev-a 와 mpwav-20261111-stray")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["catalog"]["status"], "ok")
+        self.assertEqual([w["token"] for w in report["warnings"]], ["rev-a"])     # the unlinked run needs a run record to be known
+        self.write_run(root, "mpwav-20261111-stray")
+        report = json.loads(run(text="rev-a 와 mpwav-20261111-stray").stdout)
+        self.assertEqual([(w["token"], w["kind"]) for w in report["warnings"]], [("rev-a", "alias"), ("mpwav-20261111-stray", "unregistered-run")])
+        path = self.base / "q.txt"
+        path.write_text("잔향 줄임 과 run-2\n", encoding="utf-8")
+        self.assertEqual([w["token"] for w in json.loads(run("--file", str(path)).stdout)["warnings"]], ["run-2"])
+        bad = self.make_root("bad", "y")
+        target = E.catalog_path(bad); target.parent.mkdir(parents=True, exist_ok=True); target.write_text("{no", encoding="utf-8")
+        broken = subprocess.run([sys.executable, str(SCRIPT), "scan", "--artifact-root", str(bad)], input="run-1",
+                                capture_output=True, text=True, env=clean_env(self.home))
+        self.assertEqual(broken.returncode, 0)
+        self.assertEqual(json.loads(broken.stdout)["warnings"], [])
+        self.assertEqual(run("--file", str(self.base / "missing.txt")).returncode, 0)
+
+
 class NoLeftovers(Base):
     def test_zz_no_child_process_is_left(self):
         with self.assertRaises(ChildProcessError):

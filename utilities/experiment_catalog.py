@@ -1251,6 +1251,63 @@ def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[
 
 
 # ---------------------------------------------------------------------------
+# scan: an internal name said without its catalog name (advice only)
+# ---------------------------------------------------------------------------
+
+
+def _token_pattern(token: str) -> "re.Pattern[str]":
+    # Left: not inside a longer word or identifier.  Right: only ASCII identifier characters continue a
+    # token, so a Korean particle after a name (`E는`, `기본 분리를`) still counts as the token.
+    return re.compile(r"(?<![\w-])" + re.escape(token) + r"(?![A-Za-z0-9_-])", re.IGNORECASE)
+
+
+def scan_text(text: str, doc: Optional[Mapping[str, Any]], *, unlinked: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Internal names in `text` that the reader cannot place: `[{token, line, col, kind, name, condition_id}]`.
+
+    `kind`: `run-id` (a run or `run:row` the catalog links to a condition), `alias`, `former-name`, or
+    `unregistered-run` (an id in `unlinked`, which the catalog does not know).  A token of a condition is
+    skipped when that condition's catalog name is in the same text.  Only registered tokens are looked
+    for, so a bare capital or a one-letter word is caught only when it is a registered alias; a token two
+    conditions answer to is left alone (no name to offer).  Never raises, blocks, or rewrites: it reports."""
+    try:
+        text = str(text or "")
+        if not text:
+            return []
+        folded_text = _fold(text)
+        candidates: List[Tuple[str, str, Optional[Dict[str, Any]]]] = []
+        for cond in (doc or {}).get("conditions", []):
+            name = cond.get("display_name") or ""
+            if name and _fold(name) in folded_text:
+                continue                      # the reader has the catalog name right here
+            for ref_run, ref_row in _run_ref_keys(cond):
+                candidates.append((ref_run, "run-id", cond))
+                if ref_row:
+                    candidates.append((f"{ref_run}:{ref_row}", "run-id", cond))
+            candidates += [(alias, "alias", cond) for alias in cond.get("aliases", []) if alias]
+            candidates += [(old, "former-name", cond) for old in cond.get("former_names", []) if old]
+        candidates += [(str(run_id), "unregistered-run", None) for run_id in unlinked if run_id]
+        taken: List[Tuple[int, int]] = []
+        found: List[Dict[str, Any]] = []
+        for token, kind, cond in sorted(candidates, key=lambda item: -len(item[0])):
+            if cond is not None and resolve_ex(doc, token)[1] == "ambiguous":
+                continue
+            for match in _token_pattern(token).finditer(text):
+                span = match.span()
+                if any(span[0] < end and begin < span[1] for begin, end in taken):
+                    continue
+                taken.append(span)
+                before = text[:span[0]]
+                found.append({"token": match.group(0), "line": before.count("\n") + 1,
+                              "col": span[0] - (before.rfind("\n") + 1) + 1, "kind": kind,
+                              "name": (cond or {}).get("display_name") or None,
+                              "condition_id": (cond or {}).get("id")})
+        found.sort(key=lambda row: (row["line"], row["col"]))
+        return found
+    except Exception:  # noqa: BLE001 -- a warning never fails its caller
+        return []
+
+
+# ---------------------------------------------------------------------------
 # text output (shared catalog `experiment.*`)
 # ---------------------------------------------------------------------------
 
@@ -1438,6 +1495,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("show", parents=[where], help="the catalog as written")
     st = sub.add_parser("status", parents=[where], help="catalog + public run records, read together")
     st.add_argument("--expect", action="append", default=[], metavar="NAME")
+    sc = sub.add_parser("scan", parents=[where], help="internal names in a text that lack their catalog name; never blocks")
+    sc.add_argument("--file", help="the text to read; `-` or nothing reads stdin")
     li = sub.add_parser("lint", parents=[where], help="warnings with their place; never blocks")
     li.add_argument("--expect", action="append", default=[], metavar="NAME")
     reg = sub.add_parser("register", parents=[where, write], help="add or update groups, conditions, and terms")
@@ -1538,11 +1597,34 @@ def _read_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_command(args: argparse.Namespace) -> int:
+    """`scan`: JSON of the internal names in a text; exit 0 whatever happens (advice, never a gate)."""
+    report: Dict[str, Any] = {"catalog": {"status": "unknown"}, "warnings": []}
+    try:
+        text = sys.stdin.read() if args.file in (None, "-") else Path(args.file).read_text(encoding="utf-8")
+        root = _root_from(args)
+        read = load(root)
+        report["catalog"] = {"status": read.status, "path": CATALOG_REL, "code": read.code}
+        if read.status == "ok":
+            unlinked: List[str] = []
+            try:
+                unlinked = list(status(root)["unlinked_runs"]["run_ids"])
+            except Exception:  # noqa: BLE001 -- without the run list only registered names are checked
+                pass
+            report["warnings"] = scan_text(text, read.doc, unlinked=unlinked)
+    except Exception as exc:  # noqa: BLE001
+        report["catalog"] = {"status": "unreadable", "code": type(exc).__name__}
+    _print(report)
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = _parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+    if args.command == "scan":
+        return _scan_command(args)
     if args.command in ("show", "status", "lint"):
         return _read_command(args)
     try:
