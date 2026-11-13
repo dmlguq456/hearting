@@ -263,7 +263,8 @@ class RevisionAndCancelTest(Fixture):
         self.assertIn("revision=2 late=false state=final", out)
         self.assertEqual(pr.load(request_id)["state"], "final")
 
-    def test_c3_report_with_nothing_received_is_refused_and_names_rev(self):
+    def test_c3_report_with_nothing_delivered_is_refused_and_names_rev(self):
+        self.hold = True        # no revision reaches B's transport at all
         request_id, _ = self.new_request(title="t", rev="판1")
         self.request(A, request_id, "new head", rev="판2")
         rc, out = self.report(B, request_id, result="guess", received=False)
@@ -275,6 +276,58 @@ class RevisionAndCancelTest(Fixture):
         rc, out = self.report(B, request_id, result="named", rev=2, received=False)
         self.assertEqual(rc, 0, out)
         self.assertIn("revision=2", out)
+
+    def test_c4_explicit_rev_keeps_a_late_report_late_even_when_revision_2_is_received(self):
+        # (가) The hook just delivered revision 2: "newest received" is 2, but the guidance's --rev 1 wins.
+        request_id, _ = self.new_request(title="t", rev="판1")
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.request(A, request_id, "new head", rev="판2")
+        self.ack(pr.load(request_id)["revisions"][1]["transfer_ref"])
+        rc, out = self.report(B, request_id, result="LATE-old", rev=1, received=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=1 late=true state=open", out)
+        self.assertEqual(pr.load(request_id)["state"], "open")
+
+    def test_c5_a_successor_reports_a_queued_revision_of_its_predecessor(self):
+        # (나) The predecessor's row is only queued (receipt lags a turn boundary): still accepted.
+        request_id, _ = self.new_request(title="t", rev="판1")
+        ref1 = pr.load(request_id)["revisions"][0]["transfer_ref"]
+        self.assertEqual(peer_message._read_pending(ref1)["state"], "queued")
+        self.successors[B] = (B2[1], B2[0])
+        rc, out = self.report(B2, request_id, result="HANDOFF", received=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=1", out)
+
+    def test_c6_report_commands_carry_the_revision_of_the_line_they_come_with(self):
+        # (라) Guidance, `show <rq>` and the list all print the --rev N command; one string for every harness.
+        texts = {}
+        for name, who, target in (("codex", B, "bee"), ("claude", C, "cee"), ("opencode", D, "dee")):
+            rc, out = self.request(A, target, "first", title="t", rev="판1")
+            request_id = out.split()[0].split("=")[1]
+            rc, out = self.request(A, request_id, "second", rev="판2")
+            record = pr.load(request_id)
+            guided = []
+            for number in (1, 2):
+                row = peer_message._read_pending(record["revisions"][number - 1]["transfer_ref"])
+                guidance = peer_message.receiver_guidance(
+                    row["text"], {"harness": who[0], "session_id": who[1]})
+                self.assertIn("report %s --rev %d --result" % (request_id, number), guidance)
+                self.assertIn("report %s --rev %d --partial --result" % (request_id, number), guidance)
+                self.assertIn("report %s --rev %d --reject" % (request_id, number), guidance)
+                self.assertNotIn("--rev %d" % (3 - number), guidance)
+                guided.append(guidance.replace(request_id, "RQ"))
+            texts[name] = guided
+            rc, shown = self.show(who, request_id)
+            self.assertIn("report %s --rev 2 --result" % request_id, shown)
+            self.assertRegex(shown, r"(?m)^report-final: python3 .* report %s --rev 2 --result" % request_id)
+            self.assertRegex(shown, r"(?m)^report-partial: .* --rev 2 --partial --result")
+            rc, shown = self.show(who, request_id, rev=1)
+            self.assertIn("report %s --rev 1 --partial --result" % request_id, shown)
+            rc, listing = self.show(who)
+            self.assertIn("report %s --rev 2 --result" % request_id, listing)
+            rc, shown = self.show(A, request_id)
+            self.assertNotIn("report %s --rev" % request_id, shown)
+        self.assertEqual(len({tuple(v) for v in texts.values()}), 1, texts)
 
     def test_d_superseded_pending_revision_is_not_sent_anywhere(self):
         self.hold = True

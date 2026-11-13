@@ -393,7 +393,8 @@ def peer_body_item(text: str, origin: dict | None = None) -> dict | None:
             if peer_request.valid_seal(transfer.get("request")):
                 if transfer["request"]["role"] in ("request", "followup"):
                     return {"kind": "peer-report", "required_action": "follow-through",
-                            "request": transfer["request"]["id"]}
+                            "request": transfer["request"]["id"],
+                            "revision": transfer["request"]["revision"]}
                 return None
         except Exception:  # noqa: BLE001 - an unreadable seal falls back to the first line
             pass
@@ -451,10 +452,13 @@ def nudge_text(items: list[dict]) -> str:
         elif item.get("kind") == "peer-report" and item.get("request"):
             # A sealed request (or follow-up) is owed an answer; its notice line is not the body.
             import peer_request
+            rev = item.get("revision")
+            report = ("%s %s --rev %d --result \"<one line>\"" % (peer_request.REPORT_COMMAND, item["request"], rev)
+                      if isinstance(rev, int) else "%s %s --result \"<one line>\"" % (
+                          peer_request.REPORT_COMMAND, item["request"]))
             lines.append("- another session's request %s arrived as this turn's prompt: open it with `%s %s`, "
-                         "then report with `%s %s --result \"<one line>\"` (or `--partial --result` / "
-                         "`--reject`)" % (item["request"], peer_request.SHOW_COMMAND, item["request"],
-                                          peer_request.REPORT_COMMAND, item["request"]))
+                         "then report with `%s` (or add `--partial`, or use `--reject \"<reason>\"` instead of "
+                         "`--result`)" % (item["request"], peer_request.SHOW_COMMAND, item["request"], report))
         elif item.get("kind") == "peer-report":
             lines.append("- another session's report arrived as this turn's prompt")
         else:

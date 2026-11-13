@@ -3929,13 +3929,13 @@ def _request_receiver_guidance(text, recipient):
     request_id = seal["id"]
     show = '%s %s' % (peer_request.SHOW_COMMAND, request_id)
     if seal["role"] in ("request", "followup"):
-        return ("Peer request %s from another session. Open its sealed body with this shell command "
-                "(the line above is only a notice):\n`%s`\n"
+        cmds = peer_request.report_commands(request_id, seal["revision"])
+        return ("Peer request %s (revision %d) from another session. Open its sealed body with this shell "
+                "command (the line above is only a notice):\n`%s`\n"
                 "Start at your next natural pause; do not interrupt current work or the user's draft. "
-                "Report with `%s %s --result \"<one line>\"` (final), `--partial --result \"...\"` "
-                "(more to come) or `--reject \"<reason>\"`. A report closes only this request and is not "
-                "approval, release or an answer to a user question."
-                % (request_id, show, peer_request.REPORT_COMMAND, request_id))
+                "Report this revision with `%s` (final), `%s` (more to come) or `%s`. "
+                "A report closes only this request and is not approval, release or an answer to a user question."
+                % (request_id, seal["revision"], show, cmds["final"], cmds["partial"], cmds["reject"]))
     return ("Peer request %s update (read only; nothing to answer). Details: `%s`" % (request_id, show))
 
 

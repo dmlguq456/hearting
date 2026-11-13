@@ -120,6 +120,14 @@ def _received_by(row, sessions):
     return (to.get("harness"), to.get("session_id")) in sessions
 
 
+def _delivered_to(row, sessions):
+    """True when the transfer row was handed to one of ``sessions`` (queued or received)."""
+    if not row or row.get("state") not in ("queued", "received"):
+        return False
+    to = row.get("to") or {}
+    return (to.get("harness"), to.get("session_id")) in sessions
+
+
 def _delivered_anywhere(steward, record):
     """True when some revision or follow-up of the request may have reached the receiver."""
     for row in _rows(steward, record).values():
@@ -320,17 +328,20 @@ def report(args, steward):
     if args.rev is not None:
         revision = args.rev
     else:
-        # N5: the newest revision this session (or its confirmed predecessor) actually
-        # received. Nothing received means nothing to guess: ask for an explicit --rev.
+        # The newest revision this session (or its confirmed predecessor) received; failing
+        # that, the newest one delivered to it. A convenience only: the guidance's explicit
+        # --rev is what separates a late report of an older revision.
         mine = [(me["harness"], me["session_id"])] + [
             (me["harness"], sid) for sid in pr._predecessors(me["harness"], me["session_id"])]
         received = [r["n"] for r in record["revisions"]
                     if _received_by(rows.get(r["transfer_ref"]), mine)]
-        if not received:
+        delivered = [r["n"] for r in record["revisions"]
+                     if _delivered_to(rows.get(r["transfer_ref"]), mine)]
+        if not received and not delivered:
             return _refuse(head, "report-revision-unreceived",
                            revisions=",".join(str(r["n"]) for r in record["revisions"]),
                            next="report %s --rev N" % request_id)
-        revision = max(received)
+        revision = max(received or delivered)
     target = pr.revision_of(record, revision)
     if target is None:
         return _refuse(head, "revision-unknown")
@@ -384,6 +395,9 @@ def show(args, steward):
                     other = record["requester" if side == "in" else "recipient"]
                     print("%s %s %s %s │ %s" % (mark, record["id"], record["state"],
                                                 pr._name(other), record.get("title", "")))
+                    if side == "in" and record["state"] in pr._OPEN_STATES:
+                        print("  %s" % pr.report_commands(
+                            record["id"], pr.current_revision(record)["n"])["final"])
                     count += 1
         if not count:
             print("requests=none")
@@ -414,6 +428,10 @@ def show(args, steward):
             return 1
         refs = [("revision %d" % revision["n"], revision["transfer_ref"])] + [
             ("followup %d" % (index + 1), ref) for index, ref in enumerate(revision.get("followups") or ())]
+    if args.report is None and pr._same(pr.current_recipient(record), me) \
+            and record["state"] in pr._OPEN_STATES:
+        for kind, command in pr.report_commands(record["id"], revision["n"]).items():
+            print("report-%s: %s" % (kind, command))
     status = 0
     for label, ref in refs:
         try:

@@ -59,6 +59,17 @@ _LOCK_WAIT_S = 10.0
 SHOW_COMMAND = 'python3 "$AGENT_HOME/utilities/peer-steward.py" show'
 REPORT_COMMAND = 'python3 "$AGENT_HOME/utilities/peer-steward.py" report'
 
+
+def report_commands(request_id, revision):
+    """The three report commands for one revision, ``--rev`` filled in (D8-2).
+
+    A model uses them as written; the revision number is the one the line or body
+    it just read belongs to, so a late report names its own revision."""
+    base = "%s %s --rev %d" % (REPORT_COMMAND, request_id, revision)
+    return {"final": base + ' --result "<one line>"',
+            "partial": base + ' --partial --result "<one line>"',
+            "reject": base + ' --reject "<reason>"'}
+
 # One table for the three places that read a message's kind. A sealed request
 # role wins over the first line; the first line is the fallback for messages
 # that carry no request field. (kind, read_only)

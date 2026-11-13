@@ -3518,7 +3518,9 @@ that reaches a conversation names the request; the body stays sealed and the mod
 it with `show`. Delivery and work are separate: a receipt does not change a request's state;
 only a final or reject report, or the requester's cancel, closes it, and a partial report
 keeps it open. A report belongs to the revision it answers; for a superseded one it is
-kept there as late and closes nothing. A revision superseded or cancelled before delivery
+kept there as late and closes nothing. The guidance and `show` print each report command
+with its revision (`--rev N`); a report without `--rev` is taken for the newest revision
+received (else delivered), so when reporting an older revision's work use the `--rev` given. A revision superseded or cancelled before delivery
 is not sent; a delivered one is not recalled, and the cancel notice reaches the receiver
 at its next boundary. A request follows only a successor that Hearting's lineage confirms,
 and an unconfirmed same-name session neither inherits nor may report it. A report is not
