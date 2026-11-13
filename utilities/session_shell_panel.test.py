@@ -1351,6 +1351,32 @@ assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers
 """
         self.node(script, "panel-view.cjs")
 
+    def test_a_four_cell_context_keeps_the_worker_box_line_at_the_narrowest_panel(self):
+        # #1583 review follow-up (가): at 32 cells a four-cell percent (`100%`, or a token count
+        # `250K` with no window) made the box's `CTX` row one cell too wide and its right `│`
+        # fell off. Short of cells the row keeps `CTX` and the percent and lets the bar go, as
+        # the owner's row does; every row of the box keeps the panel's width and its right line.
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+// The gauge at the panel's width, as the backend lays it out (`max(5, min(10, (width-8)//4))` cells).
+const gauge=(width,pct)=>{const n=Math.max(5,Math.min(10,Math.floor((width-8)/4)));
+ if(!pct.endsWith('%'))return [D(pct)];const on=Math.round(n*parseInt(pct)/100);return [P('━'.repeat(on)),D('─'.repeat(n-on)),D(' '),P(pct)];};
+for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
+ const route={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
+  paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh'),ctx:P('52%'),gauge_row:gauge(width,'52%')},
+  workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',tool:'Edit',
+   paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P(pct),gauge_row:gauge(width,pct)}}]};
+ const rows=draw([route],width,60),seen=width+' '+pct+'\n'+rows.join('\n');
+ for(const s of rows)assert.equal(cells(s),width,seen);
+ const top=rows.findIndex(s=>/^│ │ ╭─ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ │ ╰─+╯ │ │$/.test(s));
+ assert(top>0&&bottom>top+1,seen);
+ for(const s of rows.slice(top+1,bottom))assert(/^│ │ │ .* │ │ │$/.test(s),seen);
+ const ctx=rows.slice(top+1,bottom).find(s=>s.includes('CTX'));
+ assert(ctx&&ctx.includes(pct),seen);
+}
+"""
+        self.node(script, "panel-view.cjs")
+
     def test_the_title_value_is_bold_in_the_sessions_harness_color(self):
         # Spec E9 rule 44: the TITLE row's value bold, in the session's harness color (Fleet's
         # `hb_*`), on every row it takes; the label stays dim. Without color (NO_COLOR) the weight

@@ -1018,8 +1018,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       if(size(who)<=size(lead))who=whoOf(lead,p,w.role,[],inner-5)||cut(lead,inner-5);
       // A model name longer than the line itself is cut with `…` rather than left out.
       if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-5);
-      const g=gaugeCells(p);
-      if(g)body.push([text('   '),...g]);
+      // Short of cells (a four-cell percent at the narrowest panel) the bar goes and `CTX` and the
+      // percent stay, as the owner's row gives way (#1583 review follow-up (가)).
+      const g=gaugeCells(p),fit=g&&3+size(g)>room?[...ctxLabel(),...gaugeOfPaint(p).pct]:g;
+      if(fit)body.push([text('   '),...fit]);
       const stage=w.stage?[text(w.stage,'loc_repo')]:[],tool=w.tool?[text(w.tool,'loc_repo')]:[];
       const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3-(E.length?size(E)+1:0);
       for(const t of [[...tool,...(w.target?[text(' '+w.target,'loc_repo')]:[])],[...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool,[]]){
