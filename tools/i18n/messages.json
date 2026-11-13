@@ -898,9 +898,9 @@
    "en": "failed {n}",
    "ko": "실패 {n}"
   },
-  "fleet.lab.n_more": {
-   "en": "+{n} more",
-   "ko": "외 {n}개"
+  "fleet.lab.n_groups": {
+   "en": "{n} groups",
+   "ko": "묶음 {n}개"
   },
   "fleet.lab.n_running": {
    "en": "running {n}",

@@ -199,8 +199,8 @@ class StewardCheckLabTest(CheckBase):
                 step(T0 + 3 * INTERVAL + 100)
                 self.assertEqual(self.notify.call_count, before + 1)
                 notice = self.notice()
-                self.assertIn("LAB: AMI 가변 화자 개선 — 실패 0·정체 0·미확인 1", notice["text"])
-                self.assertIn("지금 볼 것: 작은 모델", notice["text"])
+                self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", notice["text"])
+                self.assertIn("지금 볼 것: AMI 가변 화자 개선 — 작은 모델", notice["text"])
                 self.assertNotIn("20.4", notice["text"])
                 ack()
                 step(T0 + 3 * INTERVAL + 200)
@@ -243,6 +243,104 @@ class StewardCheckLabTest(CheckBase):
                 self.deliver_and_ack()
                 self.step(now + 100)
         self.assertEqual(outcomes, [True, False, False, False, False, False, True, False])
+
+    def walk_real(self, sid, actions):
+        duty = SC.register(HARNESS, sid, now=T0, store=self.store, ensure_runner=False)
+        outcomes = []
+        for index, action in enumerate(actions):
+            action()
+            self.board.clear_cache()
+            now = T0 + (index + 1) * (INTERVAL + 200)
+            before = self.notify.call_count
+            SC.advance(self.store.get(duty["id"]), self.store, now=now)
+            sent = self.notify.call_count > before
+            outcomes.append(sent)
+            if sent:
+                obs = self.store.get(duty["id"])["observation"]
+                receipt = SC._notice_record(sid, obs["notice_delivery_id"])["receipt"]
+                session_notice.validate(receipt)
+                claimed, _ = sweep.sweep_deliver(self.tmp, CARRIER, sid)
+                self.assertEqual(sweep.ack_delivered(self.tmp, sid, claimed, acked_by="test"), 1)
+                SC.advance(self.store.get(duty["id"]), self.store, now=now + 100)
+        return outcomes
+
+    def test_real_vanish_return_two_linked_runs_wakes_once(self):
+        self.catalog.run_write(self.root, lambda ctx: self.catalog.op_link(
+            ctx, "작은 모델", "small2"), now=self.now)
+        self.fixture.write_run(self.root, "small", status="succeeded", started=self.now - 7200,
+                               at=self.now - 4000, ended=self.now - 4000)
+        path = self.root / "resource-runs" / "small2.json"
+        for age in (120, 1200):
+            with self.subTest(age=age):
+                def readable():
+                    if path.exists():
+                        path.chmod(0o600)
+                    self.fixture.write_run(self.root, "small2", started=self.now - 600,
+                                           at=self.now - age,
+                                           stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+                actions = [readable] + [a for _ in range(4)
+                                       for a in (lambda: path.chmod(0), readable)]
+                try:
+                    outcomes = self.walk_real("vanish-" + str(age), actions)
+                finally:
+                    path.chmod(0o600)
+                # Initial ordinary notice remembers small2 when stale; the first
+                # missing read announces small once. Neither is forgotten later.
+                self.assertEqual(outcomes, [True, True] + [False] * 7)
+                print("real_vanish_return", age, outcomes)
+
+    def test_real_tidy_80names_long_targets_wakes_once(self):
+        root = self.fixture.make_root("tidy80")
+        self.fixture.register(root, {"groups": [{"display_name": "가" * 80}], "conditions": [
+            {"display_name": "나" * 80, "group": "가" * 80, "refs": {"runs": [{"run_id": "r"}]}}]})
+        self.targets = [target("t" * 39 + str(i), state="done") for i in range(5)]
+        self.rows[:] = [SimpleNamespace(harness=t["harness"], session_id=t["session_id"],
+                                       cwd=str(root.parent)) for t in self.targets]
+        def write(age):
+            self.fixture.write_run(root, "r", at=self.now - age,
+                                   stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+        outcomes = self.walk_real("tidy80", [lambda: write(300), lambda: write(1200)] +
+                                  [lambda: None] * 5)
+        self.assertEqual(outcomes, [True, True] + [False] * 5)
+        text = self.notice()["text"]
+        self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", text)
+        self.assertNotIn("지금 볼 것", text)
+        self.assertIn("`peer-steward steward off`", text)
+        print("real_tidy_80names_long_targets", outcomes, text)
+
+    def test_six_lab_read_failures_preserve_other_observation(self):
+        from fleet.collectors import project_status
+        baseline = REAL_OBSERVE(HARNESS, SID)
+        def without_lab(seen):
+            return {k: v for k, v in seen.items() if k not in ("lab", "lab_roots")}
+        patches = [
+            mock.patch.object(self.board, "read", side_effect=RuntimeError("broken")),
+            mock.patch.object(project_status, "artifact_root", side_effect=OSError("broken")),
+            mock.patch.dict(sys.modules, {"experiment_board": None}),
+            mock.patch.object(self.board, "read", return_value=({"visible": True}, []))]
+        for patch in patches:
+            with patch:
+                seen = REAL_OBSERVE(HARNESS, SID)
+                self.assertEqual(seen["lab"], {})
+                self.assertEqual(without_lab(seen), without_lab(baseline))
+        path = self.catalog.catalog_path(self.root)
+        path.chmod(0)
+        try:
+            self.board.clear_cache()
+            seen = REAL_OBSERVE(HARNESS, SID)
+            self.assertEqual(seen["lab"], {})
+            self.assertEqual(without_lab(seen), without_lab(baseline))
+        finally:
+            path.chmod(0o600)
+        path.write_text(path.read_text() + " " * (1024 * 1024))
+        self.board.clear_cache()
+        seen = REAL_OBSERVE(HARNESS, SID)
+        self.assertEqual(seen["lab"], {})
+        self.assertEqual(without_lab(seen), without_lab(baseline))
+        self.register()
+        with mock.patch.object(self.board, "read", side_effect=RuntimeError("broken")):
+            self.step(T0 + INTERVAL)
+        self.assertEqual(self.obs()["phase"], "notified")
 
     def test_only_new_values_even_new_best_name_do_not_change_signature(self):
         self.assertEqual(self.board.read(self.root)[0]["groups"][0]["headline"]["name"], "작은 모델")
@@ -287,7 +385,7 @@ class StewardCheckLabTest(CheckBase):
         self.register()
         self.step(T0 + INTERVAL)
         self.assertIn("미연결 1", self.notice()["text"])
-        self.assertIn("지금 볼 것: 작은 모델", self.notice()["text"])
+        self.assertIn("지금 볼 것: AMI 가변 화자 개선 — 작은 모델", self.notice()["text"])
         self.write_run("unlinked-two", 11.0)
         after = REAL_OBSERVE(HARNESS, SID)
         self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature("tidy-and-release", after))
@@ -304,7 +402,7 @@ class StewardCheckLabTest(CheckBase):
         self.assertEqual(set(seen["lab"]), {str(self.root), str(second)})
         self.register()
         self.step(T0 + INTERVAL)
-        self.assertIn("둘째 묶음 — 실패 0·정체 0·미확인 1", self.notice()["text"])
+        self.assertIn("지금 볼 것: 둘째 묶음 — 미확인 조건", self.notice()["text"])
         self.assertLessEqual(len(self.notice()["text"]), session_notice.MAX_TEXT)
 
     def test_foreign_registry_rows_are_never_read(self):
@@ -1837,7 +1935,7 @@ class LabRegressionTest(CheckBase):
         self.assertLessEqual(len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()), 2048)
         self.assertIn("`peer-steward steward check`", receipt["text"])
 
-    def test_whole_groups_attention_first_and_intact_advice(self):
+    def test_totals_and_one_new_unknown_name_pair_with_intact_advice(self):
         self.seen["open_work"] = [f"task {i} " + "x" * 55 for i in range(4)]
         groups = [dict(name=f"healthy-{i}", headline_name="best-model-" + "x" * 20,
                        unknown=0, failed=0, stagnant=0) for i in range(4)]
@@ -1846,10 +1944,11 @@ class LabRegressionTest(CheckBase):
         self.tick(self.labs(groups=groups))
         text = self.record()["receipt"]["text"]
         self.assertIn("`peer-steward steward check`", text)
-        self.assertIn(" | LAB: attention-group", text)
+        self.assertIn("지금 볼 것: attention-group — missing-condition", text)
         self.assertIn("미확인 12", text)
         self.assertIn("missing-condition", text)
-        self.assertRegex(text, r"외 [1-4]개")
+        self.assertIn("(묶음 5개)", text)
+        self.assertNotIn("외 ", text)
         self.assertNotIn("…", text)
 
     def test_runtime_failure_and_stagnation_display_without_waking(self):
@@ -1858,9 +1957,9 @@ class LabRegressionTest(CheckBase):
             with self.subTest(field=field):
                 labs = self.labs(**{field: 1})
                 self.assertEqual(self.tick(labs), 0)
-                self.assertIn("1", SC._lab_line({"lab": labs}))
+                self.assertIn("1", SC._lab_summary({"lab": labs}, [])[0])
 
-    def test_lab_falls_back_to_ordinary_notice_and_does_not_poison_retry(self):
+    def test_count_only_notice_and_failed_delivery_do_not_poison_retry(self):
         self.seen["lab"] = self.labs(groups=[dict(name="가" * 180, headline_name="나" * 80,
                                                 unknown=12, failed=0, stagnant=0)])
         self.seen["open_work"] = ["가" * 60 + str(i) for i in range(4)]
@@ -1871,19 +1970,18 @@ class LabRegressionTest(CheckBase):
         self.step(T0 + 2 * INTERVAL)
         self.assertEqual(self.obs()["phase"], "notified")
         receipt = self.record()["receipt"]
-        self.assertNotIn("LAB:", receipt["text"])
+        self.assertIn("LAB: 미확인 12·미연결 0·실패 0·정체 0", receipt["text"])
         self.assertIn("`peer-steward steward check`", receipt["text"])
 
-    def test_omitted_lab_is_not_remembered_or_repeated(self):
+    def test_oversized_names_use_counts_and_remember_all_runs(self):
         lab = self.labs(groups=[dict(name="가" * 180, headline_name="나" * 80,
                                    unknown=1, failed=0, stagnant=0)])
         self.assertEqual(self.tick(lab), 1)
-        self.assertNotIn("LAB:", self.notice()["text"])
-        self.assertFalse(self.obs().get("lab_notified"))
+        self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", self.notice()["text"])
+        self.assertNotIn("지금 볼 것", self.notice()["text"])
+        self.assertEqual(len(self.obs()["lab_notified"]), 1)
         self.assertEqual(self.tick(lab), 0)
         lab["/synthetic"]["groups"][0].update(name="짧은 묶음", headline_name="run A")
-        self.assertEqual(self.tick(lab), 1)
-        self.assertIn(" | LAB: 짧은 묶음", self.notice()["text"])
         self.assertEqual(self.tick(lab), 0)
 
     def test_korean_actions_without_lab_fit_receipt(self):
@@ -1897,7 +1995,7 @@ class LabRegressionTest(CheckBase):
     def test_receipt_size_sweep_with_and_without_lab(self):
         sizes = []
         for ko in range(20, 71, 5):
-            self.seen["open_work"] = ["한" * ko + "a" * (69 - ko) + str(i) for i in range(4)]
+            self.seen["open_work"] = [chr(ord("가") + i) * ko for i in range(4)]
             for count in (0, 2, 3, 5):
                 groups = [dict(name="묶음" + str(i), headline_name="모델" + str(i),
                                unknown=1, failed=0, stagnant=0) for i in range(count)]
@@ -1909,12 +2007,23 @@ class LabRegressionTest(CheckBase):
                 self.assertEqual(obs["phase"], "notified", (ko, count, obs))
                 receipt = SC._notice_record(sid, obs["notice_delivery_id"])["receipt"]
                 session_notice.validate(receipt)
+                text = receipt["text"]
+                self.assertIn("`peer-steward steward check`", text)
+                self.assertEqual(" | LAB: " in text, count > 0)
+                if count:
+                    self.assertIn(f"미확인 {count}·미연결 0·실패 0·정체 0 (묶음 {count}개)", text)
+                omitted = sum(work not in text for work in self.seen["open_work"])
+                if omitted:
+                    self.assertIn(f"+{omitted} more", text)
+                for fragment in text.split("Do these now: ")[1].split(". Then run")[0].split("; "):
+                    if not fragment.startswith("+"):
+                        self.assertIn(fragment, SC.next_actions(self.seen))
                 sizes.append((len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()),
                               len(receipt["text"])))
         print("receipt-size-sweep", len(sizes), "max-bytes", max(x[0] for x in sizes),
               "max-chars", max(x[1] for x in sizes))
 
-    def test_departed_roots_are_pruned_but_unreadable_current_roots_remain(self):
+    def test_departed_and_unreadable_roots_keep_announced_identities(self):
         lab = self.labs(unknown=1)
         self.tick(lab)
         before = self.obs()["lab_notified"]
@@ -1923,9 +2032,9 @@ class LabRegressionTest(CheckBase):
         self.assertEqual(self.obs()["lab_notified"], before)
         self.seen["lab_roots"] = []
         self.assertEqual(self.tick({}), 0)
-        self.assertFalse(self.obs()["lab_notified"])
+        self.assertEqual(self.obs()["lab_notified"], before)
         self.seen["lab_roots"] = ["/synthetic"]
-        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
 
     def test_new_unknown_group_precedes_runtime_failures(self):
         failed = [dict(name="실패 묶음 " + "가" * 30 + str(i), headline_name="나" * 30,
@@ -1934,45 +2043,36 @@ class LabRegressionTest(CheckBase):
         lab = self.labs(groups=failed + [dict(name="새 미확인", headline_name="new run",
                                             unknown=1, failed=0, stagnant=0)])
         self.assertEqual(self.tick(lab), 1)
-        self.assertIn(" | LAB: 새 미확인", self.notice()["text"])
+        self.assertIn("지금 볼 것: 새 미확인 — new run", self.notice()["text"])
         self.assertEqual(self.tick(lab), 0)
 
-    def test_folded_groups_get_a_turn_and_only_visible_runs_are_remembered(self):
-        groups = [dict(name="group-" + str(i) + "가" * 30, headline_name="model" + "나" * 20,
-                       unknown=1, failed=0, stagnant=0) for i in range(4)]
+    def test_six_groups_are_announced_together_and_remembered_once(self):
+        groups = [dict(name="묶음" + str(i) + "가" * 77, headline_name="나" * 80,
+                       unknown=1, failed=0, stagnant=0) for i in range(6)]
         lab = self.labs(groups=groups)
-        remembered = set()
-        for _ in range(4):
-            if len(remembered) == 4:
-                break
-            self.assertEqual(self.tick(lab), 1)
-            text = self.notice()["text"]
-            shown = [g for g in lab["/synthetic"]["groups"] if g["name"] in text]
-            for group in shown:
-                remembered.update(SC._lab_run_ids(group, unknown_only=True))
-            self.assertEqual(set(self.obs()["lab_notified"]["/synthetic"]), remembered)
-        self.assertEqual(len(remembered), 4)
-        for _ in range(3):
+        self.assertEqual(self.tick(lab), 1)
+        self.assertIn("LAB: 미확인 6·미연결 0·실패 0·정체 0 (묶음 6개)", self.notice()["text"])
+        self.assertEqual(len(self.obs()["lab_notified"]), 6)
+        for _ in range(7):
             self.assertEqual(self.tick(lab), 0)
 
-    def test_oversized_group_does_not_hide_smaller_new_problem(self):
+    def test_oversized_group_does_not_hide_any_new_problem(self):
         lab = self.labs(groups=[
             dict(name="가" * 180, headline_name="나" * 80, unknown=1, failed=0, stagnant=0),
             dict(name="small-group", headline_name="run B", unknown=1, failed=0, stagnant=0)])
         self.assertEqual(self.tick(lab), 1)
-        self.assertIn(" | LAB: small-group", self.notice()["text"])
-        self.assertIn("외 1개", self.notice()["text"])
-        self.assertEqual(len(self.obs()["lab_notified"]["/synthetic"]), 1)
+        self.assertIn("LAB: 미확인 2·미연결 0·실패 0·정체 0 (묶음 2개)", self.notice()["text"])
+        self.assertEqual(len(self.obs()["lab_notified"]), 2)
         for _ in range(3):
             self.assertEqual(self.tick(lab), 0)
 
-    def test_healthy_group_does_not_displace_actions(self):
+    def test_healthy_name_does_not_displace_actions_but_counts_remain(self):
         self.seen["open_work"] = [str(i) + "x" * 69 for i in range(4)]
         self.tick(self.labs(groups=[dict(name="healthy" + "가" * 30, headline_name="best" + "나" * 20,
                                         unknown=0, failed=0, stagnant=0)]))
         text = self.notice()["text"]
         self.assertNotIn("more", text)
-        self.assertNotIn("LAB:", text)
+        self.assertIn("LAB: 미확인 0·미연결 0·실패 0·정체 0", text)
         for work in self.seen["open_work"]:
             self.assertIn(work, text)
 
@@ -1986,7 +2086,7 @@ class LabRegressionTest(CheckBase):
         self.assertEqual(self.tick(lab), 1)
         self.assertEqual(self.tick(lab), 0)
 
-    def test_pruning_missing_summary_and_role_reset(self):
+    def test_missing_summary_retains_memory_and_role_reset_clears_it(self):
         lab = self.labs(unknown=1)
         self.tick(lab)
         before = self.obs()["lab_notified"]
@@ -1995,12 +2095,12 @@ class LabRegressionTest(CheckBase):
         empty = {"/synthetic": dict(groups=[], unlinked=0, unlinked_run_ids=[],
                                    unknown=0, failed=0, stagnant=0)}
         self.assertEqual(self.tick(empty), 0)
-        self.assertFalse(self.obs()["lab_notified"])
-        self.assertEqual(self.tick(lab), 1)  # absent then returned is a new observation
+        self.assertEqual(self.obs()["lab_notified"], before)
+        self.assertEqual(self.tick(lab), 0)  # absent then returned is the same run
         for i in range(20):
             lab["/synthetic"]["groups"][0]["rows"][0]["run_id"] = str(i)
             self.assertEqual(self.tick(lab), 1)
-            self.assertEqual(len(self.obs()["lab_notified"]["/synthetic"]), 1)
+            self.assertEqual(len(self.obs()["lab_notified"]), i + 2)
         SC.settle_session(HARNESS, SID, reason="role-released", store=self.store)
         self.register(now=self.clock)
         self.assertEqual(self.tick(lab), 1)
@@ -2012,7 +2112,8 @@ class LabRegressionTest(CheckBase):
         for lang, words in (("en", ("failed 1", "stuck 2", "unknown 12", "look now:", "unlinked 3")),
                             ("ko", ("실패 1", "정체 2", "미확인 12", "지금 볼 것:", "미연결 3"))):
             with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
-                line = SC._lab_line(seen)
+                counts, names, _ = SC._lab_summary(seen, [])
+                line = counts + names
                 for word in words:
                     self.assertIn(word, line)
         self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature(
@@ -2036,6 +2137,60 @@ class LabRegressionTest(CheckBase):
         self.seen["targets"] = [target()]
         self.assertEqual(self.tick({}), 1)
         self.assertEqual(self.tick({}), 1)
+
+    def test_unlinked_idless_tail_only_wakes_above_announced_high(self):
+        self.tick(self.labs())
+        for count, expected in ((65, 1), (65, 0), (64, 0), (65, 0), (66, 1), (0, 0), (66, 0)):
+            lab = self.labs(unlinked=count)
+            lab["/synthetic"]["unlinked_run_ids"] = lab["/synthetic"]["unlinked_run_ids"][:64]
+            self.assertEqual(self.tick(lab), expected, count)
+        self.assertEqual(sorted(dict(self.obs()["lab_notified"]).values()), [1] * 64 + [66])
+
+    def test_2000_replacement_runs_keep_only_1024_oldest_first(self):
+        lab = self.labs(unknown=1)
+        data = lab.pop("/synthetic")
+        lab["/synthetic/" + "long-root-" * 30] = data
+        data["groups"][0]["rows"][0]["condition_id"] = "condition-" * 30
+        announced = []
+        # Exercise the actual duty store and schedule; receipt delivery is covered
+        # above. An immediate fake ACK avoids accumulating 2000 delivery fixtures.
+        self.notify.side_effect = lambda *a, **kw: {"state": "pending"}
+        with mock.patch.object(SC, "_notice_record", return_value={"state": "acked"}), \
+                mock.patch.object(self, "deliver_and_ack", return_value=[]):
+            for index in range(2000):
+                data["groups"][0]["rows"][0]["run_id"] = "long-run-" * 30 + f"r{index:04d}"
+                self.assertEqual(self.tick(lab), 1)
+                memory = self.obs()["lab_notified"]
+                self.assertEqual(len(memory), min(index + 1, 1024))
+                announced.append(memory[-1])
+            remembered = self.obs()["lab_notified"]
+            self.assertEqual(remembered, announced[976:])
+            size = len(json.dumps(self.duty()).encode())
+            self.assertLess(size, 128 * 1024)
+            self.assertEqual(self.tick(lab), 0)
+        print("memory-2000", len(remembered), "record-bytes", size)
+
+    def test_installed_main_without_lab_memory(self):
+        self.tick({})  # same ordinary signature and duty shape as installed main
+        observation = self.obs()
+        observation.pop("lab_notified", None)
+        self.store.update(self.duty()["id"], observation=observation)
+        self.assertEqual(self.tick({}), 0)
+        self.assertEqual(self.tick(self.labs()), 0)
+        self.assertEqual(self.tick(self.labs(unknown=1)), 1)
+        self.assertEqual(self.tick(self.labs(unknown=1)), 0)
+
+    def test_long_tidy_names_are_removed_whole_before_lab_counts(self):
+        self.seen["targets"] = [target("대" * 150 + str(i), state="done") for i in range(5)]
+        self.tick(self.labs())
+        self.assertEqual(self.tick(self.labs(unknown=1)), 1)
+        text = self.notice()["text"]
+        self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", text)
+        self.assertIn("`peer-steward steward off`", text)
+        shown = sum(t["name"] in text for t in self.seen["targets"])
+        self.assertIn(f"+{5 - shown} more", text)
+        self.assertEqual(text.count("대"), shown * 150)
+        self.assertEqual(self.tick(self.labs(unknown=1)), 0)
 
     def test_unknown_and_unlinked_only_wake_above_notified_level(self):
         for index, value in enumerate((1, 0, 1, None, 1, 2, 1, 2)):
