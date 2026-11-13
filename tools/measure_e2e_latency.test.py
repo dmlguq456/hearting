@@ -730,6 +730,52 @@ class UnpublishedEventTests(unittest.TestCase):
         self.assertNotIn("not_visible", reasons[0])
 
 
+class ReplaceSamplesTests(unittest.TestCase):
+    """The pass right after a whole-registry replacement is a median of several, not one noisy pass."""
+
+    def write_log(self, path, root, spans):
+        with open(path, "w", encoding="utf-8") as handle:
+            for index, (t0, t1) in enumerate(spans, 1):
+                handle.write(json.dumps({"root": root, "index": index, "t0": int(t0 * 1e9), "t1": int(t1 * 1e9),
+                                         "seg": {}, "metrics": {}}) + "\n")
+
+    def test_each_replacement_is_sampled_and_the_median_is_reported(self):
+        warm = [(2, 3), (4, 5), (6, 7), (7.5, 8.5)]
+        after = [(9, 10), (11, 11.5), (15, 17), (18, 19), (21, 24), (25, 26)]    # 1 s, settle, 2 s, settle, 3 s, settle
+        times = iter([int(8.8e9), int(14e9), int(20e9)])
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            producer, fleet = Path(tmp) / "producer.jsonl", Path(tmp) / "fleet.jsonl"
+            self.write_log(producer, "human_wait_state._refresh_cache", [(0, 1)] + warm + after)
+            self.write_log(fleet, "__init__.collect_all", [(0, 1)] + warm + after)
+
+            class FakeChildren:
+                def __init__(self, *args, **kwargs):
+                    self.producer_log, self.fleet_log = producer, fleet
+
+                def start_producer(self):
+                    pass
+
+                def start_fleet(self):
+                    pass
+
+                def close(self):
+                    pass
+
+            with mock.patch.object(t12, "Children", FakeChildren), \
+                    mock.patch.object(t12.events, "registry_replace",
+                                      side_effect=lambda fixture, n: {"t_ns": next(times)}), \
+                    mock.patch.object(t12.time, "sleep", lambda _s: None):
+                out = t12.measure_replace({"rows": 1, "bytes": 2}, scratch=Path(tmp), warm_passes=3)
+        self.assertEqual(out["replacements"], 3)
+        for role in ("producer", "fleet"):
+            entry = out["roles"][role]
+            self.assertEqual(entry["after_samples_s"], [1.0, 2.0, 3.0])
+            self.assertEqual(entry["after_replace_s"], 2.0)
+            self.assertEqual(entry["warm_median_s"], 1.0)
+            self.assertEqual(entry["extra_s"], 1.0)
+            self.assertEqual(entry["after_row"]["dur_s"], 2.0)       # the row shown is the median pass itself
+
+
 class PhasePlanTests(unittest.TestCase):
     def test_every_kind_covers_the_whole_cadence_and_the_plan_reproduces(self):
         kinds = ("worker-tool", "answer-wait", "owner-dead")

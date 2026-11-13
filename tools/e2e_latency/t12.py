@@ -744,52 +744,70 @@ def _median(values):
     return data[mid] if len(data) % 2 else (data[mid - 1] + data[mid]) / 2
 
 
-def measure_replace(fixture: dict, *, scratch: Path, warm_passes: int = 3, timeout: float = 400.0) -> dict:
+def measure_replace(fixture: dict, *, scratch: Path, warm_passes: int = 3, timeout: float = 400.0,
+                    replacements: int = 3) -> dict:
     """Warm unchanged passes versus the pass right after a whole-registry replacement.
 
-    Open routes and sessions stay as they are, no event is injected apart from
-    the replacement; both children run as in ``measure``. The result carries the
-    median warm duration, the after-replace duration and the extra the replacement
+    Open routes and sessions stay as they are, no event is injected apart from the
+    replacements; both children run as in ``measure``. The registry is replaced
+    ``replacements`` times, each from a settled state (both roles have run a pass since the
+    previous replacement), and the pass right after each one is a sample: one pass is too
+    noisy to compare two history sizes by. The result carries the median warm duration, the
+    median after-replace duration with all of its samples and the extra the replacement
     adds, for the producer and for the Fleet collect, with their registry metrics.
     """
     children = Children(fixture, scratch)
-    after_t = None
+    after_times: list[int] = []
+
+    def read():
+        return (shim_pass.read_passes(children.producer_log),
+                [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"])
+
+    def wait_for(predicate, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            producer, fleet = read()
+            if predicate(producer, fleet):
+                return True
+            time.sleep(0.2)
+        return False
+
     try:
         children.start_producer()
         children.start_fleet()
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            producer = shim_pass.read_passes(children.producer_log)
-            fleet = [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"]
-            if len(producer) >= 1 + warm_passes and len(fleet) >= 1 + 5:
-                break
-            time.sleep(0.5)
+        wait_for(lambda producer, fleet: len(producer) >= 1 + warm_passes and len(fleet) >= 1 + 5, timeout)
         time.sleep(0.3)
-        event = events.registry_replace(fixture, 0)
-        after_t = event["t_ns"]
-        deadline = time.monotonic() + 90.0
-        while time.monotonic() < deadline:
-            producer = shim_pass.read_passes(children.producer_log)
-            fleet = [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"]
-            if (any(r["t0"] >= after_t for r in producer)
-                    and any(r["t0"] >= after_t for r in fleet)):
-                break
-            time.sleep(0.2)
-        producer = shim_pass.read_passes(children.producer_log)
-        fleet = [r for r in shim_pass.read_passes(children.fleet_log) if r["root"] == "__init__.collect_all"]
+        for n in range(max(1, replacements)):
+            event = events.registry_replace(fixture, n)
+            after_times.append(event["t_ns"])
+            at = event["t_ns"]
+            wait_for(lambda producer, fleet: any(r["t0"] >= at for r in producer)
+                     and any(r["t0"] >= at for r in fleet), 90.0)
+            # settle: a pass of each role that began after the one that saw the replacement ended
+            producer, fleet = read()
+            seen = [next((r["t1"] for r in rows if r["t0"] >= at), at) for rows in (producer, fleet)]
+            wait_for(lambda producer, fleet: any(r["t0"] > seen[0] for r in producer)
+                     and any(r["t0"] > seen[1] for r in fleet), 30.0)
+        producer, fleet = read()
     finally:
         children.close()
-    out = {"rows": fixture.get("rows"), "registry_bytes": fixture.get("bytes"), "roles": {}}
+    first_after = after_times[0]
+    out = {"rows": fixture.get("rows"), "registry_bytes": fixture.get("bytes"), "roles": {},
+           "replacements": len(after_times)}
     for role, rows in (("producer", producer), ("fleet", fleet)):
-        before = [r for r in rows if r["t1"] <= after_t][1:]  # drop the cold pass
-        after = next((r for r in rows if r["t0"] >= after_t), None)
+        before = [r for r in rows if r["t1"] <= first_after][1:]  # drop the cold pass
+        afters = [next((r for r in rows if r["t0"] >= at), None) for at in after_times]
+        afters = [r for r in afters if r is not None]
         warm = [(r["t1"] - r["t0"]) / 1e9 for r in before]
         entry = {"warm_passes": len(warm), "warm_median_s": _median(warm),
                  "warm_samples_s": [round(v, 4) for v in warm]}
-        if after is not None:
-            dur = (after["t1"] - after["t0"]) / 1e9
-            entry.update(after_replace_s=round(dur, 4), extra_s=round(dur - (entry["warm_median_s"] or 0), 4),
-                         after_row=_pass_row(0, "after-replace", after, role),
+        if afters:
+            durations = sorted(((r["t1"] - r["t0"]) / 1e9, i) for i, r in enumerate(afters))
+            dur, pick = durations[len(durations) // 2] if len(durations) % 2 else durations[len(durations) // 2 - 1]
+            median = _median([d for d, _ in durations])
+            entry.update(after_replace_s=round(median, 4), extra_s=round(median - (entry["warm_median_s"] or 0), 4),
+                         after_samples_s=[round(d, 4) for d, _ in sorted(durations, key=lambda x: x[1])],
+                         after_row=_pass_row(0, "after-replace", afters[pick], role),
                          warm_row=_pass_row(0, "warm-unchanged", before[-1], role) if before else None)
             if entry["warm_median_s"] is not None:
                 entry["warm_median_s"] = round(entry["warm_median_s"], 4)

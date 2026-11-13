@@ -185,7 +185,7 @@ def d1_lines(scale: dict) -> list[str]:
         return []
     met = sum(1 for row in rows if row["met"])
     lines = [f"**d1 (history 2배, 판정 = 전체 시간 large/small < {D1_LIMIT:.2f}, 무변화·교체 직후 둘 다): "
-             f"{met}/{len(rows)} 칸 충족**"]
+             f"{met}/{len(rows)} 칸 충족** (교체 직후 = registry를 여러 번 바꾼 직후 pass들의 중앙값)"]
 
     def fmt(value, spec=".3f"):
         return "-" if value is None else format(value, spec)
