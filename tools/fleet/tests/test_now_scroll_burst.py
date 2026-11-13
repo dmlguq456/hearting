@@ -1,4 +1,7 @@
 """Exact NOW joins and hermetic real-loop terminal bursts (no live state)."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import curses
 import fcntl
@@ -211,7 +214,9 @@ def pty_probe(source_tree, sandbox, wheel=False, at_top=False, barrier='s'):
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 36, 168, 0, 0))
     read_fd, write_fd = os.pipe()
     env = {'PATH': '/usr/bin:/bin', 'TERM': 'xterm-256color', 'LC_ALL': 'C.UTF-8',
-           'HOME': str(sandbox), 'PYTHONDONTWRITEBYTECODE': '1'}
+           'HOME': str(sandbox), 'PYTHONDONTWRITEBYTECODE': '1',
+           # already inside the runner's isolation: do not re-enter it with the fixture HOME
+           'HEARTING_TEST_ISOLATED': os.environ['HEARTING_TEST_ISOLATED']}
     process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--child',
         str(source_tree), str(sandbox), str(write_fd)], stdin=slave, stdout=slave,
         stderr=slave, env=env, cwd=sandbox, pass_fds=(write_fd,), start_new_session=True)

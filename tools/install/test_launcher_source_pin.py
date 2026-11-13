@@ -16,6 +16,9 @@ to a worktree's `.agent_reports` and redirects to the primary checkout — so th
 were the inconsistent surface, not a new policy. `primary_checkout()` resolves it the same
 way `utilities/artifact-root.sh` does: the first `git worktree list --porcelain` entry.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import subprocess
 import sys

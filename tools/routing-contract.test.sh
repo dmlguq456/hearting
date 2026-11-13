@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/run-tests.py" --direct-run bash "$0" "$@"
 # routing-contract.test.sh — semantic-primary routing / main-session role /
 # delegation-surface 계약의 deterministic cross-doc 검사.
 # 2026-07-14 사고(재평가+보고서 업데이트가 autopilot-refine primary 로 오라우팅,
