@@ -494,7 +494,8 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 "harness": t_harness or "-", "session_id": t_sid,
                 "state": state,
                 "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
-                             if t_sid and not target.get("unresolved") else "unknown"),
+                             if t_sid else "unknown"),
+                **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
@@ -584,9 +585,11 @@ def _signature(action: str, observation: dict) -> str:
 
 def _quiet(observation: dict) -> bool:
     """No live unfinished target: an unchanged state sends no further model turn. Open
-    records alone do not repeat; a live unfinished target is checked every interval."""
+    records alone do not repeat; a live unfinished target is checked every interval.
+    Unresolved targets remain visible, but only repeat when positively live."""
     return not any(t["state"] != "done" and t["liveness"] != "ended"
-                   for t in observation["targets"])
+                   for t in observation["targets"]
+                   if not t.get("unresolved") or t["liveness"] == "live")
 
 
 def _classify(observation: dict) -> str:
