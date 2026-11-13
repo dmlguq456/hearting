@@ -184,7 +184,7 @@ from .render_explorer import (  # noqa: F401
 )
 from .render_routes import (  # noqa: F401
     _append_segment, _BAR_ROLES, _clamp_offset, _click_target_excluded, _collect_governor,
-    _collect_memory, _collect_memory_observed, _collect_project_status, _entry_id, _GATE_MARK,
+    _collect_memory, _collect_memory_observed, _collect_project_status, _collect_experiment_status, _entry_id, _GATE_MARK,
     _gpu_strip_keys, _HFILL, _hit_at, _INSET, _is_fill, _jobs_unconfirmed,
     _known_parentless_support_job, _malformed, _observation_lines, _opencode_availability_text,
     _PAD_IN, _painted_hit_spans, _plain, _reading_legend, _route_card_l1, _route_job_row,
@@ -5559,6 +5559,7 @@ def render_once(collect_all, hfilter, section, *, compute_hosts_refresh=None):
         size = shutil.get_terminal_size((100, 45))
         snapshot.governor, snapshot.memory = governor_snapshot, mem_snapshot
         snapshot.project_status = _collect_project_status(sessions)
+        snapshot.experiment_status = _collect_experiment_status(sessions)
         gitinfo.enrich_entities(list(sessions) + list(jobs), schedule_ahead=False)
         frame = _explorer_once_frame(snapshot, size.columns, size.lines, detail=True)
         sys.stdout.write("\n".join(frame.text_rows()).rstrip() + "\n")
@@ -6816,6 +6817,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             value.memory, memory_state = _collect_memory_observed(include_backlog=_EXPLORER_ENABLED)
             value.governor = governor
             value.project_status = _collect_project_status(value.sessions)
+            value.experiment_status = _collect_experiment_status(value.sessions)
             observations = dict(getattr(value, "observations", None) or {})
             observations["optional:memory"] = {"state": memory_state,
                                                 "observed_at": time.time()}

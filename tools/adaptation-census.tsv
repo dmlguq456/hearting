@@ -286,6 +286,7 @@ utility-deferred	dispatch_supervisor_terminal.py
 utility-deferred	dispatch_terminal_commit.py
 utility-deferred	dispatch_v20.test.py
 utility-deferred	dispatch_wrapper_common.py
+utility-deferred	experiment_board.py
 utility-deferred	experiment_catalog.py
 utility-deferred	extract_web_figures.py
 utility-deferred	fleet_cutover_gate.py

@@ -1022,18 +1022,22 @@ def _public_point(raw: Any) -> Optional[Dict[str, Any]]:
     return {"epoch": raw.get("epoch"), "value": _num(raw.get("value")), "nonfinite": bool(raw.get("nonfinite"))}
 
 
+def _keyed_point(key: str, raw: Any) -> Optional[Dict[str, Any]]:
+    point = _public_point(raw)
+    return None if point is None else {"key": key, **point}
+
+
 def _observed(summary: Mapping[str, Any], key: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """(latest, best) for the declared metric; falls back to the run's own decision metric so a
-    different metric shows up as a mismatch rather than as no value."""
+    different metric shows up as a mismatch rather than as no value.  Both points carry the key
+    they were measured in, so another metric's best never reads as the declared metric's value."""
     latest_metrics = summary.get("latest_metrics") if isinstance(summary.get("latest_metrics"), dict) else {}
     best_metrics = summary.get("best_metrics") if isinstance(summary.get("best_metrics"), dict) else {}
     if key and isinstance(latest_metrics.get(key), dict):
-        latest = {"key": key, **_public_point(latest_metrics[key])}
-        return latest, _public_point(best_metrics.get(key))
+        return _keyed_point(key, latest_metrics[key]), _keyed_point(key, best_metrics.get(key))
     own = summary.get("metric") if isinstance(summary.get("metric"), str) else None
-    latest = _public_point(summary.get("latest"))
-    if latest is not None and own:
-        return {"key": own, **latest}, _public_point(summary.get("best"))
+    if own and isinstance(summary.get("latest"), dict):
+        return _keyed_point(own, summary.get("latest")), _keyed_point(own, summary.get("best"))
     return None, None
 
 
@@ -1301,6 +1305,11 @@ def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callabl
     metric = group.get("metric") or {}
     unit = metric.get("unit") or None
     parts: List[str] = []
+    # The row's own run state in words (RV-PR1596-R2): running, or ended without a recorded outcome.
+    if row.get("run_status") == "running":
+        parts.append(t("experiment.run_state.running"))
+    elif (row.get("unknown") or {}).get("run_status") == "row-ended":
+        parts.append(t("experiment.run_state.row-ended"))
     progress = row.get("progress")
     if progress and progress.get("reached") is not None:
         parts.append(t("experiment.progress", reached=progress["reached"],
