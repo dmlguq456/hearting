@@ -13,6 +13,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from unittest import mock
@@ -2341,12 +2342,23 @@ class OwnerCandidateFloorProofTest(unittest.TestCase):
             stream.write(data)
 
     def _rewrite_in_place(self, data):
-        """Same inode, new bytes, and the old mtime restored."""
+        """Same inode, new bytes, and the old mtime restored.
+
+        Only the ctime then tells the next read that the bytes changed. A kernel
+        with a coarse timestamp clock can leave it equal to the stat that read
+        saw, so this returns once the ctime has really moved.
+        """
         info = os.stat(self.jobs)
         with self.jobs.open("r+b") as stream:
             stream.truncate(0)
             stream.write(data)
-        os.utime(self.jobs, ns=(info.st_atime_ns, info.st_mtime_ns))
+        deadline = time.monotonic() + 5.0
+        while True:
+            os.utime(self.jobs, ns=(info.st_atime_ns, info.st_mtime_ns))
+            if os.stat(self.jobs).st_ctime_ns != info.st_ctime_ns:
+                return
+            self.assertLess(time.monotonic(), deadline, "the registry ctime never moved")
+            time.sleep(0.001)
 
     def _read(self, how):
         if how == "cold":
