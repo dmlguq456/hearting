@@ -430,12 +430,23 @@ def _codex_server_busy(thread_id):
         endpoint = resolve_queue_socket()
         if not endpoint.is_socket():
             return False
-        if codex_queue_delivery._latest_turn_status(endpoint, thread_id, timeout=1.0) in {
+        if codex_queue_delivery._latest_turn_status(endpoint, thread_id, timeout=_read_timeout(1.0)) in {
                 "inProgress", "in_progress", "running"}:
             return True
-        return bool(codex_queue_delivery.list_queue(endpoint, thread_id, timeout=1.0))
+        return bool(codex_queue_delivery.list_queue(endpoint, thread_id, timeout=_read_timeout(1.0)))
     except Exception:  # noqa: BLE001 - an optional reader never blocks the rollout path
         return False
+
+
+# The wait's remaining time, so one slow App Server read cannot outlast the
+# caller's deadline (None: no deadline).
+_READ_BUDGET = None
+_UNREADABLE_LIMIT = 8  # consecutive unreadable passes before an unbounded wait gives up
+
+
+def _read_timeout(default):
+    budget = _READ_BUDGET
+    return default if budget is None else max(0.05, min(default, budget))
 
 
 def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, server=None):
@@ -443,14 +454,25 @@ def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, se
 
     This is a bounded foreground wait when a timeout is supplied. It reads the
     existing native status sources; unknown observations never become terminal.
+    A pass that cannot read the session is retried within the deadline (a
+    moment's unreadable record is not an unknown session); once the process
+    seen earlier is provably gone, the wait ends as `session_ended`.
     """
+    global _READ_BUDGET
     deadline = None if timeout_ms is None else time.monotonic() + max(0, timeout_ms) / 1000
     first = None
+    seen = None  # the last agent read: its pid birth is what a later death is proven against
+    misses = 0
     while True:
         from peer_steward_native import native_agent, native_lifetime
-        payload = native_agent(harness, session_id, pane=pane, server=server)
+        _READ_BUDGET = None if deadline is None else max(0.0, deadline - time.monotonic())
+        try:
+            payload = native_agent(harness, session_id, pane=pane, server=server)
+        finally:
+            _READ_BUDGET = None
         agent = (payload or {}).get("result", {}).get("agent") if isinstance(payload, dict) else None
         if isinstance(agent, dict):
+            seen, misses = agent, 0
             state = agent.get("agent_status", "unknown")
             if (state in until) if until else (first is not None and state != first
                                                 and first != "unknown" and state != "unknown"):
@@ -463,8 +485,16 @@ def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, se
             if lifetime == "ended":
                 return {"error": {"code": "session_ended"}, "agent": agent}
         elif payload is None:
-            return {"error": {"code": "unknown"}}
+            misses += 1
+            if seen is not None and native_lifetime(
+                    harness, session_id, pid=seen.get("pid"), pid_start=seen.get("pid_start"),
+                    pid_namespace=seen.get("pid_namespace")) == "ended":
+                return {"error": {"code": "session_ended"}, "agent": seen}
+            if deadline is None and misses >= _UNREADABLE_LIMIT:
+                return {"error": {"code": "unknown"}}
         if deadline is not None and time.monotonic() >= deadline:
+            if agent is None and payload is None:
+                return {"error": {"code": "unknown"}}
             return {"error": {"code": "timeout"}}
         delay = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
         time.sleep(delay)
