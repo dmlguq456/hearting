@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-liveness.test.sh — harness-layer-sync §4.1 / HLS-6 회귀 테스트.
 #   증명 대상: non-profile job 의 transcript 를 runtime-root(~/.claude/projects/)에서 찾아야 한다.
 #   과거 버그: PROJ="$AGENT_HOME/projects" 라 하네스 소스 repo 를 봐 살아있는 job 을 DEAD 오탐(2026-07-09).

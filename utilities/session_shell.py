@@ -859,7 +859,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     import questions
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
-    from fleet.session_line import line_segments
+    from fleet.session_line import line_segments, fresh_part
     from fleet.session_line import status_lines
     from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
@@ -906,7 +906,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
         colors = 1 << 24
     def styled(parts):
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
+        # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
+        # rest of the Git words where it shows no hue (mono, eight colors).
+        return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
+                 **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
     segments = styled(line_segments(values, columns))
     # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, two at most (the
     # journal Fleet reads, read again only when it changed); their headlines ride the open-work

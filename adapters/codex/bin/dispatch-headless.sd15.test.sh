@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-headless.sd15.test.sh — SD-15 (OPERATIONS §5.10 ⑨) limit-사망 즉시 감지 회귀 (codex).
 #   Homomorphic with adapters/claude/bin/dispatch-headless.sd15.test.sh. codex 는 --start 가
 #   preflight projection 게이트(capability-info/mode-info/headless --check)를 거치므로, bare
