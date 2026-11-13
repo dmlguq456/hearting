@@ -3,6 +3,9 @@
 
 Runnable directly or via `python3 -m unittest fleet.tests.test_f19_memory -v` (from `tools/`).
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import datetime
 import json
 import os
@@ -495,6 +498,48 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertIsNone(memcol.latest_saved("nothing-here")[0])
         self.journal.unlink()
         self.assertIsNone(session_work.latest_memory("/home/demo/repo")[0])
+
+    def test_recent_saved_memory_gives_two_records_from_the_same_one_read(self):
+        # Spec E9 rule 46 (c): the MEM section's two newest records come from the journal read
+        # the MEM row already made (one read for any number of panels and calls, nothing else
+        # opened), newest first; a supersede and its replacement's own add name one record, so
+        # it is shown once and the next record takes the second place.
+        self._make_db([{"id": rid, "cwd_origin": "git:github.com/team/repo", "type": "decision",
+                        "headline": "headline " + rid, "updated": "2026-11-13"} for rid in ("rec-a", "rec-b", "rec-c")])
+        _write_lines(self.journal, [
+            _event("2026-11-13T08:00:00", "add", rtype="lesson", snippet="first", cwd="/home/demo/repo", id="rec-a"),
+            _event("2026-11-13T08:30:00", "add", rtype="decision", snippet="second", cwd="/home/demo/repo", id="rec-old"),
+            _event("2026-11-13T09:00:00", "add", rtype="decision", snippet="third", cwd="/home/demo/repo", id="rec-b"),
+            _event("2026-11-13T09:00:00", "supersede", rtype="decision", snippet="superseded_by=rec-b",
+                   cwd="/home/demo/repo", id="rec-old"),
+            _event("2026-11-13T09:30:00", "add", snippet="other repo", cwd="/home/demo/other", id="rec-o"),
+        ])
+        from fleet import session_work
+        memcol._latest_cache.clear()
+        reads = mock.Mock(wraps=memcol._read_saved_journal)
+        with mock.patch.object(memcol, "_read_saved_journal", reads):
+            rows, paths = session_work.recent_memory("/home/demo/repo")
+            latest, _paths = session_work.latest_memory("/home/demo/repo")
+            again, _paths = session_work.recent_memory("/home/demo/repo")
+        self.assertEqual(reads.call_count, 1)
+        self.assertEqual(paths, [str(self.journal)])
+        self.assertEqual([(row["id"], row["action"], row["headline_id"]) for row in rows],
+                         [("rec-old", "supersede", "rec-b"), ("rec-a", "add", "rec-a")])
+        self.assertEqual(latest, rows[0]); self.assertEqual(again, rows)
+        self.assertEqual(len(session_work.recent_memory("/home/demo/repo", 1)[0]), 1)
+        # Both headlines ride the one open-work query.
+        connects = mock.Mock(wraps=memcol.sqlite3.connect)
+        with mock.patch.object(session_work, "project_of", return_value="repo"), \
+                mock.patch.object(memcol.sqlite3, "connect", connects):
+            work, _paths = session_work.observe("/home/demo/repo", tuple(row["headline_id"] for row in rows))
+        self.assertEqual(connects.call_count, 1)
+        self.assertEqual((work.headlines.get("rec-b"), work.headlines.get("rec-a")), ("headline rec-b", "headline rec-a"))
+        # One record only, none, no journal.
+        self.assertEqual([row["id"] for row in memcol.recent_saved("other")[0]], ["rec-o"])
+        self.assertEqual(memcol.recent_saved("nothing-here")[0], [])
+        self.journal.unlink()
+        self.assertEqual(session_work.recent_memory("/home/demo/repo"), ([], [str(self.journal)]))
+        self.assertEqual(session_work.recent_memory(""), ([], []))
 
     def test_latest_saved_asks_each_cwds_repository_once_per_read(self):
         # The journal is shared by every repository and every panel reads it again on any

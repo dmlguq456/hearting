@@ -714,7 +714,8 @@ function observeCompactRuntimeStatus(ctx, sid, status) {
 }
 
 function recordNativeTurnStatus(ctx, sid, status) {
-  const pane = process.env.HERDR_PANE_ID || ""
+  // The reader keys the record by the same pane hint: Herdr's pane, else this TUI's tmux pane.
+  const pane = paneHint()
   const endpoint = process.env.AGENT_HERDR_SESSION || "default"
   const origin = paneNativeOrigin
   const binding = paneContexts.get(ctx)

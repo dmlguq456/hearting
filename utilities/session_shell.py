@@ -44,14 +44,16 @@ def _private_json(path: Path, limit: int):
 
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
-                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time"}
+                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time",
+                    "rule_motion": "on"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
               "shade": ("none", "light", "medium")}
 # What a folded route row carries besides its title, harness and context:
-# its elapsed time or its model (spec rule 7). Same per-key fallback.
-CHOICES = {**APPEARANCE, "route_line": ("time", "model")}
+# its elapsed time or its model (spec rule 7). Whether the rule under the head's metadata
+# moves with the session's state (spec E9 rule 47 (e)). Same per-key fallback.
+CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("on", "off")}
 
 
 def _appearance(value):
@@ -848,7 +850,7 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="") -> dict:
+                     upgrade_note="", native_model=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -857,13 +859,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     import questions
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
-    from fleet.session_line import line_segments
+    from fleet.session_line import line_segments, fresh_part
     from fleet.session_line import status_lines
     from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count, latest_memory
+    from fleet.session_work import observe as observe_work, open_count, recent_memory
     from fleet.session_panel import presentation
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
@@ -899,16 +901,26 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     board = session_questions(harness, sid, view=view, retained=retained_questions)
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+    # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving
+    # rule's breath may use it (spec E9 rule 47); every other color stays a 256-color index.
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        colors = 1 << 24
     def styled(parts):
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
+        # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
+        # rest of the Git words where it shows no hue (mono, eight colors).
+        return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
+                 **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    # Spec E9 rule 37 (b): the repo's newest saved memory row (the journal Fleet reads, read
-    # again only when it changed); its headline rides the open-work query below.
-    memory_row, memory_paths = latest_memory(values.get("cwd"))
+    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, two at most (the
+    # journal Fleet reads, read again only when it changed); their headlines ride the open-work
+    # query below.
+    memory_rows, memory_paths = recent_memory(values.get("cwd"))
     work, work_paths = observe_work(values.get("cwd"),
-                                    (memory_row["headline_id"],) if memory_row and memory_row.get("headline_id") else ())
-    if memory_row:
-        values["memory_latest"] = {**memory_row, "headline": work.headlines.get(str(memory_row.get("headline_id")), "")}
+                                    tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
+    if memory_rows:
+        values["memory_recent"] = [{**row, "headline": work.headlines.get(str(row.get("headline_id")), "")}
+                                   for row in memory_rows]
+        values["memory_latest"] = values["memory_recent"][0]
     watched.extend(work_paths)
     watched.extend(memory_paths)
     human_line = last_input(display, time.time())
@@ -996,6 +1008,12 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
+    # The model name the host reads off the native's own screen, painted by the rule route rows
+    # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
+    # panel keeps no family table of its own. Display only.
+    if isinstance(native_model, str) and 0 < len(native_model) <= 128 and native_model.isprintable():
+        from fleet.session_line import _model_key
+        panel["native_model_part"] = styled([(native_model, _model_key(native_model, harness=harness))])[0]
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
@@ -1254,7 +1272,8 @@ def _backend_operation(request: dict) -> dict:
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,
-            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "")}
+            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "",
+            native_model=request.get("native_model"))}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":

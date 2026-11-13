@@ -1365,6 +1365,10 @@ def _residue_text(receipt: dict) -> str:
             "stop it if it is no longer needed. Nothing is signalled automatically.")
 
 
+# The fixed opening of a needs-attention notice; a reader can tell Hearting's own text by it.
+NEEDS_ATTENTION_HEAD = "Hearting supervision needs attention. This is not workflow completion. "
+
+
 def _printed(name: str) -> str:
     from parent_next_directive import entrypoint
     return entrypoint(Path(__file__).resolve().parents[1], f"utilities/{name}")
@@ -1925,8 +1929,8 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
         "does not require a user decision. Ask about cancellation only when actual unfinished work "
         "requires that decision under its existing authority; "
     )
-    return ("Hearting supervision needs attention. This is not workflow completion. "
-            f"reason={receipt['reason']} owner={receipt['owner_attempt_id']}. "
+    return (NEEDS_ATTENTION_HEAD
+            + f"reason={receipt['reason']} owner={receipt['owner_attempt_id']}. "
             "The controller retains waiting/recovery responsibility. Explain the blockage to the user "
             "and inspect these exact attempts. Do not infer death, erase rows, or retry from this notice. "
             + disposition +

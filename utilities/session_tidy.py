@@ -3162,6 +3162,25 @@ def is_task_notification(prompt_text: str) -> bool:
     return runtime_turn_source(prompt_text) == "notification"
 
 
+def _bound_delivery_source(prompt_text: str, sid: str) -> str:
+    """``runtime`` when the whole prompt is a Hearting delivery stored for this exact session.
+
+    A Codex native-queue item arrives as a user message ending in its receipt marker; the
+    marker must bind to that delivery's stored identity (the same proof its ACK uses) and
+    the rest must be the text Hearting sent, like ``runtime_turn_source``: a person who
+    pastes a notice with words of their own is still the person.
+    """
+    if not isinstance(prompt_text, str) or "HEARTING_RECEIPT_V1" not in prompt_text or not sid:
+        return ""
+    try:
+        from dispatch_contract import dispatch_state_roots, resolve_agent_home
+        import dispatch_recipient_receipt as receipt
+        roots = list(dict.fromkeys(dispatch_state_roots(resolve_agent_home())))
+        return "runtime" if receipt.bound_delivery_ids(prompt_text, sid, roots) else ""
+    except Exception:  # noqa: BLE001 - unproven stays the person's prompt
+        return ""
+
+
 def _current_request_origin(prompt_text: str, harness: str, sid: str) -> Optional[dict]:
     """Use the common transfer reader on this prompt only; never search nearby receipts."""
     if not prompt_text:
@@ -3661,6 +3680,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             sequence = bump_prompt_seq(seat, harness, sid, now)
             runtime_source = runtime_turn_source(prompt_text)
             request_origin = None if runtime_source else _current_request_origin(prompt_text, harness, sid)
+            if not runtime_source and not request_origin:
+                runtime_source = _bound_delivery_source(prompt_text, sid)
             self_request = matching_tidy_claim(seat, harness, sid, prompt_text, sequence)
             notification = bool(runtime_source or request_origin or self_request)
             if runtime_source:

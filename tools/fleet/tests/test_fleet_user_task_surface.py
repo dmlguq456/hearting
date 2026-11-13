@@ -3,6 +3,9 @@
 ContractProjectionTests uses synthetic native facts. It does not claim native
 response consumption or resumed provider work; those belong to convergence.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -283,6 +286,8 @@ class ContractProjectionTests(unittest.TestCase):
         contexts = build_view_model(snapshot).routes[0]["worker_contexts"]
         expected = [render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:3]]
         self.assertEqual([row["context"] for row in contexts], expected)
+        # Each row names the attempt Fleet chose, so the shell finds that very job again (spec E9 rule 43).
+        self.assertEqual([row["attempt"] for row in contexts], [job.attempt_id for job in snapshot["jobs"][1:3]])
 
     def selected_worker_snapshot(self, count=1):
         """Use the production route resolver, which supplies node.job, not node.attempt_id."""

@@ -196,16 +196,21 @@ duplicate paint to the common area.
 Custom, clipped or uncertain rows remain visible. Answers retain the existing
 queue and consumption receipts; an unproved native target stays pending.
 
-**⚙ Settings** previews placement, panel position (right or left), width,
-narrow-window behavior, auxiliary detail, theme (terminal, light terminal or
+**⚙ Settings** (the gear at the right end of the panel's last row) previews
+placement, panel position (right or left), width, narrow-window behavior,
+bottom height, auxiliary detail, theme (terminal, light terminal or
 monochrome) and shade (none, light or medium); the defaults keep the original
 look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
 the previous view, and Defaults previews the defaults. Drag the side boundary
 to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
-The default is side at sufficient width (40 columns, minimum terminal width 100),
-with a bounded 14-row bottom at narrow widths, including 80 columns. These values
-are configurable. Existing explicit layout choices are retained. OpenCode uses
+The default is a 40-column side panel. **»** beside the gear folds it into a
+eight-cell strip (state, session number, route count, answer waits) and gives
+the native area the freed columns; a press on the strip opens it again. Where
+the open panel would leave the native area under 80 columns (a 40-column panel
+in a terminal under 122 columns) it folds by itself and opens again with room;
+a choice made by hand wins at that width. The bottom layout folds to one row
+(**▾** / **▴**). Existing explicit layout choices are retained. OpenCode uses
 the same panel and settings; its own sidebar is hidden in the shell window
 (OpenCode's toggle still opens it), with Context in its footer and its MCP
 server count in the panel. Installation affects new wrapped terminals;

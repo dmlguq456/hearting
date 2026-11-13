@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Offline checks for the real-TUI scenario harness (no TUI is launched)."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 from pathlib import Path
@@ -111,6 +114,27 @@ class EnvironmentTest(unittest.TestCase):
             self.assertIsNone(hb.declared_carrier("claude", receipt))
 
 
+class PrivateTuiPaneEnvTest(unittest.TestCase):
+    def test_the_tui_gets_the_tmux_and_pane_values_its_pane_provides(self):
+        """A pane address (`%0@socket`) resolves only against the TUI's own TMUX/TMUX_PANE."""
+        import shutil
+        if not shutil.which("tmux"):
+            self.skipTest("tmux is unavailable")
+        with tempfile.TemporaryDirectory(prefix="hb-pane-env-") as raw:
+            tui = hb.PrivateTui(Path(raw), {"PATH": "/usr/bin:/bin", "HOME": raw},
+                                ["sh", "-c", 'echo "PANE=$TMUX_PANE SOCK=${TMUX%%,*} HOME=$HOME"'],
+                                Path(raw))
+            try:
+                tui.start()
+                self.assertTrue(hb.wait_for(lambda: "HOME=" in tui.screen(), 10), tui.screen())
+                screen = tui.screen()
+            finally:
+                tui.stop()
+        self.assertIn("PANE=%0", screen)
+        self.assertIn("SOCK=" + str(tui.socket), screen)
+        self.assertIn("HOME=" + raw, screen)  # the fixture env is still the only other input
+
+
 class TidyContinueCaseTest(unittest.TestCase):
     """The session-tidy continue scenarios register and patch the shared child helper."""
 
@@ -151,6 +175,20 @@ class MakeTuiTest(unittest.TestCase):
             self.assertEqual(hb.Scenario().make_tui(run, Path("/r"), ["x"])[0], "patched")
             fake.SURFACE = "herdr"
             self.assertEqual(hb.Scenario().make_tui(run, Path("/r"), ["x"])[0], "herdr")
+            # A tmux-only factory left by a companion is not consumed on Herdr: the class
+            # comes back, so the next run's companion subclasses a class, not a function.
+            fake._TMUX_TUI = type("Tmux", (), {})
+            hb.Scenario().make_tui(run, Path("/r"), ["x"])
+            self.assertIs(fake.PrivateTui, fake._TMUX_TUI)
+
+    def test_herdr_settle_uses_the_tmux_class_even_when_the_name_is_a_factory(self):
+        """``--surface herdr`` retire died with ``'function' object has no attribute 'settle'``."""
+        tui = hb.PrivateHerdrTui.__new__(hb.PrivateHerdrTui)
+        screens = iter(["a", "b", "b", "b", "b", "b", "b", "b"])
+        tui.screen = lambda: next(screens, "b")
+        with unittest.mock.patch.object(hb, "PrivateTui", lambda *a, **k: None), \
+                unittest.mock.patch.object(hb.time, "sleep", lambda _s: None):
+            self.assertTrue(tui.settle(quiet=0, timeout=5))
 
 
 class TidyCompactFlowTest(unittest.TestCase):
@@ -240,6 +278,33 @@ class TidyCompactFlowTest(unittest.TestCase):
                          [("msg_a", "$session-tidy go"), ("msg_b", "이어서해")])
         claude = {"protocol": "anthropic", "text": "user\ntext\n이어서해\nsystem\ntext\nx"}
         self.assertEqual(len(self.tc._inputs(claude)), 1)
+
+    def test_queued_start_holds_the_first_new_turn_after_the_keys_were_held(self):
+        """``tidy-compact-queued-start``: the turn that starts while the /compact keys wait
+        is held at the model, once; its steward is the stock one with that one wrapper."""
+        from types import SimpleNamespace
+        tc = self.tc
+        with tempfile.TemporaryDirectory() as tmp:
+            run = SimpleNamespace(home=SimpleNamespace(
+                env={"XDG_STATE_HOME": str(Path(tmp) / "state")}, root=Path(tmp)))
+            scenario = tc.TidyCompactQueuedStart()
+            marks = scenario.marks(run)
+            marks.mkdir(parents=True)
+            answer = scenario.script(run)
+
+            def record(kind):
+                return {"last_kind": kind, "last_text": "x", "text": "x", "user_inputs": [],
+                        "main_index": 3}
+            self.assertIsNone(answer(record("user"), []).gate)     # nothing held before the keys
+            (marks / "armed").write_text("1")
+            self.assertIsNone(answer(record("tool"), []).gate)     # a tool result starts no turn
+            self.assertIs(answer(record("developer"), []).gate, scenario.release)
+            self.assertTrue((marks / "running").exists())
+            self.assertIsNone(answer(record("user"), []).gate)     # only the first turn
+            source = tc.QUEUED_START_STEWARD.format(
+                python=sys.executable, util=str(Path(hb.__file__).resolve().parent), marks=str(marks))
+            compile(source, "queued-start-steward", "exec")
+            self.assertIn("steward._herdr_prompt = queued_start", source)
 
 
 if __name__ == "__main__":

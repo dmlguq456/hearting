@@ -1,4 +1,7 @@
 """Real PTY/control loop with synthetic native UI and private dependency assets."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 import importlib.util
 import json
@@ -117,6 +120,7 @@ while True:
         if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
         if line=='side-unicode':print('\x1b[3;1H🙂',end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
+        if line=='paint-bg':print('\x1b[48;5;232m\x1b[2KPAINTED_BG\x1b[0m\r\n',end='',flush=True)
 """
 
 HOST_LAUNCHER=r"""
@@ -148,7 +152,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -172,7 +176,7 @@ function existing(file){return new Promise((resolve,reject)=>{
 (async()=>{try{
  if(cfg.barrier)barrier=fs.openSync(cfg.barrier,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);
  child=pty.spawn(cfg.python,[cfg.entry,'claude',cfg.python,cfg.fake,cfg.sid],
-    {cols:cfg.columns||100,rows:cfg.rows||30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
+    {cols:cfg.columns||130,rows:cfg.rows||30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
         HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,LOOP_UTILITIES:cfg.utilities,LOOP_HOOK_LOG:path.join(cfg.directory,'hooks.log'),NODE_OPTIONS:'--require '+cfg.launcher,
         ...(cfg.scenario==='herdr'||cfg.peer?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(process.env.XDG_CONFIG_HOME||path.join(process.env.HOME,'.config'),'herdr','herdr.sock')}:{})}});
  child.onData(text=>{if(sideTerm)sideTerm.write(text);raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
@@ -299,16 +303,35 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('geometry-left\r').toString('base64')});await waitFor(/GEOMETRY_geometry-left_138x40/);
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const row=y=>sideTerm.buffer.active.getLine(y).translateToString(true);
-   if(!row(0).startsWith('┌')||!row(0).slice(0,40).includes('⚙')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
+   // Spec rule 49 (a): the gear stands on the panel's last row inside, the fold button `«` of a left panel before it.
+   if(!row(0).startsWith('┌')||row(0).slice(0,40).includes('⚙')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
+   if(!/«   ⚙ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
-   if(/⚙/.test(row(0).slice(42)))throw Error('panel painted twice');
+   if(/⚙/.test(row(38).slice(42)))throw Error('panel painted twice');
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
+   // Spec rule 49 (d): where the open panel would leave the native under 80 columns it folds by
+   // itself into the eight-cell strip (one blank cell apart) and opens again with room.
    child.resize(80,24);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_80x(?:1[2-9]|2[0-4])/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_71x24/);
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));
    await rpc(cfg.inlet,{batch:Buffer.from('geometry3\r').toString('base64')});await waitFor(/GEOMETRY_geometry3_138x40/);
+   const press=async(x,y)=>{await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`).toString('base64')});await new Promise(r=>setTimeout(r,80));};
+   const geometry=async(name,size)=>{await rpc(cfg.inlet,{batch:Buffer.from(name+'\r').toString('base64')});await waitFor(new RegExp('GEOMETRY_'+name+'_'+size));};
+   // The fold button `»` (the last row inside, three cells left of the gear) folds by hand; a hand fold stays folded when wider.
+   await press(174,39);await geometry('geometry4','171x40');
+   child.resize(200,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry5','191x40');
+   // Any cell of the strip opens it.
+   await press(198,10);await geometry('geometry6','158x40');
+   child.resize(110,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry7','101x40');
+   // Opened by hand where it would fold, it stays open at that width; the next width folds it again.
+   await press(108,10);await geometry('geometry8','68x40');
+   child.resize(112,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry9','103x40');
+   // A window of nine cells or fewer folds the panel to the one row under the native (the strip
+   // would leave the native no cell), and the open panel stands again once the window widens.
+   child.resize(9,40);await new Promise(r=>setTimeout(r,150));
+   child.resize(180,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry10','138x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
@@ -458,9 +481,42 @@ function existing(file){return new Promise((resolve,reject)=>{
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }
+ const ruleMotion={};
+ if(cfg.scenario==='rule-motion'){
+   // Spec E9 rule 47 (d): while the session runs, the head's rule moves on the spinner's beat
+   // and only its changed cells go out; the native half of that row is never written again.
+   const now=Date.now()/1000;
+   fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
+   await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
+   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
+   const rule=()=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
+     const m=line.slice(140).match(/^│ ([─━]{36}) │$/);
+     if(m&&m[1].includes('━'))return {y,native:line.slice(0,138),cells:m[1],colors:Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',')};}return null;};
+   let first=null;const began=Date.now();
+   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,50));}
+   let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
+   // (1.95 s: not a whole number of the light's 3.2 s round trips, so the two readings differ.)
+   await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
+   const second=rule();
+   Object.assign(ruleMotion,{first,second,bytes,writes});
+   await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
+ }
+ const nativeBg={};
+ if(cfg.scenario==='native-bg'){
+   // A native that paints its own background to its last column (OpenCode does): the two cells
+   // between it and the panel take that background; a row on the terminal's own keeps none.
+   await rpc(cfg.inlet,{batch:Buffer.from('paint-bg\r').toString('base64')});await waitFor(/PAINTED_BG/);
+   await new Promise(r=>setTimeout(r,300));await new Promise(resolve=>sideTerm.write('',resolve));
+   const rowsOf=()=>Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y));
+   const bg=(line,x)=>{const c=line.getCell(x);return c.isBgDefault()?'default':c.getBgColor();};
+   const lines=rowsOf(),painted=lines.findIndex(l=>(l?.translateToString()||'').includes('PAINTED_BG'));
+   const plain=lines.findIndex((l,y)=>y!==painted&&(l?.translateToString()||'').slice(140,141)==='│'&&bg(l,10)==='default');
+   Object.assign(nativeBg,{painted:painted<0?null:[137,138,139,140].map(x=>bg(lines[painted],x)),plain:plain<0?null:[137,138,139].map(x=>bg(lines[plain],x)),
+     border:painted<0?null:lines[painted].getCell(140).getChars()});
+ }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
+ console.log(JSON.stringify({native_bg:nativeBg,rule_motion:ruleMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -571,16 +627,23 @@ class SessionShellPTYTest(unittest.TestCase):
         if peer is not None:
             audit=directory/'audit.py'
             # Counts every subprocess the sender starts and its wall time; nothing else changes.
+            # The shared obligation runner is the one start counted apart: a queued message
+            # is a retained duty, and the sender starts that runner only when none holds its lock.
             audit.write_text('import json,runpy,sys,time\nout=sys.argv[1];sys.argv=sys.argv[2:]\n'
-                'calls=[]\nsys.addaudithook(lambda e,a:calls.append(str(a[1][0]) if a[1] else "?") if e=="subprocess.Popen" else None)\n'
+                'calls=[];runners=[]\n'
+                'def hook(e,a):\n'
+                ' if e!="subprocess.Popen":return\n'
+                ' argv=a[1] if isinstance(a[1],(list,tuple)) else []\n'
+                ' (runners if len(argv)>2 and str(argv[2])=="__obligation-runner" else calls).append(str(argv[0]) if argv else "?")\n'
+                'sys.addaudithook(hook)\n'
                 'began=time.monotonic()\ntry:\n runpy.run_path(sys.argv[0],run_name="__main__")\nexcept SystemExit:\n pass\n'
-                'finally:\n open(out,"w").write(json.dumps({"subprocesses":len(calls),"programs":sorted(set(calls)),"ms":round((time.monotonic()-began)*1000)}))\n')
+                'finally:\n open(out,"w").write(json.dumps({"subprocesses":len(calls),"programs":sorted(set(calls)),"runner_starts":len(runners),"ms":round((time.monotonic()-began)*1000)}))\n')
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg'}:
             config.update(columns=180,rows=40)
-        if scenario=='route-pages':config.update(columns=80,rows=24)
+        if scenario=='route-pages':config.update(columns=80,rows=24)  # the bottom layout's pages (policy below)
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
             fleet.write_text("import os,tty\nfrom pathlib import Path\ntty.setraw(0)\nprint('OWN_FLEET_READY\\r\\n',end='',flush=True)\nwhile True:\n data=os.read(0,65536)\n with open("+repr(str(read))+",'ab') as f:f.write(data)\n if b'q' in data:break\n")
@@ -594,7 +657,8 @@ class SessionShellPTYTest(unittest.TestCase):
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state'} else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg'}
+                          else '{"enabled":true,"layout":"bottom"}' if scenario=='route-pages' else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -644,7 +708,12 @@ class SessionShellPTYTest(unittest.TestCase):
                     self.assertIn('prompted=queued',rows[label]['receipt'])
                     self.assertIn('via=session-shell',rows[label]['receipt'])
                     self.assertTrue(rows[label].get('typed'),rows[label])
+                    # Resolution and delivery start no process. The one start allowed is the shared
+                    # obligation runner of the retained queued-message duty: it happens only when no
+                    # runner holds the lock, which depends on whether an earlier send in this state
+                    # root left one alive (the same result at origin/main when this test runs alone).
                     self.assertEqual(rows[label]['subprocesses'],0,rows[label])
+                    self.assertLessEqual(rows[label]['runner_starts'],1,rows[label])
                 for label in ('other_server','other_namespace'):
                     self.assertIn('prompted=unverified reason=target-pane-unresolved',rows[label]['receipt'])
                 self.assertEqual(herdr_calls,0)
@@ -704,6 +773,30 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertEqual([word for word,_ in result['state_colors']],['idle','running','idle'])
         self.assertNotEqual(colors['idle'],colors['running'])
         self.assertEqual(result['state_colors'][2][1],colors['idle'])
+
+    def test_the_head_rule_moves_on_the_spinner_beat_sending_only_its_changed_cells(self):
+        # Spec E9 rule 47 (d): a running session's head rule (every cell heavy) carries a moving light on the beat the
+        # spinner already keeps; each beat sends only the rule's changed cells beside the spinner's
+        # row, so a beat stays small (the whole row each beat would be about 500 bytes), and the
+        # native half stays put.
+        result=self.run_loop('rule-motion')['rule_motion']
+        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes']}))
+        first,second=result['first'],result['second']
+        self.assertIsNotNone(first);self.assertIsNotNone(second)
+        for value in (first,second):self.assertEqual(value['cells'],'━'*36,value)
+        self.assertNotEqual(first['colors'],second['colors'])
+        self.assertEqual(first['native'],second['native'])
+        self.assertGreaterEqual(result['writes'],15)
+        self.assertLess(result['bytes']/result['writes'],400,result)
+
+    def test_the_gap_beside_the_panel_takes_the_natives_own_background(self):
+        # A native that paints its whole area (OpenCode) reaches the panel's frame: the two cells
+        # between them take the native's background at that edge, so the panel stands with the
+        # same space on both sides; a native on the terminal's own background keeps them plain.
+        result=self.run_loop('native-bg')['native_bg']
+        self.assertEqual(result['painted'],[232,232,232,'default'],result)
+        self.assertEqual(result['border'],'│')
+        self.assertEqual(result['plain'],['default','default','default'],result)
 
     def test_the_border_names_the_state_right_after_start_without_a_key(self):
         # Spec rule 26: a start event leaves the host's own state unknown; until the

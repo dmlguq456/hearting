@@ -7,6 +7,9 @@ the live record's keys are drawn from the fixture's keys, its value types are th
 and an unknown value is ``None``. Additive route and question fields and the repo ``status``
 record have the explicit optional contracts below, so old render fixtures remain valid inputs.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import unittest
 import math
 from datetime import datetime
@@ -53,8 +56,10 @@ def route_extension(key, value):
                     for row in value["lines"])))
     if key == "worker_contexts":
         return isinstance(value, (list, tuple)) and all(
-            isinstance(row, dict) and set(row) == {"stage", "harness", "model", "context", "window"}
+            isinstance(row, dict) and set(row) - {"attempt"} == {"stage", "harness", "model", "context", "window"}
             and isinstance(row["stage"], str)
+            # The attempt Fleet chose for the stage (a recorded id, or none).
+            and (row.get("attempt") is None or isinstance(row["attempt"], str))
             and (row["harness"] is None or isinstance(row["harness"], str))
             and (row["model"] is None or pair(row["model"]) and all(
                 isinstance(item, str) for item in row["model"]))

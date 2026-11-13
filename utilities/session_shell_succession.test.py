@@ -4,6 +4,9 @@ Real launcher + PTY loop with a synthetic native and private dependency assets. 
 installed release is a symlink (`link -> rel-a`); an install moves it to `rel-b`, a
 copy of the session-shell sources, so the new host has another real path.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 import importlib.util
 import json
@@ -242,7 +245,7 @@ class Window:
             entry = str(bootstrap)
         self.master, slave = pty.openpty()
         self.attrs = termios.tcgetattr(slave)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 130, 0, 0))
         self.entry = subprocess.Popen(
             [sys.executable, entry, harness, sys.executable, str(native), sid],
             env=env, cwd=case.project, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
@@ -323,7 +326,7 @@ class Window:
         data = bytes(self.raw[:upto]) if upto is not None else bytes(self.raw)
         file = self.root/'outer.raw'; file.write_bytes(data)
         env = dict(self.case.env, SUCC_XTERM=str(Path(self.case.env['NODE_PATH'])/'@xterm/headless'))
-        out = subprocess.run([self.case.node, str(self.root/'vt.cjs'), str(file), '100', '30'], env=env,
+        out = subprocess.run([self.case.node, str(self.root/'vt.cjs'), str(file), '130', '30'], env=env,
                              capture_output=True, text=True, timeout=30, check=True)
         return json.loads(out.stdout)
 
@@ -638,8 +641,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.until('ROUTE_PAGE'); window.pump(.5)
         point = None
         for y, line in enumerate(window.screen()['lines']):
-            if '╭─ route' in line:
-                point = (line.index('╭─ r')+4, y+1)
+            if '╭─ 1 ROUTE' in line:
+                point = (line.index('╭─ 1')+4, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
         window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('PgUp/PgDn')
 

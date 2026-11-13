@@ -1,4 +1,7 @@
 """Create-once installation only touches a private prefix and its exact profile block."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 import importlib.util
 import json
@@ -111,11 +114,11 @@ class SessionShellInstallTest(unittest.TestCase):
         policy=install._client().policy_path();policy.parent.mkdir(parents=True,exist_ok=True)
         policy.write_text(json.dumps({'enabled':False,'layout':'side','side_width':48,'side_min_columns':150}));policy.chmod(0o600)
         install.set_enabled(True)
-        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time'})
+        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time','rule_motion':'on'})
         install.set_enabled(False)
         self.assertEqual(json.loads(policy.read_text())['side_width'],48)
-        # A stored appearance choice (position, theme, shade, route line) survives both toggles.
-        chosen={'position':'left','theme':'mono','shade':'medium','route_line':'model'}
+        # A stored appearance choice (position, theme, shade, route line, rule motion) survives both toggles.
+        chosen={'position':'left','theme':'mono','shade':'medium','route_line':'model','rule_motion':'off'}
         policy.write_text(json.dumps({**json.loads(policy.read_text()),**chosen}))
         for enabled in (True,False):
             install.set_enabled(enabled)

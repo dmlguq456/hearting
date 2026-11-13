@@ -2,6 +2,9 @@
 """Managed service provenance through the existing lifecycle callbacks."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import errno
@@ -952,7 +955,6 @@ console.log(JSON.stringify(calls[0]));
                                return_value=False), \
              mock.patch.object(peer_steward.herdr_observation,
                                "socket_path_for_endpoint", return_value=None), \
-             patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
              patch_split(peer_steward, "_herdr_missing", return_value=False), \
              patch_split(peer_steward, "subprocess", CapturingSubprocess()):
             binding = obligations.managed_service_binding(host_a)
@@ -1210,7 +1212,6 @@ console.log(JSON.stringify(calls[0]));
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "pane_census", return_value=None), \
-                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(batch, "_jobs_paths",
                                    side_effect=lambda jobs=None, strict=True: [
                                        Path(jobs).resolve(strict=False) if jobs else self.jobs.resolve()

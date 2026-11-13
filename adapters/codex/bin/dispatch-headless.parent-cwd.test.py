@@ -5,6 +5,9 @@ Regression fixture: a managed Codex thread living in one repo dispatched from
 `cd $AGENT_HOME && …`, so the launch getcwd() recorded AGENT_HOME and the job
 could never nest under its parent session in Fleet (2026-07-30).
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse
 import importlib.util
 import json

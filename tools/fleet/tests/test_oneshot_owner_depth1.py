@@ -1,4 +1,7 @@
 """A one-shot route's run is its depth-1 owner, in Fleet and in the session shell alike."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 from pathlib import Path
@@ -150,7 +153,7 @@ console.log(JSON.stringify(out));'''
             self.assertTrue(any("owner" in who and "codex" in who and "5m" in title for who, title in rows), side)
             # The staged route: its owner first, its live worker under it.
             self.assertIn("owner  claude Opus 5.5 high", side)
-            self.assertIn("└─⠋ worker codex", side)
+            self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)
             self.assertNotIn("hb_", side + bottom)

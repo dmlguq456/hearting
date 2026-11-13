@@ -374,7 +374,8 @@ def native_turn(harness, pid, session_id):
     """``idle`` | ``working`` | ``blocked`` | ``unknown`` from the runtime's own record.
 
     Claude: its session registry entry for this exact process (PID start) and
-    session. Codex: the latest task lifecycle in that thread's rollout; a thread with
+    session. Codex: the latest task lifecycle in that thread's rollout (an ended one is
+    still work while its App Server runs a turn or holds a queued item); a thread with
     no rollout has no recorded turn and stays unknown. OpenCode: that session's own
     record in its database (V1 messages; OpenCode 2's run record, whose ``idle`` row
     ends a turn), read only while this exact process's TUI selection record still
@@ -409,10 +410,64 @@ def native_turn(harness, pid, session_id):
             if lifecycle and lifecycle[0] == "task_started":
                 return "working"
             if lifecycle and lifecycle[0] in {"task_complete", "turn_aborted"}:
-                return "idle"
+                # The rollout can trail the App Server by a moment, and a queued item starts
+                # right at a turn's end: where the App Server answers, that is still work.
+                return "working" if _codex_server_busy(session_id) else "idle"
     except Exception:
         pass
     return "unknown"
+
+
+def _codex_server_busy(thread_id):
+    """The Codex App Server reports a running turn or a queued item for this thread.
+
+    Unknown (no socket, an RPC error, a thread it does not hold) is not busy, so the
+    rollout's own judgment stands.
+    """
+    try:
+        import codex_queue_delivery
+        from codex_queue_dispatch import resolve_queue_socket
+        endpoint = resolve_queue_socket()
+        if not endpoint.is_socket():
+            return False
+        if codex_queue_delivery._latest_turn_status(endpoint, thread_id, timeout=1.0) in {
+                "inProgress", "in_progress", "running"}:
+            return True
+        return bool(codex_queue_delivery.list_queue(endpoint, thread_id, timeout=1.0))
+    except Exception:  # noqa: BLE001 - an optional reader never blocks the rollout path
+        return False
+
+
+def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, server=None):
+    """Wait in the caller for one native turn state, returning agent-info shape.
+
+    This is a bounded foreground wait when a timeout is supplied. It reads the
+    existing native status sources; unknown observations never become terminal.
+    """
+    deadline = None if timeout_ms is None else time.monotonic() + max(0, timeout_ms) / 1000
+    first = None
+    while True:
+        from peer_steward_native import native_agent, native_lifetime
+        payload = native_agent(harness, session_id, pane=pane, server=server)
+        agent = (payload or {}).get("result", {}).get("agent") if isinstance(payload, dict) else None
+        if isinstance(agent, dict):
+            state = agent.get("agent_status", "unknown")
+            if (state in until) if until else (first is not None and state != first
+                                                and first != "unknown" and state != "unknown"):
+                return payload
+            if first is None:
+                first = state
+            lifetime = native_lifetime(
+                harness, session_id, pid=agent.get("pid"),
+                pid_start=agent.get("pid_start"), pid_namespace=agent.get("pid_namespace"))
+            if lifetime == "ended":
+                return {"error": {"code": "session_ended"}, "agent": agent}
+        elif payload is None:
+            return {"error": {"code": "unknown"}}
+        if deadline is not None and time.monotonic() >= deadline:
+            return {"error": {"code": "timeout"}}
+        delay = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
+        time.sleep(delay)
 
 
 def _opencode_turn(observed):

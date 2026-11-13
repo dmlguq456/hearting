@@ -1,4 +1,7 @@
 """Private, real-process identity and local-control checks; no operating TUI."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 from contextlib import ExitStack
 import importlib.util
@@ -91,7 +94,7 @@ class SessionShellTest(unittest.TestCase):
     def test_optional_side_geometry_uses_the_existing_policy_and_validates_only_present_values(self):
         path=shell.policy_path();path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'enabled':True}));path.chmod(0o600)
-        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time'})
+        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time','rule_motion':'on'})
         path.write_text(json.dumps({'enabled':True,'layout':'side','side_width':48,'side_min_columns':150}))
         self.assertTrue(shell.policy()[0]);self.assertEqual(shell.display_policy()['side_width'],48)
         for field,value in (('layout','other'),('side_width',True),('side_width',-1),('side_min_columns','132')):
