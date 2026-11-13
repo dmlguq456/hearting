@@ -117,7 +117,10 @@ while True:
         if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
         if line=='side-unicode':print('\x1b[3;1H🙂',end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
-        if line=='paint-bg':print('\x1b[48;5;232m\x1b[2KPAINTED_BG\x1b[0m\r\n',end='',flush=True)
+        if line=='mouse-on':print('\x1b[?1000h\x1b[?1006h',end='',flush=True)
+        if line=='paint-bg':print('\x1b[48;5;232m\x1b[2KPAINTED_BG\x1b[0m\r\n'
+                                  '\x1b[48;5;24m\x1b[2KINVERSE_EDGE\x1b[138G\x1b[7;38;5;88;48;5;52mX\x1b[0m\r\n'
+                                  '\x1b[48;5;24m\x1b[2KINVERSE_PLAIN\x1b[138G\x1b[7;48;5;52mX\x1b[0m\r\n',end='',flush=True)
 """
 
 HOST_LAUNCHER=r"""
@@ -305,6 +308,17 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!/«   ⚙ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
    if(/⚙/.test(row(38).slice(42)))throw Error('panel painted twice');
+   // #1586 review follow-up 7: folded at the left the native stands nine cells right (the strip
+   // and its blank cell): a press in the native area reaches the native at its own column, a press
+   // on the strip opens the panel.
+   const pinnedLeft=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
+   await rpc(pinnedLeft.socket,{...pinnedLeft,op:'panel',expanded:false});
+   await rpc(cfg.inlet,{batch:Buffer.from('mouse-on\r').toString('base64')});await waitFor(/DONE_mouse-on/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-strip\r').toString('base64')});await waitFor(/GEOMETRY_geometry-strip_171x40/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;12;5M\x1b[<0;12;5mMOUSE_AT\r').toString('base64')});
+   await waitFor(/NATIVE_ESC_\^\[<0;3;5M\^\[<0;3;5mMOUSE_AT/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;4;10M\x1b[<0;4;10m').toString('base64')});await new Promise(r=>setTimeout(r,150));
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-opened\r').toString('base64')});await waitFor(/GEOMETRY_geometry-opened_138x40/);
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
@@ -329,6 +343,23 @@ function existing(file){return new Promise((resolve,reject)=>{
    // would leave the native no cell), and the open panel stands again once the window widens.
    child.resize(9,40);await new Promise(r=>setTimeout(r,150));
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry10','138x40');
+   // #1586 review follow-up 6: folding by hand while the settings editor is open closes the
+   // editor first; the strip stands and the keys reach the native.
+   const pinnedFold=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
+   raw='';await press(178,39);await waitFor(/rule motion/);
+   await rpc(pinnedFold.socket,{...pinnedFold,op:'panel',expanded:false});await new Promise(r=>setTimeout(r,150));
+   await geometry('geometry11','171x40');
+   const after=await rpc(pinnedFold.socket,{...pinnedFold,op:'status'});
+   if(after.expanded!==false||after.focused!==false)throw Error('the editor outlived the fold '+JSON.stringify(after));
+   await press(177,10);await geometry('geometry12','138x40');
+   // #1586 review follow-up 3: a width set in the settings editor counts as opening the panel by
+   // hand at this window width (as a drag does): applying a wider panel that would fold keeps it
+   // open; the next window width judges again.
+   child.resize(125,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry13','83x40');
+   raw='';await press(123,39);await waitFor(/rule motion/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\t\t++++++\r').toString('base64')});await new Promise(r=>setTimeout(r,300));
+   await geometry('geometry14','77x40');
+   child.resize(126,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry15','117x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
@@ -497,7 +528,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
    // (1.95 s: not a whole number of the light's 3.5 s period, so the two readings differ.)
    await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
-   const second=rule();
+   // (The same row, lit or resting: the light may be out on its rest by then.)
+   const second=first&&rule(first.y);
    // Spec rule 51 (c): the next rest (frames 26-34 of the 35-frame period and the frame after,
    // 100 ms each on the wall clock the host beats by). Inside it the host writes nothing for the
    // rule's row: what goes out is the spinner's own glyph only, the beat it already kept.
@@ -521,8 +553,11 @@ function existing(file){return new Promise((resolve,reject)=>{
    const bg=(line,x)=>{const c=line.getCell(x);return c.isBgDefault()?'default':c.getBgColor();};
    const lines=rowsOf(),painted=lines.findIndex(l=>(l?.translateToString()||'').includes('PAINTED_BG'));
    const plain=lines.findIndex((l,y)=>y!==painted&&(l?.translateToString()||'').slice(140,141)==='│'&&bg(l,10)==='default');
+   // #1583 review follow-up (다): an inverse edge cell shows its foreground as its background,
+   // so the gap takes that color (the terminal's own where the foreground is the default).
+   const edge=word=>{const y=lines.findIndex(l=>(l?.translateToString()||'').includes(word));return y<0?null:[138,139].map(x=>bg(lines[y],x));};
    Object.assign(nativeBg,{painted:painted<0?null:[137,138,139,140].map(x=>bg(lines[painted],x)),plain:plain<0?null:[137,138,139].map(x=>bg(lines[plain],x)),
-     border:painted<0?null:lines[painted].getCell(140).getChars()});
+     border:painted<0?null:lines[painted].getCell(140).getChars(),inverse:edge('INVERSE_EDGE'),inverse_plain:edge('INVERSE_PLAIN')});
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
@@ -808,6 +843,8 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertEqual(result['painted'],[232,232,232,'default'],result)
         self.assertEqual(result['border'],'│')
         self.assertEqual(result['plain'],['default','default','default'],result)
+        self.assertEqual(result['inverse'],[88,88],result)
+        self.assertEqual(result['inverse_plain'],['default','default'],result)
 
     def test_the_border_names_the_state_right_after_start_without_a_key(self):
         # Spec rule 26: a start event leaves the host's own state unknown; until the

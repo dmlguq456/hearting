@@ -1258,10 +1258,6 @@
    "en": "Terminal",
    "ko": "터미널"
   },
-  "fleet.session_panel.threshold": {
-   "en": "Side minimum columns",
-   "ko": "옆 배치 최소 폭"
-  },
   "fleet.session_panel.title": {
    "en": "SESSION {tag} · {harness} · Ctrl+] {collapse}",
    "ko": "세션 {tag} · {harness} · Ctrl+] {collapse}"

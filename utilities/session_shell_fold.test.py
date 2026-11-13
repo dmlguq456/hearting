@@ -112,6 +112,13 @@ assert.equal(d.NATIVE_MIN,80);
 assert.equal(fold(122).folded,false);assert.equal(fold(121).folded,true);
 for(const width of [32,60,80])assert.equal(d.fold({cols:width+82,configuration:{...configuration,side_width:width}}).folded,false),
  assert.equal(d.fold({cols:width+81,configuration:{...configuration,side_width:width}}).folded,true);
+// #1586 review follow-up 2: a panel folded by itself opens again only three columns past the
+// threshold (83 native columns), so a window dragged across it does not jump back and forth; an
+// open panel still folds under 80.
+const now=(cols,expanded)=>d.fold({cols,configuration,expanded}).folded;
+assert.equal(d.REOPEN_MARGIN,3);
+assert.deepEqual([121,122,123,124,125].map(c=>now(c,false)),[true,true,true,true,false]);
+assert.deepEqual([125,122,121].map(c=>now(c,true)),[false,false,true]);
 // The old `side_min_columns` does not take part.
 assert.equal(d.fold({cols:130,configuration:{...configuration,side_min_columns:1000}}).folded,false);
 // A hand fold stays folded however wide; a hand unfold stays open at its width and lapses with the next.

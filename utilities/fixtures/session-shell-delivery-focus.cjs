@@ -10,6 +10,8 @@ function fixture(delivery){
   fleetView:undefined,paste:false,relay:false,dragging:false,heldBytes:0,routeDetail:false,routeArea:null,routeScroll:0,sessionDetails:false,keyTail:'',actionLines:[],
   panelHits:[{row:0,left:30,right:38,action:'settings'}],geometry:()=>({side:true,panelColumn:93}),panelRow:()=>0,height:()=>30,panelColumns:()=>40,
   terminal:{modes:{mouseTrackingMode:'none'}},queueLayout(){},queueDisplay(){},rebuildDisplay(){},observeInput(){},openFleet(){},
+  // The press targets stand for the placement on screen (#1586 review follow-up 5); a hand fold choice.
+  layoutQueued:false,panelHitsPlacement:'shown',placement:()=>'shown',foldByHand(){},
   source:(op,value)=>{saved.push({op,value});return Promise.resolve({ok:true,settings:value.settings});},
   settingsInput(){saved.push({op:'settings-input'});},
   inputOwner:{hold:b=>held.push(Buffer.from(b))},child:{write:b=>native.push(Buffer.from(b))},process:{stdin:{pause(){}}},

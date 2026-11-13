@@ -167,11 +167,17 @@ the native area takes the freed columns through the same PTY resize a window
 resize uses; folded under the native area it is one row (the status line and
 `▴`). A press anywhere on the strip or that row opens it. Where the open panel
 would leave the native area under 80 columns it folds by itself, and opens again
-with room; that one constant replaces the earlier minimum terminal width and
+once there are three columns more (83), so a window dragged across the line does
+not jump back and forth; that one constant replaces the earlier minimum terminal width and
 bottom fallback. The person's last choice wins at its width: folded by hand it
 stays folded however wide the window grows, opened by hand it stays open until
 the width changes. An open settings editor, a question being answered or a drag
-of the panel's edge keeps it open. The fold choice lasts while the window is up
+of the panel's edge keeps it open; when that ends, a width the person set (the
+drag, or a new width applied in the settings editor) counts as opening it by
+hand at this window width, and otherwise (a question answered, the editor
+closed) the width is judged once again. Folding by hand closes an open settings
+editor first; a press made while the panel is being drawn for another placement
+is dropped. The fold choice lasts while the window is up
 (it rides a host hand-over) and is not saved. A panel opened by hand where it
 cannot stand beside the native area (under 48 native columns or 8 rows) opens
 under it. All four edges belong

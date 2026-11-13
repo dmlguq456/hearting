@@ -69,9 +69,9 @@ class SessionShellSurvivalTest(unittest.TestCase):
     def setUpClass(cls):
         fixture.SessionShellPTYTest.setUpClass.__func__(cls)
 
-    def run_failure(self,mode):
+    def run_failure(self,mode,cols=130):
         inflight=mode.startswith('held-')
-        directory=self.root/('survival-'+mode);directory.mkdir(mode=0o700)
+        directory=self.root/('survival-'+mode+('' if cols==130 else '-'+str(cols)));directory.mkdir(mode=0o700)
         native_file=directory/'native.json';exit_fifo=directory/'exit';os.mkfifo(exit_fifo,0o600)
         pause_fifo=directory/'pause';os.mkfifo(pause_fifo,0o600)
         enter_gate=directory/'enter-gate';enter_ready=directory/'enter-ready'
@@ -94,7 +94,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
         policy=Path(env.get('XDG_CONFIG_HOME') or Path(env['HOME'])/'.config')/'hearting/session-shell.json'
         policy.parent.mkdir(parents=True,exist_ok=True);policy.write_text('{"enabled":true}');policy.chmod(0o600)
         cache=Path(env['XDG_STATE_HOME'])/'hearting/human-waits/projection.json';cache.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-        sid='survival-native-'+mode;key='claude\0'+sid;now=time.time()
+        sid='survival-native-'+mode+('' if cols==130 else '-'+str(cols));key='claude\0'+sid;now=time.time()
         cache.write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],'by_session':{},
             'total':0,'older':0,'complete':True,'route_status':{key:''},'route_sessions':{key:now}}));cache.chmod(0o600)
         entry_script=ROOT/'utilities/session-shell/entry.py'
@@ -116,7 +116,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
                 +"input_owner.InputOwner.advance=gated\n"
                 +"sys.argv=["+repr(str(entry_script))+",*sys.argv[1:]]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
             entry_script=bootstrap
-        master,slave=pty.openpty();outer_attrs=termios.tcgetattr(slave);success=False;fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,130,0,0))
+        master,slave=pty.openpty();outer_attrs=termios.tcgetattr(slave);success=False;fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,cols,0,0))
         entry=fixture.subprocess.Popen([sys.executable,str(entry_script),'claude',sys.executable,str(native),sid],
             env=env,cwd=self.project,stdin=slave,stdout=slave,stderr=slave,start_new_session=True,
             preexec_fn=lambda:fcntl.ioctl(0,termios.TIOCSCTTY,0))
@@ -150,6 +150,8 @@ class SessionShellSurvivalTest(unittest.TestCase):
                         if status.get('empty'):break
                         self.assertLess(time.monotonic(),deadline,(why,status))
                         select.select([],[],[],.01)
+                    # A narrow window starts with the panel folded by itself (#1586 review follow-up 7).
+                    self.assertEqual(status.get('expanded'),cols>=122,status)
                     peer=shell._peer_message()
                     peer_text,ref=peer.prepare_peer_message('PEER_NO_CALLBACK',
                         {'harness':'codex','session_id':'synthetic-sender'},
@@ -240,6 +242,9 @@ class SessionShellSurvivalTest(unittest.TestCase):
     def test_backend_exit_preserves_the_same_child(self):self.run_failure('backend')
     def test_host_death_retains_paste_enter_and_held_bytes_once_in_order(self):self.run_failure('held-host')
     def test_live_host_drains_the_same_transaction_before_direct_input(self):self.run_failure('held-control')
+    # #1586 review follow-up 7: the folded panel keeps the same input: held bytes, the paste and
+    # Enter reach the same native once, in order, across a host death.
+    def test_a_folded_panel_retains_held_bytes_across_a_host_death(self):self.run_failure('held-host',cols=110)
 
 
 if __name__=='__main__':unittest.main()
