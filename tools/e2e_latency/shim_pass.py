@@ -263,9 +263,11 @@ if _OUT:
                     rows.append(session)
                 return rows
             module.scan = scan
-            starts = {int(i["pid"]): i.get("pid_start") for i in json.load(open(_SESSIONS))}
-            _orig = module.read_proc_start
-            module.read_proc_start = lambda pid: starts.get(int(pid)) or _orig(pid)
+            # ``read_proc_start`` is left as it is: the fixture's sessions are real sleeper
+            # processes whose start time /proc gives, and the Fleet judges its registry rows by a
+            # compiled selection only while that reader is the native one (``_job_selection``).
+            # Replacing it sent every Fleet pass down the slow path that visits every finished
+            # row, a path an operating Fleet does not take.
         elif name.endswith(".collectors.dispatch"):
             module._scan_processes = lambda *a, **k: []
 

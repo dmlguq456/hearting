@@ -388,6 +388,9 @@ class ShimTests(unittest.TestCase):
 
     def test_shim_source_compiles(self):
         compile(shim_pass.render(), "sitecustomize.py", "exec")
+        # The Fleet keeps its compiled row selection only while procscan.read_proc_start is the
+        # native reader; a shim that wrapped it measured a path an operating Fleet never takes.
+        self.assertNotIn("module.read_proc_start =", shim_pass.render())
         self.assertIn(("human_wait_state", "_refresh_cache"), shim_pass.TARGETS)
         # the segments the holder memo (speed-e2e leg C) is judged by
         self.assertIn(("dispatch", "_prime_route_display_rows"), shim_pass.TARGETS)
