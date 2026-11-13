@@ -3549,7 +3549,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       observeCompactRuntimeStatus(ctx, sid, "working")
       if (sid) noteInteractionRequest(sid, event.properties?.requestID, "closed")
       if (sid && !isWorkerSession()) {
-        publishInteraction("clear", sid, { request_id: event.properties?.requestID })
+        publishInteraction("clear", sid, { request_id: event.properties?.requestID,
+          closure_reason: event.type === "question.rejected" ? "cancelled" : "answered" })
       }
     }
     if (event && event.type === "session.idle") {
