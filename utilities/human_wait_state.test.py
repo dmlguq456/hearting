@@ -3517,6 +3517,10 @@ class MessageCompletionTests(unittest.TestCase):
         # question's real state x the publication's re-read of its source x what is published (a
         # collection read before the change, published late, or a new collection). B, an
         # unanswered question of another session, is read normally and always stays.
+        # Review 1597-r4: a source that is read decides; the completions are used only when it
+        # cannot be read. "reopened" is A answered and settled, then the same id registered again
+        # (another question C, then A, in the same input sequence): read, it shows; not read, its
+        # completion keeps it out until a publication that reads it (checked below).
         import session_shell
         LOAD, DROP = "load", "drop"
         # state -> {read: (late publication of the earlier collection, new collection)}
@@ -3528,6 +3532,7 @@ class MessageCompletionTests(unittest.TestCase):
             "source-cancelled": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
             "source-gone":     {"ok": (DROP, DROP), "fail": (DROP, DROP)},
             "replaced":        {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "reopened":        {"ok": (LOAD, LOAD), "fail": (DROP, DROP)},
         }
         def collect():
             with mock.patch.object(observation, "_session_liveness_probe",
@@ -3550,12 +3555,19 @@ class MessageCompletionTests(unittest.TestCase):
                             earlier = collect()
                             self.assertTrue(state.publish_cache(earlier))
                             source = state._signal_path(a)
-                            if change == "answered":
+                            if change in ("answered", "reopened"):
                                 self.f.submit(ea, "answer A")
                                 wire, _, _ = self.f.prepare(a)
                                 self.f.consume(a, wire)
                                 self.assertEqual(self.source(a)["lifecycle"], "answered")
                                 self.assertNotIn(a["id"], [row["id"] for row in state._read_cache_file()["items"]])
+                            if change == "reopened":
+                                self.f.ask(harness, sid, "question C %d" % cell)
+                                again, _ = self.f.ask(harness, sid, "question A %d" % cell)
+                                self.assertEqual(again["id"], a["id"])
+                                self.assertEqual(self.source(a)["lifecycle"], "open")
+                                self.assertIn(a["id"], [row["id"] for row in
+                                                        state._read_cache_file()["settled_waits"]])
                             elif change.startswith("source-") and change != "source-gone":
                                 # Reflected in the source only; its completion has not settled yet.
                                 signal = self.source(a)
@@ -3592,6 +3604,17 @@ class MessageCompletionTests(unittest.TestCase):
                                 for view in (shared, fleet):
                                     self.assertIs(view["complete"], False)
                                     self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+                            if change == "reopened":
+                                if read == "fail":
+                                    # The next publication that reads the source shows it.
+                                    self.assertTrue(state.publish_cache(published))
+                                    shared = state._read_cache_file()
+                                    self.assertIn(a["id"], [row["id"] for row in shared["items"]])
+                                    self.assertIn(a["id"], [row["id"] for row in json.loads(
+                                        state._fleet_cache_path().read_text())["items"]])
+                                # Read open, its id leaves the completions.
+                                self.assertNotIn(a["id"], [row["id"] for row in
+                                                           shared.get("settled_waits", ())])
 
     def test_settled_waits_leave_once_a_later_collection_is_published(self):
         # Review 1597-r3: the remembered completions do not grow. Many answers between two

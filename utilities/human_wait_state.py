@@ -996,11 +996,12 @@ def _owner_projection(item: dict) -> dict:
 
 def _message_source_state(item: dict) -> str:
     """What the exact S4 source a collection read says now: ``open`` (still that open
-    question), ``ended`` (removed, replaced by its session's next one, or no longer open) or
-    ``unread`` (not read just now — not the same as ended; the collection's reading stands)."""
+    question), ``ended`` (removed, replaced by its session's next one, or no longer open),
+    ``unread`` (not read just now — not the same as ended; the collection's reading stands)
+    or ``unchecked`` (no exact source to re-read; the next collection decides)."""
     owner = item.get("owner") or {}
     if not owner.get("seat_key"):
-        return "open"  # Nothing exact to re-read; the next collection decides.
+        return "unchecked"
     try:
         path = _signal_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
                              "seat_key": owner["seat_key"], "id": item.get("id")})
@@ -1141,30 +1142,35 @@ def publish_cache(result: dict) -> bool:
                             and all(identity.get(key) == row.get(key)
                                     for key in ("turn_id", "item_id")))
                 removed = {row["id"] for row in items if answered(row)}
-            # A wait whose completion already settled it never comes back, whatever this pass
-            # read and whether or not its source can be read now (review 1597-r3). Its row
-            # leaves once a pass that started after the completion is published: that pass
-            # read the source after it.
+            # A registered question read by this pass may have been answered (or replaced by its
+            # session's next one) before this write. Its exact source, read under this same lock
+            # that its completion takes, decides (review 1597-1): open stays, even with its id in
+            # the completions (the same id registered again, review 1597-r4), ended leaves. Only
+            # a source that could not be read falls back on the completions (review 1597-r3): a
+            # settled id stays out; any other keeps what the collection read, and the publication
+            # says it is incomplete (review 1597-r2). A completion row leaves once a pass that
+            # started after it is published: that pass read the source after it.
             settled_waits = _settled_waits(previous)
             settled_ids = {row["id"] for row in settled_waits}
-            removed |= {row["id"] for row in items if row["id"] in settled_ids}
-            kept_settled = [row for row in settled_waits if row["at"] >= observed_at]
-            if kept_settled:
-                value["settled_waits"] = kept_settled[-_SETTLED_WAITS_MAX:]
-            # A registered question read by this pass may have been answered (or replaced by its
-            # session's next one) before this write; its exact source decides, under this same
-            # lock that its completion takes to settle the published waits (review 1597-1).
-            # Only a source confirmed ended leaves; one that could not be read keeps what the
-            # collection read, and the publication says it is incomplete (review 1597-r2).
+            read_open = set()
             unread = False
             for item in result["items"]:
-                if (isinstance(item, dict) and item.get("source") == "S4" and item.get("id")
-                        and item["id"] not in settled_ids):
+                if isinstance(item, dict) and item.get("source") == "S4" and item.get("id"):
                     source_state = _message_source_state(item)
                     if source_state == "ended":
                         removed.add(item["id"])
+                    elif source_state == "open":
+                        read_open.add(item["id"])
+                    elif item["id"] in settled_ids:
+                        removed.add(item["id"])
                     elif source_state == "unread":
                         unread = True
+            removed |= {row["id"] for row in items
+                        if row["id"] in settled_ids and row["id"] not in read_open}
+            kept_settled = [row for row in settled_waits
+                            if row["at"] >= observed_at and row["id"] not in read_open]
+            if kept_settled:
+                value["settled_waits"] = kept_settled[-_SETTLED_WAITS_MAX:]
             if unread:
                 for projection in (value, fleet_value):
                     projection["complete"] = False
