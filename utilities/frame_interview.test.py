@@ -545,6 +545,40 @@ class IntentTest(unittest.TestCase):
         explicit = {**answers, "actor_kind": "supervisor"}
         self.assertIs(FI.recorded_answer_context(explicit, "user"), explicit)
 
+    def test_user_scope_precedes_brief_and_marks_only_exact_field_conflicts(self):
+        interview = good_interview()
+        interview["brief"]["outcome"] = "training_count: 2; device: mpwav0/1"
+        answers = good_answers(interview)
+        answers["answers"]["q-scope"]["note"] = "training_count: 1; device: mpwav0"
+        text = FI.render_intent(interview, answers)
+        self.assertLess(text.index("## Decisions"), text.index("## Proposed Outcome"))
+        self.assertIn("The user's answers take precedence", text)
+        self.assertIn("training_count: 2", text)
+        self.assertIn("training_count: 1", text)
+        self.assertIn("Conflict for `training_count`", text)
+        self.assertIn("Conflict for `device`", text)
+        answers["answers"]["q-scope"]["note"] = "training_count: 2; device: mpwav0/1"
+        self.assertNotIn("Conflict for", FI.render_intent(interview, answers))
+        answers["actor_kind"] = "supervisor"
+        self.assertNotIn("The user's answers take precedence", FI.render_intent(interview, answers))
+
+    def test_ami_scope_example_and_leg_completion_conflicts_stay_advisory(self):
+        interview = routed_interview()
+        interview["brief"]["outcome"] = "추가 2조건이 mpwav 0/1에서 완료된다."
+        answers = good_answers(interview)
+        note = "추가 학습은 E 한 건, mpwav 1은 다른 경로가 씀"
+        answers["answers"]["q-scope"]["note"] = note
+        text = FI.render_intent(interview, answers)
+        self.assertLess(text.index(note), text.index(interview["brief"]["outcome"]))
+        self.assertIn("The user's answers take precedence", text)
+        self.assertNotIn("Conflict for", text)  # do not guess field equality from prose
+        proposal = interview["route_proposals"]["by_option"]["Both (recommended)"]
+        proposal["legs"][0]["done_when"] = [{"id": "training", "text": "training_count: 2"}]
+        answers["answers"]["q-scope"]["note"] = "training_count: 1"
+        rendered = FI.render_intent(interview, answers)
+        self.assertIn("Conflict for `training_count`", rendered.split("## Route")[1])
+        self.assertEqual(FI.route_choice(interview, answers)["state"], "selected")
+
     def test_intent_carries_every_decision_and_the_brief(self):
         interview = good_interview()
         answers = good_answers(interview)
