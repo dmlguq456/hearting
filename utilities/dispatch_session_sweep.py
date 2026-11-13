@@ -1177,8 +1177,11 @@ def _followup(root: Path, record: dict) -> str:
         return ""
 
 
+# `compute-hosts` leads a run's ended notice with the experiment catalog name when the run has one
+# (`{name}: run … ended with exit …`); the name is optional here so a named notice is folded and
+# recognized like an unnamed one.  `compute-hosts` keeps its no-observation words literally.
 _COMPUTE_RUN_NOTICE_RE = re.compile(
-    r"^run (?P<run_id>[A-Za-z0-9_-]+) on (?P<host>[A-Za-z0-9_.-]+) "
+    r"^(?:(?P<name>[^\n]+?): )?run (?P<run_id>[A-Za-z0-9_-]+) on (?P<host>[A-Za-z0-9_.-]+) "
     r"ended with exit (?P<exit>[0-9]+)(?: \([^()\n]*\))?"
     r"(?:; started by attempt [^;\n]+ in route [^;\n]+)?"
     r"(?:; 지표 없음; 계획 시간 미상; run 기록 경로 없음)?"
@@ -1216,7 +1219,7 @@ def _compute_run_notice(record: dict) -> dict | None:
         return None
     return {"host": host, "stamp": identity.group("stamp"),
             "label": identity.group("label") or "", "exit": int(match.group("exit")),
-            "run_id": run_id}
+            "run_id": run_id, "name": match.group("name") or ""}
 
 
 _EXPERIMENT_FINAL_KEY_RE = re.compile(r"^experiment:(?P<run_id>[^:]+):final(?::|$)")
@@ -1375,7 +1378,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
             if run and run["exit"] == 0:
                 receipt = record.get("receipt") or {}
                 key = (receipt.get("subject"), run["host"], run["label"],
-                       receipt.get("required_action"), 0)
+                       receipt.get("required_action"), 0, run["name"])
                 groups.setdefault(key, []).append((run, {"root": root, "record": record}))
             else:
                 receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
@@ -1396,7 +1399,8 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
             runs = [run for run, _pair in members]
             latest = runs[-1]
             label = key[2] or "(unlabeled)"
-            summary = (f"compute run summary: {len(runs)} runs on {key[1]} label={label}; "
+            named = f" name={key[5]}" if key[5] else ""
+            summary = (f"compute run summary: {len(runs)} runs on {key[1]} label={label}{named}; "
                        f"exit 0:{len(runs)}; time {runs[0]['stamp']}..{latest['stamp']}; "
                        f"latest {latest['run_id']}; compute-hosts tail {latest['run_id']}")
             markers = []
@@ -1456,7 +1460,7 @@ def _render_keys(batches) -> dict[int, tuple]:
                 if run and run["exit"] == 0:
                     key = tuple(str(part) for part in (
                         receipt.get("subject"), run["host"], run["label"],
-                        receipt.get("required_action")))
+                        receipt.get("required_action"), run["name"]))
                     groups.setdefault(key, []).append((run, record))
                 keys[id(record)] = (1, 0, str(receipt.get("text", "")), delivery_id)
             else:

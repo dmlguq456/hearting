@@ -2255,6 +2255,20 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(released["state"], "released")
         self.assertEqual(self.resolution()["actor_kind"], "user")
 
+    def test_the_refusal_branch_of_needs_question_carries_the_name_advice_too(self):
+        self.lab_catalog()
+        question, answer, response = self.crossing()
+        question["questions"][0]["question"] += " (run-rev-1)"
+        self.question_file.write_text(json.dumps(question))
+        self.step(interview=self.question_file)
+        answer.write_text(json.dumps({**response, "actor_kind": "supervisor"}))
+        refused = self.step(answers=answer)
+        self.assertEqual((refused["state"], refused["reason"]), ("needs-question", "supervisor-choice-crosses-not-doing"))
+        self.assertEqual([(w["field"], w["token"], w["name"]) for w in refused["name_warnings"]],
+                         [("questions[0].question", "run-rev-1", "잔향 줄임")])
+        self.assertIn("run-rev-1 (= 잔향 줄임)", refused["next_step"])
+        self.assertIn("only the person can choose it", refused["next_step"])
+
     def test_the_release_command_refuses_the_same_supervisor_choice(self):
         import work_intent
         question, answer, response = self.crossing()
@@ -2419,6 +2433,109 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertIn("status: agreed-on-behalf\nactor_kind: supervisor",
                       Path(released["intent_file"]).read_text())
         self.assertEqual(self.calls, ["gate", "release"])
+
+    # --- name advice on the registered question (BC-LAB-REPORT-LEGIBILITY, requirement 6) ----------------
+
+    def lab_catalog(self, broken=False):
+        """A project whose catalog gives run `run-rev-1` the name `잔향 줄임`; the route points at its root."""
+        import artifact_admission as admission
+        import experiment_catalog as E
+        root = self.base / "proj" / ".agent_reports"
+        root.mkdir(parents=True)
+        admission.ensure_root_identity(root)
+        E.run_write(root, lambda ctx: E.op_register(ctx, {
+            "groups": [{"display_name": "소리 분리 개선", "goal": "잔향에서 기준보다 높은가"}],
+            "conditions": [{"display_name": "잔향 줄임", "group": "소리 분리 개선", "aliases": ["rev-a"],
+                            "refs": {"runs": [{"run_id": "run-rev-1"}]}}]}), now=1_790_000_000.0)
+        if broken:
+            E.catalog_path(root).write_text("{no", encoding="utf-8")
+        self.route["artifact_root"] = str(root)
+
+    def ask_with_label(self, label):
+        import frame_interview as FI
+        item = json.loads(json.dumps(FI.QUESTION_EXAMPLE))
+        item["options"][0]["label"] = label
+        self.question_file.write_text(json.dumps({**self.question, "questions": [item]}))
+        return self.step(interview=self.question_file)
+
+    def test_a_question_that_names_a_run_without_its_catalog_name_gets_advice_and_nothing_else_changes(self):
+        plain = self.ask_with_label("run-rev-1")
+        self.setUp()
+        self.lab_catalog()
+        asked = self.ask_with_label("run-rev-1")
+        self.assertEqual(asked["state"], "needs-question")
+        self.assertEqual(asked["required_action"], plain["required_action"])        # advice never changes what happens
+        self.assertEqual(asked["parent_next"], plain["parent_next"])
+        self.assertEqual(asked["human_wait"], plain["human_wait"])
+        self.assertEqual(asked["name_warnings"], [{"field": "questions[0].options[0].label", "token": "run-rev-1",
+                                                   "kind": "run-id", "name": "잔향 줄임"}])
+        self.assertTrue(asked["next_step"].startswith(plain["next_step"]))
+        self.assertIn("run-rev-1 (= 잔향 줄임)", asked["next_step"])
+        self.assertNotIn("name_warnings", plain)
+        self.assertEqual(self.resolution()["status"], "blocked")                      # the question is still registered as before
+
+    def test_the_catalog_name_beside_the_token_or_a_label_without_internal_names_gives_no_advice(self):
+        self.lab_catalog()
+        asked = self.ask_with_label("잔향 줄임 (run-rev-1)")
+        self.assertEqual(asked["state"], "needs-question")
+        self.assertNotIn("name_warnings", asked)
+        self.assertNotIn("catalog name", asked["next_step"])
+
+    def test_no_catalog_or_a_broken_one_leaves_the_field_out_and_the_question_unhindered(self):
+        for broken in (False, True):
+            with self.subTest(broken=broken):
+                self.setUp()
+                self.lab_catalog(broken=broken)
+                if not broken:
+                    import experiment_catalog as E
+                    E.catalog_path(Path(self.route["artifact_root"])).unlink()
+                asked = self.ask_with_label("run-rev-1")
+                self.assertEqual((asked["state"], asked["required_action"]), ("needs-question", "ask-registered-question"))
+                self.assertNotIn("name_warnings", asked)
+
+    def test_the_other_needs_question_branch_carries_the_same_advice(self):
+        self.lab_catalog()
+        item = {"id": "alpha", "topic": "t", "question": "q", "kind": "choice", "recommended": 0, "why": "w",
+                "options": [{"label": "run-rev-1", "means": "m"}, {"label": "Skip", "means": "n"}]}
+        step = {"state": "needs-question", "next_step": "ask"}
+        warned = W._with_name_warnings(self.route, {"understanding": "u", "questions": [item]}, step)
+        self.assertEqual([w["token"] for w in warned["name_warnings"]], ["run-rev-1"])
+        self.assertEqual((warned["state"], warned["next_step"].startswith("ask")), ("needs-question", True))
+        for _ in range(10):
+            item["options"].append({"label": "run-rev-1", "means": "x"})
+        many = W._with_name_warnings(self.route, {"understanding": "u", "questions": [item]}, step)
+        self.assertEqual(len(many["name_warnings"]), 8)                               # a bounded advice list
+
+    def test_ordinary_words_files_versions_and_a_name_given_elsewhere_in_the_question_get_no_advice(self):
+        self.lab_catalog()
+        import experiment_catalog as E
+        root = Path(self.route["artifact_root"])
+        cid = E.load(root).doc["conditions"][0]["id"]
+        E.run_write(root, lambda ctx: E.op_register(ctx, {"conditions": [
+            {"id": cid, "aliases": ["rev-a", "base", "v2", "0.3"]}]}), now=1_790_000_001.0)
+        self.assertEqual(E.load(root).doc["conditions"][0]["aliases"], ["rev-a", "base", "v2", "0.3"])
+        ordinary = {"understanding": "설정을 정리한다", "questions": [
+            {"question": "base.py를 고칠까요?", "options": [{"label": "v2 설치", "means": "base 경로 이용, 오차 0.3"}]}]}
+        self.assertEqual(W._name_warning_fields(self.route, ordinary), {})
+        named = {"understanding": "잔향 줄임(run-rev-1)을 다시 본다", "questions": [
+            {"question": "어떻게 할까요?", "options": [{"label": "run-rev-1 계속", "means": "그대로"}]}]}
+        self.assertEqual(W._name_warning_fields(self.route, named), {})
+        bare = {**named, "understanding": "다시 본다"}
+        self.assertEqual(W._name_warning_fields(self.route, bare)["name_warnings"],
+                         [{"field": "questions[0].options[0].label", "token": "run-rev-1", "kind": "run-id", "name": "잔향 줄임"}])
+
+    def test_one_lookup_table_serves_every_field_of_a_question(self):
+        from unittest import mock
+        import experiment_catalog as E
+        self.lab_catalog()
+        item = {"question": "q", "options": [{"label": f"선택 {i}", "means": "run-rev-1 대기"} for i in range(6)]}
+        real = E.scan_index
+        calls = []
+        with mock.patch.object(E, "scan_index", lambda *a, **kw: calls.append(1) or real(*a, **kw)), \
+                mock.patch.object(E, "resolve_ex", side_effect=AssertionError("no catalog walk per token")):
+            found = W._name_warning_fields(self.route, {"understanding": "u", "questions": [item]})
+        self.assertEqual(len(found["name_warnings"]), 6)
+        self.assertEqual(len(calls), 1)                                   # 14 fields, one table
 
     def test_register_before_question_then_actual_answers_release_once(self):
         self.assertEqual(self.step()["state"], "needs-interview")
