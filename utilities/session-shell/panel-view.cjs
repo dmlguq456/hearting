@@ -1405,8 +1405,23 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     }else for(const item of ask)add(item.parts,item.action);
     // A reset time that does not fit goes whole, never as a cut `(↻ …`. Spec rule 49 (b): 5h/7d
     // share the last row with the fold button and the gear, which stay however short rows run.
+    // Correction 7 (11-13): the model windows (Fable's) stand after 7d; short of cells the row
+    // gives way in this order: the reset times, then 5h (the windows shorter than 7d), then the
+    // model values from the last, then 7d. Each value goes whole.
     const quotaRoom=inner-BUTTONS-1;
-    const quotaRow=size(quota)<=quotaRoom?quota:quota.filter(part=>!/^\(↻/.test(String(part.text)));
+    const quotaRow=(()=>{
+      const groups=[];let cur=[],sep=null;
+      for(const part of quota){if(String(part.text)===' │ '){sep=sep||part;if(cur.length)groups.push(cur);cur=[];}else cur.push(part);}
+      if(cur.length)groups.push(cur);
+      const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
+      const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g]:g);
+      let kept=groups.map(g=>g.filter(part=>!/^\(↻/.test(String(part.text))));
+      const tries=[groups,kept];
+      kept=kept.filter(g=>kind(g)!=='window');tries.push(kept);
+      while(kept.some(g=>kind(g)==='model')){const at=kept.map(kind).lastIndexOf('model');kept=kept.filter((_,i)=>i!==at);tries.push(kept);}
+      tries.push([]);
+      return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
+    })();
     lastRow(keepQuota?quotaRow:[],keepQuota&&quota.length?['quota']:[],order.length);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];

@@ -200,8 +200,12 @@ state's color, and the three glyph shapes still differ in `mono` and under
 `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
 the number; the glyph stays. Right of that head the border is the line alone:
 the gear `⚙` stands at the right end of the panel's last row inside, three cells
-right of the fold button, beside 5h/7d (which give up their reset times first),
-and that row stays however short rows run. The state shown is the host's
+right of the fold button, beside 5h/7d and the model windows (`5h … │ 7d … │
+fable 70%`, the model word in its model color), and that row stays however
+short rows run; short of cells it gives way whole value by whole value: the
+reset times, then 5h, then the model values, then 7d. Claude's statusline
+callback carries only its 5h and 7d windows: the same credential-bound account
+cache's model windows stay beside them (a callback that carries its own wins). The state shown is the host's
 own observation; hook events confirm and correct it, and input readiness and
 every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
 into its session record as it paints (`busy` while it shows progress, `waiting`

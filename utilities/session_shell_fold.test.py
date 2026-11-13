@@ -50,6 +50,27 @@ assert(bottom.at(-2).endsWith('▾   ⚙ │'),bottom.join('\n'));
 assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('«   ⚙ │'));
 """)
 
+    def test_the_last_row_keeps_the_model_quota_and_gives_way_in_order(self):
+        # Correction 7 (2026-11-13): the last row reads `5h … │ 7d … │ fable 70%` (the model word in
+        # its model color). Short of cells it gives way in this order: the reset times `(↻ …)`,
+        # then 5h, then the model values, then 7d. The folded strip carries none of it.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
+const P=(t,o={})=>({text:t,...o}),sep=P(' │ ',{dim:true});
+const quota=[P('5h ',{dim:true}),P('12%',{foreground:150}),P('(↻ 2h)',{dim:true}),sep,P('7d ',{dim:true}),P('66%',{foreground:186}),P('(↻ 5d)',{dim:true}),
+ sep,P('fable ',{foreground:176}),P('70%',{foreground:186})];
+const model={tag:'[e9]',repo:[P('hearting/')],quota};
+const last=w=>{const r=v.render({width:w,height:20,side:true,model,state:'idle',harness:'claude',questions:()=>[]});return r.rows.at(-2);};
+const text=row=>row.map(x=>x.text).join('');
+const want=[[60,'5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 70%'],[40,'5h 12% │ 7d 66% │ fable 70%'],[32,'7d 66% │ fable 70%'],[26,'7d 66%'],[15,'']];
+for(const [w,s] of want){const t=text(last(w));assert(t.startsWith('│ '+s+(s?' ':''))&&t.endsWith('»   ⚙ │')&&!t.includes('…'),w+' '+t);}
+// The model word keeps its model color; nothing of the row is cut mid-value.
+assert.equal(last(40).find(x=>x.text==='fable ').foreground,176);
+// The folded strip has no quota.
+const strip=v.render({width:8,height:20,side:true,folded:true,model:{...model,route_total:2},state:'idle',questions:()=>[]}).rows.map(text).join('\n');
+assert(!/fable|7d|5h/.test(strip),strip);
+""")
+
     def test_the_folded_strip_carries_the_core_values_only(self):
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));

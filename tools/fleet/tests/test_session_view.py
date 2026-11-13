@@ -147,6 +147,29 @@ class SessionViewTest(unittest.TestCase):
         self.assertEqual(values["model_quotas"],[("opus",57),("fable",42)])
         self.assertEqual(values["weekly_pct"],62)
 
+    def test_a_callback_without_model_windows_keeps_the_cached_model_quota(self):
+        # Correction 7 (2026-11-13): Claude's statusline callback carries only `five_hour` and
+        # `seven_day`; the account cache's model windows (`rl_ms`, Fable's) stay beside them.
+        # A callback that carries model windows wins; no cache, no model value.
+        path = self.root / "claude/.statusline" / (self.sid + ".json")
+        windows = {"five_hour": {"used_percentage": 31, "resets_at": 1800000000},
+                   "seven_day": {"used_percentage": 62, "resets_at": 1800200000}}
+        self.write(path, {"session_id": self.sid, "rate_limits": windows})
+        with patch.object(usage_cache, "read", return_value={"payload": {"rl_7d": 60, "rl_ms": [["fable", 70]]}}):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertEqual(values["quota_windows"], [("5h", 31, 1800000000), ("7d", 62, 1800200000)])
+        self.assertEqual([tuple(row) for row in values["model_quotas"]], [("fable", 70)])
+        self.assertEqual(values["weekly_pct"], 62)
+        self.write(path, {"session_id": self.sid, "rate_limits": {**windows, "model_scoped": [
+            {"display_name": "Fable 5", "utilization": .42}]}})
+        with patch.object(usage_cache, "read", return_value={"payload": {"rl_ms": [["fable", 70]]}}):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertEqual([tuple(row) for row in values["model_quotas"]], [("fable", 42)])
+        self.write(path, {"session_id": self.sid, "rate_limits": windows})
+        with patch.object(usage_cache, "read", return_value={}):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertEqual(values["model_quotas"], [])
+
     def test_changed_process_birth_yields_no_other_session_values(self):
         self.assertEqual(view.observe("claude", os.getpid(), self.start + "0", self.sid), ({}, []))
 

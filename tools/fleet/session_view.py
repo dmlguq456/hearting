@@ -186,7 +186,11 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
         native_quota = claude_quota(callback)
         if native_quota:
             # This terminal mirrors its exact native callback; Fleet account
-            # quota admission remains credential-bound and unchanged.
+            # quota admission remains credential-bound and unchanged. Claude's
+            # callback carries no model windows today: the same credential-bound
+            # cache's (`rl_ms`, Fable's) stay beside its 5h/7d windows.
+            if "rl_ms" not in native_quota and quota.get("rl_ms"):
+                native_quota = {**native_quota, "rl_ms": quota["rl_ms"]}
             quota = native_quota
     values.update(harness=harness, title=title or None, now=now_line or None, native_turn=turn, git=observed_git,
                   branch=branch + "*" if branch and observed_git.get("dirty") == 1 else branch,
