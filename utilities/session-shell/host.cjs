@@ -49,7 +49,7 @@ try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}ca
 // Spec rule 49 (d): a window too narrow for the open panel starts with it folded.
 const initialFold=nativeDisplay.fold({cols,configuration:displayConfiguration});
 const initialGeometry=nativeDisplay.layout({cols,rows,expanded:!initialFold.folded,configuration:displayConfiguration});
-const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.side?rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
+const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.nativeRows, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
 let widthProvider;
 new Unicode11Addon().activate({unicode:{register:provider=>{widthProvider=provider;}}});
@@ -331,7 +331,7 @@ function panelColumns(){return geometry().panelCols;}
 // opening paints current values at once.
 function openColumns(){return nativeDisplay.layout({cols,rows,expanded:true,configuration:displayConfiguration}).panelCols;}
 function nativeColumns(){return geometry().nativeCols;}
-function nativeRows(){return geometry().side?rows:rows-height();}
+function nativeRows(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,panelRows:height()}).nativeRows;}
 function panelRow(){return geometry().side?0:rows-height();}
 function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
 // The opened route page's owner output (Fleet's `attempts`), read once per opening.

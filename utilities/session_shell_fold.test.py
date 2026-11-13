@@ -133,6 +133,30 @@ assert.deepEqual([at(180,false,{layout:'bottom'}).side,at(180,false,{layout:'bot
 assert.deepEqual([at(80,true).side,at(80,true).nativeCols],[false,80]);
 """)
 
+    def test_no_window_size_leaves_the_native_area_without_a_cell(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),d=require(path.join(process.argv[1],'native-display.cjs'));
+// A window of nine cells or fewer once left the native beside the strip zero or fewer columns: the
+// PTY refused the size and the panel never came back. The strip stands only where the native beside
+// it keeps STRIP_NATIVE_MIN columns; narrower, the panel folds to the one row under the native.
+assert.equal(d.STRIP_NATIVE_MIN,20);
+const strip=(cols,extra={})=>d.layout({cols,rows:40,expanded:false,configuration:{layout:'side',side_width:40,...extra}});
+assert.deepEqual([strip(29).side,strip(29).nativeCols,strip(29).panelCols],[true,20,d.STRIP]);
+for(const cols of [28,9,1])for(const extra of [{},{position:'left'}]){
+ const g=strip(cols,extra);
+ assert.deepEqual([g.side,g.folded,g.left,g.nativeCols,g.panelCols,g.nativeColumn,g.panelRow,g.nativeRows],[false,true,false,cols,cols,0,null,39],JSON.stringify({cols,extra,g}));
+}
+// Every width 1-40 and height 1-12, open or folded, beside or under: the native keeps a cell and a row.
+for(const extra of [{},{position:'left'},{layout:'bottom'}])for(const expanded of [true,false])
+ for(let cols=1;cols<=40;cols++)for(let rows=1;rows<=12;rows++)for(const panelRows of [undefined,0,1,rows-1,rows,rows+3]){
+  const g=d.layout({cols,rows,expanded,configuration:{layout:'side',side_width:40,...extra},panelRows});
+  const seen=JSON.stringify({cols,rows,expanded,extra,panelRows,g});
+  assert(g.nativeCols>=1&&g.nativeRows>=1,seen);
+  assert.equal(g.side?g.nativeCols+g.gap+g.panelCols:g.nativeCols,cols,seen);
+  assert.equal(g.nativeRows,g.side?rows:Math.max(1,rows-(panelRows??1)),seen);
+ }
+""")
+
 
 if __name__ == "__main__":
     unittest.main()

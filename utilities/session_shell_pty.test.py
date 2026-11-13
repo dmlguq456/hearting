@@ -325,6 +325,10 @@ function existing(file){return new Promise((resolve,reject)=>{
    // Opened by hand where it would fold, it stays open at that width; the next width folds it again.
    await press(108,10);await geometry('geometry8','68x40');
    child.resize(112,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry9','103x40');
+   // A window of nine cells or fewer folds the panel to the one row under the native (the strip
+   // would leave the native no cell), and the open panel stands again once the window widens.
+   child.resize(9,40);await new Promise(r=>setTimeout(r,150));
+   child.resize(180,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry10','138x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);

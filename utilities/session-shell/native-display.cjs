@@ -167,6 +167,9 @@ const NATIVE_MIN=80;
 // Spec rule 49 (c): the folded strip is eight cells (two borders, a blank cell inside each,
 // four content cells), one blank cell from the native area. Its width is this one constant.
 const STRIP=8,STRIP_GAP=1;
+// The strip stands only where the native beside it keeps this many columns; a narrower window
+// folds the panel to the one row under the native instead (the native never gets zero columns).
+const STRIP_NATIVE_MIN=20;
 const sideWidth=configuration=>{const width=configuration?.side_width;return Number.isInteger(width)&&width>=32&&width<=80?width:0;};
 function fold({cols,choice=null,configuration={},pinned=false}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
@@ -177,14 +180,15 @@ function fold({cols,choice=null,configuration={},pinned=false}) {
   const roomy=!(configuration.layout==='side'&&width)||cols-width-2>=NATIVE_MIN;
   return {folded:!roomy&&!pinned,choice:null};
 }
-function layout({cols,rows,expanded=true,configuration={}}) {
+// `panelRows` is the panel's row count under the native area; the native keeps at least one row.
+function layout({cols,rows,expanded=true,configuration={},panelRows=1}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=sideWidth(configuration),wanted=configuration.layout==='side'&&width>0;
   // Folded beside the native area: the eight-cell strip at the panel's edge; the native
   // area takes the rest (spec rule 49 (c)).
-  if(wanted&&!expanded){
+  if(wanted&&!expanded&&cols-STRIP-STRIP_GAP>=STRIP_NATIVE_MIN){
     const left=configuration.position==='left';
-    return {side:true,folded:true,left,gap:STRIP_GAP,panelCols:STRIP,nativeCols:cols-STRIP-STRIP_GAP,
+    return {side:true,folded:true,left,gap:STRIP_GAP,panelCols:STRIP,nativeCols:cols-STRIP-STRIP_GAP,nativeRows:rows,
       panelColumn:left?0:cols-STRIP,nativeColumn:left?STRIP+STRIP_GAP:0,panelRow:0};
   }
   // An open panel stands beside the native area when it physically fits (the native area
@@ -196,6 +200,7 @@ function layout({cols,rows,expanded=true,configuration={}}) {
   // shell's own panel moves; the native area keeps its own column count.
   const left=side&&configuration.position==='left';
   return {side,folded:!expanded,left,gap:side?2:0,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
+    nativeRows:side?rows:Math.max(1,rows-panelRows),
     panelColumn:side&&!left?cols-width:0,nativeColumn:left?width+2:0,panelRow:side?0:null};
 }
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
@@ -242,4 +247,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,NATIVE_MIN,STRIP,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,NATIVE_MIN,STRIP,STRIP_NATIVE_MIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
