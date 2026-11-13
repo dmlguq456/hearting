@@ -802,6 +802,10 @@
    "en": "invalid",
    "ko": "유효하지 않음"
   },
+  "fleet.lab.look_now": {
+   "en": "look now: {name}",
+   "ko": "지금 볼 것: {name}"
+  },
   "fleet.lab.metric": {
    "en": "METRIC",
    "ko": "지표"
@@ -814,6 +818,10 @@
    "en": "failed {n}",
    "ko": "실패 {n}"
   },
+  "fleet.lab.n_more": {
+   "en": "+{n} more",
+   "ko": "외 {n}개"
+  },
   "fleet.lab.n_running": {
    "en": "running {n}",
    "ko": "진행 {n}"
@@ -825,6 +833,10 @@
   "fleet.lab.n_unknown": {
    "en": "unknown {n}",
    "ko": "미확인 {n}"
+  },
+  "fleet.lab.n_unlinked": {
+   "en": "unlinked {n}",
+   "ko": "미연결 {n}"
   },
   "fleet.lab.no_conditions": {
    "en": "no conditions registered in this group",

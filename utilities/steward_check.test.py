@@ -133,6 +133,9 @@ class StewardCheckLabTest(CheckBase):
 
     def setUp(self):
         super().setUp()
+        language = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "ko"})
+        language.start()
+        self.addCleanup(language.stop)
         import experiment_board as board
         import experiment_catalog as catalog
         spec = importlib.util.spec_from_file_location("lab_catalog_fixture", HERE / "experiment_catalog.test.py")
@@ -205,6 +208,22 @@ class StewardCheckLabTest(CheckBase):
                 self.assertEqual(result["reason"], "quiet-no-change")
                 self.assertEqual(self.notify.call_count, before + 1)
                 self.write_run("small", 20.0)
+
+    def test_real_board_stale_fresh_stale_does_not_repeat_notice(self):
+        self.register()
+        outcomes = []
+        for index, age in enumerate((1200, 300, 1200, 300, 1200, 300)):
+            self.fixture.write_run(self.root, "small", at=self.now - age,
+                                   stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+            now = T0 + (index + 1) * (INTERVAL + 200)
+            before = self.notify.call_count
+            self.step(now)
+            sent = self.notify.call_count > before
+            outcomes.append(sent)
+            if sent:
+                self.deliver_and_ack()
+                self.step(now + 100)
+        self.assertEqual(outcomes, [True, False, False, False, False, False])
 
     def test_only_new_values_even_new_best_name_do_not_change_signature(self):
         self.assertEqual(self.board.read(self.root)[0]["groups"][0]["headline"]["name"], "작은 모델")
@@ -1743,6 +1762,128 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         for wrong in ("unanswered", "follow up", "do that work now"):
             self.assertNotIn(wrong, text)
         self.assertIn("queued", text)
+
+
+
+class LabRegressionTest(CheckBase):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "ko"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.seen["targets"] = [target(state="done")]
+        self.clock = T0
+        self.register()
+
+    def labs(self, unknown=0, failed=0, stagnant=0, unlinked=0, groups=None):
+        groups = groups or [dict(name="AMI", headline_name="작은 모델", unknown=unknown,
+                                 failed=failed, stagnant=stagnant)]
+        return {"/synthetic": dict(groups=groups, unlinked=unlinked,
+            **{key: sum(g[key] for g in groups) for key in ("unknown", "failed", "stagnant")})}
+
+    def tick(self, lab):
+        self.clock += INTERVAL + 100
+        self.seen["lab"] = lab
+        before = self.notify.call_count
+        self.step(self.clock)
+        if self.obs()["phase"] == "notified":
+            self.deliver_and_ack()
+            self.step(self.clock + 100)
+        return self.notify.call_count - before
+
+    def test_korean_receipt_delivers_with_lab(self):
+        self.seen["targets"] = [target()]
+        self.seen["open_work"] = [
+            "실험 보고 가독성 사단계로 카드와 주입에서 정본 이름을 쓰고 모든 세션이 시작할 때 정본을 발견하게 하며 남은 경고 문구도 함께 고치기",
+            "셸 패널 실험 구획과 여덟 칸 띠를 설치 전 화면으로 확인하고 사용자에게 보여 줄 시안을 고른 뒤 접기와 펼치기 동작까지 맞추기",
+            "자식 실패 알림이 쉬고 있는 감독을 깨우지 않는 문제의 세 번째 단계 정정과 수신처 인계를 마무리하고 재현 시험을 남기기",
+            "감독 정정 묶음에서 런타임 종료 처리와 남은 자식 정리 그리고 사용자 결정 대기 항목을 따로 나누어 보고서에 적어 두기"]
+        groups = [dict(name=name, headline_name=head, unknown=1, failed=0, stagnant=0)
+                  for name, head in (("AMI 가변 화자 개선", "작은 모델"),
+                                     ("VoxConverse 일반화 확인", "큰 모델 기준선 재현"))]
+        sid = "0199a1b2-c3d4-7e5f-8a9b-123456789012"
+        duty = SC.register(HARNESS, sid, now=T0, store=self.store, ensure_runner=False)
+        self.seen["lab"] = self.labs(groups=groups)
+        SC.advance(self.store.get(duty["id"]), self.store, now=T0 + INTERVAL)
+        obs = self.store.get(duty["id"])["observation"]
+        self.assertEqual(obs["phase"], "notified", obs)
+        receipt = SC._notice_record(sid, obs["notice_delivery_id"])["receipt"]
+        self.assertLessEqual(len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()), 2048)
+        self.assertIn("`peer-steward steward check`", receipt["text"])
+
+    def test_whole_groups_attention_first_and_intact_advice(self):
+        self.seen["open_work"] = [f"task {i} " + "x" * 55 for i in range(4)]
+        groups = [dict(name=f"healthy-{i}", headline_name="best-model-" + "x" * 20,
+                       unknown=0, failed=0, stagnant=0) for i in range(4)]
+        groups.append(dict(name="attention-group", headline_name="missing-condition",
+                           unknown=12, failed=0, stagnant=0))
+        self.tick(self.labs(groups=groups))
+        text = self.record()["receipt"]["text"]
+        self.assertIn("`peer-steward steward check`", text)
+        self.assertIn(" | LAB: attention-group", text)
+        self.assertIn("미확인 12", text)
+        self.assertIn("missing-condition", text)
+        self.assertRegex(text, r"외 [1-4]개")
+        self.assertRegex(text, r"\+[1-4] more")
+        self.assertNotIn("…", text)
+
+    def test_runtime_failure_and_stagnation_display_without_waking(self):
+        self.tick(self.labs())
+        for field in ("failed", "stagnant"):
+            with self.subTest(field=field):
+                labs = self.labs(**{field: 1})
+                self.assertEqual(self.tick(labs), 0)
+                self.assertIn("1", SC._lab_line({"lab": labs}))
+
+    def test_lab_falls_back_to_ordinary_notice_and_does_not_poison_retry(self):
+        self.seen["lab"] = self.labs(groups=[dict(name="가" * 120, headline_name="나" * 80,
+                                                unknown=12, failed=0, stagnant=0)])
+        self.seen["open_work"] = ["가" * 60 + str(i) for i in range(4)]
+        with mock.patch.object(session_notice, "notify", return_value=None):
+            self.step(T0 + INTERVAL)
+        self.assertEqual(self.obs()["reason"], "notice-unavailable")
+        self.assertNotIn("lab_notified", self.obs())
+        self.step(T0 + 2 * INTERVAL)
+        self.assertEqual(self.obs()["phase"], "notified")
+        receipt = self.record()["receipt"]
+        self.assertNotIn("LAB:", receipt["text"])
+        self.assertIn("`peer-steward steward check`", receipt["text"])
+
+    def test_lab_language_and_existing_signature_scope(self):
+        seen = {**self.seen, "lab": self.labs(unknown=12, failed=1, stagnant=2, unlinked=3)}
+        for lang, words in (("en", ("failed 1", "stuck 2", "unknown 12", "look now:", "unlinked 3")),
+                            ("ko", ("실패 1", "정체 2", "미확인 12", "지금 볼 것:", "미연결 3"))):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                line = SC._lab_line(seen)
+                for word in words:
+                    self.assertIn(word, line)
+        self.assertEqual(SC._signature("tidy-and-release", seen), SC._signature(
+            "tidy-and-release", {**seen, "lab": self.labs(unknown=12, failed=9, unlinked=3)}))
+        changed = self.labs(unknown=12, unlinked=3)
+        changed["/synthetic"]["groups"][0]["headline_name"] = "다른 조건"
+        self.assertNotEqual(SC._signature("tidy-and-release", seen), SC._signature(
+            "tidy-and-release", {**seen, "lab": changed}))
+
+    def test_separate_groups_roots_and_ordinary_work_still_wake(self):
+        self.tick(self.labs(unknown=1))
+        self.assertEqual(self.tick(self.labs(unlinked=1)), 1)
+        self.assertEqual(self.tick(self.labs(unlinked=0)), 0)
+        labs = self.labs(unlinked=1)
+        labs["/synthetic"]["groups"][0].update(name="new-group", unknown=1)
+        self.assertEqual(self.tick(labs), 1)
+        labs["/second"] = labs.pop("/synthetic")
+        self.assertEqual(self.tick(labs), 1)
+        self.seen["open_work"] = ["new work"]
+        self.assertEqual(self.tick({}), 1)
+        self.seen["targets"] = [target()]
+        self.assertEqual(self.tick({}), 1)
+        self.assertEqual(self.tick({}), 1)
+
+    def test_unknown_and_unlinked_only_wake_above_notified_level(self):
+        for index, value in enumerate((1, 0, 1, None, 1, 2, 1, 2)):
+            labs = {} if value is None else self.labs(unknown=value, unlinked=value)
+            with self.subTest(index=index):
+                self.assertEqual(self.tick(labs), int(index in (0, 5)))
 
 
 if __name__ == "__main__":

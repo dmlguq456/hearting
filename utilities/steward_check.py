@@ -493,16 +493,71 @@ def _observe_lab(cwds) -> dict:
     return lab
 
 
-def _lab_line(observation: dict) -> str:
+def _lab_text():
+    def load():
+        path = _UTILITIES.parent / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("_steward_ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    return _module("ui_text", load).translator()
+
+
+def _lab_parts(observation: dict) -> list[str]:
+    t = _lab_text()
     parts = []
     for lab in (observation.get("lab") or {}).values():
         groups = lab["groups"] or [{"name": None, "headline_name": None, **lab}]
-        for group in groups:
-            parts.append(f"{group['name'] or '-'} — 실패 {group['failed']}·정체 {group['stagnant']}"
-                         f"·미확인 {group['unknown']}, 지금 볼 것: {group['headline_name'] or '-'}")
-        if lab["unlinked"]:
-            parts[-1] += f", 미연결 {lab['unlinked']}"
-    return "LAB: " + "; ".join(parts) if parts else ""
+        for index, group in enumerate(groups):
+            unlinked = lab["unlinked"] if index == 0 else 0
+            counts = "·".join(t("fleet.lab.n_" + key, n=group[key])
+                              for key in ("failed", "stagnant", "unknown"))
+            text = f"{group['name'] or '-'} — {counts}, " + t(
+                "fleet.lab.look_now", name=group["headline_name"] or "-")
+            if unlinked:
+                text += ", " + t("fleet.lab.n_unlinked", n=unlinked)
+            attention = unlinked or any(group[key] for key in ("failed", "stagnant", "unknown"))
+            parts.append((bool(attention), text))
+    return [text for _, text in sorted(parts, key=lambda part: not part[0])]
+
+
+def _lab_line(observation: dict, *, parts=None, shown=None) -> str:
+    parts = _lab_parts(observation) if parts is None else parts
+    shown = len(parts) if shown is None else shown
+    if not shown:
+        return ""
+    kept = parts[:shown]
+    if shown < len(parts):
+        kept = [*kept, _lab_text()("fleet.lab.n_more", n=len(parts) - shown)]
+    return "LAB: " + "; ".join(kept)
+
+
+def _lab_attention(observation: dict) -> dict:
+    """Only evidence not already covered by runtime failure/stall notices."""
+    result = {}
+    for root, lab in (observation.get("lab") or {}).items():
+        groups = {g["name"]: {"unknown": g["unknown"], "headline_name": g["headline_name"]}
+                  for g in lab["groups"] if g["unknown"]}
+        if groups or lab["unlinked"]:
+            result[root] = {"groups": groups, "unlinked": lab["unlinked"]}
+    return result
+
+
+def _lab_notified_level(current: dict, previous: dict) -> dict:
+    """Retain notified high counts through decreases and missing reads.
+
+    A headline follows a newly increased count; changing only the name must not
+    re-wake the holder at a count already reported. Kept inside the existing duty.
+    """
+    result = {root: {"unlinked": lab["unlinked"], "groups": dict(lab["groups"])}
+              for root, lab in previous.items()}
+    for root, lab in current.items():
+        kept = result.setdefault(root, {"unlinked": 0, "groups": {}})
+        kept["unlinked"] = max(kept["unlinked"], lab["unlinked"])
+        for name, group in lab["groups"].items():
+            if group["unknown"] > kept["groups"].get(name, {}).get("unknown", 0):
+                kept["groups"][name] = dict(group)
+    return result
 
 
 def _observe_role(harness: str, session_id: str) -> dict:
@@ -637,14 +692,8 @@ def _signature(action: str, observation: dict) -> str:
     raw = repr((action, rows, observation["pending_messages"],
                 tuple(observation.get("open_work") or ()),
                 tuple(observation.get("user_decisions") or ())))
-    if observation.get("lab"):
-        # Keep the board's actual headline for display, but a healthy best-name change
-        # is new-result news, not a change in this duty's attention evidence.
-        lab = {root: {**summary, "groups": [
-            {**group, "headline_name": group["headline_name"] if any(
-                group[key] for key in ("failed", "stagnant", "unknown")) else None}
-            for group in summary["groups"]]}
-            for root, summary in observation["lab"].items()}
+    lab = _lab_attention(observation)
+    if lab:
         raw += json.dumps(lab, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -670,18 +719,44 @@ def _classify(observation: dict) -> str:
     return "run-steward-check"
 
 
-def _actions_text(actions: list[str]) -> str:
+def _actions_text(actions: list[str], limit: int | None = None) -> str:
     """The assign-next notice within the carrier's text limit."""
     import session_notice
-    limit = getattr(session_notice, "MAX_TEXT", 600)
+    limit = session_notice.MAX_TEXT if limit is None else limit
     shown = list(actions[:_MAX_ACTIONS])
     while True:
         more = len(actions) - len(shown)
-        joined = "; ".join(shown) + (f"; +{more} more" if more else "")
+        joined = "; ".join([*shown, *([f"+{more} more"] if more else [])])
         text = TEXT_ASSIGN_NEXT.format(actions=joined)
-        if len(text) <= limit or len(shown) <= 1:
-            return text[:limit]
+        if len(text) <= limit or not shown:
+            return text
         shown.pop()
+
+
+def _notice_text(base: str, seen: dict, action: str, key: str, waiting_since, now) -> str:
+    """Fit whole LAB groups and actions to both carrier limits before notifying."""
+    import session_notice
+    try:
+        parts = _lab_parts(seen) if seen.get("lab") else []
+    except Exception:  # optional display must never disable the ordinary notice
+        return base
+    actions = next_actions(seen, waiting_since, now) if action == "assign-next" else None
+    for shown in range(len(parts), 0, -1):
+        line = _lab_line(seen, parts=parts, shown=shown)
+        if len(line) > 250:
+            continue
+        suffix = " | " + line
+        advice = (_actions_text(actions, session_notice.MAX_TEXT - len(suffix))
+                  if actions is not None else base)
+        text = " ".join((advice + suffix).split())
+        try:
+            # Same normalization and ASCII-escaped byte accounting as notify.
+            session_notice.validate({"schema_version": 1, "kind": "notice",
+                "subject": "steward-check", "text": text, "required_action": action, "key": key})
+        except ValueError:
+            continue
+        return text
+    return base  # LAB cannot make an otherwise deliverable notice unavailable
 
 
 # ---------------------------------------------------------------- notices
@@ -932,7 +1007,15 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
     waiting_since = _track_waiting(observation.get("waiting_since"), seen["targets"], now)
     observation = {**observation, "waiting_since": waiting_since}
     action = _classify(seen)
-    signature = _signature(action, seen)
+    lab_seen = _lab_attention(seen)
+    lab_level = _lab_notified_level(lab_seen, observation.get("lab_notified") or {})
+    # Reuse the ordinary signature with the notified LAB level, not the latest
+    # fluctuating read. Display still uses the current shared board unchanged.
+    signature_lab = {root: {"unlinked": lab["unlinked"], "groups": [
+        {"name": name, **group} for name, group in lab["groups"].items()]}
+        for root, lab in lab_level.items()}
+    signature = _signature(action, {**seen, "lab": signature_lab})
+    observation = {**observation, "lab_seen": lab_seen}
     quiet = _quiet(seen)
     if quiet and signature == observation.get("quiet_signature"):
         store.update(duty["id"], observation={
@@ -947,22 +1030,15 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         text = _actions_text(next_actions(seen, waiting_since, now))
     else:
         text = TEXT_RUN_CHECK
-    lab_line = _lab_line(seen)
-    if lab_line:
-        import session_notice
-        # Leave room for the existing advice and keep LAB visible within the carrier budget.
-        lab_line = lab_line if len(lab_line) <= 250 else lab_line[:249] + "…"
-        budget = session_notice.MAX_TEXT - len(lab_line) - 1
-        text = text if len(text) <= budget else text[:budget - 1] + "…"
-        text += "\n" + lab_line
     cycle = int(observation.get("cycle") or 0)
     key = _notice_key(harness, session_id, observation["epoch"], cycle)
+    text = _notice_text(text, seen, action, key, waiting_since, now)
     delivery_id = _delivery_id(key)
     # Record the intent first so a carrier claiming right away already finds the
     # duty vouching for this exact notice.
     sent = {**observation, "phase": "notified", "cycle": cycle + 1, "notified_at": now,
             "notice_delivery_id": delivery_id, "reason": action,
-            "quiet_signature": signature if quiet else None}
+            "quiet_signature": signature if quiet else None, "lab_notified": lab_level}
     store.update(duty["id"], observation=sent)
     _THROTTLE[(duty["id"], "notified")] = now
     try:
