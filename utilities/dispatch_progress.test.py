@@ -212,10 +212,18 @@ class ProgressTest(unittest.TestCase):
              mock.patch.object(P.supervision, "_attempt_human_wait", return_value=False):
             P.supervision.update_attempt_stall_observation(
                 self.jobs, self.attempt, now=10, row=("open", metadata), worktree=str(self.base))
-            running = P.supervision.update_attempt_stall_observation(
-                self.jobs, self.attempt, now=1000, row=("open", metadata), worktree=str(self.base))
+            # PR #1592 R2: the start record alone is not progress past the quiet windows;
+            # the exact tool command started for it still running is.
+            with mock.patch.object(P.supervision, "_running_tool_command", return_value=(11.0, "sleep")):
+                running = P.supervision.update_attempt_stall_observation(
+                    self.jobs, self.attempt, now=1000, row=("open", metadata), worktree=str(self.base))
             self.assertEqual((running["state"], running["reason"]),
                              ("active", "native-tool-active"))
+            with mock.patch.object(P.supervision, "_running_tool_command", return_value=None):
+                pinned = P.supervision.update_attempt_stall_observation(
+                    self.jobs, self.attempt, now=1000, row=("open", metadata), worktree=str(self.base))
+            self.assertEqual((pinned["state"], pinned["reason"]),
+                             ("stalled", "no-comparable-progress"))
             log.write_text(json.dumps({"type": "item.completed", "item": {
                 "id": "cmd-long", "type": "command_execution"}}) + "\n")
             completed = P.supervision.update_attempt_stall_observation(

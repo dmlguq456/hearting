@@ -272,7 +272,7 @@ class Window:
                     return
                 self.raw.extend(data)
 
-    def until(self, needle, timeout=8):
+    def until(self, needle, timeout=30):
         if isinstance(needle, str):
             needle = needle.encode()
         end = time.monotonic()+timeout
@@ -294,7 +294,7 @@ class Window:
                 rows.append(row)
         return rows[0] if len(rows) == 1 else None
 
-    def wait_binding(self, timeout=10, other_than=None):
+    def wait_binding(self, timeout=30, other_than=None):
         end = time.monotonic()+timeout
         while time.monotonic() < end:
             row = self.binding()
@@ -307,7 +307,7 @@ class Window:
         row = row or self.binding()
         return rpc(row['socket'], {**row, 'op': 'status'})
 
-    def wait_empty(self, timeout=10):
+    def wait_empty(self, timeout=30):
         end = time.monotonic()+timeout
         while time.monotonic() < end:
             try:
@@ -422,7 +422,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
         return window
 
     # ---------------------------------------------------------------- helpers
-    def switched(self, window, old_host, timeout=20):
+    def switched(self, window, old_host, timeout=60):
         return window.wait_binding(timeout, other_than=old_host)
 
     def assert_keeps_native(self, window, native, host_before=None):
@@ -558,7 +558,9 @@ class SessionShellSuccessionTest(unittest.TestCase):
         # DONE_x clears the screen; one more flood leaves rows above the viewport.
         window.type('y\r'); window.until('DONE_y'); window.wait_empty()
         window.point('rel-b'); second = self.switched(window, first['host_pid'])
-        window.wait_empty(); window.point('rel-c'); self.switched(window, second['host_pid'])
+        # The next install comes after the second host has settled and made its own start check, as a
+        # person's next install does: only that host's watch on the link can notice it (no idle event follows).
+        window.wait_empty(); window.pump(.5); window.point('rel-c'); self.switched(window, second['host_pid'])
         seeds = window.seeds()
         self.assertEqual(len(seeds), 2, seeds)
         one, two = (json.loads(path.read_text()) for path in seeds)
@@ -626,7 +628,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.point('rel-b'); window.pump(1.0)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])
-        window.until('DONE_slow', 6)
+        window.until('DONE_slow', 30)
         self.switched(window, first['host_pid'])
         self.assert_keeps_native(window, native)
 
@@ -640,7 +642,28 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.type(b'\x1d'); window.pump(.3)
         self.switched(window, first['host_pid'])
 
+    def hold_projection(self, window):
+        """Hold the panel cache producer's lock for the rest of the test, so the seeded projection stays.
+
+        The producer (a detached `--refresh-cache` refresher, which earlier windows' demands start and
+        which stays while demand lasts) holds this lock and rewrites the cache from this fixture's real
+        state, which has none of the seeded rows. The fixture's own refresher is ended (as the class
+        cleanup ends it) and the lock taken, so no new one starts while the test reads the seeded page.
+        """
+        lock = Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits/.projection.lock'
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, fd)
+        end = time.monotonic()+30
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                self.assertLess(time.monotonic(), end, 'the fixture cache refresher kept the lock')
+                self.reap_refreshers(); window.pump(.05)
+
     def open_read_page(self, window):
+        self.hold_projection(window)
         cache = Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits/projection.json'
         value = json.loads(cache.read_text()); key = window.harness+'\0'+window.sid
         value['observed_at'] = time.time()

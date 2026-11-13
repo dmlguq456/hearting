@@ -172,7 +172,7 @@ let foldChoice=null;
 let displaySequence=0,nativeMcp;
 // Hand-over between host generations (plan §3.0): `succeeding` is the frozen window of the old
 // display, `upgrade` a newer installed release waiting for a safe moment.
-let succeeding=false,switched=!SUCCESSOR,running=!SUCCESSOR,upgrade=null,upgradeNote='',checkingRelease=false,checkedKey='';
+let succeeding=false,switched=!SUCCESSOR,running=!SUCCESSOR,upgrade=null,upgradeNote='',checkingRelease=false,checkedKey='',recheckRelease=false,releaseWake;
 let successionChannel,socketIno=-1,seedFile='',layoutDeferred=false;
 const bound=[],releaseWatchers=[],staleServers=[],nextPath=socketPath+'.next';
 const myRelease=(()=>{try{return fs.realpathSync(__filename);}catch{return null;}})();
@@ -868,18 +868,21 @@ function screenSnapshot() {
   }
   return lines;
 }
+// Returns why the reading gave no answer for the screen it was asked about ('moved': the screen,
+// input or lifecycle changed meanwhile; 'unavailable': the backend did not answer), or '' when it did.
 async function refreshReadiness() {
   // A previous empty frame cannot acknowledge bytes still waiting inside the
   // native input loop. Only untouched startup or an exact submitted frontier
   // can be corroborated by the screen/native-idle observation.
   const inputSettled=nativeEpoch===0||(submitted>=0&&submitted===nativeEpoch);
-  if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return;}
+  if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return '';}
   // A lifecycle event that arrives meanwhile is newer than this observation.
   const before=epoch,selected=selection,revision=screenRevision,observed=sequence;
   const result=await source('readiness',{screen:screenSnapshot(),state});
-  if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return;}
+  if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return 'moved';}
   empty=result.ok===true&&result.ready===true;
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
+  return result.ok===true?'':'unavailable';
 }
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
@@ -1298,14 +1301,31 @@ function successionSafe(skipEmpty=false) {
     &&displayVTs.size===0&&!rebuilding&&!checkingNativeSelection&&!modelReading&&!mouseInput.pending()&&terminal.modes.bracketedPasteMode;
   return quiet&&(skipEmpty||empty);
 }
+// Every reason to look again is kept until a look has seen it: one that comes while a look is under
+// way is taken up when that look ends (it may have read a screen that changed since), and the second's
+// pause after an attempt that ended unsafe (or a reading the backend could not give) ends in one look of
+// its own, since an idle window has no other event to look again on. Neither polls the link.
 function checkRelease() {
-  if(!upgrade||upgrade.requested||upgrade.blocked||Date.now()<(upgrade.retryAfter||0)||succeeding||checkingRelease||!successionChannel||!successionSafe(true))return;
+  if(checkingRelease){recheckRelease=true;return;}
+  if(!upgrade||upgrade.requested||upgrade.blocked||succeeding||!successionChannel)return;
+  const pause=(upgrade.retryAfter||0)-Date.now();
+  if(pause>0){if(!releaseWake)releaseWake=setTimeout(()=>{releaseWake=undefined;checkRelease();},pause);return;}
+  if(!successionSafe(true))return;
   checkingRelease=true;
   (async()=>{
     const key=[screenRevision,epoch,selection,state].join(':');
-    if(!successionSafe()&&checkedKey!==key){checkedKey=key;await refreshReadiness();}
+    if(!successionSafe()&&checkedKey!==key){
+      checkedKey=key;
+      // A reading with no answer for this screen proves nothing either way: a screen that moved is read
+      // on the change that moved it, a backend that did not answer is asked again after the pause.
+      const unread=await refreshReadiness();
+      if(unread){checkedKey='';if(unread==='unavailable'&&upgrade)upgrade.retryAfter=Date.now()+1000;}
+    }
     if(upgrade&&!upgrade.requested&&successionSafe()){upgrade.requested=true;succSend({op:'request',release:myRelease});}
-  })().catch(()=>{}).finally(()=>{checkingRelease=false;});
+  })().catch(()=>{}).finally(()=>{
+    checkingRelease=false;
+    if(recheckRelease||upgrade&&!upgrade.requested&&Date.now()<(upgrade.retryAfter||0)){recheckRelease=false;checkRelease();}
+  });
 }
 
 // ---- the succession channel: the old host answers freeze/resume/retire, the new one commit/switch/run ----
@@ -1323,7 +1343,13 @@ function startSuccessionChannel() {
 }
 async function onSuccession(message) {
   if(message.op==='declined'){
-    if(upgrade){upgrade.requested=false;if(message.reason!=='busy'&&message.reason!=='not-running')upgrade.blocked=String(message.reason||'declined');}
+    if(upgrade){
+      upgrade.requested=false;
+      // `busy`: the owner is still ending an earlier attempt, so this one is asked again after the pause.
+      if(message.reason==='busy')upgrade.retryAfter=Date.now()+1000;
+      else if(message.reason!=='not-running')upgrade.blocked=String(message.reason||'declined');
+      checkRelease();
+    }
     return;
   }
   if(message.op==='freeze')return succSend(await freeze());
@@ -1358,7 +1384,12 @@ function buildSeed() {
   }
   return json;
 }
+// The host's own display work (a panel rebuild, a scratch VT, a model or selection read) ends by
+// itself within milliseconds: a freeze that meets it waits for it (inside the owner's freeze limit)
+// instead of ending the attempt as unsafe, which would spend a successor on no person's activity.
+function displayBusy(){return rebuilding||displayVTs.size>0||checkingNativeSelection||modelReading;}
 async function freeze() {
+  for(let waited=0;displayBusy()&&waited<200;waited++)await new Promise(resolve=>setTimeout(resolve,5));
   if(!successionSafe())return {ok:false,reason:'unsafe'};
   succeeding=true;
   try{
@@ -1506,6 +1537,9 @@ function runSuccessor() {
   if(running||!switched)return;
   running=true;
   child.resume();createInputOwner();process.stdin.resume();
+  // From now on this host is the window's display, so it notices the next install as the first
+  // host does: by the watch on the link's directory. The check below sees one made before the watch.
+  watchRelease();
   refreshReadiness().finally(()=>{detectRelease();checkRelease();});
 }
 
