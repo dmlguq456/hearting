@@ -1596,6 +1596,17 @@ class ManagedGatewayTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertIn(expected, self.server.approval_responses)
         self.wait_interaction("thread-1", False)
+        import human_wait_state
+        item_id = f"S1:codex:thread-1:{int(marker['waiting_since'] * 1000)}"
+        deadline = time.monotonic() + 5
+        closed = None
+        while time.monotonic() < deadline:
+            closed = human_wait_state.closed_question(item_id)
+            if closed and closed["status"] == "answered":
+                break
+            time.sleep(0.01)
+        self.assertEqual(closed["status"], "answered")
+        self.assertEqual(set(closed), {"status", "at"})
         persisted = "".join(
             path.read_text(encoding="utf-8")
             for path in (self.trace, self.ledger)

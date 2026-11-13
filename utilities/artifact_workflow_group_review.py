@@ -698,7 +698,8 @@ class _View:
 def _view(root: Path, campaign_id: str, record: Mapping[str, Any], titles_by_id: Mapping[str, str]) -> _View:
     cycle_id = record["cycle_id"]
     title = titles_by_id.get(cycle_id) or str(record.get("title") or "")
-    request = _clip(cycle_titles._route_text(root, record) or "", REQUEST_MAX)
+    from work_intent import original_work_request
+    request = _clip(original_work_request(cycle_titles._route_text(root, record) or ""), REQUEST_MAX)
     view = _View(cycle_id, title, "sealed" if producer.cycle_record_closed(record) else "open",
                  record, request, [], [])
     try:

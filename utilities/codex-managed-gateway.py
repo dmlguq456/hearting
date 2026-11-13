@@ -1248,7 +1248,13 @@ class ManagedGateway:
                         item_id=(pending[0].item_id if len(pending) == 1 else None),
                     )
             elif existing and existing.get("source") == "codex-appserver":
-                fleet_interaction.clear_wait(thread_id, "codex")
+                retired = self._retired_appserver_requests.get(
+                    (thread_id, request_key(existing.get("request_id"))), {})
+                reason = {"applied": "answered", "received": "answered",
+                          "cancelled": "cancelled", "expired": "expired"}.get(retired.get("state"), "closed")
+                if retired.get("state") == "submitted" and retired.get("action_id"):
+                    reason = "answered"  # the selected-response path already wrote the reply
+                fleet_interaction.clear_wait(thread_id, "codex", reason=reason)
         except Exception:
             pass
 
@@ -1409,6 +1415,8 @@ class ManagedGateway:
             "ref": self._server_request_ref(pending),
             "state": state,
             "action_id": pending.action_id,
+            "wait_id": f"S1:codex:{pending.thread_id}:{int(pending.received_at * 1000)}",
+            "closed_at": time.time(),
         }
         if pending.action_id:
             self._set_retired_request_state_locked(identity, state)
@@ -1420,6 +1428,16 @@ class ManagedGateway:
         if retired is None:
             return
         retired["state"] = state
+        # A native response retires the marker before the upstream write. Only this
+        # post-write result may say answered; a failed write stays reason-unavailable.
+        try:
+            from human_wait_state import record_closed_question
+            reason = {"submitted": "answered", "received": "answered", "applied": "answered",
+                      "cancelled": "cancelled", "expired": "expired"}.get(state, "closed")
+            if retired.get("wait_id"):
+                record_closed_question(retired["wait_id"], reason, at=retired["closed_at"])
+        except Exception:
+            pass  # diagnostic loss cannot affect forwarding
         action_id = retired.get("action_id")
         previous = (
             self._interaction_actions.get(action_id)
