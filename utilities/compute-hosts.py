@@ -2803,18 +2803,28 @@ def _claim_run_recipient(run_root, identity, claim):
     if identity.get("run_id_error"):
         return unchanged(identity["run_id_error"])
     if not run_id:
-        return unchanged("이 PID에 HEARTING_COMPUTE_RUN_ID가 없음")
+        return {"status": "unchanged", "run_id": run_id,
+                "message": "등록 실행이 아니어서 옮길 알림 없음"}
     if (not isinstance(run_id, str) or len(run_id) > 255
             or Path(run_id).name != run_id or run_id in {".", ".."}
             or any(ord(char) < 32 or ord(char) == 127 for char in run_id)):
         return unchanged("유효하지 않은 run id")
     owner = claim["owner"]
+    registered_worker = (bool(os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"))
+                         and os.environ.get("AGENT_DISPATCH_DEPTH") in {"1", "2"})
+    if registered_worker:
+        # A short-lived worker keeps its GPU label, but notices belong to its parent seat.
+        owner = _launcher_session_owner()
+        if owner is None:
+            return unchanged("dispatch 작업자 세션으로는 알림을 옮기지 않음: 담당 부모 세션을 확인할 수 없음")
     # Explicit --harness/--session or the existing unambiguous launcher identity.
     # Never copy attempt-parent authority from the run's previous recipient.
     verified = _unique_session_owner({CANONICAL_SESSION_KEY[owner["harness"]]: owner["id"]})
     if verified is None:
         return unchanged("넘겨받는 세션 신원을 확인할 수 없음")
     recipient = {"harness": verified["harness"], "id": verified["id"]}
+    recipient_label = (f"담당 부모 세션 {recipient['harness']}:{recipient['id']}"
+                       if registered_worker else "이 세션")
     root = Path(run_root)
     run_dir = root / run_id
     meta_path = run_dir / "meta.json"
@@ -2840,7 +2850,7 @@ def _claim_run_recipient(run_root, identity, claim):
             if (previous["session"] == recipient
                     and ("notify" not in provenance or previous["notify"] == recipient)):
                 return {"status": "unchanged", "run_id": run_id,
-                        "message": f"run {run_id}의 알림은 이미 이 세션으로 옴"}
+                        "message": f"run {run_id}의 알림은 이미 {recipient_label}으로 옴"}
             history = provenance.setdefault("recipient_handovers", [])
             if not isinstance(history, list):
                 return unchanged("meta.json의 인계 이력을 읽을 수 없음")
@@ -2868,8 +2878,12 @@ def _claim_run_recipient(run_root, identity, claim):
 
     old_labels = ", ".join(f"{row['harness']}:{row['session_id']}" for row in targets) or "미확인"
     result = {"status": "moved", "run_id": run_id, "from": previous, "to": recipient,
-              "message": f"run {run_id}의 알림은 이제 이 세션으로 옴 (전에는 {old_labels})"}
+              "message": f"run {run_id}의 알림은 이제 {recipient_label}으로 옴 (전에는 {old_labels})"}
     warnings = []
+    # Reuse an existing watcher, or attach one to a previously sessionless run.
+    # Like reattachment, depth zero avoids rewriting meta from this in-memory snapshot.
+    if not _spawn_completion_watch(run_dir, meta, environ={**os.environ, "AGENT_DISPATCH_DEPTH": "0"}):
+        warnings.append("수신처는 옮겼지만 실행 감시자를 시작하지 못함")
     for target in targets:
         harness, session_id = target["harness"], target["session_id"]
         if (harness, session_id) == (recipient["harness"], recipient["id"]):
@@ -2895,8 +2909,9 @@ def cmd_claim(args):
     _refuse_namespace_self(config, "claim")
     (name, host), = _select(config, [args.host])
     if not args.session:
-        # The launcher's own session, read the way `run` exports it.
-        owner = _unique_session_owner(os.environ)
+        # Session keys come from session_identity; installed blank aliases are unset.
+        # Keep claim's strict ambiguity checks and its own GPU identity (not the parent).
+        owner = _unique_session_owner({key: value for key, value in os.environ.items() if value != ""})
         if owner is None or (args.harness and args.harness != owner["harness"]):
             raise ConfigError("claim needs --session (and --harness) outside one harness session")
         args.harness, args.session = owner["harness"], owner["id"]
