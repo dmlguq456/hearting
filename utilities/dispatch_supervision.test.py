@@ -3,6 +3,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import contextlib
 import importlib.util
 import hashlib
 import json
@@ -173,6 +174,36 @@ class ResponsibilityTest(unittest.TestCase):
             "thread_id": "thread-a", "turn_id": "turn-b"}) + "\n")
         with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
             self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+
+    def test_claude_and_opencode_retry_waits_are_read_by_their_turn_ordinal(self):
+        log = self.root / "owner.jsonl"
+        start = {"type": "dispatch.supervisor.transient-wait.started",
+                 "parent_attempt_id": "att-owner", "turn_ordinal": 3,
+                 "reason_code": "transient-edge-block", "ordinal": 1, "deadline_monotonic": 160.0}
+        for harness in ("claude", "opencode"):
+            with self.subTest(harness=harness):
+                metadata = {"harness": harness, "log_file": str(log)}
+                with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
+                    log.write_text(json.dumps(start) + "\n")
+                    self.assertTrue(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                    self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-other"))
+                    for changed in ({"turn_ordinal": None}, {"reason_code": "transient-capacity"},
+                                    {"turn_ordinal": None, "thread_id": "t", "turn_id": "u"}):
+                        log.write_text(json.dumps({**start, **changed}) + "\n")
+                        self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                    for after in ({"type": "dispatch.supervisor.transient-wait.ended",
+                                   "parent_attempt_id": "att-owner", "turn_ordinal": 3},
+                                  {"type": "dispatch.supervisor.turn-started",
+                                   "parent_attempt_id": "att-owner", "turn_ordinal": 4}):
+                        log.write_text(json.dumps(start) + "\n" + json.dumps(after) + "\n")
+                        self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                    # Another turn's end does not close this wait.
+                    log.write_text(json.dumps(start) + "\n" + json.dumps({
+                        "type": "dispatch.supervisor.transient-wait.ended",
+                        "parent_attempt_id": "att-owner", "turn_ordinal": 2}) + "\n")
+                    self.assertTrue(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                with mock.patch.object(supervision.time, "monotonic", return_value=161.0):
+                    self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
 
     def test_committed_success_survives_delays_and_unknown_cleanup_for_all_harnesses(self):
         for harness in ("claude", "codex", "opencode"):
@@ -1763,6 +1794,75 @@ class OwnerProgressAlarmTest(unittest.TestCase):
             handle.write(json.dumps({"type": "turn.completed"}) + "\n")
         self.assertEqual(supervision.runtime_tool_progress(metadata), ["codex", "item-b", "item.completed"])
 
+
+    def retry_wait(self, harness, reason="transient-edge-block", attempt_id=None, deadline=1960.0):
+        """The retry wait each supervisor writes before it resumes the same session."""
+        event = {"type": "dispatch.supervisor.transient-wait.started",
+                 "parent_attempt_id": attempt_id or self.aid, "reason_code": reason,
+                 "ordinal": 5, "deadline_monotonic": deadline}
+        event.update({"thread_id": "thread-rv", "turn_id": "turn-rv"} if harness == "codex"
+                     else {"turn_ordinal": 6})
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+    def test_e_owner_waiting_out_a_retry_reads_waiting_on_every_harness(self):
+        # RV-PR1615: a live owner retrying a 403 edge page, and Codex's capacity wait, read
+        # `stalled / no-comparable-progress` with one attempt-stalled notice after 601 s.
+        cases = [("codex", "transient-capacity", "active"), ("codex", "transient-edge-block", "active"),
+                 ("claude", "transient-edge-block", "active"), ("opencode", "transient-edge-block", "active"),
+                 # Between turns only the supervisor carrier remains, and it reads unclassified.
+                 ("claude", "transient-edge-block", "unknown"),
+                 ("opencode", "transient-edge-block", "unknown")]
+        for index, (harness, reason, runtime) in enumerate(cases):
+            with self.subTest(harness=harness, reason=reason, runtime=runtime):
+                self.owner(harness, case=f"-wait{index}")
+                self.runtime(runtime, "runtime-command-live" if runtime == "active"
+                             else "attempt-process-role-unclassified")
+                self.retry_wait(harness, reason)
+                with self.lease(), mock.patch.object(supervision.time, "monotonic", return_value=1000.0):
+                    self.phase("running-turn")
+                    self.assertTrue(supervision._transient_retry_wait_active(self.owner_meta, self.aid))
+                    count = self.alarms(self.t0) + self.alarms(self.t0 + 601)
+                    observation = self.state(self.t0 + 601)
+                self.assertEqual(count, 0)
+                self.assertEqual((observation["state"], observation["reason"]),
+                                 ("waiting", "registered-transient-retry-backoff"))
+
+    def test_e_a_retry_wait_never_hides_a_real_stop(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness, case="deadline-passed"):
+                # Observed through the whole wait, then no next turn: the windows count again.
+                self.owner(harness, case="-late")
+                self.runtime("active", "runtime-command-live")
+                self.retry_wait(harness)
+                counts = []
+                with self.lease():
+                    self.phase("running-turn")
+                    for offset in (0, 300, 600, 900, 961, 1501):
+                        with mock.patch.object(supervision.time, "monotonic",
+                                               return_value=1000.0 + offset):
+                            counts.append(self.alarms(self.t0 + offset))
+                    with mock.patch.object(supervision.time, "monotonic", return_value=2501.0):
+                        observation = self.state(self.t0 + 1501)
+                self.assertEqual(counts, [0, 0, 0, 0, 0, 1])
+                self.assertEqual((observation["state"], observation["reason"]),
+                                 ("stalled", "no-comparable-progress"))
+            for case in ("other-attempt", "dead-lease"):
+                with self.subTest(harness=harness, case=case):
+                    self.owner(harness, case="-" + case)
+                    self.runtime("active", "runtime-command-live")
+                    self.retry_wait(harness, attempt_id="att-alarm-other" if case == "other-attempt" else None)
+                    with contextlib.ExitStack() as stack:
+                        if case == "other-attempt":
+                            stack.enter_context(self.lease())
+                        stack.enter_context(mock.patch.object(supervision.time, "monotonic",
+                                                              return_value=1000.0))
+                        self.phase("running-turn")
+                        count = self.alarms(self.t0) + self.alarms(self.t0 + 601)
+                        observation = self.state(self.t0 + 601)
+                    self.assertEqual(count, 1)
+                    self.assertEqual((observation["state"], observation["reason"]),
+                                     ("stalled", "no-comparable-progress"))
 
 class StallNoticeRunningToolTest(unittest.TestCase):
     """2026-11-11 00:02: the notice for att-a9d2c7d7 read like a hang while its owner waited
