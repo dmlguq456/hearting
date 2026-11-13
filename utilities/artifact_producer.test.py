@@ -3455,6 +3455,43 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         self.assertFalse(campaign_dir.exists())
         self.assertFalse((campaign_dir / cycle_dir.name / "artifacts/spec").exists())
 
+    def test_whole_tree_code_seed_is_complete_without_component_states(self):
+        """A bucket-top transaction writes no `component_seeds`; `seed_complete` alone says complete."""
+        self.activate()
+        _, _, base = self._completed({"prd.md": b"# Root base\n", "c/prd.md": b"# Component\n"})
+        self.assertEqual(self._publish(base)["status"], "admitted")
+
+        def code_cycle(slug):
+            code_route, code_path = self.route("direct", "autopilot-code", "dev", slug=slug)
+            return code_route, code_path, P.begin(self.root, route_file=code_path,
+                                                  capability="autopilot-code", intensity="direct")
+
+        route, path, cycle = code_cycle("whole-tree-changed")
+        spec_root = Path(cycle["cycle_dir"]) / "artifacts/spec"
+        transaction_spec = importlib.util.spec_from_file_location(
+            "spec_transaction_whole_tree_code_seed", Path(__file__).with_name("spec-transaction.py"))
+        transaction = importlib.util.module_from_spec(transaction_spec)
+        transaction_spec.loader.exec_module(transaction)
+        transaction.seed_cycle_spec(spec_root, self.root, spec_root)
+        receipt = json.loads((spec_root / P.SPEC_BASE_RECEIPT).read_text())
+        self.assertIs(receipt["seed_complete"], True)
+        self.assertNotIn("component_seeds", receipt)
+        unchanged_route, unchanged_path, unchanged = code_cycle("whole-tree-unchanged")
+        self.assertNotEqual(unchanged["cycle_id"], cycle["cycle_id"])
+        unchanged_root = Path(unchanged["cycle_dir"]) / "artifacts/spec"
+        transaction.seed_cycle_spec(unchanged_root, self.root, unchanged_root)
+        (spec_root / "prd.md").write_bytes(b"# Root changed\n")
+        for seeded, (r, p) in ((cycle, (route, path)), (unchanged, (unchanged_route, unchanged_path))):
+            self.write_output(seeded, rel="plans/fixture/final_report.md", data=b"PASS\n")
+            self.close(r, p)
+            P.finalize(self.root, cycle_id=seeded["cycle_id"])
+        observed = self._publish(cycle, settle=False)
+        self.assertEqual((observed["status"], observed.get("reason")),
+                         ("pending", "shared-publication-required"), observed)
+        self.assertEqual(self._publish(unchanged, settle=False)["status"], "not-applicable")
+        published = self._publish(cycle)
+        self.assertEqual(published["status"], "admitted", published)
+
     def test_code_missing_seed_remains_pending_when_manifest_records_transaction(self):
         self.activate()
         _, _, base = self._completed({"c/prd.md": b"# Component base\n"})
