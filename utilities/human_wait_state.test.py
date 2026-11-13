@@ -3411,6 +3411,55 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.direct(b, "answer B")
         self.assertEqual(state._read_cache_file()["items"], [])
 
+    def test_a_collection_read_before_the_answer_does_not_publish_the_answered_question(self):
+        # Review 1597-1 (11-13): one pass read A, A was answered from the panel and the same
+        # session registered B, then the pass published what it had read — the answered A came
+        # back to the cache and Fleet until the next collection. The publish re-reads each
+        # registered question's exact source under the lock its completion settles with.
+        from tools.fleet.collectors import dispatch
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, ea = self.f.ask(harness, "session-a", "first")
+                b, _ = self.f.ask(harness, "session-b", "other")
+                original = observation.read_answer_waits
+                def collect():
+                    with mock.patch.object(observation, "_session_liveness_probe",
+                                           return_value=lambda *args: "live"), \
+                         mock.patch.object(observation, "_codex_rollout_waits",
+                                           return_value={"complete": True, "pending": {}}):
+                        return original(jobs_paths=[self.f.jobs])
+                self.assertTrue(state.publish_cache(collect()))
+                later = []
+                def read_then_answer(**kwargs):
+                    seen = collect()
+                    self.f.submit(ea, "answer first")
+                    wire, _, _ = self.f.prepare(a)
+                    self.f.consume(a, wire)
+                    later.append(self.f.ask(harness, "session-a", "second")[0])
+                    return seen
+                with mock.patch.object(observation, "read_answer_waits", side_effect=read_then_answer), \
+                     mock.patch.object(state, "_route_demands", return_value={}), \
+                     mock.patch.object(state, "_notify_result"), \
+                     mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[self.f.jobs]):
+                    self.assertTrue(state._refresh_cache())
+                self.assertEqual(self.source(later[0])["lifecycle"], "open")
+                shared = state._read_cache_file()
+                fleet = json.loads(state._fleet_cache_path().read_text())
+                for view in (shared, fleet):
+                    self.assertEqual([row["id"] for row in view["items"]], [b["id"]])
+                    self.assertEqual(view["total"], 1)
+                self.assertNotIn(harness + "\0session-a", shared["by_session"])
+                # The next collection (registration requests one) shows B beside the other question.
+                with mock.patch.object(observation, "read_answer_waits", side_effect=lambda **kw: collect()), \
+                     mock.patch.object(state, "_route_demands", return_value={}), \
+                     mock.patch.object(state, "_notify_result"), \
+                     mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[self.f.jobs]):
+                    self.assertTrue(state._refresh_cache())
+                self.assertEqual(sorted(row["id"] for row in state._read_cache_file()["items"]),
+                                 sorted([b["id"], later[0]["id"]]))
+
     def test_legacy_question_keeps_its_address_when_another_session_registers(self):
         import session_tidy as tidy
         a, envelope = self.f.ask("codex", "session-a", "legacy question")

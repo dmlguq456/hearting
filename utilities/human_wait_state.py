@@ -976,6 +976,21 @@ def _owner_projection(item: dict) -> dict:
     return row
 
 
+def _message_source_still_open(item: dict) -> bool:
+    """Whether the exact S4 source a collection read still holds that open question."""
+    owner = item.get("owner") or {}
+    if not owner.get("seat_key"):
+        return True  # Nothing exact to re-read; the next collection decides.
+    try:
+        path = _signal_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
+                             "seat_key": owner["seat_key"], "id": item.get("id")})
+    except (OSError, ValueError, TypeError):
+        return True
+    signal = _read(path) if path is not None else None
+    return bool(signal and signal.get("id") == item.get("id")
+                and (signal.get("mode") != "message" or signal.get("lifecycle") == "open"))
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -1072,6 +1087,7 @@ def publish_cache(result: dict) -> bool:
             selected = previous.get("selected_responses", {}) if previous else {}
             if not _valid_selected_overlay(selected):
                 return False
+            removed = set()
             if selected:
                 value["selected_responses"] = selected
                 # A producer may briefly see an old native sidecar after its
@@ -1092,19 +1108,25 @@ def publish_cache(result: dict) -> bool:
                             and all(identity.get(key) == row.get(key)
                                     for key in ("turn_id", "item_id")))
                 removed = {row["id"] for row in items if answered(row)}
-                if removed:
-                    value["items"] = [row for row in items if row["id"] not in removed]
-                    value["by_session"] = {key: [ref for ref in refs if ref not in removed]
-                                           for key, refs in by_session.items()
-                                           if any(ref not in removed for ref in refs)}
-                    fleet_value["items"] = [row for row in fleet_value["items"]
-                                            if row["id"] not in removed]
-                    counts = wait_counts(value["items"])
-                    for projection in (value, fleet_value):
-                        projection.update(counts)
-                        projection["unattributed"] = [ref for ref in projection["unattributed"]
-                                                       if ref not in removed]
-                    value["stale_total"] = value["older"]
+            # A registered question read by this pass may have been answered (or replaced by its
+            # session's next one) before this write; its exact source decides, under this same
+            # lock that its completion takes to settle the published waits (review 1597-1).
+            removed |= {item.get("id") for item in result["items"]
+                        if isinstance(item, dict) and item.get("source") == "S4" and item.get("id")
+                        and not _message_source_still_open(item)}
+            if removed:
+                value["items"] = [row for row in items if row["id"] not in removed]
+                value["by_session"] = {key: [ref for ref in refs if ref not in removed]
+                                       for key, refs in by_session.items()
+                                       if any(ref not in removed for ref in refs)}
+                fleet_value["items"] = [row for row in fleet_value["items"]
+                                        if row["id"] not in removed]
+                counts = wait_counts(value["items"])
+                for projection in (value, fleet_value):
+                    projection.update(counts)
+                    projection["unattributed"] = [ref for ref in projection["unattributed"]
+                                                   if ref not in removed]
+                value["stale_total"] = value["older"]
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)
