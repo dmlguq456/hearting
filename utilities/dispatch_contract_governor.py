@@ -436,6 +436,14 @@ def wait_governor_reservation_claim(
         timeout = reservation_claim_timeout()
     deadline = time.monotonic() + max(0.1, timeout)
     while True:
+        # Look for exit and the deadline before the read, not after it: a
+        # runner that claims (and exits) while the read is in flight, or a read
+        # slower than the deadline, would otherwise be reported as an unclaimed
+        # timeout although it ran (and the parent would retry it). The read
+        # after both are seen is the last word; a claim recorded by then is
+        # still there after the runner exits.
+        exit_code = _unreaped_exit_code(proc)
+        expired = time.monotonic() >= deadline
         payload = _governor_json(
             [
                 sys.executable,
@@ -468,9 +476,33 @@ def wait_governor_reservation_claim(
                 "model-worker-reservation-lost",
                 "reservation disappeared before the governed runner claimed it",
             )
-        if proc.poll() is not None or time.monotonic() >= deadline:
+        if exit_code is not None or expired:
             raise DispatchContractError(
                 "model-worker-reservation-claim-timeout",
-                f"state={payload.get('state', 'unknown')} exit={proc.returncode}",
+                f"state={payload.get('state', 'unknown')} exit={exit_code}",
             )
         time.sleep(0.02)
+
+
+def _unreaped_exit_code(proc: subprocess.Popen) -> int | None:
+    """The child's exit code once it has exited, without reaping it.
+
+    `Popen.poll()` reaps an exited child and its `/proc/<pid>` entry goes with
+    it, so the foreground wait after a successful claim could no longer read
+    the start time of a run that finished normally and closed it as
+    `process-identity-unavailable`. `WNOWAIT` leaves the child for that wait.
+    """
+
+    if proc.returncode is not None:
+        return proc.returncode
+    waitid = getattr(os, "waitid", None)
+    if waitid is None:
+        return proc.poll()
+    try:
+        info = waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        # Not a child this process can wait on (already reaped elsewhere).
+        return proc.poll()
+    if info is None:
+        return None
+    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status

@@ -6478,6 +6478,101 @@ class ReservationClaimTimeoutTest(unittest.TestCase):
             self.assertLess(time.monotonic() - start, 5.0)
             self.assertEqual(ctx.exception.reason, "model-worker-reservation-claim-timeout")
 
+    def test_runner_that_claims_and_exits_during_the_read_is_claimed(self):
+        # CI run 43419406229: the read said unclaimed, the fast runner claimed
+        # and exited before the exit check, and a launch that ran was reported
+        # `claim-timeout state=unclaimed exit=0` (exit 75, row closed dead).
+        class Proc:
+            pid = 4242
+            returncode = None
+            def poll(self):
+                return self.returncode
+        proc = Proc()
+        claimed = {"state": "claimed", "claimant_pid": 4242, "claimant_starttime": "7"}
+        reads = []
+        def read(*_args, **_kwargs):
+            reads.append(1)
+            if len(reads) == 1:
+                proc.returncode = 0  # claims and exits while this read is in flight
+                return {"state": "unclaimed"}
+            return claimed
+        with patch_split(D, "_governor_json", side_effect=read), \
+             patch_split(D, "process_start_ticks", return_value=None), \
+             patch_split(D, "_return_governor_witness") as returned:
+            payload = D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", proc, timeout=5)
+        self.assertEqual(payload, claimed)
+        returned.assert_called_once_with(Path("/r"), "tok", claimed)
+
+    def test_runner_that_claims_during_a_read_slower_than_the_deadline_is_claimed(self):
+        # PR #1605 review: the runner claimed 0.014s after start and exited 0,
+        # but the read that had begun before the claim answered `unclaimed`
+        # only after the deadline, and the wait failed with `claim-timeout
+        # state=unclaimed exit=0` without reading the claim that was there.
+        class Proc:
+            pid = 4242
+            returncode = None
+            def poll(self):
+                return self.returncode
+        proc = Proc()
+        claimed = {"state": "claimed", "claimant_pid": 4242, "claimant_starttime": "7"}
+        clock = [100.0]
+        reads = []
+        def read(*_args, **_kwargs):
+            reads.append(1)
+            if len(reads) == 1:
+                proc.returncode = 0  # claims and exits while this read is in flight
+                clock[0] += 0.5  # ... and the read answers after the deadline
+                return {"state": "unclaimed"}
+            return claimed
+        import dispatch_contract_governor as governor
+        fake_time = SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _seconds: None)
+        with patch_split(D, "_governor_json", side_effect=read), \
+             patch_split(D, "process_start_ticks", return_value=None), \
+             patch_split(D, "_return_governor_witness") as returned, \
+             mock.patch.object(governor, "time", fake_time):
+            payload = D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", proc, timeout=0.1)
+        self.assertEqual(payload, claimed)
+        returned.assert_called_once_with(Path("/r"), "tok", claimed)
+
+    @unittest.skipUnless(hasattr(os, "waitid") and Path("/proc/self/stat").exists(), "Linux child identity")
+    def test_claim_wait_leaves_an_exited_runner_for_the_foreground_wait(self):
+        # PR #1605 review: the exit check before the read reaped a runner that
+        # had claimed and exited 0; its /proc entry went with it, and the
+        # foreground wait closed a normal run as `process-identity-unavailable`.
+        import dispatch_lifecycle as lifecycle
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        try:
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not reaped
+            start = D.process_start_ticks(proc.pid)
+            self.assertTrue(start)
+            claimed = {"state": "claimed", "claimant_pid": proc.pid, "claimant_starttime": start}
+            with patch_split(D, "_governor_json", return_value=claimed), \
+                 patch_split(D, "_return_governor_witness"):
+                payload = D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", proc, timeout=5)
+            self.assertEqual(payload, claimed)
+            self.assertEqual(D.process_start_ticks(proc.pid), start)
+            result = lifecycle.wait_foreground(proc, 5, poll_interval=0.01)
+            self.assertEqual((result.exit_code, result.failure, result.group_empty), (0, "", True))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+    @unittest.skipUnless(hasattr(os, "waitid"), "non-reaping exit check")
+    def test_exited_unclaimed_runner_still_fails_with_its_exit_code(self):
+        proc = subprocess.Popen([sys.executable, "-c", "raise SystemExit(3)"], start_new_session=True)
+        try:
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not reaped
+            with patch_split(D, "_governor_json", return_value={"state": "unclaimed"}):
+                with self.assertRaises(D.DispatchContractError) as ctx:
+                    D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", proc, timeout=5)
+            self.assertEqual(ctx.exception.reason, "model-worker-reservation-claim-timeout")
+            self.assertEqual(ctx.exception.detail, "state=unclaimed exit=3")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
 
 class SealedLaunchHomeRowFieldTest(unittest.TestCase):
     # C47-13 (SD-115 axis 4 (a)): dispatch_adapters_v11.test.py's
