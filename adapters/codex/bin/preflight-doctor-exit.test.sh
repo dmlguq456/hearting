@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # A passing adaptation-boundary check must not erase an earlier doctor failure.
 # `doctor_boundary` runs in the caller's shell, so a bare `rc=$?` there shared
 # the accumulator `doctor()` uses and reported status=ok with exit 0.

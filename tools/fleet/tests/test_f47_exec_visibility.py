@@ -12,6 +12,9 @@ Coverage maps 1:1 onto the v30 contract:
   (f) codex unclosed tool_call detail, `task_started` rule intact (prd.md:263)
   (g) group tier / pulse census follow classification only        (prd.md:263)
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import re
 import sys

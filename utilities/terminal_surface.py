@@ -438,6 +438,38 @@ def _codex_server_busy(thread_id):
         return False
 
 
+def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, server=None):
+    """Wait in the caller for one native turn state, returning agent-info shape.
+
+    This is a bounded foreground wait when a timeout is supplied. It reads the
+    existing native status sources; unknown observations never become terminal.
+    """
+    deadline = None if timeout_ms is None else time.monotonic() + max(0, timeout_ms) / 1000
+    first = None
+    while True:
+        from peer_steward_native import native_agent, native_lifetime
+        payload = native_agent(harness, session_id, pane=pane, server=server)
+        agent = (payload or {}).get("result", {}).get("agent") if isinstance(payload, dict) else None
+        if isinstance(agent, dict):
+            state = agent.get("agent_status", "unknown")
+            if (state in until) if until else (first is not None and state != first
+                                                and first != "unknown" and state != "unknown"):
+                return payload
+            if first is None:
+                first = state
+            lifetime = native_lifetime(
+                harness, session_id, pid=agent.get("pid"),
+                pid_start=agent.get("pid_start"), pid_namespace=agent.get("pid_namespace"))
+            if lifetime == "ended":
+                return {"error": {"code": "session_ended"}, "agent": agent}
+        elif payload is None:
+            return {"error": {"code": "unknown"}}
+        if deadline is not None and time.monotonic() >= deadline:
+            return {"error": {"code": "timeout"}}
+        delay = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
+        time.sleep(delay)
+
+
 def _opencode_turn(observed):
     """One OpenCode session's turn state from ``read_session_observation``.
 

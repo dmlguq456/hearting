@@ -760,7 +760,9 @@ class PrivateTui:
 
     def start(self):
         exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(self.env.items()))
-        command = f"cd {shlex.quote(str(self.cwd))} && env -i {exports} " + \
+        # A process in a real tmux pane inherits TMUX and TMUX_PANE; `env -i` would drop them and
+        # a pane address (`%0@socket`) could then never match this TUI. Pass the pane's own values.
+        command = f"cd {shlex.quote(str(self.cwd))} && env -i TMUX=\"$TMUX\" TMUX_PANE=\"$TMUX_PANE\" {exports} " + \
             " ".join(shlex.quote(a) for a in self.argv) + \
             "; echo HEARTING-SCENARIO-TUI-EXIT=$?; sleep 3600"
         self._tmux("new-session", "-d", "-s", "scenario", "-x", "200", "-y", "50",

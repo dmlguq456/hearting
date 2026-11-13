@@ -404,33 +404,42 @@ def _git_part(part):
     return part[1] == "dim" and str(part[0]).startswith(" (")
 
 
+def _head_and_git(values):
+    """The folder group's parts up to its Git parentheses, and the parentheses' parts on."""
+    from .session_line import line_segments
+    parts = line_segments(values, 10000, complete=True, fields={"folder"})
+    at = next((index for index, part in enumerate(parts) if _git_part(part)), len(parts))
+    return parts[:at], parts[at:]
+
+
 def session_head(values):
     """``[e9] hearting``: the session number and project (the panel's top row)."""
-    from .session_line import line_segments
-    return [part for part in line_segments(values, 10000, complete=True, fields={"folder"}) if not _git_part(part)]
+    return _head_and_git(values)[0]
 
 
 def session_git(values):
-    """``(main 🚧 3)``: the dim Git observation the panel paints on the row below."""
-    from .session_line import line_segments
-    return [(str(text).lstrip(), key) for text, key in line_segments(values, 10000, complete=True, fields={"folder"})
-            if _git_part((text, key))]
+    """``(main ↑2 🚧 3)``: the Git observation the panel paints on the row below, dim but
+    ``↑N``/``↓N`` in Fleet's green and red (spec E9 rule 50)."""
+    git = _head_and_git(values)[1]
+    return [(str(text).lstrip() if not index else text, key) for index, (text, key) in enumerate(git)]
 
 
 def session_git_side(values, columns=40):
     """``fix/fleet-opencode-d… ✓``: the ``GIT`` row's value beside the native area (spec E9
     rules 40 (b)-(e), 41 (b)): the branch cut at 20 cells (32 with 60 cells inside), then
-    ``✓`` or ``↑N``/``↓N``, then the existing warning; all dim, no parentheses, and the
-    worktree count on the ``REPO`` row. Empty when Git has nothing else to say."""
-    from .session_line import _git_words, git_branch_cells
+    ``✓`` or ``↑N``/``↓N``, then the existing warning; all dim but ``↑N``/``↓N`` in Fleet's
+    green and red (rule 50), no parentheses, and the worktree count on the ``REPO`` row. Empty
+    when Git has nothing else to say."""
+    from .session_line import _git_words, fresh_key, git_branch_cells
     if not session_git(values):
         return []
     if (values.get("git") or {}).get("repo") == 0:
         return [("no-git", "dim")]
     words = _git_words(values, branch_cells=git_branch_cells(int(columns) - 4))
     # One part per word, so the panel can shorten the branch and keep the status and warning whole.
-    shown = [part for part in (words["branch"], *words["fresh"], words["flag"]) if part]
-    return [((" " if index else "") + part, "dim") for index, part in enumerate(shown)]
+    shown = [(part, key) for part, key in ((words["branch"], "dim"), *((word, fresh_key(word)) for word in words["fresh"]),
+                                           (words["flag"], "dim")) if part]
+    return [((" " if index else "") + part, key) for index, (part, key) in enumerate(shown)]
 
 
 def session_repo_side(values):

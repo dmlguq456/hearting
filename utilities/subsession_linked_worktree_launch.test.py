@@ -12,6 +12,9 @@ worktree is the linked one, and two live owners share one slug:
   * the worker guard accepts the linked worktree only while the gates are off,
   * every wrapper's start command runs in the worktree it was given.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse
 import importlib.util
 import json

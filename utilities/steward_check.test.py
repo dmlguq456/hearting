@@ -4,6 +4,9 @@
 Every test injects ``now``; nothing sleeps, no input or Stop hook runs, and the
 real ``session_notice`` carrier writes into a private jobs root.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import io
 import json
@@ -23,7 +26,6 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 import dispatch_session_sweep as sweep  # noqa: E402
-import herdr_observation  # noqa: E402
 import peer_obligations  # noqa: E402
 import session_notice  # noqa: E402
 import steward_check as SC  # noqa: E402
@@ -33,6 +35,7 @@ REAL_ROLE_HELD = SC._role_held
 REAL_HUMAN_WAIT = SC._human_wait_open
 REAL_ROLE_FLAGGED = SC._role_flagged
 REAL_SESSION_LIVENESS = SC._session_liveness
+REAL_ENSURE_NORMAL_RUNNER = peer_obligations.ensure_normal_runner
 T0 = 1_000_000.0
 INTERVAL = 7200
 HARNESS = "claude"
@@ -428,7 +431,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
         rows = [SimpleNamespace(harness="claude", session_id=SID, cwd="/repo/wt"),
                 SimpleNamespace(harness="codex", session_id="other", cwd="/elsewhere")]
         collector = SimpleNamespace(
-            _projection_sessions=lambda: rows,
+            _registry_sessions=lambda: rows,
             _session_keys=lambda row: {(row.harness, row.session_id)})
         from fleet import session_work
         observed = mock.Mock(return_value=([{"type": "backlog", "headline": "  #1425   review "},
@@ -441,7 +444,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
     def test_unknown_or_ambiguous_cwd_reads_no_backlog(self):
         rows = [SimpleNamespace(harness="claude", session_id=SID, cwd="/a"),
                 SimpleNamespace(harness="claude", session_id=SID, cwd="/b")]
-        collector = SimpleNamespace(_projection_sessions=lambda: rows,
+        collector = SimpleNamespace(_registry_sessions=lambda: rows,
                                     _session_keys=lambda row: {(row.harness, row.session_id)})
         from fleet import session_work
         with mock.patch.object(SC, "_collector", return_value=collector), \
@@ -453,8 +456,8 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
         module = SimpleNamespace(pending_messages=lambda who: (
             [{"state": "pending"}, {"state": "acked"}] if who["session_id"] == "sid-e7" else []))
         collector = SimpleNamespace(
-            role_targets=lambda h, s: [{"name": "e7", "harness": "codex", "session_id": "sid-e7"}],
-            _peer_message_module=lambda: module)
+            role_targets=lambda h, s, **kw: [{"name": "e7", "harness": "codex", "session_id": "sid-e7"}],
+            _registry_sessions=lambda: [], _peer_message_module=lambda: module)
         with mock.patch.object(SC, "_collector", return_value=collector), \
                 mock.patch.object(SC, "_agents", return_value=[]), \
                 mock.patch.object(SC, "_end_observation", return_value=None), \
@@ -464,6 +467,104 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
         self.assertEqual(seen["targets"][0]["owed"], 1)
         self.assertEqual(seen["pending_messages"], 0)
         self.assertEqual(seen["open_work"], ["w"])
+
+
+class StewardCheckPeerRequestCountTest(CheckBase):
+    """Only a request another session sent and the holder has not received is a
+    "peer request queued for you"; runtime notices (route completions, experiment
+    finals, this check's own notice) never are. Rows keep the real shape the
+    peer-message store gives them, per receiving harness."""
+
+    # The receipt a notice's carrier row keeps differs per adapter: Claude's hook
+    # releases its in-flight reservation, Codex and OpenCode leave the native queue's
+    # ``native-pending`` row.
+    RECEIPTS = {"claude": "delivery-reservation-released",
+                "codex": "native-pending", "opencode": "native-pending"}
+
+    def setUp(self):
+        super().setUp()
+        self.rows = []
+        module = SimpleNamespace(pending_messages=lambda who: [
+            row for row in self.rows
+            if (row["to"]["harness"], row["to"]["session_id"]) == (who["harness"], who["session_id"])])
+        self.collector = SimpleNamespace(role_targets=lambda h, s, **kw: [],
+                                         _registry_sessions=lambda: [],
+                                         _peer_message_module=lambda: module)
+        for name, patch in (
+                ("_observe_role", mock.patch.object(SC, "_observe_role", REAL_OBSERVE)),
+                ("_collector", mock.patch.object(SC, "_collector", return_value=self.collector)),
+                ("_end_observation", mock.patch.object(SC, "_end_observation", return_value=None)),
+                ("_open_work", mock.patch.object(SC, "_open_work", return_value=([], [])))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def row(self, harness, sid, *, sender="runtime", state="pending", receipt=None, text="x"):
+        binding = ({"schema": "session-notice-runtime-v1"} if sender == "runtime" else None)
+        row = {"ref": f"{len(self.rows):032x}", "state": state, "text": text,
+               "from": {"harness": sender, "session_id": None if sender == "runtime" else "sid-other"},
+               "to": {"harness": harness, "session_id": sid},
+               "receipt": receipt or self.RECEIPTS[harness], "producer_binding": binding}
+        self.rows.append(row)
+        return row
+
+    def test_only_runtime_notices_pending_is_not_a_peer_request(self):
+        for harness, receipt in self.RECEIPTS.items():
+            with self.subTest(harness=harness):
+                self.rows.clear()
+                for kind in ("route completion", "experiment final", "steward-check: 12 peer request(s)"):
+                    self.row(harness, SID, text=kind)
+                self.row(harness, SID, state="queued", receipt="claude-pty-continue-submitted")
+                seen = REAL_OBSERVE(harness, SID)
+                self.assertEqual(seen["pending_messages"], 0)
+                self.assertNotIn("queued for you", " ".join(SC.next_actions(seen, {}, T0)))
+                self.assertFalse(SC._remaining(seen))
+
+    def test_running_the_check_repeatedly_never_grows_the_count(self):
+        for harness in self.RECEIPTS:
+            with self.subTest(harness=harness):
+                self.rows.clear()
+                for index in range(6):
+                    out = self.check_as(harness, T0 + index * 3600)
+                    self.assertNotIn("queued for you", out)
+                    self.assertNotIn("pending_messages=1", out)
+                    # the courier leaves this check's own notice pending, as observed
+                    self.row(harness, SID, text="steward-check: notice %d" % index)
+                self.assertEqual(len(self.rows), 6)
+                self.assertEqual(REAL_OBSERVE(harness, SID)["pending_messages"], 0)
+
+    def check_as(self, harness, now):
+        out = io.StringIO()
+        with mock.patch.object(SC, "_role_held", return_value={"held": True, "reason": None,
+                                                                "successor": None}):
+            SC.cmd_check(harness, SID, now=now, out=out)
+        return out.getvalue()
+
+    def test_one_undelivered_request_from_another_session_counts_once(self):
+        for harness in self.RECEIPTS:
+            with self.subTest(harness=harness):
+                self.rows.clear()
+                self.row(harness, SID, text="route completion")
+                self.row(harness, SID, sender="claude", text="please review")
+                self.row(harness, SID, sender="codex", state="received", text="old")
+                seen = REAL_OBSERVE(harness, SID)
+                self.assertEqual(seen["pending_messages"], 1)
+                self.assertIn("1 peer request(s) queued for you → handle them as they arrive",
+                              SC.next_actions(seen, {}, T0))
+                out = self.check_as(harness, T0)
+                self.assertIn("pending_messages=1", out)
+                self.assertIn("1 peer request(s) queued for you", out)
+
+    def test_runtime_notice_to_a_target_is_not_a_request_owed_by_it(self):
+        self.collector.role_targets = lambda h, s, **kw: [
+            {"name": "e7", "harness": "codex", "session_id": "sid-e7"}]
+        self.row("codex", "sid-e7", text="route completion")
+        with mock.patch.object(SC, "_session_liveness", return_value="live"):
+            seen = REAL_OBSERVE("claude", SID)
+        self.assertEqual(seen["targets"][0]["owed"], 0)
+        self.row("codex", "sid-e7", sender="claude", text="do this")
+        with mock.patch.object(SC, "_session_liveness", return_value="live"):
+            seen = REAL_OBSERVE("claude", SID)
+        self.assertEqual(seen["targets"][0]["owed"], 1)
 
 
 class StewardCheckOwnTargetsTest(CheckBase):
@@ -495,7 +596,7 @@ class StewardCheckOwnTargetsTest(CheckBase):
             mock.patch.object(SC, "_observe_role", side_effect=REAL_OBSERVE),
             mock.patch.object(self.steward, "read_markers", return_value=markers),
             mock.patch.object(self.steward, "read_relations", return_value=[]),
-            mock.patch.object(self.steward, "_projection_sessions", return_value=rows),
+            mock.patch.object(self.steward, "_registry_sessions", return_value=rows),
             mock.patch.object(self.steward, "_native_role_sessions", return_value=[])]
         for patch in patches:
             patch.start()
@@ -939,14 +1040,222 @@ class StewardCheckProcessProofTest(CheckBase):
         self.assertEqual(self.duty_of("claude", unsure)["state"], "pending")
 
 
+HERDR_LOGGER = """#!/bin/sh
+echo "$@" >> "$FAKE_HERDR_CALLLOG"
+case "$*" in
+  *"agent list"*) cat "$FAKE_HERDR_AGENTS"; exit 0 ;;
+esac
+exit 1
+"""
+
+
+class _NativeStewardWorld(CheckBase):
+    """A steward marker and native registry records in one repository, read for real."""
+
+    HOLDER = "aaaaaaaa-1111-4111-8111-000000000001"
+    WORKER = "bbbbbbbb-1111-4111-8111-000000000002"
+    HELPER = "cccccccc-1111-4111-8111-000000000003"
+
+    def setUp(self):
+        super().setUp()
+        from fleet.collectors import steward
+        import recipient_lifetime
+        census = recipient_lifetime.RecipientCensus(lambda harness, sid: "alive")
+        for target_module, name, replacement in (
+                (SC, "_session_liveness", REAL_SESSION_LIVENESS),
+                (SC, "_role_flagged", REAL_ROLE_FLAGGED),
+                (SC, "_observe_role", REAL_OBSERVE),
+                (steward, "end_observation", lambda: _StubObservation(claude=census))):
+            patch = mock.patch.object(target_module, name, replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
+        # PATH without any real `herdr`: "absent" must mean absent on this host too.
+        self.path = os.pathsep.join(
+            part for part in os.environ.get("PATH", "").split(os.pathsep)
+            if part and not os.path.exists(os.path.join(part, "herdr")))
+
+    def world(self, name, *, herdr_answers):
+        root = self.tmp / name
+        repo = root / "repo"
+        (repo / ".git").mkdir(parents=True)
+        ledger, claude, bindir = root / "ledger", root / "claude", root / "bin"
+        bindir.mkdir()
+        (root / "jobs.log").write_text("")
+        log = root / "herdr-calls.log"
+        if herdr_answers:
+            agents = root / "agents.json"
+            agents.write_text(json.dumps({"result": {"agents": [{
+                "agent": "claude", "agent_session": {"value": self.HELPER},
+                "cwd": str(repo), "pane_id": "w1:p2", "name": "helper"}]}}))
+            shim = bindir / "herdr"
+            shim.write_text(HERDR_LOGGER)
+            shim.chmod(0o755)
+        ts = "2026-11-13T00:00:00Z"
+        marker = ledger / "peer-steward" / "claude" / f"{self.HOLDER}.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps({
+            "schema_version": 1, "harness": "claude", "session_id": self.HOLDER,
+            "generation": "gen-holder", "updated": ts, "targets": {
+                "worker": {"harness": "claude", "session_id": self.WORKER, "name": "worker",
+                           "kind": "watch", "source": "watch", "ts": ts},
+                "helper": {"harness": "claude", "session_id": None, "name": "helper",
+                           "kind": "watch", "source": "watch", "ts": ts}}}))
+        sessions = claude / "sessions"
+        sessions.mkdir(parents=True)
+        for pid, sid in ((4194301, self.HOLDER), (4194302, self.WORKER)):
+            (sessions / f"{pid}.json").write_text(json.dumps(
+                {"pid": pid, "sessionId": sid, "cwd": str(repo)}))
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("HERDR_", "AGENT_HERDR", "TMUX", "CODEX_"))}
+        env.update(PATH=f"{bindir}{os.pathsep}{self.path}", HOME=str(root / "home"),
+                   CLAUDE_CONFIG_DIR=str(claude), CODEX_HOME=str(root / "codex"),
+                   FLEET_SESSION_REGISTRY_DIR=str(root / "registry"),
+                   XDG_CONFIG_HOME=str(root / "xdg-config"), XDG_DATA_HOME=str(root / "xdg-data"),
+                   XDG_STATE_HOME=str(root / "xdg-state"),
+                   AGENT_PEER_LEDGER_ROOT=str(ledger), AGENT_DISPATCH_JOBS=str(root / "jobs.log"),
+                   FAKE_HERDR_CALLLOG=str(log), FAKE_HERDR_AGENTS=str(root / "agents.json"))
+        return env, ledger, log
+
+
+class StewardCheckHerdrReachTest(_NativeStewardWorld):
+    """`steward check` and the runner's steward-check duty never ask Herdr.
+
+    The same native world is built twice: once with a logging `herdr` first on PATH that
+    answers `agent list` with an extra same-repository agent, once with no `herdr` at all.
+    Each case ends by asserting that the logger saw no call and that both worlds give the
+    same check output and duty steps."""
+
+    def run_world(self, name, *, herdr_answers):
+        env, ledger, log = self.world(name, herdr_answers=herdr_answers)
+        SC._THROTTLE.clear()
+        self.notify.reset_mock()
+        with mock.patch.dict(os.environ, env, clear=True):
+            store = peer_obligations.ObligationStore(ledger)
+            out = io.StringIO()
+            self.assertEqual(SC.cmd_check(HARNESS, self.HOLDER, now=T0, out=out), 0)
+            duty_id = SC.duty_id(HARNESS, self.HOLDER)
+            SC.advance(store.get(duty_id), store, now=T0 + INTERVAL)  # due: notice sent
+            due = store.get(duty_id)["observation"]
+            state = SC._notice_record(self.HOLDER, due["notice_delivery_id"])["state"]
+            SC.advance(store.get(duty_id), store, now=T0 + INTERVAL + 100)  # open notice
+            after = store.get(duty_id)
+        calls = log.read_text().splitlines() if log.exists() else []
+        notice = self.notify.call_args.kwargs if self.notify.call_args else {}
+        return calls, {"check": out.getvalue(), "due_phase": due["phase"],
+                       "notice_state": state, "notice_text": notice.get("text"),
+                       "notice_action": notice.get("required_action"),
+                       "after": (after["state"], after["observation"]["phase"])}
+
+    def test_check_and_duty_never_ask_herdr_and_match_without_herdr(self):
+        answered_calls, answered = self.run_world("answering", herdr_answers=True)
+        absent_calls, absent = self.run_world("absent", herdr_answers=False)
+        self.assertEqual(answered_calls, [])
+        self.assertEqual(absent_calls, [])
+        self.assertEqual(answered, absent)
+        names = re.findall(r"^target name=(\S+) .*liveness=(\S+)", absent["check"], re.M)
+        self.assertEqual(names, [("worker", "live")], absent["check"])
+        self.assertIn("targets=1 ", absent["check"])
+        self.assertEqual((absent["due_phase"], absent["notice_state"]), ("notified", "pending"))
+        self.assertEqual(absent["after"], ("pending", "notified"))
+
+
+class StewardCheckWorkerStartedRunnerTest(_NativeStewardWorld):
+    """The shared runner is one service of this user: a registered worker's hook may start
+    it, and the steward-check duty it runs still reads the user's own native records.
+
+    A worker masks its own harness home (Claude ``CLAUDE_CONFIG_DIR``, Codex
+    ``CODEX_HOME``) with a private home and pins the user's in
+    ``HEARTING_MODEL_CONFIG_HOME``. The runner's environment is taken from the real
+    launch, then the duty's own seams run in it."""
+
+    CODEX_TARGET = "019a0000-0000-7000-8000-0000000000dd"
+
+    def runner_environment(self, starter, ledger):
+        with mock.patch.dict(os.environ, starter, clear=True):
+            store = peer_obligations.ObligationStore(ledger)
+            SC.register(HARNESS, self.HOLDER, now=T0, store=store, ensure_runner=False)
+            with mock.patch.object(peer_obligations.subprocess, "Popen") as launch:
+                self.assertTrue(REAL_ENSURE_NORMAL_RUNNER(ledger))
+            env = launch.call_args.kwargs["env"]
+            return dict(os.environ) if env is None else dict(env)
+
+    def worker_home(self, root, name):
+        home = root / "dispatch" / "homes" / "workers" / name
+        (home / "sessions").mkdir(parents=True)
+        (home / "worker-home.json").write_text("{}", encoding="utf-8")
+        return home
+
+    def observed_in(self, env):
+        SC._THROTTLE.clear()
+        with mock.patch.dict(os.environ, env, clear=True):
+            flagged = REAL_ROLE_FLAGGED(HARNESS, self.HOLDER)
+            names = sorted(target["name"] for target in SC._observe_role(HARNESS, self.HOLDER)["targets"])
+        return flagged, names
+
+    def test_a_runner_a_claude_worker_starts_reads_the_users_claude_home(self):
+        env, ledger, log = self.world("claude-worker", herdr_answers=False)
+        worker = self.worker_home(self.tmp / "claude-worker", "claude-owner")
+        starter = {**env, "CLAUDE_CONFIG_DIR": str(worker), "HEARTING_WORKER_HOME": str(worker),
+                   "HEARTING_MODEL_CONFIG_HOME": env["CLAUDE_CONFIG_DIR"]}
+        runner = self.runner_environment(starter, ledger)
+        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+        self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
+        for name in ("HEARTING_WORKER_HOME", "HEARTING_MODEL_CONFIG_HOME"):
+            self.assertNotIn(name, runner)
+        self.assertFalse(log.exists())
+
+    def test_a_default_claude_home_stays_the_native_default(self):
+        env, ledger, _log = self.world("claude-default", herdr_answers=False)
+        default = Path(env["HOME"]) / ".claude"
+        default.parent.mkdir(parents=True)
+        Path(env["CLAUDE_CONFIG_DIR"]).rename(default)
+        worker = self.worker_home(self.tmp / "claude-default", "claude-owner")
+        starter = {**env, "CLAUDE_CONFIG_DIR": str(worker), "HEARTING_WORKER_HOME": str(worker),
+                   "HEARTING_MODEL_CONFIG_HOME": str(default)}
+        runner = self.runner_environment(starter, ledger)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", runner)
+        self.assertEqual(self.observed_in(runner), (True, ["worker"]))
+
+    def test_a_runner_a_codex_worker_starts_reads_the_users_codex_threads(self):
+        import sqlite3
+        env, ledger, _log = self.world("codex-worker", herdr_answers=False)
+        marker = ledger / "peer-steward" / "claude" / f"{self.HOLDER}.json"
+        record = json.loads(marker.read_text())
+        record["targets"]["codex"] = {"harness": "codex", "session_id": self.CODEX_TARGET,
+                                      "name": "codex-worker", "kind": "watch", "source": "watch",
+                                      "ts": record["updated"]}
+        marker.write_text(json.dumps(record))
+        repo = self.tmp / "codex-worker" / "repo"
+        user_codex = Path(env["CODEX_HOME"])
+        worker = self.worker_home(self.tmp / "codex-worker", "codex-owner")
+        for home, rows in ((user_codex, [(self.CODEX_TARGET, str(repo))]), (worker, [])):
+            home.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(home / "state_5.sqlite") as con:
+                con.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT)")
+                con.executemany("INSERT INTO threads VALUES (?, ?)", rows)
+            con.close()
+        starter = {**env, "CODEX_HOME": str(worker), "HEARTING_WORKER_HOME": str(worker),
+                   "HEARTING_MODEL_CONFIG_HOME": str(user_codex)}
+        runner = self.runner_environment(starter, ledger)
+        self.assertEqual(self.observed_in(runner), (True, ["codex-worker", "worker"]))
+        self.assertEqual(runner.get("CODEX_HOME"), str(user_codex))
+        self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), env["CLAUDE_CONFIG_DIR"])
+
+    def test_an_ordinary_session_keeps_its_own_claude_home(self):
+        env, ledger, _log = self.world("ordinary", herdr_answers=False)
+        other = self.tmp / "ordinary" / "chosen-claude"
+        (other / "sessions").mkdir(parents=True)
+        runner = self.runner_environment({**env, "CLAUDE_CONFIG_DIR": str(other)}, ledger)
+        self.assertEqual(runner.get("CLAUDE_CONFIG_DIR"), str(other))
+
+
 class StewardCheckWindowClosedTest(CheckBase):
-    """A role whose seat pane vanished from a complete census is released, never guessed."""
+    """A role is released only when native evidence proves its exact SID ended."""
 
     KEY = "seat-key-1"
 
     def setUp(self):
         super().setUp()
-        self.panes = herdr_observation.PaneCensus("default", (), 1.0, True)
         self.released = mock.Mock(return_value={"roles": 1})
         peer_message = SimpleNamespace(peer_state_root=lambda: self.tmp,
                                        release_closed_session=self.released)
@@ -955,79 +1264,44 @@ class StewardCheckWindowClosedTest(CheckBase):
                 (SC, "_relations", lambda: [{"holder": {"harness": HARNESS, "sid": SID},
                                              "origin": {"harness": HARNESS, "sid": SID},
                                              "seat_key": self.KEY, "released": False}]),
-                (SC, "_pane_census", lambda server: self.panes),
                 (SC, "_end_observation", lambda: None)):
             patcher = mock.patch.object(target, name, side_effect=replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
         self.liveness = "unknown"
-
-    def arm(self, name="watch-1", *, pane="w1:p9", server="default", key=None, sid=SID, receipt=False):
-        root = self.tmp / "peer-watches"
-        root.mkdir(exist_ok=True)
-        (root / f"{name}.json").write_text(json.dumps({
-            "watch_id": name, "steward": {"harness": HARNESS, "session_id": sid},
-            "steward_seat": {"kind": "pane", "key": key or self.KEY, "pane": pane},
-            "steward_server": server}))
-        if receipt:
-            (root / f"{name}.receipt.json").write_text(json.dumps({"watch_id": name, "reason": "steward-exited"}))
-
-    def occupied(self, pane="w1:p9", agent="claude"):
-        self.panes = herdr_observation.PaneCensus(
-            "default", ({"pane_id": pane, "agent": agent, "agent_session": {"value": "someone-else"}},), 1.0, True)
+        patcher = mock.patch.object(SC, "_session_liveness",
+                                    side_effect=lambda harness, sid, *args, **kwargs: self.liveness)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def advance(self):
         self.register()
         return self.step(T0 + 1)
 
-    def test_absent_pane_and_unknown_liveness_release_the_role_and_end_the_duty(self):
-        self.arm()
-        duty = self.advance()
-        self.released.assert_called_once_with(HARNESS, SID, reason="window-closed")
-        self.assertEqual((duty["state"], duty["observation"]["reason"]), ("complete", "window-closed"))
-
-    def test_an_arm_that_already_has_its_receipt_still_proves_the_pane(self):
-        self.arm(receipt=True)
-        duty = self.advance()
-        self.released.assert_called_once()
-        self.assertEqual(duty["observation"]["reason"], "window-closed")
-
-    def test_another_session_in_the_same_pane_leaves_the_role_alone_even_with_a_receipt(self):
-        self.arm(receipt=True)
-        self.occupied()
+    def test_unknown_lifetime_keeps_the_role_and_duty(self):
         duty = self.advance()
         self.released.assert_not_called()
         self.assertNotEqual(duty["state"], "complete")
 
-    def test_a_live_session_keeps_its_role(self):
-        self.arm()
+    def test_live_lifetime_keeps_the_role(self):
         self.liveness = "live"
-        self.advance()
+        duty = self.advance()
         self.released.assert_not_called()
+        self.assertNotEqual(duty["state"], "complete")
 
-    def test_an_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
-        self.arm()
+    def test_exact_ended_lifetime_releases_with_session_ended_reason(self):
+        self.liveness = "ended"
+        duty = self.advance()
+        self.released.assert_called_once_with(HARNESS, SID, reason="session-ended")
+        self.assertEqual((duty["state"], duty["observation"]["reason"]),
+                         ("complete", "session-ended"))
+
+    def test_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
+        self.liveness = "ended"
         self.released.return_value = {"roles": "unresolved", "marker": "kept"}
         duty = self.advance()
-        self.released.assert_called_once()
+        self.released.assert_called_once_with(HARNESS, SID, reason="session-ended")
         self.assertNotEqual(duty["state"], "complete")
-
-    def test_without_a_watch_arm_for_the_seat_nothing_is_concluded(self):
-        self.arm(key="another-seat")
-        self.arm(name="watch-2", sid="someone-else")
-        self.advance()
-        self.released.assert_not_called()
-
-    def test_an_unavailable_pane_census_is_not_absence(self):
-        self.arm()
-        self.panes = None
-        self.advance()
-        self.released.assert_not_called()
-
-    def test_a_census_of_another_endpoint_is_not_absence(self):
-        self.arm(server="other")
-        self.advance()
-        self.released.assert_not_called()
 
 
 class StewardCheckEscTest(CheckBase):
@@ -1091,10 +1365,15 @@ class StewardCheckRoleFlagTest(CheckBase):
         self.assertEqual(self.notify.call_count, 1)
 
     def test_real_flag_seam_reads_the_fleet_role_flag(self):
-        collector = SimpleNamespace(role_flag=mock.Mock(return_value=False))
+        rows = [SimpleNamespace(harness=HARNESS, session_id=SID, cwd="/repo", runtime_name=None)]
+        collector = SimpleNamespace(role_flag=mock.Mock(return_value=False),
+                                    _registry_sessions=mock.Mock(return_value=rows),
+                                    role_targets=mock.Mock(return_value=[]))
         with mock.patch.object(SC, "_collector", return_value=collector):
             self.assertFalse(REAL_ROLE_FLAGGED(HARNESS, SID))
-        collector.role_flag.assert_called_once_with(HARNESS, SID)
+        collector.role_targets.assert_called_once_with(HARNESS, SID, sessions=rows,
+                                                       include_native=True)
+        collector.role_flag.assert_called_once_with(HARNESS, SID, sessions=rows, _targets=[])
         with mock.patch.object(SC, "_collector", return_value=None):
             self.assertTrue(REAL_ROLE_FLAGGED(HARNESS, SID))
 
@@ -1182,7 +1461,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         con.commit()
         con.close()
         collector = SimpleNamespace(
-            _projection_sessions=lambda: [SimpleNamespace(cwd=str(repo))],
+            _registry_sessions=lambda: [SimpleNamespace(cwd=str(repo))],
             _session_keys=lambda row: {(HARNESS, SID)})
         memory._project_cache.clear()
         self.addCleanup(memory._project_cache.clear)

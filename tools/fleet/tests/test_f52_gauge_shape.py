@@ -3,6 +3,9 @@
 v36 (2026-08-04) replaced only F-51a's GLYPH and context-WIDTH clauses: the usage header meter
 stays a fixed six cells, and every quantization / color / unknown-vs-0% rule is untouched.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import sys
 import re
