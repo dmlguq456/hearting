@@ -533,11 +533,8 @@ class RecoveryFieldsTest(unittest.TestCase):
                 self.assertEqual(fields["next_action"], "owner-inline")
                 self.assertEqual(fields["recovery_surface"], "capability-route complete --inline")
                 self.assertEqual(fields["review_independence_when_owner_run"], "degraded")
-                self.assertIn("verification-background-lease.py", fields["recovery_run_command"])
-                self.assertIn("smoke-attestation.py attest", fields["recovery_run_command"])
-                self.assertIn("smoke-attestation.py verify", fields["recovery_check_command"])
-                self.assertIn("complete --inline --route /r/route.json --node smoke",
-                              fields["recovery_complete_command"])
+                self.assertEqual(fields["recovery_unavailable"], "recorded-smoke-command-unavailable")
+                self.assertNotIn("recovery_run_command", fields)
                 self.assertIn("unverified", fields["recovery_hint"])
 
     def test_model_review_and_owner_closure_keep_their_existing_recovery(self):
@@ -565,6 +562,112 @@ class RecoveryFieldsTest(unittest.TestCase):
         fields = CAP.recovery_fields("pipeline-stage", "verdictless-bound")
         self.assertEqual(fields["next_action"], "owner-inline")
 
+
+
+class DeterministicSmokeRecoveryTest(unittest.TestCase):
+    """No GPU or model account: a real subprocess stands in for one smoke batch."""
+
+    def test_recorded_smoke_recovery_runs_and_never_reuses_stale_pass(self):
+        import hashlib
+        import json
+        import os
+        import shlex
+        import subprocess
+        import dispatch_contract as DC
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "experiment-scaffold"
+            inputs.mkdir()
+            script = inputs / "batch.py"
+            script.write_text("from pathlib import Path\nPath('steps').write_text('1')\n")
+            evidence = root / "reviews/smoke-attestation.json"
+            evidence.parent.mkdir()
+            smoke_spec = importlib.util.spec_from_file_location("ami_smoke", ROOT / "tools/smoke-attestation.py")
+            smoke = importlib.util.module_from_spec(smoke_spec)
+            smoke_spec.loader.exec_module(smoke)
+            (root / "configs").mkdir()
+            config = root / "configs/smoke.yaml"
+            config.write_text("steps: 1\n")
+            def seal_config():
+                sealed = subprocess.run([sys.executable, str(ROOT / "tools/lab-config-provenance.py"),
+                    "seal", "--repo", str(root), "--config", "smoke.yaml", "--slug", "ami",
+                    "--artifact-root", str(root)], capture_output=True, text=True, check=True)
+                return root / "experiments/ami/_internal/configs" / (json.loads(sealed.stdout)["run_id"] + ".manifest.json")
+            manifest = seal_config()
+            data = smoke.payload([inputs], [sys.executable, str(script)], str(root), manifest)
+            data.update(status="passed", exit_code=0)
+            data["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+                data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            evidence.write_text(json.dumps(data))
+            node = {"id": "smoke", "kind": "review-worker", "completion_gate": "hash-bound-smoke"}
+            r = {**route(), "route_id": "rt-smoke", "route_hash": "sha256:smoke",
+                 "artifact_root": str(root), "cwd": str(root), "nodes": [node]}
+            jobs = root / "jobs.log"
+            jobs.write_text("")
+            marker_dir = root / "completion"
+            marker_dir.mkdir()
+            marker = {"route_id": r["route_id"], "route_hash": r["route_hash"],
+                      "node_id": "smoke", "attempt_id": "att-smoke-pass", "registered_worker": False,
+                      "round_census": {"verdict_rounds": 1},
+                      "reviewer_kind": "owner-inline", "review_independence": "degraded",
+                      "evidence": {"path": str(evidence), "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest()}}
+            (marker_dir / "smoke.json").write_text(json.dumps(marker))
+            with mock.patch.object(DC, "_route_module") as module, \
+                 mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
+                 mock.patch.object(DC, "gate_currency", return_value=mock.Mock(state="current")), \
+                 mock.patch.object(DC, "completion_attempt_readiness", return_value=mock.Mock(state="ready")):
+                module.return_value.completion_dir.return_value = marker_dir
+                concrete = CAP.recovery_fields("review-worker", "exhausted", route=r, node=node,
+                                               jobs=jobs, route_file=root / "route.json")
+                self.assertNotIn("<", concrete["recovery_run_command"])
+                budget = CAP.round_budget(r, node, [row("done", "completed-marker")])
+                reused = CAP.reuse_deterministic_pass(r, node, jobs, budget)
+                self.assertEqual(reused["required_action"], "use-current-pass")
+                self.assertEqual(reused["child_spawned"], "0")
+                self.assertEqual(reused["review_independence"], "degraded")
+                for status, expected in (("open", "blocked-live"), ("running", "blocked-live")):
+                    live = CAP.round_budget(r, node, [row(status, "")])
+                    self.assertEqual(live.state, expected)
+                    self.assertIsNone(CAP.reuse_deterministic_pass(r, node, jobs, live))
+                script.write_text("from pathlib import Path\nPath('steps').write_text('2')\n")
+                config.write_text("steps: 2\n")
+                manifest = seal_config()
+                self.assertIsNone(CAP.reuse_deterministic_pass(r, node, jobs, budget))
+                fields = CAP.recovery_fields("review-worker", "exhausted", route=r, node=node,
+                                             jobs=jobs, route_file=root / "route.json")
+                self.assertEqual(fields["required_action"], "run-deterministic-check")
+                self.assertNotIn("<", fields["recovery_run_command"])
+                env = {k:v for k,v in os.environ.items() if not k.startswith(("AGENT_", "CLAUDE", "CODEX", "OPENCODE"))}
+                done = subprocess.run(shlex.split(fields["recovery_run_command"]), env=env,
+                                      capture_output=True, text=True, timeout=30)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertEqual((root / "steps").read_text(), "2")
+                evidence = Path(shlex.split(fields["recovery_check_command"])[-1])
+                fresh = json.loads(evidence.read_text())
+                self.assertTrue(smoke.verify(fresh))
+                self.assertEqual(fresh["config_source_sha256"], smoke.digest(config))
+                self.assertIn(str(manifest), fields["recovery_run_command"])
+                self.assertIn(str(jobs), fields["recovery_complete_command"])
+                self.assertEqual(fields["review_independence_when_owner_run"], "degraded")
+                # A real failing batch remains failed; no fresh PASS can be reused.
+                marker["evidence"]["path"] = str(evidence)
+                marker["evidence"]["sha256"] = hashlib.sha256(evidence.read_bytes()).hexdigest()
+                (marker_dir / "smoke.json").write_text(json.dumps(marker))
+                script.write_text("raise SystemExit(7)\n")
+                failing = CAP.recovery_fields("review-worker", "exhausted", route=r, node=node,
+                                             jobs=jobs, route_file=root / "route.json")
+                failed = subprocess.run(shlex.split(failing["recovery_run_command"]), env=env,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(failed.returncode, 7, failed.stdout + failed.stderr)
+                with self.assertRaisesRegex(ValueError, "smoke did not pass"):
+                    failed_evidence = Path(shlex.split(failing["recovery_check_command"])[-1])
+                    smoke.verify(json.loads(failed_evidence.read_text()))
+                self.assertIsNone(CAP.reuse_deterministic_pass(r, node, jobs, budget))
+                # A changed/malformed evidence file cannot be replayed as the old marker's command.
+                evidence.write_text('{}')
+                bad = CAP.recovery_fields("review-worker", "exhausted", route=r, node=node,
+                                          jobs=jobs, route_file=root / "route.json")
+                self.assertNotIn("recovery_run_command", bad)
 
 class RoundBudgetParityTest(unittest.TestCase):
     """A-SD153-7: every registered launch surface reads the exact same

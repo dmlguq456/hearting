@@ -103,6 +103,30 @@ def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+_OPENED = []
+_OPEN_HOOK = []
+
+
+def _record_open(event, args):
+    if event == "open" and _OPENED:
+        _OPENED[-1].append(os.fsdecode(args[0]) if isinstance(args[0], (str, bytes, os.PathLike))
+                           else str(args[0]))
+
+
+@contextlib.contextmanager
+def _read_opens():
+    """Paths this process opens inside the block (an audit hook stays for the process)."""
+    if not _OPEN_HOOK:
+        sys.addaudithook(_record_open)
+        _OPEN_HOOK.append(True)
+    opened = []
+    _OPENED.append(opened)
+    try:
+        yield opened
+    finally:
+        _OPENED.pop()
+
+
 class ReplayProcess:
     """A private payload/owner process owned by one test."""
 
@@ -562,6 +586,137 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
     def test_d1_finished_run_delivers_receipt_marker_and_run_verify_admission(self):
         self._inherit()
         self._finish_payload_and_deliver()
+
+    def _stall_notices(self, t0, offsets):
+        """Run the existing observer pass at each offset; 1 where it raised this owner's notice."""
+        import dispatch_supervision as SUPERVISION
+        result = []
+        for offset in offsets:
+            raised = []
+            with mock.patch.object(SUPERVISION.time, "time", return_value=t0 + offset), \
+                 mock.patch.object(SUPERVISION, "materialize",
+                                   side_effect=lambda _jobs, ids, reason: raised.extend(ids) or []):
+                SUPERVISION.update_open_attempt_stall_observations(self.jobs)
+            result.append(int(REPLACEMENT in raised))
+        return result
+
+    def _park_successor_on_the_inherited_run(self):
+        """The live replacement owner, parked on the run the proven handoff moved to it."""
+        self.owner_meta.update(DC.process_launch_identity(self.owner_process.process.pid))
+        fields = self.owner_row.split("\t")
+        fields[5] = ",".join(f"{key}={value}" for key, value in self.owner_meta.items())
+        self.owner_row = "\t".join(fields)
+        self.jobs.write_text("\n".join([self.old_owner_row, self.r1_owner_row, self.owner_row]) + "\n",
+                             encoding="utf-8")
+        self._inherit()
+        JOIN.write_supervisor_state(self.state_path, REPLACEMENT, set(), phase="parked")
+        self.assertEqual(self.registry_rows[VAR_RUN]["parent_attempt_id"], OLD_OWNER)
+
+    def test_successor_owner_parked_on_the_inherited_live_run_gets_no_stall_notice(self):
+        # RV-PR1592-R2: the replacement owner parks on the live run its predecessor launched
+        # and the proven pin handoff moved to its route. The run and owner records keep the
+        # predecessor; before the fix the successor read as "no progress" from 601 s on.
+        import dispatch_supervision as SUPERVISION
+        self._park_successor_on_the_inherited_run()
+        t0 = time.time()
+        self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 0, 0, 0])
+        observation = SUPERVISION.update_attempt_stall_observation(
+            self.jobs, REPLACEMENT, persist=False, now=t0 + 7200)
+        self.assertEqual((observation["state"], observation["reason"]),
+                         ("active", "supervised-owner-parked"))
+        # Without the proven handoff the same live run and copied watch stay the predecessor's
+        # route's: the owner's quiet windows run out as before (R1's foreign-run case).
+        outcome = json.loads(self._outcome_path().read_text())
+        outcome["summary"] = "cancelled"
+        self._outcome_path().write_text(json.dumps(outcome), encoding="utf-8")
+        self._assert_identity(self._var_holder())
+        (DC.dispatch_state_root(self.jobs) / "watchdog" / f"{REPLACEMENT}.json").unlink()
+        self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 1, 1, 1])
+
+    def test_one_observation_pass_reads_the_predecessor_close_journal_once(self):
+        # RV-PR1592-R3: the handoff proof answers its intent, result, parent-close entries
+        # and workflow state from one read of the predecessor's close journal. It used to
+        # open and parse the same file five times on every pass of an inherited run.
+        self._park_successor_on_the_inherited_run()
+        journal = os.path.realpath(self.ledger0.journal_path)
+        with _read_opens() as opened:
+            notices = self._stall_notices(time.time(), (0,))
+        self.assertEqual(notices, [0])
+        self.assertEqual(sum(1 for path in opened if path.endswith("journal.jsonl")
+                             and os.path.realpath(path) == journal), 1)
+
+    @contextlib.contextmanager
+    def _journal_changed_after_its_read(self, change):
+        """Apply ``change`` to the predecessor journal right after the proof has read it.
+
+        ``_rows`` runs after the proof's one journal read and before its state checks.
+        """
+        real_rows = CLOSE._rows
+
+        def rows_then_change(*args, **kwargs):
+            rows = real_rows(*args, **kwargs)
+            change(self.ledger0.journal_path)
+            return rows
+
+        with mock.patch.object(CLOSE, "_rows", side_effect=rows_then_change):
+            yield
+
+    def _journal_changes(self):
+        def corrupt(path):
+            path.write_text("{broken\n", encoding="utf-8")
+
+        def replace_with_empty(path):
+            staged = path.with_name(path.name + ".staged")
+            staged.write_bytes(b"")
+            os.replace(staged, path)
+
+        def append_running(path):
+            del path
+            self.ledger0._append({"at": WS.now_iso(), "route_id": self.r0["route_id"],
+                                  "route_hash": self.r0["route_hash"], "node": None, "state": None,
+                                  "workflow_state": "RUNNING", "evidence": None,
+                                  "actor": "workflow-supervisor", "pid": os.getpid()})
+
+        # change, and the state a fresh read of the changed journal gives
+        return {"corrupt": (corrupt, ("CREATED", True)),
+                "replace-with-empty": (replace_with_empty, ("CREATED", False)),
+                "append-running": (append_running, ("RUNNING", False))}
+
+    def test_a_predecessor_journal_changed_after_its_read_proves_no_handoff(self):
+        # RV-PR1592-R4: the proof judges one journal read. A journal corrupted, replaced
+        # by an empty file, or appended a RUNNING entry after that read was accepted as
+        # the read's handoff; reading it again (as before the one-read change) refuses it.
+        path = self.ledger0.journal_path
+        original = path.read_bytes()
+        self.assertIsNotNone(CLOSE.verified_owner_pin_handoff_close(self.r0, jobs=self.jobs))
+        for name, (change, fresh) in self._journal_changes().items():
+            with self.subTest(name):
+                try:
+                    with self._journal_changed_after_its_read(change):
+                        self.assertIsNone(CLOSE.verified_owner_pin_handoff_close(self.r0, jobs=self.jobs))
+                    state = self.ledger0.read_only_state()
+                    self.assertEqual((state["workflow_state"], state["journal_unreadable"]), fresh)
+                finally:
+                    path.write_bytes(original)
+        self.assertIsNotNone(CLOSE.verified_owner_pin_handoff_close(self.r0, jobs=self.jobs))
+
+    def test_a_journal_changed_within_each_observation_pass_keeps_the_stall_notice(self):
+        # RV-PR1592-R4: the reviewer's alarm replay. Each pass starts from the intact
+        # journal and the change lands after the pass's read: the notice must still come.
+        for name, (change, _fresh) in self._journal_changes().items():
+            with self.subTest(name):
+                self.tearDown_and_rebuild()
+                self._park_successor_on_the_inherited_run()
+                path = self.ledger0.journal_path
+                original = path.read_bytes()
+                t0 = time.time()
+                notices = []
+                for offset in (0, 601, 1202, 7200):
+                    path.write_bytes(original)
+                    with self._journal_changed_after_its_read(change):
+                        notices += self._stall_notices(t0, (offset,))
+                path.write_bytes(original)
+                self.assertEqual(notices, [0, 1, 1, 1])
 
     def _finish_payload_and_deliver(self):
         """Finish the payload, deliver the receipt, then admit the follow-up start.

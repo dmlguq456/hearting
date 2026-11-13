@@ -29,6 +29,21 @@ def _with_hash(data):
     return data
 
 class TestSmoke(unittest.TestCase):
+ def test_two_real_runs_of_same_bytes_have_distinct_execution_evidence(self):
+  with tempfile.TemporaryDirectory() as td:
+   source=Path(td)/"batch.py";source.write_text("pass\n")
+   output=Path(td)/"smoke.json"
+   command=[sys.executable,str(P),"attest","--input",str(source),"--cwd",td,
+            "--output",str(output),"--",sys.executable,str(source)]
+   subprocess.run(command,check=True,env=CLEAN_ENV,capture_output=True)
+   first=json.loads(output.read_text())
+   subprocess.run(command,check=True,env=CLEAN_ENV,capture_output=True)
+   second=json.loads(output.read_text())
+   self.assertTrue(M.verify(first));self.assertTrue(M.verify(second))
+   self.assertEqual(first["inputs"],second["inputs"])
+   self.assertNotEqual(first["attestation_hash"],second["attestation_hash"])
+   self.assertLess(first["executed_at"],second["executed_at"])
+
  def test_execution_environment_identity_binds_selection_without_ambient_secrets(self):
   import resource_execution_environment as ENV
   with tempfile.TemporaryDirectory() as td:
