@@ -396,6 +396,53 @@ const apart=(times,what)=>{for(let i=1;i<times.length;i++)
 """
 
 
+# Review RV-PR1612 R4: the watch on a question, route or message FILE keeps failing. That path is not
+# the run folder's: it keeps its own pace (a change is drawn within its 25 ms batch, as before this PR).
+# Three files, three names, three folders; every watch made on their folders fails at once.
+HOST_FAILING_FILES = r"""
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const host=fs.readFileSync(process.argv[1],'utf8');
+const body=host.slice(host.indexOf('function queueProjection('),host.indexOf('\nfunction claudePanelPainted('));
+const files=JSON.parse(process.argv[2]).files;
+const read=file=>{try{return fs.readFileSync(file,'utf8');}catch{return '';}};
+const wait=ms=>new Promise(done=>setTimeout(done,ms));
+const folders=new Set(files.map(file=>path.dirname(file)));
+let made=0;
+const nativeWatch=fs.watch.bind(fs);
+fs.watch=(...args)=>{
+ const w=nativeWatch(...args);
+ if(folders.has(String(args[0]))){made++;setImmediate(()=>w.emit('error',Object.assign(new Error('injected watch failure'),{code:'ENOSPC'})));}
+ return w;
+};
+let drawn=[];
+const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),sid:'s',ended:false,relay:false,succeeding:false,
+ projectionTimer:undefined,projecting:false,projectionPending:false,selection:0,clock:0,nativeSelectionRevision:0,
+ sourceError:undefined,openColumns:()=>40,rows:30,cols:80,state:'idle',expanded:true,nativeContext:undefined,
+ nativeMcp:undefined,block:{references:()=>[],update(){}},actionWorker:undefined,currentDelivery:undefined,
+ upgradeNoteNow:()=>'',displayValues:{},harness:'codex',turnRecord:'',readTurnRecord(){},noteTurn(){},
+ projectionKey:'',heldBytes:0,shownState:()=>'idle',bootstrapModel:false,nativeSelected:{},publishNativeDisplay(){},
+ height:()=>30,applyLayout(){},nativeFooter:null,footer:'',footerSegments:[],panelLines:[],panelSections:undefined,
+ panelModel:{},
+ source:async()=>{const lines=files.map(read);await wait(20);return {ok:true,watch:files,lines};},
+ rebuildDisplay(){drawn.push({at:Date.now(),lines:c.panelLines.slice()});}};
+vm.createContext(c);vm.runInContext(body,c);
+(async()=>{
+ c.projection();await wait(1100);
+ assert(made>=1,'the files\' folders are watched');
+ for(let i=0;i<files.length;i++){
+  await wait(1100); // the watch has failed and been made again for a while by now
+  drawn=[];const at=Date.now();fs.writeFileSync(files[i],'changed '+i);
+  await wait(400);
+  const shown=drawn.find(row=>row.lines[i]==='changed '+i);
+  assert(shown,'the change to '+path.basename(files[i])+' is drawn within 400 ms');
+  assert(shown.at-at<300,path.basename(files[i])+' drawn after '+(shown.at-at)+' ms');
+ }
+ c.ended=true;clearTimeout(c.projectionTimer);
+ for(const row of c.watchers.values())row.watch.close();c.watchers.clear();
+})().catch(error=>{console.error(error);process.exit(1);});
+"""
+
+
 class ShellLabWatch(LabBase):
     """Review RV-PR1612 R1: a record past the first few is watched like the first one. R2: a folder
     made again is watched again, and a busy one redraws at most once a second."""
@@ -452,6 +499,14 @@ class ShellLabWatch(LabBase):
         question = self.base / "questions" / "q.json"
         question.parent.mkdir()
         self.host(HOST_FAILING, {"runs": str(root / "resource-runs"), "question": str(question)})
+
+    def test_a_files_watch_that_keeps_failing_keeps_its_own_pace(self):
+        """Review RV-PR1612 R4: the file targets' watch failing again and again was slowed to once a second."""
+        files = []
+        for folder, name in (("questions", "q.json"), ("routes", "route-1.json"), ("messages", "m-7.json")):
+            (self.base / folder).mkdir()
+            files.append(str(self.base / folder / name))
+        self.host(HOST_FAILING_FILES, {"files": files})
 
     def test_more_record_folders_than_the_cap_are_unconfirmed_never_left_out_silently(self):
         root = self.project()

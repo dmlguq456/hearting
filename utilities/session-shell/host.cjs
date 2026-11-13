@@ -747,10 +747,12 @@ function folderIdentity(directory){try{const s=fs.statSync(directory);return [s.
 // replaced, added or removed in it redraws, however many files it holds (LAB's run records).
 // A watched folder removed, renamed away or made again leaves its watch on the old folder: the
 // watch is dropped at that event, or at the next projection's observation, and made again.
-// A watch that fails stays as failed until the next projection's observation makes it again. Made
-// again for its failure alone (the same folder, the same targets), it asks no 25 ms redraw: its
-// re-read takes a folder's once-a-second pace, so a watch failing again and again is made again,
-// and redrawn for, at most once a second, the last change still drawn.
+// A folder's watch that fails stays as failed until the next projection's observation makes it
+// again. Made again for its failure alone (the same folder, the same targets), it asks no 25 ms
+// redraw: its re-read takes a folder's once-a-second pace, so a watch failing again and again is
+// made again, and redrawn for, at most once a second, the last change still drawn. A watch on a
+// file target keeps its own way: dropped at the failure, made again as a new watch at the next
+// projection.
 function observeFiles(paths) {
   const wanted=new Map();let changed=false;
   for(const target of (Array.isArray(paths)?paths:[]).slice(0,64)){
@@ -784,7 +786,11 @@ function observeFiles(paths) {
           queueProjection(!!name&&folder(hits));
         }
       });
-      row.watch.on('error',()=>{row.watch.close();row.failed=true;
+      // Only a folder watched whole stays as failed (its slow, once-a-second remake). A file target's
+      // watch is dropped and made again at the projection as before this PR.
+      row.watch.on('error',()=>{row.watch.close();
+        if(row.targets.some(target=>target.endsWith(path.sep)))row.failed=true;
+        else if(watchers.get(directory)===row)watchers.delete(directory);
         sourceError={reason:'file-observation-unavailable'};queueProjection(true);});
       watchers.set(directory,row);
       if(retried)queueProjection(true);else changed=true;
