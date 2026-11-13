@@ -318,6 +318,7 @@ def _compact(value: object) -> str:
 
 _HIDDEN_TYPES = {"token_usage", "thinking_tokens", "tool_progress", "api-request-blob",
                  "cost-state", "queue-operation", "dispatch.supervisor.token_usage",
+                 "dispatch.supervisor.step_tokens",
                  "supervisor.token_usage", "last-prompt", "atis-latch", "mode",
                  "api-request", "api-request-shape"}
 

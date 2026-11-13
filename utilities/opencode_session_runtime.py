@@ -149,6 +149,22 @@ def _add_step_tokens(usage: dict, tokens) -> None:
             usage[key] = usage.get(key, 0) + value
 
 
+def _step_token_record(tokens) -> dict | None:
+    """One finished step's native token counters for the attempt log; None without any.
+
+    Counters only (no text). Fleet's context gauge reads the newest one with the
+    OpenCode prompt-size rule it uses for every OpenCode session."""
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+    record = {key: tokens[key] for key in ("total", "input", "output", "reasoning")
+              if _count(tokens.get(key)) is not None}
+    cache = {key: cache[key] for key in ("read", "write") if _count(cache.get(key)) is not None}
+    if cache:
+        record["cache"] = cache
+    return record or None
+
+
 def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
              ordinary_owner_turn: bool = False) -> tuple[dict, int]:
     """Stream one exact native turn, then return the portable result envelope.
@@ -239,6 +255,13 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
         elif kind == "step_finish":
             terminal_stop = part.get("reason") == "stop"
             _add_step_tokens(usage, part.get("tokens"))
+            # The step's own prompt size, so the owner's route row shows its context
+            # during the turn. Its own type: a forwarded `step_finish` reads as a
+            # terminal event elsewhere, and its stop reason stays out of this log.
+            counts = _step_token_record(part.get("tokens"))
+            if counts:
+                emit({"type": "dispatch.supervisor.step_tokens", "runtime": "opencode",
+                      "sessionID": session, "tokens": counts})
         elif kind == "error":
             runtime_error = opencode_runtime.safe_provider_error(value.get("error"))
         elif kind == "tool_use":
