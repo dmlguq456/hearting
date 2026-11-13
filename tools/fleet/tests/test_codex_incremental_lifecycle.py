@@ -448,6 +448,9 @@ class DiskLifecycleCursorTest(unittest.TestCase):
 
     def test_every_mismatch_reads_from_byte_zero(self):
         def boundary(saved):
+            # Past the head digest: only the boundary digest can see this change.
+            self.assertGreaterEqual(saved.offset - codex._LIFECYCLE_BOUNDARY_BYTES,
+                                    codex._LIFECYCLE_HEAD_BYTES)
             with open(self.path, "r+b") as handle:
                 handle.seek(saved.offset - 2)
                 handle.write(b"[]")
@@ -467,7 +470,8 @@ class DiskLifecycleCursorTest(unittest.TestCase):
 
         def regrown(saved):
             with open(self.path, "w", encoding="utf-8") as handle:
-                handle.write(_event("task_started", "other") + "{}\n" * 400)
+                handle.write(_event("task_started", "other") + "{}\n" * 2000)
+            self.assertGreater(os.path.getsize(self.path), saved.offset)
 
         def damaged(saved):
             directory = os.path.join(self.tmp.name, "cache", "hearting", "fleet-parses")
@@ -489,7 +493,8 @@ class DiskLifecycleCursorTest(unittest.TestCase):
         for name, mutate, version in cases:
             with self.subTest(name):
                 self._new_process()
-                saved = self._leave_cursor(*self._rows(), "{}\n" * 60)
+                # Longer than the head digest plus the boundary window (4 KiB + 256 B).
+                saved = self._leave_cursor(*self._rows(), "{}\n" * 1500)
                 mutate(saved)
                 with mock.patch.object(codex.parse_cache, "_VERSION",
                                        version or codex.parse_cache._VERSION):

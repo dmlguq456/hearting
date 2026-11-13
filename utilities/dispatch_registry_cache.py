@@ -643,16 +643,18 @@ def _line_spans(data: bytes, start: int, end: int):
         start = stop + 1
 
 
-def _reusable_prefix(cached, raw: bytes, resolved: str):
+def _reusable_prefix(cached, raw: bytes, resolved: str, signature: tuple):
     """What of the cached parse the new bytes ``raw`` still prove unchanged.
 
-    Returns ``(segments, byte_end, hasher, hint, whole)`` or None. ``segments`` are the
-    leading cached segments whose cumulative digest equals the digest of the same
-    byte range of ``raw`` (the first mismatch stops the walk; the inode is not
-    asked, the digest proves the bytes). ``hasher`` has consumed ``raw[:byte_end]``
-    for the new view to continue. ``hint`` maps the fields of every discarded
-    cached row to its record (no row text is copied); ``whole`` says every cached
-    segment was kept.
+    Returns ``(segments, byte_end, hasher, hint, whole, discarded, same_file)`` or None.
+    ``segments`` are the leading cached segments whose cumulative digest equals the
+    digest of the same byte range of ``raw`` (the first mismatch stops the walk; the
+    inode is not asked, the digest proves the bytes). ``hasher`` has consumed
+    ``raw[:byte_end]`` for the new view to continue. ``hint`` maps the fields of
+    every discarded cached row to its record (no row text is copied); ``whole``
+    says every cached segment was kept. ``same_file`` says ``signature`` names the
+    cached generation's ``(dev, ino)``. ``discarded`` are the cached segments past the kept
+    prefix, which ``_resync_segments`` may recognise again.
     None means a plain full parse.
     """
     if (cached is None or not cached._prefix_reuse_eligible
@@ -677,7 +679,8 @@ def _reusable_prefix(cached, raw: bytes, resolved: str):
         return None
     discarded = cached._segments[kept:]
     hint = {record.fields: record for segment in discarded for record in segment.records} or None
-    return cached._segments[:kept], position, good, hint, kept == len(cached._segments), discarded
+    return (cached._segments[:kept], position, good, hint, kept == len(cached._segments), discarded,
+            tuple(cached.signature[:2]) == tuple(signature[:2]))
 
 
 def demand_replacement_rows() -> None:
@@ -720,10 +723,14 @@ class RegistryView:
         self.resolved_path = resolved_path
         self.signature = signature
         self._fd = fd
-        # A reuse that kept every cached segment is the same continuation of an
-        # observed prefix, now proven by digest instead of asserted.
+        # A reuse that kept every (at least one) cached segment of the same file
+        # is the same continuation of an observed prefix, now proven by digest
+        # instead of asserted. A replacement file is never an append generation,
+        # even when it holds the old rows: a later inode reuse could otherwise
+        # pass as the continuation of an older cursor's file.
         self._append_only_generation = bool(
-            previous is not None or (reuse is not None and reuse[4]))
+            previous is not None
+            or (reuse is not None and reuse[4] and reuse[0] and reuse[6]))
         # True while any part of this generation rests on a caller's append-only
         # assertion instead of bytes whose prefix digest was compared here.
         self._asserted_suffix = bool(
@@ -1502,7 +1509,7 @@ def _observe_generation(path: Path) -> list:
             cached._settled = cached._settled or settled
             view = cached
         else:
-            reuse = _reusable_prefix(cached, raw, resolved)
+            reuse = _reusable_prefix(cached, raw, resolved, signature)
             _drop(identity, keep_parse=bool(reuse and reuse[0]))
             _METRICS["invalidations"] += 1
             cached = None  # the old generation is not held while the new one parses
@@ -1641,7 +1648,7 @@ def _registry_view_fresh(jobs: Path, *, append_only: bool = False) -> RegistryVi
                 if _drop(identity) is not None:
                     _METRICS["invalidations"] += 1
                 raise
-            reuse = _reusable_prefix(stale, raw, resolved)
+            reuse = _reusable_prefix(stale, raw, resolved, signature)
             if stale is not None:
                 _drop(identity, keep_parse=bool(reuse and reuse[0]))
                 _METRICS["invalidations"] += 1
