@@ -2044,6 +2044,115 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             with self.assertRaisesRegex(JOIN.JoinContractError,"resource-owner-binding-invalid"):
                 RESOURCE.context(args,control)
 
+    def _observer_fixture(self, observer_extra=None):
+        """A running supervised-owner primary plus an auxiliary observer of it, one registry."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        registry = self.root / "resources.json"
+        owner = {"parent_attempt_id": "att-parent"}
+        primary = {"run_id": "primary", "pid": 123, "starttime": "100", "command": ["train"],
+                   "route": "/exact", "node": "full-run", "jobs": str(self.jobs),
+                   "owner_wait": owner, "resource_policy": "supervised-owner", "status": "running"}
+        observer = {"run_id": "watch", "pid": 124, "starttime": "101", "command": ["watch"],
+                    "route": "/exact", "node": "full-run", "jobs": str(self.jobs),
+                    "owner_wait": owner, "resource_policy": "observer", "observer_of": "primary",
+                    "status": "running", **(observer_extra or {})}
+        registry.write_text(json.dumps({"runs": {"primary": primary, "watch": observer}}))
+        armed = {"node": "full-run", "predecessor_id": "primary", "resource_registry": str(registry)}
+        state = {"watch": {"terminal": False, "reason": "resource-still-running", "liveness": "working"},
+                 "primary": {"terminal": False, "reason": "resource-still-running", "liveness": "working"}}
+        def evidence(item):
+            value = dict(state[item["predecessor_id"]])
+            if value.get("terminal"):
+                row = json.loads(registry.read_text())["runs"][item["predecessor_id"]]
+                value["resource_sha256"] = RESOURCE.RESUME.row_digest(row)
+            return value
+        polls = []
+        sup = SimpleNamespace(poll_once=lambda *_: polls.append(1), resource_evidence=evidence,
+            read_resource_watches=lambda *_: [armed], artifact_evidence=lambda _: {"missing": []},
+            resource_predecessors=lambda *_: [(armed, primary)], reattach_resource_watch=lambda *_: None,
+            runner=lambda: SimpleNamespace(read_sentinel=lambda _: None))
+        ledger = SimpleNamespace(state=lambda: {"nodes": {"full-run": {"state": "RUNNING"}}})
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        path = self.root / "state.json"
+        JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+        return SimpleNamespace(RESOURCE=RESOURCE, registry=registry, armed=armed, primary=primary,
+                               observer=observer, state=state, sup=sup, ledger=ledger, args=args,
+                               control=control, path=path, polls=polls,
+                               ctx=(sup, {}, ledger, [(armed, primary)]))
+
+    def test_observer_failure_reaches_the_waiting_owner_once_and_leaves_the_primary_alone(self):
+        f = self._observer_fixture()
+        RESOURCE = f.RESOURCE
+        class Paused(Exception):
+            pass
+        def pause(_):
+            raise Paused()
+        primary_before = json.dumps(f.primary, sort_keys=True)
+        with mock.patch.object(RESOURCE, "context", return_value=f.ctx), \
+             mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True):
+            # A clean or unknown observer ends nobody's wait: the owner keeps waiting.
+            for observation in ({"terminal": True, "succeeded": True, "exit_code": 0, "quiescent": None},
+                                {"terminal": False, "reason": "resource-observation-unsettled", "liveness": "unknown"}):
+                f.state["watch"] = observation
+                with self.assertRaises(Paused):
+                    RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None, sleep=pause)
+                self.assertIsNone(JOIN.read_supervisor_phase_state(f.path, "att-parent").resource["outbox"])
+            f.state["watch"] = {"terminal": True, "succeeded": False, "exit_code": 6, "quiescent": None}
+            prompt = RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None,
+                                   sleep=lambda _: self.fail("an observer failure returns at once"))
+            state = JOIN.read_supervisor_phase_state(f.path, "att-parent")
+            receipt = state.resource["outbox"]["receipt"]
+            self.assertEqual((receipt["state"], receipt["reason"], receipt["exit_code"], receipt["run_id"]),
+                             ("needs-attention", "observer-failed", 6, "watch"))
+            self.assertEqual(receipt["successors"], [])
+            self.assertFalse(receipt["verification_pass"] or receipt["workflow_complete"])
+            self.assertTrue(JOIN.valid_resource_state(state.resource))
+            self.assertIn("observer-failed", prompt)
+            self.assertIn("adds no retry authorization", prompt)
+            self.assertEqual(state.delivered_attempt_ids, frozenset())
+            # The same pending receipt is returned again, never a second one.
+            self.assertEqual(RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None), prompt)
+            self.assertTrue(RESOURCE.acknowledge(f.path, "att-parent", state.resource["outbox"]["receipt_id"]))
+            # Acknowledged once: the same failed observer does not wake the owner again.
+            with self.assertRaises(Paused):
+                RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None, sleep=pause)
+            self.assertIsNone(JOIN.read_supervisor_phase_state(f.path, "att-parent").resource["outbox"])
+        self.assertEqual(json.dumps(f.primary, sort_keys=True), primary_before)
+        self.assertEqual(json.loads(f.registry.read_text())["runs"]["primary"]["status"], "running")
+
+    def test_observer_failure_survives_the_primary_ending_before_acknowledgement(self):
+        f = self._observer_fixture()
+        RESOURCE = f.RESOURCE
+        f.state["watch"] = {"terminal": True, "succeeded": False, "exit_code": 6, "quiescent": None}
+        found_primary = {**f.primary}
+        with mock.patch.object(RESOURCE, "context", return_value=f.ctx), \
+             mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True):
+            prompt = RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None)
+            # The primary's watch is gone: the receipt is still described from the observer row.
+            f.ctx = (f.sup, {}, f.ledger, [])
+            with mock.patch.object(RESOURCE, "current_responsibility", return_value={"ok": True}), \
+                 mock.patch.object(RESOURCE, "resource_holder", return_value={
+                     "origin": {"route_id": None, "route_hash": None, "route_file": None}}):
+                f.sup.resource_predecessors = lambda *_: [({**f.armed, "route_id": None, "route_hash": None,
+                    "route_file": None, "jobs": str(Path(f.args.jobs).resolve()),
+                    "successor_external": True, "successor_command": None}, found_primary)]
+                f.ctx = (f.sup, {}, f.ledger, [(f.armed, found_primary)])
+                with mock.patch.object(RESOURCE, "context", return_value=f.ctx):
+                    self.assertEqual(RESOURCE.pending_prompt(f.path, "att-parent", f.args, f.control), prompt)
+
+    def test_observer_of_another_route_or_owner_is_not_this_owners_to_hear(self):
+        for field, value in (("route", "/other"), ("node", "other-run"),
+                             ("observer_of", "someone-else"), ("owner_wait", {"parent_attempt_id": "att-other"}),
+                             ("pid", None), ("execution", {"kind": "compute-hosts"})):
+            with self.subTest(field=field):
+                f = self._observer_fixture({field: value})
+                self.assertEqual(f.RESOURCE.observer_rows([(f.armed, f.primary)]), [])
+        f = self._observer_fixture()
+        self.assertEqual([row["run_id"] for _, row in f.RESOURCE.observer_rows([(f.armed, f.primary)])], ["watch"])
+
     def test_resource_state_reader_rejects_malformed_foreign_and_false_pass(self):
         import copy
         import dispatch_resource_wait as RESOURCE
@@ -7037,6 +7146,112 @@ class SettlingReceiptNoticeTest(unittest.TestCase):
         self.assertEqual(notices[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
         self.assertIn((61.0 + ceiling - 0.1, "waiting"), observations, observations)
         self.assertIn((61.0 + ceiling, "attention"), observations, observations)
+
+    def test_a_wait_cut_into_short_joins_keeps_the_settling_clock(self):
+        """RV-PR1602 finding 4: a supervisor that looks at its resources between join pieces
+        starts a new join process every 30s. The child that ended normally and never gets its
+        post-exit receipt is still noticed once at the settling ceiling, as one long join does."""
+        self.jobs.write_text(self.owner + self.awaiting_line, encoding="utf-8")
+        rows = JOIN.current_children(self.jobs, self.parent)
+        clock = [0.0]
+
+        def piece(seconds):
+            # No observation context passed in: a fresh one, exactly as a new join process has.
+            return JOIN._join_snapshot(
+                jobs=self.jobs, initial=rows, refresh=lambda _: JOIN.current_children(self.jobs, self.parent),
+                identity={"parent_attempt_id": self.parent}, interval=2.0, timeout=seconds,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None, observation_jobs=self.jobs)
+
+        def notices():
+            return [record for record in (
+                        json.loads(path.read_text(encoding="utf-8"))
+                        for path in (self.root / "pending-delivery").glob("*/*.json"))
+                    if record.get("receipt", {}).get("reason") == "process-unverifiable"]
+
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(JOIN.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch("dispatch_supervision.materialize", wraps=__import__("dispatch_supervision").materialize) as told:
+            early = [piece(30.0) for _ in range(19)]
+            self.assertLess(clock[0], JOIN.SETTLING_NOTICE_SECONDS)
+            self.assertEqual(notices(), [])
+            later = [piece(30.0) for _ in range(5)]
+        self.assertGreaterEqual(clock[0], JOIN.SETTLING_NOTICE_SECONDS)
+        self.assertEqual({receipt["state"] for receipt in early + later}, {"timeout"})
+        self.assertEqual(len(notices()), 1)
+        self.assertEqual(notices()[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+        # The recorded notice is carried too: later pieces do not record it again.
+        self.assertEqual(told.call_count, 1)
+
+    def _cut_wait(self, gap, pieces=24):
+        """30s join pieces with `gap` seconds between them, each a fresh join process."""
+        self.jobs.write_text(self.owner + self.awaiting_line, encoding="utf-8")
+        rows = JOIN.current_children(self.jobs, self.parent)
+        clock = [0.0]
+        receipts = []
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(JOIN.time, "time", side_effect=lambda: 10000.0 + clock[0]), \
+             mock.patch.object(JOIN.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch("dispatch_supervision.materialize",
+                        wraps=__import__("dispatch_supervision").materialize) as told:
+            for index in range(pieces):
+                receipts.append(JOIN._join_snapshot(
+                    jobs=self.jobs, initial=rows, refresh=lambda _: rows,
+                    identity={"parent_attempt_id": self.parent}, interval=2.0, timeout=30.0,
+                    liveness_command=None, liveness_probe_timeout=1.0, env=None,
+                    observation_jobs=self.jobs))
+                if index + 1 < pieces:
+                    clock[0] += gap
+        notices = [record for record in (
+                       json.loads(path.read_text(encoding="utf-8"))
+                       for path in (self.root / "pending-delivery").glob("*/*.json"))
+                   if record.get("receipt", {}).get("reason") == "process-unverifiable"]
+        return receipts, notices, told.call_count, clock[0]
+
+    def test_a_wait_cut_into_short_joins_far_apart_keeps_the_settling_clock(self):
+        """RV-PR1602-R2 finding 2: a display record older than 120s is stale for display, but the
+        same parent still waiting on the same unsettled child keeps that child's settling clock
+        and its recorded notice: exactly one notice whether pieces are 121s or 300s apart."""
+        for gap in (121.0, 300.0):
+            with self.subTest(gap=gap):
+                self.setUp()
+                receipts, notices, told, elapsed = self._cut_wait(gap)
+                self.assertGreater(elapsed, JOIN.SETTLING_NOTICE_SECONDS)
+                self.assertEqual({receipt["state"] for receipt in receipts}, {"timeout"})
+                self.assertEqual(len(notices), 1, (gap, notices))
+                self.assertEqual(notices[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+                self.assertEqual(told, 1)
+
+    def test_a_far_older_record_carries_only_the_same_parents_same_unsettled_child(self):
+        identity = {"parent_attempt_id": self.parent}
+        JOIN.write_join_observation(
+            self.jobs, identity,
+            [{"attempt_id": self.attempt, "readiness": "pending", "reason": "process-unverifiable"},
+             {"attempt_id": "att-alive-child", "readiness": "pending", "reason": "process-alive"}],
+            elapsed=700, recovery_results={}, eligible_attempt_ids={self.attempt},
+            unverifiable_seconds={self.attempt: 700.0}, notified_attempt_ids={self.attempt})
+        path = JOIN.join_observation_path(self.jobs, identity)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["observed_at"] -= 3600
+        path.write_text(json.dumps(value), encoding="utf-8")
+        # Stale for any display reader...
+        self.assertEqual(JOIN.read_join_observation(self.jobs, identity), {})
+        # ...but the same parent's same unsettled child keeps its clock (gap included) and notice.
+        since, notified = JOIN.joined_observation_history(
+            self.jobs, identity, {self.attempt, "att-alive-child", "att-new-child"})
+        self.assertEqual(set(since), {self.attempt})
+        self.assertGreaterEqual(time.monotonic() - since[self.attempt], 700 + 3600 - 1)
+        self.assertEqual(notified, {self.attempt})
+        # Another parent, or the next wait's new attempt, does not inherit it.
+        self.assertEqual(JOIN.joined_observation_history(
+            self.jobs, {"parent_attempt_id": "att-other-parent"}, {self.attempt}), ({}, set()))
+        self.assertEqual(JOIN.joined_observation_history(
+            self.jobs, identity, {"att-new-child"}), ({}, set()))
 
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):

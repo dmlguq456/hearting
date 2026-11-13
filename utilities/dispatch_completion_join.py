@@ -64,6 +64,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import math
 from pathlib import Path
 import shlex
 import subprocess
@@ -3983,16 +3984,18 @@ def join_observation_path(jobs: Path, identity: dict[str, str]) -> Path:
     return jobs.resolve().parent / "join-observations" / f"{key}.json"
 
 
-def read_join_observation(jobs: Path, identity: dict[str, str], *, now: float | None = None) -> dict:
-    """Read a fresh exact-parent diagnostic; it never grants completion."""
+def _join_observation_record(jobs: Path, identity: dict[str, str]) -> dict:
+    """The exact parent's last observation record, however old; {} when unreadable."""
     path = join_observation_path(jobs, identity)
     try:
         if path.is_symlink() or path.stat().st_size > MAX_STATE_BYTES:
             return {}
         value = json.loads(path.read_text(encoding="utf-8"))
-        age = (time.time() if now is None else now) - value["observed_at"]
         if (value.get("schema_version") != 1 or value.get("identity") != identity
-                or not 0 <= age <= 120 or value.get("state") not in {"waiting", "attention", "ready"}
+                or not isinstance(value.get("observed_at"), (int, float))
+                or isinstance(value.get("observed_at"), bool)
+                or not math.isfinite(value["observed_at"])
+                or value.get("state") not in {"waiting", "attention", "ready"}
                 or not isinstance(value.get("children"), list)):
             return {}
         return value
@@ -4000,13 +4003,31 @@ def read_join_observation(jobs: Path, identity: dict[str, str], *, now: float | 
         return {}
 
 
+def read_join_observation(jobs: Path, identity: dict[str, str], *, now: float | None = None) -> dict:
+    """Read a fresh exact-parent diagnostic; it never grants completion."""
+    value = _join_observation_record(jobs, identity)
+    if not value:
+        return {}
+    age = (time.time() if now is None else now) - value["observed_at"]
+    return value if 0 <= age <= 120 else {}
+
+
 def write_join_observation(jobs: Path, identity: dict[str, str], children: list[dict],
                            *, elapsed: float, recovery_results: dict,
                            eligible_attempt_ids: set[str],
-                           residue_pids: dict[str, list[int]] | None = None) -> None:
-    """Publish bounded diagnostics separately from the completion receipt."""
+                           residue_pids: dict[str, list[int]] | None = None,
+                           unverifiable_seconds: dict[str, float] | None = None,
+                           notified_attempt_ids: set[str] | frozenset[str] = frozenset()) -> None:
+    """Publish bounded diagnostics separately from the completion receipt.
+
+    `unverifiable_seconds` and `notified` per child are how long it has been
+    continuously unverifiable and whether its notice was recorded; the next join
+    of the same parent continues from them while this record is fresh
+    (`joined_observation_history`).
+    """
     pending = [child for child in children if child["readiness"] == "pending"]
     attention = any(child["attempt_id"] in eligible_attempt_ids for child in pending)
+    unverifiable_seconds = unverifiable_seconds or {}
     value = {"schema_version": 1, "identity": identity, "observed_at": time.time(),
              "state": "attention" if attention else ("waiting" if pending else "ready"),
              "elapsed_seconds": round(elapsed, 1),
@@ -4014,7 +4035,11 @@ def write_join_observation(jobs: Path, identity: dict[str, str], children: list[
              "children": [{"attempt_id": child["attempt_id"], "reason": child["reason"],
                            "recovery_reason": recovery_results.get(child["attempt_id"], {}).get("reason", ""),
                            **({"residue_pids": residue_pids[child["attempt_id"]]}
-                              if (residue_pids or {}).get(child["attempt_id"]) else {})}
+                              if (residue_pids or {}).get(child["attempt_id"]) else {}),
+                           **({"unverifiable_seconds": round(unverifiable_seconds[child["attempt_id"]], 3)}
+                              if child["attempt_id"] in unverifiable_seconds else {}),
+                           **({"notified": True}
+                              if child["attempt_id"] in notified_attempt_ids else {})}
                           for child in pending[:16]]}
     path = join_observation_path(jobs, identity)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4030,6 +4055,39 @@ def write_join_observation(jobs: Path, identity: dict[str, str], children: list[
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def joined_observation_history(jobs: Path, identity: dict[str, str],
+                               attempt_ids: set[str]) -> tuple[dict[str, float], set[str]]:
+    """What the previous join of this parent saw, for a join that starts fresh.
+
+    A supervisor that looks at its resources between join pieces starts a new join
+    process every piece; reading the last observation record keeps each child's
+    continuous-unverifiable clock and its recorded notice instead of starting them
+    over. The 120s freshness is for display only: the same parent still waiting on the
+    same unsettled child continues that child's clock however long the gap was (the
+    gap counts as waiting). Another parent's record, a child no longer listed as
+    unverifiable (settled or otherwise), and the next wait's new attempts carry
+    nothing. Returns `(since, notified)` with `since` on this process's monotonic
+    clock; anything unreadable is simply absent.
+    """
+    value = _join_observation_record(jobs, identity)
+    since: dict[str, float] = {}
+    notified: set[str] = set()
+    if not value:
+        return since, notified
+    age = max(0.0, time.time() - float(value["observed_at"]))
+    now = time.monotonic()
+    for child in value["children"]:
+        if not isinstance(child, dict) or child.get("attempt_id") not in attempt_ids:
+            continue
+        seconds = child.get("unverifiable_seconds")
+        if child.get("reason") == "process-unverifiable" and type(seconds) in (int, float) \
+                and math.isfinite(seconds) and seconds >= 0:
+            since[child["attempt_id"]] = now - (float(seconds) + age)
+            if child.get("notified") is True:
+                notified.add(child["attempt_id"])
+    return since, notified
 
 
 def reconcile_exact_dead_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
@@ -4215,15 +4273,19 @@ def _join_snapshot(
         observation_context = ObservationContext(max_entries=8)
     state_key = ("join", str(Path(jobs).resolve(strict=False)),
                  tuple(sorted(snapshot)), tuple(sorted(identity.items())))
-    state = observation_context.state(state_key, lambda: {
-        "started": time.monotonic(), "last_recovery": {}, "last_settlement": {},
-        "settlement_backoff": {}, "recovery_results": {},
-        "last_observation": float("-inf"), "last_signature": "",
-        "observation_error": "", "unverifiable_since": {}, "settling_attempt_ids": set(),
-        "notified_attempt_ids": set(),
-        "last_notice_attempt": float("-inf"), "blocked_notice_published": False,
-        "last_blocked_notice_attempt": float("-inf"), "registry_generation": None,
-    })
+    def fresh_state() -> dict:
+        since, notified = (joined_observation_history(observation_jobs, identity, snapshot)
+                           if observation_jobs is not None else ({}, set()))
+        return {
+            "started": time.monotonic(), "last_recovery": {}, "last_settlement": {},
+            "settlement_backoff": {}, "recovery_results": {},
+            "last_observation": float("-inf"), "last_signature": "",
+            "observation_error": "", "unverifiable_since": since, "settling_attempt_ids": set(),
+            "notified_attempt_ids": notified,
+            "last_notice_attempt": float("-inf"), "blocked_notice_published": False,
+            "last_blocked_notice_attempt": float("-inf"), "registry_generation": None,
+        }
+    state = observation_context.state(state_key, fresh_state)
     started = state["started"]
     last_recovery = state["last_recovery"]
     last_settlement = state["last_settlement"]
@@ -4423,8 +4485,9 @@ def _join_snapshot(
                 else UNVERIFIABLE_NOTICE_SECONDS)
         }
         signature = json.dumps({"children": children, "eligible": sorted(eligible)}, sort_keys=True)
-        if observation_jobs is not None and (signature != last_signature
-                or time.monotonic() - last_observation >= 30):
+
+        def publish_observation() -> None:
+            nonlocal observation_error
             try:
                 # Display only: name the survivors a finished worker left running.
                 residue_pids = {
@@ -4437,11 +4500,19 @@ def _join_snapshot(
                 write_join_observation(observation_jobs, identity, children,
                                        elapsed=elapsed, recovery_results=recovery_results,
                                        eligible_attempt_ids=eligible,
-                                       residue_pids=residue_pids)
+                                       residue_pids=residue_pids,
+                                       unverifiable_seconds={
+                                           attempt_id: now - since
+                                           for attempt_id, since in unverifiable_since.items()},
+                                       notified_attempt_ids=notified_attempt_ids)
                 observation_error = ""
             except OSError:
                 # A display record never owns the child's lifetime or verdict.
                 observation_error = "join-observation-write-failed"
+
+        if observation_jobs is not None and (signature != last_signature
+                or time.monotonic() - last_observation >= 30):
+            publish_observation()
             last_signature, last_observation = signature, time.monotonic()
             state["last_signature"], state["last_observation"] = last_signature, last_observation
             state["observation_error"] = observation_error
@@ -4459,6 +4530,8 @@ def _join_snapshot(
                 if notice_attempt_ids:
                     materialize(observation_jobs, notice_attempt_ids, reason="process-unverifiable")
                     notified_attempt_ids.update(notice_attempt_ids)
+                    # Recorded now, so a later join of this parent does not record it again.
+                    publish_observation()
             except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
                 observation_error = "supervision-notice-unpersisted:" + str(exc)
         if (not blocked_notice_published and observation_jobs is not None and blocked_attempt_ids

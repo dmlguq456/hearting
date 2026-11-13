@@ -86,6 +86,17 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
         grid.put(x + 3, y, ui_text("fleet.repo.no_status"), "dim", limit=right)
         y += 1
 
+    lab = repo.get("lab")
+    if isinstance(lab, Mapping) and lab.get("visible"):
+        from . import lab_table
+        clock = getattr(vm, "clock", None)
+        try:
+            y = _section(grid, x, right, y + 1, ui_text("fleet.lab.title"), lab_table.summary(lab, clock))
+            y = lab_table.draw_lab(grid, lab, x, right, y, clock)
+        except Exception:  # noqa: BLE001 -- a broken board never takes the project page with it
+            grid.put(x + 3, y, "?", "dim", limit=right)
+            y += 1
+
     y = _section(grid, x, right, y + 1, ui_text("fleet.repo.open_work"))
     db_state = str(memory.get("state") or "unknown")
     if db_state != "success":

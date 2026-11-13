@@ -158,5 +158,122 @@ class SharedDecisionsTest(unittest.TestCase):
         self.assertIn('default_harness="codex"', source["codex"])
 
 
+class ReparkClaimTest(unittest.TestCase):
+    def test_parking_the_same_children_again_after_a_resource_turn_claims_nothing_new(self):
+        with tempfile.TemporaryDirectory() as temp:
+            def park():
+                return BR.claim_terminal_handoff(Path(temp), owner_attempt_id="att-owner",
+                                                 route_hash="sha256:r", child_attempt_ids=["att-b", "att-a"])
+            first, again = park(), park()
+            self.assertEqual(first, again)
+            self.assertEqual(len(list(Path(temp).rglob("claim.json"))), 1)
+
+
+class JoinWithResourceAttentionTest(unittest.TestCase):
+    """A supervisor parked on model children is not deaf to the resources its owner holds."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name) / "state.json"
+        D.completion_join.write_supervisor_state(self.state, "att-parent", set(), phase="parked")
+        self.args = SimpleNamespace(parent_attempt_id="att-parent", join_timeout=100.0)
+        self.control = SimpleNamespace(thread_id="native", pending=lambda: False)
+        self.now = [0.0]
+        self.calls = []
+
+    def join(self, args, attempts, *, state="timeout"):
+        self.calls.append(args.join_timeout)
+        self.now[0] += args.join_timeout
+        return {"state": state, "children": []}
+
+    def wrapped(self, **kw):
+        return D.join_with_resource_attention(self.args, self.state, self.control, set(), self.join,
+                                              clock=lambda: self.now[0], **kw)
+
+    def test_an_owner_holding_nothing_gets_the_one_original_join(self):
+        with mock.patch.object(D.resource_wait, "context", return_value=None):
+            receipt = self.wrapped()({"att-child"})
+        self.assertEqual(self.calls, [100.0])
+        self.assertEqual(receipt["state"], "timeout")
+        with mock.patch.object(D.resource_wait, "context", side_effect=ValueError("unreadable")):
+            self.wrapped()({"att-child"})
+        self.assertEqual(self.calls, [100.0, 100.0])
+
+    def test_a_holder_not_read_yet_keeps_the_short_pieces_until_it_is_read(self):
+        """RV-PR1602 finding 2: one transient read error is "not read yet", never "holds nothing"."""
+        unread = D.resource_wait.HolderUnobserved("registry-unobserved:JSONDecodeError")
+        self.args.join_timeout = 3600.0
+        with mock.patch.object(D.resource_wait, "context", side_effect=[unread, unread, object()]) as context, \
+             mock.patch.object(D.resource_wait, "observe_once", return_value=D.resource_wait.WAITING) as look:
+            receipt = self.wrapped(check_seconds=30.0)({"att-child"})
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertLessEqual(max(self.calls), 30.0)
+        self.assertEqual(sum(self.calls), 3600.0)
+        # Read again at each checkpoint until it reads; then the pieces look at the resources.
+        self.assertEqual(context.call_count, 3)
+        self.assertEqual(look.call_count, len(self.calls) - 1)
+
+    def test_a_holder_read_later_as_holding_nothing_finishes_with_one_join(self):
+        unread = D.resource_wait.HolderUnobserved("registry-unobserved:OSError")
+        with mock.patch.object(D.resource_wait, "context", side_effect=[unread, None]), \
+             mock.patch.object(D.resource_wait, "observe_once") as look:
+            receipt = self.wrapped(check_seconds=30.0)({"att-child"})
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(self.calls, [30.0, 70.0])
+        look.assert_not_called()
+
+    def test_held_resources_are_looked_at_between_pieces_of_the_same_total_wait(self):
+        with mock.patch.object(D.resource_wait, "context", return_value=object()), \
+             mock.patch.object(D.resource_wait, "observe_once", return_value=D.resource_wait.WAITING) as look:
+            receipt = self.wrapped(check_seconds=30.0)({"att-child"})
+        # The wait is the same 100s, cut at 30s; the model children stay joined, never delivered.
+        self.assertEqual(self.calls, [30.0, 30.0, 30.0, 10.0])
+        self.assertEqual(sum(self.calls), 100.0)
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(look.call_count, 4)  # after every piece, the last one too
+
+    def test_a_ready_join_receipt_ends_the_wait_without_a_look(self):
+        def ready(args, attempts):
+            return {"state": "ready", "children": []}
+        with mock.patch.object(D.resource_wait, "context", return_value=object()), \
+             mock.patch.object(D.resource_wait, "observe_once") as look:
+            receipt = D.join_with_resource_attention(self.args, self.state, self.control, set(), ready)({"a"})
+        self.assertEqual(receipt["state"], "ready")
+        look.assert_not_called()
+
+    def test_a_resource_receipt_stops_the_wait_and_a_bare_correction_does_not(self):
+        def receipt_written(*_):
+            import hashlib, json
+            receipt = {"type": "resource-completion", "parent_attempt_id": "att-parent",
+                       "session_id": "native", "route_id": "rt", "route_hash": "h", "jobs": "/j",
+                       "node": "n", "run_id": "r", "resource_key": "b" * 64,
+                       "resource_sha256": "c" * 64, "state": "needs-attention", "exit_code": 3,
+                       "reason": "x", "verification_pass": False, "workflow_complete": False,
+                       "successors": []}
+            digest = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            resource = {"session_id": "native", "delivered": [], "outbox": {
+                "receipt_id": "resource-" + digest[:32], "digest": digest, "key": "b" * 64, "receipt": receipt}}
+            D.completion_join._write_supervisor_state_unlocked(
+                self.state, "att-parent", set(), phase="deliverable", resource=resource)
+            return "Runtime resource receipt"
+        with mock.patch.object(D.resource_wait, "context", return_value=object()), \
+             mock.patch.object(D.resource_wait, "observe_once", side_effect=receipt_written):
+            with self.assertRaises(D.ResourceAttentionReady) as caught:
+                self.wrapped(check_seconds=30.0)({"att-child"})
+        self.assertEqual(caught.exception.prompt, "Runtime resource receipt")
+        self.assertEqual(self.calls, [30.0])
+        self.assertTrue(issubclass(D.ResourceAttentionReady, D.StopWaiting))
+        # A pending user correction is not a resource receipt: the children keep waiting.
+        self.calls.clear()
+        self.now[0] = 0.0
+        D.completion_join.write_supervisor_state(self.state, "att-parent", set(), phase="parked")
+        self.state.write_text(self.state.read_text())
+        with mock.patch.object(D.resource_wait, "context", return_value=object()), \
+             mock.patch.object(D.resource_wait, "observe_once", return_value="Continue ... correction"):
+            receipt = self.wrapped(check_seconds=50.0)({"att-child"})
+        self.assertEqual(receipt["state"], "timeout")
+
+
 if __name__ == "__main__":
     unittest.main()
