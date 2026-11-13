@@ -197,7 +197,8 @@ Custom, clipped or uncertain rows remain visible. Answers retain the existing
 queue and consumption receipts; an unproved native target stays pending.
 
 **⚙ Settings** (the gear at the right end of the panel's last row) previews
-placement, panel position (right or left), width, bottom height, auxiliary detail, theme (terminal, light terminal or
+placement, panel position (right or left), width, narrow-window behavior,
+bottom height, auxiliary detail, theme (terminal, light terminal or
 monochrome) and shade (none, light or medium); the defaults keep the original
 look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
 the previous view, and Defaults previews the defaults. Drag the side boundary
