@@ -48,6 +48,27 @@ class BuildResponseTest(unittest.TestCase):
         self.assertIsNone(questions.build_response(self.INTERVIEW, text="note")[0])
         self.assertEqual(questions.questions_of(self.INTERVIEW)[1]["recommended"], 1)
 
+    def test_render_reuses_the_shared_recommended_label(self):
+        row = {"id": "q1", "kind": "question", "age": "now", "project": "",
+               "owner": {}, "owner_state": "live", "state": "current", "answerable": False,
+               "questions": [{"question": "Pick one", "choices": ["A", "B"], "recommended": 0}]}
+        with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}), \
+             mock.patch.object(questions.HWS, "ui_translator", return_value=lambda _key: "추천"):
+            out = questions.render({"items": [], "complete": True}, [row], [])
+        self.assertIn("(추천)", out)
+
+    def test_render_indents_continuation_lines_of_decision_questions(self):
+        row = {"id": "q1", "kind": "question", "age": "now", "project": "",
+               "owner": {}, "owner_state": "live", "state": "current", "answerable": False,
+               "questions": [{"question": "[결정 필요] 보관 기간\n- 30일: 유지\n추천: 30일 — 복구 가능",
+                              "choices": [], "recommended": None}]}
+        with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}):
+            out = questions.render({"items": [], "complete": True}, [row], [])
+        lines = out.splitlines()
+        self.assertIn("  [결정 필요] 보관 기간", lines)
+        self.assertIn("  - 30일: 유지", lines)
+        self.assertIn("  추천: 30일 — 복구 가능", lines)
+
     def test_single_question_text_answers_file_and_approval_shapes(self):
         single = {"kind": "question", "question_id": "owner-correction",
                   "detail": {"question": "blocked", "choices": []}}

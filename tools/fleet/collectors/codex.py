@@ -27,6 +27,7 @@ A per-tick cache (cwd → newest rollout path) is built from cheap line-1 reads 
 import contextlib
 import contextvars
 import glob
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,7 @@ from urllib.parse import urlsplit
 from .. import session_registry
 from ..model import ContextEvidence, SESSION_WORK_SEC, SubAgent
 from ..token_budget import parse_codex_token_count
+from . import parse_cache
 from . import shell_jobs
 
 # rollout filename tail: rollout-<ISO-ts>-<uuid>.jsonl
@@ -71,6 +73,20 @@ _EXACT_LIFECYCLE_CACHE = OrderedDict()   # path -> (full stat stamp, exact-scan 
 _ROLLOUT_CWD_CACHE_MAX = 8192
 _ROLLOUT_CWD_CACHE = {}                  # path -> (stat stamp, session_meta cwd)
 _LIFECYCLE_BOUNDARY_BYTES = 256
+_LIFECYCLE_HEAD_BYTES = 4096
+# A cursor is written to the disk cache after a full read and then at most once
+# per this many bytes of growth; a new process rereads at most that much again.
+_LIFECYCLE_SAVE_INTERVAL = 256 * 1024
+_LIFECYCLE_CURSOR_STAMP = "cursor-v1"
+_LIFECYCLE_CURSOR_LIMITS = [_LIFECYCLE_BOUNDARY_BYTES, _LIFECYCLE_HEAD_BYTES]
+_LIFECYCLE_DISK_MARK = {}               # path -> offset last written to (or resumed from) the disk cache
+_LIFECYCLE_DISK_RESUMES = 0             # cursors a new process continued from the disk cache
+# How each observation was served: "hits" = the saved cursor already covered the file,
+# "append_reads" = only the bytes after the saved offset were read, "full_reads" = the
+# file was read from byte zero. Read-only counters (the equivalence test checks that an
+# incremental path was really taken); they never feed a decision.
+_LIFECYCLE_STATS = {"hits": 0, "append_reads": 0, "full_reads": 0}
+_EXACT_LIFECYCLE_DISK_HITS = 0
 _TURN_CONTEXT_CACHE_MAX = 512
 _TURN_CONTEXT_CACHE = OrderedDict()
 _TURN_CONTEXT_CACHE_EVICTIONS = 0
@@ -522,13 +538,140 @@ def _parse_latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
     return _initialize_lifecycle_cursor(canonical_path, chunk).lifecycle
 
 
+def _memory_cursor_usable(cursor, current):
+    """Whether the in-process cursor still names this file at or before ``current``."""
+    if (current.st_dev, current.st_ino) != (cursor.dev, cursor.ino):
+        return False
+    if current.st_size < cursor.offset or _lifecycle_timestamps_regressed(cursor, current):
+        return False
+    return (current.st_size != cursor.offset
+            or (current.st_mtime_ns, current.st_ctime_ns) == (cursor.mtime_ns, cursor.ctime_ns))
+
+
+def _read_cursor_append(canonical_path, cached, chunk):
+    """Advance ``cached`` over the bytes appended after its offset, or raise OSError."""
+    with open(canonical_path, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        endpoint = opened.st_size
+        if (opened.st_dev, opened.st_ino) != (cached.dev, cached.ino):
+            raise OSError("lifecycle identity changed before append read")
+        if endpoint < cached.offset:
+            raise OSError("lifecycle file truncated before append read")
+        if _lifecycle_timestamps_regressed(cached, opened):
+            raise OSError("lifecycle timestamps regressed before append read")
+        if _cursor_boundary(handle, cached.offset) != cached.boundary:
+            raise OSError("saved lifecycle boundary changed before append read")
+        pending_calls = dict(cached.pending_calls or {})
+        lifecycle, carry = _read_lifecycle_range(
+            handle, cached.offset, endpoint, chunk,
+            cached.lifecycle, cached.carry, pending_calls=pending_calls,
+        )
+        current = _stable_path_stat(canonical_path, handle, endpoint)
+        if _lifecycle_timestamps_regressed(cached, current):
+            raise OSError("lifecycle timestamps regressed after append read")
+        boundary = _cursor_boundary(handle, endpoint)
+    return _LifecycleCursor(
+        dev=opened.st_dev,
+        ino=opened.st_ino,
+        offset=endpoint,
+        mtime_ns=current.st_mtime_ns,
+        ctime_ns=current.st_ctime_ns,
+        carry=carry,
+        lifecycle=lifecycle,
+        boundary=boundary,
+        pending_calls=pending_calls,
+    )
+
+
+def _cursor_disk_key(canonical_path):
+    return parse_cache.key("codex-lifecycle-cursor", canonical_path,
+                           _LIFECYCLE_CURSOR_STAMP, _LIFECYCLE_CURSOR_LIMITS)
+
+
+def _sha256_text(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _load_disk_lifecycle_cursor(canonical_path, current):
+    """The cursor an earlier process left, only if this very file still matches it.
+
+    Same checks as the in-process cursor, plus the digests of the bytes just before
+    the offset and of the file head: identity, size and clocks are compared first,
+    then the bytes themselves. Anything short of a match returns None (read it all).
+    """
+    try:
+        value = parse_cache.load(_cursor_disk_key(canonical_path))
+        if value is None:
+            return None
+        offset = value["offset"]
+        if ((current.st_dev, current.st_ino) != (value["dev"], value["ino"])
+                or current.st_size < offset
+                or current.st_mtime_ns < value["mtime_ns"]
+                or current.st_ctime_ns < value["ctime_ns"]):
+            return None
+        with open(canonical_path, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if ((opened.st_dev, opened.st_ino) != (value["dev"], value["ino"])
+                    or opened.st_size < offset):
+                return None
+            boundary = _cursor_boundary(handle, offset)
+            handle.seek(0)
+            head = handle.read(min(_LIFECYCLE_HEAD_BYTES, offset))
+        if (_sha256_text(boundary) != value["boundary_sha256"]
+                or len(head) != min(_LIFECYCLE_HEAD_BYTES, offset)
+                or _sha256_text(head) != value["head_sha256"]):
+            return None
+        pending = {call_id: _PendingInput(
+                       since, turn_id, None if questions is None else frozenset(questions), ended)
+                   for call_id, since, turn_id, questions, ended in value["pending"]}
+        lifecycle = tuple(value["lifecycle"]) if value["lifecycle"] is not None else None
+        return _LifecycleCursor(
+            dev=value["dev"], ino=value["ino"], offset=offset,
+            mtime_ns=value["mtime_ns"], ctime_ns=value["ctime_ns"], carry=b"",
+            lifecycle=lifecycle, boundary=boundary, pending_calls=pending)
+    except Exception:  # noqa: BLE001 - a damaged or unreadable cursor only means a full read
+        return None
+
+
+def _save_disk_lifecycle_cursor(canonical_path, cursor):
+    """Leave the cursor for a later process; ids, offsets and digests only, best effort."""
+    try:
+        if cursor.carry:
+            return          # the file ends inside a row; the next complete boundary will do
+        with open(canonical_path, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if ((opened.st_dev, opened.st_ino) != (cursor.dev, cursor.ino)
+                    or opened.st_size < cursor.offset):
+                return
+            head = handle.read(min(_LIFECYCLE_HEAD_BYTES, cursor.offset))
+        pending = [[call_id, request.since, request.turn_id,
+                    None if request.questions is None else sorted(request.questions),
+                    bool(request.ended)]
+                   for call_id, request in (cursor.pending_calls or {}).items()]
+        value = {
+            "dev": cursor.dev, "ino": cursor.ino, "offset": cursor.offset,
+            "mtime_ns": cursor.mtime_ns, "ctime_ns": cursor.ctime_ns,
+            "boundary_sha256": _sha256_text(cursor.boundary), "head_sha256": _sha256_text(head),
+            "lifecycle": list(cursor.lifecycle) if cursor.lifecycle else None,
+            "pending": pending,
+        }
+        # ``save`` publishes only while the file is still the one this cursor ended at.
+        parse_cache.save(_cursor_disk_key(canonical_path), value, canonical_path,
+                         (cursor.mtime_ns, cursor.offset, cursor.dev, cursor.ino))
+    except Exception:  # noqa: BLE001 - leaving a cursor behind is best effort
+        pass
+
+
 def _latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
     """Identity-bound incremental lifecycle observation.
 
-    A path's first stable identity is scanned in full. Later calls verify a small
-    boundary fingerprint and consume only bytes after the saved offset. Rotation,
-    truncation, retargeting, or any I/O failure removes the cursor and returns no
-    lifecycle for that observation; a later clean call may initialize afresh.
+    A path's first stable identity is scanned in full, or continued from the cursor
+    an earlier process left in the disk cache when the file still matches it. Later
+    calls verify a small boundary fingerprint and consume only bytes after the saved
+    offset. Rotation, truncation, retargeting, a changed boundary or a clock that
+    went backwards drop the cursor and read the file again from byte zero in the same
+    call, so the answer is still exact; only an I/O failure returns no lifecycle for
+    that observation (a later clean call may initialize afresh).
     Intermediate-byte rewrites are outside the contract and are not detected;
     detecting them would require rereading the whole file on every tick, which
     conflicts with this feature's purpose. ``max_scan=None`` is the exact full scan
@@ -537,7 +680,7 @@ def _latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
     if max_scan is None:
         return _exact_task_lifecycle(rollout_path, chunk)
 
-    global _LIFECYCLE_CACHE_EVICTIONS
+    global _LIFECYCLE_CACHE_EVICTIONS, _LIFECYCLE_DISK_RESUMES
     canonical_path = os.path.realpath(os.path.abspath(rollout_path))
     cached = _LIFECYCLE_CACHE.get(canonical_path)
     try:
@@ -546,72 +689,63 @@ def _latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
         _LIFECYCLE_CACHE.pop(canonical_path, None)
         return None
 
+    resumed = False
     if cached is not None:
-        if (before.st_dev, before.st_ino) != (cached.dev, cached.ino):
+        if not _memory_cursor_usable(cached, before):
             _LIFECYCLE_CACHE.pop(canonical_path, None)
-            return None
-        if before.st_size < cached.offset:
-            _LIFECYCLE_CACHE.pop(canonical_path, None)
-            return None
-        if _lifecycle_timestamps_regressed(cached, before):
-            _LIFECYCLE_CACHE.pop(canonical_path, None)
-            return None
-        if before.st_size == cached.offset:
-            if (before.st_mtime_ns, before.st_ctime_ns) != (
-                    cached.mtime_ns, cached.ctime_ns):
-                _LIFECYCLE_CACHE.pop(canonical_path, None)
-                return None
+            cached = None
+        elif before.st_size == cached.offset:
             _LIFECYCLE_CACHE.move_to_end(canonical_path)
+            _LIFECYCLE_STATS["hits"] += 1
             return cached.lifecycle
+    else:
+        cached = _load_disk_lifecycle_cursor(canonical_path, before)
+        if cached is not None:
+            if (before.st_size == cached.offset
+                    and (before.st_mtime_ns, before.st_ctime_ns)
+                    != (cached.mtime_ns, cached.ctime_ns)):
+                cached = None       # touched without growing: not the file that was saved
+            else:
+                resumed = True
+                _LIFECYCLE_DISK_MARK[canonical_path] = cached.offset
 
-    try:
-        if cached is None:
+    updated = None
+    initialized = False
+    if cached is not None:
+        try:
+            updated = _read_cursor_append(canonical_path, cached, chunk)
+        except (OSError, ValueError):
+            updated = None
+        else:
+            _LIFECYCLE_STATS["append_reads"] += 1
+            if resumed:
+                _LIFECYCLE_DISK_RESUMES += 1
+    if updated is None:
+        try:
             updated = _initialize_lifecycle_cursor(canonical_path, chunk)
             confirmed = os.stat(canonical_path)
             if ((confirmed.st_dev, confirmed.st_ino) != (updated.dev, updated.ino)
                     or confirmed.st_size < updated.offset):
                 raise OSError("lifecycle identity changed after initialization")
-        else:
-            with open(canonical_path, "rb") as handle:
-                opened = os.fstat(handle.fileno())
-                endpoint = opened.st_size
-                if (opened.st_dev, opened.st_ino) != (cached.dev, cached.ino):
-                    raise OSError("lifecycle identity changed before append read")
-                if endpoint < cached.offset:
-                    raise OSError("lifecycle file truncated before append read")
-                if _lifecycle_timestamps_regressed(cached, opened):
-                    raise OSError("lifecycle timestamps regressed before append read")
-                if _cursor_boundary(handle, cached.offset) != cached.boundary:
-                    raise OSError("saved lifecycle boundary changed before append read")
-                pending_calls = dict(cached.pending_calls or {})
-                lifecycle, carry = _read_lifecycle_range(
-                    handle, cached.offset, endpoint, chunk,
-                    cached.lifecycle, cached.carry, pending_calls=pending_calls,
-                )
-                current = _stable_path_stat(canonical_path, handle, endpoint)
-                if _lifecycle_timestamps_regressed(cached, current):
-                    raise OSError("lifecycle timestamps regressed after append read")
-                boundary = _cursor_boundary(handle, endpoint)
-            updated = _LifecycleCursor(
-                dev=opened.st_dev,
-                ino=opened.st_ino,
-                offset=endpoint,
-                mtime_ns=current.st_mtime_ns,
-                ctime_ns=current.st_ctime_ns,
-                carry=carry,
-                lifecycle=lifecycle,
-                boundary=boundary,
-                pending_calls=pending_calls,
-            )
-    except (OSError, ValueError):
-        _LIFECYCLE_CACHE.pop(canonical_path, None)
-        return None
+        except (OSError, ValueError):
+            _LIFECYCLE_CACHE.pop(canonical_path, None)
+            return None
+        initialized = True
+        _LIFECYCLE_STATS["full_reads"] += 1
 
     _LIFECYCLE_CACHE[canonical_path] = updated
     _LIFECYCLE_CACHE.move_to_end(canonical_path)
     while len(_LIFECYCLE_CACHE) > _LIFECYCLE_CACHE_MAX:
         _LIFECYCLE_CACHE.popitem(last=False)
         _LIFECYCLE_CACHE_EVICTIONS += 1
+    if len(_LIFECYCLE_DISK_MARK) > 2 * _LIFECYCLE_CACHE_MAX:
+        _LIFECYCLE_DISK_MARK.clear()
+    marked = _LIFECYCLE_DISK_MARK.get(canonical_path)
+    if (not updated.carry
+            and (initialized or marked is None
+                 or updated.offset - marked >= _LIFECYCLE_SAVE_INTERVAL)):
+        _LIFECYCLE_DISK_MARK[canonical_path] = updated.offset
+        _save_disk_lifecycle_cursor(canonical_path, updated)
     return updated.lifecycle
 
 
@@ -620,10 +754,13 @@ def _exact_task_lifecycle(rollout_path, chunk=65536):
 
     Completed native children keep ``open`` spawn edges, so every child ever spawned
     is observed on every tick. Only a byte-identical stat (identity, size, mtime,
-    ctime) reuses the previous full scan; any change, including an in-place rewrite,
-    replacement, or I/O failure, scans or fails exactly as an uncached read would.
+    ctime) reuses the previous full scan, in this process or from the disk cache;
+    any change, including an in-place rewrite, replacement, or I/O failure, scans or
+    fails exactly as an uncached read would. The disk copy is never continued from an
+    earlier offset: an exact scan must see a rewrite anywhere in the file.
     The incremental session cursor is neither consulted nor mutated.
     """
+    global _EXACT_LIFECYCLE_DISK_HITS
     canonical_path = os.path.realpath(os.path.abspath(rollout_path))
     try:
         st = os.stat(canonical_path)
@@ -635,11 +772,19 @@ def _exact_task_lifecycle(rollout_path, chunk=65536):
     if cached is not None and cached[0] == stamp:
         _EXACT_LIFECYCLE_CACHE.move_to_end(canonical_path)
         return cached[1]
-    try:
-        lifecycle = _parse_latest_task_lifecycle(rollout_path, chunk=chunk, max_scan=None)
-    except (OSError, ValueError):
-        _EXACT_LIFECYCLE_CACHE.pop(canonical_path, None)
-        return None
+    disk_key = parse_cache.key("codex-lifecycle-exact", canonical_path, list(stamp), None)
+    stored = parse_cache.load(disk_key)
+    if stored is not None:
+        lifecycle = tuple(stored["lifecycle"]) if stored["lifecycle"] is not None else None
+        _EXACT_LIFECYCLE_DISK_HITS += 1
+    else:
+        try:
+            lifecycle = _parse_latest_task_lifecycle(rollout_path, chunk=chunk, max_scan=None)
+        except (OSError, ValueError):
+            _EXACT_LIFECYCLE_CACHE.pop(canonical_path, None)
+            return None
+        parse_cache.save(disk_key, {"lifecycle": list(lifecycle) if lifecycle else None},
+                         canonical_path, (st.st_mtime_ns, st.st_size, st.st_dev, st.st_ino))
     # The stamp predates the scan, so a write racing the scan forces the next rescan.
     _EXACT_LIFECYCLE_CACHE[canonical_path] = (stamp, lifecycle)
     _EXACT_LIFECYCLE_CACHE.move_to_end(canonical_path)
@@ -1732,13 +1877,20 @@ def process_for_thread(thread_id, environ=None, *, expected_service=None, fresh=
     if not row:
         return None
     port, source = row
-    if not port or not source or source == "subagent":
+    if not source or source == "subagent":
         return None
-    observed = _tcp_listener_snapshot(port)
+    observed = _tcp_listener_snapshot(port) if port else (frozenset(), frozenset())
     if observed is None:
         _invalidate_origins(origins)
         return None
     inodes, owners = observed
+    if not inodes and not fresh:
+        # A loaded thread can move to another TUI (a window reopened with the same session id)
+        # without leaving the loaded list, so the cached origin names a listener that is gone, or
+        # was read before the TUI connected. A long-lived reader (the notice runner) would call
+        # the thread unowned for as long as it stays loaded: read the daemon once more first.
+        _invalidate_origins(origins)
+        return process_for_thread(thread_id, environ, expected_service=expected_service, fresh=True)
     if not inodes or len(owners) != 1:
         return None
     pid = next(iter(owners))

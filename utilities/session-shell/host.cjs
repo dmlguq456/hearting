@@ -12,7 +12,7 @@ function startupResult(value) {
   const fd = Number(process.env.HEARTING_SHELL_START_FD);
   fs.writeSync(fd, value + '\n'); fs.closeSync(fd);
 }
-function bypass() { startupResult('BYPASS'); process.exit(0); }
+function bypass() { try{startupResult('BYPASS');}catch{} process.exit(0); }
 let pty, Terminal, Unicode11Addon;
 try {
   if (!['claude','codex','opencode'].includes(harness) || !command.length || !process.stdin.isTTY || !process.stdout.isTTY) throw Error();
@@ -37,11 +37,19 @@ const socketPath = path.join(dir, 'control.sock');
 let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const nativeDisplay=require('./native-display.cjs');
+const succession=require('./succession.cjs');
+const {serialize}=succession;
+// A broker that offers hand-over names its channel; without it this host never asks for or takes one.
+const SUCCESSION=process.env.HEARTING_SHELL_SUCCESSION==='1'&&Number(process.env.HEARTING_SHELL_SUCCESSION_FD)>=3;
+const SUCCESSOR=SUCCESSION&&process.env.HEARTING_SHELL_SUCCESSOR==='1';
+const GENERATION=Number(process.env.HEARTING_SHELL_GENERATION)||0;
 const panelView=require('./panel-view.cjs');
 let displayConfiguration={...panelView.defaults};
 try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
-const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration});
-const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.side?rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
+// Spec rule 49 (d): a window too narrow for the open panel starts with it folded.
+const initialFold=nativeDisplay.fold({cols,configuration:displayConfiguration});
+const initialGeometry=nativeDisplay.layout({cols,rows,expanded:!initialFold.folded,configuration:displayConfiguration});
+const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.nativeRows, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
 let widthProvider;
 new Unicode11Addon().activate({unicode:{register:provider=>{widthProvider=provider;}}});
@@ -74,10 +82,75 @@ function sameTerminal(pid, root) {
   } catch { return false; }
 }
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
-let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
-let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
+// What the panel shows as this session's state is the host's own observation (spec
+// rules 25-26, 11-12 rule 6); hook events confirm and correct it. Display only: `state`
+// (the lifecycle the hooks report), readiness and every input gate keep their meaning.
+// - Claude's REPL writes its own UI state into its session record as it paints it
+//   (`busy` while it shows progress, `waiting` with a dialog or question open, `idle`);
+//   the host reads that record the moment its watched file changes, so the panel turns
+//   with the native screen instead of after a hook's process start.
+// - Codex appends each turn's start and end to its rollout (read with the projection);
+//   a newer reading than the last hook event wins. After an approval the question
+//   screen leaving (the readiness judgment's own form test) means the turn goes on.
+// - OpenCode's in-process plugin reports its native events directly.
+// Nothing here polls: readings come from file events and native output the host
+// already receives.
+let nativeTurn = '', turnMark = 0, eventMark = 0, seenTurn = null, clock = 0, turnRecord = '';
+const TURN={busy:'working',idle:'idle'};
+// A record's `waiting` is an answer wait only for these reasons (Claude's own `waitingFor`).
+// A menu, settings or side dialog (`dialog open`, also `/btw` beside a running turn) is not
+// one, as Fleet's row reads it, and says nothing about the turn: the previous reading
+// stands (after an answer wait, or with none, the hooks say). An unlisted reason is the hooks'.
+const ANSWER_WAITS=new Set(['permission prompt','input needed','worker request','sandbox request','goal proposal']);
+const recordTurn=value=>value.status!=='waiting'?TURN[value.status]||'':ANSWER_WAITS.has(value.waitingFor)?'blocked'
+  :value.waitingFor==='dialog open'&&nativeTurn!=='blocked'?nativeTurn:'';
+function shownState(){
+  if(state==='submitting')return state;
+  if(harness==='claude'&&nativeTurn)return nativeTurn;
+  if(seenTurn&&seenTurn.mark>eventMark)return seenTurn.value;
+  // Before any hook (a start or resume) a rollout's last turn start may be a turn cut off
+  // mid-way: only its idle is taken; a turn seen starting after that reads as `seenTurn`.
+  return state==='unknown'&&nativeTurn&&nativeTurn!=='working'?nativeTurn:state;
+}
+// One reading of the native's own turn record, ordered by when it was asked for.
+function noteTurn(turn,mark){
+  if(mark<turnMark)return;
+  const before=shownState();
+  if(turn!==nativeTurn&&turn&&turnMark&&mark>eventMark)seenTurn={value:turn,mark};
+  nativeTurn=turn;turnMark=mark;
+  if(shownState()!==before)queueDisplay();
+}
+function readTurnRecord(){
+  if(harness!=='claude'||!turnRecord||!native||!sid||relay||ended)return;
+  const mark=++clock;let value;
+  try{
+    const st=fs.lstatSync(turnRecord);if(!st.isFile()||st.uid!==process.getuid()||st.size>65536)return;
+    value=JSON.parse(fs.readFileSync(turnRecord,'utf8'));
+  }catch{return;}
+  // The same identity the pane reader requires: this exact process and session.
+  if(!value||value.pid!==native.pid||String(value.procStart??'')!==String(native.start)||value.sessionId!==sid)return;
+  noteTurn(recordTurn(value),mark);
+}
+// Codex after an approval: the question screen shown, then gone, while no newer event came.
+// It is asked for as long as the hooks say the turn waits (a screen the judgment missed
+// once is asked about again), and a question seen again turns the panel back to waiting.
+let formSeen=false,formRevision=-1,formAsking=false;
+function observeForm(){
+  if(harness!=='codex'||!sid||relay||ended||formAsking||formRevision===screenRevision||state!=='blocked')return;
+  formAsking=true;formRevision=screenRevision;const mark=++clock,events=eventMark,selected=selection;
+  source('readiness',{screen:screenSnapshot(),state}).then(result=>{
+    if(selected!==selection||events!==eventMark||!result?.ok)return;
+    if(result.reason==='form-open'){formSeen=true;if(seenTurn){seenTurn=null;queueDisplay();}return;}
+    if(formSeen&&shownState()==='blocked'){formSeen=false;seenTurn={value:'working',mark};queueDisplay();}
+  }).finally(()=>{formAsking=false;if(formRevision!==screenRevision)schedule();});
+}
+// `unselected`: the input frontier of the session the native just deselected. OpenCode reloads its
+// plugins when an install rewrites its config, which reports deselect then select of the same session;
+// that is no new input, so the frontier and an open read page survive it (keys typed in between end it).
+let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
+let expanded = !initialFold.folded, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
-let last = [], nativeLast = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
+let last = [], nativeLast = [], nativeGap = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
@@ -93,7 +166,16 @@ let routeScroll=0,routeArea=null;
 // Route and message rows opened in place by a press. Display only: a press
 // here is not typing, so it moves neither the input epoch nor `empty`.
 const panelOpen=new Set();
+// Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`,
+// or `{folded:false,cols}` opened by hand at that width); `expanded` follows it and the width.
+let foldChoice=null;
 let displaySequence=0,nativeMcp;
+// Hand-over between host generations (plan §3.0): `succeeding` is the frozen window of the old
+// display, `upgrade` a newer installed release waiting for a safe moment.
+let succeeding=false,switched=!SUCCESSOR,running=!SUCCESSOR,upgrade=null,upgradeNote='',checkingRelease=false,checkedKey='';
+let successionChannel,socketIno=-1,seedFile='',layoutDeferred=false;
+const bound=[],releaseWatchers=[],staleServers=[],nextPath=socketPath+'.next';
+const myRelease=(()=>{try{return fs.realpathSync(__filename);}catch{return null;}})();
 function binding() {
   // An unselected seat (OpenCode home after /new) keeps its pane as '-': no
   // session lookup can match it, so nothing is ever delivered to an old session.
@@ -221,7 +303,7 @@ function readAction(extra,operation='action',own=false) {
     const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
     worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
     worker.stdin.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
-    worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();}finish({ok:false,reason:'action-unavailable'});});
+    worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();checkRelease();}finish({ok:false,reason:'action-unavailable'});});
     worker.stdout.setEncoding('utf8');
     worker.stdout.on('data',bytes=>{
       if(settled)return;
@@ -232,27 +314,24 @@ function readAction(extra,operation='action',own=false) {
   });
 }
 function emit(value) { process.stdout.write(value); }
-function color(c,bg) {
-  const v=bg?c.getBgColor():c.getFgColor();
-  if(bg?c.isBgRGB():c.isFgRGB())return `${bg?48:38};2;${v>>16};${v>>8&255};${v&255}`;
-  if(bg?c.isBgPalette():c.isFgPalette())return `${bg?48:38};5;${v}`;
-  return bg?'49':'39';
-}
-function serialize(line,width,from=0) {
-  let s='',previous='';
-  for(let x=from;x<width;x++) {
-    const c=line?.getCell(x); if(!c||!c.getWidth())continue;
-    const a=[0,color(c,false),color(c,true)];
-    for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(c[method]())a.push(sgr);
-    const attr=a.join(';');if(attr!==previous)s+=`\x1b[${attr}m`;
-    s+=c.getChars()||' ';previous=attr;
-  }
-  return s+'\x1b[0m';
-}
 function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration});}
+// Spec rule 49: the panel opened or folded through the same layout path a window resize takes
+// (the native is told its new width by the PTY resize in applyLayout). An open settings editor,
+// a question being answered or the panel's edge being dragged keeps an open panel open.
+function refold(){
+  const next=nativeDisplay.fold({cols,choice:foldChoice,configuration:displayConfiguration,pinned:expanded&&(!!settings||block.focused||dragging)});
+  foldChoice=next.choice;
+  if(expanded===!next.folded)return;
+  expanded=!next.folded;
+  if(!expanded)block.leave();
+}
+function foldByHand(folded){foldChoice=folded?{folded:true}:{folded:false,cols};}
 function panelColumns(){return geometry().panelCols;}
+// The open panel's width: the projection is laid out for it while the panel is folded, so
+// opening paints current values at once.
+function openColumns(){return nativeDisplay.layout({cols,rows,expanded:true,configuration:displayConfiguration}).panelCols;}
 function nativeColumns(){return geometry().nativeCols;}
-function nativeRows(){return geometry().side?rows:rows-height();}
+function nativeRows(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,panelRows:height()}).nativeRows;}
 function panelRow(){return geometry().side?0:rows-height();}
 function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
 // The opened route page's owner output (Fleet's `attempts`), read once per opening.
@@ -261,11 +340,19 @@ function readRouteRaw(){
   const selected=selection,who=sid;routeRaw=undefined;
   readAction({action:'raw'},'action',true).then(r=>{if(selected===selection&&who===sid&&routeDetail===true&&r?.ok&&Array.isArray(r.attempts)){routeRaw={sid:who,attempts:r.attempts};queueDisplay();}});
 }
+// Spec rule 49 (e): the folded bottom row is the session's status line (the earlier collapsed
+// footer), with what is being delivered.
+function deliveryNote(){return currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';}
+function foldedSegments(){
+  if(expanded||geometry().side)return [];
+  const note=deliveryNote();
+  return [...(footerSegments.length?footerSegments:[{text:footer||`${harness} · CTX ?`}]),...(note?[{text:note}]:[])];
+}
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
-    cellWidth,background:terminalBackground,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shownState(),sid,harness,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
+    cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
@@ -279,36 +366,113 @@ function panelViewNow(){
 // the cached rows; the blink, a color change, repaints the panel once a second.
 function spinFrame(){return Math.floor(Date.now()/100);}
 let viewGroups=[],paintedGroups=new Set(),viewSpins=[],paintedSpins=new Set(),viewAnimated=false,panelAnimated=false;
+// Spec rule 47 (d): the moving rule beside the native area turns on the same beat as the
+// spinner. Its row, painted at the current spinner frame, is written as the scratch VT would
+// write it (`serialize`'s per-cell attributes; every cell of that row is one cell wide), so a
+// native frame and the beat write the same line, and the beat sends only the cells that changed.
+let viewMotion=null,paintedMotion=null,viewBlinks=false,panelBlinks=false;
+// A part's foreground as SGR: a 256-color index, or `#rrggbb` (24-bit, where the terminal takes it:
+// the moving rule's breath), as the scratch VT writes them back.
+function foregroundSgr(value){
+  if(Number.isInteger(value)&&value>=0&&value<=255)return '38;5;'+value;
+  const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(value??''));
+  return m?'38;2;'+m.slice(1).map(x=>parseInt(x,16)).join(';'):null;
+}
+function motionCells(parts){
+  const cells=[];
+  for(const part of parts){
+    const a=[0,foregroundSgr(part.foreground)||'39',
+      Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
+    if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
+    const attr=a.join(';');
+    for(const ch of String(part.text).replace(/[\x00-\x1f\x7f]/g,' '))cells.push([attr,ch]);
+  }
+  return cells;
+}
+function sgrRun(cells,from=0,to=cells.length){
+  let s='',previous='';
+  for(let i=from;i<to;i++){const [attr,ch]=cells[i];if(attr!==previous){s+=`\x1b[${attr}m`;previous=attr;}s+=ch;}
+  return s+'\x1b[0m';
+}
+function motionNow(){
+  const m=paintedMotion,frame=spinFrame();
+  if(m.frame!==frame){m.frame=frame;m.cells=motionCells(m.at(frame));m.line=sgrRun(m.cells);}
+  m.offered=m.cells;return m.line;
+}
+// The cells of the moving rule's row that differ from what the terminal shows, at their place.
+function motionSpan(y){
+  const m=paintedMotion,now=m.offered,was=m.shown,column=geometry().left?1:terminal.cols+1+geometry().gap;
+  if(!was||was.length!==now.length)return `\x1b[${y+1};${column}H\x1b[0m`+sgrRun(now);
+  const same=i=>was[i][0]===now[i][0]&&was[i][1]===now[i][1];
+  let from=0,to=now.length;
+  while(from<to&&same(from))from++;
+  while(to>from&&same(to-1))to--;
+  return from<to?`\x1b[${y+1};${column+from}H`+sgrRun(now,from,to):'';
+}
+// The gap beside the panel: the terminal's own background, or the native's own at its edge cell.
+// Two cells beside the open panel, one beside the folded strip (spec rule 49 (c)).
+function gapText(){return '\x1b[0m'+' '.repeat(geometry().gap);}
+function gapOf(line,x){
+  const cell=line?.getCell(x);if(!cell||cell.isBgDefault())return gapText();
+  return `\x1b[0;${succession.color(cell,true)}m${' '.repeat(geometry().gap)}\x1b[0m`;
+}
 function spun(y,row){
+  if(paintedMotion&&y===paintedMotion.row&&typeof row==='string')return motionNow();
   if(typeof row!=='string'||!paintedSpins.has(y))return row;
   const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);
 }
 let beatTimer,beatPhase=-1;
-function beating(){return panelAnimated&&activated&&!ended&&!relay&&!fleetView&&!settings&&expanded&&panelRows.length>0;}
-function armBeat(){if(!beatTimer&&beating())beatTimer=setTimeout(beatTick,100-Date.now()%100);}
+function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&panelRows.length>0;}
+// The beat wakes at the next moment something painted changes: a spinner's next frame, the
+// moving rule's next change (a waiting rule's breath: four times a breath), a blink's phase
+// change once a second (spec rule 47 (d)). A blink repaints the panel; the rest swap their own
+// cells. Nothing changing, nothing wakes.
+function armBeat(){
+  if(beatTimer||!beating())return;
+  const now=Date.now();let wait=Infinity;
+  if(panelBlinks)wait=1000-now%1000;
+  if(paintedSpins.size)wait=Math.min(wait,100-now%100);
+  if(paintedMotion)wait=Math.min(wait,Math.max(1,paintedMotion.next(spinFrame())*100-now));
+  if(wait!==Infinity)beatTimer=setTimeout(beatTick,wait);
+}
 function beatTick(){
   beatTimer=undefined;if(!beating())return;
   const phase=Math.floor(Date.now()/1000)%2;
-  if(phase!==beatPhase){beatPhase=phase;rebuildDisplay();}
-  else spinPaint();
+  if(phase!==beatPhase){beatPhase=phase;if(panelBlinks){rebuildDisplay();armBeat();return;}}
+  spinPaint();
   armBeat();
 }
-// Only the spinner cells of the panel rows, with the cursor kept where the native left it.
-// A native frame already on its way paints them itself.
+// Only the spinner glyphs of a row whose other cells stand as last painted: each written at its
+// own cell with the attributes it stands in (the row as the scratch VT wrote it; Unicode 11 widths).
+function spinSpan(y,row,column){
+  const spin=panelView.SPIN,glyph=spin[spinFrame()%spin.length];
+  let out='',sgr='',col=0;
+  for(const token of String(row).match(/\x1b\[[0-9;]*m|[\s\S]/gu)||[]){
+    if(token.startsWith('\x1b[')){sgr=token;continue;}
+    if(spin.includes(token))out+=`\x1b[${y+1};${column+col}H${sgr}${glyph}`;
+    col+=cellWidth(token);
+  }
+  return out&&out+'\x1b[0m';
+}
+// Only the changed cells of the panel rows (the spinner glyphs, the moving rule), with the cursor
+// kept where the native left it. A native frame already on its way paints them itself.
 function spinPaint(){
-  if(frameTimer||!paintedSpins.size)return;
+  if(frameTimer||!paintedSpins.size&&!paintedMotion||succeeding)return;
   let text='';const side=geometry().side;
-  for(const y of paintedSpins){
+  for(const y of paintedMotion?new Set([...paintedSpins,paintedMotion.row]):paintedSpins){
     if(y>=panelRows.length)continue;
-    const panel=spun(y,panelRows[y]);
+    const panel=spun(y,panelRows[y]),motion=!!paintedMotion&&y===paintedMotion.row;
     if(side){
       if(nativeLast[y]===undefined)continue;
-      const line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+nativeLast[y]:nativeLast[y]+`\x1b[${terminal.cols+1}G\x1b[0m  `+panel;
-      if(last[y]===line)continue;last[y]=line;
-      text+=`\x1b[${y+1};${geometry().left?1:terminal.cols+3}H\x1b[0m`+panel;
+      const gap=nativeGap[y]||gapText();
+      const line=geometry().left?panel+`\x1b[${panelColumns()+1}G`+gap+nativeLast[y]:nativeLast[y]+`\x1b[${terminal.cols+1}G`+gap+panel;
+      if(last[y]===line)continue;
+      const column=geometry().left?1:terminal.cols+1+geometry().gap;
+      text+=last[y]===undefined?`\x1b[${y+1};${column}H\x1b[0m`+panel:motion?motionSpan(y):spinSpan(y,panelRows[y],column);
+      last[y]=line;if(motion)paintedMotion.shown=paintedMotion.offered;
     }else{
       const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
-      if(last[row]===panel)continue;last[row]=panel;text+=`\x1b[${row+1};1H`+panel;
+      if(last[row]===panel)continue;text+=last[row]===undefined?`\x1b[${row+1};1H`+panel:spinSpan(row,panelRows[y],1);last[row]=panel;
     }
   }
   if(text)emit('\x1b[?2026h\x1b7'+text+'\x1b8\x1b[?2026l');
@@ -318,7 +482,7 @@ function spinPaint(){
 // unknown background keeps the terminal's own and paints no shade.
 const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=Number(value.split(';').pop());
   return value.includes(';')&&Number.isInteger(bg)?([7,15].includes(bg)?'light':bg>=0&&bg<16?'dark':''):'';})();
-function panelContent(){const view=panelViewNow();panelHits=view.hits;routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewAnimated=!!view.animated;return view.rows;}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
 // only while it is on screen. Collapsed, under Fleet or the settings editor,
 // relayed, or no longer kept, it leaves them to the native like any other key;
@@ -329,13 +493,13 @@ function readPageShown(){
 }
 function height(){
   if(fleetView)return 0;
-  if(!expanded)return harness==='claude'?0:1;
   if(geometry().side)return rows;
+  if(!expanded)return 1;
   const content=panelContent();
   return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
 
 }
-function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
+function schedule() { if(!frameTimer&&!succeeding)frameTimer=setTimeout(render,8); }
 function displayModelKey(lines){return lines.slice(-4).join('\n');}
 function observeSelectedModel(lines){
   if(harness!=='codex'||modelReading||!native||nativeSelected.model)return;
@@ -350,9 +514,9 @@ function observeSelectedModel(lines){
   }).finally(()=>{modelReading=false;});
 }
 function render() {
-  frameTimer=undefined;if(ended||!activated||relay)return;
+  frameTimer=undefined;if(ended||!activated||relay||succeeding)return;
   try {
-    observeNativeSelection();
+    observeNativeSelection();observeForm();
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
@@ -383,16 +547,27 @@ function render() {
       let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
         serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      let motion=false;
       if(!fleetView&&geometry().side){
-        nativeLast[y]=line;
+        // The two cells between the native and the panel take the native's own background at
+        // that edge (OpenCode paints its whole area): the native's area then reaches the panel's
+        // frame and the panel stands with the same space on both sides; a native on the
+        // terminal's own background keeps the bytes it had.
+        const plain=y!==notice&&!concealed.has(y)&&!masked;
+        const gap=plain?gapOf(view.buffer.active.getLine(view.buffer.active.viewportY+y),geometry().left?0:view.cols-1):gapText();
+        const same=nativeLast[y]===line&&nativeGap[y]===gap;nativeLast[y]=line;nativeGap[y]=gap;
         const panel=y<panelRows.length?spun(y,panelRows[y]):' '.repeat(panelColumns());
-        line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
+        line=geometry().left?panel+`\x1b[${panelColumns()+1}G`+gap+line:line+`\x1b[${view.cols+1}G`+gap+panel;
+        // The moving rule's row whose native part is unchanged: only its changed cells.
+        motion=!!paintedMotion&&y===paintedMotion.row&&y<panelRows.length;
+        if(motion&&same&&last[y]!==undefined&&last[y]!==line){text+=motionSpan(y);last[y]=line;}
       }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
+      if(motion)paintedMotion.shown=paintedMotion.offered;
     }
-    if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
+    if(!fleetView&&!geometry().side&&(expanded||height()>0))for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
-      const cached=y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
+      const cached=expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
         '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
       if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
     }
@@ -402,10 +577,10 @@ function render() {
     text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
     text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
     text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
-    if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
+    if(!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
     else if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
     text+=`\x1b[?1004${m.sendFocusMode?'h':'l'}\x1b[?7h${(block.focused&&!fleetView?!!blockCursor:cursorVisible)?'\x1b[?25h':''}\x1b[?2026l`;
-    emit(text);armBeat();
+    emit(text);armBeat();checkRelease();
   } catch { rawRelay(); }
 }
 function lineLength(line){
@@ -421,7 +596,7 @@ function displayLines(lines,height,done) {
   const safe=s=>String(s).replace(/[\x00-\x1f\x7f]/g,' ');
   const paint=line=>Array.isArray(line)?line.map(part=>{
     const attrs=[0];
-    if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    const fg=foregroundSgr(part.foreground);if(fg)attrs.push(fg);
     if(Number.isInteger(part.background)&&part.background>=0&&part.background<=255)attrs.push(48,5,part.background);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
@@ -451,12 +626,12 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();paintedMotion=null;panelBlinks=false;panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
-  const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
-  let lines,edit=-1,groups=[],spins=[],animated=false;
+  const extra=deliveryNote();
+  let lines,edit=-1,groups=[],spins=[],animated=false,motion=null,blinks=false;
   if(expanded){
-    const base=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
+    const base=panelContent();groups=viewGroups;spins=viewSpins;motion=viewMotion;blinks=viewBlinks;animated=viewAnimated;
     const detail=[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
@@ -465,14 +640,19 @@ function rebuildDisplay() {
     }else lines=base;
     if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
-  }else lines=footerSegments.length?panelView.appearance([[...footerSegments,{text:extra}]],{...displayConfiguration,shade:'none'},
-    {colors:panelModel.colors??256,noColor:panelModel.no_color===true}):[footer||`${harness} · CTX ?`];
+  }else{
+    // Spec rule 49 (c), (e): folded, the strip beside the native area or the one row under it.
+    lines=panelContent();spins=viewSpins;animated=viewAnimated;
+  }
   const editParts=edit>=0?lines[edit]:[];
   const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
   const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
-  displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
+  displayLines(lines,height(),(painted,lengths,plain)=>{
     blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
     panelRows=painted;paintedGroups=new Set(groups);paintedSpins=new Set(spins);panelAnimated=animated;
+    // What the terminal shows of the moving rule stays known while its row stays the same.
+    paintedMotion=motion?{row:motion.row,at:motion.at,next:motion.next,shown:paintedMotion&&paintedMotion.row===motion.row?paintedMotion.shown:null}:null;
+    panelBlinks=blinks;
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
     displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
@@ -511,12 +691,14 @@ function openFleet() {
 let displayFooter='';
 function applyLayout() {
   if(relay)return;
+  if(succeeding){layoutDeferred=true;return;}
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
+  refold();
   child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 function queueProjection() {
-  if(ended||relay||projectionTimer)return;
+  if(ended||relay||projectionTimer||succeeding)return;
   nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
   projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
 }
@@ -536,7 +718,11 @@ function observeFiles(paths) {
       const row={targets};
       row.watch=fs.watch(directory,(_event,name)=>{
         const changed=name?path.join(directory,String(name)):directory;
-        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep)))queueProjection();
+        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep))){
+          // The native's own turn record is read at once; the rest waits for the projection.
+          if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
+          queueProjection();
+        }
       });
       row.watch.on('error',()=>{row.watch.close();watchers.delete(directory);sourceError={reason:'file-observation-unavailable'};});
       watchers.set(directory,row);
@@ -546,14 +732,21 @@ function observeFiles(paths) {
   return changed;
 }
 async function projection() {
-  if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
+  if(!sid||ended||relay||succeeding)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
+    const asked=++clock;
+    const data=await source('projection',{columns:openColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
+      ...(typeof displayValues.model==='string'&&displayValues.model?{native_model:displayValues.model}:{})});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
+    turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
+    // Claude's record is read here as well, by the host itself: one reading rule (a dialog
+    // keeps the previous reading), and the file as it is now.
+    if(turnRecord)readTurnRecord();
+    else noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState(),upgradeNoteNow()]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
@@ -603,6 +796,10 @@ function claudeStatusRecord(){
 function rawRelay() {
   if(relay||ended)return;
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
+  // A display lost while frozen for hand-over reads again: the relay needs the PTY and the keyboard.
+  // Ending this side of the hand-over channel first tells the owner (`eof`), so it drops the successor
+  // before that one is told to read; a `retire` already sent still arrives and ends this host.
+  if(succeeding){succeeding=false;try{successionChannel?.end();}catch{}try{child.resume();process.stdin.resume();}catch{}}
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
@@ -625,7 +822,7 @@ async function releaseHeld(ref,cancel=false) {
   // No new direct writes may overtake keys the owner is still draining.
   process.stdin.pause();
   await inputOwner.release(ref,cancel);
-  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';queueProjection();}
+  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting'){state='unknown';eventMark=++clock;}queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 function screenSnapshot() {
@@ -694,6 +891,8 @@ function panelAction(action){
   epoch++;empty=false;
   if(settings?.saving)return;
   if(action==='settings'){openSettings();return;}
+  // Spec rule 49 (b), (c): the fold button folds the panel; a press on the strip or the folded row opens it.
+  if(action==='fold'||action==='unfold'){foldByHand(action==='fold');applyLayout();return;}
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
@@ -743,12 +942,13 @@ function panelMouse(code,x,y,release){
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
     if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
-    else{dragging=false;source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
+    // A width set by hand is the person's choice to keep the panel open at this window width.
+    else{dragging=false;foldByHand(false);schedule();source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
   // The boundary beside the native area resizes: the left edge of a right
   // panel, the right edge of a left one.
-  if(g.side&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
+  if(g.side&&!g.folded&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
   // The wheel over the route box scrolls it in place (spec rule 23); elsewhere in the panel it does nothing.
   if((code&0xc3)===64||(code&0xc3)===65){if(!release&&!routeDetail&&!settings&&routeArea&&row>=routeArea.top&&row<=routeArea.bottom)scrollRoutes((code&1)?1:-1);return true;}
@@ -833,7 +1033,7 @@ function inputBytes(data) {
     // Escape has already reached native. Ctrl+] cannot continue an Escape/CSI
     // prefix; keeping that lone byte pending would disable focus after a modal.
     if(keyTail==='\x1b'&&!paste)keyTail='';
-    if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];routeDetail=false;routePage=0;block.enter();queueLayout();}
+    if(!paste&&!keyTail){epoch++;foldByHand(false);expanded=true;actionLines=[];routeDetail=false;routePage=0;block.enter();queueLayout();}
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
   }
@@ -847,20 +1047,35 @@ async function lifecycle(req) {
      ||typeof req.sid!=='string'||!/^[A-Za-z0-9._-]{1,256}$/.test(req.sid))return {ok:false,reason:'event-identity'};
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
+    // Spec E9 rule 34 (f): `/clear` keeps the process and its model, so the model and
+    // effort row stays as last observed (its context starts empty); a start or a
+    // switch (`/resume`) reads them anew.
+    const cleared=req.event==='start'&&req.source==='clear'&&!!sid;
     nativeFooter=null;paintedCommon=[];
     if(nativeContext?.sid!==req.sid)nativeContext=undefined;
     // Preserve a current TUI-selected model across its first SID binding only.
     // Context and session data are never carried from the previous selection.
-    if(sid&&harness!=='opencode')nativeSelected={};
+    if(sid&&harness!=='opencode'&&!cleared)nativeSelected={};
     if(typeof req.native_model==='string'&&req.native_model.length>0&&req.native_model.length<=128&&!/[\x00-\x1f\x7f]/.test(req.native_model)){
       nativeSelected={model:req.native_model,...(nativeSelected.model===req.native_model?{effort:nativeSelected.effort}:{})};
     }
     displayValues={...nativeSelected};
-    panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
-    projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
-    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
+    // Spec E9 rule 33 (c): this seat's own values (its folder, Git, the account usage)
+    // stay drawn across a start, resume, /clear or switch; session values clear.
+    panelModel={labels:panelModel.labels,styles:panelModel.styles,repo:panelModel.repo,git:panelModel.git,quota:panelModel.quota,
+      head:Array.isArray(panelModel.head)?panelModel.head.filter(part=>!/^\[/.test(String(part?.text))):undefined,
+      ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
+    projectionKey='';footer='';footerSegments=[];
+    const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
+    // The same session selected again with no key between keeps its open read page as well.
+    routeDetail=again?unselected.routeDetail:false;routePage=again?unselected.routePage:0;routeScroll=again?unselected.routeScroll:0;unselected=null;
+    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
+    // A start or selection follows the keys that chose it (a resume picker's Enter, /clear):
+    // bytes up to that Enter were submitted, so the screen reading can settle this frontier.
+    // Without this, a seat reopened through a picker refused every delivery until a prompt.
+    submitted=lastEnter;
     const selected=selection;
     // Display collection must never delay the native start hook or input.
     setImmediate(()=>{if(selected===selection)source('register').then(()=>projection());});
@@ -869,16 +1084,20 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
+    unselected={sid:req.sid,nativeEpoch,routeDetail,routePage,routeScroll};
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
   if(req.event==='prompt'||req.event==='submit') {
     submitted=lastEnter;state='working';empty=false;
+    if(upgradeNote==='scrollback'){upgradeNote='';queueProjection();}
     if(currentDelivery){deliveries.set(currentDelivery,'submitted');releaseHeld(currentDelivery,true);rebuildDisplay();}
-  } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false; }
+  } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false;setImmediate(()=>{detectRelease();checkRelease();}); }
   else if(req.event==='working') { state='working';empty=false; }
   else {state='blocked';empty=false;}
+  // A hook event is newer than every reading asked for before it.
+  eventMark=++clock;if(state==='blocked'&&was!=='blocked')formSeen=false;
   // The border's state is the host's own: paint it now, not after the projection.
   if(state!==was)queueDisplay();
   projection();return {ok:true,...status()};
@@ -901,20 +1120,21 @@ async function request(req) {
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
-  if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
+  if(req.op==='status'){await refreshReadiness();if(empty)checkRelease();return {ok:true,...status()};}
   // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
   if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
-  if(req.op==='panel'){expanded=req.expanded===true;if(!expanded)block.leave();applyLayout();return {ok:true,...status()};}
+  if(req.op==='panel'){foldByHand(req.expanded!==true);applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
+  if(!running||succeeding)return {ok:false,reason:'not-idle-empty',not_started:true};
   if(typeof req.ref!=='string'||req.ref.length>128)return {ok:false,reason:'peer-ref-unavailable',not_started:true};
   if(deliveries.has(req.ref))return {ok:true,duplicate:true,state:deliveries.get(req.ref)};
-  const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&(!block.focused||block.waitingForReceipt)&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
+  const safe=()=>!relay&&!succeeding&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&(!block.focused||block.waitingForReceipt)&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
   if(!safe())return {ok:false,reason:'not-idle-empty',not_started:true};
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
   if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
-  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueProjection();
+  currentDelivery=req.ref;state='submitting';eventMark=++clock;empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueDisplay();queueProjection();
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // The retained owner is the sole writer for this admitted paste/50ms Enter
@@ -927,48 +1147,64 @@ terminal.parser.registerCsiHandler({prefix:'?',final:'l'},p=>{if(p.includes(25))
 for(const [code,rgb] of [[10,'dddd/dddd/dddd'],[11,'1111/1111/1111']])terminal.parser.registerOscHandler(code,text=>{
   if(text==='?'){child.write(`\x1b]${code};rgb:${rgb}\x1b\\`);return true;}return false;
 });
-server=net.createServer(conn=>{
+// A connection's one request line, answered by this host's own state.
+function serve(conn,line) {
+  setImmediate(async()=>{
+    let result;try{
+      const req=JSON.parse(line.toString());
+      result=await request(req);}
+    catch{result={ok:false,reason:'control-unavailable',not_started:false};}
+    conn.end(JSON.stringify({...result,...identity()})+'\n');
+  });
+}
+function onConnection(conn) {
   let raw=Buffer.alloc(0),consumed=false;conn.setTimeout(2000,()=>conn.destroy());
   conn.on('error',()=>{});
   conn.on('data',chunk=>{
     if(consumed)return;raw=Buffer.concat([raw,chunk]);if(raw.length>65536)return conn.destroy();
     const newline=raw.indexOf(10);if(newline<0)return;consumed=true;conn.pause();
-    setImmediate(async()=>{
-      let result;try{
-        const req=JSON.parse(raw.subarray(0,newline).toString());
-        result=await request(req);}
-      catch{result={ok:false,reason:'control-unavailable',not_started:false};}
-      conn.end(JSON.stringify({...result,...identity()})+'\n');
-    });
+    // While the display is frozen for hand-over no request is answered: it waits here for the
+    // successor (retire) or for this host again (resume).
+    if(succeeding){bound.push({conn,line:raw.subarray(0,newline+1)});return;}
+    serve(conn,raw.subarray(0,newline));
   });
+}
+function serverFailure() {if(!activated)bypass();else{state='unknown';empty=false;}}
+function listenControl(target,done) {
+  const listener=net.createServer(onConnection);
+  listener.on('error',serverFailure);
+  listener.listen(target,()=>{fs.chmodSync(target,0o600);done(listener);});
+  return listener;
+}
+terminal.parser.registerCsiHandler({prefix:'?',final:'h'},p=>{if(p.includes(25))cursorVisible=true;return false;});
+terminal.parser.registerCsiHandler({prefix:'?',final:'l'},p=>{if(p.includes(25))cursorVisible=false;return false;});
+for(const [code,rgb] of [[10,'dddd/dddd/dddd'],[11,'1111/1111/1111']])terminal.parser.registerOscHandler(code,text=>{
+  if(text==='?'){child.write(`\x1b]${code};rgb:${rgb}\x1b\\`);return true;}return false;
 });
-server.on('error',()=>{if(!activated)bypass();else{state='unknown';empty=false;}});
-server.listen(socketPath,()=>{
-  fs.chmodSync(socketPath,0o600);
-  try {
-    const broker=processRow(Number(process.env.HEARTING_SHELL_BROKER_PID));
-    if(!broker||broker.pid!==host.parent||broker.start!==process.env.HEARTING_SHELL_BROKER_START)throw Error('PTY owner changed');
-    child=require('./adopted-pty.cjs')(pty,Number(process.env.HEARTING_SHELL_PTY_FD),
-      Number(process.env.HEARTING_SHELL_NATIVE_PID),Number(process.env.HEARTING_SHELL_PTY_EXIT_FD));
-    inputOwner=require('./input-owner.cjs')(Number(process.env.HEARTING_SHELL_INPUT_FD),
-      Number(process.env.HEARTING_SHELL_HELD_FD),ref=>{
-        if(deliveries.get(ref)!=='submitted')deliveries.set(ref,'transport-submitted');
-        releaseHeld(ref);
-      });
-    native=processRow(child.pid);rootNative=native;
-  } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
-  // The parent may only fall back before this boundary. A failed display keeps
-  // this same native child; no second CLI is ever started.
-  startupResult('STARTED');activated=true;process.stdin.resume();
+
+// ---- the native, the input owner and the backend: the same for a first host and a successor ----
+function adoptNative(paused) {
+  const broker=processRow(Number(process.env.HEARTING_SHELL_BROKER_PID));
+  if(!broker||broker.pid!==host.parent||broker.start!==process.env.HEARTING_SHELL_BROKER_START)throw Error('PTY owner changed');
+  child=require('./adopted-pty.cjs')(pty,Number(process.env.HEARTING_SHELL_PTY_FD),
+    Number(process.env.HEARTING_SHELL_NATIVE_PID),Number(process.env.HEARTING_SHELL_PTY_EXIT_FD),paused);
+  native=processRow(child.pid);rootNative=native;
+}
+function createInputOwner() {
+  inputOwner=require('./input-owner.cjs')(Number(process.env.HEARTING_SHELL_INPUT_FD),
+    Number(process.env.HEARTING_SHELL_HELD_FD),ref=>{
+      if(deliveries.get(ref)!=='submitted')deliveries.set(ref,'transport-submitted');
+      releaseHeld(ref);
+    });
+}
+function startBackend() {
   backend=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
   backend.on('error',rawRelay);backend.on('exit',rawRelay);backend.stdin.on('error',()=>{});
-  // OpenCode starts on its home route with no session: publish the seat now.
-  if(harness==='opencode'&&!sid){state='idle';source('register');}
   readline.createInterface({input:backend.stdout}).on('line',line=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });
-  source('display-bootstrap').then(data=>{if(data.ok&&!projectionKey){panelModel=data.panel;queueDisplay();}});
-  emit('\x1b[?1049h\x1b[2J');
+}
+function wireDisplay() {
   terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
   terminal.onTitleChange(title=>{
     try{if(!ended&&!relay)emit(nativeDisplay.titleSequence(title));}catch{rawRelay();}
@@ -980,11 +1216,289 @@ server.listen(socketPath,()=>{
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
   });
   child.onExit(async event=>{
+    // A successor that has not taken over owns nothing outside itself.
+    if(!switched)process.exit(0);
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
+    for(const watch of releaseWatchers)try{watch.close();}catch{}
     server.close();await source('unregister');backend?.stdin.end();
     emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
-    fs.rmSync(socketPath,{force:true});process.exit(event.exitCode);
+    fs.rmSync(socketPath,{force:true});fs.rmSync(nextPath,{force:true});if(seedFile)fs.rmSync(seedFile,{force:true});process.exit(event.exitCode);
   });
+}
+
+// ---- release detection (H1) and the safe moment (H2) ----
+function installedRelease() {try{return fs.realpathSync(process.env.HEARTING_SHELL_HOST_PATH);}catch{return null;}}
+function upgradeNoteNow() {return upgradeNote||(upgrade?'pending':'');}
+// A newer installed release is noticed when its link moves (an event, not a poll) and when
+// the session goes idle. A link that cannot be watched leaves only the idle check.
+function detectRelease() {
+  if(!SUCCESSION||!activated||ended||relay||succeeding||!running)return;
+  const target=installedRelease();
+  if(!target||target===myRelease){
+    if(upgrade&&!upgrade.requested){upgrade=null;queueProjection();}
+    return;
+  }
+  if(upgrade&&upgrade.target===target)return;
+  upgrade={target,requested:false,blocked:''};queueProjection();checkRelease();
+}
+function watchRelease() {
+  const hostPath=process.env.HEARTING_SHELL_HOST_PATH;
+  if(!SUCCESSION||!hostPath||!path.isAbsolute(hostPath))return;
+  let probe=path.sep;const links=[];
+  for(const part of hostPath.split(path.sep).filter(Boolean)){
+    const next=path.join(probe,part);
+    try{if(fs.lstatSync(next).isSymbolicLink())links.push([probe,part]);}catch{break;}
+    probe=next;
+  }
+  for(const [directory,name] of links.slice(0,4)){
+    try{
+      const watch=fs.watch(directory,(_event,changed)=>{if(!changed||String(changed)===name)detectRelease();});
+      watch.on('error',()=>{try{watch.close();}catch{}});releaseWatchers.push(watch);
+    }catch{}
+  }
+}
+// The old host's conditions for starting the hand-over. `empty` is not assumed: it is proven
+// by one readiness read of this exact screen. Anything a person or a delivery is in the middle of keeps this false.
+function successionSafe(skipEmpty=false) {
+  const quiet=!relay&&activated&&!ended&&running&&!succeeding&&state==='idle'&&!paste&&!keyTail&&!block.focused&&!settings&&!fleetView
+    &&!currentDelivery&&!releasing&&heldBytes===0&&!routeDetail&&!actionWorker&&!panelModel.answerable&&!dragging&&!settingsPaste
+    &&displayVTs.size===0&&!rebuilding&&!checkingNativeSelection&&!modelReading&&!mouseInput.pending()&&terminal.modes.bracketedPasteMode;
+  return quiet&&(skipEmpty||empty);
+}
+function checkRelease() {
+  if(!upgrade||upgrade.requested||upgrade.blocked||Date.now()<(upgrade.retryAfter||0)||succeeding||checkingRelease||!successionChannel||!successionSafe(true))return;
+  checkingRelease=true;
+  (async()=>{
+    const key=[screenRevision,epoch,selection,state].join(':');
+    if(!successionSafe()&&checkedKey!==key){checkedKey=key;await refreshReadiness();}
+    if(upgrade&&!upgrade.requested&&successionSafe()){upgrade.requested=true;succSend({op:'request',release:myRelease});}
+  })().catch(()=>{}).finally(()=>{checkingRelease=false;});
+}
+
+// ---- the succession channel: the old host answers freeze/resume/retire, the new one commit/switch/run ----
+function succSend(value) {try{successionChannel.write(JSON.stringify(value)+'\n');}catch{}}
+function startSuccessionChannel() {
+  if(!SUCCESSION||successionChannel)return;
+  successionChannel=new net.Socket({fd:Number(process.env.HEARTING_SHELL_SUCCESSION_FD),readable:true,writable:true});
+  successionChannel.on('error',()=>{});
+  let queue=Promise.resolve();
+  readline.createInterface({input:successionChannel}).on('line',line=>{
+    let message;try{message=JSON.parse(line);}catch{return;}
+    // One message at a time: a resume that arrives during a freeze waits for it to finish.
+    queue=queue.then(()=>onSuccession(message)).catch(()=>{});
+  });
+}
+async function onSuccession(message) {
+  if(message.op==='declined'){
+    if(upgrade){upgrade.requested=false;if(message.reason!=='busy'&&message.reason!=='not-running')upgrade.blocked=String(message.reason||'declined');}
+    return;
+  }
+  if(message.op==='freeze')return succSend(await freeze());
+  if(message.op==='resume')return resumeHost(message.failed===true);
+  if(message.op==='retire')return retireHost();
+  if(!SUCCESSOR)return;
+  if(message.op==='commit')return succSend(await commitSuccessor(message.seed));
+  if(message.op==='switch')return succSend(await switchSuccessor());
+  if(message.op==='run')return runSuccessor();
+}
+
+// H3/H4: stop reading both sides, let the VT parse what it already has, give up the binding and write the screen out.
+function buildSeed() {
+  // The seed is capped at 8 MiB; HEARTING_SHELL_SEED_LIMIT can only lower it (a test hook).
+  const limit=Math.min(8*1024*1024,Number(process.env.HEARTING_SHELL_SEED_LIMIT)||8*1024*1024);
+  const captured=succession.capture(terminal,{scrollback:true});
+  const seed={schema:succession.SCHEMA,harness,sid,native:{pid:native.pid,start:native.start},rootNative:{pid:rootNative.pid,start:rootNative.start},
+    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
+    panelOpen:[...panelOpen],deliveries:[...deliveries].filter(([,value])=>value==='submitted'||value==='transport-submitted').slice(-128),
+    displayValues,nativeSelected,nativeContext:nativeContext??null,nativeMcp:nativeMcp??null,
+    // The host's own turn observation (what the panel shows as the state), so the successor shows the same
+    // state at its first paint and goes on reading the native's turn record; its marks keep their order.
+    turn:{nativeTurn,turnMark,eventMark,clock,seenTurn,turnRecord,formSeen},
+    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
+    terminal:captured.terminal,scrollback:captured.scrollback,
+    outer:{cols,rows,last:Array.from(last,value=>value??null),nativeLast:Array.from(nativeLast,value=>value??null),footerLast}};
+  let json=JSON.stringify(seed);
+  if(Buffer.byteLength(json)>limit&&seed.scrollback.carried){
+    // Too large: carry the viewport only and say so, never cut the scrollback silently.
+    seed.terminal=succession.capture(terminal,{scrollback:false}).terminal;seed.scrollback={carried:false,reason:'seed-too-large',lines:0};
+    json=JSON.stringify(seed);
+  }
+  return json;
+}
+async function freeze() {
+  if(!successionSafe())return {ok:false,reason:'unsafe'};
+  succeeding=true;
+  try{
+    process.stdin.pause();child.pause();
+    clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
+    await new Promise(resolve=>terminal.write('',resolve));
+    await new Promise(resolve=>process.stdout.write('',resolve));
+    if(currentDelivery||releasing||heldBytes||paste||keyTail||settings||fleetView||mouseInput.pending()){await resumeHost(false);return {ok:false,reason:'unsafe'};}
+    await source('unregister');
+    const json=buildSeed();
+    seedFile=path.join(dir,`succession-${GENERATION+1}.json`);
+    fs.writeFileSync(seedFile+'.tmp',json,{mode:0o600});fs.renameSync(seedFile+'.tmp',seedFile);
+    return {ok:true,seed:seedFile};
+  }catch(error){
+    await resumeHost();
+    if(upgrade)upgrade.blocked='capture';
+    return {ok:false,reason:'capture'};
+  }
+}
+// H7: the successor did not take over. Take the socket path back if it is no longer this host's,
+// publish the binding again and paint the whole screen.
+async function resumeHost(failed=true) {
+  // A host that only asked (nothing frozen) learns the attempt is over. A counted failure may retry at once,
+  // another end (not safe after all) waits a second so a persistent condition cannot spin.
+  if(upgrade)upgrade.retryAfter=failed?0:Date.now()+1000;
+  // A host that only asked also paints the whole screen once: whatever a dying successor wrote is overwritten.
+  if(!succeeding){if(upgrade)upgrade.requested=false;last=[];footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
+  let listenFailed=false;
+  try{
+    let ino=-1;try{ino=fs.statSync(socketPath).ino;}catch{}
+    if(ino!==socketIno){
+      fs.rmSync(nextPath,{force:true});
+      staleServers.push(server);
+      // A listen that fails settles too: a rollback never leaves the host frozen with the queue blocked.
+      await new Promise(resolve=>{
+        server=listenControl(nextPath,()=>{try{fs.renameSync(nextPath,socketPath);socketIno=fs.statSync(socketPath).ino;}catch{listenFailed=true;}resolve();});
+        server.once('error',()=>{listenFailed=true;resolve();});
+      });
+    }
+    if(seedFile){fs.rmSync(seedFile,{force:true});fs.rmSync(seedFile+'.tmp',{force:true});}
+  }catch{}
+  // No control socket to serve: the display keeps nothing frozen and falls back to the plain relay.
+  if(listenFailed){for(const entry of bound.splice(0))entry.conn.destroy();rawRelay();return;}
+  succeeding=false;
+  if(upgrade)upgrade.requested=false;
+  await source('register');
+  child.resume();process.stdin.resume();
+  last=[];footerLast='\0';
+  if(layoutDeferred){layoutDeferred=false;applyLayout();}
+  schedule();queueProjection();
+  for(const entry of bound.splice(0))if(!entry.conn.destroyed)serve(entry.conn,entry.line.subarray(0,entry.line.length-1));
+}
+// H9: hand each waiting connection to the successor's socket (same path) and leave without
+// closing this host's listener: closing it would unlink the path the successor now owns.
+function forward(entry) {
+  return new Promise(resolve=>{
+    if(entry.conn.destroyed)return resolve();
+    const up=net.connect(socketPath);let finished=false;
+    const finish=()=>{if(!finished){finished=true;resolve();}};
+    up.setTimeout(1500,()=>{up.destroy();entry.conn.destroy();finish();});
+    up.on('connect',()=>up.write(entry.line));
+    up.on('data',data=>entry.conn.write(data));
+    up.on('end',()=>{entry.conn.end();finish();});
+    up.on('error',()=>{entry.conn.destroy();finish();});
+  });
+}
+async function retireHost() {
+  // The owner retires only a host it froze; one that fell to the relay meanwhile leaves as well.
+  if(!succeeding&&!relay)return;
+  await new Promise(resolve=>setImmediate(resolve));
+  await Promise.all(bound.splice(0).map(forward));
+  try{backend?.stdin.end();}catch{}
+  if(seedFile){try{fs.rmSync(seedFile,{force:true});}catch{}}
+  process.exit(0);
+}
+
+// H8: the successor. It prepares (assets, Terminal), commits (reads the seed, rebuilds the screen
+// and state, listens on a side path, warms its backend), switches (takes the control path) and
+// runs (reads the PTY and the keyboard) only on the owner's word.
+async function commitSuccessor(file) {
+  try{
+    const info=fs.lstatSync(file);
+    if(typeof file!=='string'||path.dirname(file)!==dir||!info.isFile()||info.uid!==process.getuid()||info.mode&0o077||info.size>9*1024*1024)throw Error('seed file');
+    const seed=JSON.parse(fs.readFileSync(file,'utf8'));
+    const bad=succession.validate(seed);if(bad)throw Error('seed '+bad);
+    if(seed.harness!==harness)throw Error('seed harness');
+    seedFile=file;
+    adoptNative(true);
+    const root=processRow(seed.rootNative.pid),row=processRow(seed.native.pid);
+    if(!root||root.start!==seed.rootNative.start||child.pid!==root.pid||!row||row.start!==seed.native.start)throw Error('native changed');
+    rootNative=root;native=row;
+    sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
+    submitted=seed.submitted;lastEnter=seed.lastEnter;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
+    const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&(choice.folded===true||Number.isInteger(choice.cols))?{folded:choice.folded===true,...(choice.folded===true?{}:{cols:choice.cols})}:null;
+    displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;
+    for(const key of seed.panelOpen.slice(0,16))if(typeof key==='string')panelOpen.add(key);
+    for(const [ref,value] of seed.deliveries)deliveries.set(ref,value);
+    const object=value=>value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    displayValues=object(seed.displayValues);nativeSelected=object(seed.nativeSelected);
+    nativeContext=seed.nativeContext&&typeof seed.nativeContext==='object'?seed.nativeContext:undefined;
+    nativeMcp=seed.nativeMcp&&typeof seed.nativeMcp==='object'?seed.nativeMcp:undefined;
+    {
+      // Absent or malformed (an older seed): the first projection reads the native's record again.
+      const turn=object(seed.turn),count=value=>Number.isSafeInteger(value)&&value>=0?value:0,word=value=>['idle','working','blocked'].includes(value)?value:'';
+      nativeTurn=word(turn.nativeTurn);clock=count(turn.clock);turnMark=Math.min(count(turn.turnMark),clock);eventMark=Math.min(count(turn.eventMark),clock);
+      seenTurn=word(turn.seenTurn?.value)?{value:turn.seenTurn.value,mark:Math.min(count(turn.seenTurn.mark),clock)}:null;
+      turnRecord=typeof turn.turnRecord==='string'&&path.isAbsolute(turn.turnRecord)?turn.turnRecord:'';formSeen=turn.formSeen===true;
+    }
+    const panel=object(seed.panel);
+    panelModel=object(panel.model);panelLines=Array.isArray(panel.lines)?panel.lines:[];panelSections=panel.sections??undefined;
+    footer=typeof panel.footer==='string'?panel.footer:'';footerSegments=Array.isArray(panel.segments)?panel.segments:[];
+    nativeFooter=panel.nativeFooter&&typeof panel.nativeFooter==='object'?panel.nativeFooter:null;
+    await succession.restore(terminal,seed.terminal);
+    last=seed.outer.last.map(value=>value===null?undefined:value);nativeLast=seed.outer.nativeLast.map(value=>value===null?undefined:value);
+    footerLast=seed.outer.footerLast;seedOuter={cols:seed.outer.cols,rows:seed.outer.rows};
+    if(seed.scrollback.carried===false)upgradeNote='scrollback';
+    fs.rmSync(nextPath,{force:true});
+    await new Promise(resolve=>{server=listenControl(nextPath,()=>resolve());});
+    startBackend();
+    // The panel rows are rebuilt from the seeded values before the first paint, so that paint is a difference.
+    rebuildDisplay();
+    for(let waited=0;(rebuilding||rebuildPending)&&waited<400;waited++)await new Promise(resolve=>setTimeout(resolve,5));
+    return {ok:true};
+  }catch(error){return {ok:false,reason:String(error&&error.message||error).slice(0,80)};}
+}
+let seedOuter={cols:0,rows:0};
+async function switchSuccessor() {
+  try{
+    fs.renameSync(nextPath,socketPath);socketIno=fs.statSync(socketPath).ino;
+    switched=true;activated=true;
+    try{fs.rmSync(seedFile,{force:true});}catch{}
+    // Stay paused (no PTY, no keys) until the owner says run: a successor lost now loses nothing.
+    process.stdin.pause();
+    wireDisplay();
+    // Normally nothing differs and nothing is cleared: the old host left the screen painted.
+    cols=process.stdout.columns;rows=process.stdout.rows;
+    if(cols!==seedOuter.cols||rows!==seedOuter.rows||terminal.cols!==nativeColumns()||terminal.rows!==nativeRows())applyLayout();
+    await source('register');
+    clearTimeout(frameTimer);frameTimer=undefined;render();
+    queueProjection();
+    return {ok:true,settled:true};
+  }catch(error){return {ok:false,reason:String(error&&error.message||error).slice(0,80)};}
+}
+function runSuccessor() {
+  if(running||!switched)return;
+  running=true;
+  child.resume();createInputOwner();process.stdin.resume();
+  refreshReadiness().finally(()=>{detectRelease();checkRelease();});
+}
+
+// ---- start ----
+server=net.createServer(onConnection);
+server.on('error',serverFailure);
+if(SUCCESSOR){
+  // Nothing is read, listened or spawned until the owner commits: a failure here is a quiet exit.
+  startupResult('PREPARED');
+  startSuccessionChannel();
+}else server.listen(socketPath,()=>{
+  fs.chmodSync(socketPath,0o600);
+  try {
+    socketIno=fs.statSync(socketPath).ino;
+    adoptNative(false);createInputOwner();
+  } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
+  // The parent may only fall back before this boundary. A failed display keeps
+  // this same native child; no second CLI is ever started.
+  startupResult('STARTED');activated=true;process.stdin.resume();
+  startBackend();
+  // OpenCode starts on its home route with no session: publish the seat now.
+  if(harness==='opencode'&&!sid){state='idle';source('register');}
+  source('display-bootstrap').then(data=>{if(data.ok&&!projectionKey){panelModel=data.panel;queueDisplay();}});
+  emit('\x1b[?1049h\x1b[2J');
+  wireDisplay();
   applyLayout();
+  startSuccessionChannel();watchRelease();detectRelease();
 });

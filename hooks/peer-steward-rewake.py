@@ -205,7 +205,8 @@ def main() -> int:
         # The join blocks for the whole remaining budget; its own `--timeout`
         # is the bound, and the subprocess cap only backstops a wedged utility.
         join_cap = max(1.0, deadline - time.monotonic()) + BUDGET_MARGIN_SECONDS
-        joined = _run("join", watch_id, "--timeout", remaining_ms(), timeout=join_cap)
+        joined = _run("join", watch_id, "--timeout", remaining_ms(), "--no-ack",
+                      timeout=join_cap)
         if joined is None:
             return 0
         code = joined.returncode

@@ -170,7 +170,11 @@ class FindTest(unittest.TestCase):
         self.assertEqual(len(record["decisions"]), 3)
         _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
         self.assertEqual(project_status.newest(str(self.root), self.now)["relative"],
-                         "research/2026-10-01_old/STATUS.md")
+                         "campaigns/2026-11-02_v4/2026-11-02_status/artifacts/현황.md")
+
+    def test_research_log_is_not_a_status_board_without_campaign_or_cycle_pages(self):
+        _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
+        self.assertIsNone(project_status.newest(str(self.root), self.now))
 
     def test_names_match_the_producer_rule_and_hangul_name_comes_first(self):
         campaign = self.root / "campaigns" / "2026-11-02_v4"
@@ -194,7 +198,7 @@ class FindTest(unittest.TestCase):
                          unicodedata.normalize("NFD", "현황.md"))]))
 
     def test_collect_scans_one_root_once_per_interval(self):
-        doc = self.root / "research" / "2026-11-02_x" / "STATUS.md"
+        doc = self.root / "campaigns" / "2026-11-02_x" / "STATUS.md"
         _touch(doc, STATUS_EN, self.now - 10)
         (self.project / "a").mkdir()
         cwds = [str(self.project), str(self.project / "a"), str(self.tmp)]
@@ -216,7 +220,7 @@ class FindTest(unittest.TestCase):
             _touch(campaign / "STATUS.md", "# Campaign " + str(index) + "\n\nSummary " + str(index),
                    self.now - index * 10)
             _touch(campaign / "2026-11-06_old" / "artifacts/STATUS.md", "# Cycle copy", self.now + 100)
-        _touch(self.root / "research/x/STATUS.md", "# Legacy copy", self.now + 100)
+        _touch(self.root / "research/x/STATUS.md", "# Chronological log", self.now + 100)
         record = project_status.newest(str(self.root), now=self.now)
         self.assertEqual(record["line"], "Summary 0")
         self.assertEqual([row["campaign"] for row in record["campaigns"]],
@@ -244,6 +248,21 @@ class FindTest(unittest.TestCase):
 
 
 class ProjectionTest(unittest.TestCase):
+    def test_repo_page_gets_only_first_lines_from_existing_current_question_material(self):
+        now = time.time()
+        sessions = [Session(harness="claude", pid=10, session_tag="a1", session_id="sid-a", cwd="/w/alpha",
+                            title="t", liveness="idle")]
+        waits = {"complete": True, "total": 4, "older": 0, "ownerless": 0,
+                 "items": [{"id": f"q{index}", "source": "S2", "kind": "human gate",
+                            "since": now, "stale": "current", "harness": "claude",
+                            "session_id": "sid-a", "question": f"Decision {index}\nsecond line"}
+                           for index in range(4)]}
+        snapshot = {"sessions": sessions, "jobs": [], "resources": [], "answer_waits": waits,
+                    "project_of": lambda cwd: os.path.basename(cwd)}
+        repos = {repo["id"]: repo for repo in build_view_model(snapshot, now=now).repos}
+        status = repos["alpha"]["status"]
+        self.assertEqual(tuple(status["question_lines"]), ("Decision 0", "Decision 1", "Decision 2"))
+
     def test_document_and_derived_status_on_repo_records(self):
         now = time.time()
         sessions = [Session(harness="claude", pid=10, session_tag="a1", session_id="sid-a", cwd="/w/alpha",
@@ -269,7 +288,8 @@ class RenderTest(unittest.TestCase):
     DOC = {"routes": 0, "questions": 2, "done": "importer", "done_age": "41m ago",
            "line": "백로그를 묶어 v4.0.0 정식 공개까지 간다.", "decisions": 3,
            "decision": "케언 PR 병합", "next": "[50] 정리 뒤 계획 확정",
-           "doc": "research/x/현황.md", "doc_age": "12m ago", "stale": False, "changed": "12m ago"}
+           "doc": "campaigns/x/현황.md", "doc_age": "12m ago", "stale": False, "changed": "12m ago",
+           "question_lines": ["보관 기간을 정할까요?", "두 번째 질문", "세 번째 질문", "숨길 네 번째 질문"]}
     DERIVED = {"routes": 2, "questions": 0, "done": "csi bundle", "done_age": "53m ago", "changed": "53m ago"}
 
     def setUp(self):
@@ -288,18 +308,24 @@ class RenderTest(unittest.TestCase):
     def test_segments(self):
         segments = tables.repo_status_segments(self.DOC, 120)
         text = "".join(text for text, _key in segments)
-        self.assertEqual(text, "백로그를 묶어 v4.0.0 정식 공개까지 간다. │ 3 to decide │ ◑ to answer 2 │ 12m ago")
+        self.assertEqual(text, "◑ to answer 2 │ 3 to decide")
         self.assertIn(("3 to decide", "lvl_y"), segments)
-        self.assertEqual(tables.repo_status_segments(self.DOC, 120, narrow=True), [("3 to decide", "lvl_y")])
-        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)),
-                         "route 2 │ 53m ago ✓ csi bundle")
-        self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True), [])
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DOC, 120, narrow=True)),
+                         "◑ to answer 2 │ 3 to decide")
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)), "route 2")
+        self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True),
+                         [("◑ to answer 2", "blocked")])
+        # A narrow screen keeps what waits on the person; the route count gives way, not them.
+        busy = dict(self.DOC, routes=3, routes_running=1)
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(busy, 120)),
+                         "route 3 ⠏1 │ ◑ to answer 2 │ 3 to decide")
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(busy, 30, narrow=True)),
+                         "◑ to answer 2 │ 3 to decide")
+        self.assertEqual(tables.repo_status_segments(self.DERIVED, 120, narrow=True), [])
         stale = dict(self.DOC, stale=True, doc_age="5d ago", changed="5d ago", questions=0)
-        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)),
-                         "5d ago · 백로그를 묶어 v4.0.0 정식 공개까지 간다. │ 3 to decide")
-        tight = tables.repo_status_segments(self.DOC, 50)
-        self.assertLessEqual(sum(tables._seg_width(text) for text, _ in tight), 50)
-        self.assertTrue(tight[0][0].endswith("…"))
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)), "3 to decide")
+        tight = tables.repo_status_segments(self.DOC, 18)
+        self.assertLessEqual(sum(tables._seg_width(text) for text, _ in tight), 18)
 
     def test_status_rides_on_the_rule_without_adding_rows(self):
         plain = self._text(draw(self.vm, NavState(), 140, 45, beat=1))
@@ -307,9 +333,10 @@ class RenderTest(unittest.TestCase):
                                 NavState(), 140, 45, beat=1))
         changed = [y for y, (a, b) in enumerate(zip(plain, shown)) if a != b]
         self.assertEqual(len(changed), 2, changed)                     # exactly the two group rules
-        self.assertIn(self.first + "/ │ 백로그를 묶어", shown[changed[0]])
-        self.assertIn("3 to decide │ ◑ to answer 2 │ 12m ago ┈", shown[changed[0]])
-        self.assertIn(self.second + "/ │ route 2 │ 53m ago ✓ csi bundle ┈", shown[changed[1]])
+        self.assertIn(self.first + "/ │ ◑ to answer 2 │ 3 to decide", shown[changed[0]])
+        self.assertNotIn("백로그를 묶어", shown[changed[0]])
+        self.assertIn(self.second + "/ │ route 2", shown[changed[1]])
+        self.assertNotIn("csi bundle", shown[changed[1]])
 
     def test_repo_page_opens_with_four_status_lines(self):
         state = NavState(scope="repo:" + self.first)
@@ -320,7 +347,9 @@ class RenderTest(unittest.TestCase):
         self.assertIn("3 · 케언 PR 병합 · +2 more", shown[top + 1])
         self.assertIn("◑ to answer 2", shown[top + 1])
         self.assertIn("[50] 정리 뒤 계획 확정", shown[top + 2])
-        self.assertIn("12m ago research/x/현황.md · 41m ago ✓ importer", shown[top + 3])
+        self.assertIn("12m ago campaigns/x/현황.md · 41m ago ✓ importer", shown[top + 3])
+        self.assertIn("? 보관 기간을 정할까요?", "\n".join(shown[top + 4:top + 8]))
+        self.assertNotIn("숨길 네 번째 질문", "\n".join(shown))
         header = next(y for y, row in enumerate(plain) if " ID " in row and "MODEL" in row)
         pane = 32                                                     # the sidebar left of the pane is unchanged
         new_header = next(y for y, row in enumerate(shown) if " ID " in row and "MODEL" in row)

@@ -94,7 +94,7 @@ class SessionShellTest(unittest.TestCase):
     def test_optional_side_geometry_uses_the_existing_policy_and_validates_only_present_values(self):
         path=shell.policy_path();path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'enabled':True}));path.chmod(0o600)
-        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time'})
+        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time','rule_motion':'on'})
         path.write_text(json.dumps({'enabled':True,'layout':'side','side_width':48,'side_min_columns':150}))
         self.assertTrue(shell.policy()[0]);self.assertEqual(shell.display_policy()['side_width'],48)
         for field,value in (('layout','other'),('side_width',True),('side_width',-1),('side_min_columns','132')):
@@ -175,7 +175,7 @@ class SessionShellTest(unittest.TestCase):
                        "HEARTING_SHELL_TOKEN": "synthetic-private-control-token"}
                 session_tidy.run_hook(harness, "start", sid, source="resume",
                                       cwd=str(self.root), env=env)
-                report.assert_called_once_with(harness, "start", sid, env=env)
+                report.assert_called_once_with(harness, "start", sid, env=env, source="resume")
 
     def test_hook_reports_proven_native_owner_instead_of_its_helper_process(self):
         row = self.binding(); received = self.serve(row)
@@ -190,6 +190,13 @@ class SessionShellTest(unittest.TestCase):
         self.assertEqual(received[0]["start"], row["native_start"])
         self.assertEqual(received[0]["native_model"], "native-selected-model")
         self.assertEqual(received[0]["sid"], row["sid"])
+        self.assertNotIn("source", received[0])
+        # Spec E9 rule 34 (f): a start carries the native's own start reason to the host.
+        for event, want in (("start", "clear"), ("prompt", None)):
+            os.unlink(row["socket"]); received = self.serve(row)
+            with mock.patch("pane_ownership._caller_runtime", return_value=(owner, False)):
+                shell.lifecycle("claude", event, row["sid"], env=env, source="clear")
+            self.assertEqual(received[0].get("source"), want, event)
 
     def test_native_callback_can_register_before_the_passive_session_registry_exists(self):
         row = self.binding()
@@ -236,6 +243,39 @@ class SessionShellTest(unittest.TestCase):
         self.assertEqual([text.index(field) for field in fields], sorted(text.index(field) for field in fields))
         self.assertNotIn("private draft", text)
         self.assertTrue(any("private draft" in "".join(part["text"] for part in line) for line in result["lines"]))
+
+    def test_a_broken_byte_in_the_memory_journal_does_not_stop_the_panel(self):
+        # Every panel reads the one shared memory journal; a half-written line there costs
+        # only that line: the projection answers and MEM shows the newest whole row.
+        shell.registry_root()   # puts `tools` on the path
+        import human_wait_state, session_tidy
+        from fleet import session_tags, session_view
+        from fleet.collectors import memory
+        row = self.binding()
+        observed = {"harness": "claude", "cwd": "/synthetic/hearting", "title": "Common title"}
+        line = lambda ts, text, rid: json.dumps({"ts": ts, "action": "add", "id": rid, "type": "decision",
+                                                 "snippet": text, "cwd": "/synthetic/hearting"}, ensure_ascii=False).encode()
+        older, newer = line("2026-11-12T09:00:00", "앞 기록", "a"), line("2026-11-12T10:00:00", "뒤 기록", "b")
+        cut = newer[:newer.index("뒤".encode()) + 1]
+        journal = self.root / "memory" / "write-events.jsonl"
+        journal.parent.mkdir()
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.dict(os.environ, {"MEM_STORE": str(journal.parent), "MEM_WRITE_EVENTS": str(journal)}))
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")))
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_view", return_value=None))
+            patches.enter_context(mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "none"}))
+            patches.enter_context(mock.patch.object(session_tags, "assigned_tag", return_value="52"))
+            patches.enter_context(mock.patch.object(session_view, "observe", return_value=(observed, [])))
+            patches.enter_context(mock.patch.object(shell.os, "getppid", return_value=os.getpid()))
+            for name, data, shown in (("the last line cut inside a character", older + b"\n" + cut, "앞 기록"),
+                                      ("a broken byte mid-journal", older + b"\n\xff" + cut + b"\n" + newer + b"\n", "뒤 기록")):
+                with self.subTest(name):
+                    journal.write_bytes(data)
+                    memory._latest_cache.clear()
+                    result = shell._backend_operation({"op": "projection", "binding": row, "columns": 100, "state": "idle"})
+                    self.assertTrue(result.get("ok"), result)
+                    self.assertIn(str(journal), result["watch"])
+                    self.assertIn(shown, "".join(part["text"] for part in result["panel"]["memory"]))
 
     def test_an_unobserved_question_projection_does_not_become_zero_waits(self):
         import human_wait_state, session_tidy

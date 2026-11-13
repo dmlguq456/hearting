@@ -1080,10 +1080,10 @@ def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
 def harvest_command_lines(prompt: str) -> list[str]:
     """Extract the exact harvest command lines a supervisor prompt prescribes.
 
-    Both supervisors emit a command on its own line: the existing harvest
-    operation or portable read-only inspection. Used by the producer<->guard
-    parity fixture (plan SS3.4 D1b) so that fixture never needs a
-    hand-written command literal.
+    Both supervisors emit a command on its own line: the shared harvest or
+    portable read-only inspection (an earlier receipt may still name the Codex
+    `preflight.sh harvest` wrapper). Used by the producer<->guard parity fixture
+    (plan SS3.4 D1b) so that fixture never needs a hand-written command literal.
     """
 
     lines = []
@@ -1097,6 +1097,9 @@ def harvest_command_lines(prompt: str) -> list[str]:
             and tokens[1] == "harvest"
             and tokens[0].endswith("preflight.sh")
         ):
+            lines.append(line)
+        elif (len(tokens) >= 2 and tokens[0] in {"python", "python3"}
+              and tokens[1].endswith("/utilities/dispatch-harvest.py")):
             lines.append(line)
         elif (len(tokens) >= 3 and tokens[0] in {"python", "python3"}
               and tokens[1].endswith("/utilities/dispatch-registry.py")
@@ -1156,22 +1159,41 @@ def delivery_required_action(state: CurrentDeliveryState) -> str:
     return _delivery_choice(state).next_action
 
 
-def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surface: str) -> str:
-    """Project an already-decided record action; grant no workflow authority."""
+def completion_harvest_command(attempt_id: str, action: str, *, jobs: str) -> str:
+    """Project an already-decided record action; grant no workflow authority.
+
+    Every line names a shared `utilities/` entry point of this tree, so an owner
+    on any harness is shown the same command (no adapter path)."""
+    from parent_next_directive import entrypoint
     if action == "finish-workflow":
-        from parent_next_directive import entrypoint
-        utility = entrypoint(Path(__file__).resolve().parents[1], "utilities/dispatch_terminal_commit.py")
+        utility = entrypoint(ROOT, "utilities/dispatch_terminal_commit.py")
         return f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(jobs)} --attempt {shlex.quote(attempt_id)}"
-    if action not in {"complete-open", "inspect-done-failure"}:
-        return ""
     if action == "inspect-done-failure":
-        from parent_next_directive import entrypoint
-        utility = entrypoint(Path(__file__).resolve().parents[1], "utilities/dispatch-registry.py")
+        utility = entrypoint(ROOT, "utilities/dispatch-registry.py")
         registry = f" --jobs {shlex.quote(jobs)}" if jobs else ""
         return f"python3 {shlex.quote(str(utility))} observed-status{registry} --attempt {shlex.quote(attempt_id)}"
+    if action != "complete-open":
+        return ""
     registry = f"--jobs {shlex.quote(jobs)} " if jobs else ""
-    status = "--status open --mark-done" if action == "complete-open" else "--status done"
-    return f"{shlex.quote(surface)} harvest {registry}--attempt-id {shlex.quote(attempt_id)} {status}"
+    return (f"python3 {shlex.quote(str(entrypoint(ROOT, HARVEST_ENTRYPOINT)))} {registry}"
+            f"--attempt-id {shlex.quote(attempt_id)} --status open --mark-done")
+
+
+HARVEST_ENTRYPOINT = "utilities/dispatch-harvest.py"
+# The open-row line the immediately previous release shipped: the Codex adapter
+# wrapper of this same tree. Receipt recovery only.
+_PREVIOUS_HARVEST_ENTRYPOINT = "adapters/codex/bin/preflight.sh"
+
+
+def previous_harvest_wording(text: str) -> str:
+    """`text` with each current open-row harvest line as the previous release wrote it.
+
+    Recovery recognizes an already queued or injected body by its exact bytes;
+    every other byte of `text` is left as it is."""
+    from parent_next_directive import entrypoint
+    current = f"python3 {shlex.quote(str(entrypoint(ROOT, HARVEST_ENTRYPOINT)))} "
+    previous = f"{shlex.quote(str(ROOT / _PREVIOUS_HARVEST_ENTRYPOINT))} harvest "
+    return text.replace(current, previous)
 
 
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
@@ -1240,22 +1262,26 @@ RUNTIME_V1_FOLLOWUP_PREFIXES = {
     True: ("Original request/format apply. Review the result and continue approved work or its existing "
            "continuation. First close: "
            "give the result in one or two sentences; preserve any important remaining failure, "
-           "unfinished work, or user-impacting limit; ask for at most one decision the person "
-           "must make; and point to the detailed record. Keep the runtime summary below as "
+           "unfinished work, or user-impacting limit; ask only what only the person can decide and "
+           "state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+           "proceeding; "
+           "and point to the detailed record. Keep the runtime summary below as "
            "agent context and record; do not reproduce it for the person. "
            " No harvest/restart/manual finalize. "
            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
     False: ("Original request/format apply. Review the result and continue approved work or its existing "
             "continuation. First close: "
             "give the result in one or two sentences, preserve any important remaining failure, "
-            "unfinished work, or user-impacting limit, ask for at most one necessary decision, "
+            "unfinished work, or user-impacting limit, ask only what only the person can decide, "
+            "state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+            "proceeding, "
             "and point to the detailed record. "
             " No harvest/restart/manual finalize. "
             "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
 }
 
 
-def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
+def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
         return ("Parent-requested close has settled. No harvest, next-stage launch, "
@@ -1307,7 +1333,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
                 continue  # Legacy/corrupt context retains the exact inspection surface below.
     commands = [work_commands.get(child["attempt_id"]) or
                 completion_harvest_command(child["attempt_id"], child["required_action"],
-                    jobs=jobs, surface=surface) for child in receipt["children"]]
+                    jobs=jobs) for child in receipt["children"]]
     if completed_work and all(child["attempt_id"] in completed_work for child in receipt["children"]):
         notes = [f"The approved route plan names a next leg (index {child['next_leg']['index']}): "
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
@@ -3450,13 +3476,20 @@ def classify_supervised_shell_command(
             return None
         return SupervisorShellAction("harvest", attempt, "done", False)
 
-    if (
+    harvest_args = None
+    if (len(tokens) >= 2 and tokens[0] in {"python", "python3"}
+            and _local_contract_path(base, tokens[1], HARVEST_ENTRYPOINT, extra_roots)):
+        harvest_args = tokens[2:]
+    elif (
         len(tokens) >= 2
-        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh", extra_roots)
+        and _local_contract_path(base, tokens[0], _PREVIOUS_HARVEST_ENTRYPOINT, extra_roots)
         and tokens[1] == "harvest"
     ):
+        # The Codex wrapper an earlier receipt names runs the same shared body.
+        harvest_args = tokens[2:]
+    if harvest_args is not None:
         options = _parse_long_options(
-            tokens[2:],
+            harvest_args,
             {"--attempt-id", "--status", "--completion", "--jobs"},
             {"--mark-done", "--keep-home", "--failure-detail"},
         )
@@ -4078,13 +4111,20 @@ def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
                 "reason": "recovery-process-failed"}
 
 
-def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
+def settle_finished_attempt(
+    jobs: Path, row: ChildRow, previous: tuple[object, object] | None = None
+) -> dict[str, object]:
     """Commit exact terminal evidence before a runtime join can deliver it.
 
     Reapers and joiners use the same terminal writers. The canonical row, not
     a writer's exit code, proves that the transition actually committed.
+    ``previous`` is the join's own last ``(closed, reason)`` for this attempt:
+    a completion refusal that repeats it closes the row typed.
     """
     reason = ""
+    refused_before = ""
+    if previous and previous[0] is False and str(previous[1]).startswith("completion-"):
+        refused_before = str(previous[1])
     try:
         support = _route_free_support_row(row)
         if support:
@@ -4123,7 +4163,7 @@ def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
             reason = apply_exact_route_free_review_classification(
                 fresh, jobs=jobs, classification=classification)
         else:
-            reason = close_finished_child(row, jobs=jobs)
+            reason = close_reaped_child(row, jobs=jobs, refused_before=refused_before)
         current = exact_attempt_row(jobs, row.attempt_id)
         if support and launched_attempt_identity(current.raw.split("\t")) != selected_identity:
             return {"attempt_id": row.attempt_id, "closed": False,
@@ -4154,7 +4194,7 @@ def _join_snapshot(
     env: dict[str, str] | None,
     recovery: Callable[[ChildRow], dict[str, object]] | None = None,
     observation_jobs: Path | None = None,
-    settlement: Callable[[ChildRow], dict[str, object]] | None = None,
+    settlement: Callable[[ChildRow, tuple[object, object] | None], dict[str, object]] | None = None,
     observation_context=None,
     registry_append_only: bool = False,
 ) -> dict[str, object]:
@@ -4297,12 +4337,19 @@ def _join_snapshot(
                     backoff["interval"] = 2.0
                 if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= backoff["interval"]:
                     last_settlement[row.attempt_id] = time.monotonic()
-                    outcome = settlement(row)
+                    outcome = settlement(row, backoff["result"])
                     recovery_results[row.attempt_id] = outcome
                     recovered = recovered or outcome.get("closed") is True
                     result_key = (outcome.get("closed"), outcome.get("reason"))
+                    # A completion refusal is not new progress: it keeps the
+                    # backed-off cadence, so the pass that confirms it (and
+                    # closes the row typed) comes after a short NAS or
+                    # finish-in-progress hiccup has had time to clear.
+                    refused = (outcome.get("closed") is False
+                               and str(outcome.get("reason") or "").startswith("completion-"))
                     backoff["interval"] = (
-                        2.0 if result_key != backoff["result"] else min(60.0, backoff["interval"] * 2)
+                        2.0 if result_key != backoff["result"] and not refused
+                        else min(60.0, backoff["interval"] * 2)
                     )
                     backoff["result"] = result_key
                     backoff["registry_key"] = registry_key
@@ -4469,7 +4516,7 @@ def join_selected_attempts(*, jobs: Path, expected_attempts: set[str],
         liveness_probe_timeout=30.0, env=None,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover else None,
         observation_jobs=jobs if recover else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -4505,7 +4552,7 @@ def join_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover_receiptless else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -4552,7 +4599,7 @@ def join_session_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover_receiptless else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -5356,19 +5403,47 @@ def close_wrapper_pass(
     reason = close_finished_child(row, jobs=jobs)
     if not reason:
         return ""
+    return _close_refused_completion(row, jobs=jobs, reason=reason)
+
+
+def close_reaped_child(
+    row: ChildRow, *, jobs: str | Path, refused_before: str | bool = False
+) -> str:
+    """Close one route-bound child whose process is already proven gone.
+
+    The wrapper's reap watcher, and the runtime join that repeats its drain
+    when that watcher was lost, both reach this state. They share this one
+    step: commit the exact terminal evidence, and when ``complete`` refuses
+    it again, close the still-open row as the typed contract failure the
+    watcher has always written. A first refusal may be transient (a route
+    file briefly unreadable on NAS, a finish in progress), so it stays open
+    for the next attempt; ``refused_before`` names the refusal that attempt
+    repeats (the join's previous pass), or ``True`` for the watcher's own
+    second attempt. The join therefore no longer retries a refusal in silence
+    while the owner waits.
+    """
+
+    reason = close_finished_child(row, jobs=jobs)
+    if (reason.startswith("completion-") and row.status in OPEN_STATES
+            and (refused_before is True or (refused_before and refused_before == reason))):
+        return _close_refused_completion(row, jobs=jobs, reason=reason)
+    return reason
+
+
+def _close_refused_completion(row: ChildRow, *, jobs: str | Path, reason: str) -> str:
+    """Record a refused or transport-failed completion on its exact row."""
+
     try:
         current = exact_attempt_row(Path(jobs), row.attempt_id)
     except JoinContractError:
         return reason
     if current.status == "done" and success_note(current.metadata):
         return ""
-    if current.status == "done" and deferred_completion(current.metadata):
-        # C13: already closed typed-deferred by an earlier budget exhaustion
-        # (this attempt's own retry above just failed transiently again).
-        # Re-closing a terminal row here would only manufacture a terminal
-        # conflict (`completion-deferred` -> `dead-route-completion-rejected`)
-        # against a row that already has a committed outcome; the caller
-        # keeps retrying via the ordinary settlement path instead.
+    if current.status not in OPEN_STATES:
+        # C13: another writer (an earlier budget exhaustion's
+        # `completion-deferred`, or the join's own typed close) already
+        # committed this row. Re-closing it would only manufacture a terminal
+        # conflict against a row that has a committed outcome.
         return reason
     if reason.startswith("completion-transient:"):
         try:

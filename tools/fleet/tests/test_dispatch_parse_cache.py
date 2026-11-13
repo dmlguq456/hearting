@@ -354,7 +354,9 @@ class RegistryGenerationRetentionTest(unittest.TestCase):
             raced.unlink()
             raise FileNotFoundError(str(raced))
 
-        with mock.patch.object(Path, "read_text", side_effect=remove_during_read):
+        # The shared view reads first; its failure falls through to the text read.
+        with mock.patch.object(Path, "read_text", side_effect=remove_during_read), \
+                mock.patch.object(self.cache, "registry_view", side_effect=OSError("unreadable")):
             self.assertEqual(dispatch.parsed_registry_rows(str(raced)), ())
         self.assertIsInstance(dispatch._registry_diagnostics(str(raced))[0], FileNotFoundError)
         self.assertFalse(any(key[0] == str(raced.absolute())
@@ -362,7 +364,8 @@ class RegistryGenerationRetentionTest(unittest.TestCase):
 
         denied = self.jobs.with_name("denied.log")
         denied.write_text(self._row("att-denied"), encoding="utf-8")
-        with mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")), \
+                mock.patch.object(self.cache, "registry_view", side_effect=PermissionError("denied")):
             self.assertEqual(dispatch.parsed_registry_rows(str(denied)), ())
         self.assertIsInstance(dispatch._registry_diagnostics(str(denied))[0], PermissionError)
         self.assertFalse(any(key[0] == str(denied.absolute())
@@ -383,6 +386,55 @@ class RegistryGenerationRetentionTest(unittest.TestCase):
         retained_paths = set(dispatch._PARSED_REGISTRY_PATH_ORDER)
         for cache in self._cache_maps():
             self.assertEqual({key[0] for key in cache}, retained_paths)
+
+
+    def test_a_rewrite_keeps_the_rows_of_segments_it_did_not_change(self):
+        rows = [self._row("att%03d" % n, "done") for n in range(10)]
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        with mock.patch.object(self.cache, "_PARSE_CHUNK_LINES", 3), \
+                mock.patch.object(dispatch, "_registry_record_metadata",
+                                  wraps=dispatch._registry_record_metadata) as convert:
+            first = dispatch.parsed_registry_rows(str(self.jobs))
+            self.assertEqual(convert.call_count, 10)
+            staged = self.jobs.with_name("jobs.staged")
+            rows[8] = self._row("att008", "killed")
+            rows.append(self._row("att010", "done"))
+            staged.write_text("".join(rows), encoding="utf-8")
+            os.replace(staged, self.jobs)
+            second = dispatch.parsed_registry_rows(str(self.jobs))
+            # Two untouched segments keep their rows; the changed segment (rows 6-8,
+            # of which rows 6 and 7 convert by their exact fields) and the new row do not.
+            self.assertEqual(convert.call_count, 10 + 1 + 1)
+        self.assertEqual(len(second), 11)
+        for index in range(6):
+            self.assertIs(second[index], first[index])
+        self.assertIsNot(second[8], first[8])
+        self.assertEqual(second[8][1][1], "killed")
+        self.cache.clear_cache()
+        with dispatch._PARSED_REGISTRY_CACHE_LOCK:
+            for cache in (*self._cache_maps(), dispatch._PARSED_REGISTRY_PATH_ORDER):
+                cache.clear()
+        fresh = dispatch.parsed_registry_rows(str(self.jobs))
+        self.assertEqual([(o, f, dict(m)) for o, f, m in second],
+                         [(o, f, dict(m)) for o, f, m in fresh])
+
+    def test_a_direct_read_outside_a_pass_reads_the_file_once_through_the_shared_view(self):
+        self.jobs.write_text(self._row("att-a") + self._row("att-b", "done"), encoding="utf-8")
+        self.cache.reset_metrics()
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("text re-read")):
+            rows = dispatch.parsed_registry_rows(str(self.jobs))
+            again = dispatch.parsed_registry_rows(str(self.jobs))
+        self.assertIs(again, rows)
+        self.assertEqual(self.cache.metrics_snapshot()["content_reads"], 1)
+        self.assertEqual([row[1][5] for row in rows],
+                         ["attempt_id=att-a,route_node=execute", "attempt_id=att-b,route_node=execute"])
+        self.assertEqual(dispatch._registry_diagnostics(str(self.jobs)), (None, 0))
+
+    def test_a_direct_read_of_text_the_view_cannot_answer_keeps_the_text_path(self):
+        self.jobs.write_bytes((self._row("att-a") + "x\ty\n").encode() + b"half a row")
+        rows = dispatch.parsed_registry_rows(str(self.jobs))
+        self.assertEqual([row[1][5] for row in rows], ["attempt_id=att-a,route_node=execute"])
+        self.assertEqual(dispatch._registry_diagnostics(str(self.jobs))[1], 2)
 
 
 class PinnedRegistryParityTest(unittest.TestCase):

@@ -36,8 +36,11 @@ Each clause is one contract line plus the signal that it was violated.
   factual answers, and status-only replies with one or two sentences. The first
   close of material work follows `core/WORKFLOW.md §0.5`: result in one or two
   sentences, material remaining items and limits, at most one necessary decision,
-  and one pointer to the detailed record. Preserve explicit requested output and
-  format. *Violation signal:* process narration ("first I'll look at X, then…"),
+  and one pointer to the detailed record. Speak up without prompting only when
+  work is ready to use, the person must decide, or failure or risk matters;
+  progress and handoffs stay in the record. Do not repeat an unchanged status or
+  wait list. Preserve explicit requested output and format. *Violation signal:*
+  process narration ("first I'll look at X, then…"),
   a material-work close missing an important result or requested output, or
   tables/boxes/code blocks that add no visual anchor.
 - **Answer-first bounding** — lead with the answer, then stop. Explanation the
@@ -52,9 +55,12 @@ Each clause is one contract line plus the signal that it was violated.
   is as exact as the harness term, expand a term the first time it carries
   weight in a reply, and put the conclusion ahead of its qualifications. Do not
   make the user reconstruct meaning from compressed internal vocabulary,
-  reference chains, or clause-stacked sentences. Density that is correct in
-  agent-facing files is a defect in a user-facing reply. *Violation signal:* the
-  user has to ask what a term or a sentence in your own reply meant.
+  reference chains, or clause-stacked sentences. In user-facing replies, omit
+  correction rounds, route or cycle numbers, PR-number lists, reviewer numbers,
+  and receipt values unless needed; explain the useful meaning in ordinary words.
+  A pointer to the detailed record may use its exact locator. Density that is
+  correct in agent-facing files is a defect in a user-facing reply. *Violation
+  signal:* the user has to ask what a term or a sentence in your own reply meant.
   In user-facing replies, identify other sessions by Fleet tag and pane (SID
   when needed), with their role in parentheses; use herdr name and pane when
   no tag exists, rather than internal abbreviations. Durable card and peer trailer
@@ -122,11 +128,29 @@ Each clause is one contract line plus the signal that it was violated.
   "camera-ready" request does not by itself add a pause). The one-time entry
   confirmation above is a separate pre-execution contract. *Violation signal:*
   a pause flag added because the task merely feels important.
+- **Decision requests** — when an option is recommended, within the approved
+  scope, and reversible (or the person has said to use the recommendation —
+  never for destructive, irreversible, or external-facing work, which is asked
+  even then), do not ask: proceed and report `고른 안: <안> — <이유 한 줄>`.
+  A clear follow-up such as fixing a defect or running the next approved step
+  is not a decision.
+  Ask only about what only the person can decide: goals, scope beyond approval,
+  product choices without a justified recommendation, destructive or irreversible
+  work, external effects, another project, actual external spending or credentials,
+  or a Hearting receipt question. Ask one at a time in a self-contained message:
+  what is being decided; how each option changes the outcome for the person; the
+  recommendation and why; and what waits if there is no answer, while independent
+  work continues. Do not bury it at the end of a long report. Register it on the
+  existing question surface using this text as the question, short choice names,
+  and the recommended choice; do not ask the same decision again or reopen one
+  already answered or acted on. Usage (tokens, time, or session count) is a fact
+  to state in one line, never a reason to ask, stop, or defer. *Violation signal:*
+  asking about a recommended reversible option, stopping for usage, or omitting a
+  decision's difference, recommendation, or no-answer outcome.
 - **No answer is not a decision** — an empty answer, no response, or elapsed
   time or an async acknowledgement (`accepted`) from a structured question (`AskUserQuestion`, Codex
   `request_user_input[_async]`, OpenCode `question`, or equivalent) never counts
-  as the user's decision. For a simple, reversible confirmation of your own,
-  proceed with the recommended option and report it briefly. A question that
+  as the user's decision. A question that
   needs a user decision — goals, architecture, destructive actions, external
   effects, a large scope, or any question a Hearting receipt asks — stays open:
   do not proceed with work that depends on it. If the turn ends first, end it
@@ -141,7 +165,8 @@ Each clause is one contract line plus the signal that it was violated.
   never permission or approval. Only a nonempty human answer bound to the exact
   session and question closes its wait.
 - **Register ordinary questions** — use `hearting run questions ask "question"`
-  for an ordinary question, then say the notice it prints (“질문 대기 중입니다. Fleet에서 답하거나
+  for an ordinary question, write decisions in the self-contained Decision requests
+  form, then say the notice it prints (“질문 대기 중입니다. Fleet에서 답하거나
   이 창에 답해 주세요.”; with `--choice`, “… 이 창에 선택지 번호나 선택지 문구로 답해 주세요.”).
   With choices, a prompt that is not one choice number or a choice's wording leaves
   the question open; if that prompt was in fact the answer, record it with
@@ -170,7 +195,7 @@ Each clause is one contract line plus the signal that it was violated.
   the wait unresolved and use its native prompt as the fallback.
 - **Ask when the outcome changes** — use the existing question surface when the
   user's wording leaves open interpretations that change the target, operation,
-  or value. Show the concrete difference and a recommended choice before acting;
+  or value. Follow Decision requests for the difference and recommendation;
   apply the same rule to corrections made during execution. A familiar label or
   a more precise name does not resolve an unchosen operation. Once the user has
   specified the concrete target, operation, and value, proceed without asking

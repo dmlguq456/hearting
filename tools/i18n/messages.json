@@ -14,6 +14,14 @@
    "en": "Checks: {items}",
    "ko": "검증: {items}"
   },
+  "completion.command_checks": {
+   "en": "{count} commands · {passed} passed · {failed} failed",
+   "ko": "명령 {count}개 · 통과 {passed} · 실패 {failed}"
+  },
+  "completion.command_checks_unmarked": {
+   "en": "{count} commands · no pass/fail shown",
+   "ko": "명령 {count}개 · 결과 표시 없음"
+  },
   "completion.corrections_undelivered": {
    "en": "Unapplied correct {count}: no delivery evidence; application is unverified.",
    "ko": "미반영 correct {count}건: 전달 증거 없음, 실제 반영 여부 미확인."
@@ -102,13 +110,29 @@
    "en": "Review completed with findings; the inspected subject has not passed",
    "ko": "검토 완료 · 지적 사항 있음(검토 대상의 통과가 아님)"
   },
+  "completion.result_check": {
+   "en": "check the report's remaining items (below)",
+   "ko": "보고서의 남은 것 확인(아래)"
+  },
+  "completion.result_decision": {
+   "en": "One decision remains",
+   "ko": "결정할 일 남음"
+  },
   "completion.result_done": {
-   "en": "Done — the runtime confirmed the route and cycle closed",
-   "ko": "완료 — 런타임이 route·사이클 종결을 확인함"
+   "en": "Done",
+   "ko": "완료"
+  },
+  "completion.result_follow_up": {
+   "en": "follow-ups listed (below)",
+   "ko": "후속 있음(아래)"
   },
   "completion.result_leg": {
    "en": "This leg ({index}/{legs}) is done — a later leg remains",
    "ko": "이 leg({index}/{legs}) 완료 — 다음 leg가 남음"
+  },
+  "completion.result_with_remaining": {
+   "en": "Finished with failures or unfinished work (below)",
+   "ko": "끝남 — 실패·못 한 것 있음(아래)"
   },
   "completion.unreadable": {
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
@@ -898,6 +922,22 @@
    "en": "Layout",
    "ko": "배치"
   },
+  "fleet.session_panel.message_delivered": {
+   "en": "delivered",
+   "ko": "전달됨"
+  },
+  "fleet.session_panel.message_failed": {
+   "en": "failed",
+   "ko": "실패"
+  },
+  "fleet.session_panel.message_sent": {
+   "en": "sent",
+   "ko": "보냄"
+  },
+  "fleet.session_panel.message_undelivered": {
+   "en": "not delivered",
+   "ko": "전달 안 됨"
+  },
   "fleet.session_panel.narrow": {
    "en": "Narrow window",
    "ko": "좁은 창"
@@ -1633,6 +1673,14 @@
   "route.tier.inline": {
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
+  },
+  "session_shell.upgrade_pending": {
+   "en": "New release waiting",
+   "ko": "새 판 대기"
+  },
+  "session_shell.upgrade_scrollback": {
+   "en": "Switched without scrollback",
+   "ko": "스크롤백 없이 전환됨"
   },
   "tidy.ago.day": {
    "en": "{count} day ago",

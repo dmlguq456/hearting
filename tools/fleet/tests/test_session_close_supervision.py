@@ -44,6 +44,7 @@ from split_module_fixture import patch_split                            # noqa: 
 
 # The patched module attribute replaces ``claude_session_census``; keep the real one.
 _REAL_CENSUS = claude_process_identity.claude_session_census
+_REAL_REGISTRY_SESSIONS = steward._registry_sessions
 SELF_EXPLICIT = {"harness": "unknown", "session_id": None, "name": "-"}
 NOW = "2026-11-02T00:00:00Z"
 _TMP_ROOT = os.environ.get("TMPDIR")
@@ -104,6 +105,7 @@ class CloseSupervisionBase(unittest.TestCase):
         self.panes = None
         self.seat_of = {}
         for target, name, replacement in (
+                (steward, "_registry_sessions", lambda: list(self.rows)),
                 (steward, "_projection_sessions", lambda: list(self.rows)),
                 (herdr, "list_agents", lambda: list(self.agents)),
                 (codex, "open_rollout_sessions", lambda: dict(self.codex_seen)),
@@ -363,21 +365,84 @@ class HeartingNamedTest(CloseSupervisionBase):
         self.assertFalse(self.holds_role("codex", self.E0))
         self.assertEqual(self.supervision()["counted"], 0)
 
-    def test_a_lost_window_does_not_release_a_holder_still_shown_in_its_pane(self):
-        self.setup_named(row=True)
+    def lost_window_pass(self):
         seat_key = self.seat_of[("codex", self.E0)]
         self.arm_watch("namedwatch000001", steward_ident={"harness": "codex", "session_id": self.E0},
                        steward_seat={"kind": "pane", "key": seat_key, "pane": "w1:pE0"},
                        target_ident={"harness": "claude", "session_id": sid("77777777"),
                                      "pane": "w1:pT"})
-        self.pane_census(("w1:pE0", {"agent": "codex"}))
         store = peer_obligations.ObligationStore(self.base / "obligations")
         duty = store.create(SC.duty_id("codex", self.E0), SC.DUTY_KIND,
                             {"harness": "codex", "session_id": self.E0}, {"carrier": "x", "schema": 1})
         duty = store.update(duty["id"], state="pending", observation=SC._new_observation(1000.0))
         SC.advance(duty, store, now=1001.0)
+
+    def test_a_lost_window_does_not_release_a_holder_the_native_proof_shows_live(self):
+        # Native form of "still shown in its pane": the pane is gone from every census
+        # (none is read any more), yet a process still holds the rollout open, so the
+        # holder is live and keeps its role and its slot.
+        self.setup_named()
+        self.codex_seen = {"complete": True, "open": frozenset({self.E0})}
+        self.lost_window_pass()
         self.assertTrue(self.holds_role("codex", self.E0))
         self.assertEqual(self.supervision()["counted"], 1)
+
+    def test_a_lost_window_does_not_release_a_holder_whose_end_is_unproven(self):
+        self.setup_named(complete=False)
+        self.lost_window_pass()
+        self.assertTrue(self.holds_role("codex", self.E0))
+        self.assertEqual(self.holder_state(self.supervision(), "codex", self.E0), ("unknown", True))
+
+    def test_a_native_ended_holder_is_released_without_any_pane_read(self):
+        self.setup_named()
+        self.lost_window_pass()
+        self.assertFalse(self.holds_role("codex", self.E0))
+        self.assertEqual(self.supervision()["counted"], 0)
+
+
+class NativeRegistryCapTest(CloseSupervisionBase):
+    """The grant cap sees its holders and the requester through native registry records only.
+
+    No fixture row is injected and the Herdr agent list is empty (it is not read at all):
+    the requester's cwd and the holders' liveness come from the real registry files."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(steward, "_registry_sessions", _REAL_REGISTRY_SESSIONS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from fleet import session_registry
+        self.registry = session_registry
+        self.rows.clear()
+
+    def native(self, session, pid):
+        self.registry.write("codex", pid, {"sessionId": session, "cwd": str(self.repo),
+                                           "status": "idle"})
+
+    def test_a_second_steward_over_the_cap_is_limited_from_registry_rows(self):
+        first, second, third = sid("c1c1c1c1"), sid("c2c2c2c2"), sid("c3c3c3c3")
+        for session, pid in ((first, os.getpid()), (second, os.getppid()), (third, 1)):
+            self.native(session, pid)
+        self.holder("codex", first)
+        self.holder("codex", second)
+        result = self.grant("codex", third)
+        self.assertEqual(result["status"], "limited", result)
+        self.assertEqual({item["session_id"] for item in result["holders"]}, {first, second})
+        self.assertEqual(result["repository"], "alpha")
+
+    def test_a_registry_holder_that_is_proven_gone_frees_the_slot(self):
+        first, second, third = sid("c1c1c1c1"), sid("c2c2c2c2"), sid("c3c3c3c3")
+        # Birth time that cannot match the running process: the recorded pid was recycled.
+        for session, pid, born in ((first, os.getpid(), None), (second, os.getppid(), "1"),
+                                   (third, 1, None)):
+            fields = {"sessionId": session, "cwd": str(self.repo), "status": "idle"}
+            if born:
+                fields["procStart"] = born
+            self.registry.write("codex", pid, fields)
+        self.holder("codex", first)
+        self.holder("codex", second)
+        result = self.grant("codex", third)
+        self.assertEqual(result["status"], "granted", result)
 
 
 class SrModelaTest(CloseSupervisionBase):
@@ -522,10 +587,12 @@ class Watch915dTest(CloseSupervisionBase):
         self.assertEqual(now["rearm_count"], 31)
         popen.assert_not_called()
 
-    def test_closed_supervisor_pane_alone_ends_the_watch(self):
+    def test_ended_supervisor_alone_ends_the_watch(self):
+        # Native form: the supervisor session is proven ended (rollout nobody holds
+        # open under a complete table); no pane census is consulted or needed.
         target = sid("c0696404")
+        self.codex_rollouts = {sid("01a1816b")}
         arm = self.arm(target)
-        self.pane_census(("wB:pA6", {"agent": "claude", "agent_session": {"value": target}}))
         popen, receipt, now = self.watch_pass(self.WATCH, arm)
         self.assertEqual(receipt and receipt["reason"], "steward-exited")
         self.assertEqual(now["rearm_count"], 31)

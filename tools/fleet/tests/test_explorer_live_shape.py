@@ -36,7 +36,7 @@ def route_extension(key, value):
     pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
     if key == "owner_gauge":
         return pair(value) and optional_pct(value[0]) and optional_number(value[1])
-    if key in ("current", "owner_waits", "closed"):
+    if key in ("current", "closed"):
         return type(value) is bool
     if key == "worker_context_index":
         return type(value) is int and value >= 0
@@ -56,8 +56,10 @@ def route_extension(key, value):
                     for row in value["lines"])))
     if key == "worker_contexts":
         return isinstance(value, (list, tuple)) and all(
-            isinstance(row, dict) and set(row) == {"stage", "harness", "model", "context", "window"}
+            isinstance(row, dict) and set(row) - {"attempt"} == {"stage", "harness", "model", "context", "window"}
             and isinstance(row["stage"], str)
+            # The attempt Fleet chose for the stage (a recorded id, or none).
+            and (row.get("attempt") is None or isinstance(row["attempt"], str))
             and (row["harness"] is None or isinstance(row["harness"], str))
             and (row["model"] is None or pair(row["model"]) and all(
                 isinstance(item, str) for item in row["model"]))
@@ -68,7 +70,7 @@ def route_extension(key, value):
         # with what that tool acts on, since when, and the call it just finished when reported.
         optional_text = lambda item: item is None or isinstance(item, str)
         activity = {"target": str, "tool_age": str, "after_tool": str,
-                    "tool_since": (int, float), "idle_tool": bool}
+                    "tool_since": (int, float), "idle_tool": bool, "worker": bool}
         return (isinstance(value, dict)
                 and {"harness", "model", "effort", "context", "window", "tokens",
                      "tool", "agents"} <= set(value)
@@ -200,7 +202,7 @@ def conform(live, samples, path, problems):
                     problems.append(f"{path}.{key}: expected optional finite completion timestamp")
                 continue
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
-                                              "worker_context_index", "owner_waits", "visibility", "doer",
+                                              "worker_context_index", "visibility", "doer",
                                               "closed"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")

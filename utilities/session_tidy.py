@@ -3162,6 +3162,25 @@ def is_task_notification(prompt_text: str) -> bool:
     return runtime_turn_source(prompt_text) == "notification"
 
 
+def _bound_delivery_source(prompt_text: str, sid: str) -> str:
+    """``runtime`` when the whole prompt is a Hearting delivery stored for this exact session.
+
+    A Codex native-queue item arrives as a user message ending in its receipt marker; the
+    marker must bind to that delivery's stored identity (the same proof its ACK uses) and
+    the rest must be the text Hearting sent, like ``runtime_turn_source``: a person who
+    pastes a notice with words of their own is still the person.
+    """
+    if not isinstance(prompt_text, str) or "HEARTING_RECEIPT_V1" not in prompt_text or not sid:
+        return ""
+    try:
+        from dispatch_contract import dispatch_state_roots, resolve_agent_home
+        import dispatch_recipient_receipt as receipt
+        roots = list(dict.fromkeys(dispatch_state_roots(resolve_agent_home())))
+        return "runtime" if receipt.bound_delivery_ids(prompt_text, sid, roots) else ""
+    except Exception:  # noqa: BLE001 - unproven stays the person's prompt
+        return ""
+
+
 def _current_request_origin(prompt_text: str, harness: str, sid: str) -> Optional[dict]:
     """Use the common transfer reader on this prompt only; never search nearby receipts."""
     if not prompt_text:
@@ -3480,6 +3499,12 @@ def run_hook(*args, **kwargs) -> str:
     try:
         result = _run_hook(*args, _closed=closed, **kwargs)
         if len(args) >= 3 and args[1] == "start" and kwargs.get("source") == "resume":
+            # Only the reopening itself takes over this session's running routes
+            # (before the notice filter, once per resume generation); the steward's
+            # periodic `register` pass does not.
+            with contextlib.suppress(Exception):
+                import session_route_resume
+                session_route_resume.reopened(args[0], args[2], env=kwargs.get("env"))
             with contextlib.suppress(Exception):
                 import session_resume
                 session_resume.register(args[0], args[2], source="resume", env=kwargs.get("env"))
@@ -3520,13 +3545,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # applies its worker/attachment checks before selecting a terminal.
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if is_worker(env) or harness not in HARNESSES or not sid or event not in ("start", "prompt", "compact", "runtime-status"):
         return ""
     if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness == "claude":
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if event == "runtime-status":
         if harness == "opencode":
             observed = False
@@ -3655,6 +3680,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             sequence = bump_prompt_seq(seat, harness, sid, now)
             runtime_source = runtime_turn_source(prompt_text)
             request_origin = None if runtime_source else _current_request_origin(prompt_text, harness, sid)
+            if not runtime_source and not request_origin:
+                runtime_source = _bound_delivery_source(prompt_text, sid)
             self_request = matching_tidy_claim(seat, harness, sid, prompt_text, sequence)
             notification = bool(runtime_source or request_origin or self_request)
             if runtime_source:

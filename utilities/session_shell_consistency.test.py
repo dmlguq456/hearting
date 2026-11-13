@@ -219,27 +219,32 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const question=['question','focus','draft','restored'].includes(state);
  const args={width,height,side,model,native:{model:'fixture',effort:''},focused:['focus','draft'].includes(state),
    questions:()=>question?[[{text:'Choose the destination'}],[{text:'1 Current project'}],[{text:state==='draft'?'› My draft':'Ctrl+] answer'}]]:[]};
- const rows=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ const all=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ // Spec rule 29: the top border names the harness (Fleet's session-row head); every other row is the same.
+ all.forEach((rows,i)=>assert(rows[0].includes(['claude','codex','opencode'][i]),state+' top border names its harness'));
+ const rows=all.map(r=>r.slice(1));
  assert.deepEqual(rows[1],rows[0],state+' codex');assert.deepEqual(rows[2],rows[0],state+' opencode');
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
  if(question){assert(text.includes('─ Choose the destination ')&&text.includes('│ │ 1 Current project'),state+' question box title and inner padding');}
- if(state!=='start')assert(text.includes('route 1')&&text.includes('Current task'),state+' route row missing');
- else assert(!text.includes('route'),state+' a known-empty route list draws no box');
+ // Spec E9 rule 45: beside the native area the count leads its upper-case word.
+ if(state!=='start')assert(text.includes(side?'1 ROUTE':'route 1')&&text.includes('Current task'),state+' route row missing');
+ else assert(!/route/i.test(text),state+' a known-empty route list draws no box');
 }
 '''
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_opencode_settings_offer_the_same_width_and_threshold_as_the_others(self):
+    def test_opencode_settings_offer_the_same_width_as_the_others(self):
+        # Spec rule 49 (d): the fold judgment is one constant, so no harness offers a `threshold`.
         script = r"""
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
 assert.equal(v.nativePanelHit,undefined);assert.equal(v.nativeSidebarColumns,undefined);
 const text=harness=>v.render({width:40,height:21,side:true,harness,model:{labels:{layout:'Layout',width:'Width',threshold:'Threshold'}},
   settings:{value:{...v.defaults},index:0},questions:()=>[]}).rows.flat().map(p=>p.text).join('');
-const opencode=text('opencode');assert(opencode.includes('Width')&&opencode.includes('Threshold'));
+const opencode=text('opencode');assert(opencode.includes('Width')&&!opencode.includes('Threshold'));
 assert(!/fixed 42/.test(opencode));assert.equal(opencode,text('claude'));assert.equal(opencode,text('codex'));
 """
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],

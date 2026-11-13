@@ -86,7 +86,8 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertIn("codex", text["overview"])
         self.assertIn("opencode", text["overview"])
         self.assertIn("answer needed", text["overview"])
-        self.assertIn("plan ✓ › execute ●", text["overview"])
+        # Spec E9 rule 24: a staged route reads its kind and place (`staged 2/4 execute ●`).
+        self.assertRegex(text["overview"], r"staged \d+/\d+ execute ●")
         self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
         self.assertIn("1 link", text["session"])

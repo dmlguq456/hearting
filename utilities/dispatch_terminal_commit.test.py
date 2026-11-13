@@ -3139,7 +3139,7 @@ class ProducerFinalizeRefusalHoldTest(PRODUCER_FIXTURE.ProducerTestBase):
         row = self._join_row(metadata)
         settlement_calls = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "producer-finalize-pending"}
@@ -3196,7 +3196,7 @@ class ProducerFinalizeRefusalHoldTest(PRODUCER_FIXTURE.ProducerTestBase):
         settlement_calls = []
         notices = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "should-not-be-called"}
@@ -3317,7 +3317,7 @@ class ProducerFinalizeForkSettlementTest(unittest.TestCase):
                        raw=raw, metadata=meta)
         settlement_calls = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "should-not-be-called"}

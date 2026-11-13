@@ -1778,8 +1778,7 @@ class FallbackTest(unittest.TestCase):
     self.assertEqual(result.returncode,0,result.stdout+result.stderr)
     self.assertIn("continuation_followup="+guidance,result.stdout)
    receipt={"children":[{"attempt_id":"att-review-fail","required_action":"inspect-done-failure"}]}
-   for surface in ("codex","opencode","claude"):
-    self.assertIn(guidance,join.completion_followup_text(receipt,jobs=str(self.jobs),surface=surface))
+   self.assertIn(guidance,join.completion_followup_text(receipt,jobs=str(self.jobs)))
    self.assertTrue(worker.correction_continuation_eligible(route,nodes["execute"],producer,self.jobs,parent))
    calls=[]
    def wrapper(_args,argv,**_policy):
@@ -1837,8 +1836,7 @@ class FallbackTest(unittest.TestCase):
     self.assertEqual(result.returncode,0,result.stdout+result.stderr)
     self.assertIn("continuation_followup="+guidance,result.stdout)
    receipt={"children":[{"attempt_id":"att-execute-blocked","required_action":"inspect-done-failure"}]}
-   for surface in ("codex","opencode","claude"):
-    self.assertIn(guidance,join.completion_followup_text(receipt,jobs=str(self.jobs),surface=surface))
+   self.assertIn(guidance,join.completion_followup_text(receipt,jobs=str(self.jobs)))
 
  def check_blocked_execute_handoff(self,blocker):
   import dispatch_contract as dc

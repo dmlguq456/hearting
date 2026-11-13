@@ -1365,11 +1365,12 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         encoded = GATEWAY.canonical(start)
         self.assertIn(
-            "harvest --jobs "
+            "/utilities/dispatch-harvest.py --jobs "
             + str(Path(__file__).resolve())
             + " --attempt-id att-batch-open --status open --mark-done",
             encoded,
         )
+        self.assertNotIn("/adapters/", encoded)
 
     def test_missing_or_unsafe_job_registry_never_reaches_upstream(self) -> None:
         before = self.server.counts()

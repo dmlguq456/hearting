@@ -2710,8 +2710,7 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
         self.assertTrue(self.sent[0]["message"].startswith("AGENT_HARNESS_COMPLETION_V1\n"))
         record = self.pending.read(self.root, SESSION, failure[1])
         followup = self.module.completion_followup_text(
-            failure[2], jobs=str(self.jobs),
-            surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"))
+            failure[2], jobs=str(self.jobs))
         self.assertEqual(self.sent[0]["message"], self.module.codex_queue_delivery.native_completion_body(
             SESSION, [record], failure[2], followup))
         self.assertEqual(results[0]["status"], "accepted")
@@ -2763,8 +2762,7 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
             expected_id = self.module.codex_queue_delivery.native_client_message_id(
                 storage, [records[0]["delivery_id"]])
             followup = self.module.completion_followup_text(
-                receipt, jobs=str(self.jobs),
-                surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"))
+                receipt, jobs=str(self.jobs))
             expected_body = self.module.codex_queue_delivery.native_completion_body(
                 storage, records, receipt, followup)
             self.assertEqual(result["client_user_message_id"], expected_id)

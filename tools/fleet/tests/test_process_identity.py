@@ -540,6 +540,49 @@ setInterval(() => {}, 1000);
                     process.terminate()
                     process.communicate(timeout=5)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the TUI identity bridge")
+    def test_tui_teardown_clears_the_selected_sessions_wait_only(self):
+        # The TUI's exit is its session's end (Claude SessionEnd, utilities/codex_tui_exit.py).
+        from fleet import interaction
+        source = ROOT / "adapters/opencode/tui/hearting-tui-identity.ts"
+        script = r'''import { pathToFileURL } from "node:url";
+const plugin = await import(pathToFileURL(process.env.HEARTING_PLUGIN));
+const sid = "ses_nativeBridge123";
+let dispose;
+const events = { on: () => () => {} };
+const lifecycle = { onDispose: (fn) => { dispose = fn; } };
+const api = process.env.HEARTING_API === "v2"
+  ? { ui: { router: { current: () => ({type: "session", sessionID: sid}) } },
+      event: events, lifecycle }
+  : { route: { current: {name: "session", params: {sessionID: sid}} },
+      event: events, lifecycle, slots: {register: () => {}} };
+if (process.env.HEARTING_API === "v2") plugin.default.setup(api);
+else await plugin.default.tui(api);
+dispose();
+'''
+        quiet = ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+                 "OPENCODE_DISPATCH_SLUG", "FLEET_TITLE_REFRESH", "MEM_DISTILL")
+        with tempfile.TemporaryDirectory(prefix="opencode-identity-exit-") as temporary:
+            root = Path(temporary)
+            for api in ("v1", "v2"):
+                entry = root / (api + ".mjs")
+                shutil.copyfile(source, entry)
+                state, waits = root / ("state-" + api), root / ("waits-" + api)
+                state.mkdir()
+                with unittest.mock.patch.dict(os.environ, {"FLEET_INTERACTION_STATE_DIR": str(waits)}):
+                    for sid in ("ses_nativeBridge123", "ses_otherPane456"):
+                        self.assertTrue(interaction.set_wait(sid, "opencode", "decision",
+                                                             "opencode-question"))
+                env = {key: value for key, value in os.environ.items() if key not in quiet}
+                done = subprocess.run(
+                    [shutil.which("node"), "--input-type=module", "-e", script],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+                    env={**env, "XDG_STATE_HOME": str(state), "FLEET_INTERACTION_STATE_DIR": str(waits),
+                         "AGENT_HOME": str(ROOT), "HEARTING_PLUGIN": str(entry), "HEARTING_API": api})
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertFalse((waits / "opencode" / "ses_nativeBridge123.json").exists(), api)
+                self.assertTrue((waits / "opencode" / "ses_otherPane456.json").exists(), api)
+
 
 class StartedOnIsNotProofTest(unittest.TestCase):
     def test_a_start_time_session_argument_is_reported_but_never_proof(self):

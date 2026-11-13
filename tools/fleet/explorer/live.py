@@ -16,7 +16,7 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import current_attempt_rank, exec_child_is_wait
+from ..model import current_attempt_rank
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -91,15 +91,18 @@ def _clock(epoch):
         return None
 
 
-def _model_pair(model):
-    """``[text, colour key]`` for a runtime model name, or None when it is unknown."""
+def _model_pair(model, harness=None):
+    """``[text, colour key]`` for a runtime model name, or None when it is unknown.
+
+    ``harness`` is the runtime running it: a model without a family colour wears that
+    harness's hue (``render._model_key``)."""
     name = _text(model)
     if name is None:
         return None
     try:
         from .. import render
         text = render._clean_model(render._dispatch_display_model(name)) or name
-        key = render._model_key(name)
+        key = render._model_key(name, harness=_text(harness))
     except Exception:
         text = name.split(" (", 1)[0]
         key = "fam_other"
@@ -118,7 +121,7 @@ def _session_model_effort(session, state):
     dead row has no live telemetry (bare harness); the runtime's own default effort is ``default``."""
     if state in ("stale", "dead"):
         return None, None
-    model = _model_pair(_get(session, "model", "m"))
+    model = _model_pair(_get(session, "model", "m"), _get(session, "harness", "h"))
     effort = _effort(_get(session, "effort", "e"))
     if effort is None and model is not None and _get(session, "effort_default"):
         effort = "default"
@@ -527,14 +530,14 @@ def _stage_state(node):
     return _NODE_STAGE.get(node.get("state"), "todo")
 
 
-def _stage_model(model):
+def _stage_model(model, harness=None):
     """A stage's model as the route record names it (``opus`` stays ``opus``): ``[name, colour key]``."""
     name = _text(model)
     if name is None:
         return None
     try:
         from .. import render
-        return [name, render._model_key(name)]
+        return [name, render._model_key(name, harness=_text(harness))]
     except Exception:
         return [name, "fam_other"]
 
@@ -544,7 +547,7 @@ def _stage_record(node):
     stage = {
         "name": _text(node.get("id")) or "·", "st": _stage_state(node),
         "el": _dur(node.get("elapsed_min")), "h": harness,
-        "m": _stage_model(node.get("model")), "e": _effort(node.get("effort")),
+        "m": _stage_model(node.get("model"), harness), "e": _effort(node.get("effort")),
         "gate": bool(node.get("gate_passed")),
     }
     rounds = _num(node.get("route_attempt_round")) or _num(node.get("attempt_round"))
@@ -607,8 +610,8 @@ def _worker_segments(node, resources, state_text=None, owner=None):
         return None
     # The session shell reads these segments too; Fleet draws them in its MODEL cell words.
     segs = [[harness, "hb_" + harness]]
-    pair = _model_pair(node.get("model")) or (
-        _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+    pair = _model_pair(node.get("model"), harness) or (
+        _model_pair(_get(owner, "resolved_model", "model"), _get(owner, "harness")) if owner is not None else None)
     effort = _effort(node.get("effort")) or (_effort(_get(owner, "effort")) if owner is not None else None)
     if pair:
         segs += [[" (", _SEG_DIM], [pair[0], pair[1]]]
@@ -927,7 +930,7 @@ def _frame_leg_displays(jobs):
         rank = _frame_leg_job_rank(job)
         if key not in found or rank > found[key][0]:
             found[key] = (rank, {"harness": _text(_get(job, "harness")),
-                                 "model": _model_pair(_get(job, "resolved_model", "model")),
+                                 "model": _model_pair(_get(job, "resolved_model", "model"), _get(job, "harness")),
                                  "effort": _effort(_get(job, "effort")),
                                  "rank": rank})
     return {key: value for key, (_rank, value) in found.items()}
@@ -964,13 +967,16 @@ def _route_doer(worker, owner, dead, now=None):
     """Who does the route's work now, for its one-line row: harness, model, effort, context
     (percent, window, or the exact token count when no window is known), the open tool and
     the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
-    attempt (a one-shot route's owner is its worker). A dead route keeps the harness only."""
+    attempt (a one-shot route's owner is its worker). With nothing of a dead or unanswering
+    route running, the attempt's recorded harness, model and effort remain (spec rule 27);
+    its context, tool and sub-agents are no longer read."""
     job = worker if worker is not None else owner
     if job is None:
         return None
     harness = _text(_get(job, "harness"))
     if dead:
-        return {"harness": harness, "model": None, "effort": None, "context": None,
+        return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
+                "effort": _effort(_get(job, "effort")), "context": None,
                 "window": None, "tokens": None, "tool": None, "agents": 0}
     pct, window = _context_gauge(job)
     tool = _get(job, "exec_tool")
@@ -978,8 +984,10 @@ def _route_doer(worker, owner, dead, now=None):
     live = _get(job, "liveness") == "working"
     agents = sum(1 for item in (_get(job, "subagents") or ())
                  if _get(item, "active") is True)
-    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
+            # Spec E9 rule 24: a stage worker (not the owner) does the work now.
+            **({"worker": True} if worker is not None and worker is not owner else {}),
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
     doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
@@ -1116,11 +1124,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         worker = _worker_segments(worker_node, run_children, state_text,
                                   owner if _runs_node(owner, worker_node) else None)
         dead = state in ("dead", "stale")
-        owner_model = None if dead else (
-            _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+        # Spec rule 27: the owner's harness, model and effort are what its attempt
+        # recorded when the route started; they stay when nothing of it runs now.
+        owner_model = (_model_pair(_get(owner, "resolved_model", "model"), _get(owner, "harness"))
+                       if owner is not None else None)
         owner_harness = _text(_get(owner, "harness")) if owner is not None else None
-        owner_effort = None if dead else (
-            _effort(_get(owner, "effort")) if owner is not None else None)
+        owner_effort = _effort(_get(owner, "effort")) if owner is not None else None
         worktree = None
         if cwd and ("-wt" in cwd or "/.worktrees/" in cwd):
             worktree = os.path.basename(cwd.rstrip("/")) or None
@@ -1180,8 +1189,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 worker_context_index = len(worker_contexts)
             context_jobs.append(job)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
-                                    "model": _model_pair(_get(job, "resolved_model", "model")),
-                                    "context": pct, "window": window})
+                                    "model": _model_pair(_get(job, "resolved_model", "model"), _get(job, "harness")),
+                                    "context": pct, "window": window, "attempt": attempt})
         resume = None
         if state == "dead":
             resume = next((n.get("id") for n in view_nodes if _stage_state(n) == "failed"), None) or \
@@ -1208,14 +1217,6 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                        or owner_live in ("working", "idle", "blocked")
                        and total and done != total and (active is not None or not failed))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
-        # 3cffaf: while a live worker holds the stage, the route row shows the owner's own
-        # state. An owner that is idle, or whose running call is only a wait, has delegated
-        # and is waiting; one doing its own work still reads as running.
-        owner_self = owner_live if owner is not None else owner_state
-        owner_raw = owner if owner is not None else (session_index.get(owner_tag) or {}).get("session")
-        owner_waits = bool(running and (worker_contexts or run_children) and (
-            owner_self == "idle"
-            or owner_self == "working" and exec_child_is_wait(_get(owner_raw, "exec_child"))))
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
             "outcome": _text(_get(result, "result", "status")),
@@ -1234,7 +1235,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "owner_context": ([owner_tokens, None] if owner_tokens is not None else None),
             "owner_gauge": list(owner_gauge),
             "worker_contexts": worker_contexts, "subworker": None,
-            "current": current, "owner_waits": owner_waits,
+            "current": current,
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
@@ -1283,7 +1284,7 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
             line = [[short_id + "  ", "dim"]]
             harness = _text(node.get("harness"))
             if harness:
-                model = _stage_model(node.get("model"))
+                model = _stage_model(node.get("model"), harness)
                 effort = _effort(node.get("effort"))
                 line += _model_segments(harness, model or None, effort if model else None)
             lines.append(line)
@@ -1417,6 +1418,10 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
     """
     documents = _get(snapshot, "project_status")
     documents = documents if isinstance(documents, Mapping) else {}
+    waits = _get(snapshot, "answer_waits")
+    raw_waits = _get(waits, "items", default=()) if isinstance(waits, Mapping) else ()
+    raw_by_id = {str(item.get("id")): item for item in raw_waits
+                 if isinstance(item, Mapping) and item.get("id") and not item.get("older")}
     cwds = {}
     for row in session_rows:
         cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
@@ -1440,6 +1445,22 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        question_lines = []
+        for question in questions:
+            if question.get("project") != name or question.get("older"):
+                continue
+            source = raw_by_id.get(str(question.get("id")))
+            value = source.get("question") if isinstance(source, Mapping) else None
+            if not isinstance(value, str) and isinstance(source, Mapping):
+                detail = source.get("detail")
+                listed = detail.get("questions") if isinstance(detail, Mapping) else None
+                value = (listed[0].get("question") if isinstance(listed, (list, tuple))
+                         and listed and isinstance(listed[0], Mapping) else None)
+            first = str(value or "").splitlines()[0:1]
+            if first and first[0].strip():
+                question_lines.append(first[0].strip()[:100])
+        if question_lines:
+            status["question_lines"] = question_lines[:3]
         if open_routes:
             by_state = route_state_counts(route for route in routes if route["repo"] == name)
             status.update({"routes_running": by_state["running"],
@@ -3274,14 +3295,15 @@ def route_marker_state(route):
     """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
     ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
 
-    A route whose worker still runs reads as working; an owner that only waits on its
-    worker reads as waiting, the worker's own line being the one that spins."""
-    if route.get("owner_waits"):
-        return "idle"
+    Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
+    working. A route its reader found with nothing running reads as no response and never
+    spins, as the session tree's mark already reads it."""
+    state = str(route.get("state") or "")
+    if state == "stale":
+        return "stale"
     if route.get("activity") == "running":
         return "working"
-    state = str(route.get("state") or "")
-    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+    return state if state in ("working", "blocked", "dead", "done") else "idle"
 
 
 def route_state_counts(routes):
@@ -3438,13 +3460,18 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                 {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
                  **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
                     and item["model"] and item["model"][0] else {}),
-                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {})}
+                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
+                 # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
+                 **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
                 for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
             if type(route.get("result_at")) in (int, float):
                 row["result_at"] = route["result_at"]
             row["worker"] = _worker_pieces(route.get("worker"))
             row["owner"] = _owner_text(route)
+            pair = route.get("model")
+            if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+                row["owner_model"] = pair[0][:64]
             visibility = route.get("visibility")
             if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
                 row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],

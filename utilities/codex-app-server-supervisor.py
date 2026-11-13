@@ -94,32 +94,6 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_JOIN_STATES = frozenset({"ready", "timeout"})
 
 
-# Deliberately UNRESOLVED, for the same reason as the identical helper in
-# claude-session-supervisor.py: resolving here would pin the receipt to the
-# versioned release directory behind the managed `current` pointer, so a
-# release rotation mid-flight would leave every delivered command denied.
-def harvest_surface(launch_file: str) -> str:
-    """Shared harvest CLI path as seen from THIS supervisor's launch path.
-
-    Absolute, not repository-relative. The park guard resolves a relative
-    `adapters/codex/bin/preflight.sh` against the *owner's* cwd, so the
-    relative form is admitted only when that cwd happens to be a harness root
-    and is denied for every ordinary project worktree -- the same
-    producer<->guard vocabulary split that deadlocked att-30344fd4 (plan
-    SS3.4 D1). Surfaced by the D2a precheck.
-    """
-
-    return shlex.quote(
-        str(
-            Path(launch_file).absolute().parents[1]
-            / "adapters" / "codex" / "bin" / "preflight.sh"
-        )
-    )
-
-
-SHARED_HARVEST_SURFACE = harvest_surface(__file__)
-
-
 SupervisorError = DECISIONS.SupervisorError
 
 
@@ -566,7 +540,7 @@ def completion_prompt(
             if outbox is not None
             else ""
         )
-        + completion_followup_text(receipt, jobs=jobs, surface=shlex.split(SHARED_HARVEST_SURFACE)[0])
+        + completion_followup_text(receipt, jobs=jobs)
         + "\nEmit the exact final three-line handoff when no owned registered child remains open."
         + (f"\n{notice}" if notice else "")
     )

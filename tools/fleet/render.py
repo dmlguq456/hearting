@@ -1493,7 +1493,7 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     # indent / no far-right flush).
     l2 = [(" " * _SESSION_DETAIL_COL, None),
           (_pad(fmt_min(s.elapsed_min), 4 + _HW - _SESSION_DETAIL_COL), "dim")]
-    l2 += _model_cell(s.model, s.effort, _MW, dim=dim_tel)
+    l2 += _model_cell(s.model, s.effort, _MW, dim=dim_tel, harness=s.harness)
     # Same cell as the wide row (capability tag, route chain, spec breadcrumb): this card
     # used to call the bare projection text and showed `-` for inline work the wide row named.
     l2 = _pad_to_column(l2, _session_routing_column("narrow"))
@@ -1576,7 +1576,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         lead = _RAIL_COL + 3
         eff = j.effort or parent_effort or None
         l2 = [(" " * lead, None), (_pad(fmt_min(j.elapsed_min), 4 + _HW - lead), "dim")]
-        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2 = _pad_to_column(l2, _session_routing_column("narrow"))
         l2 += _opts_segs(j)[0]
     elif afterglow_j:
@@ -1586,13 +1586,13 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         # elapsed cell, so no depth needs it repeated (F-64a).
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2.append(("    ", None))
         l2 += _stage_zone_segs([("done %s" % _LIVE_GLYPH["done"], "dim")])
     else:
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2.append(("    ", None))
         opt_segs, optw = _opts_segs(j)
         l2 += opt_segs

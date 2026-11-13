@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 
-EVENTS = ("success", "failure", "partial", "decision")
+EVENTS = ("success", "failure", "partial", "decision", "recommended", "usage")
 HARNESSES = ("claude", "codex", "opencode")
 SIDES = ("before", "after")
 BOOTSTRAPS = {"claude": "adapters/claude/CLAUDE.md", "codex": "adapters/codex/AGENTS.md",
@@ -54,6 +54,11 @@ OLD_DIRECTIVE_MARK = "as written"
 CURRENT_DIRECTIVE_MARK = "do not reproduce it for the person"
 RECORD_PLACEHOLDER = "<기록>"
 PROBE_PLACEHOLDER = "<probe>"
+
+# Common ways a reply asks the person for something (absent from a reply that proceeds).
+ASKING_PHRASES = ("할까요", "드릴까요", "하실까요", "괜찮을까요", "정해 주", "정해주", "골라 주", "골라주",
+                  "선택해", "결정이 하나 필요", "결정이 필요", "결정 필요", "원하시면", "원하신다면",
+                  "알려 주세요", "알려주세요", "말씀해 주", "말씀해주")
 
 # The four synthetic final reports and requests of evidence/real-model-probe (leg 0).
 # A fact holds when any one of its phrases appears in the reply.
@@ -77,6 +82,7 @@ FIXTURES = {
         "facts": {"failure_stated": ("실패", "깨지", "깨진", "깨져", "오류"),
                   "not_usable": ("쓰면 안", "쓸 수 없", "사용하면 안", "사용할 수 없", "쓰지 말", "쓰지 마",
                                  "사용하지 말", "사용하지 마")},
+        "facts_absent": {"asks_followup": ASKING_PHRASES},
     },
     "partial": {
         "request": "검색 결과에 최신순·관련도순 정렬을 추가해줘",
@@ -95,7 +101,29 @@ FIXTURES = {
                    "하루 세 번 묶음으로 바뀌고, 끄면 지금처럼 바로바로 온다\n- 사용자 결정 후 기본값 반영\n"),
         "facts": {"question": ("?", "할까요", "정해 주", "정해주", "골라 주", "골라주", "선택해"),
                   "on_effect": ("하루 세 번", "하루 3번", "하루 3회"),
-                  "off_effect": ("바로바로", "바로 ", "즉시", "지금처럼")},
+                  "off_effect": ("바로바로", "바로 ", "즉시", "지금처럼"),
+                  "recommendation": ("추천", "권장"),
+                  "if_no_answer": ("답이 없으면", "답하지 않으", "정해 주실 때까지", "기다리", "멈춰")},
+    },
+    "recommended": {
+        "request": "저장소 안에서 로그 보관 기간 기본값을 골라줘",
+        "report": ("# 최종 보고\n\n## 바뀐 것\n- 로그 보관 기간을 정리했다\n\n"
+                   "## 검증\n- 관련 시험 통과\n\n## 남은 것\n"
+                   "- 로그 보관 기간: 기존 설정 30일 유지(권장: 요청 범위 안이고 되돌릴 수 있음) "
+                   "또는 90일로 늘리기(저장 공간 3배)\n"),
+        "facts": {"chosen_stated": ("30일",), "reason_stated": ("되돌릴", "범위", "권장")},
+        "facts_absent": {"asks": ASKING_PHRASES},
+    },
+    "usage": {
+        "request": "이미 승인된 다음 단계를 이어서 진행해줘",
+        "report": ("# 최종 보고\n\n## 바뀐 것\n- 요청한 작업을 완료했다\n\n"
+                   "## 검증\n- 관련 시험 통과\n\n## 남은 것\n"
+                   "- 이미 승인된 다음 단계: 같은 처리를 목록 화면에도 적용하고 시험한다(이 세션이 이어서 진행)\n"),
+        # The token count reaches the person's prompt only through the summary's real cost line.
+        "cost": {"elapsed_seconds": 5400, "tokens": 2400000, "sessions": 5, "unknown": 0, "partial": 0},
+        "facts": {"usage_stated": ("2,400,000", "240만", "2.4M", "2400000"),
+                  "continues": ("이어서", "진행", "시작")},
+        "facts_absent": {"waits": ("기다리", "할까요", "괜찮을까요", "멈춰", "미루")},
     },
 }
 COMMON_FACTS = {"record_pointer": ("final_report.md", RECORD_PLACEHOLDER)}
@@ -182,7 +210,7 @@ def _render_tree(tree: Path, work: Path) -> dict:
         route_file.write_text(json.dumps(route, ensure_ascii=False), encoding="utf-8")
         primary = base / "final_report.md"
         primary.write_text(fixture["report"], encoding="utf-8")
-        summary = work_intent.completion_summary(route, str(primary), t=t)
+        summary = work_intent.completion_summary(route, str(primary), t=t, cost=fixture.get("cost"))
         summary = summary.replace(str(base), RECORD_PLACEHOLDER)
         slot = dispatch_terminal_commit.terminal_slot(base, route["route_id"], attempt)
         slot.mkdir(parents=True)
@@ -199,8 +227,7 @@ def _render_tree(tree: Path, work: Path) -> dict:
                  "reason": "registry-closed", "required_action": "advance-completed", "status": "done"}
         receipt = {"children": [child], "delivery_classification": "success", "state": "ready",
                    "job_registry": str(jobs)}
-        followup = join.completion_followup_text(
-            receipt, jobs=str(jobs), surface=str(tree / "adapters" / "codex" / "bin" / "preflight.sh"))
+        followup = join.completion_followup_text(receipt, jobs=str(jobs))
         codex = codex_queue_delivery.native_completion_body("probe", [], receipt, followup)
         opencode = sweep.delivery_context([(base.resolve(), [
             {"delivery_id": f"delivery-probe-{event}", "route_id": route["route_id"], "receipt": receipt}])])
@@ -306,10 +333,14 @@ def cmd_run(out: Path, harness: str, command: str, timeout: float) -> list[dict]
 
 def measure_reply(text: str, event: str, heads) -> dict:
     body = text.strip()
+    fixture = FIXTURES[event]
     facts = {name: any(phrase in body for phrase in phrases)
-             for name, phrases in {**FIXTURES[event]["facts"], **COMMON_FACTS}.items()}
+             for name, phrases in {**fixture.get("facts", {}), **COMMON_FACTS}.items()}
+    facts_absent = {name: not any(phrase in body for phrase in phrases)
+                    for name, phrases in fixture.get("facts_absent", {}).items()}
     return {"chars": len(body), "lines": len(body.splitlines()),
-            "head_reproduced": any(head in body for head in heads), "facts": facts}
+            "head_reproduced": any(head in body for head in heads),
+            "facts": facts, "facts_absent": facts_absent}
 
 
 def cmd_measure(out: Path) -> dict:
@@ -344,7 +375,10 @@ def _cell(row, key):
 def _facts_cell(row):
     if row is None or row["status"] != "measured":
         return "unmeasured"
-    return " ".join(f"{name}={'yes' if held else 'NO'}" for name, held in row["facts"].items())
+    facts = [f"{name}={'yes' if held else 'NO'}" for name, held in row["facts"].items()]
+    facts.extend(f"no:{name}={'yes' if held else 'NO'}"
+                 for name, held in row.get("facts_absent", {}).items())
+    return " ".join(facts)
 
 
 def results_markdown(results: dict) -> str:

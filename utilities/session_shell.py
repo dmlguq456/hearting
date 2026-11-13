@@ -44,14 +44,16 @@ def _private_json(path: Path, limit: int):
 
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
-                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time"}
+                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time",
+                    "rule_motion": "on"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
               "shade": ("none", "light", "medium")}
 # What a folded route row carries besides its title, harness and context:
-# its elapsed time or its model (spec rule 7). Same per-key fallback.
-CHOICES = {**APPEARANCE, "route_line": ("time", "model")}
+# its elapsed time or its model (spec rule 7). Whether the rule under the head's metadata
+# moves with the session's state (spec E9 rule 47 (e)). Same per-key fallback.
+CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("on", "off")}
 
 
 def _appearance(value):
@@ -584,8 +586,11 @@ def _lifecycle_owner(harness: str, sid: str, env: dict):
     return current, env
 
 
-def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
-    """Silent native hook report, separate from all prompt classification."""
+def lifecycle(harness: str, event: str, sid: str, *, env=None, source: str = "") -> None:
+    """Silent native hook report, separate from all prompt classification.
+
+    A start carries the native's own start reason (``clear`` keeps the process and its
+    model, spec E9 rule 34 (f))."""
     env = os.environ if env is None else env
     native_model = env.get("HEARTING_SHELL_NATIVE_MODEL")
     if harness not in HARNESSES or not _SID.fullmatch(sid or ""):
@@ -610,6 +615,8 @@ def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
            "token": token, "pid": me["pid"], "start": me["start"], "seq": time.monotonic_ns() // 1000}
     if isinstance(native_model, str) and 0 < len(native_model) <= 128 and all(ord(c) >= 32 and ord(c) != 127 for c in native_model):
         req["native_model"] = native_model
+    if event == "start" and source in {"startup", "resume", "clear", "compact"}:
+        req["source"] = source
     try:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(0.5)
@@ -752,15 +759,19 @@ def _panel_common_rows(panel, columns):
         first = " │ ".join(part for part in (head, selected, context) if part)
         rows = [first, git] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context, git]
     else:
-        rows = [head, git, selected, context]
+        # Beside the native area the Git row is painted without the worktree count (spec E9
+        # rule 37 (a)): the row compared is the row painted.
+        side_git = text("git_side") if panel.get("git_side") is not None else git
+        rows = [head, side_git, selected, context]
     return [row for row in rows + [quota] if row]
 
 
 _SENT_CACHE: dict = {}
 
 
-def _sent_peer_messages(sid, limit=3):
-    """This session's own sent peer records (``to`` and ``summary``), newest last.
+def _sent_peer_messages(sid, limit=8):
+    """This session's own sent peer records (``to``, ``summary``, ``kind`` and the
+    delivery ``status``; a later record of the same message updates its status), newest last.
 
     One bounded tail read of the existing ledger shard this session writes,
     reparsed only when the file changes; nothing else is opened. The record
@@ -795,8 +806,17 @@ def _sent_peer_messages(sid, limit=3):
                 at = datetime.fromisoformat(record["ts"].replace("Z", "+00:00")).timestamp()
             except ValueError:
                 continue
+            delivery = record.get("delivery") if isinstance(record.get("delivery"), dict) else {}
+            status = delivery.get("status") if isinstance(delivery.get("status"), str) else None
+            message_id = record.get("message_id") if isinstance(record.get("message_id"), str) else None
+            earlier = next((row for row in rows if message_id and row.get("message_id") == message_id), None)
+            if earlier is not None:
+                earlier["status"] = status or earlier.get("status")
+                continue
             rows.append({"to": record.get("to") if isinstance(record.get("to"), dict) else {},
-                         "summary": record["summary"][:400], "at": at})
+                         "summary": record["summary"][:400], "at": at, "message_id": message_id,
+                         "kind": record.get("kind") if isinstance(record.get("kind"), str) else None,
+                         "status": status})
     except OSError:
         return [], [str(shard)]
     rows = rows[-limit:]
@@ -820,9 +840,17 @@ def _observe_session(observe, harness, sid, pid, start):
     return values, watched
 
 
+# The shared style keys the panel paints by name (state glyphs and frame, harness names,
+# the steward mark's two beats); the rest arrive already styled.
+PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
+                    "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
+                    "hb_claude", "hb_codex", "hb_opencode", "hb_other")
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
-                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
+                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
+                     upgrade_note="", native_model=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -831,13 +859,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     import questions
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
-    from fleet.session_line import line_segments
+    from fleet.session_line import line_segments, fresh_part
     from fleet.session_line import status_lines
     from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count
+    from fleet.session_work import observe as observe_work, open_count, recent_memory
     from fleet.session_panel import presentation
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
@@ -860,17 +888,41 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         values["mcp"] = mcp
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
+    # Fleet's steward mark, from the same role evidence Fleet's collector reads (markers and
+    # relations); no collection pass. A failed read shows no mark.
+    try:
+        from fleet.collectors import steward as steward_role
+        values["steward"] = bool(steward_role.role_flag(harness, sid, cwd=values.get("cwd")))
+    except Exception:
+        values["steward"] = False
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
                   state=state, route_label=_plain(route),
                   answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
     board = session_questions(harness, sid, view=view, retained=retained_questions)
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+    # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving
+    # rule's breath may use it (spec E9 rule 47); every other color stays a 256-color index.
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        colors = 1 << 24
     def styled(parts):
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
+        # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
+        # rest of the Git words where it shows no hue (mono, eight colors).
+        return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
+                 **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    work, work_paths = observe_work(values.get("cwd"))
+    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, two at most (the
+    # journal Fleet reads, read again only when it changed); their headlines ride the open-work
+    # query below.
+    memory_rows, memory_paths = recent_memory(values.get("cwd"))
+    work, work_paths = observe_work(values.get("cwd"),
+                                    tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
+    if memory_rows:
+        values["memory_recent"] = [{**row, "headline": work.headlines.get(str(row.get("headline_id")), "")}
+                                   for row in memory_rows]
+        values["memory_latest"] = values["memory_recent"][0]
     watched.extend(work_paths)
+    watched.extend(memory_paths)
     human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
                         received=peers, human=human_line,
@@ -909,36 +961,59 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # field: Claude's `notice` below is the native status row's segments.
     notice, notice_paths = session_tidy.waiting_notice_display(seat, harness, sid)
     panel["tidy_notice"] = _plain(notice, 400)
+    # A newer installed release this window has not switched to yet, or a switch that could
+    # not carry the scrollback: the lowest-priority line, never over another notice.
+    panel["tidy_upgrade"] = False
+    if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
+        panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
+        panel["tidy_upgrade"] = upgrade_note == "pending"
+    # An open route page has no notice slot: it shows the same words on its own page row.
+    panel["upgrade_waiting"] = ui_text("session_shell.upgrade_pending") if upgrade_note == "pending" else ""
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
-    for row in panel["routes"]:
+    def route_paint(row):
         paint = {}
         for name, key in (("glyph", "glyph_key"), ("harness", "harness_key"), ("model_text", "model_key"),
                           ("effort", "effort_key"), ("ctx", "ctx_key")):
             if row.get(name):
                 paint[name] = styled([(row[name], row.get(key) or "dim")])[0]
-        for name in ("gauge", "gauge5"):
+        for name in ("gauge", "gauge5", "gauge_row"):
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
-        row["paint"] = paint
+        return paint
+    for row in panel["routes"]:
+        row["paint"] = route_paint(row)
+        # Spec E9 rule 43: the owner apart from a worker that leads the row, and each live worker.
+        if isinstance(row.get("owner_paint"), dict):
+            row["owner_paint"] = route_paint(row["owner_paint"])
+        for worker in row.get("workers_live") or ():
+            worker["paint"] = route_paint(worker)
     # The repo's open work, as the earlier panel's tail row read it.
     panel["work"] = styled([("◌ ", "dim"), (str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
-    panel["messages"] = peer_message_rows(received, sent, assigned_tag)
+    panel["messages"] = peer_message_rows(received, sent, assigned_tag, limit=8)
     if harness == "claude":
         from fleet.session_panel import notice_line
-        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
+        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time(), upgrade_note=upgrade_note))
+        # A waiting-release line stands only for this host: the next one starts without it.
+        panel["notice_upgrade"] = upgrade_note == "pending" and not notice_line(
+            values, panel["routes"], board, display, time.time())
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
-                                   "g_spin", "g_work_off")}
+                       for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
+    # The model name the host reads off the native's own screen, painted by the rule route rows
+    # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
+    # panel keeps no family table of its own. Display only.
+    if isinstance(native_model, str) and 0 < len(native_model) <= 128 and native_model.isprintable():
+        from fleet.session_line import _model_key
+        panel["native_model_part"] = styled([(native_model, _model_key(native_model, harness=harness))])[0]
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
@@ -948,7 +1023,18 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
+    # Spec rule 26 and the 11-12 rule 6: the runtime's own turn record, read with the
+    # session above (its files are watched), for the host's own display of this session's
+    # state. Display only: it never stands for input readiness.
+    turn = values.get("native_turn")
+    turn_record = None
+    if harness == "claude" and native_pid:
+        # The record the host reads itself the moment its watched file changes.
+        from fleet.collectors import claude as claude_collector
+        turn_record = os.fspath(Path(claude_collector._home()) / "sessions" / f"{int(native_pid)}.json")
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
+            **({"native_turn": turn} if turn in ("idle", "working", "blocked") else {}),
+            **({"turn_record": turn_record} if turn_record else {}),
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
@@ -1142,12 +1228,11 @@ def _backend_operation(request: dict) -> dict:
             panel["status"] = []
             panel["summary"] = []
             panel["session"] = panel["brief"] = []
-            for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
+            for name in ("head", "repo", "git", "selected", "context", "quota", "jobs", "mcp"):
                 panel[name] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
                                for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r",
-                                           "g_spin", "g_work_off")}
+                               for key in PANEL_STYLE_KEYS}
             panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:
@@ -1186,7 +1271,9 @@ def _backend_operation(request: dict) -> dict:
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
-            answer_busy=request.get("answer_busy") is True)}
+            answer_busy=request.get("answer_busy") is True,
+            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "",
+            native_model=request.get("native_model"))}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":

@@ -32,7 +32,7 @@ class RepoPageTest(unittest.TestCase):
         self.other = str(vm.repos[1]["id"])
         own = dict(vm.repos[0], done="confirmed-result", done_result="success", age="1m",
                    status={"line": "status-from-doc", "next": "next-from-doc", "questions": 0})
-        sessions = tuple(dict(row, title="own-session", last_input="› 1m · human-line")
+        sessions = tuple(dict(row, title="own-session", last_input="› 1m · human-line", now="now-line")
                          for row in vm.sessions if row.get("repo_id", row.get("repo")) == self.ident)[:1]
         route = dict(vm.routes[0], id="repo-active", repo=self.ident, current=True,
                      state="working", title="active-route", outcome=None)
@@ -62,7 +62,7 @@ class RepoPageTest(unittest.TestCase):
         positions = [text.index("── " + name) for name in names]
         self.assertEqual(positions, sorted(positions))
         for value in ("status-from-doc", "doing-item", "waiting-item", "active-route",
-                      "confirmed-result", "closed-route", "small-work", "greet.py", "human-line"):
+                      "confirmed-result", "closed-route", "small-work", "greet.py", "now-line"):
             self.assertIn(value, text)
         for value in ("foreign-route-sentinel", "foreign-work-sentinel", "foreign-journal-sentinel",
                       "memory-save-sentinel", "failed-result-sentinel", "backlog-item"):
@@ -163,14 +163,17 @@ class RepoPageTest(unittest.TestCase):
         block = text.split("── OPEN ROUTES", 1)[1].split("── RECENT RESULTS", 1)[0]
         self.assertIn("paused-route", block)
 
-    def test_last_input_remains_visible_when_the_table_has_no_input_column(self):
+    def test_now_remains_visible_when_the_table_has_no_now_column(self):
+        # Spec rule 28: the folded session row (or the row under it on a narrow pane)
+        # says what the session is on now; the last input waits for the unfolded lines.
         for cols in (80, 100, 140, 168):
             with self.subTest(cols=cols):
                 text = pane(draw(self.vm, self.state, cols, 90, beat=1))
                 sessions = text.split("── SESSIONS", 1)[1]
-                self.assertIn("human-line", sessions)
+                self.assertIn("now-line", sessions)
+                self.assertNotIn("human-line", sessions)
 
-    def test_resume_notice_and_repo_last_input_both_survive_the_rebase(self):
+    def test_resume_notice_and_repo_now_both_survive_the_rebase(self):
         session = dict(self.vm.sessions[0], restart="stopped", state="idle")
         vm = replace(self.vm, sessions=(session,))
         for cols in (80, 100, 140, 168):
@@ -178,7 +181,7 @@ class RepoPageTest(unittest.TestCase):
                 sessions = pane(draw(vm, self.state, cols, 90, beat=1)).split("── SESSIONS", 1)[1]
                 lines = sessions.splitlines()
                 notice = next(i for i, line in enumerate(lines) if ui_text("fleet.resume.stopped") in line)
-                prompt = next(i for i, line in enumerate(lines) if "human-line" in line)
+                prompt = next(i for i, line in enumerate(lines) if "now-line" in line)
                 if cols == 80:
                     self.assertNotEqual(notice, prompt)
 

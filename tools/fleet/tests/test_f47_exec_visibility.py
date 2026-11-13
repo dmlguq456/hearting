@@ -295,10 +295,9 @@ class CodexExecDetail(unittest.TestCase):
         started = self.rollout(self.CALL, self.STARTED)
         self.assertEqual(codex._latest_task_lifecycle(started)[0], "task_started")
         done = self.rollout(self.STARTED, self.CALL, self.COMPLETE)
-        # `rollout()` rewrites the same inode in place. The incremental observer must
-        # fail closed for that truncation/rewrite observation, then initialize the
-        # now-stable file on the next observation.
-        self.assertIsNone(codex._latest_task_lifecycle(done))
+        # `rollout()` rewrites the same inode in place. The incremental observer sees the
+        # truncation/rewrite and reads the file again from its start in the same call.
+        self.assertEqual(codex._latest_task_lifecycle(done)[0], "task_complete")
         self.assertEqual(codex._latest_task_lifecycle(done)[0], "task_complete")
         model.reset_state_tracker()
         ev = {"harness": "codex", "pid": 100, "pid_alive": True, "status": None,

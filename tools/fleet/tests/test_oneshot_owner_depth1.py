@@ -121,9 +121,10 @@ console.log(JSON.stringify(out));'''
         for harness in ("claude", "codex", "opencode"):
             # Wall clock: the row keeps an absolute start time and the panel ages it.
             labels, panels = shell_route_status(_snapshot(harness), include_details=True)
-            # Fleet's own judgment: the staged route's owner waits on its worker (●).
-            self.assertEqual(set(labels.values()), {"route 2 ⠏1 ●1"})
-            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "route 2 ⠏1 ●1"},
+            # Fleet's own judgment (spec rule 27): the staged route's owner waits on its
+            # running worker, so that route runs too.
+            self.assertEqual(set(labels.values()), {"route 2 ⠏2"})
+            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "route 2 ⠏2"},
                                                    {"route_panels": panels}, harness, "sid-main", 60)
             solo = next(route for route in presented["routes"] if route["id"] == "rt-solo")
             self.assertEqual(solo["owner"], "owner · codex (Opus 5.5·high)")
@@ -133,17 +134,26 @@ console.log(JSON.stringify(out));'''
             self.assertEqual(staged["owner_line"], "owner · claude (Opus 5.5·high)")
             self.assertEqual(staged["harness"], "codex")              # the live worker of the shown stage
             self.assertIn("code-execute ●", staged["flow"])
+            paint = lambda row: {name: {"text": row[name]} for name in ("glyph", "harness", "model_text", "effort", "ctx")
+                                 if row.get(name)}
             for route in presented["routes"]:
-                route["paint"] = {name: {"text": route[name]} for name in ("glyph", "harness", "model_text", "effort", "ctx")
-                                  if route.get(name)}
+                route["paint"] = paint(route)
+                # Spec E9 rule 43: the owner apart from a leading worker, and each live worker.
+                if isinstance(route.get("owner_paint"), dict):
+                    route["owner_paint"] = paint(route["owner_paint"])
+                for worker in route.get("workers_live") or ():
+                    worker["paint"] = paint(worker)
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # Beside the native area a folded route takes two rows (spec rule 19): its title,
-            # then harness and time on the row below.
+            # Beside the native area a folded route reads who / context / what and time (spec
+            # rules 24, 36, 38, 43): its glyph, role and harness, then its title ending in its time.
             lines = side.splitlines()
-            rows = [lines[i + 1] for i, line in enumerate(lines[:-1]) if "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("codex" in line and "5m" in line for line in rows), side)
+            rows = [(lines[i - 1], line) for i, line in enumerate(lines) if i > 0 and "│ │ " in line and "Fixture solo route" in line]
+            self.assertTrue(any("owner" in who and "codex" in who and "5m" in title for who, title in rows), side)
+            # The staged route: its owner first, its live worker under it.
+            self.assertIn("owner  claude Opus 5.5 high", side)
+            self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)
             self.assertNotIn("hb_", side + bottom)

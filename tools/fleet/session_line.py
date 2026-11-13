@@ -48,28 +48,70 @@ def _remaining(reset):
     return elapsed_text(seconds // 60)
 
 
-def _git_text(values):
-    """``main 🚧 3`` and its existing Git warnings, for the dim parentheses."""
+def git_branch_cells(width):
+    """The branch name's cells (spec E9 rule 40 (b)): 20, or 32 with 60 cells inside."""
+    return 32 if int(width) >= 60 else 20
+
+
+def _git_words(values, *, branch_cells=32):
+    """The Git observation's words: the branch (cut to ``branch_cells``), its warning, whether it
+    is up to date (spec E9 rule 40 (c): ``✓`` when ahead and behind are both known to be 0, else
+    ``↑N``/``↓N``, nothing when unknown) and the worktree count."""
     git = values.get("git") or {}
     branch = _text(values.get("branch"), "")
-    parts = [clip_cells(branch, 32)] if branch else []
+    words = {"branch": clip_cells(branch, branch_cells) if branch else "", "flag": "", "fresh": [], "worktrees": ""}
     if git and git.get("repo") != 0:
         operation = git.get("operation")
         flag = "⚠️" + operation if operation in {"merge", "rebase", "cherry-pick"} else (
             "💀merged" if operation == "none" and (git.get("merged") == 1 or git.get("branch_done") == 1) else "")
         if operation is None or operation == "unknown":
             flag = "⚠️?"
-        if flag:
-            parts.append(flag)
-        for key, glyph in (("ahead", "↑"), ("behind", "↓")):
-            if type(git.get(key)) is int and git[key] > 0:
-                parts.append(glyph + str(git[key]))
+        words["flag"] = flag
+        ahead, behind = git.get("ahead"), git.get("behind")
+        if type(ahead) is int and type(behind) is int and ahead == 0 and behind == 0:
+            words["fresh"] = ["✓"]
+        else:
+            words["fresh"] = [glyph + str(count) for count, glyph in ((ahead, "↑"), (behind, "↓"))
+                              if type(count) is int and count > 0]
         wt = git.get("extra_worktrees")
-        if wt is None:
-            parts.append("🚧 ?")
-        elif type(wt) is int and wt > 0:
-            parts.append("🚧 " + str(wt))
-    return " ".join(parts)
+        words["worktrees"] = "🚧 ?" if wt is None else "🚧 " + str(wt) if type(wt) is int and wt > 0 else ""
+    return words
+
+
+def fresh_key(word):
+    """Spec E9 rule 50 (a): ``↑N`` (ahead) takes Fleet's green ``lvl_g`` and ``↓N`` (behind)
+    its red ``lvl_r``, the keys Fleet's own Git suffix uses; ``✓`` stays dim."""
+    return {"↑": "lvl_g", "↓": "lvl_r"}.get(str(word)[:1], "dim")
+
+
+def fresh_part(text, key):
+    """Whether a painted part is one of Git's ahead/behind words (`` ↑2`` in ``lvl_g``, `` ↓5``
+    in ``lvl_r``): where no hue is shown they read as the rest of the Git words (rule 50 (d))."""
+    return key in ("lvl_g", "lvl_r") and re.fullmatch(r" ?[↑↓][0-9]+", str(text)) is not None
+
+
+def _git_parts(values, *, worktrees=True, branch_cells=32):
+    """``main ✓ 🚧 3`` and its existing Git warnings as painted parts: dim, but ``↑N``/``↓N``
+    in Fleet's green and red (spec E9 rule 50); neighbouring dim words stay one part.
+
+    ``worktrees=False`` leaves the worktree count out (the side panel draws it beside the
+    repository name, spec E9 rule 37 (a)); every other surface keeps it here."""
+    words = _git_words(values, branch_cells=branch_cells)
+    shown = [(words["branch"], "dim"), (words["flag"], "dim"), *[(word, fresh_key(word)) for word in words["fresh"]],
+             (words["worktrees"] if worktrees else "", "dim")]
+    parts = []
+    for text, key in ((text, key) for text, key in shown if text):
+        text = (" " if parts else "") + text
+        if parts and key == "dim" and parts[-1][1] == "dim":
+            parts[-1] = (parts[-1][0] + text, "dim")
+        else:
+            parts.append((text, key))
+    return parts
+
+
+def _git_text(values, *, worktrees=True, branch_cells=32):
+    """``main ✓ 🚧 3`` and its existing Git warnings, for the dim parentheses."""
+    return "".join(text for text, _key in _git_parts(values, worktrees=worktrees, branch_cells=branch_cells))
 
 
 def gauge_parts(percent, *, cells=10):
@@ -86,7 +128,7 @@ def effort_label(effort):
     return "med" if text == "medium" else text
 
 
-def line_segments(values, columns, *, complete=False, reported_only=False, fields=None):
+def line_segments(values, columns, *, complete=False, reported_only=False, fields=None, branch_room=None):
     """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ route N │ 5h … 7d …``.
 
     Shorten words before losing a known count; never invent an unknown value.
@@ -118,12 +160,21 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
 
     tag = _text(values.get("tag"), "").strip("[]")
     project = project_of(values.get("cwd")) if values.get("cwd") else None
-    git = _git_text(values)
+    # Spec E9 rule 40 (b): the branch keeps 20 cells, 32 on a line of 60 cells or more
+    # (``branch_room``: the width a wrapped, complete line is shown at).
+    git = _git_parts(values, branch_cells=git_branch_cells(columns if branch_room is None else branch_room))
     if values.get("git") and (values["git"] or {}).get("repo") == 0:
-        git = "no-git"
-    after = [(" (" + git + ")", "dim")] if git else []
+        git = [("no-git", "dim")]
+    # The dim parentheses around the Git words; only ``↑N``/``↓N`` take a color (rule 50).
+    after = ([(" (" + git[0][0], "dim")] if git[0][1] == "dim" else [(" (", "dim"), git[0]]) if git else []
+    if len(git) > 1:
+        after.extend(git[1:])
+    if after:
+        after[-1:] = [(after[-1][0] + ")", "dim")] if after[-1][1] == "dim" else [after[-1], (")", "dim")]
     if project:
-        words("folder", project, "loc_repo", 64 if complete else 24, 2,
+        # Spec E9 rule 29: the repository name ends in `/` (a folder); a name cut to its
+        # budget loses the mark with its tail, so it shows only on a whole name.
+        words("folder", project + "/", "loc_repo", 64 if complete else 24, 2,
               before=[("[" + tag + "] ", "tag")] if tag else [], after=after)
     elif tag and (fields is None or "folder" in fields):
         groups.append({"name": "folder", "text": "[" + tag + "]", "key": "tag", "budget": cell_width(tag) + 2,
@@ -132,7 +183,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
         words("thread", values["native_sid"], "dim", 256, 0)
     effort = effort_label(values.get("effort"))
     suffix = [(" ", "dim"), (effort, _eff_key(values.get("effort"), False))] if effort else []
-    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
+    words("model", _clean_model(values.get("model")), _model_key(values.get("model"), harness=values.get("harness")),
+          48 if complete else 24, 4, after=suffix)
     percent = values.get("ctx_pct")
     unreported = reported_only and _percent(percent) == "?"
     if not unreported:
@@ -226,7 +278,7 @@ def wrap_segments(parts, columns):
 
 def status_lines(values, columns, *, wrap_long=False, reported_only=False, fields=None):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
-    parts = line_segments(values, 10000, complete=True, reported_only=reported_only, fields=fields)
+    parts = line_segments(values, 10000, complete=True, reported_only=reported_only, fields=fields, branch_room=columns)
     groups = [[]]
     for part in parts:
         if part == (SEPARATOR, "dim"):
@@ -281,7 +333,6 @@ def claude_native_statusline(callback, environ):
     import sys
     from pathlib import Path
     from .native_display import claude_fields
-    from .palette import ansi_segments
     from .session_tags import assigned_tag
     from . import session_registry
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
@@ -326,7 +377,16 @@ def claude_native_statusline(callback, environ):
     # panel goes away, the native row is already complete.
     rows = [clip_segments(line, columns) for line in status_lines(values, columns, reported_only=True)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
-    return "\n".join(ansi_segments(row, colors=colors, no_color="NO_COLOR" in environ) for row in rows)
+    return statusline_ansi(rows, colors=colors, no_color="NO_COLOR" in environ)
+
+
+def statusline_ansi(rows, *, colors=256, no_color=False):
+    """Claude's statusline rows in the shared palette. Spec E9 rule 50 (d): in eight colors
+    Git's ``↑N``/``↓N`` keep their words and read dim as the rest of the Git words."""
+    from .palette import ansi_segments
+    if colors < 256:
+        rows = [[(text, "dim" if fresh_part(text, key) else key) for text, key in row] for row in rows]
+    return "\n".join(ansi_segments(row, colors=colors, no_color=no_color) for row in rows)
 
 
 def _shell_directory(environ):
@@ -542,12 +602,12 @@ def route_marker(route):
     shared = getattr(live, "route_marker_state", None)
     if shared is not None:
         return shared(route)
-    if route.get("owner_waits"):
-        return "idle"
+    state = str(route.get("state") or "")
+    if state == "stale":
+        return "stale"
     if route.get("activity") == "running":
         return "working"
-    state = str(route.get("state") or "")
-    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+    return state if state in ("working", "blocked", "dead", "done") else "idle"
 
 
 def route_tally(markers):
@@ -644,6 +704,8 @@ def route_doer(route, jobs, get, live):
         pair = shared.get("model")
         return {"harness": shared.get("harness"), "model": pair[0] if isinstance(pair, (list, tuple)) and pair else None,
                 "effort": shared.get("effort"), "percent": _number(shared.get("context")),
+                "worker": shared.get("worker") is True,
+                "role": ((_worker_role(route) if shared.get("worker") is True else "owner")),
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
                 "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
                 **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
@@ -657,21 +719,106 @@ def route_doer(route, jobs, get, live):
     if job is None:
         return None
     harness = get(job, "harness")
+    pair = live._model_pair(get(job, "resolved_model", "model"), harness)
+    # Spec E9 rule 36 (a): the attempt's recorded role (a frame leg names itself by its node
+    # or worker type, as Fleet's ``_is_frame_leg`` reads it).
+    role = "owner" if job is owner else (
+        "frame" if get(job, "worker_type") == "frame" or get(job, "route_node") in live.FRAME_NODES else "worker")
     if (route or {}).get("state") in ("dead", "stale"):
-        return {"harness": harness}
-    pair = live._model_pair(get(job, "resolved_model", "model"))
+        # Spec rule 27: nothing runs; the attempt's recorded harness, model and effort stay.
+        return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"), "role": role}
     percent, tokens = job_context(job, get)
     tool = get(job, "exec_tool")
     name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
     working = get(job, "liveness") == "working"
     agents = get(job, "subagents") or ()
     activity = live._doer_activity(job, tool if working and name else None, working)
-    return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"),
+    return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"), "role": role,
             "percent": percent, "tokens": tokens, "tool": name if working else None,
             "agents": sum(1 for agent in agents if get(agent, "active") is True)
                       if working and isinstance(agents, (list, tuple)) else 0,
             **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
                if key in activity}}
+
+
+_DOER_LIMITS = (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64), ("target", 120), ("tool_age", 16))
+
+
+def _doer_values(doer):
+    """A doer's bounded display values for a panel row (as ``route_details`` keeps the lead's)."""
+    shown = {key: doer[key] for key, limit in _DOER_LIMITS
+             if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit}
+    if doer.get("percent") is not None:
+        shown["ctx_pct"] = round(doer["percent"], 1)
+    elif type(doer.get("tokens")) is int:
+        shown["ctx_tokens"] = doer["tokens"]
+    return shown
+
+
+def route_tree(row, jobs, owner, doer, get, live, now, state=None):
+    """Spec E9 rule 43: the owner and each stage worker running now, apart.
+
+    The workers are Fleet's own (the row's ``worker_contexts``, the live workers its route
+    record selected), each found again among the jobs of the same pass by the attempt id Fleet
+    recorded with it, read with the same ``route_doer`` and nothing collected again.
+    ``owner_doer`` carries the owner's values when a worker leads the row; with a worker leading
+    and no single owner, nothing is returned: the row keeps its one doer and the panel its
+    earlier form. A finished stage's worker is not live, so not listed.
+    """
+    lead_works = bool(doer) and (doer.get("worker") is True or doer.get("role") in ("frame", "worker"))
+    if lead_works and owner is None:
+        return {}
+    tree = {"workers_live": []}
+    if lead_works:
+        values = route_doer({"state": state}, [owner], get, live)
+        if values:
+            tree["owner_doer"] = _doer_values(values)
+    used = list(live._owner_jobs(jobs))
+    # An older producer's row names no attempt: its worker is matched by its values, each
+    # job's model and context read once (the model name may ask the model catalog).
+    shown = {}
+
+    def values_of(job):
+        if id(job) not in shown:
+            pair = live._model_pair(get(job, "resolved_model", "model"), get(job, "harness"))
+            percent = job_context(job, get)[0]
+            shown[id(job)] = ((pair[0][:64] if pair else None), (None if percent is None else round(percent, 1)))
+        return shown[id(job)]
+    for item in (row.get("worker_contexts") or ())[:8]:
+        if not isinstance(item, dict) or not item.get("stage"):
+            continue
+
+        def fits(job, exact):
+            if (any(job is seen for seen in used) or get(job, "route_node") != item["stage"]
+                    or get(job, "liveness") not in ("working", "idle", "blocked")
+                    or item.get("harness") and get(job, "harness") != item["harness"]):
+                return False
+            if item.get("attempt"):
+                return get(job, "attempt_id") == item["attempt"]
+            return not exact or values_of(job) == (item.get("model"), item.get("ctx_pct"))
+        job = next((job for job in jobs if fits(job, True)), None) or (
+            None if item.get("attempt") else next((job for job in jobs if fits(job, False)), None))
+        if job is None:
+            continue
+        used.append(job)
+        values = route_doer({"worker_stage": item["stage"], "state": state}, [job], get, live) or {}
+        worker = {"stage": str(item["stage"])[:64], "marker": get(job, "liveness"),
+                  "role": "frame" if values.get("role") == "frame" else "worker", **_doer_values(values)}
+        elapsed = _number(get(job, "elapsed_min"))
+        if elapsed is not None:
+            worker["since"] = now - elapsed * 60
+        tree["workers_live"].append(worker)
+    return tree
+
+
+def _worker_role(route):
+    """``frame`` or ``worker``: the role word of Fleet's route body line for its live stage worker
+    (``_worker_segments``: a frame/frame-alternative leg reads ``frame``)."""
+    worker = route.get("worker") if isinstance(route, dict) else None
+    label = worker[0] if isinstance(worker, (list, tuple)) and worker else None
+    if isinstance(label, (list, tuple)):
+        label = label[0] if label else None
+    return "frame" if label == "frame" else "worker"
 
 
 def route_details(snapshot, panels, routes=None, now=None):
@@ -715,6 +862,8 @@ def route_details(snapshot, panels, routes=None, now=None):
                 else:
                     row["elapsed_min"] = round(max(elapsed), 1)
             doer = route_doer(route if isinstance(route, dict) else row, jobs, get, live)
+            row.update(route_tree(row, jobs, owner, doer, get, live, now,
+                                  (route if isinstance(route, dict) else row).get("state")))
             if not doer:
                 continue
             for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
@@ -723,6 +872,10 @@ def route_details(snapshot, panels, routes=None, now=None):
                     row[key] = doer[key]
             if doer.get("idle_tool") is True:
                 row["idle_tool"] = True
+            if doer.get("worker") is True:
+                row["doer_worker"] = True
+            if doer.get("role") in ("owner", "frame", "worker"):
+                row["role"] = doer["role"]
             if doer.get("percent") is not None:
                 row["ctx_pct"] = round(doer["percent"], 1)
             elif type(doer.get("tokens")) is int:
@@ -808,25 +961,80 @@ def stage_glyph(state):
 
 # -- messages: what this session and other sessions sent each other -----------------------
 
-def peer_message_rows(received, sent, tag_of, limit=3):
-    """The latest ``limit`` peer messages, oldest first: ``{"way", "who", "text", "at"}``.
+_MESSAGE_FRAME = re.compile(r"^(?:\s*\[[^\]\n]{0,160}\]\s*|\s*#{1,6}\s+|\s+)")
 
-    ``received`` are the exact session's retained received inputs (source
-    ``peer``); ``sent`` are its own ledger records. Bodies are what those
-    records already keep; nothing is fetched or reconstructed here.
+
+def message_body(text):
+    """The message's first meaningful text: its leading bracket frames (``[52 → e9]``,
+    ``[notice]``), markdown heading marks and blank lines left out; nothing else changes."""
+    body = str(text or "")
+    for _ in range(16):
+        stripped = _MESSAGE_FRAME.sub("", body, count=1)
+        if stripped == body:
+            break
+        body = stripped
+    return " ".join(body.split()) or " ".join(str(text or "").split())
+
+
+def _message_when(at, now):
+    """``HH:MM`` today, ``MM-DD`` otherwise (local time); empty without a time."""
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+        return ""
+    stamp, today = time.localtime(at), time.localtime(now)
+    return time.strftime("%H:%M" if stamp[:3] == today[:3] else "%m-%d", stamp)
+
+
+# The sender's ledger status (peer-message `record --status`): the receiver's own
+# acknowledgement, the transport's acceptance, a failure, and `unknown`, written only
+# when the recipient could not be resolved (peer-steward), so it never arrives: `not
+# delivered`, with no age, in the caution color (it is not on its way).
+def _message_delivery(status, at, now):
+    from .config import ui_text
+    if status == "received":
+        return [ui_text("fleet.session_panel.message_delivered"), "dim"]
+    if status == "sent":
+        return [ui_text("fleet.session_panel.message_sent"), "dim"]
+    if status == "failed":
+        return [ui_text("fleet.session_panel.message_failed"), "lvl_r"]
+    if status == "unknown":
+        return [ui_text("fleet.session_panel.message_undelivered"), "lvl_y"]
+    return None
+
+
+def peer_message_rows(received, sent, tag_of, limit=8, now=None):
+    """The latest ``limit`` peer messages, oldest first.
+
+    Each row: ``way`` (``←`` received, ``→`` sent), ``who`` (the other session's Fleet
+    number, else its name), ``harness``, ``when``, ``kind`` and, for a sent one, its
+    ``delivery`` (spec E9 rule 31), the whole kept ``text`` and its first meaningful
+    ``body``. ``received`` are the exact session's retained received inputs (source
+    ``peer``); ``sent`` are its own ledger records. Values are what those records
+    already keep; nothing is fetched or reconstructed here, and an absent one is left out.
     """
+    now = time.time() if now is None else now
     rows = []
     for row in received or ():
         if not isinstance(row, dict) or row.get("source") != "peer":
             continue
         tag = tag_of(row.get("sender_harness"), row.get("sender_session_id"))
         who = "[" + tag.strip("[]") + "]" if tag else _text(row.get("sender"), "peer")
-        rows.append({"way": "←", "who": who, "text": _text(row.get("text"), ""), "at": row.get("at") or 0})
+        rows.append({"way": "←", "who": who, "harness": _text(row.get("sender_harness"), ""),
+                     "kind": _text(row.get("kind"), ""), "text": _text(row.get("text"), ""),
+                     "at": row.get("at") or 0, "delivery": None})
     for record in sent or ():
         target = record.get("to") if isinstance(record.get("to"), dict) else {}
         tag = tag_of(target.get("harness"), target.get("session_id"))
         who = "[" + tag.strip("[]") + "]" if tag else _text(target.get("name"), "peer")
-        rows.append({"way": "→", "who": who, "text": _text(record.get("summary"), ""), "at": record.get("at") or 0})
+        rows.append({"way": "→", "who": who, "harness": _text(target.get("harness"), ""),
+                     "kind": _text(record.get("kind"), ""), "text": _text(record.get("summary"), ""),
+                     "at": record.get("at") or 0,
+                     "delivery": _message_delivery(record.get("status"), record.get("at"), now)})
     rows = [row for row in rows if row["text"]]
     rows.sort(key=lambda row: row["at"])
-    return rows[-limit:]
+    rows = rows[-limit:]
+    for row in rows:
+        row["when"] = _message_when(row["at"], now)
+        row["body"] = message_body(row["text"])
+        if row["harness"] not in ("claude", "codex", "opencode"):
+            row["harness"] = ""
+    return rows

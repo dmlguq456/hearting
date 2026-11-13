@@ -341,19 +341,10 @@ class NoticeWatcher:
 
     def _native_notice_text(self, record, storage_key):
         from dispatch_recipient_receipt import receipt_marker
-        receipt = record["receipt"]
-        if receipt.get("kind") == "notice":
-            import session_notice
-            text = session_notice.render_text(receipt)
-        else:
-            context = notice_receipt.context(receipt, notice_receipt.gateway_delivery_id(receipt))
-            additional = context.get("additionalContext")
-            values = [value.get("value") for value in additional.values()
-                      if isinstance(value, dict) and isinstance(value.get("value"), str)] \
-                if isinstance(additional, dict) else []
-            if len(values) != 1:
-                raise CompletionError("native-queue-notice-context-invalid")
-            text = values[0]
+        try:
+            text = notice_receipt.native_text(record["receipt"])
+        except notice_receipt.NativeTextError as exc:
+            raise CompletionError(str(exc)) from None
         return text + "\n" + receipt_marker(record, storage_key), text
 
     def _historical_notice_receipt(self, record, storage_key):
@@ -1225,11 +1216,7 @@ def _native_queue_delivery_once(
         raise CompletionError("native-queue-thread-identity-invalid")
     if thread.get("cwd") and not isinstance(thread.get("cwd"), str):
         raise CompletionError("native-queue-thread-cwd-invalid")
-    followup = completion_followup_text(
-        receipt,
-        jobs=str(args.jobs),
-        surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"),
-    )
+    followup = completion_followup_text(receipt, jobs=str(args.jobs))
     prior_followup = _prior_followup_text(followup)
     client_message_id = codex_queue_delivery.native_client_message_id(
         args.thread_id, [row.metadata.get("delivery_id", "") for row in rows])

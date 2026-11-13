@@ -491,6 +491,83 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
     return dict(result)
 
 
+_latest_cache = {}
+SAVED_ACTIONS = ("add", "supersede")
+# Rows kept per project: the panel shows two records, and a supersede with the add of its
+# replacement names one record twice, so a few more stay to find the second.
+SAVED_KEEP = 6
+
+
+def _read_saved_journal(path):
+    """The journal's rows for ``latest_saved``. Undecodable bytes (a half-written line) become
+    replacement characters, so one broken byte costs its own line, not the panel; an unreadable
+    journal reads as empty (spec E9 rule 37 (b): no journal, no row)."""
+    out = []
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+    except (OSError, ValueError):
+        return []
+    return out
+
+
+def _saved_rows(repo):
+    """The newest ``add``/``supersede`` journal rows of one project (``by_repo``'s grouping key),
+    newest first (``SAVED_KEEP`` at most), with the journal path. Read-only; the journal is read
+    again only when its size or modification time changed, so a panel projection with an
+    unchanged journal reads nothing but its stat. Bodies are never carried: each row's id, time,
+    type and its bounded snippet. The journal is shared by every repository and each panel reads
+    it again on any write, so a re-read asks each cwd's grouping key once (a key walks the
+    directories up to `.git`). Rows of one time keep the journal's order (the later one first)."""
+    path = _write_events_path()
+    try:
+        stat = path.stat()
+        stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return [], str(path)
+    if _latest_cache.get("stamp") != stamp:
+        newest, keys = {}, {}
+        newer = lambda item: (item[0], item[1])
+        for order, event in enumerate(_read_saved_journal(path)):
+            if event.get("action") not in SAVED_ACTIONS:
+                continue
+            cwd = event.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                if cwd not in keys:
+                    keys[cwd] = _repo_key(event)
+                key = keys[cwd]
+            else:
+                key = _repo_key(event)
+            if key:
+                kept = newest.setdefault(key, [])
+                kept.append((str(event.get("ts") or ""), order,
+                             {name: event.get(name) for name in ("ts", "action", "type", "snippet", "id")}))
+                if len(kept) > 2 * SAVED_KEEP:
+                    kept[:] = sorted(kept, key=newer, reverse=True)[:SAVED_KEEP]
+        _latest_cache.update(stamp=stamp, rows={key: [row for *_order, row in sorted(kept, key=newer, reverse=True)[:SAVED_KEEP]]
+                                                for key, kept in newest.items()})
+    return [dict(row) for row in (_latest_cache.get("rows") or {}).get(repo) or ()], str(path)
+
+
+def latest_saved(repo):
+    """The newest ``add``/``supersede`` journal row of one project, or None, with the journal
+    path (``_saved_rows``' first row)."""
+    rows, path = _saved_rows(repo)
+    return (rows[0] if rows else None), path
+
+
+def recent_saved(repo):
+    """Spec E9 rule 46 (c): the newest saved journal rows of one project, newest first, from the
+    same read as ``latest_saved`` (no other file, no other pass), with the journal path."""
+    return _saved_rows(repo)
+
+
 def collect(now=None, *, include_summary=True, include_backlog=False):
     """Return an additive `memory` dict (fleet.py --json / render.py consume it), or None
     when neither the journal nor the graveyard exists (F-19 not wired up yet — panel omitted).

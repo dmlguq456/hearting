@@ -142,7 +142,7 @@ shows.
   summaries on the repo page, and keeps the newest summary on OVERVIEW. Editing a
   page in place is observed even when the campaign directory's timestamp is old.
 - **Legacy documents.** With no campaign page, Fleet reads status documents directly
-  in a cycle's `artifacts/` and the legacy flat `research/<folder>/` copies. When
+  in a cycle's `artifacts/`, not the chronological research folders. When
   `finalize` picks the
   primary itself, this file is the cycle's primary (`현황.md` first, then `STATUS.md`,
   after the official spec PRD; an explicit `--primary` still wins), and its row carries
@@ -151,8 +151,7 @@ shows.
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
   `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
-  and edits it in place (a finalized cycle still takes writes, D-123). Fleet keeps the
-  most recently modified legacy document when no campaign page is available.
+  and edits it in place (a finalized cycle still takes writes, D-123).
 - **One selection rule.** Fleet, the close-time stamp updater and the artifact
   entrance use the common campaign-document reader. Conflicting campaign-root
   `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy

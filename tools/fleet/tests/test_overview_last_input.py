@@ -1,4 +1,7 @@
-"""The collapsed human input and expanded received inputs have separate sources."""
+"""The human input, the session's NOW and received inputs have separate sources.
+
+Spec rule 28 (2026-11-12): the folded row's cell is NOW again; the last input is in the
+unfolded lines, with the received inputs."""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
@@ -70,17 +73,27 @@ class OverviewLastInputTests(unittest.TestCase):
                     vm = live.build_view_model(snapshot, now=1000)
                     self.assertEqual(vm.sessions[0]["last_input"], "› ?")
 
-    def test_input_uses_existing_grey_and_now_keeps_its_white(self):
-        from tools.fleet import render
-        vm = self.model(self.snapshot())
-        frame = draw(vm, NavState(opened="b6"), 168, 45)
-        input_row = next(row for row in frame.cells if "유휴 기준" in "".join(c[0] for c in row))
-        marker = next(i for i, cell in enumerate(input_row) if cell[0] == "›")
-        self.assertEqual(input_row[marker][1], "dim")
-        now_row = next(row for row in frame.cells if "Bash · current work" in "".join(c[0] for c in row))
-        first = next(i for i, cell in enumerate(now_row) if cell[0] == "B")
-        self.assertEqual(now_row[first][1], "name_dim")
-        self.assertNotEqual(render._HUE_OF["dim"][0], render._HUE_OF["name_dim"][0])
+    def test_now_keeps_its_earlier_colors_and_the_unfolded_input_its_row(self):
+        # NOW as it was drawn before LAST INPUT took its cell: bright while the session
+        # works or waits, the title's dim otherwise; `·` when nothing is observed.
+        for liveness, bright in (("working", True), ("idle", False)):
+            with self.subTest(liveness=liveness):
+                snapshot = self.snapshot()
+                snapshot["sessions"][0].liveness = liveness
+                vm = self.model(snapshot)
+                folded = draw(vm, NavState(), 168, 45)
+                now_row = next(row for row in folded.cells if "Bash · current work" in "".join(c[0] for c in row))
+                self.assertIn("[b6]", "".join(c[0] for c in now_row))
+                first = next(i for i, cell in enumerate(now_row) if cell[0] == "B")
+                self.assertEqual(now_row[first][1], "section_head" if bright else "name_dim")
+                self.assertNotIn("유휴 기준", "\n".join("".join(c[0] for c in row) for row in folded.cells))
+                opened = draw(vm, NavState(opened="b6"), 168, 45)
+                input_row = next(row for row in opened.cells if "유휴 기준" in "".join(c[0] for c in row))
+                self.assertIn("LAST INPUT", "".join(c[0] for c in input_row))
+        snapshot = self.snapshot()
+        snapshot["sessions"][0].summary = None
+        row = next(row for row in draw(self.model(snapshot), NavState(), 168, 45).text_rows() if "[b6]" in row)
+        self.assertIn("  ·  ", row)
 
     def test_received_sender_uses_the_exact_native_tag_instead_of_the_saved_name(self):
         snapshot = self.snapshot()
@@ -91,17 +104,19 @@ class OverviewLastInputTests(unittest.TestCase):
         row = next(row for row in self.model(snapshot).sessions if row["tag"] == "b6")
         self.assertTrue(row["received_inputs"][0].startswith("⇄ [52] "))
 
-    def test_long_input_changes_only_its_cells_even_when_the_title_is_clipped(self):
+    def test_long_now_changes_only_its_cells_even_when_the_title_is_clipped(self):
         for width in (140, 168, 274):
             with self.subTest(width=width), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "ko"}):
-                snapshot = self.snapshot(text="짧은 입력")
+                snapshot = self.snapshot()
                 snapshot["sessions"][0].title = "제목이 잘리는 긴 작업 " * 30
+                snapshot["sessions"][0].summary = "Bash · short"
                 short = draw(self.model(snapshot), NavState(), width, 45)
-                snapshot["sessions"][0]._prompt_display["human"]["text"] = "긴 입력 " * 100
+                snapshot["sessions"][0].summary = "Bash · " + "long work " * 100
                 long = draw(self.model(snapshot), NavState(), width, 45)
                 y = next(y for y, row in enumerate(short.cells) if "[b6]" in "".join(c[0] for c in row))
-                marker = next((x for x, cell in enumerate(short.cells[y]) if cell[0] == "›"), None)
-                if marker is None:  # The narrow layout omits the whole input cell.
+                text = "".join(cell[0] for cell in short.cells[y])
+                marker = text.find("Bash · short")
+                if marker < 0:  # The narrow layout omits the whole NOW cell.
                     self.assertEqual(short.cells, long.cells)
                     continue
                 changed = [(cy, cx) for cy, row in enumerate(short.cells)
@@ -111,7 +126,7 @@ class OverviewLastInputTests(unittest.TestCase):
                 self.assertEqual(short.cells[y][:marker], long.cells[y][:marker])
                 self.assertEqual(short.cells[y][-8:], long.cells[y][-8:])
 
-    def test_folded_input_and_unfolded_now_and_messages_at_narrow_and_wide_widths(self):
+    def test_folded_now_and_unfolded_input_and_messages_at_narrow_and_wide_widths(self):
         snapshot = self.snapshot(text="내 마지막 입력 " + "긴글" * 80)
         vm = self.model(snapshot)
         for width in (100, 140, 168, 274, 410):
@@ -120,10 +135,15 @@ class OverviewLastInputTests(unittest.TestCase):
                 expanded = draw(vm, NavState(view="OVERVIEW", title="OVERVIEW", opened="b6"), width, 45)
                 folded_text = "\n".join("".join(cell[0] for cell in row) for row in folded.cells)
                 expanded_text = "\n".join("".join(cell[0] for cell in row) for row in expanded.cells)
+                self.assertNotIn("› 1m ·", folded_text)
+                self.assertIn("› 1m ·", expanded_text)
                 if width >= 140:
-                    self.assertIn("› 1m ·", folded_text)
-                self.assertNotIn("Bash · current work", folded_text)
-                self.assertIn("Bash · current work", expanded_text)
+                    self.assertIn("Bash · current work", folded_text)
+                    # Shown on the folded row, NOW is not drawn again under it.
+                    self.assertEqual(expanded_text.count("Bash · current work"), 1)
+                else:
+                    self.assertNotIn("Bash · current work", folded_text)
+                    self.assertIn("Bash · current work", expanded_text)
                 self.assertIn("RECEIVED", expanded_text)
                 self.assertIn("계획 2라운드", expanded_text)
                 self.assertTrue(all(len(row) == width for row in folded.cells))

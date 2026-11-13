@@ -854,7 +854,7 @@ def _harvest_unread_blocked_owner(route, jobs, run):
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             return {"ok": False, "attempt_id": aid,
                     "reason": "blocked-result-harvest-unavailable", "detail": str(exc)[:160]}
-    command = [sys.executable, str(ROOT / "adapters/codex/bin/dispatch-harvest.py"),
+    command = [sys.executable, str(ROOT / "utilities/dispatch-harvest.py"),
                "--jobs", str(Path(jobs).resolve()), "--attempt-id", aid, "--status", "all"]
     env = {**os.environ, "AGENT_HOME": str(ROOT), "AGENT_DISPATCH_JOBS": str(Path(jobs).resolve())}
     try:
@@ -1245,8 +1245,7 @@ def _outcome(jobs, aid):
     action = delivery_required_action(state)
     result = {"attempt_id": aid, "classification": delivery_classification(state),
             "required_action": action, "marker": state.marker,
-            "recovery_command": completion_harvest_command(aid, action, jobs=str(jobs),
-                surface=str(ROOT / "adapters/codex/bin/preflight.sh"))}
+            "recovery_command": completion_harvest_command(aid, action, jobs=str(jobs))}
     row = _rows(jobs).get(aid)
     import route_parent_close
     stopped = bool(row and route_parent_close._user_stopped(row[1]))

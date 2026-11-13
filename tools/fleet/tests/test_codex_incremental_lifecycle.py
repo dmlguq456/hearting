@@ -34,7 +34,13 @@ class IncrementalLifecycleTest(unittest.TestCase):
     def setUp(self):
         codex._LIFECYCLE_CACHE.clear()
         codex._EXACT_LIFECYCLE_CACHE.clear()
+        codex._LIFECYCLE_DISK_MARK.clear()
         codex._LIFECYCLE_CACHE_EVICTIONS = 0
+        cache_home = tempfile.TemporaryDirectory()
+        self.addCleanup(cache_home.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache_home.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _write(self, path, *records):
         with open(path, "w", encoding="utf-8") as handle:
@@ -142,8 +148,9 @@ class IncrementalLifecycleTest(unittest.TestCase):
                 ("task_started", "new"),
             )
             self.assertIs(codex._LIFECYCLE_CACHE[canonical], cached)
-            self.assertIsNone(codex._latest_task_lifecycle(path))
-            self.assertNotIn(canonical, codex._LIFECYCLE_CACHE)
+            # The session cursor notices the rotation and reads the new file at once.
+            self.assertEqual(codex._latest_task_lifecycle(path), ("task_started", "new"))
+            self.assertIsNot(codex._LIFECYCLE_CACHE[canonical], cached)
 
     def test_max_scan_none_reuses_unchanged_file_and_rescans_on_change(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +188,7 @@ class IncrementalLifecycleTest(unittest.TestCase):
                 self.assertIsNone(codex._latest_task_lifecycle(path, max_scan=None))
             self.assertIs(codex._LIFECYCLE_CACHE[canonical], cached)
 
-    def test_append_timestamp_regression_before_or_after_read_fails_closed(self):
+    def test_append_timestamp_regression_before_or_after_read_rereads_from_zero(self):
         for phase in ("before", "after"):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
                 codex._LIFECYCLE_CACHE.clear()
@@ -195,6 +202,7 @@ class IncrementalLifecycleTest(unittest.TestCase):
                 with open(path, "a", encoding="utf-8") as handle:
                     handle.write("{}\n")
                 current = os.stat(path)
+                # Only the first look at the clock is falsified; the reread sees the real one.
                 regressed = SimpleNamespace(
                     st_dev=current.st_dev,
                     st_ino=current.st_ino,
@@ -208,15 +216,28 @@ class IncrementalLifecycleTest(unittest.TestCase):
                         if phase == "before" else cached.ctime_ns - 1
                     ),
                 )
+                real = os.stat if phase == "before" else codex._stable_path_stat
+                calls = []
+
+                def first_call_regressed(*args, **kwargs):
+                    calls.append(args)
+                    return regressed if len(calls) == 1 else real(*args, **kwargs)
+
                 with mock.patch.object(
                     codex.os if phase == "before" else codex,
                     "stat" if phase == "before" else "_stable_path_stat",
-                    return_value=regressed,
-                ):
-                    self.assertIsNone(codex._latest_task_lifecycle(path))
-                self.assertNotIn(canonical, codex._LIFECYCLE_CACHE)
+                    side_effect=first_call_regressed,
+                ), mock.patch.object(
+                    codex, "_initialize_lifecycle_cursor",
+                    wraps=codex._initialize_lifecycle_cursor,
+                ) as reread:
+                    self.assertEqual(codex._latest_task_lifecycle(path),
+                                     ("task_started", "turn"))
+                self.assertEqual(reread.call_count, 1)
+                self.assertIsNot(codex._LIFECYCLE_CACHE[canonical], cached)
+                self.assertEqual(codex._LIFECYCLE_CACHE[canonical].offset, current.st_size)
 
-    def test_saved_boundary_change_and_short_read_fail_closed(self):
+    def test_saved_boundary_change_rereads_and_short_read_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "boundary.jsonl")
             canonical = os.path.realpath(path)
@@ -228,10 +249,9 @@ class IncrementalLifecycleTest(unittest.TestCase):
                 handle.write(b"[]")
                 handle.seek(0, os.SEEK_END)
                 handle.write(b"{}\n")
-            self.assertIsNone(codex._latest_task_lifecycle(path))
-            self.assertNotIn(canonical, codex._LIFECYCLE_CACHE)
-
             self.assertEqual(codex._latest_task_lifecycle(path), ("task_started", "turn"))
+            self.assertIsNot(codex._LIFECYCLE_CACHE[canonical], cached)
+
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write("{}\n")
             with mock.patch.object(codex, "_cursor_boundary", side_effect=OSError):
@@ -253,19 +273,25 @@ class IncrementalLifecycleTest(unittest.TestCase):
                 }) + "\n")
             self.assertIsNone(codex._latest_task_lifecycle(path))
 
-    def test_rotation_and_truncation_fail_closed_before_reinitializing(self):
+    def test_rotation_and_truncation_reinitialize_in_the_same_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "changing.jsonl")
+            canonical = os.path.realpath(path)
             self._write(path, _event("task_started", "old"))
             self.assertEqual(codex._latest_task_lifecycle(path), ("task_started", "old"))
+            first = codex._LIFECYCLE_CACHE[canonical]
             replacement = os.path.join(tmp, "replacement.jsonl")
             self._write(replacement, _event("task_started", "new"))
             os.replace(replacement, path)
-            self.assertIsNone(codex._latest_task_lifecycle(path))
             self.assertEqual(codex._latest_task_lifecycle(path), ("task_started", "new"))
+            rotated = codex._LIFECYCLE_CACHE[canonical]
+            self.assertNotEqual((rotated.dev, rotated.ino), (first.dev, first.ino))
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("{}\n")
+            # Truncated below the saved offset: the file is read again, and it holds
+            # no lifecycle event, so the answer is a true "none".
             self.assertIsNone(codex._latest_task_lifecycle(path))
+            self.assertEqual(codex._LIFECYCLE_CACHE[canonical].offset, 3)
             self.assertIsNone(codex._latest_task_lifecycle(path))
 
     def test_deletion_permission_read_and_stat_errors_drop_stale_state(self):
@@ -321,6 +347,224 @@ class IncrementalLifecycleTest(unittest.TestCase):
         self.assertTrue(benchmark_tick._live_budget(result, 11.0)["pass"])
         result["warm_samples"][0]["wall_ns"] += 1
         self.assertFalse(benchmark_tick._live_budget(result, 11.0)["pass"])
+
+
+def _call(call_id, name="request_user_input", **payload):
+    return json.dumps({
+        "type": "response_item", "timestamp": "2026-08-03T00:00:00Z",
+        "payload": {"type": "function_call", "name": name, "call_id": call_id, **payload},
+    }) + "\n"
+
+
+def _async_call(call_id, count):
+    return _call(call_id, "request_user_input_async",
+                 arguments=json.dumps({"questions": [{"title": "Q"}] * count}))
+
+
+class DiskLifecycleCursorTest(unittest.TestCase):
+    """A new process continues from the cursor an earlier one left, or reads it all."""
+
+    def setUp(self):
+        codex._LIFECYCLE_CACHE.clear()
+        codex._EXACT_LIFECYCLE_CACHE.clear()
+        codex._LIFECYCLE_DISK_MARK.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": os.path.join(self.tmp.name, "cache")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.path = os.path.join(self.tmp.name, "rollout.jsonl")
+        self.canonical = os.path.realpath(self.path)
+
+    def _write(self, *records):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.writelines(records)
+
+    def _append(self, *records):
+        with open(self.path, "a", encoding="utf-8") as handle:
+            handle.writelines(records)
+
+    def _leave_cursor(self, *records):
+        self._write(*records)
+        codex._latest_task_lifecycle(self.path)
+        saved = codex._LIFECYCLE_CACHE[self.canonical]
+        self._new_process()
+        return saved
+
+    def _new_process(self):
+        codex._LIFECYCLE_CACHE.clear()
+        codex._EXACT_LIFECYCLE_CACHE.clear()
+        codex._LIFECYCLE_DISK_MARK.clear()
+
+    def _observe(self):
+        """The lifecycle and pending input a call returns, and how it got there."""
+        resumes = codex._LIFECYCLE_DISK_RESUMES
+        with mock.patch.object(codex, "_initialize_lifecycle_cursor",
+                               wraps=codex._initialize_lifecycle_cursor) as init, \
+                mock.patch.object(codex, "_read_lifecycle_range",
+                                  wraps=codex._read_lifecycle_range) as ranges:
+            lifecycle = codex._latest_task_lifecycle(self.path)
+            pending = codex._tail_pending_request_user_input(self.path)
+        return {"lifecycle": lifecycle, "pending": pending, "initialized": init.call_count,
+                "resumed": codex._LIFECYCLE_DISK_RESUMES - resumes,
+                "starts": [call.args[1] for call in ranges.call_args_list]}
+
+    def _from_zero(self):
+        """What a process with no cursor at all answers for the same file."""
+        self._new_process()
+        with mock.patch.object(codex, "_load_disk_lifecycle_cursor", return_value=None):
+            return self._observe()
+
+    def _rows(self):
+        return [_event("task_started", "t1"), _call("blocking"), _async_call("async", 3),
+                _event("task_complete", "t1"), "{}\n" * 50]
+
+    def test_a_new_process_continues_from_the_saved_offset_with_the_same_answer(self):
+        saved = self._leave_cursor(*self._rows())
+        self._append(_event("task_started", "t2"), _call("later"), "{}\n" * 5)
+        resumed = self._observe()
+        self.assertEqual((resumed["initialized"], resumed["resumed"]), (0, 1))
+        self.assertEqual(resumed["starts"], [saved.offset])
+        fresh = self._from_zero()
+        self.assertEqual((fresh["initialized"], fresh["resumed"], fresh["starts"][0]), (1, 0, 0))
+        self.assertEqual({k: v for k, v in resumed.items() if k in ("lifecycle", "pending")},
+                         {k: v for k, v in fresh.items() if k in ("lifecycle", "pending")})
+        self.assertEqual(resumed["lifecycle"], ("task_started", "t2"))
+        self.assertEqual(resumed["pending"]["call_id"], "later")
+
+    def test_pending_input_state_survives_the_saved_cursor_exactly(self):
+        saved = self._leave_cursor(*self._rows()[:3], _call("blocking-2"))
+        self.assertGreater(len(saved.pending_calls), 1)
+        self._append("{}\n")
+        resumed = codex._LIFECYCLE_CACHE.get(self.canonical) or None
+        self.assertIsNone(resumed)
+        self.assertEqual(self._observe()["resumed"], 1)
+        loaded = codex._LIFECYCLE_CACHE[self.canonical].pending_calls
+        self.assertEqual(list(loaded), list(saved.pending_calls))
+        self.assertEqual(loaded, saved.pending_calls)
+
+    def test_an_unchanged_file_is_answered_from_the_cursor_without_reading_rows(self):
+        saved = self._leave_cursor(*self._rows())
+        seen = self._observe()
+        self.assertEqual((seen["initialized"], seen["resumed"], seen["starts"]), (0, 1, [saved.offset]))
+        self.assertEqual(seen["lifecycle"], saved.lifecycle)
+
+    def test_every_mismatch_reads_from_byte_zero(self):
+        def boundary(saved):
+            # Past the head digest: only the boundary digest can see this change.
+            self.assertGreaterEqual(saved.offset - codex._LIFECYCLE_BOUNDARY_BYTES,
+                                    codex._LIFECYCLE_HEAD_BYTES)
+            with open(self.path, "r+b") as handle:
+                handle.seek(saved.offset - 2)
+                handle.write(b"[]")
+            self._append("{}\n")
+
+        def head(saved):
+            with open(self.path, "r+b") as handle:
+                handle.seek(4)
+                handle.write(b"Z")
+            self._append("{}\n")
+
+        def inode(saved):
+            replacement = self.path + ".new"
+            with open(self.path, "rb") as source, open(replacement, "wb") as target:
+                target.write(source.read() + b"{}\n")
+            os.replace(replacement, self.path)
+
+        def regrown(saved):
+            with open(self.path, "w", encoding="utf-8") as handle:
+                handle.write(_event("task_started", "other") + "{}\n" * 2000)
+            self.assertGreater(os.path.getsize(self.path), saved.offset)
+
+        def damaged(saved):
+            directory = os.path.join(self.tmp.name, "cache", "hearting", "fleet-parses")
+            for name in os.listdir(directory):
+                full = os.path.join(directory, name)
+                with open(full, encoding="utf-8") as stream:
+                    record = json.load(stream)
+                record["value"]["offset"] = "not a number"
+                with open(full, "w", encoding="utf-8") as stream:
+                    json.dump(record, stream)
+            self._append("{}\n")
+
+        def other_parser_version(saved):
+            self._append("{}\n")
+
+        cases = [("boundary", boundary, None), ("head", head, None), ("inode", inode, None),
+                 ("truncated then longer", regrown, None), ("schema", damaged, None),
+                 ("parser version", other_parser_version, "another-release")]
+        for name, mutate, version in cases:
+            with self.subTest(name):
+                self._new_process()
+                # Longer than the head digest plus the boundary window (4 KiB + 256 B).
+                saved = self._leave_cursor(*self._rows(), "{}\n" * 1500)
+                mutate(saved)
+                with mock.patch.object(codex.parse_cache, "_VERSION",
+                                       version or codex.parse_cache._VERSION):
+                    got = self._observe()
+                self.assertEqual((got["resumed"], got["initialized"], got["starts"][0]), (0, 1, 0), name)
+                want = self._from_zero()
+                self.assertEqual((got["lifecycle"], got["pending"]),
+                                 (want["lifecycle"], want["pending"]), name)
+
+    def test_an_unterminated_last_row_is_not_saved_until_it_completes(self):
+        self._write(_event("task_started", "t1"), '{"type":"event_msg","payload":{"type":"task_com')
+        with mock.patch.object(codex.parse_cache, "save") as save:
+            codex._latest_task_lifecycle(self.path)
+            self.assertEqual(save.call_count, 0)
+            self._append('plete","turn_id":"t1"}}\n')
+            self.assertEqual(codex._latest_task_lifecycle(self.path), ("task_complete", "t1"))
+            self.assertEqual(save.call_count, 1)
+
+    def test_growth_is_saved_only_every_interval(self):
+        self._write(_event("task_started", "t1"))
+        with mock.patch.object(codex.parse_cache, "save") as save, \
+                mock.patch.object(codex, "_LIFECYCLE_SAVE_INTERVAL", 300):
+            codex._latest_task_lifecycle(self.path)
+            self.assertEqual(save.call_count, 1)
+            for _ in range(5):                      # 15 bytes each: below the interval
+                self._append("{}\n" * 5)
+                codex._latest_task_lifecycle(self.path)
+            self.assertEqual(save.call_count, 1)
+            self._append("{}\n" * 120)
+            codex._latest_task_lifecycle(self.path)
+            self.assertEqual(save.call_count, 2)
+
+    def test_exact_scan_reuses_only_an_identical_stat_from_disk(self):
+        self._write(_event("task_started", "t1"), _event("task_complete", "t1"))
+        self.assertEqual(codex._latest_task_lifecycle(self.path, max_scan=None),
+                         ("task_complete", "t1"))
+        self._new_process()
+        with mock.patch.object(codex, "_parse_latest_task_lifecycle",
+                               wraps=codex._parse_latest_task_lifecycle) as scan:
+            self.assertEqual(codex._latest_task_lifecycle(self.path, max_scan=None),
+                             ("task_complete", "t1"))
+            self.assertEqual(scan.call_count, 0)
+            self._new_process()
+            self._append(_event("task_started", "t2"))
+            self.assertEqual(codex._latest_task_lifecycle(self.path, max_scan=None),
+                             ("task_started", "t2"))
+            self.assertEqual(scan.call_count, 1)
+
+    def test_a_stored_value_is_checked_before_use(self):
+        valid = {"dev": 1, "ino": 2, "offset": 3, "mtime_ns": 4, "ctime_ns": 5,
+                 "boundary_sha256": "a" * 64, "head_sha256": "b" * 64,
+                 "lifecycle": ["task_started", "t"],
+                 "pending": [["c", 1.5, "t", [0, 2], False], ["d", None, None, None, True]]}
+        check = lambda value, parser="codex-lifecycle-cursor": codex.parse_cache._valid_value(parser, value)
+        self.assertTrue(check(valid))
+        for field, bad in (("offset", -1), ("dev", True), ("boundary_sha256", "xyz"),
+                           ("lifecycle", ["bogus", "t"]), ("lifecycle", ["task_started"]),
+                           ("pending", [["c", float("nan"), None, None, False]]),
+                           ("pending", [["c", None, None, [2, 0], False]]),
+                           ("pending", [["c", None, None, None, False]] * 2),
+                           ("pending", "none")):
+            self.assertFalse(check({**valid, field: bad}), (field, bad))
+        self.assertFalse(check({k: v for k, v in valid.items() if k != "head_sha256"}))
+        self.assertFalse(check({**valid, "carry": ""}))
+        self.assertTrue(check({"lifecycle": None}, "codex-lifecycle-exact"))
+        self.assertFalse(check({"lifecycle": ["task_started", ""]}, "codex-lifecycle-exact"))
+        self.assertFalse(check({"lifecycle": None, "extra": 1}, "codex-lifecycle-exact"))
 
 
 if __name__ == "__main__":

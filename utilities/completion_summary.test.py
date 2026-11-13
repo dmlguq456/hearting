@@ -98,7 +98,7 @@ class CompletionMeaningTest(unittest.TestCase):
                         commit._seal_completion_summary(request,self.route,self.report,slot)
                     summary=work_intent.sealed_summary(self.meta,self.aid)
                     self.assertIn('findings',summary)
-                    body=join.completion_followup_text({'children':[{'attempt_id':self.aid,'required_action':'advance-completed'}]},jobs=str(self.jobs),surface=f'/adapter/{parent}/preflight.sh')
+                    body=join.completion_followup_text({'children':[{'attempt_id':self.aid,'required_action':'advance-completed'}]},jobs=str(self.jobs))
                     self.assertIn(summary,body);self.assertNotIn('inspect-done-failure',body)
                     summaries.append(summary)
         self.assertEqual(len(set(summaries)),1)
@@ -238,7 +238,7 @@ class CompletionMeaningTest(unittest.TestCase):
 
     def test_failure_inspection_is_portable_read_only_and_guarded_to_the_same_attempt(self):
         self.seed()
-        command=join.completion_harvest_command(self.aid,'inspect-done-failure',jobs=str(self.jobs),surface='/adapters/codex/bin/preflight.sh')
+        command=join.completion_harvest_command(self.aid,'inspect-done-failure',jobs=str(self.jobs))
         self.assertNotIn('/adapters/',command);self.assertIn('observed-status',command)
         import shlex
         before=self.jobs.read_bytes()

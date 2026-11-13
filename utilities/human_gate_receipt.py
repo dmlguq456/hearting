@@ -36,6 +36,8 @@ MAX_JOURNAL_BYTES = 16 * 1024 * 1024
 MAX_JOBS_BYTES = 128 * 1024 * 1024
 SCHEMA_VERSION = 1
 KIND = "human-gate"
+# The first line of the native text a carrier sends for a gate.
+NATIVE_HEAD = "AGENT_HARNESS_HUMAN_GATE_V1"
 STATE = "blocked"
 REQUIRED_ACTION = "inspect-release"
 RECIPIENT_KIND = CODEX_QUEUE_PARENT_DELIVERY
@@ -529,7 +531,7 @@ def render_context(
             command += " --answers <validated-answers-file>"
         release_commands.append(command)
     text = (
-        "AGENT_HARNESS_HUMAN_GATE_V1\n"
+        NATIVE_HEAD + "\n"
         + canonical(normalized).decode("utf-8")
         + "\nA human decision is required; the owner is waiting at the gate or has paused there, "
         + "and the release continues the work either way.\n"

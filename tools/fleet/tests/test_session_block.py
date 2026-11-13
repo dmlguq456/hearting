@@ -24,6 +24,23 @@ class SessionBlockTest(unittest.TestCase):
         self.assertEqual(display['source'], [])
         self.assertEqual(item['questions'][0]['choices'], choices)
 
+    def test_question_body_preserves_decision_lines_at_wide_and_narrow_widths(self):
+        from tools.fleet.session_block import question_presentations
+        text = "[결정 필요] 로그 보관 기간\n- 30일: 기존 설정 유지\n- 90일: 저장 공간 3배\n추천: 30일 — 되돌리기 쉬움\n답이 없으면: 보류"
+        for width in (100, 48):
+            item = {"answerable": True, "questions": [{"question": text,
+                    "choices": ["켜기", "끄기"], "recommended": 1}]}
+            question_presentations([item], width)
+            body = ["".join(part for part, _ in line) for line in item["questions"][0]["display"]["body"]]
+            self.assertGreaterEqual(len(body), 5)
+            self.assertTrue(body[0].startswith("[결정 필요]"))
+            self.assertTrue(any(line.startswith("- 30일") for line in body))
+            self.assertTrue(any(line.startswith("- 90일") for line in body))
+            self.assertTrue(any(line.startswith("추천:") for line in body))
+            options = ["".join(part for part, _ in line) for line in item["questions"][0]["display"]["options"]]
+            from tools.fleet.config import ui_text
+            self.assertIn("(" + ui_text("fleet.session_block.recommended") + ")", "\n".join(options))
+
     def values(self):
         return dict(harness='claude',tag='52',state='idle',cwd='/work/project',title='A session',
                     branch='topic*',ctx_pct=42,model='opus',effort='high',weekly_pct=60)
@@ -32,8 +49,9 @@ class SessionBlockTest(unittest.TestCase):
         for percentage,key in ((0,'lvl_g'),(49,'lvl_g'),(50,'lvl_y'),(79,'lvl_y'),(80,'lvl_r')):
             parts=session_line.line_segments({**self.values(),'ctx_pct':percentage},300)
             text=''.join(text for text,_ in parts)
-            # Spec 2026-11-11: `[number] project (git)`, no folder or branch glyph.
-            self.assertIn('[52] project (topic*)',text);self.assertNotIn('📁',text);self.assertNotIn('⎇',text)
+            # Spec 2026-11-11: `[number] project (git)`, no folder or branch glyph; E9 rule 29:
+            # the name ends in `/`.
+            self.assertIn('[52] project/ (topic*)',text);self.assertNotIn('📁',text);self.assertNotIn('⎇',text)
             self.assertTrue('━' in text or '─' in text)
             self.assertIn(key,[style for text,style in parts if '%' in text])
 

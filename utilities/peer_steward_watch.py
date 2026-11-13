@@ -21,7 +21,6 @@ from dispatch_contract import process_start_ticks
 from parent_next_directive import steward_fields
 import peer_obligations
 import shared_readiness
-import herdr_observation
 
 from peer_steward_base import (
     _AGENT_STATES, _CLAIM_TIMEOUT_MS, _HERDR_GET_TIMEOUT_SECONDS, _interpret_payload,
@@ -36,10 +35,11 @@ from peer_steward_base import (
 _WATCH_SCHEMA = 1
 _WATCH_STATES = _AGENT_STATES + (
     "timeout", "agent-not-found", "herdr-unavailable", "pane-exited",
-    "steward-exited", "superseded",
+    "session-ended", "session-replaced", "steward-exited", "superseded",
 )
 _JOIN_EXIT = {"timeout": 3, "agent-not-found": 2, "herdr-unavailable": 4,
-              "pane-exited": 2, "steward-exited": 0, "superseded": 0}
+              "pane-exited": 2, "session-ended": 0, "session-replaced": 0,
+              "steward-exited": 0, "superseded": 0}
 _WATCH_TRANSITION_LOCK_BUDGET_SEC = 0.2
 _WATCH_RECEIPT_CONTENDED = "contended"
 _WATCH_RECEIPT_PENDING = "pending"
@@ -216,178 +216,64 @@ def _terminal_watch_request(paths, expected, server):
     return str(observation.get("reason") or "completed-retire")
 
 
-def _watch_terminal_from_view(view, expected, server, transport=None):
-    """Return terminal evidence only for this endpoint and armed pane lifetime."""
-    if (view is None or view.complete is not True
-            or herdr_observation.endpoint_name(view.endpoint) !=
-               herdr_observation.endpoint_name(server)):
-        return None
-    pane_id = expected.get("pane")
-    if not isinstance(pane_id, str) or not pane_id or pane_id == "-":
-        return None
-    terminal = view.terminal.get(pane_id)
-    if terminal in {"pane-closed", "pane-exited"}:
-        if transport is None:
-            return terminal
-        # Event envelopes carry pane IDs but no public lifetime sequence. A
-        # fresh snapshot on the same subscription prevents a delayed terminal
-        # event from retiring a new occupant that reused the public pane ID.
-        view = transport.resnapshot()
-        if (view is None or view.complete is not True
-                or herdr_observation.endpoint_name(view.endpoint) !=
-                   herdr_observation.endpoint_name(server)):
-            return None
-        if not any(row.get("pane_id") == pane_id for row in view.panes):
-            return terminal
-    rows = [row for row in view.panes if row.get("pane_id") == pane_id]
-    if not rows:
-        return "pane-absent"
-    if len(rows) != 1:
-        return None
-    pane = rows[0]
-    harness = expected.get("harness")
-    session_id = expected.get("session_id")
-    current_harness = pane.get("agent")
-    current_session = pane.get("agent_session") or {}
-    if isinstance(current_session, dict):
-        current_session = current_session.get("value")
-    # An unknown transport label is not evidence of a different native occupant.
-    if (harness not in {None, "", "-"}
-            and current_harness not in {None, "", "-", "unknown", harness}):
-        return "session-replaced"
-    if (session_id not in {None, "", "-"}
-            and isinstance(current_session, str) and current_session
-            and current_session != session_id):
-        return "session-replaced"
-    return None
-
-
-def _watch_registered_work_pending(view, expected, server):
-    """A fresh blocking fact can defer readiness, never authorize completion."""
-    if (view is None or getattr(view, "complete", False) is not True
-            or herdr_observation.endpoint_name(view.endpoint) !=
-               herdr_observation.endpoint_name(server)):
-        return False
-    pane, harness, sid = (expected.get(key) for key in ("pane", "harness", "session_id"))
-    if not pane or harness not in {"claude", "codex", "opencode"} or not sid or sid == "-":
-        return False
-    matches = [row for row in view.panes if row.get("pane_id") == pane]
-    if len(matches) != 1:
-        return False
-    current_sid = matches[0].get("agent_session")
-    if isinstance(current_sid, dict):
-        current_sid = current_sid.get("value")
-    if matches[0].get("agent") != harness or current_sid != sid:
-        return False
-    try:
-        work, state = peer_obligations.bound_work_for_pane(
-            pane, harness, sid, registry_append_only=True)
-        if state != "observed" or not work:
-            return False
-        states = [peer_obligations.completion_readiness(item).state for item in work]
-    except (OSError, ValueError, TypeError):
-        # Uncertainty takes the ordinary complete readiness path below.
-        return False
-    return "unknown" not in states and "pending" in states
-
-
 class _WatchCloseEvidence:
-    """One pass's evidence for deciding that a watch's supervisor or target is gone.
-
-    Every item is read at most once per pass and only when a watch needs it: the
-    recipient census (seat-less Claude), the session lineage, the live agents and
-    process observation, and one CLI ``herdr pane list`` per endpoint."""
+    """Memoized native lifetime and lineage evidence for one close pass."""
 
     def __init__(self, recipient_census=None):
-        if recipient_census is None:
-            from recipient_lifetime import RecipientCensus
-            recipient_census = RecipientCensus()
-        self.recipient_census = recipient_census
-        self._graph = None
         self._chain = {}
-        self._panes = {}
-        self._agents = self._observation = self._UNSET
         self._liveness = {}
-
-    _UNSET = object()
-
-    def pane_census(self, server):
-        if server not in self._panes:
-            try:
-                self._panes[server] = herdr_observation.pane_census(session=server)
-            except Exception:
-                self._panes[server] = None
-        return self._panes[server]
 
     def chain_end(self, harness, sid):
         key = (harness, sid)
         if key not in self._chain:
             try:
                 import dispatch_seat_handover as handover
-                if self._graph is None:
-                    self._graph = handover.lineage_graph()
-                self._chain[key] = handover._chain_end(self._graph, harness, sid)
+                graph = handover.lineage_graph()
+                self._chain[key] = handover._chain_end(graph, harness, sid)
             except Exception:
                 self._chain[key] = (sid, "unresolved")
         return self._chain[key]
 
-    def liveness(self, harness, sid):
+    def liveness(self, harness, sid, agent=None):
         key = (harness, sid)
         if key not in self._liveness:
             try:
-                check = _steward_check_module()
-                if self._agents is self._UNSET:
-                    self._agents = check._agents()
-                    self._observation = check._end_observation()
-                self._liveness[key] = check._session_liveness(
-                    harness, sid, self._agents, self._observation)
+                from peer_steward_native import native_lifetime
+                agent = agent if isinstance(agent, dict) else {}
+                self._liveness[key] = native_lifetime(
+                    harness, sid, pid=agent.get("pid"),
+                    pid_start=agent.get("pid_start"),
+                    pid_namespace=agent.get("pid_namespace"))
             except Exception:
                 self._liveness[key] = "unknown"
         return self._liveness[key]
 
 
 def _watch_close_reason(watch_id, arm, evidence):
-    """Why this watch can no longer be served, or None when that is not established.
-
-    The target is gone when it left its pane or its session was replaced (a complete
-    pane census, or a confirmed same-seat lineage). The supervisor is gone when its
-    session ended, or, with no live socket, when its seat's pane is absent from a
-    complete census. A pane that now holds some other session never ends the watch."""
+    """Close only on exact native end or a confirmed successor; unknown stays armed."""
     expected = dict(arm.get("agent") or {})
-    server = arm.get("server") or "default"
-    has_socket = bool(herdr_observation.socket_path_for_endpoint(server))
-    if not has_socket:
-        census = evidence.pane_census(server)
-        if census is not None:
-            view = SimpleNamespace(endpoint=census.endpoint, complete=census.complete,
-                                   panes=list(census.panes), terminal={})
-            reason = _watch_terminal_from_view(view, expected, server)
-            if reason in {"pane-absent", "session-replaced"}:
-                return reason
     target_harness, target_sid = expected.get("harness"), expected.get("session_id")
     if (isinstance(target_harness, str) and isinstance(target_sid, str)
             and target_harness not in {"", "-"} and target_sid not in {"", "-"}):
         end, disposition = evidence.chain_end(target_harness, target_sid)
         if disposition == "successor" and end != target_sid:
             return "session-replaced"
+        if evidence.liveness(target_harness, target_sid, expected) == "ended":
+            return "session-ended"
 
     steward = arm.get("steward") or {}
     seat = arm.get("steward_seat") or {}
     holder = (steward.get("harness"), steward.get("session_id"))
     if seat.get("key"):
-        import dispatch_seat_handover as handover
-        relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
-        current = (relation or {}).get("holder") or {}
-        holder = (current.get("harness"), current.get("sid")) if relation else (None, None)
-    if not all(isinstance(value, str) and value for value in holder):
-        return None
-    if evidence.liveness(*holder) == "ended":
-        return "steward-exited"
-    if (holder == (steward.get("harness"), steward.get("session_id")) and not has_socket
-            and seat.get("kind") == "pane" and seat.get("pane")
-            and (arm.get("steward_server") or "default") == server
-            and herdr_observation.confirms_absence(
-                evidence.pane_census(server), seat["pane"], endpoint=server)):
+        try:
+            import dispatch_seat_handover as handover
+            relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
+            current = (relation or {}).get("holder") or {}
+            holder = (current.get("harness"), current.get("sid")) if relation else (None, None)
+        except Exception:
+            holder = (None, None)
+    if (all(isinstance(value, str) and value for value in holder)
+            and evidence.liveness(*holder) == "ended"):
         return "steward-exited"
     return None
 
@@ -547,15 +433,134 @@ def _watch_monotonic_deadline(arm, *, wall=None, monotonic=None, boot_id=None):
 
 
 def _steward_seat(harness, sid):
-    """Return a pane/native seat only when the shared seat resolver proves one."""
+    """The caller's own pane/native seat, proved without asking Herdr about other panes.
+
+    Herdr is asked about one pane only: the caller's own, when the caller runs in a
+    Herdr window (`HERDR_PANE_ID`). A tmux pane (`TMUX_PANE`) is read through tmux, and a
+    caller with neither window is not searched for: its seat stays unknown and the watch
+    arms and settles natively. A Codex tool command runs in a shared service, so its
+    TUI is found from the native process table and its own tmux or Herdr pane (also
+    through a session shell), never by walking every Codex pane on the host.
+    """
     if not harness or harness == "unknown" or not sid:
         return None
     try:
+        import pane_ownership
+        import session_tidy
+        env = os.environ
+        window = bool((env.get("HERDR_PANE_ID") or "").strip()) or bool(
+            session_tidy.terminal_tmux_pane(env))
+        if harness == "codex":
+            # A Codex TUI behind the session shell is proven by its own attachment,
+            # whichever environment the tool command or the TUI inherited.
+            try:
+                attached = _codex_shell_seat(sid)
+            except Exception:  # noqa: BLE001 - an unproven attachment leaves the other proofs
+                attached = None
+            if attached is not None:
+                return attached
+            _caller, service = pane_ownership._caller_runtime(os.getpid(), "codex")
+            if service:
+                return _codex_service_seat(sid)
+            if not window:
+                return None
         import dispatch_seat_handover
         seat = dispatch_seat_handover.pane_seat(harness=harness, sid=sid)
         return seat.as_dict() if seat is not None and seat.kind in {"pane", "native"} else None
     except Exception:
         return None
+
+
+def _codex_shell_seat(sid):
+    """Seat of the Codex TUI behind the session shell whose attachment names thread `sid`.
+
+    The attachment record is birth-bound proof of the TUI (`session_shell.exact_binding`
+    re-reads births, parentage and descent). The pane is the tmux pane named by the
+    environment of the attachment's own processes (broker, host or TUI: any one of them
+    carries it), accepted only when `session_shell.pane_seat` joins that pane's
+    foreground to this very attachment. The caller must be this thread (its thread id,
+    or a descendant of the attachment's TUI). No Herdr call is made and no other pane is
+    read; anything unproven returns None so the other proofs still run.
+    """
+    import pane_ownership
+    import session_shell
+    import session_tidy
+    import terminal_surface
+    from fleet.collectors import codex as codex_collector, procscan
+    caller = os.getpid()
+    if pane_ownership._registered_worker(caller):
+        return None
+    binding, _why = session_shell.exact_binding("codex", sid)
+    if binding is None:
+        return None
+    native, birth = binding["native_pid"], binding["native_start"]
+    if not pane_ownership._native_user_tui(native, "codex"):
+        return None
+    if (os.environ.get("CODEX_THREAD_ID") or "") != sid and not session_shell._descends(caller, native):
+        return None
+    current = codex_collector.session_id_of_process(native, fresh=True)
+    if current and current != sid:
+        return None  # the TUI proves a different thread now
+    hint = ""
+    for pid in (binding.get("broker_pid"), binding.get("host_pid"), native):
+        if type(pid) is not int:
+            continue
+        hint, _socket = terminal_surface.caller_tmux_pane(procscan.read_environ(pid) or {})
+        if hint:
+            break
+    if not hint:
+        return None
+    info = pane_ownership._pane_process_info(hint, executable="tmux")
+    joined = session_shell.pane_seat(info, "codex")
+    if not joined or any(joined.get(key) != binding.get(key) for key in (
+            "host_pid", "host_start", "native_pid", "native_start", "sid")):
+        return None
+    if session_shell.process(native) is None or session_shell.process(native)["start"] != birth:
+        return None
+    seat = session_tidy.session_seat(session_tidy.pane_seat_from_binding(
+        {"pane": hint, "socket_path": "", "pid": native, "pid_start": birth,
+         "session_id": sid}), "codex", sid)
+    return seat.as_dict() if seat.kind in {"pane", "native"} else None
+
+
+def _codex_service_seat(sid):
+    """Seat of the one native Codex TUI whose thread is `sid`, from that TUI's own window.
+
+    The TUI's pane address comes from the TUI process's own environment (the caller's
+    inherited values belong to the shared service): its tmux pane, else the Herdr pane
+    it runs in (`HERDR_PANE_ID`). The same live proof as every other pane seat decides
+    it, including the session-shell attachment join. A Herdr-hosted TUI costs at most
+    one `pane process-info` for its own pane; no other pane is ever asked.
+    """
+    import pane_ownership
+    import session_tidy
+    import terminal_surface
+    from fleet.collectors import procscan
+    if (os.environ.get("CODEX_THREAD_ID") or "") != sid or pane_ownership._registered_worker(os.getpid()):
+        return None
+    processes = pane_ownership.codex_tui_processes_for_session(sid)
+    if len(processes) != 1:
+        return None
+    tui = processes[0]
+    tui_env = procscan.read_environ(tui["pid"])
+    hint, _socket = terminal_surface.caller_tmux_pane(tui_env)
+    socket_path = ""
+    if hint:
+        proven = pane_ownership.verified_pane(
+            hint, "codex", sid, executable="tmux", socket_path="")
+    else:
+        hint = str(tui_env.get("HERDR_PANE_ID") or "").strip()
+        socket_path = str(tui_env.get("HERDR_SOCKET_PATH") or "")
+        if not hint or (tui_env.get("AGENT_HERDR_SESSION") and not socket_path):
+            return None  # no window, or a named server whose socket cannot be carried
+        proven = pane_ownership.verified_pane(
+            hint, "codex", sid, socket_path=socket_path)
+    if not hint or proven != hint:
+        return None
+    seat = session_tidy.session_seat(session_tidy.pane_seat_from_binding(
+        {"pane": hint, "socket_path": socket_path, "pid": tui["pid"],
+         "pid_start": tui["pid_start"], "session_id": sid}), "codex", sid)
+    return seat.as_dict() if seat.kind in {"pane", "native"} else None
 
 
 def _seat_claim_path(root, server, seat):
@@ -1175,6 +1180,7 @@ def _acquire_bounded(lock_fd, timeout_ms):
 
 
 def cmd_join(args):
+    """Wait for the watch and print its receipt; sets ``args.joined_receipt`` when it did."""
     root = _watch_root()
     watch_id = args.watch_id
     paths = _watch_paths(watch_id, root)
@@ -1182,6 +1188,7 @@ def cmd_join(args):
     receipt = _read_json(paths.receipt)
     if receipt is not None:
         print(_receipt_line(receipt, watch_id, paths))
+        args.joined_receipt = True
         return _exit_for_state(receipt.get("state", "unknown"))
 
     try:
@@ -1203,6 +1210,7 @@ def cmd_join(args):
             receipt = _read_json(paths.receipt)
             if receipt is not None:
                 print(_receipt_line(receipt, watch_id, paths))
+                args.joined_receipt = True
                 return _exit_for_state(receipt.get("state", "unknown"))
 
             arm = _read_json(paths.arm)
@@ -1342,6 +1350,7 @@ def _watch_observer_takeover_argvs(watch_id, arm):
 
 
 _WATCH_SERVER_ENDPOINT_PREFIX = "server:"
+_WATCH_NATIVE_ENDPOINT_PREFIX = "native:"
 
 
 def _watch_selected_readiness_endpoint(arm, server=None):
@@ -1352,15 +1361,13 @@ def _watch_selected_readiness_endpoint(arm, server=None):
         if not isinstance(endpoint, str) or not endpoint:
             return None
         if endpoint.startswith(_WATCH_SERVER_ENDPOINT_PREFIX):
-            expected = (_WATCH_SERVER_ENDPOINT_PREFIX
-                        + herdr_observation.endpoint_name(selected_server))
+            expected = _WATCH_SERVER_ENDPOINT_PREFIX + str(selected_server)
+            return endpoint if endpoint == expected else None
+        if endpoint.startswith(_WATCH_NATIVE_ENDPOINT_PREFIX):
+            expected = _WATCH_NATIVE_ENDPOINT_PREFIX + str(selected_server)
             return endpoint if endpoint == expected else None
         return endpoint
-    endpoint = herdr_observation.socket_path_for_endpoint(selected_server)
-    if endpoint:
-        return endpoint
-    return (_WATCH_SERVER_ENDPOINT_PREFIX
-            + herdr_observation.endpoint_name(selected_server))
+    return _WATCH_NATIVE_ENDPOINT_PREFIX + str(selected_server)
 
 
 def _watch_readiness_identity_matches_arm(identity, arm, native_state):
@@ -1382,15 +1389,18 @@ def _watch_readiness_identity_matches_arm(identity, arm, native_state):
             or identity.get("purpose") != "completion"):
         return False
     if endpoint.startswith(_WATCH_SERVER_ENDPOINT_PREFIX):
-        if endpoint != (_WATCH_SERVER_ENDPOINT_PREFIX
-                        + herdr_observation.endpoint_name(server)):
+        if endpoint != _WATCH_SERVER_ENDPOINT_PREFIX + str(server):
             return False
     if ("readiness_endpoint" in arm
             and endpoint != _watch_selected_readiness_endpoint(arm, server)):
         return False
     pane_identity = arm.get("pane_identity") or arm.get("foreground_identity") or {}
-    shell_pid = pane_identity.get("shell_pid")
-    shell_start = str(pane_identity.get("shell_start") or "")
+    if int(arm.get("observer_protocol", 0) or 0) >= 3:
+        shell_pid = agent.get("pid")
+        shell_start = str(agent.get("pid_start") or "")
+    else:
+        shell_pid = pane_identity.get("shell_pid")
+        shell_start = str(pane_identity.get("shell_start") or "")
     if shell_pid is not None:
         try:
             if (int(identity.get("shell_pid")) != int(shell_pid)

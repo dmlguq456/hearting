@@ -494,6 +494,54 @@ class ParsedRegistryRowsTest(unittest.TestCase):
             self.assertEqual(actual[0], expected[0], raw)
             self.assertEqual(set(actual[1]), set(expected[1]), raw)
 
+    def test_whitespace_free_fast_path_gives_the_same_analysis_as_the_full_scan(self):
+        """The pure-string fast path of ``_registry_metadata_analysis`` against the
+        full per-piece scan it short-cuts (the reference below is that scan, unchanged)."""
+        whitespace_run = re.compile(r"\s+")
+
+        def reference(raw):
+            eq_pos, colon_pos = raw.find("="), raw.find(":")
+            if ("(" in raw or eq_pos < 0
+                    or (colon_pos >= 0 and colon_pos < eq_pos)):
+                return True, ()
+            whitespace_keys = set()
+            for part in raw.split(","):
+                field_eq = part.find("=")
+                if field_eq < 0:
+                    return True, ()
+                match = whitespace_run.search(part)
+                if match is None:
+                    continue
+                if match.start() <= field_eq + 1 or part.find("=", match.end()) >= 0:
+                    return True, ()
+                whitespace_keys.add(part[:field_eq])
+            return False, tuple(whitespace_keys)
+
+        examples = [
+            "a=1", "a=", "a=,b=2", "a=1,b=", "a=,b=,c=", "=", "=a", ",=", "a=1,=2",
+            "a=b=c", "a=b=c,d=e=f=g", "a==b", "a=1,", ",a=1", "a=1,,b=2", "a=1,b",
+            "a=1,b,c=2", "a", "", ",", "a:b=1", "a=b:c", "a=1(", "(a=1)", "a=1:2,b=3",
+            "a=1 b", "a=1, b=2", "a=1,b=2 ", " a=1", "a=1\tb", "a=1\nb=2", "a=1\x1cb", "a=1\x1fb",
+            "a=1\x0bb", "a=1\x0cb", "a=1\rb", "a= 1", "a =1", "a=1 b=2", "a=1 b,c=2",
+            "a=\u00e9", "a=\ud55c\uae00,b=2", "a=1\u00a0b", "a=1\u3000b", "a=1\u2003b=2",
+            "a=\u0085b", "\ud55c=1", "a=1,\ud55c", "a=1\x7fb", "a=1\x00b",
+            "capability=code,mode=dev", "capability=code,note=foo,bar",
+        ]
+        alphabet = ["a", "=", ",", " ", ":", "\u00a0", "\u00e9", "\x1f", "(", "1"]
+        import itertools
+        examples.extend("".join(chars) for length in range(1, 6)
+                        for chars in itertools.product(alphabet, repeat=length)
+                        if length <= 4 or chars[0] != " ")
+        fast = 0
+        for raw in examples:
+            actual = dispatch._registry_metadata_analysis(raw)
+            expected = reference(raw)
+            self.assertEqual(actual[0], expected[0], repr(raw))
+            self.assertEqual(set(actual[1]), set(expected[1]), repr(raw))
+            if raw.isascii() and not any(ch in raw for ch in " \t\n\v\f\r\x1c\x1d\x1e\x1f"):
+                fast += 1
+        self.assertGreater(fast, 100, "the fast path was not exercised")
+
     def test_canonical_metadata_normalizes_only_values_with_whitespace(self):
         class CountingWhitespace:
             def __init__(self):

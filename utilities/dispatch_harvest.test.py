@@ -26,6 +26,13 @@ HARVEST_SPEC = importlib.util.spec_from_file_location(
 )
 HARVEST = importlib.util.module_from_spec(HARVEST_SPEC)
 HARVEST_SPEC.loader.exec_module(HARVEST)
+# Every harvest entry point a person or receipt can name: the two adapter
+# wrappers and the shared body the completion receipts print (PG-35).
+HARVEST_ENTRY = {
+    "codex": ROOT / "adapters/codex/bin/dispatch-harvest.py",
+    "opencode": ROOT / "adapters/opencode/bin/dispatch-harvest.py",
+    "shared": ROOT / "utilities/dispatch-harvest.py",
+}
 
 
 class HarvestTest(unittest.TestCase):
@@ -301,14 +308,14 @@ class HarvestTest(unittest.TestCase):
         )
         self.assertTrue(completion.is_file())
 
-        for adapter in ("codex", "opencode"):
+        for adapter in HARVEST_ENTRY:
             with self.subTest(adapter=adapter):
                 jobs = self.base / f"{adapter}.jobs.log"
                 jobs.write_text(self.current_row(attempt), encoding="utf-8")
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "worker", "--status", "open",
                         "--mark-done", "--completion", str(completion),
                     ],
@@ -322,7 +329,7 @@ class HarvestTest(unittest.TestCase):
     # -- Phase 5 (plan.md, round_1 finding 5): derived route completion -----
 
     def test_derived_completion_succeeds_with_no_completion_flag(self):
-        for adapter in ("codex", "opencode"):
+        for adapter in HARVEST_ENTRY:
             with self.subTest(adapter=adapter):
                 attempt = f"att-derived-pass-{adapter}"
                 artifact = self.artifact / f"derived-{adapter}.md"
@@ -336,7 +343,7 @@ class HarvestTest(unittest.TestCase):
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "worker", "--status", "open",
                         "--mark-done",
                     ],
@@ -348,7 +355,7 @@ class HarvestTest(unittest.TestCase):
                 self.assertIn("note=completed-marker", after)
 
     def test_derived_completion_still_refused_for_blocked_verdict(self):
-        for adapter in ("codex", "opencode"):
+        for adapter in HARVEST_ENTRY:
             with self.subTest(adapter=adapter):
                 attempt = f"att-derived-blocked-{adapter}"
                 artifact = self.artifact / f"derived-blocked-{adapter}.md"
@@ -363,7 +370,7 @@ class HarvestTest(unittest.TestCase):
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "worker", "--status", "open",
                         "--mark-done",
                     ],
@@ -374,7 +381,7 @@ class HarvestTest(unittest.TestCase):
                 self.assertEqual(jobs.read_text(encoding="utf-8"), before)
 
     def test_derived_completion_refused_for_out_of_root_artifact(self):
-        for adapter in ("codex", "opencode"):
+        for adapter in HARVEST_ENTRY:
             with self.subTest(adapter=adapter):
                 attempt = f"att-derived-outroot-{adapter}"
                 outside = self.base / f"outside-{adapter}.md"
@@ -389,7 +396,7 @@ class HarvestTest(unittest.TestCase):
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "worker", "--status", "open",
                         "--mark-done",
                     ],
@@ -404,7 +411,7 @@ class HarvestTest(unittest.TestCase):
         # not a readable file must hard-error, not silently fall through to
         # the derived path — a typo'd or since-deleted marker path should not
         # be masked by an unrelated derived PASS succeeding instead.
-        for adapter in ("codex", "opencode"):
+        for adapter in HARVEST_ENTRY:
             with self.subTest(adapter=adapter):
                 attempt = f"att-explicit-missing-{adapter}"
                 artifact = self.artifact / f"explicit-missing-{adapter}.md"
@@ -420,7 +427,7 @@ class HarvestTest(unittest.TestCase):
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "worker", "--status", "open",
                         "--mark-done", "--completion", str(missing_completion),
                     ],
@@ -703,8 +710,29 @@ class HarvestTest(unittest.TestCase):
         self.assertNotEqual(duplicate.returncode, 0)
         self.assertIn("native-stop-receipt-not-delivered", duplicate.stdout)
 
+    def test_codex_wrapper_runs_the_shared_body_under_its_own_names(self):
+        jobs = self.base / "header.jobs.log"
+        jobs.write_text(self.current_row("att-header-a", "header"), encoding="utf-8")
+        lines = {}
+        for adapter in ("codex", "shared"):
+            result = subprocess.run(
+                [sys.executable, str(HARVEST_ENTRY[adapter]), "--jobs", str(jobs), "--status", "all"],
+                text=True, capture_output=True, env=self.env(),
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines[adapter] = result.stdout.splitlines()
+        named = ("adapter=", "runtime_surface=", "cleanup_command=")
+        self.assertEqual([line for line in lines["codex"] if line.startswith(named)], [
+            "adapter=codex", "runtime_surface=codex-dispatch-harvest",
+            "cleanup_command=adapters/codex/bin/preflight.sh worktree-cleanup --check --worktree <path>"])
+        self.assertEqual([line for line in lines["shared"] if line.startswith(named)], [
+            "adapter=shared", "runtime_surface=dispatch-harvest",
+            "cleanup_command=python3 utilities/worktree-cleanup.py --check --worktree <path>"])
+        self.assertEqual([line for line in lines["codex"] if not line.startswith(named)],
+                         [line for line in lines["shared"] if not line.startswith(named)])
+
     def test_ambiguous_or_legacy_selector_never_breadth_closes(self):
-        for adapter in ("codex", "opencode"):
+        for adapter in HARVEST_ENTRY:
             with self.subTest(adapter=adapter, case="ambiguous"):
                 jobs = self.base / f"{adapter}.ambiguous.log"
                 jobs.write_text(
@@ -716,7 +744,7 @@ class HarvestTest(unittest.TestCase):
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "same", "--status", "open",
                         "--mark-done",
                     ],
@@ -736,7 +764,7 @@ class HarvestTest(unittest.TestCase):
                 result = subprocess.run(
                     [
                         sys.executable,
-                        str(ROOT / f"adapters/{adapter}/bin/dispatch-harvest.py"),
+                        str(HARVEST_ENTRY[adapter]),
                         "--jobs", str(jobs), "--slug", "legacy", "--status", "open",
                         "--mark-done",
                     ],

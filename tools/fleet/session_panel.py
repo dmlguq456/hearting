@@ -226,7 +226,7 @@ def session_brief(values):
 NOTICE_NEWS_SECONDS = 600
 
 
-def notice_line(values, routes, questions, display, now):
+def notice_line(values, routes, questions, display, now, upgrade_note=""):
     """The one line under Claude's input while the panel paints the status area.
 
     Only what the person must know now, one item by priority: an answer this
@@ -273,14 +273,59 @@ def notice_line(values, routes, questions, display, now):
                               (ui_text("fleet.session_panel.ready") + " · ", "lvl_g"),
                               (route.get("title") or route.get("id") or "", "loc_repo"),
                               (" · " + route["outcome"], "dim")]))
-    return max(news, key=lambda item: item[0])[1] if news else []
+    if news:
+        return max(news, key=lambda item: item[0])[1]
+    # Below everything above: a newer release this window has not taken yet, or a switch without scrollback.
+    if upgrade_note in ("pending", "scrollback"):
+        return [(ui_text("session_shell.upgrade_" + upgrade_note), "dim")]
+    return []
 
 
-def route_row(row, now=None):
+ROLES = ("owner", "frame", "worker")
+
+
+def route_gauge_cells(columns):
+    """The folded route's context gauge width beside the native area (spec E9 rule 38):
+    about eight cells in a 40-cell panel, five to ten as the panel narrows or widens."""
+    return max(5, min(10, (int(columns or 40) - 8) // 4))
+
+
+def doer_paint(row, cells=None):
+    """A doer's painted harness, model, effort and context (gauge at ``cells`` for the folded row)."""
+    from .session_line import effort_label, gauge_parts, token_text
+    shown = {}
+    harness = sanitize_title(str(row.get("harness") or ""))[:32]
+    if harness:
+        shown.update(harness=harness, harness_key="hb_" + harness)
+    model = row.get("model")
+    if model:
+        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model, harness=harness or None))
+    effort = effort_label(row.get("effort"))
+    if effort:
+        shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
+    percent = row.get("ctx_pct")
+    if _percent(percent) != "?":
+        shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
+                     gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
+        if cells:
+            # Spec E9 rule 38: the folded route's own context row: the head's context gauge
+            # (``gauge_parts``, its level colors) at the panel's width.
+            shown["gauge_row"] = [list(part) for part in gauge_parts(percent, cells=cells)]
+    elif token_text(row.get("ctx_tokens")):
+        # No window known: the exact token count, as Fleet writes it, never a made-up percent.
+        tokens = token_text(row["ctx_tokens"])
+        shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
+        if cells:
+            shown["gauge_row"] = [[tokens, "dim"]]
+    return shown
+
+
+def route_row(row, now=None, *, cells=None):
     """A route row's painted values (spec rules 5-7); an unreported value is left out."""
     import time
     from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
                                stage_glyph, token_text, _number)
+    from .explorer.live import _short_capability
     now = time.time() if now is None else now
     # The producer's Fleet marker; an older cache row has only its state.
     marker = row.get("marker")
@@ -290,23 +335,14 @@ def route_row(row, now=None):
         marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
     glyph, key = route_glyph(marker)
     shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
-    harness = sanitize_title(str(row.get("harness") or ""))[:32]
-    if harness:
-        shown.update(harness=harness, harness_key="hb_" + harness)
-    model = row.get("model")
-    if model:
-        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model))
-    effort = effort_label(row.get("effort"))
-    if effort:
-        shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
-    percent = row.get("ctx_pct")
-    if _percent(percent) != "?":
-        shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
-                     gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
-    elif token_text(row.get("ctx_tokens")):
-        # No window known: the exact token count, as Fleet writes it, never a made-up percent.
-        tokens = token_text(row["ctx_tokens"])
-        shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
+    # Spec E9 rule 36: the doer's recorded role (owner, frame or worker; none unrecorded) and
+    # the route's kind in Fleet's own word (``code``, ``lab``, ``frame``: Fleet's KIND).
+    if row.get("role") in ROLES:
+        shown["role"] = row["role"]
+    kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
+    if kind_word:
+        shown["kind_word"] = kind_word
+    shown.update(doer_paint(row, cells))
     minutes = None
     if _number(row.get("since")) is not None:
         minutes = max(0.0, (now - row["since"]) / 60)
@@ -314,6 +350,28 @@ def route_row(row, now=None):
         minutes = row["elapsed_min"]
     if minutes is not None:
         shown["elapsed"] = elapsed_text(minutes)
+    # Spec E9 rule 43: the owner's values when a worker leads the row, and each stage worker
+    # running now (its mark, role, stage, open tool and its own time); a row from an older
+    # producer has neither and keeps its one doer.
+    if isinstance(row.get("owner_doer"), dict):
+        shown["owner_paint"] = doer_paint(row["owner_doer"], cells)
+    if isinstance(row.get("workers_live"), list):
+        shown["workers_live"] = []
+        for item in row["workers_live"][:8]:
+            if not isinstance(item, dict):
+                continue
+            marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
+            glyph, key = route_glyph(marker)
+            worker = {"glyph": glyph, "glyph_key": key, "kind": marker,
+                      "role": "frame" if item.get("role") == "frame" else "worker",
+                      "stage": sanitize_title(str(item.get("stage") or ""))[:64], **doer_paint(item, cells)}
+            for name, limit in (("tool", 48), ("target", 120)):
+                value = sanitize_title(str(item.get(name) or ""))[:limit]
+                if value and (name == "tool" or worker.get("tool")):
+                    worker[name] = value
+            if _number(item.get("since")) is not None:
+                worker["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+            shown["workers_live"].append(worker)
     # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
     tool = sanitize_title(str(row.get("tool") or ""))[:48]
     if tool:
@@ -346,17 +404,124 @@ def _git_part(part):
     return part[1] == "dim" and str(part[0]).startswith(" (")
 
 
+def _head_and_git(values):
+    """The folder group's parts up to its Git parentheses, and the parentheses' parts on."""
+    from .session_line import line_segments
+    parts = line_segments(values, 10000, complete=True, fields={"folder"})
+    at = next((index for index, part in enumerate(parts) if _git_part(part)), len(parts))
+    return parts[:at], parts[at:]
+
+
 def session_head(values):
     """``[e9] hearting``: the session number and project (the panel's top row)."""
-    from .session_line import line_segments
-    return [part for part in line_segments(values, 10000, complete=True, fields={"folder"}) if not _git_part(part)]
+    return _head_and_git(values)[0]
 
 
 def session_git(values):
-    """``(main 🚧 3)``: the dim Git observation the panel paints on the row below."""
-    from .session_line import line_segments
-    return [(str(text).lstrip(), key) for text, key in line_segments(values, 10000, complete=True, fields={"folder"})
-            if _git_part((text, key))]
+    """``(main ↑2 🚧 3)``: the Git observation the panel paints on the row below, dim but
+    ``↑N``/``↓N`` in Fleet's green and red (spec E9 rule 50)."""
+    git = _head_and_git(values)[1]
+    return [(str(text).lstrip() if not index else text, key) for index, (text, key) in enumerate(git)]
+
+
+def session_git_side(values, columns=40):
+    """``fix/fleet-opencode-d… ✓``: the ``GIT`` row's value beside the native area (spec E9
+    rules 40 (b)-(e), 41 (b)): the branch cut at 20 cells (32 with 60 cells inside), then
+    ``✓`` or ``↑N``/``↓N``, then the existing warning; all dim but ``↑N``/``↓N`` in Fleet's
+    green and red (rule 50), no parentheses, and the worktree count on the ``REPO`` row. Empty
+    when Git has nothing else to say."""
+    from .session_line import _git_words, fresh_key, git_branch_cells
+    if not session_git(values):
+        return []
+    if (values.get("git") or {}).get("repo") == 0:
+        return [("no-git", "dim")]
+    words = _git_words(values, branch_cells=git_branch_cells(int(columns) - 4))
+    # One part per word, so the panel can shorten the branch and keep the status and warning whole.
+    shown = [(part, key) for part, key in ((words["branch"], "dim"), *((word, fresh_key(word)) for word in words["fresh"]),
+                                           (words["flag"], "dim")) if part]
+    return [((" " if index else "") + part, key) for index, (part, key) in enumerate(shown)]
+
+
+def session_repo_side(values):
+    """``hearting``: the ``REPO`` row's name beside the native area (spec E9 rule 41 (a)), the
+    repository row's own name and color without the trailing ``/``."""
+    repo = [part for part in session_head(values) if part[1] != "tag"]
+    if not repo:
+        return []
+    *head, (name, key) = repo
+    return [*head, (name[:-1] if name.endswith("/") and len(name) > 1 else name, key)]
+
+
+def session_worktrees(values):
+    """``wt 12`` beside the repository name (spec E9 rules 37 (a), 41 (a)), dim: the Git row's own
+    ``extra_worktrees``; nothing for none or an unknown count."""
+    git = values.get("git") or {}
+    count = git.get("extra_worktrees")
+    return [("wt " + str(count), "dim")] if git and git.get("repo") != 0 and type(count) is int and count > 0 else []
+
+
+def _memory_values(row, now=None):
+    """``(text, age, type)`` of one saved memory row: its headline (else the start of its
+    snippet), its age and its recorded type; no text for a row without either."""
+    import datetime
+    from .session_line import elapsed_text
+    headline = sanitize_title(str(row.get("headline") or "")).strip()
+    snippet = sanitize_title(str(row.get("snippet") or "")).strip()
+    if not headline and snippet.startswith("superseded_by="):
+        snippet = ""
+    text = (headline or snippet)[:160]
+    try:
+        saved = datetime.datetime.fromisoformat(str(row.get("ts") or ""))
+        clock = now or (datetime.datetime.now(saved.tzinfo) if saved.tzinfo else datetime.datetime.now())
+        age = elapsed_text(max(0.0, (clock - saved).total_seconds() / 60))
+    except (TypeError, ValueError):
+        age = ""
+    return text, age, sanitize_title(str(row.get("type") or "")).strip()[:32]
+
+
+def session_memory(values, now=None):
+    """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
+    its age and type dim and its headline (else the start of its snippet) in the body color.
+    Nothing for no row; a body is never carried. (An earlier panel's MEM row reads this.)"""
+    row = values.get("memory_latest")
+    if not isinstance(row, dict):
+        return []
+    text, age, kind = _memory_values(row, now)
+    if not text:
+        return []
+    parts = []
+    if age:
+        parts.append((age + " ", "dim"))
+    if kind:
+        parts.append((kind + " ", "dim"))
+    return parts + [(text, "loc_repo")]
+
+
+# Spec E9 rule 46 (b): a memory type as its short word; another type stays as recorded.
+MEMORY_KIND_WORDS = {"user-correction": "correction", "completion": "done"}
+
+
+def memory_kind(kind):
+    """``decision``, ``lesson``, ``correction`` (``user-correction``), ``done`` (``completion``);
+    any other type as recorded, cut to twelve cells with ``…``."""
+    word = MEMORY_KIND_WORDS.get(kind, kind)
+    return word if len(word) <= 12 else word[:11] + "…"
+
+
+def session_memory_items(values, now=None):
+    """Spec E9 rule 46: the MEM section's records, two at most, newest first: each its short type
+    word, its age and its headline (else the start of its snippet). Nothing without a record or a
+    text; a body is never carried."""
+    items = []
+    for row in values.get("memory_recent") or ():
+        if not isinstance(row, dict):
+            continue
+        text, age, kind = _memory_values(row, now)
+        if text:
+            items.append({"kind": memory_kind(kind), "age": age, "text": text})
+        if len(items) >= 2:
+            break
+    return items
 
 
 def quota_row(values):
@@ -405,16 +570,20 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         owner_text = "owner · " + owner if owner else ""
         runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
-        routes.append({**route_row(row), "id": clean(row.get("id")), "title": clean(row.get("title")),
+        routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
+                       # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
+                       # stage worker leads the row, the owner's own model for its third row.
+                       "shape": clean(row.get("shape"))[:32], "owner_model": clean(row.get("owner_model"))[:64],
+                       "doer_worker": row.get("doer_worker") is True,
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")
-    model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
     effort = _effort_text(values.get("effort"))
     model_line += [(" · " + (effort or "?"), _eff_key(values.get("effort"), False) if effort else "dim")]
     labels = {name: ui_text("fleet.session_panel." + name) for name in (
@@ -425,9 +594,10 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
     # Fixed words are English in every language (spec rule 3).
-    labels.update(settings="Settings", routes="route", context="context", route_line="route line")
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line",
+                  rule_motion="rule motion")
     from .session_line import effort_label, gauge_parts, answer_wait_word
-    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
     if effort_label(values.get("effort")):
         selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
     gauge = gauge_parts(values.get("ctx_pct"))
@@ -445,8 +615,20 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
                                     "lvl_r" if mcp.get("failed") else "lvl_g")]
                  if isinstance(mcp, dict) and mcp.get("total") else [])
-    return {"head": session_head(values), "git": session_git(values), "selected": selected,
+    # Spec E9 rule 29: Fleet's session-row head (number, harness, steward mark) goes to the
+    # top border; the repository row keeps the project alone (`hearting/`).
+    head = session_head(values)
+    tag = sanitize_title(str(values.get("tag") or "")).strip()
+    return {"head": head, "repo": [part for part in head if part[1] != "tag"],
+            "tag": tag if re.fullmatch(r"\[[^\]?]{1,16}\]", tag) else "",
+            "steward": values.get("steward") is True,
+            "now": sanitize_title(str(values.get("now") or ""))[:320],
+            "git": session_git(values), "git_side": session_git_side(values, columns), "worktrees": session_worktrees(values),
+            "repo_side": session_repo_side(values),
+            "memory": session_memory(values), "memory_items": session_memory_items(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
+            # Spec E9 rule 42 (b): beside the native area the `CTX` label stands for the word.
+            "context_side": gauge,
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
             "session_title": sanitize_title(str(values.get("title") or ""))[:320],
