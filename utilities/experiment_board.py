@@ -176,6 +176,12 @@ def board(status_doc: Mapping[str, Any]) -> Dict[str, Any]:
     # project with no experiments yet, the second is already counted in `unlinked`.
     news = [w for w in warnings if w.get("code") != "catalog-missing" and not str(w.get("where", "")).startswith("resource-runs/")]
     visible = bool(groups or unlinked["count"] or news or catalog.get("status") == "invalid")
+    # The moment of the last progress, so a screen counts the age from its own clock like `observed_at`.
+    read_at = E._ts(status_doc.get("generated_at"))
+    for group in groups:
+        for row in group["rows"]:
+            since = row.get("since_last_progress_seconds")
+            row["last_progress_at"] = None if read_at is None or since is None else E._rfc3339(read_at - since)
     return {
         "schema": CONTRACT, "generated_at": status_doc.get("generated_at"), "visible": visible,
         "catalog": {k: catalog.get(k) for k in ("status", "code", "path", "updated_at")},
@@ -267,11 +273,16 @@ def delta_text(row: Mapping[str, Any]) -> str:
     return E._signed(row["delta"]) + ("%p" if unit == "pp" else f" {unit}" if unit else "")
 
 
-def age_seconds(row: Mapping[str, Any], now: float) -> Optional[int]:
-    """The age of a row's observation at `now` (render time), never the cached age."""
-    at = E._ts(row.get("observed_at"))
-    if at is None or now < at:
+def age_seconds(row: Mapping[str, Any], now: float, field: str = "observed_at") -> Optional[int]:
+    """The age of a row's observation (or, with `field="last_progress_at"`, of its last progress) at
+    `now` (render time), never the cached age."""
+    at = E._ts(row.get(field))
+    if at is None:
         return None
+    if now < at:
+        # a screen counts from its clock rounded down to the minute, so a moment inside the current
+        # minute is "0s old", not unknown; a moment further ahead is a clock that disagrees
+        return 0 if at - now < 60 else None
     return int(now - at)
 
 
@@ -314,6 +325,11 @@ def read(root: Path, *, now: Optional[float] = None, cache: Optional[Dict[str, A
     The key is the stat of the catalog, the `resource-runs` folder, and each linked public record.
     A changed key, or a cache older than `ttl`, reads `status()` again; the TTL is what lets a
     record that did not change still become `observation-stale` within a minute of the 900 s mark.
+    The stat that keys an entry is taken *before* `status()` reads, never after: a file that changes
+    while `status()` runs then differs from its key on the next call and is read again, instead of
+    a stale board being filed under the new stat for a whole TTL.  A record linked for the first time
+    has no earlier stat, so it is keyed by the stat after the read (a window of one read, and only
+    for a file edited in place during it).
     Any failure returns the "unreadable" board with the same watch paths, never an empty one."""
     store = _CACHE if cache is None else cache
     stamp = time.time() if now is None else now
@@ -322,14 +338,17 @@ def read(root: Path, *, now: Optional[float] = None, cache: Optional[Dict[str, A
     if entry is not None and 0 <= stamp - entry["at"] < ttl \
             and all(_stat(p) == s for p, s in entry["signature"]):
         return entry["board"], list(entry["watch"])
+    base = [str(E.catalog_path(Path(root))), str(Path(root) / "resource-runs")]
+    before = {p: _stat(p) for p in base + [p for p in (entry["watch"] if entry else ()) if p not in base]}
     try:
         doc = E.status(Path(root), now=stamp)
         result = board(doc)
         watch = _watch_paths(Path(root), doc)
     except Exception as exc:  # noqa: BLE001 -- a screen never fails because the catalog could not be read
         result = unreadable(Path(root), stamp, type(exc).__name__)
-        watch = [str(E.catalog_path(Path(root))), str(Path(root) / "resource-runs")]
-    store[key] = {"at": stamp, "board": result, "watch": watch, "signature": [(p, _stat(p)) for p in watch]}
+        watch = list(base)
+    store[key] = {"at": stamp, "board": result, "watch": watch,
+                  "signature": [(p, before[p] if p in before else _stat(p)) for p in watch]}
     return result, list(watch)
 
 

@@ -110,7 +110,10 @@ def cells(row, group, now):
     base = board.baseline_text(row)
     delta = _delta_cell(row)
     progress = board.progress_text(row)
-    since = board.duration_text(_g(row, "since_last_progress_seconds"))
+    # Both ages count from the draw clock; a board without the anchor (an older shape) keeps the read-time value.
+    since_s = board.age_seconds(row, now, "last_progress_at") if now is not None and _g(row, "last_progress_at") \
+        else _g(row, "since_last_progress_seconds")
+    since = board.duration_text(since_s)
     age = board.age_seconds(row, now) if now is not None else _g(row, "observed_age_seconds")
     return {
         "name": (_g(row, "name") or ui_text("experiment.unnamed"), "soft" if _g(row, "name") else "lvl_y"),

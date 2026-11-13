@@ -209,6 +209,48 @@ class ReadCache(T.Base):
         second, _ = B.read(root, now=NOW + 2, cache=cache)  # inside the TTL
         self.assertEqual(second["groups"][0]["rows"][0]["name"], "짧은 발화 보존")
 
+    def test_b7d_a_change_while_status_runs_is_read_again_inside_the_ttl(self):
+        # The key is the stat before the read: a file that moves while `status()` runs must not be
+        # filed under its new stat with the old board (a stale name for a whole TTL, #1595's kind).
+        root = self.setup_root()
+        cache = {}
+        real = E.status
+        def renaming(*args, **kwargs):
+            doc = real(*args, **kwargs)           # the read ends with the old name...
+            E.run_write(root, lambda ctx: E.op_rename(ctx, "짧은 발화 유지", "읽는 동안 바뀐 이름"), now=NOW + 1)
+            return doc                            # ...and the catalog changes before it is filed
+        with mock.patch.object(E, "status", side_effect=renaming):
+            first, _ = B.read(root, now=NOW, cache=cache)
+        self.assertEqual(first["groups"][0]["rows"][0]["name"], "짧은 발화 유지")
+        second, _ = B.read(root, now=NOW + 2, cache=cache)        # inside the TTL
+        self.assertEqual(second["groups"][0]["rows"][0]["name"], "읽는 동안 바뀐 이름")
+
+    def test_b7e_a_record_that_changes_while_status_runs_is_read_again_inside_the_ttl(self):
+        root = self.setup_root(reached=12)
+        cache = {}
+        B.read(root, now=NOW, cache=cache)                         # the record is in the watch list now
+        real = E.status
+        def advancing(*args, **kwargs):
+            doc = real(*args, **kwargs)
+            self.write_run(root, "run-a", stagnation=HEALTHY, reached=30)   # the run reports while we read
+            return doc
+        with mock.patch.object(E, "status", side_effect=advancing):
+            old, _ = B.read(root, now=NOW + B.TTL_SECONDS + 1, cache=cache)   # TTL over: read again
+        self.assertEqual(old["groups"][0]["rows"][0]["progress"]["reached"], 12)
+        fresh, _ = B.read(root, now=NOW + B.TTL_SECONDS + 2, cache=cache)     # inside the new TTL
+        self.assertEqual(fresh["groups"][0]["rows"][0]["progress"]["reached"], 30)
+
+    def test_b11_the_last_progress_moment_is_kept_so_a_screen_counts_its_own_age(self):
+        root = self.setup_root()
+        stagnant = {"state": "ok", "seconds_since_anchor": 600.0}
+        self.write_run(root, "run-a", stagnation=stagnant)
+        row = B.read(root, now=NOW, cache={})[0]["groups"][0]["rows"][0]
+        self.assertEqual(row["since_last_progress_seconds"], 600)
+        self.assertEqual(B.age_seconds(row, NOW, "last_progress_at"), 600)
+        self.assertEqual(B.age_seconds(row, NOW + 120, "last_progress_at"), 720)
+        self.assertEqual(B.age_seconds(row, NOW - 630, "last_progress_at"), 0)     # inside the minute, not unknown
+        self.assertIsNone(B.age_seconds(row, NOW - 1000, "last_progress_at"))      # a clock that disagrees
+
     def test_b7b_an_unchanged_redraw_reads_the_status_once(self):
         root = self.setup_root()
         cache = {}

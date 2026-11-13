@@ -206,6 +206,20 @@ class LabPageTest(T.Base):
         self.assertIn("2d", two_days)                    # the age follows the draw clock
         self.assertRegex(two_days, r"\d\d-\d\d \d\d:\d\d")   # the read time carries its date, not "just now"
 
+    def test_the_since_column_ages_from_the_draw_clock_like_observed(self):
+        for i in range(4):          # a known last-progress age on every row: 10 minutes at the read
+            self.write_run(self.root, f"run-{i}", key="si_sdr", series={"si_sdr": [(5, 8.4)]},
+                           stagnation={"state": "ok", "seconds_since_anchor": 600.0}, reached=36, total=60)
+        minute = int(NOW_EPOCH // 60 * 60)
+        lab = self.board(minute)                           # read exactly on a minute: since = 10m
+        def since_cells(text):
+            return [row.split()[-2] for row in text.splitlines() if "기본 구성" in row or "잔향 줄임" in row]
+        read_time, same_minute = self.page_at(lab, minute), self.page_at(lab, minute + 59.9)
+        self.assertEqual(read_time, same_minute)                      # one HH:MM, one set of cells
+        self.assertEqual(since_cells(read_time), ["10m", "10m"])
+        self.assertEqual(since_cells(self.page_at(lab, minute + 120)), ["12m", "12m"])   # +2 min: since +2 min
+        self.assertEqual(since_cells(self.page_at(lab, minute + 120 + 59)), ["12m", "12m"])
+
     def test_a_saved_view_never_replays_a_board(self):
         from tools.fleet.explorer.view_model import persistable_view_model, restore_persisted_view_model
         repo = dict(self.vm.repos[0], lab=self.board())
