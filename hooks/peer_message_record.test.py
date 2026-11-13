@@ -24,6 +24,7 @@ sys.path.insert(0, str(_UTILITIES))
 import fixture_processes
 import dispatch_pending_delivery as pending_delivery
 import peer_obligations
+import shared_readiness
 _PEER_SPEC = importlib.util.spec_from_file_location("hook_test_peer_message", _UTILITIES / "peer-message.py")
 peer_message = importlib.util.module_from_spec(_PEER_SPEC)
 _PEER_SPEC.loader.exec_module(peer_message)
@@ -69,7 +70,6 @@ class _BaseTest(unittest.TestCase):
             "CLAUDE_HOME": str(self.tmp_root / "runtime" / "claude"),
             "CLAUDE_CONFIG_DIR": str(self.tmp_root / "home" / ".claude"),
             "OPENCODE_CONFIG_DIR": str(self.tmp_root / "home" / ".config" / "opencode"),
-            "FAKE_HERDR_SHELL_PID": str(os.getpid()),
         })
         self.env.pop("AGENT_HOME", None)
         for key in ("AGENT_SERVICE_CURRENT", "HEARTING_SERVICE_CURRENT", "SERVICE_CURRENT",
@@ -735,28 +735,6 @@ class PromptTest(_BaseTest):
 
 _PEER_STEWARD = _HERE.parent / "utilities" / "peer-steward.py"
 
-_FAKE_HERDR = r'''#!/usr/bin/env python3
-import json, os, sys
-argv = sys.argv[1:]
-target = argv[2] if len(argv) > 2 else "-"
-if argv[:2] == ["pane", "process-info"]:
-    shell_pid = int(os.environ.get("FAKE_HERDR_SHELL_PID", os.getppid()))
-    print(json.dumps({"result": {"process_info": {
-        "pane_id": argv[-1], "shell_pid": shell_pid,
-        "foreground_process_group_id": shell_pid,
-        "foreground_processes": [{"pid": shell_pid, "argv": ["zsh"]}]}}}))
-    sys.exit(0)
-if argv[:2] == ["pane", "list"]:
-    print(json.dumps({"result": {"panes": [{"pane_id": "w1:p9", "agent": "claude",
-        "agent_session": {"value": "sid-fake"}, "agent_status": "idle"}]}}))
-    sys.exit(0)
-print(json.dumps({"result": {"agent": {"agent": "claude",
-    "agent_session": {"value": "sid-fake"}, "agent_status": "idle",
-    "name": target, "pane_id": "w1:p9"}, "type": "agent_info"}}))
-sys.exit(0)
-'''
-
-
 class SweepTest(_BaseTest):
     def setUp(self):
         super().setUp()
@@ -764,25 +742,22 @@ class SweepTest(_BaseTest):
         # been created yet. Keep this real runner fixture on that path; peer
         # receipt delivery must not require an empty jobs.log setup file.
         self.jobs_path.unlink()
-        self.bin = self.tmp_root / "fakebin"
-        self.bin.mkdir()
-        fake = self.bin / "herdr"
-        fake.write_text(_FAKE_HERDR)
-        fake.chmod(0o755)
-        self.env["PATH"] = str(self.bin) + os.pathsep + self.env.get("PATH", "")
         self.session = "sweep-session-1"
-        # A pane census must report a live, fixture-owned foreground shell;
-        # the hook/observer children must not borrow a caller's Herdr socket.
-        self.shell = subprocess.Popen(
-            ["/bin/sleep", "60"], env=self.env, start_new_session=True,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(self._stop_fixture_shell)
-        self.env["FAKE_HERDR_SHELL_PID"] = str(self.shell.pid)
+        self.native = {}
 
-    def _stop_fixture_shell(self):
-        if self.shell.poll() is None:
-            self.shell.kill()
-            self.shell.wait(timeout=5)
+    def _native_target(self, name):
+        """The session a watch observes: a real native process and registry record, no
+        Herdr. One per name, so several watches can be armed side by side."""
+        if name not in self.native:
+            self.native[name] = fixture_processes.NativeSession(
+                self, sid=f"sid-{name}", home=self.tmp_root / "home", name=name,
+                pane=f"w1:p{10 + len(self.native)}")
+        return self.native[name]
+
+    def _wake_runner(self):
+        """The shared runner reads native state when it is woken; nothing polls."""
+        store = peer_obligations.ObligationStore(self.tmp_root / "peer-steward" / "obligations")
+        shared_readiness.wake_runner(store.root)
 
     def _steward(self, *argv, session_id=None):
         env = dict(self.env)
@@ -797,11 +772,16 @@ class SweepTest(_BaseTest):
         return Path(json.loads(out)["watch_root"])
 
     def _arm_and_complete(self, target, session_id=None):
+        # Armed on a working target: only the change to idle completes the watch.
+        native = self._native_target(target)
+        native.set("working")
         proc = self._steward("watch", target, session_id=session_id)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         watch_id = dict(
             t.split("=", 1) for t in proc.stdout.split() if "=" in t
         )["watch_id"]
+        native.set("idle")
+        self._wake_runner()
         receipt = self._watch_root() / f"{watch_id}.receipt.json"
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not receipt.exists():

@@ -54,47 +54,18 @@ if "peer-steward.py" in sys.argv[0] and "__obligation-runner" in sys.argv:
 '''
 
 
-_FAKE_HERDR = r'''#!/usr/bin/env python3
-import json, os, sys
-argv = sys.argv[1:]
-if argv[:1] == ["--session"]:
-    argv = argv[2:]
-verb = argv[1] if len(argv) > 1 else ""
-target = argv[2] if len(argv) > 2 else "fixture-target"
-log = os.environ["FIXTURE_HERDR_LOG"]
-with open(log, "a", encoding="utf-8") as out:
-    out.write(f"{os.getpid()} {verb} {target}\n")
-payload = {"id": "fixture-herdr", "result": {"agent": {
-    "agent": "claude", "agent_session": {"value": "sid-fixture"},
-    "agent_status": "idle", "name": target, "pane_id": "w1:p9"
-}, "type": "agent_info"}}
-if verb == "process-info":
-    worker = int(os.environ["FIXTURE_WATCH_FOREGROUND_PID"])
-    payload["result"] = {"process_info": {
-        "pane_id": "w1:p9", "shell_pid": int(os.environ["FIXTURE_WATCH_SHELL_PID"]),
-        "foreground_process_group_id": worker,
-        "foreground_processes": [{"pid": worker, "argv": [sys.executable]}]}}
-print(json.dumps(payload))
+_HERDR_GUARD = r'''#!/usr/bin/env python3
+# Communication and watch work never reaches Herdr: any call is logged and answered
+# "unavailable", and the fixture reports the count.
+import os, sys
+with open(os.environ["FIXTURE_HERDR_LOG"], "a", encoding="utf-8") as out:
+    out.write(f"{os.getpid()} {' '.join(sys.argv[1:])}\n")
+sys.exit(1)
 '''
 
 
-class FakeObservationEndpoint:
-    """Small newline JSON server implementing the two observed protocol methods."""
-
-    def __init__(self, path: Path, panes: list[dict], agents: list[dict] | None = None):
-        self.path = path
-        self.panes = panes
-        self.agents = list(panes if agents is None else agents)
-        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.listener.bind(str(path))
-        self.listener.listen(64)
-        self.listener.settimeout(0.1)
-        self.stop = threading.Event()
-        self.lock = threading.Lock()
-        self.subscriptions: list[socket.socket] = []
-        self.requests = {"events.subscribe": 0, "session.snapshot": 0}
-        self.thread = threading.Thread(target=self._accept, daemon=True)
-        self.thread.start()
+class _LineProtocol:
+    """Newline JSON framing shared by the control endpoint fixture."""
 
     @staticmethod
     def _read_line(connection):
@@ -109,79 +80,6 @@ class FakeObservationEndpoint:
     @staticmethod
     def _send(connection, payload):
         connection.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
-
-    def _serve(self, connection):
-        try:
-            request = self._read_line(connection)
-            if not isinstance(request, dict):
-                return
-            method = request.get("method")
-            with self.lock:
-                self.requests[method] = self.requests.get(method, 0) + 1
-            response = {"id": request.get("id")}
-            if method == "events.subscribe":
-                response["result"] = {"subscribed": True}
-                self._send(connection, response)
-                connection.settimeout(0.2)
-                with self.lock:
-                    self.subscriptions.append(connection)
-                while not self.stop.is_set():
-                    try:
-                        if not connection.recv(1):
-                            break
-                    except socket.timeout:
-                        continue
-            elif method == "session.snapshot":
-                response["result"] = {"type": "session_snapshot", "snapshot": {
-                    "protocol": 22, "panes": self.panes, "agents": self.agents}}
-                self._send(connection, response)
-            else:
-                response["error"] = {"code": "unknown_method"}
-                self._send(connection, response)
-        except (OSError, ValueError, TypeError):
-            pass
-        finally:
-            with self.lock:
-                if connection in self.subscriptions:
-                    self.subscriptions.remove(connection)
-            with contextlib.suppress(OSError):
-                connection.close()
-
-    def _accept(self):
-        while not self.stop.is_set():
-            try:
-                connection, _ = self.listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            threading.Thread(target=self._serve, args=(connection,), daemon=True).start()
-
-    def publish_unrelated(self):
-        frame = (json.dumps({"event": "pane.updated", "data": {
-            "pane_id": "w99:p999", "pane": {"pane_id": "w99:p999", "agent": "claude"}
-        }}, separators=(",", ":")) + "\n").encode()
-        failed = []
-        with self.lock:
-            for connection in self.subscriptions:
-                try:
-                    connection.sendall(frame)
-                except OSError:
-                    failed.append(connection)
-            for connection in failed:
-                self.subscriptions.remove(connection)
-
-    def close(self):
-        self.stop.set()
-        with contextlib.suppress(OSError):
-            self.listener.close()
-        with self.lock:
-            connections = list(self.subscriptions)
-        for connection in connections:
-            with contextlib.suppress(OSError):
-                connection.shutdown(socket.SHUT_RDWR)
-                connection.close()
-        self.thread.join(timeout=1)
 
 
 class FakeControlEndpoint:
@@ -208,7 +106,7 @@ class FakeControlEndpoint:
             with connection:
                 try:
                     connection.settimeout(2)
-                    request = FakeObservationEndpoint._read_line(connection)
+                    request = _LineProtocol._read_line(connection)
                     if not isinstance(request, dict):
                         continue
                     self.requests += 1
@@ -219,7 +117,7 @@ class FakeControlEndpoint:
                         self.deliveries.update(child["attempt_id"]
                             for child in (request.get("receipt") or {}).get("children", []))
                         response = {"schema_version": 1, "status": "retryable", "reason": "fixture-recipient-busy"}
-                    FakeObservationEndpoint._send(connection, response)
+                    _LineProtocol._send(connection, response)
                 except (OSError, ValueError, TypeError, KeyError):
                     continue
 
@@ -988,12 +886,9 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
             profile_dir = temp_root / "profiles"
             profile_hook = temp_root / "profile-hook"
             fake_bin.mkdir()
-            fake_herdr = fake_bin / "herdr"
-            fake_herdr.write_text(_FAKE_HERDR, encoding="utf-8")
-            fake_herdr.chmod(0o755)
-            fifo = temp_root / "herdr-wait.fifo"
-            os.mkfifo(fifo)
-            fifo_keeper = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+            herdr_guard = fake_bin / "herdr"
+            herdr_guard.write_text(_HERDR_GUARD, encoding="utf-8")
+            herdr_guard.chmod(0o755)
             call_log = temp_root / "herdr-calls.log"
             jobs_path = temp_root / "dispatch" / "jobs.log"
             home.mkdir()
@@ -1029,9 +924,7 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                 "AGENT_HOME": str(source),
                 "AGENT_DISPATCH_JOBS": str(jobs_path),
                 "AGENT_PEER_LEDGER_ROOT": str(state_root),
-                "HERDR_SOCKET_PATH": str(temp_root / "herdr-observation.sock"),
-                "AGENT_HERDR_SESSION": "default",
-                "FIXTURE_HERDR_FIFO": str(fifo),
+                "CLAUDE_CONFIG_DIR": str(home / ".claude"),
                 "FIXTURE_HERDR_LOG": str(call_log),
                 "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
                 "PYTHONPATH": str(source / "utilities") + os.pathsep
@@ -1096,7 +989,7 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
             worker_processes = []
             foreground_processes = []
             foreground_children = set()
-            observation_server = None
+            native_sessions = []
             control_server = None
             open_successor_locks = contextlib.ExitStack()
             try:
@@ -1135,8 +1028,6 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                     if not identity.get("pid_start"):
                         raise AssertionError("fixture worker has no exact PID/start identity")
                     worker_identities.append(identity)
-                os.environ["FIXTURE_WATCH_SHELL_PID"] = str(os.getpid())
-                os.environ["FIXTURE_WATCH_FOREGROUND_PID"] = str(worker_processes[0].pid)
                 _write_jobs(jobs_path, source, worker_identities)
                 jobs_size = jobs_path.stat().st_size
                 if jobs_size < JOBS_BYTES:
@@ -1183,14 +1074,18 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                     foreground_children.add(json.loads(ready.read_text())["child_pid"])
                 jobs_size = jobs_path.stat().st_size
 
-                panes = [{"pane_id": "w1:p9", "agent": "claude",
-                          "agent_session": {"value": "sid-fixture"},
-                          "agent_status": "idle", "name": "fixture-target"}]
-                observation_server = FakeObservationEndpoint(
-                    Path(isolated["HERDR_SOCKET_PATH"]), panes, agents=[{
-                        "pane_id": "w1:p9", "agent": "claude",
-                        "agent_session": {"value": "sid-fixture"},
-                        "agent_status": "idle", "name": "fixture-target"}])
+                # The one session every watch observes, plus one it never watches: real
+                # native processes with the runtime's own registry records. No Herdr.
+                sys.path.insert(0, str(SOURCE_ROOT / "tools"))
+                fixture_processes = __import__("fixture_processes")
+                watched = fixture_processes.NativeSession(
+                    self, sid="sid-fixture", home=home, pane="w1:p9", name="fixture-target")
+                unrelated = fixture_processes.NativeSession(
+                    self, sid="sid-unrelated", home=home, pane="w1:p10", name="fixture-other")
+                native_sessions.extend([watched, unrelated])
+                watched_identity = {
+                    "pid": watched.pid, "pid_start": watched.birth,
+                    "pid_namespace": dispatch_contract.process_namespace_identity()}
                 control_server = FakeControlEndpoint(temp_root / "control.sock")
                 binding = peer_obligations.managed_service_binding(source)
                 if binding != str(current):
@@ -1211,12 +1106,16 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                         "watch_id": watch_id, "target": "fixture-target",
                         "until": ["idle"], "timeout": 300_000,
                         "deadline": steward._watch_deadline(300_000),
-                        "server": "default", "armed_ts": steward._utc_now(),
+                        "server": "default", "steward_server": "default",
+                        "readiness_endpoint": "native:default", "armed_ts": steward._utc_now(),
                         "agent": {"harness": "claude", "session_id": "sid-fixture",
-                                  "name": "fixture-target", "pane": "w1:p9"},
+                                  "name": "fixture-target", "pane": "w1:p9",
+                                  **watched_identity},
+                        "initial_state": "idle", "wake": "none",
                         "steward": {"harness": "codex", "session_id": "sid-steward",
                                     "project": str(source)},
-                        "observer_protocol": 2, "observer_generation": 1,
+                        "steward_seat": None,
+                        "observer_protocol": 3, "observer_generation": 1,
                         "rearm_count": 0, "watcher": {},
                     }
                     steward._write_json_atomic(paths.arm, arm)
@@ -1312,24 +1211,6 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                                      if item["phase"] == "terminal-owner-recipient-busy"}
                 _wait_for(lambda: terminal_attempts <= control_server.deliveries,
                           30, "terminal observers to normalize real history and reach the busy recipient")
-                try:
-                    _wait_for(lambda: len(observation_server.subscriptions) >= WATCHER_COUNT,
-                              20, "eleven actual watch subscriptions")
-                except AssertionError as exc:
-                    diagnostics = []
-                    for watch_id, process in watch_processes:
-                        paths = steward._watch_paths(watch_id, watch_root)
-                        diagnostics.append({
-                            "watch_id": watch_id, "pid": process.pid,
-                            "returncode": process.poll(),
-                            "observation": (json.loads(paths.observation.read_text())
-                                            if paths.observation.exists() else None),
-                            "receipt": (json.loads(paths.receipt.read_text())
-                                        if paths.receipt.exists() else None),
-                            "log": paths.log.read_text(errors="replace")[-2000:]
-                                    if paths.log.exists() else "",
-                        })
-                    raise AssertionError(f"{exc}; watcher diagnostics={diagnostics}") from exc
                 watcher_pids = {process.pid for _watch_id, process in watch_processes}
                 def pending_watch_readiness():
                     observations = []
@@ -1409,7 +1290,10 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                 sent_events = []
                 def publish_events():
                     while not stop_events.is_set():
-                        observation_server.publish_unrelated()
+                        # An unrelated native session changes state every second. Nothing
+                        # is pushed to the runner or any watch (no subscription exists),
+                        # so no watch of the fixture target may react to it.
+                        unrelated.set("working" if len(sent_events) % 2 == 0 else "idle")
                         sent_events.append(WATCHER_COUNT)
                         stop_events.wait(1)
                 publisher = threading.Thread(target=publish_events, daemon=True)
@@ -1628,7 +1512,8 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                     "warm_idle": warm,
                     "unrelated_event": burst,
                     "profile_summaries": profile_summaries,
-                    "herdr_requests": dict(observation_server.requests),
+                    "herdr_calls": (call_log.read_text().splitlines()
+                                    if call_log.exists() else []),
                     "unrelated_events_sent": sum(sent_events),
                     "historical_index_projection_metrics_delta": historical_metrics,
                     "observer_replacement_retry": replacement_result,
@@ -1745,13 +1630,12 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                     if process is not None:
                         with contextlib.suppress(Exception):
                             process.wait(timeout=2)
-                if observation_server is not None:
-                    observation_server.close()
+                for native_session in native_sessions:
+                    with contextlib.suppress(Exception):
+                        native_session.stop()
                 if control_server is not None:
                     control_server.close()
                 open_successor_locks.close()
-                with contextlib.suppress(OSError):
-                    os.close(fifo_keeper)
                 os.environ.clear()
                 os.environ.update(old_env)
                 for entry in (str(source / "utilities"), str(source / "tools" / "install")):

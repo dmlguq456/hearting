@@ -3075,10 +3075,10 @@ or the work itself is complete; those are
 different facts, and the bound recipient remains the exact (harness, session_id).
 
 **S3** no polling — watching is a checked steward watch (`utilities/peer-steward.py watch`
-→ a detached watcher, separate from the session's lifetime, that waits on `herdr agent
-wait` exactly once and leaves a disk receipt; no self-written sleep/poll loop), a bounded
-foreground `utilities/peer-steward.py wait`, a one-shot idle-notify subscription (Claude
-`notify_when_idle`, secondary), or a registered continuation supervisor/monitor.
+→ a detached watcher, separate from the session's lifetime, that waits for the existing
+obligation runner's native session record and leaves a disk receipt; no new poller), a
+bounded foreground `utilities/peer-steward.py wait`, a one-shot idle-notify subscription
+(Claude `notify_when_idle`, secondary), or a registered continuation supervisor/monitor.
 `ListAgents` loops, "is it done yet?" messages, sleep loops, and periodic recaps are
 forbidden for completion watching. The role-bound periodic steward check above is a
 separate obligation, not completion watching. Foreground launch and retirement observations
@@ -3350,13 +3350,12 @@ role decision below. The pane pid probe
 (`herdr pane process-info`) is what places an OpenCode session in its herdr pane. The
 steward marker under `<dispatch-state-root>/peer-steward/` is a **role** flag, not a
 side effect of talking: it is raised only by `peer-steward.py
-steward on` (`source=explicit`), by `peer-steward.py wait`/`watch` once herdr answered
-about a real target (`source=watch`; a mistyped target leaves no flag), including a
-birth-bound native attachment observed in that same pane when its optional
-transport omits the identity. That is identity evidence only: missing native
-activity remains `unknown`, never an inferred idle or completion. Input and
-terminal gates keep their existing guards. The same observation reader is used
-at wait/watch admission, revalidation and native wait-result decoding.
+steward on` (`source=explicit`), by `peer-steward.py wait`/`watch` after a unique
+Hearting-native target session is resolved (`source=watch`; an unresolved target leaves no
+flag). The binding carries exact native PID birth and PID namespace. That is identity
+evidence only: missing native activity remains `unknown`, never an inferred idle or
+completion. Input and terminal gates keep their existing guards. Wait and watch resolve
+and revalidate through `peer_address` and the same native session reader.
 It can also be raised by a
 `peer-steward.py start` that launched a session (`source=start`). No `record` path and
 no send raises it — not a steer/handoff/gate-relay and not a `SendMessage` with `notify_when_idle`, which the
@@ -3572,23 +3571,18 @@ directly); `SendMessage` is secondary.
 
 **Detached watch (model-visible).** `peer-steward.py watch <target>` returns one typed
 `state=armed` line carrying the next-action field `parent_next` (§5.10a).
-The exact server/pane/session obligation remains stored when a bounded observer
-times out, loses herdr, or exits; the existing startup/reconnect path replaces
-only that observer under its existing claim, publishing its identity and generation
-before reporting reattachment. `join`/`status`/`ack` report the stored duty and
-observation; a fulfilled duty allows a new watch. A tab is a location hint, not identity.
-The existing obligation runner may share a narrow, target-bound readiness
-observation across watchers after their native results arrive. Each watcher
-retains its own native result, deadline, receipt, and ack; the shared observation
-does not settle a watch. Stale or unavailable observations remain pending and
-reconnect through the same watch id, with current identity and transition
-authority checked by the existing owner.
-A target with no session yet (a Codex before its first input) is held by server
-and pane, and the observer continues on the first session that pane reports;
-`prompt` refuses such a pane (`target-session-unresolved`) and `retire` exits it
-on its native turn and screen alone, since nothing can be bound to it yet. A session its foreground
-process already proves (Codex 0.162 opens one at start) is that pane's session
-until herdr reports one: registered work bound to it still withholds input.
+The exact session obligation remains stored when a bounded observer times out or exits;
+the existing startup/reconnect path replaces only that observer under its existing claim.
+The obligation runner reads native session status once per existing pass and wakes matching
+observers. A meaningful idle/done, blocked, confirmed end, or confirmed successor result
+writes one receipt; working, unreadable, and unknown states write none. `join`/`status`/`ack`
+report the stored duty and observation; a fulfilled duty allows a new watch. A pane is only a
+location hint, not identity. Shared readiness remains target-bound and cannot settle a watch
+by itself. Unknown observations remain pending and reconnect through the same watch id.
+A target with no session id cannot arm a new watch (`target-session-unresolved`). A
+protocol-2 arm without native PID birth remains unknown; the observer does not adopt the
+first session later reported in that pane. `prompt` and `retire` keep their existing
+native-turn and screen guards for a pane that has no session yet.
 Watcher, lock, receipt, and available wake carriers are runtime-owned
 (`core/ADAPTATION.md §7.3`).
 

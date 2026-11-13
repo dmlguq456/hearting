@@ -558,7 +558,7 @@ def _watch_transition_authority_lock(identity, server, *, deadline=None):
             raise _WatchTransitionLockBusy("jobs-lock-budget-expired")
         endpoint = identity.get("endpoint") if isinstance(identity, dict) else None
         socket_path = (None if isinstance(endpoint, str)
-                       and endpoint.startswith(_WATCH_SERVER_ENDPOINT_PREFIX)
+                       and endpoint.startswith((_WATCH_SERVER_ENDPOINT_PREFIX, "native:"))
                        else endpoint if isinstance(endpoint, str) and endpoint
                        else herdr_observation.socket_path_for_endpoint(server))
         now = time.monotonic()

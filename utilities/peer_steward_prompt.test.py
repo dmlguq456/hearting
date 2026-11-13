@@ -79,7 +79,40 @@ def _install_native_seats(test, rows, tags=None):
 
 
 class KillFixtureTest(_WatchMixin, unittest.TestCase):
-    """A56-7 — the smallest falsifying test for the whole direction."""
+    """Detached native observer lifetime, reattachment, and wake ownership."""
+
+    def _native_env(self):
+        env = self._env("held")
+        site = self.tmp_root / "native-watch-site"
+        site.mkdir(exist_ok=True)
+        env["TEST_NATIVE_PID"] = str(self.shell.pid)
+        env["TEST_UTILITIES_ROOT"] = str(_HERE)
+        (site / "sitecustomize.py").write_text(
+            "import os, sys\n"
+            "pid=int(os.environ['TEST_NATIVE_PID'])\n"
+            "start=open(f'/proc/{pid}/stat').read().rsplit(') ',1)[1].split()[19]\n"
+            "namespace=os.readlink(f'/proc/{pid}/ns/pid')\n"
+            "utilities=os.environ['TEST_UTILITIES_ROOT']\n"
+            "sys.path.insert(0,utilities) if utilities not in sys.path else None\n"
+            "import peer_address, peer_steward_native\n"
+            "peer_address.resolve=lambda target,**kw: ({'harness':'claude','session_id':'sid-fake','pane':'w1:p9'},None) if target=='peer-a' else (None,'target-not-found')\n"
+            "peer_steward_native.native_agent=lambda harness,sid,*,pane=None,server=None: {'result':{'agent':{'agent':harness,'agent_status':'working','agent_session':{'value':sid},'name':'peer-a','pane_id':pane or 'w1:p9','pid':pid,'pid_start':start,'pid_namespace':namespace}}} if (harness,sid)==('claude','sid-fake') else None\n"
+            "if os.environ.get('TEST_REFUSE_ARM_WRITE') and b'__watch-run' in open('/proc/self/cmdline','rb').read().split(b'\\0'):\n"
+            " import errno, re\n"
+            " old=os.replace\n"
+            " def replace(src,dst,*a,**kw):\n"
+            "  if re.fullmatch(r'[0-9a-f]{16}\\.json',os.path.basename(str(dst))): raise OSError(errno.ENOSPC,'fixture')\n"
+            "  return old(src,dst,*a,**kw)\n"
+            " os.replace=replace\n",
+            encoding="utf-8")
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(site), env.get("PYTHONPATH")) if item)
+        return env
+
+    def _run(self, *argv, env=None, timeout=30, **kw):
+        return subprocess.run([sys.executable, str(_HERE / "peer-steward.py"), *argv],
+                              capture_output=True, text=True,
+                              env=env or self._native_env(), timeout=timeout, **kw)
 
     def _spawn_caller(self, subcommand):
         script = (
@@ -89,240 +122,114 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
             "open(%r,'w').write(p.stdout);" % str(self.tmp_root / "caller.out")
             + "import time;time.sleep(300)"
         )
-        return subprocess.Popen([sys.executable, "-c", script], env=self._env("held"),
+        return subprocess.Popen([sys.executable, "-c", script], env=self._native_env(),
                                 start_new_session=True)
 
-    def test_watcher_survives_sigkill_of_the_callers_process_group(self):
-        caller = self._spawn_caller("watch")
-        # Read the watcher identity from disk, not from the caller's stdout:
-        # a killed caller's stdout may never be flushed.
-        deadline = time.monotonic() + 30
-        arm = None
-        while time.monotonic() < deadline:
-            # Only "<watch_id>.json" is an arm record. The writer's atomic temp
-            # file (".tmp-*.json") matches "*.json" too and vanishes at its
-            # rename (FileNotFoundError on CI), and observation/receipt files
-            # carry no watcher identity.
-            arms = ([p for p in self.watch_root.glob("*.json")
-                     if not p.name.startswith(".") and p.name.count(".") == 1]
-                    if self.watch_root.is_dir() else [])
-            if arms:
-                candidate = json.loads(arms[0].read_text())
-                # The accepted record exists before its observer is published.
-                # Kill the caller only after that observer's identity is ready.
-                watcher = candidate.get("watcher") or {}
-                if watcher.get("pid") and watcher.get("pid_start"):
-                    arm = candidate
-                    break
-            time.sleep(0.02)
-        self.assertIsNotNone(arm, "watch never armed")
-        pid, pid_start = arm["watcher"]["pid"], arm["watcher"]["pid_start"]
-
-        os.killpg(os.getpgid(caller.pid), signal.SIGKILL)
-        caller.wait(timeout=10)
-
-        self.assertTrue(peer_steward._pid_identity_ok(pid, pid_start),
-                        "the watcher must outlive its caller's process group")
-        self._release()
-        receipt = self._wait_for_receipt(arm["watch_id"])
-        self.assertEqual(receipt["state"], "idle")
-
     def _run_spawner(self, argv, after_spawn, env=None):
-        """Run one peer-steward command with `after_spawn` right after its observer spawn.
-
-        Spawners record the observer identity in the arm only after the spawn;
-        `after_spawn` (source using `process`) acts in exactly that gap.
-        """
         source = (
-            "import importlib.util, os, signal, subprocess, sys\n"
-            f"sys.path.insert(0, {str(_HERE)!r})\n"
-            "spec = importlib.util.spec_from_file_location(\n"
-            f"    'peer_steward_spawner', {str(_HERE / 'peer-steward.py')!r})\n"
-            "module = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(module)\n"
-            "real_popen = subprocess.Popen\n"
-            "def popen(command, *args, **kwargs):\n"
-            "    process = real_popen(command, *args, **kwargs)\n"
-            "    if '__watch-run' in command:\n"
-            f"        {after_spawn}\n"
-            "    return process\n"
-            "subprocess.Popen = popen\n"
+            "import importlib.util,os,signal,subprocess,sys\n"
+            f"sys.path.insert(0,{str(_HERE)!r})\n"
+            "spec=importlib.util.spec_from_file_location('peer_steward_spawner',"
+            f"{str(_HERE / 'peer-steward.py')!r})\n"
+            "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n"
+            "real_popen=subprocess.Popen\n"
+            "def popen(command,*args,**kwargs):\n"
+            " process=real_popen(command,*args,**kwargs)\n"
+            " if '__watch-run' in command:\n"
+            f"  {after_spawn}\n"
+            " return process\n"
+            "subprocess.Popen=popen\n"
             f"sys.exit(module.main({list(argv)!r}))\n"
         )
-        return subprocess.run([sys.executable, "-c", source], env=env or self._env("held"),
-                              capture_output=True, text=True, timeout=60)
+        return subprocess.run([sys.executable, "-c", source], env=env or self._native_env(),
+                              capture_output=True, text=True, timeout=30)
 
-    def _run_killed_after_spawn(self, argv):
-        spawner = self._run_spawner(argv, "os.kill(os.getpid(), signal.SIGKILL)")
-        self.assertEqual(spawner.returncode, -signal.SIGKILL, spawner.stdout + spawner.stderr)
-
-    def _wait_for_named_observer(self, arm_path):
-        # The observer holding the watch lock must be named by its arm, or the
-        # runner cannot wake it and no later pass can replace it.
-        deadline = time.monotonic() + 10
-        arm = json.loads(arm_path.read_text())
-        while (not peer_steward._alive(arm, self.watch_root)
-               and time.monotonic() < deadline):
-            time.sleep(0.02)
-            arm = json.loads(arm_path.read_text())
-        self.assertTrue(peer_steward._alive(arm, self.watch_root), arm)
-        return arm
-
-    def _armed_with_dead_observer(self):
-        """A watch whose first observer started its native wait and was killed."""
-        armed = self._fields(self._run("watch", "peer-a", env=self._env("held")).stdout)
-        self._wait_for_lock(armed["watch_id"])
-        self._wait_for_wait_calls(1)
-        os.kill(int(armed["pid"]), signal.SIGKILL)
-        deadline = time.monotonic() + 10
-        while (peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"])
-               and time.monotonic() < deadline):
-            time.sleep(0.02)
-        self.assertFalse(peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"]))
-        return armed
-
-    def test_watcher_names_itself_when_its_caller_dies_right_after_the_spawn(self):
-        self._run_killed_after_spawn(["watch", "peer-a"])
-        arms = self._arm_records()
-        self.assertEqual(len(arms), 1, arms)
-        arm = self._wait_for_named_observer(arms[0])
-
-        self._release()
-        receipt = self._wait_for_receipt(arm["watch_id"])
-        self.assertEqual(receipt["state"], "idle")
-        self.assertEqual(receipt["watcher"], arm["watcher"])
-
-    def test_watcher_that_cannot_name_itself_exits_so_a_respawn_can(self):
-        # The spawner dies before naming its observer, and the observer's own
-        # arm write fails (ENOSPC). The observer must end and release the
-        # watch lock: an unnamed lock holder can be neither woken nor replaced.
-        site = self.tmp_root / "fixture-site"
-        site.mkdir()
-        (site / "sitecustomize.py").write_text(
-            "import errno, os, re\n"
-            "if b'__watch-run' in open('/proc/self/cmdline', 'rb').read().split(b'\\0'):\n"
-            "    _replace = os.replace\n"
-            "    def replace(src, dst, *args, **kwargs):\n"
-            "        if re.fullmatch(r'[0-9a-f]{16}\\.json', os.path.basename(str(dst))):\n"
-            "            raise OSError(errno.ENOSPC, 'fixture: arm write refused')\n"
-            "        return _replace(src, dst, *args, **kwargs)\n"
-            "    os.replace = replace\n", encoding="utf-8")
-        env = self._env("held")
-        env["PYTHONPATH"] = os.pathsep.join(
-            item for item in (str(site), env.get("PYTHONPATH")) if item)
-        spawner = self._run_spawner(["watch", "peer-a"], "os.kill(os.getpid(), signal.SIGKILL)",
-                                    env=env)
-        self.assertEqual(spawner.returncode, -signal.SIGKILL, spawner.stdout + spawner.stderr)
-        arms = self._arm_records()
-        self.assertEqual(len(arms), 1, arms)
-        watch_id = json.loads(arms[0].read_text())["watch_id"]
-        lock = self.watch_root / f"{watch_id}.lock"
-        deadline = time.monotonic() + 10
-        while peer_steward._lock_held(lock) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertFalse(peer_steward._lock_held(lock),
-                         "an observer that could not name itself kept the watch lock")
-        self.assertEqual(json.loads(arms[0].read_text())["watcher"], {})
-
-        rearmed = self._fields(self._run("rearm", watch_id, env=self._env("held")).stdout)
-        self.assertEqual(rearmed.get("state"), "rearmed", rearmed)
-        arm = self._wait_for_named_observer(arms[0])
-        self._release()
-        receipt = self._wait_for_receipt(watch_id)
-        self.assertEqual(receipt["state"], "idle")
-        self.assertEqual(receipt["watcher"], arm["watcher"])
-
-    def test_reattached_watcher_names_itself_when_its_spawner_dies_right_after_the_spawn(self):
-        # Here the arm still names the previous observer, which has exited.
-        armed = self._armed_with_dead_observer()
-        self._run_killed_after_spawn(["rearm", armed["watch_id"]])
-        arm = self._wait_for_named_observer(self.watch_root / f"{armed['watch_id']}.json")
-        self.assertNotEqual(arm["watcher"]["pid"], int(armed["pid"]))
-        self.assertEqual(len(self._wait_calls()), 1,
-                         "the reattached observer adopts the one native wait")
-        # The generation was recorded before the spawn, so a later release
-        # takeover still recognises this observer's exact argv.
-        self.assertEqual((arm["observer_generation"], arm["rearm_count"]), (2, 1))
-        cmdline = Path(f"/proc/{arm['watcher']['pid']}/cmdline").read_bytes()
-        live = cmdline.decode().rstrip("\0").split("\0")[2:]
-        duty, index = [], 0
-        while index < len(live):
-            if live[index] in {"--lock-fd", "--service-current"}:
-                index += 2
-                continue
-            duty.append(live[index])
-            index += 1
-        self.assertIn(duty, peer_steward._watch_observer_takeover_argvs(armed["watch_id"], arm))
-
-        self._release()
-        receipt = self._wait_for_receipt(armed["watch_id"])
-        self.assertEqual(receipt["state"], "idle")
-        self.assertEqual(receipt["watcher"], arm["watcher"])
-
-    def test_reattached_watcher_survives_a_wake_sent_right_after_its_spawn(self):
-        # The first spawn holds SIGUSR1 blocked across the spawn so an early
-        # wake waits for the handler; a reattach spawn must do the same.
-        armed = self._armed_with_dead_observer()
-        spawner = self._run_spawner(["rearm", armed["watch_id"]],
-                                    "os.kill(process.pid, signal.SIGUSR1)")
-        self.assertEqual(spawner.returncode, 0, spawner.stdout + spawner.stderr)
-        watcher = json.loads(
-            (self.watch_root / f"{armed['watch_id']}.json").read_text())["watcher"]
-        self.assertNotEqual(watcher["pid"], int(armed["pid"]))
-        usr1 = 1 << (signal.SIGUSR1 - 1)
-
-        def signal_mask(field):
-            for line in Path(f"/proc/{watcher['pid']}/status").read_text().splitlines():
-                if line.startswith(field + ":"):
-                    return int(line.split()[1], 16)
-            return 0
-
-        # Wait until its handler is installed and the signal unblocked, i.e.
-        # until the early wake has been delivered one way or the other.
-        deadline = time.monotonic() + 10
+    def _armed(self):
+        proc = self._run("watch", "peer-a")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        fields = self._fields(proc.stdout)
+        watch_id = fields["watch_id"]
+        path = self.watch_root / f"{watch_id}.json"
+        deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            try:
-                if signal_mask("SigCgt") & usr1 and not signal_mask("SigBlk") & usr1:
-                    break
-            except OSError:
+            if path.exists():
+                arm = json.loads(path.read_text())
+                if (arm.get("watcher") or {}).get("pid"):
+                    return arm
+            time.sleep(0.02)
+        self.fail("native watch arm did not name its observer")
+
+    def test_watcher_survives_sigkill_of_callers_process_group(self):
+        caller = self._spawn_caller("watch")
+        deadline = time.monotonic() + 10
+        arms = []
+        while time.monotonic() < deadline:
+            arms = self._arm_records()
+            if arms and (json.loads(arms[0].read_text()).get("watcher") or {}).get("pid"):
                 break
             time.sleep(0.02)
-        self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]),
-                        "the early wake killed the reattached observer")
-        self._release()
-        receipt = self._wait_for_receipt(armed["watch_id"])
-        self.assertEqual(receipt["state"], "idle")
-
-    def test_wait_by_contrast_loses_its_herdr_child(self):
-        # The regression proof: the identical fixture against (9) `wait`.
-        caller = self._spawn_caller("wait")
-        deadline = time.monotonic() + 30
-        child = None
-        while time.monotonic() < deadline and child is None:
-            for entry in Path("/proc").glob("[0-9]*"):
-                try:
-                    if entry.joinpath("comm").read_text().strip() != "herdr":
-                        continue
-                    stat = entry.joinpath("stat").read_text()
-                    if str(caller.pid) in stat.split(")")[-1].split()[2:4]:
-                        child = int(entry.name)
-                        break
-                except OSError:
-                    continue
-            if child is None:
-                time.sleep(0.02)
+        self.assertTrue(arms, "watch never armed")
+        arm = json.loads(arms[0].read_text())
+        pid, start = arm["watcher"]["pid"], arm["watcher"]["pid_start"]
         os.killpg(os.getpgid(caller.pid), signal.SIGKILL)
         caller.wait(timeout=10)
-        if child is not None:
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and Path(f"/proc/{child}").exists():
-                time.sleep(0.02)
-            self.assertFalse(Path(f"/proc/{child}").exists(),
-                             "`wait`'s herdr child must die with the caller's group")
-        self.assertEqual(list(self.watch_root.glob("*.receipt.json"))
-                         if self.watch_root.is_dir() else [], [],
-                         "`wait` leaves no receipt -- that is the defect (10) fixes")
+        self.assertTrue(peer_steward._pid_identity_ok(pid, start))
+        self.assertEqual(arm["observer_protocol"], 3)
+        observation_path = self.watch_root / f"{arm['watch_id']}.observation.json"
+        deadline = time.monotonic() + 3
+        observation = {}
+        while not observation_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if observation_path.exists():
+            observation = json.loads(observation_path.read_text())
+            self.assertEqual((observation.get("native_wait") or {}).get("state"), "armed")
+        self.assertTrue(peer_steward.settle_steward_exited_watch(arm["watch_id"]))
+        self.assertEqual(self._wait_for_receipt(arm["watch_id"])["state"], "steward-exited")
 
+    def test_reattach_replaces_only_observer_and_never_starts_a_native_wait_child(self):
+        arm = self._armed()
+        watch_id, first_pid = arm["watch_id"], arm["watcher"]["pid"]
+        os.kill(first_pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while peer_steward._pid_identity_ok(first_pid, arm["watcher"]["pid_start"]) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(peer_steward._pid_identity_ok(first_pid, arm["watcher"]["pid_start"]))
+        peer_steward._HERDR_SESSION = None
+        with mock.patch.object(peer_steward, "native_agent", side_effect=lambda h,sid,**kw:
+                {"result":{"agent":{"agent":h,"agent_status":"working","agent_session":{"value":sid},
+                 "name":"peer-a","pane_id":"w1:p9","pid":self.shell.pid,
+                 "pid_start":peer_steward._proc_start_ticks(self.shell.pid),
+                 "pid_namespace":os.readlink(f"/proc/{self.shell.pid}/ns/pid")}}}):
+            peer_steward._ensure_watch_observers()
+        replacement = json.loads((self.watch_root / f"{watch_id}.json").read_text())
+        self.assertEqual(replacement["watch_id"], watch_id)
+        self.assertGreaterEqual(replacement.get("observer_generation", 1), 2)
+        self.assertNotEqual(replacement["watcher"]["pid"], first_pid)
+        observation_path = self.watch_root / f"{watch_id}.observation.json"
+        if observation_path.exists():
+            record = json.loads(observation_path.read_text())["native_wait"]
+            self.assertEqual(record["state"], "armed")
+            self.assertNotIn("pid", record)
+        # No native wait child and no Herdr call of any kind (the call guard stayed empty).
+        self.assertEqual(self.calllog.read_text() if self.calllog.exists() else "", "")
+
+    def test_failed_self_naming_releases_lock_so_the_same_watch_can_reattach(self):
+        arm = self._armed()
+        watch_id = arm["watch_id"]
+        old_pid, old_start = arm["watcher"]["pid"], arm["watcher"]["pid_start"]
+        os.kill(old_pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while peer_steward._pid_identity_ok(old_pid, old_start) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(peer_steward._pid_identity_ok(old_pid, old_start))
+        env=self._native_env(); env["TEST_REFUSE_ARM_WRITE"] = "1"
+        spawner=self._run_spawner(["rearm",watch_id],"os.kill(os.getpid(),signal.SIGKILL)",env=env)
+        self.assertEqual(spawner.returncode,-signal.SIGKILL,spawner.stdout+spawner.stderr)
+        lock=self.watch_root/f"{watch_id}.lock"
+        deadline=time.monotonic()+5
+        while peer_steward._lock_held(lock) and time.monotonic()<deadline: time.sleep(0.02)
+        self.assertFalse(peer_steward._lock_held(lock))
+        self.assertTrue(self._run("rearm",watch_id).returncode in {0,3})
 
 
 class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
@@ -4092,7 +3999,6 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(peer_steward, "_settle_terminal_watch_if_unobserved",
                                    return_value=False), \
                  patch_split(peer_steward, "_herdr_missing", return_value=False), \
-                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(batch.subprocess, "Popen", side_effect=launch), \
@@ -4287,6 +4193,47 @@ class MessageTerminalObligationTest(_TmpRootMixin, unittest.TestCase):
         delay = store.get("delay-" + original_ref)
         notice_ref = delay["observation"]["transfer_ref"]
         return store, delay, pm._read_pending(notice_ref), sender, original_ref
+
+    def _ordinary_message_duty(self, sid):
+        peer = peer_steward.peer_message
+        sender = {"harness": "claude", "session_id": "exact-sender", "name": "sender"}
+        recipient = {"harness": "codex", "session_id": sid, "name": "worker"}
+        _text, ref = peer.prepare_peer_message("[request] sealed work", sender, recipient, defer=True)
+        row = peer._read_pending(ref)
+        store = peer_steward.peer_obligations.ObligationStore()
+        duty = peer_steward._schedule_message_obligation(row, sid)
+        return store, duty, row, recipient
+
+    def test_confirmed_native_end_cancels_delivery_duty_and_notifies_sender_once(self):
+        import peer_steward_native
+        import dispatch_seat_handover
+        from fleet.collectors import steward
+        store,duty,row,recipient=self._ordinary_message_duty("ended-recipient")
+        with mock.patch.object(peer_steward,"_current_shell_binding",return_value=(None,"attachment-missing")), \
+             mock.patch.object(peer_steward,"native_lifetime",return_value="ended"), \
+             mock.patch.object(peer_steward_native,"native_lifetime",return_value="ended"), \
+             mock.patch.object(steward,"session_liveness",return_value="ended"), \
+             mock.patch.object(dispatch_seat_handover,"lineage_graph",return_value={}), \
+             mock.patch.object(dispatch_seat_handover,"_chain_end",return_value=("ended-recipient","self")), \
+             mock.patch.object(peer_steward,"_ensure_sender_delay_notice") as sender_notice:
+            peer_steward._resume_message_obligation(duty,store)
+        # Transfer receipt state remains independent of the cancelled delivery duty.
+        self.assertEqual(peer_steward.peer_message._read_pending(row["ref"])["state"],"pending")
+        settled=store.get(duty["id"])
+        self.assertEqual((settled["state"],settled["delivery"],
+                          settled["observation"]["reason"]),
+                         ("cancelled","failed","recipient-session-ended"))
+        sender_notice.assert_called_once()
+
+    def test_unknown_native_recipient_lifetime_keeps_pending_message(self):
+        store,duty,row,_recipient=self._ordinary_message_duty("unknown-recipient")
+        with mock.patch.object(peer_steward,"_current_shell_binding",return_value=(None,"attachment-missing")), \
+             mock.patch.object(peer_steward,"native_lifetime",return_value="unknown"), \
+             mock.patch.object(peer_steward,"_ensure_sender_delay_notice") as sender_notice:
+            peer_steward._resume_message_obligation(duty,store)
+        self.assertEqual(peer_steward.peer_message._read_pending(row["ref"])["state"],"pending")
+        self.assertNotEqual(store.get(duty["id"])["state"],"cancelled")
+        sender_notice.assert_not_called()
 
     def test_received_delay_notice_closes_its_logical_duty_and_courier(self):
         store, delay, notice, recipient, original_ref = self._normal_delay_notice()

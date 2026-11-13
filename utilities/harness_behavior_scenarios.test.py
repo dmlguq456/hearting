@@ -111,6 +111,27 @@ class EnvironmentTest(unittest.TestCase):
             self.assertIsNone(hb.declared_carrier("claude", receipt))
 
 
+class PrivateTuiPaneEnvTest(unittest.TestCase):
+    def test_the_tui_gets_the_tmux_and_pane_values_its_pane_provides(self):
+        """A pane address (`%0@socket`) resolves only against the TUI's own TMUX/TMUX_PANE."""
+        import shutil
+        if not shutil.which("tmux"):
+            self.skipTest("tmux is unavailable")
+        with tempfile.TemporaryDirectory(prefix="hb-pane-env-") as raw:
+            tui = hb.PrivateTui(Path(raw), {"PATH": "/usr/bin:/bin", "HOME": raw},
+                                ["sh", "-c", 'echo "PANE=$TMUX_PANE SOCK=${TMUX%%,*} HOME=$HOME"'],
+                                Path(raw))
+            try:
+                tui.start()
+                self.assertTrue(hb.wait_for(lambda: "HOME=" in tui.screen(), 10), tui.screen())
+                screen = tui.screen()
+            finally:
+                tui.stop()
+        self.assertIn("PANE=%0", screen)
+        self.assertIn("SOCK=" + str(tui.socket), screen)
+        self.assertIn("HOME=" + raw, screen)  # the fixture env is still the only other input
+
+
 class TidyContinueCaseTest(unittest.TestCase):
     """The session-tidy continue scenarios register and patch the shared child helper."""
 

@@ -38,6 +38,7 @@ through ``session_notice.notify``.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -50,9 +51,10 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
+from harness_behavior_scenarios import Reply, Scenario, PrivateTui, harness_argv, wait_for  # noqa: E402
 from harness_behavior_cases_a import _helper, _install_helper, _shell, _summary  # noqa: E402
 from harness_behavior_cases_b import fixture_python, long_shell, session_id  # noqa: E402
+from dispatch_contract_roots import stable_state_root  # noqa: E402
 
 
 NOTICE_CODE = r"""
@@ -307,94 +309,178 @@ class FollowThroughUnrelatedScenario(CompletionMidTurnScenario):
 
 
 # --------------------------------------------------------------------------
-# watch-wake (private Herdr)
-# --------------------------------------------------------------------------
+# native watch scenarios (private tmux, no Herdr server)
 
 class WatchWakeScenario(Scenario):
     name = "watch-wake"
-    summary = ("Steward arms peer-steward watch on another agent and obeys parent_next; the "
-               "receipt must wake it after it ended its turn (needs --surface herdr).")
-    surface = "herdr"
+    summary = ("A native watch on a second isolated tmux session emits one meaningful receipt "
+               "and wakes the steward after its turn ends.")
+    surface = "tmux"
     NEXT = "HB-WATCH-NEXT"
 
     def __init__(self):
         self.target = "hbtarget" + uuid.uuid4().hex[:4]
+        self.target_tui = None
+        self.target_address = None
+
+    def _answer(self, record, earlier):
+        last, kind = record["last_text"], record["last_kind"]
+        shells = [r["reply"].get("shell") or "" for r in earlier]
+        # The steward TUI and the target TUI share this script. record["text"] is the whole
+        # conversation, so a session is told apart by its own markers and answered from its
+        # current input (last/kind), never from text an earlier turn of the same session left.
+        steward = "SCENARIO-WATCH arm" in record["text"]
+        if not steward and "SCENARIO-WATCH-TARGET" in record["text"]:
+            if kind == "tool":
+                return Reply("target turn done")
+            if "SCENARIO-WATCH-TARGET WORK" in last:
+                return Reply(shell="sleep 12; echo SCENARIO-WATCH-TARGET-DONE")
+            return Reply("target initialized")
+        if kind == "tool" and self.NEXT in last:
+            return Reply("Watch handled.")
+        armed = [r for r in earlier if "state=armed" in r["last_text"]]
+        receipt_seen = bool(armed) and re.search(
+            r"state=(?:idle|done|session-ended|session-replaced)\b[^\n]*watch_id=|"
+            r"watch_id=\S+ state=(?:idle|done|session-ended|session-replaced)\b",
+            record["text"]) is not None
+        if receipt_seen and not any(self.NEXT in shell for shell in shells):
+            return Reply(shell=f"echo {self.NEXT}-42")
+        if kind == "tool" and "state=armed" in last:
+            match = re.search(r"parent_next=(\S+).*?parent_next_command=(.*)$", last, re.S)
+            if match and match.group(1) == "bounded-wait" and match.group(2).strip() not in ("", "-") \
+                    and not any(" join " in shell for shell in shells):
+                command = match.group(2).strip().splitlines()[0]
+                return Reply(shell=long_shell(command, wait_ms=600000))
+            return Reply("Watch armed; ending my turn as the line says.")
+        if "SCENARIO-WATCH arm" in last and not any(
+                "peer-steward.py" in shell and " watch " in shell for shell in shells):
+            target = self.target_address or "claude:unresolved"
+            return Reply(shell=f'python3 "$AGENT_HOME/utilities/peer-steward.py" watch {shlex.quote(target)} '
+                               f'--until idle --timeout 240000')
+        return Reply("Nothing new.")
 
     def script(self, run):
-        target = self.target
+        return self._answer
 
-        def answer(record, earlier):
-            last, kind = record["last_text"], record["last_kind"]
-            shells = [r["reply"].get("shell") or "" for r in earlier]
-            if "SCENARIO-WATCH-TARGET" in record["text"] and "SCENARIO-WATCH arm" not in record["text"]:
-                return Reply("target turn done")
-            if kind == "tool" and self.NEXT in last:
-                return Reply("Watch handled.")
-            armed = [r for r in earlier if "state=armed" in r["last_text"]]
-            receipt_seen = bool(armed) and (
-                re.search(r"state=done\b[^\n]*watch_id=|watch_id=\S+ state=done\b",
-                          record["text"]) is not None)
-            if receipt_seen and not any(self.NEXT in s for s in shells):
-                return Reply(shell=f"echo {self.NEXT}-42")
-            if kind == "tool" and "state=armed" in last:
-                match = re.search(r"parent_next=(\S+).*?parent_next_command=(.*)$", last, re.S)
-                if match and match.group(1) == "bounded-wait" and match.group(2).strip() not in ("", "-") \
-                        and not any(" join " in s for s in shells):
-                    command = match.group(2).strip().splitlines()[0]
-                    return Reply(shell=long_shell(command, wait_ms=600000))
-                return Reply("Watch armed; ending my turn as the line says.")
-            if "SCENARIO-WATCH arm" in last and not shells:
-                return Reply(shell=f'python3 "$AGENT_HOME/utilities/peer-steward.py" watch {target} '
-                                   f'--until done --timeout 240000')
-            return Reply("Nothing new.")
-        return answer
+    def prepare(self, run):
+        """Start a second real runtime under its own private tmux server."""
+        root = Path(run.home.root)
+        argv = harness_argv(run.harness, run.binary)
+        self.target_tui = PrivateTui(root, dict(run.home.env), argv, run.home.workspace)
+        self.target_tui.start()
+        ready = wait_for(lambda: self.target_tui.alive() and run._ready(self.target_tui.screen()), 90)
+        if not ready:
+            raise RuntimeError("native watch target TUI did not become ready")
+        run._dismiss_startup(self.target_tui)
+        if not self.target_tui.type_text("SCENARIO-WATCH-TARGET INIT"):
+            raise RuntimeError("native watch target prompt was not accepted")
+        if not self.target_tui.settle(quiet=2, timeout=45):
+            raise RuntimeError("native watch target did not settle after initialization")
+        address = self.target_tui._tmux(
+            "display-message", "-p", "-t", "scenario", "#{pane_id}@#{socket_path}")
+        self.target_address = (address.stdout or "").strip()
+        if not self.target_address or address.returncode:
+            raise RuntimeError("native watch target pane address unavailable")
+        run.evidence["target_address"] = self.target_address
+
+    def cleanup(self, run):
+        if self.target_tui is not None:
+            with contextlib.suppress(Exception):
+                self.target_tui.stop()
+            self.target_tui = None
+
+    def _next_action_ran(self, run, timeout=30):
+        """The woken steward's action output reached the model. Its shell call is only the
+        request: the result comes back in the next model request, so wait (bounded) for it
+        instead of reading the transcript the moment the call is seen."""
+        return bool(wait_for(lambda: any(f"{self.NEXT}-42" in r["text"] for r in run.main_requests()),
+                             timeout, 0.5))
 
     def drive(self, run):
         ev = run.evidence
-        surface = getattr(run, "surface", None)
-        if surface is None or not hasattr(surface, "start_target"):
-            run.note("needs --surface herdr (a private Herdr server)")
+        if self.target_tui is None or not self.target_address:
+            run.note("private tmux target was not created")
             return "inconclusive"
-        ev["target_start"] = surface.start_target(self.target)
-        if not ev["target_start"].get("ok"):
-            run.note("target agent did not start in the private Herdr")
+        ev["target_prompt"] = self.target_tui.type_text("SCENARIO-WATCH-TARGET WORK")
+        if not ev["target_prompt"]:
+            run.note("target work prompt was not accepted")
             return "inconclusive"
-        run.prompt("SCENARIO-WATCH arm the watch on the target and follow the printed next step")
+        run.prompt("SCENARIO-WATCH arm a native watch on the target and follow parent_next")
         armed = wait_for(lambda: _first_with(run, "state=armed"), 90)
         if not armed:
             line = _first_with(run, "watch_id=")
             ev["watch_output"] = (line or {}).get("last_text", "")[-600:]
-            run.note("the watch was not armed")
+            run.note("native watch was not armed")
             return "inconclusive"
         text = armed["last_text"]
         ev["watch_line"] = (re.search(r"watch_id=[^\n]*state=armed[^\n]*", text) or [""])[0][:300]
         ev["parent_next"] = (re.search(r"parent_next=(\S+)", text) or [None, None])[1]
         ev["parent_next_reason"] = (re.search(r"parent_next_reason=(\S+)", text) or [None, None])[1]
-        time.sleep(6)
+        before = len(run.main_requests())
         ended = wait_for(lambda: any(r["reply"].get("text", "").startswith("Watch armed")
                                      for r in run.main_requests()), 20)
         ev["steward_ended_turn"] = bool(ended)
-        before = len(run.main_requests())
-        ev["target_prompt"] = surface.prompt_target(self.target, "SCENARIO-WATCH-TARGET do one step")
-        early = [r for r in run.main_requests()[:before] if self.NEXT in (r["reply"].get("shell") or "")]
-        ev["receipt_before_target_worked"] = bool(early)
+        completed = wait_for(lambda: "SCENARIO-WATCH-TARGET-DONE" in self.target_tui.screen(), 30, 0.2)
+        ev["target_completed"] = bool(completed)
         woke = wait_for(lambda: any(self.NEXT in (r["reply"].get("shell") or "")
                                     for r in run.main_requests()[before:]), 150, 1)
-        run.wait_idle(6, 40)
-        ev["next_action_ran"] = any(f"{self.NEXT}-42" in r["text"] for r in run.main_requests())
+        ev["next_action_ran"] = self._next_action_ran(run)
         if woke and ended:
-            run.note(f"steward ended its turn ({ev['parent_next']}) and the receipt woke it")
+            run.note(f"steward ended its turn ({ev['parent_next']}) and the native receipt woke it")
             return "pass" if ev["next_action_ran"] else "fail"
-        if woke:
-            run.note(f"steward held a foreground wait ({ev['parent_next']}) until the receipt")
-            return "gap"
-        typed = len(run.main_requests())
-        run.prompt("SCENARIO-WATCH-NEXT anything new?")
-        run.wait_idle(6, 60)
-        ev["next_prompt_delivery"] = any("watch_id=" in r["text"] for r in run.main_requests()[typed:])
-        run.note(f"parent_next={ev['parent_next']}; no wake after the target finished")
+        run.note(f"parent_next={ev['parent_next']}; no native wake after target activity")
         return "fail" if ev["parent_next"] == "end-turn" else "gap"
 
 
+class NativeWatchEndScenario(WatchWakeScenario):
+    name = "native-watch-end"
+    summary = "An exact native session end writes one receipt; unknown states remain unnotified."
+
+    def drive(self, run):
+        ev = run.evidence
+        if self.target_tui is None or not self.target_address:
+            return "inconclusive"
+        ev["target_prompt"] = self.target_tui.type_text("SCENARIO-WATCH-TARGET WORK")
+        if not ev["target_prompt"]:
+            return "inconclusive"
+        run.prompt("SCENARIO-WATCH arm a native watch on the target and follow parent_next")
+        armed = wait_for(lambda: _first_with(run, "state=armed"), 90)
+        if not armed:
+            run.note("native watch was not armed")
+            return "inconclusive"
+        text = armed["last_text"]
+        ev["watch_line"] = (re.search(r"watch_id=[^\n]*state=armed[^\n]*", text) or [""])[0][:300]
+        watch_id = (re.search(r"watch_id=([0-9a-f]{16})", text) or [None, None])[1]
+        before = len(run.main_requests())
+        self.target_tui.stop()
+        self.target_tui = None
+        receipt = wait_for(lambda: self._read_watch_receipt(run, watch_id), 45, 0.2)
+        ev["receipt"] = receipt
+        ev["receipt_count"] = 1 if receipt else 0
+        woke = wait_for(lambda: any(self.NEXT in (r["reply"].get("shell") or "")
+                                    for r in run.main_requests()[before:]), 120, 1)
+        ev["next_action_ran"] = self._next_action_ran(run)
+        if receipt and receipt.get("state") == "session-ended" and woke:
+            return "pass" if ev["next_action_ran"] else "fail"
+        run.note("target end did not produce one exact session-ended receipt and native wake")
+        return "fail"
+
+    @staticmethod
+    def _read_watch_receipt(run, watch_id):
+        if not watch_id:
+            return None
+        # The fixture env never sets AGENT_PEER_LEDGER_ROOT, so resolve the receipt root the way
+        # peer-message.peer_state_root() does inside the fixture: the override when present, else
+        # the stable per-user state root under that env.
+        env = run.home.env
+        override = env.get("AGENT_PEER_LEDGER_ROOT")
+        state = Path(override) if override else stable_state_root(env)
+        path = state / "peer-watches" / f"{watch_id}.receipt.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+
 SCENARIOS = [NoticeMidTurnScenario, CompletionMidTurnScenario, CompletionMidTurnNoSocketScenario,
-             FollowThroughUnrelatedScenario, WatchWakeScenario]
+             FollowThroughUnrelatedScenario, WatchWakeScenario, NativeWatchEndScenario]
