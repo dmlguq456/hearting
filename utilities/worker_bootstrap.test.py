@@ -13,7 +13,10 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -230,30 +233,119 @@ class WorkerBootstrapTest(unittest.TestCase):
         # PR #1605 review: where `link` fails (EXDEV, EPERM, ENOTSUP), the
         # fallback created the marker and then filled it; a second start
         # arriving the moment it appeared still read it empty and got "".
-        # The second start runs at the first instant the marker exists.
+        # The second start runs at the first instant the marker exists, and
+        # the first goes on filling it only after the second has read it.
         for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
             with self.subTest(errno=errno.errorcode[code]), tempfile.TemporaryDirectory() as tmp:
                 runtime = Path(tmp) / "project" / ".agent_runtime"
                 marker = runtime / ".gitignore"
-                concurrent = []
+                concurrent, second_read = [], threading.Event()
+                real_read = Path.read_bytes
+
+                def read_and_tell(self):
+                    content = real_read(self)
+                    if self == marker and threading.current_thread() is not threading.main_thread():
+                        second_read.set()
+                    return content
 
                 def then_second_start(call):
                     def wrapper(*args, **kwargs):
                         result = call(*args, **kwargs)
                         if not concurrent and (marker.exists() or marker.is_symlink()):
-                            concurrent.append(None)
-                            concurrent[0] = W.prepare_runtime_dir(str(runtime))
+                            second = threading.Thread(target=lambda: concurrent.append(
+                                W.prepare_runtime_dir(str(runtime))))
+                            concurrent.append(second)
+                            second.start()
+                            second_read.wait(5)
                         return result
                     return wrapper
 
                 with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                     mock.patch.object(Path, "read_bytes", read_and_tell), \
                      mock.patch.object(Path, "open", then_second_start(Path.open)), \
+                     mock.patch.object(W.os, "open", then_second_start(os.open)), \
                      mock.patch.object(W.os, "rename", then_second_start(os.rename)), \
                      mock.patch.object(W.os, "replace", then_second_start(os.replace)):
                     first = W.prepare_runtime_dir(str(runtime))
-                self.assertEqual([first, *concurrent], [str(runtime), str(runtime)])
+                    concurrent[0].join(10)
+                self.assertTrue(second_read.is_set())
+                self.assertEqual([first, *concurrent[1:]], [str(runtime), str(runtime)])
                 self.assertEqual(marker.read_bytes(), b"*\n")
                 self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_marker_fallback_never_replaces_a_marker_published_at_the_last_instant(self):
+        # PR #1605 review r2: without hard links, another launcher completes a
+        # different marker after the last look and right before this one
+        # publishes. The publication must not replace it (a rename did, and
+        # the root was then taken as this launcher's own).
+        for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
+            with self.subTest(errno=errno.errorcode[code]), tempfile.TemporaryDirectory() as tmp:
+                runtime = Path(tmp) / ".agent_runtime"
+                marker = runtime / ".gitignore"
+                real_open, inserted = os.open, []
+
+                def foreign_first(call, target_of):
+                    def wrapper(*args, **kwargs):
+                        if not inserted and target_of(*args, **kwargs) == marker:
+                            inserted.append(True)
+                            descriptor = real_open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                            try:
+                                os.write(descriptor, b"foreign-owner\n")
+                            finally:
+                                os.close(descriptor)
+                        return call(*args, **kwargs)
+                    return wrapper
+
+                def path_open_target(path, mode="r", *_args, **_kwargs):
+                    return Path(path) if any(flag in mode for flag in "wxa") else None
+
+                def os_open_target(path, flags, *_args, **_kwargs):
+                    return Path(path) if flags & os.O_CREAT else None
+
+                with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                     mock.patch.object(Path, "open", foreign_first(Path.open, path_open_target)), \
+                     mock.patch.object(W.os, "open", foreign_first(os.open, os_open_target)), \
+                     mock.patch.object(W.os, "rename", foreign_first(os.rename, lambda _a, b: Path(b))), \
+                     mock.patch.object(W.os, "replace", foreign_first(os.replace, lambda _a, b: Path(b))):
+                    prepared = W.prepare_runtime_dir(str(runtime))
+                self.assertEqual(inserted, [True])
+                self.assertEqual(marker.read_bytes(), b"foreign-owner\n")
+                self.assertEqual(prepared, "")
+                self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_marker_left_unfilled_is_refused_in_bounded_time_and_kept(self):
+        # A launcher that died between creating the marker and filling it
+        # leaves it empty (or `*`). Later starts re-read it only briefly, then
+        # launch without the root; nobody rewrites a marker they did not create.
+        for left in (b"", b"*"):
+            with self.subTest(left=left), tempfile.TemporaryDirectory() as tmp:
+                runtime = Path(tmp) / ".agent_runtime"
+                runtime.mkdir()
+                (runtime / ".gitignore").write_bytes(left)
+                started = time.monotonic()
+                with mock.patch.object(W, "_RUNTIME_MARKER_SETTLE_SECONDS", 0.05):
+                    self.assertEqual(W.prepare_runtime_dir(str(runtime)), "")
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual((runtime / ".gitignore").read_bytes(), left)
+
+    def test_concurrent_launchers_without_hard_links_all_get_the_runtime_root(self):
+        for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
+            for count in (3, 8):
+                with self.subTest(errno=errno.errorcode[code], count=count), \
+                     tempfile.TemporaryDirectory() as tmp:
+                    runtime = Path(tmp) / ".agent_runtime"
+                    together = threading.Barrier(count)
+
+                    def start(_index):
+                        together.wait(5)
+                        return W.prepare_runtime_dir(str(runtime))
+
+                    with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                         ThreadPoolExecutor(count) as pool:
+                        prepared = list(pool.map(start, range(count)))
+                    self.assertEqual(prepared, [str(runtime)] * count)
+                    self.assertEqual((runtime / ".gitignore").read_bytes(), b"*\n")
+                    self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
 
     def test_runtime_marker_fallback_never_replaces_a_marker_that_appeared(self):
         # The fallback rename would replace a name; a foreign marker that
