@@ -301,6 +301,22 @@ class RevisionAndCancelTest(Fixture):
         self.assertNotIn("멈", notice["text"])
         self.assertEqual(peer_request_kind(notice), ("notice", True))
 
+    def test_runner_closes_a_withdrawn_revision_that_followed_a_confirmed_successor(self):
+        self.hold = True
+        with mock.patch.object(peer_obligations, "ensure_normal_runner"):
+            self.patch(peer_steward, "_schedule_message_obligation", self._real_schedule)
+            request_id, _ = self.new_request(title="t", rev="판1")
+            ref1 = pr.load(request_id)["revisions"][0]["transfer_ref"]
+            self.successors[B] = (B2[1], B2[0])
+            self.hold = False
+            self.request(A, request_id, "second", rev="판2")
+            store = peer_obligations.ObligationStore()
+            duty = store.get("message-" + ref1)
+            peer_steward._resume_message_obligation_scoped(duty, store)
+            closed = store.get("message-" + ref1)
+            self.assertEqual((closed["state"], closed["observation"].get("reason")),
+                             ("cancelled", "request-withdrawn"))
+
     def test_cancel_before_delivery_needs_no_notice(self):
         self.hold = True
         request_id, _ = self.new_request(title="t")
