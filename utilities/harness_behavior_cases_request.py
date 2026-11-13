@@ -101,6 +101,21 @@ def panel_request_lines(screen, titles, marks):
     return found
 
 
+SHOWN_COMMAND = re.compile(r"^report-(final|partial|reject): (.+)$", re.MULTILINE)
+
+
+def shown_command(text, request_id, kind, result, *, first=False):
+    """The report command a `show` output printed (`report-<kind>: <command>`), with the model's
+    one line put in place of its `<one line>` placeholder, as a model uses the command it was
+    given. ``first`` takes the earliest shown (the revision B began working on), else the newest.
+    ``""`` when no `show` output in ``text`` printed one for this request."""
+    found = [m.group(2) for m in SHOWN_COMMAND.finditer(text)
+             if m.group(1) == kind and f" report {request_id} " in m.group(2)]
+    if not found:
+        return ""
+    return (found[0] if first else found[-1]).replace("<one line>", result)
+
+
 def _shells(records, mark):
     return [(r["reply"].get("shell") or "") for r in records if mark in r["text"]]
 
@@ -117,12 +132,6 @@ def answer(ctx, record, earlier):
 def _answer_b(ctx, text, last, kind, shells, nonce):
     sent = lambda needle: any(needle in shell for shell in shells)  # noqa: E731
     if kind == "tool":
-        if "report-revision-unreceived" in last and shells:
-            # N5: a report names the revision its session received; when none is recorded yet the
-            # refusal says `--rev N`. B knows which sealed revision it just read: say it.
-            read = re.findall(r"revision (\d+) \(sealed body\)", text)
-            if read and "--rev" not in shells[-1]:
-                return Reply(shell=f"{shells[-1]} --rev {read[-1]}")
         done = re.search(r"report=(rq-[0-9a-f]{6}) kind=(\w+)", last)
         if "(sealed body)" in last and f"BODY-KEEP-{nonce}" in last:
             return Reply("B holds this request open.")  # stays open for the cancel-after-delivery case
@@ -130,15 +139,21 @@ def _answer_b(ctx, text, last, kind, shells, nonce):
             request_id = re.findall(r"request=(rq-[0-9a-f]{6})", last)[-1]
             if ctx.get("hold") and not sent("time.sleep"):
                 return Reply(shell=busy_step(ctx["hold"]))
+            # B's report is the command this `show` printed for the revision it just read.
             if ctx.get("partial", True) and not sent("--partial"):
-                return Reply(shell=f'{STEWARD} report {request_id} --partial --result "PARTIAL-{nonce}"')
-            return Reply(shell=f'{STEWARD} report {request_id} --result "FINAL-{nonce}"')
+                command = shown_command(last, request_id, "partial", f'"PARTIAL-{nonce}"')
+            else:
+                command = shown_command(last, request_id, "final", f'"FINAL-{nonce}"')
+            return Reply(shell=command) if command else Reply("B found no report command in show.")
         if "B-WORK-DONE" in last:
-            # The long step ended: answer the earlier revision (the one B actually received).
+            # The long step ended: B reports the work it began, with the command the `show` of
+            # that revision printed (its own `--rev`), not whatever line arrived meanwhile.
             request_id = ctx.get("report_id") or re.findall(r"rq-[0-9a-f]{6}", text)[0]
-            return Reply(shell=f'{STEWARD} report {request_id} --result "LATE-{nonce}"')
+            command = shown_command(text, request_id, "final", f'"LATE-{nonce}"', first=True)
+            return Reply(shell=command) if command else Reply("B found no report command in show.")
         if done and done.group(2) == "partial" and not sent('--result "FINAL'):
-            return Reply(shell=f'{pause(3)}; {STEWARD} report {done.group(1)} --result "FINAL-{nonce}"')
+            command = shown_command(text, done.group(1), "final", f'"FINAL-{nonce}"')
+            return Reply(shell=f"{pause(3)}; {command}") if command else Reply("B step done.")
         return Reply("B step done.")
     cancelled = CANCEL_LINE.search(last)
     if cancelled:
@@ -553,13 +568,23 @@ class RequestHandoffScenario(_RequestScenario):
         self.lineage_row(run, old_sid, successor)
         listing = self.run_steward(run, "show", sid=successor)
         ev["successor_lists_request"] = first in (listing.stdout or "")
-        # A report answers a revision the receiver (or its confirmed predecessor) actually received
-        # (N5): wait for B to take the line in, then report as the successor.
+        # The successor uses the command the numberless `show` list printed for the request
+        # (`report <rq> --rev N --result "<one line>"`), adding only `--partial` and its result.
+        shown = next((line.strip() for line in (listing.stdout or "").splitlines()
+                      if f" report {first} --rev " in line), "")
+        ev["successor_listed_command"] = shown
+        argv = []
+        if shown:
+            parts = shlex.split(shown)
+            argv = [("HANDOFF-" + self.nonce) if part == "<one line>" else part
+                    for part in parts[parts.index("report"):]]
+            argv.insert(argv.index("--result"), "--partial")
+        # A report answers a revision delivered to the receiver (or its confirmed predecessor):
+        # wait for B to take the line in, then report as the successor.
         wait_for(lambda: any(f"[요청 {first}" in turn(r) for r in self.b_requests(run)), 90)
         accepted = None
         for _attempt in range(10):
-            accepted = self.run_steward(run, "report", first, "--partial", "--result", "HANDOFF-" + self.nonce,
-                                        sid=successor)
+            accepted = self.run_steward(run, *argv, sid=successor) if argv else listing
             if "kind=partial" in (accepted.stdout or "") or "report-revision-unreceived" not in (accepted.stdout or ""):
                 break
             time.sleep(3)

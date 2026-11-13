@@ -21,6 +21,16 @@ import harness_behavior_scenarios as hb
 HERE = Path(__file__).resolve().parent
 
 
+def show_output(rq, rev, body):
+    """What B's `show <rq>` prints for revision ``rev``: the report commands carry that `--rev`."""
+    base = f'python3 "$AGENT_HOME/utilities/peer-steward.py" report {rq} --rev {rev}'
+    return (f"request={rq} state=open\nrevision={rev} state=current\n"
+            f'report-final: {base} --result "<one line>"\n'
+            f'report-partial: {base} --partial --result "<one line>"\n'
+            f'report-reject: {base} --reject "<reason>"\n'
+            f"--- revision {rev} (sealed body) ---\n{body}\n--- end ---")
+
+
 def record(text, last, kind="user", reply=None, turn=None):
     found = {"text": text, "last_text": last, "last_kind": kind, "reply": reply or {}, "main_index": 0}
     if turn is not None:
@@ -69,26 +79,16 @@ class ScriptedModelTest(unittest.TestCase):
         shown = self.ask("SCENARIO-WATCH-TARGET INIT\n" + line, line)
         self.assertIn(f"show {self.rq}", shown.shell)
         self.assertNotIn(f"BODY-1-{self.nonce}", line)
-        out = (f"request={self.rq} state=open\n--- revision 1 (sealed body) ---\nBODY-1-{self.nonce}\n--- end ---")
+        out = show_output(self.rq, 1, f"BODY-1-{self.nonce}")
         partial = self.ask("SCENARIO-WATCH-TARGET INIT\n" + line + out, out, kind="tool")
-        self.assertIn("report %s --partial" % self.rq, partial.shell)
+        # B uses the command `show` printed, `--rev 1` and all.
+        self.assertIn("report %s --rev 1 --partial --result" % self.rq, partial.shell)
+        self.assertIn("PARTIAL-" + self.nonce, partial.shell)
         done = f"report={self.rq} kind=partial revision=1 late=false state=partial"
-        final = self.ask("SCENARIO-WATCH-TARGET " + done, done, kind="tool",
+        final = self.ask("SCENARIO-WATCH-TARGET " + out + done, done, kind="tool",
                          earlier=[record("SCENARIO-WATCH-TARGET INIT", "x", reply={"shell": partial.shell})])
-        self.assertIn(f"report {self.rq} --result", final.shell)
+        self.assertIn(f"report {self.rq} --rev 1 --result", final.shell)
         self.assertIn("FINAL-" + self.nonce, final.shell)
-
-    def test_a_refused_report_is_repeated_with_the_revision_b_read(self):
-        # N5: when no revision is recorded as received, the refusal says `--rev N`; B names the
-        # sealed revision it read.
-        out = (f"request={self.rq} state=open\n--- revision 2 (sealed body) ---\nBODY-1-{self.nonce}\n--- end ---")
-        report = f'python3 "$AGENT_HOME/utilities/peer-steward.py" report {self.rq} --partial --result "PARTIAL-{self.nonce}"'
-        refused = f"report={self.rq} delivery=refused reason=report-revision-unreceived revisions=1,2 next=report {self.rq} --rev N"
-        earlier = [record("SCENARIO-WATCH-TARGET " + out, out, "tool", reply={"shell": report})]
-        again = self.ask("SCENARIO-WATCH-TARGET " + out + refused, refused, kind="tool", earlier=earlier)
-        self.assertEqual(again.shell, report + " --rev 2")
-        earlier = [record("SCENARIO-WATCH-TARGET " + out, out, "tool", reply={"shell": report + " --rev 2"})]
-        self.assertFalse(self.ask("SCENARIO-WATCH-TARGET " + out + refused, refused, kind="tool", earlier=earlier).shell)
 
     def test_a_is_woken_by_a_report_line_without_acting(self):
         wake = f"[요청 답 {self.rq}] [e7] │ 검토 │ 일부 │ PARTIAL-{self.nonce} │ 3s │ 본문: show"
@@ -102,15 +102,20 @@ class ScriptedModelTest(unittest.TestCase):
         scenario.target_address = "%1@/tmp/socket"
         ctx = scenario.make_context(run)
         nonce = scenario.nonce
-        out = f"request={self.rq} state=open\n--- revision 1 (sealed body) ---\nBODY-REV1-{nonce}\n--- end ---"
+        out = show_output(self.rq, 1, f"BODY-REV1-{nonce}")
         busy = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + out, out, "tool"), [])
         self.assertIn("time.sleep", busy.shell)
         earlier = [record("SCENARIO-WATCH-TARGET " + out, out, reply={"shell": busy.shell})]
-        late = cases.answer(ctx, record(f"SCENARIO-WATCH-TARGET {self.rq} B-WORK-DONE", "B-WORK-DONE", "tool"), earlier)
+        # Revision 2's guidance (its own `--rev 2` command) reached B meanwhile, but B reports the
+        # work it began with the command revision 1's `show` printed.
+        arrived = f"{out}\nPeer request {self.rq} (revision 2): report {self.rq} --rev 2 --result \"<one line>\"\nB-WORK-DONE"
+        late = cases.answer(ctx, record(f"SCENARIO-WATCH-TARGET {arrived}", "B-WORK-DONE", "tool"), earlier)
         self.assertIn("LATE-" + nonce, late.shell)
-        out2 = f"request={self.rq} state=open\n--- revision 2 (sealed body) ---\nBODY-REV2-{nonce}\n--- end ---"
-        final = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + out2, out2, "tool"), earlier)
-        self.assertIn(f"report {self.rq} --result", final.shell)
+        self.assertIn(f"report {self.rq} --rev 1 --result", late.shell)
+        self.assertNotIn("--rev 2", late.shell)
+        out2 = show_output(self.rq, 2, f"BODY-REV2-{nonce}")
+        final = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + out + out2, out2, "tool"), earlier)
+        self.assertIn(f"report {self.rq} --rev 2 --result", final.shell)
         # Revision 2's line reaches the idle B: it opens the body and reports the final answer.
         line2 = f"[요청 {self.rq} 판2-{nonce}] [e9] │ 판 검토 │ 열기: show {self.rq}"
         shown2 = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + line2, line2), earlier)
@@ -164,12 +169,12 @@ class HostRunR2Test(ScriptedModelTest):
         scenario = cases.RequestRevisionCancelScenario()
         scenario.target_address = "%1@/tmp/socket"
         ctx = scenario.make_context(run)
-        out = f"request={self.rq} state=open\n--- revision 1 (sealed body) ---\nBODY-REV1-{scenario.nonce}\n--- end ---"
+        out = show_output(self.rq, 1, f"BODY-REV1-{scenario.nonce}")
         busy = cases.answer(ctx, record("SCENARIO-WATCH-TARGET " + out, out, "tool"), [])
         self.assertFalse(self.BLOCKED_SLEEP.search(busy.shell), busy.shell)
         self.assertIn("B-WORK-DONE", busy.shell)
         partial = f"report={self.rq} kind=partial revision=1 late=false state=partial"
-        final = cases.answer(self.ctx, record("SCENARIO-WATCH-TARGET " + partial, partial, "tool",
+        final = cases.answer(self.ctx, record("SCENARIO-WATCH-TARGET " + out + partial, partial, "tool",
                                               reply={}), [record("x", "x", reply={"shell": "--partial"})])
         self.assertFalse(self.BLOCKED_SLEEP.search(final.shell), final.shell)
 
