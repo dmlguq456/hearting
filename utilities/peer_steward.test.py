@@ -2150,11 +2150,7 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
         self.assertNotIn("dispatch-wait", command)
 
     def test_no_line_the_hook_cannot_arm_from_ever_says_end_turn(self):
-        """The dedupe hit and `rearm` both print from the session, not `watch`.
-
-        Answering `end-turn` there is worst exactly when it is reached: a caller
-        re-runs `watch`/`rearm` *because* it doubts the first arm carried.
-        """
+        """Dedupe and rearm reconnect the same validated hook carrier."""
         first = self._run("watch", self.target, "--wake", "hook", env=self._env("held"))
         self.assertEqual(first.returncode, 0, first.stderr)
         watch_id = self._fields(first.stdout.splitlines()[0])["watch_id"]
@@ -2170,9 +2166,9 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
                 self.assertIn(state, {"already-armed", "alive"}, proc.stdout)
                 directive = self._directive(proc.stdout)
                 self.assertEqual(
-                    directive.get("parent_next"), "bounded-wait", proc.stdout
+                    directive.get("parent_next"), "end-turn", proc.stdout
                 )
-                self.assertIn("--timeout ", directive.get("parent_next_command", ""))
+                self.assertEqual(directive.get("parent_next_command"), "-")
         self._release()
         self._wait_for_receipt(watch_id)
 
@@ -3653,12 +3649,9 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
         head = self._fields(proc.stdout.splitlines()[0])
         self.assertEqual(head["state"], "rearmed", proc.stdout)
         directive = self._directive(proc.stdout)
-        self.assertEqual(directive.get("parent_next"), "bounded-wait", proc.stdout)
-        self.assertEqual(
-            directive.get("parent_next_reason"), "steward-line-does-not-arm", proc.stdout
-        )
-        # The wait continues to join the original logical watch.
-        self.assertIn(f"join {head['watch_id']}", directive.get("parent_next_command", ""))
+        self.assertEqual(directive.get("parent_next"), "end-turn", proc.stdout)
+        self.assertEqual(directive.get("parent_next_command"), "-")
+        # The carrier still owns the original logical watch.
         self.assertEqual(head["watch_id"], dead["watch_id"])
         self._release(seat_dead)
         self._wait_for_receipt(dead["watch_id"])
