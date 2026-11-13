@@ -44,15 +44,18 @@ def intent(route, jobs=None):
     return ledger_intent(route, ledger)
 
 
-def ledger_intent(route, ledger):
-    return next((e["evidence"]["parent_close"] for e in ledger.journal()
+def ledger_intent(route, ledger, *, journal=None):
+    # ``journal``: entries the caller already read from this ledger, checked as that one read.
+    entries = ledger.journal() if journal is None else journal
+    return next((e["evidence"]["parent_close"] for e in entries
                  if e.get("route_hash") == route["route_hash"]
                  and isinstance(e.get("evidence"), dict)
                  and isinstance(e["evidence"].get("parent_close"), dict)), None)
 
 
-def settled_result(route, ledger):
-    return next((entry["evidence"]["parent_close_result"] for entry in reversed(ledger.journal())
+def settled_result(route, ledger, *, journal=None):
+    entries = ledger.journal() if journal is None else journal
+    return next((entry["evidence"]["parent_close_result"] for entry in reversed(entries)
                  if entry.get("route_hash") == route["route_hash"]
                  and isinstance(entry.get("evidence"), dict)
                  and isinstance(entry["evidence"].get("parent_close_result"), dict)), None)
@@ -1357,9 +1360,11 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
 
         jobs = jobs_path(jobs)
         ledger = WS.WorkflowLedger(route_id, route_hash, jobs=jobs)
-        close_intent = ledger_intent(sealed, ledger)
-        result = settled_result(sealed, ledger)
+        # One read of the journal answers every journal check below (intent, result,
+        # their parent-close entries, workflow state) instead of one read per check.
         journal = ledger.journal()
+        close_intent = ledger_intent(sealed, ledger, journal=journal)
+        result = settled_result(sealed, ledger, journal=journal)
         if (not isinstance(close_intent, dict) or not isinstance(result, dict)
                 or close_intent.get("summary") != "owner-pin-handoff"
                 or close_intent.get("route_file") != str(path)
@@ -1410,7 +1415,7 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
                 or metadata.get("harness") not in AUTH.PIN_HARNESSES):
             return None
 
-        workflow = ledger.read_only_state()
+        workflow = ledger.read_only_state(entries=journal)
         if workflow.get("journal_unreadable") or workflow.get("workflow_state") != "CANCELLED":
             return None
 

@@ -103,6 +103,30 @@ def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+_OPENED = []
+_OPEN_HOOK = []
+
+
+def _record_open(event, args):
+    if event == "open" and _OPENED:
+        _OPENED[-1].append(os.fsdecode(args[0]) if isinstance(args[0], (str, bytes, os.PathLike))
+                           else str(args[0]))
+
+
+@contextlib.contextmanager
+def _read_opens():
+    """Paths this process opens inside the block (an audit hook stays for the process)."""
+    if not _OPEN_HOOK:
+        sys.addaudithook(_record_open)
+        _OPEN_HOOK.append(True)
+    opened = []
+    _OPENED.append(opened)
+    try:
+        yield opened
+    finally:
+        _OPENED.pop()
+
+
 class ReplayProcess:
     """A private payload/owner process owned by one test."""
 
@@ -576,11 +600,8 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             result.append(int(REPLACEMENT in raised))
         return result
 
-    def test_successor_owner_parked_on_the_inherited_live_run_gets_no_stall_notice(self):
-        # RV-PR1592-R2: the replacement owner parks on the live run its predecessor launched
-        # and the proven pin handoff moved to its route. The run and owner records keep the
-        # predecessor; before the fix the successor read as "no progress" from 601 s on.
-        import dispatch_supervision as SUPERVISION
+    def _park_successor_on_the_inherited_run(self):
+        """The live replacement owner, parked on the run the proven handoff moved to it."""
         self.owner_meta.update(DC.process_launch_identity(self.owner_process.process.pid))
         fields = self.owner_row.split("\t")
         fields[5] = ",".join(f"{key}={value}" for key, value in self.owner_meta.items())
@@ -590,6 +611,13 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
         self._inherit()
         JOIN.write_supervisor_state(self.state_path, REPLACEMENT, set(), phase="parked")
         self.assertEqual(self.registry_rows[VAR_RUN]["parent_attempt_id"], OLD_OWNER)
+
+    def test_successor_owner_parked_on_the_inherited_live_run_gets_no_stall_notice(self):
+        # RV-PR1592-R2: the replacement owner parks on the live run its predecessor launched
+        # and the proven pin handoff moved to its route. The run and owner records keep the
+        # predecessor; before the fix the successor read as "no progress" from 601 s on.
+        import dispatch_supervision as SUPERVISION
+        self._park_successor_on_the_inherited_run()
         t0 = time.time()
         self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 0, 0, 0])
         observation = SUPERVISION.update_attempt_stall_observation(
@@ -604,6 +632,18 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
         self._assert_identity(self._var_holder())
         (DC.dispatch_state_root(self.jobs) / "watchdog" / f"{REPLACEMENT}.json").unlink()
         self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 1, 1, 1])
+
+    def test_one_observation_pass_reads_the_predecessor_close_journal_once(self):
+        # RV-PR1592-R3: the handoff proof answers its intent, result, parent-close entries
+        # and workflow state from one read of the predecessor's close journal. It used to
+        # open and parse the same file five times on every pass of an inherited run.
+        self._park_successor_on_the_inherited_run()
+        journal = os.path.realpath(self.ledger0.journal_path)
+        with _read_opens() as opened:
+            notices = self._stall_notices(time.time(), (0,))
+        self.assertEqual(notices, [0])
+        self.assertEqual(sum(1 for path in opened if path.endswith("journal.jsonl")
+                             and os.path.realpath(path) == journal), 1)
 
     def _finish_payload_and_deliver(self):
         """Finish the payload, deliver the receipt, then admit the follow-up start.
