@@ -229,13 +229,20 @@ words are unchanged. Beside the
 native area one empty row then parts the repository and Git from the model
 (without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (two rows beside
-the native area, one `│`-separated row with the repo row at the bottom);
+the native area, one `│`-separated row with the repo row at the bottom). Beside
+the native area these two rows take the same dim labels, `MODEL` and `CTX`
+(`MODEL  Fable 5.2 high`, `MODEL  Checking` before the model is known;
+`CTX    ━━━━──── 41%`, the label standing for the word `context`); short of
+cells the model name is cut with `…` and the effort stays whole, and narrower
+than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
 then parts it from this session's content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
-there too; narrower than 30 cells the labels go first), Fleet's title and NOW
-(bright while the session works or waits), each on as many rows as it needs,
+there too; narrower than 30 cells the labels go first), Fleet's title (bold,
+in the session's harness color, Fleet's `hb_*`, on every row; plain without
+color) and NOW (bright while the session works or waits), each on as many rows
+as it needs,
 then `MEM`: this repository's newest saved memory record from the journal
 Fleet reads (the newest `add`/`supersede` row of its project: age and type dim,
 the stored headline, else the start of its snippet, in the body color; no
@@ -285,7 +292,21 @@ unknown context leaves its cells empty, and with neither value the row is left
 out. What: two cells in, its title on at most two rows, the second ending in
 `…`. Short of cells effort goes first, then the tool, then the harness; the
 role and the model stay, and a value is shown whole or not at all. A route
-with no value at all takes one row, glyph and title. A fourth row says which
+with no value at all takes one row, glyph and title. When the producer names
+the owner and the stage workers running now apart (`workers_live`), the first
+row is always the owner's (or a frame leg's with no owner), the context row
+starts with a dim `CTX` in the role column with the gauge under the harness
+(`CTX    ━━━━──── 52%`; no row for an unknown context), the route's time ends
+the title's last row (the title folds and ends in `…` within the cells left
+beside it), and no `owner <model>` word follows the stage. Each live worker
+hangs under the owner two cells in on a dim branch (`├─`, the last `└─`; `│`
+down the owner's rows and an earlier worker's): its own mark, `worker` (or
+`frame`), harness, model and effort (effort, then the harness go), its `CTX`
+row, then its stage, open tool and target (the path, the file name, the tool,
+then none) with its own time at the right; a finished stage's worker is not
+drawn. Short of rows a worker first takes one row (model, percent, time), then
+the workers go and the kind row ends with `· worker N`, before the steps
+below; a producer that sends no `workers_live` keeps the one-doer rows. A fourth row says which
 kind of route it is and where it stands, dim: Fleet's kind word (`code`, `lab`,
 `frame`: the capability without `autopilot-`, Fleet's own function; mode and
 intensity only in the opened `KIND`), then `one-shot` (the owner works itself)
