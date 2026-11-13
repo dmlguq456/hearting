@@ -959,6 +959,43 @@ class SegmentedEvidenceTest(unittest.TestCase):
             self.assertGreater(stats["segment_fold_reuses"], 0)
             self.assertGreater(stats["index_segment_reuses"], 0)
 
+    def test_a_recognised_segment_carries_its_converted_rows_whole_after_a_rewrite(self):
+        # A rewrite that keeps the leading bytes recognises those segments again as new objects over
+        # the same records: their rows are carried by segment, not proved one row at a time, and
+        # the rows are the ones a conversion from nothing gives.
+        cache = dispatch._dispatch_registry_cache
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cache, "_PARSE_CHUNK_LINES", 3):
+            path = Path(directory) / "jobs.log"
+            rows = [self._row(i, "open" if i % 4 == 0 else "done") for i in range(24)]
+            path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            with cache.registry_read_scope():
+                first = dispatch.parsed_registry_rows(path)
+            changed = list(rows)
+            changed[4] = changed[4].replace("harness=codex", "harness=claude-with-a-longer-name")   # an early row, longer
+            path.write_text("\n".join(changed) + "\n", encoding="utf-8")
+            os.utime(path, (2_000_000, 2_000_000))
+            before = dispatch.registry_fold_metrics()
+            with cache.registry_read_scope():
+                second = dispatch.parsed_registry_rows(path)
+            after = dispatch.registry_fold_metrics()
+            carried = after["rows_carried_by_segment"] - before["rows_carried_by_segment"]
+            proved = after["rows_proved_by_fields"] - before["rows_proved_by_fields"]
+            self.assertEqual(carried + proved, len(rows))
+            self.assertGreaterEqual(carried, 18)         # the segment before the edit and every one after it
+            self.assertLessEqual(proved, 6)              # only the segment the edited row is in
+            self.assertEqual([row[:2] for row in second], [row[:2] for row in first[:4]]
+                             + [(4, tuple(changed[4].split("\t")))] + [row[:2] for row in first[5:]])
+            self.assertTrue(all(new is old for new, old in zip(second[6:], first[6:])))
+            # from nothing: the same rows
+            dispatch._PARSED_REGISTRY_ROWS.clear()
+            dispatch._PARSED_REGISTRY_PATH_ORDER.clear()
+            cache.clear_cache()
+            with cache.registry_read_scope():
+                scratch = dispatch.parsed_registry_rows(path)
+            self.assertEqual([(row[0], row[1], dict(row[2])) for row in second],
+                             [(row[0], row[1], dict(row[2])) for row in scratch])
+
 
 if __name__ == '__main__':
     unittest.main()

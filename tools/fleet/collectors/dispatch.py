@@ -1038,29 +1038,32 @@ def _row_order(row):
 
 
 def _carried_segment_rows(old_rows, old_segments, new_segments):
-    """Converted rows of every new segment that is the same object as an old one.
+    """Converted rows of every new segment whose rows are the very records of an old one.
 
-    A segment object is immutable and owns a fixed range of physical orders, so
-    the rows already converted for that range are the rows of the same segment
-    now, whatever else the new generation changed (a rewrite included).
+    A converted row is a pure function of its record and the physical order it stands at, and
+    ``records`` is the identity of a segment's content: a segment object that a rewrite recognised
+    again (``_RegistrySegment.resynced``) is a new object holding the old segment's own ``records``
+    tuple at the same physical orders. So the rows already converted for that range are the rows of
+    that segment now, whatever else the new generation changed. A segment of other records, or the
+    same records at other orders, is not carried; ``by_fields`` of ``_parse_registry_view`` proves
+    those row by row.
 
-    The key is ``id(segment)``, which names one object only while the old segments are
-    held: ``_PARSED_REGISTRY_SEGMENTS`` keeps them for as long as ``old_rows`` is kept.
-    A segment a rewrite recognised again (``_RegistrySegment.resynced``) is a new object over
-    the same rows, so it is not carried here; the row conversion is carried for it by the
-    ``by_fields`` lookup of ``_parse_registry_view`` (the same fields at the same order).
+    The key is ``id(records)``, which names one object only while the old segments are held (and
+    the tuple itself is compared): ``_PARSED_REGISTRY_SEGMENTS`` keeps them for as long as
+    ``old_rows`` is kept.
     """
     if not old_rows or not old_segments:
         return {}
     spans = {}
     start = 0
     for segment in old_segments:
-        spans[id(segment)] = (start, segment.order_end)
+        spans[id(segment.records)] = (start, segment.order_end, segment.records)
         start = segment.order_end
     carried = {}
     for segment in new_segments:
-        span = spans.get(id(segment))
-        if span is not None:
+        span = spans.get(id(segment.records))
+        if (span is not None and span[2] is segment.records
+                and span[0] == segment.order_start and span[1] == segment.order_end):
             low = bisect.bisect_left(old_rows, span[0], key=_row_order)
             high = bisect.bisect_left(old_rows, span[1], key=_row_order)
             carried[id(segment)] = old_rows[low:high]
@@ -1084,9 +1087,11 @@ def _parse_registry_view(path, view, generation):
         held = carried.get(id(segment))
         if held is not None:
             rows.extend(held)
+            _REGISTRY_FOLD_STATS["rows_carried_by_segment"] += len(held)
             continue
         if by_fields is None:
             by_fields = {row[1]: row for row in old_rows}
+        _REGISTRY_FOLD_STATS["rows_proved_by_fields"] += len(segment.records)
         for record in segment.records:
             old = (by_fields.get(record.fields)
                    if type(record) is _dispatch_registry_cache.RegistryRecord else None)
@@ -4356,7 +4361,8 @@ class RegistryEvidence(dict):
 _REGISTRY_FOLD_PARTS = {}
 _REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0,
                         "index_segment_builds": 0, "index_segment_reuses": 0,
-                        "selection_fact_builds": 0, "selection_fact_reuses": 0}
+                        "selection_fact_builds": 0, "selection_fact_reuses": 0,
+                        "rows_carried_by_segment": 0, "rows_proved_by_fields": 0}
 _REGISTRY_INDEX_PARTS = {}
 
 
