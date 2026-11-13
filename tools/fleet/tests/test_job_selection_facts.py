@@ -128,6 +128,18 @@ class JobSelectionFactsTest(unittest.TestCase):
         self.write()
         self.assertSame("deleted")
 
+    def test_the_compiled_index_is_charged_by_schema_and_never_sized_by_walking_it(self):
+        from runtime_observation import retained_size
+        with mock.patch.object(dispatch._JOB_SELECTION_CACHE, "remember",
+                               wraps=dispatch._JOB_SELECTION_CACHE.remember) as remember:
+            self.select()
+        self.assertEqual(remember.call_count, 1)
+        self.assertIsNotNone(remember.call_args.kwargs.get("weight"))          # a charge, not a walk of the index
+        (key, compiled), = list(dispatch._JOB_SELECTION_CACHE.items())
+        charged = dispatch._JOB_SELECTION_CACHE.weights[key]
+        self.assertGreaterEqual(charged, retained_size((key, compiled)))       # never below what it holds
+        self.assertEqual(charged, dispatch._JOB_SELECTION_BYTES_PER_JOB * len(compiled["positions"]) + 8192)
+
     def test_another_namespace_or_policy_keeps_nothing(self):
         self.select()
         built = self.stats()["selection_fact_builds"]

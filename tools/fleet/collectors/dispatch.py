@@ -1368,6 +1368,7 @@ _JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=12 * 1024 * 102
 # is held beside them, so an id that is reused never answers for another row). Nothing that
 # changes with the clock or the processes is kept here: those are read per pass below.
 _SELECTION_FACTS = {"scope": None, "rows": {}}
+_JOB_SELECTION_BYTES_PER_JOB = 450
 
 
 def _selection_facts(fields, meta):
@@ -1443,7 +1444,10 @@ def _job_selection(derived, live_attempt_ids, *, include_stall):
                         dead_dates=tuple(sorted(dead_dates)), pids=pids, attempts=attempts,
                         identities=identities, positions=positions)
         with _PARSED_REGISTRY_CACHE_LOCK:
-            _JOB_SELECTION_CACHE[key] = compiled
+            # Charged by schema (measured 377 bytes per job at 15,444 jobs) instead of walking
+            # the whole compiled index to size it, which cost as much as building it.
+            _JOB_SELECTION_CACHE.remember(
+                key, compiled, weight=_JOB_SELECTION_BYTES_PER_JOB * len(compiled['positions']) + 8192)
     alive = set()
     for pid in compiled['pids'].keys() & visible:
         start = procscan.read_proc_start(pid)
