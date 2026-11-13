@@ -567,5 +567,118 @@ class DiskLifecycleCursorTest(unittest.TestCase):
         self.assertFalse(check({"lifecycle": None, "extra": 1}, "codex-lifecycle-exact"))
 
 
+def _decode_every_row(lifecycle, carry, data, pending_calls=None):
+    """The reader before rows were skipped by name: every complete row is decoded."""
+    parts = (carry + data).split(b"\n")
+    carry = parts.pop()
+    for raw_line in parts:
+        try:
+            row = json.loads(raw_line)
+        except Exception:
+            row = None
+        if pending_calls is not None:
+            codex._advance_pending_input(pending_calls, lifecycle, row)
+        lifecycle = codex._advance_task_lifecycle_row(lifecycle, row)
+    return lifecycle, carry
+
+
+class SkippedRowsEquivalenceTest(unittest.TestCase):
+    """Skipping the rows that name none of the lifecycle events gives the same cursor."""
+
+    @staticmethod
+    def _rows(seed, count):
+        import random
+        rng = random.Random(seed)
+        calls, rows = [], []
+        for index in range(count):
+            kind = rng.choice(("tool", "tool", "tool", "output", "start", "done", "abort", "ask", "ask_async",
+                               "reply", "prompt", "delivery", "prose", "junk", "odd"))
+            call = "call-%d" % rng.randrange(8)
+            turn = "turn-%d" % rng.randrange(4)
+            stamp = "2026-11-13T00:00:%02dZ" % (index % 60)
+            if kind == "tool":
+                row = {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                                                            "call_id": call, "arguments": "{}"}}
+            elif kind == "output":
+                row = {"type": "response_item", "payload": {"type": "function_call_output", "call_id": call,
+                                                            "output": json.dumps({"accepted": rng.random() < .5})}}
+            elif kind in ("start", "done", "abort"):
+                row = {"type": "event_msg", "payload": {
+                    "type": {"start": "task_started", "done": "task_complete", "abort": "turn_aborted"}[kind],
+                    "turn_id": turn if rng.random() < .9 else ""}}
+            elif kind == "ask":
+                row = {"type": "response_item", "payload": {"type": "function_call", "name": "request_user_input",
+                                                            "call_id": call, "timestamp": stamp}, "timestamp": stamp}
+            elif kind == "ask_async":
+                row = {"type": "response_item", "timestamp": stamp, "payload": {
+                    "type": "function_call", "name": "request_user_input_async", "call_id": call,
+                    "arguments": json.dumps({"questions": [{"title": "q"}] * rng.randrange(0, 3)}),
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn}}}
+            elif kind == "reply":
+                body = json.dumps([{"answer": "a", "questionItemId": json.dumps(
+                    ["request_user_input_async", call, rng.randrange(2)])}])
+                row = {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "<send_user_message_question_reply>" + body
+                     + "</send_user_message_question_reply>"}]}}
+            elif kind == "prompt":
+                row = {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                    "type": "UserMessage", "client_id": "11111111-2222-3333-4444-555555555555", "content": []}}}
+            elif kind == "delivery":
+                row = {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                    "type": "UserMessage", "client_id": "delivery-abc", "content": []}}}
+            elif kind == "prose":
+                row = {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "the word task_started or request_user_input in prose"}]}}
+            elif kind == "junk":
+                rows.append("{not json task_started\n")
+                continue
+            else:
+                row = {"type": "turn_context", "payload": {"cwd": "/x", "note": "x" * rng.randrange(0, 400)}}
+            rows.append(json.dumps(row) + "\n")
+        return rows
+
+    def _both(self, data, chunk):
+        results = []
+        for consume in (_decode_every_row, codex._consume_lifecycle_bytes):
+            lifecycle, carry, pending, offset = None, b"", {}, 0
+            while offset < len(data):
+                lifecycle, carry = consume(lifecycle, carry, data[offset:offset + chunk], pending)
+                offset += chunk
+            plain, plain_carry = None, b""
+            for offset in range(0, len(data), chunk):
+                plain, plain_carry = consume(plain, plain_carry, data[offset:offset + chunk], None)
+            results.append((lifecycle, carry, dict(pending), plain, plain_carry))
+        return results
+
+    def test_a_random_rollout_gives_the_same_cursor_with_and_without_the_skipping(self):
+        for seed in range(40):
+            data = "".join(self._rows(seed, 300 + seed * 7)).encode()
+            for chunk in (64, 4096, 65536):
+                reference, current = self._both(data, chunk)
+                self.assertEqual(current, reference, (seed, chunk))
+
+    def test_the_skipping_really_skips_the_bulk_rows(self):
+        bulk = (json.dumps({"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                                                                  "call_id": "c", "arguments": "{}"}}) + "\n") * 400
+        with mock.patch.object(codex.json, "loads", wraps=json.loads) as loads:
+            codex._consume_lifecycle_bytes(None, b"", bulk.encode(), {})
+            codex._consume_lifecycle_bytes(None, b"", bulk.encode(), None)
+        self.assertEqual(loads.call_count, 0)
+        started = (json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t"}}) + "\n").encode()
+        self.assertEqual(codex._consume_lifecycle_bytes(None, b"", bulk.encode() + started, {})[0],
+                         ("task_started", "t"))
+
+    def test_a_tool_result_is_decoded_only_while_a_question_call_is_open(self):
+        ask = (json.dumps({"type": "response_item", "payload": {"type": "function_call", "name": "request_user_input",
+                                                               "call_id": "q"}}) + "\n").encode()
+        output = (json.dumps({"type": "response_item", "payload": {"type": "function_call_output",
+                                                                  "call_id": "q"}}) + "\n").encode()
+        pending = {}
+        codex._consume_lifecycle_bytes(None, b"", ask, pending)
+        self.assertIn("q", pending)
+        codex._consume_lifecycle_bytes(None, b"", output, pending)
+        self.assertEqual(pending, {})
+
+
 if __name__ == "__main__":
     unittest.main()
