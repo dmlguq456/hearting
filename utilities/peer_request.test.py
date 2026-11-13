@@ -617,6 +617,46 @@ class LockOrderTest(Fixture):
         self.assertEqual(nested, [])
 
 
+class RealLineageTest(Fixture):
+    """The confirmed-successor rule against Hearting's own lineage rows, not a replaced reader."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack.close()  # undo the Fixture's lineage replacements; keep the carrier ones
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        for name, value in (("_current_session_identity", lambda: (self.caller[1], self.caller[0])),
+                            ("_current_shell_binding", lambda h, s: (None, "")),
+                            ("_prompt_codex_native_owner", lambda sid: None),
+                            ("_prompt_codex_owner_conflict", lambda sid: False),
+                            ("_schedule_message_obligation", self._schedule),
+                            ("_prompt_carrier_note", lambda *a, **k: None),
+                            ("_record", lambda **k: self.records.append(k))):
+            self.patch(peer_steward, name, value)
+        self.patch(peer_address, "resolve", self._resolve)
+        self.patch(peer_message, "peer_alias", lambda h, s: "[%02x]" % (sum(map(ord, s)) % 256))
+        self.patch(peer_message, "deliver_pending_codex", self._deliver_codex)
+        self.hold = True
+
+    def write_succession(self, harness, old, new):
+        directory = Path(os.environ["XDG_STATE_HOME"]) / "hearting" / "session-tidy" / "sessions"
+        directory.mkdir(parents=True, exist_ok=True)
+        with open(directory / "seat-1.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event": "succession", "source": "tidy-clear", "harness": harness,
+                                     "from": old, "sid": new, "ts": 1}) + "\n")
+
+    def test_a_session_tidy_succession_row_moves_the_request_and_nothing_else_does(self):
+        request_id, _ = self.new_request(title="t")
+        self.assertEqual(pr.session_requests(*B2)["in"], [])
+        self.write_succession(B[0], B[1], B2[1])
+        self.assertEqual([r["id"] for r in pr.session_requests(*B2)["in"]], [request_id])
+        rc, out = self.report(B2, request_id, result="from the successor")
+        self.assertEqual(rc, 0, out)
+        stranger = ("codex", "sid-bbbb-9999")
+        rc, out = self.report(stranger, request_id, result="x")
+        self.assertIn("reporter-not-recipient", out)
+
+
 def peer_request_kind(row):
     transfer = peer_message._read_transfer_record(row["ref"])
     return pr.message_kind(row.get("text") or "", transfer)

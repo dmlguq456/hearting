@@ -2009,6 +2009,13 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
         watch_id = armed_id = self._fields(armed.stdout)["watch_id"]
         self._wait_for_lock(watch_id)
         paths = peer_steward._watch_paths(watch_id, self.watch_root)
+        # #1576 review follow-up F14: the background observer this test armed writes its own
+        # first observation once it holds the lock; under load that write could land after the
+        # request written below and replace it. The test is about the runner's no-change pass,
+        # so it waits for the observer's own first write before staging the request.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not paths.observation.exists():
+            time.sleep(0.05)
         arm = peer_steward._read_json(paths.arm)
         pending = {"schema_version": 1, "watch_id": armed_id, "state": "terminal_pending",
                    "reason": "session-replaced", "server": "default",
@@ -2020,6 +2027,65 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
                 peer_steward.peer_obligations.ObligationStore(), snapshot,
                 read_context=None, incarnation="no-change-pass")
         self.assertEqual(peer_steward._read_json(paths.observation)["state"], "terminal_pending")
+
+    def test_a_process_that_now_runs_another_unconfirmed_session_is_named_not_notified(self):
+        """#1576 review follow-up F1: the armed process runs a different session and no
+        lineage confirms it. The observation says so; there is no receipt and no wake."""
+        armed = self._run("watch", self.target, "--wake", "none", env=self._env("held"))
+        watch_id = self._fields(armed.stdout)["watch_id"]
+        self._wait_for_lock(watch_id)
+        paths = peer_steward._watch_paths(watch_id, self.watch_root)
+        arm = peer_steward._read_json(paths.arm)
+        pid = arm["agent"]["pid"]
+        snapshot = {"watch_root": self.watch_root, "watches": [(watch_id, arm)]}
+        row = {"harness": arm["agent"]["harness"], "pid": pid, "sid": "sid-someone-else"}
+        import peer_address
+        with mock.patch.object(peer_steward, "native_agent", return_value=None), \
+                mock.patch.object(peer_address, "native_sessions", return_value=[row]), \
+                mock.patch.object(peer_steward, "native_lifetime", return_value="live"), \
+                mock.patch.object(peer_steward, "_wake_watch_observer") as wake:
+            peer_steward._publish_watch_readiness(
+                peer_steward.peer_obligations.ObligationStore(), snapshot,
+                read_context=None, incarnation="changed-in-place")
+        wake.assert_not_called()
+        self.assertFalse(paths.receipt.exists())
+        observation = peer_steward._read_json(paths.observation) or {}
+        self.assertEqual(observation.get("reason"), "target-session-changed-unconfirmed")
+        self.assertNotEqual(observation.get("state"), "terminal_pending")
+        # The same session on the same process is not "changed".
+        row["sid"] = arm["agent"]["session_id"]
+        peer_steward._write_json_atomic(paths.observation, {"watch_id": watch_id, "state": "pending"})
+        with mock.patch.object(peer_steward, "native_agent", return_value=None), \
+                mock.patch.object(peer_address, "native_sessions", return_value=[row]), \
+                mock.patch.object(peer_steward, "native_lifetime", return_value="live"), \
+                mock.patch.object(peer_steward, "_wake_watch_observer"):
+            peer_steward._publish_watch_readiness(
+                peer_steward.peer_obligations.ObligationStore(), snapshot,
+                read_context=None, incarnation="same-session")
+        self.assertNotEqual((peer_steward._read_json(paths.observation) or {}).get("reason"),
+                            "target-session-changed-unconfirmed")
+
+    def test_a_cleared_steward_with_a_live_seat_holder_does_not_end_its_watch(self):
+        """#1576 review follow-up F7: a restarted watcher saw the steward sid it was armed
+        under as ended after the steward's `/clear` and settled `steward-exited`, though the
+        seat's current holder was alive. The seat relation decides first."""
+        import dispatch_seat_handover as handover
+        arm = {"steward": {"harness": "claude", "session_id": "sid-before-clear"},
+               "steward_seat": {"key": "seat-key"}}
+        live = {"holder": {"harness": "claude", "sid": "sid-after-clear"}}
+        lifetime = lambda harness, sid, **kw: "ended" if sid == "sid-before-clear" else "live"  # noqa: E731
+        with mock.patch.object(peer_steward, "native_lifetime", side_effect=lifetime), \
+                mock.patch.object(handover, "resolve_watch", return_value=live):
+            self.assertFalse(peer_steward._steward_session_gone("w", arm))
+        # A holder that is itself ended, an unreadable relation and a watch with no seat key
+        # keep the plain ended judgment.
+        with mock.patch.object(peer_steward, "native_lifetime", return_value="ended"), \
+                mock.patch.object(handover, "resolve_watch", return_value=live):
+            self.assertTrue(peer_steward._steward_session_gone("w", arm))
+        with mock.patch.object(peer_steward, "native_lifetime", side_effect=lifetime), \
+                mock.patch.object(handover, "resolve_watch", side_effect=OSError("unreadable")):
+            self.assertTrue(peer_steward._steward_session_gone("w", arm))
+        self.assertTrue(peer_steward._steward_session_gone("w", {"steward": arm["steward"]}))
 
     def test_a_working_or_unknown_target_never_notifies(self):
         armed = self._run("watch", self.target, "--wake", "none", env=self._env("held"))

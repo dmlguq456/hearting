@@ -6893,6 +6893,64 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     self.assertEqual(peer_steward.shared_readiness._read_json(
                         peer_steward.shared_readiness._target_path(store.root,identity))["identity"],identity)
 
+    def test_claim_handover_readiness_runs_the_real_projection_without_a_readiness_mock(self):
+        from dispatch_contract import process_start_ticks
+        # #1576 review follow-up F4: no `_pane_readiness` mock. The bound-work and
+        # cleanup outcomes need registered-child rows the fixture does not build;
+        # the existing mocked test above keeps them. Here the real projection decides
+        # the clear case from the exact native birth.
+        for label,state in (("clear","ready"),):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                base=Path(temporary); state_root=base/"peer-state"; state_root.mkdir()
+                watch_root=state_root/"peer-watches"; watch_root.mkdir()
+                jobs=base/"dispatch"/"jobs.log"; jobs.parent.mkdir(); jobs.write_text("")
+                store=peer_steward.peer_obligations.ObligationStore(state_root); store.ensure_directory()
+                pid=os.getpid(); start=str(process_start_ticks(pid)); namespace=os.readlink(f"/proc/{pid}/ns/pid")
+                watch_id=f"watch-{label}"
+                arm={"watch_id":watch_id,"server":"server-a","target":"agent-a",
+                     "observer_protocol":3,"readiness_endpoint":"native:server-a",
+                     "until":["idle"],"initial_state":"working",
+                     "agent":{"pane":"%1","harness":"claude","session_id":"sid-a",
+                              "name":"agent-a","pid":pid,"pid_start":start,
+                              "pid_namespace":namespace},
+                     "pane_identity":{"native_pid":pid,"native_start":start,
+                                      "pid_namespace":namespace}}
+                paths=peer_steward._watch_paths(watch_id,watch_root)
+                peer_steward._write_json_atomic(paths.arm,arm)
+                identity=peer_steward._watch_readiness_identity(arm,"idle")
+                token="native-transition-"+label
+                peer_steward._write_json_atomic(paths.observation,{"watch_id":watch_id,
+                    "state":"pending","native_wait":{"state":"result","agent_state":"idle",
+                    "agent":{"harness":"claude","session_id":"sid-a","pane":"%1",
+                             "agent_state":"idle","pid":pid,"pid_start":start,
+                             "pid_namespace":namespace}},
+                    "readiness_transition":{"token":token,"identity":identity,
+                        "consumer":{"pid":pid,"pid_start":start},"requested_at":time.time()}})
+                incarnation="native-runner-"+label
+                peer_steward.shared_readiness.publish_runner_incarnation(
+                    store.root,pid,start,incarnation)
+                payload={"result":{"agent":{"agent":"claude","agent_status":"idle",
+                    "agent_session":{"value":"sid-a"},"pane_id":"%1","pid":pid,
+                    "pid_start":start,"pid_namespace":namespace}}}
+                projection=SimpleNamespace(state=state,reason=label,
+                    identity=(("server","server-a"),("pane","%1"),("harness","claude"),
+                              ("session_id","sid-a"),("pid_birth",f"{pid}:{start}")))
+                with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs)}), \
+                     mock.patch.object(peer_steward,"native_agent",return_value=payload), \
+                     mock.patch.object(peer_steward,"_wake_watch_observer",return_value=True):
+                    changed=peer_steward._publish_watch_readiness(
+                        store,{"watch_root":watch_root,"watches":[(watch_id,arm)]},
+                        read_context=None,incarnation=incarnation)
+                    self.assertTrue(changed)
+                    response=peer_steward.shared_readiness.target_result(store.root,identity)
+                    self.assertIsNotNone(response)
+                    self.assertEqual(response["reason"],"native-turn-ready")
+                    self.assertEqual((response["lineage"]["shell_pid"],str(response["lineage"]["shell_start"])),
+                                     (pid,start))
+                    self.assertEqual(response["state"],state)
+                    self.assertEqual(peer_steward.shared_readiness._read_json(
+                        peer_steward.shared_readiness._target_path(store.root,identity))["identity"],identity)
+
     def test_native_identity_change_between_runner_and_receipt_blocks_ready(self):
         from dispatch_contract import process_start_ticks
         with tempfile.TemporaryDirectory() as temporary:

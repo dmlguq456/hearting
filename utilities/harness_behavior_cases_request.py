@@ -348,10 +348,10 @@ class RequestHandoffScenario(_RequestScenario):
         return {"nonce": self.nonce, "hold": 40, "partial": False, "a_steps": [(f"{A_MARK} send", send)]}
 
     def lineage_row(self, run, old, new):
+        """One private session-tidy succession row, the lineage Hearting already confirms."""
         env = run.home.env
-        state = Path(env["AGENT_PEER_LEDGER_ROOT"]).parent if env.get("AGENT_PEER_LEDGER_ROOT") \
-            else stable_state_root(env).parent
-        directory = state / "session-tidy" / "sessions"
+        base = env.get("XDG_STATE_HOME") or str(Path(env.get("HOME") or Path.home()) / ".local" / "state")
+        directory = Path(base) / "hearting" / "session-tidy" / "sessions"
         directory.mkdir(parents=True, exist_ok=True)
         row = {"event": "succession", "source": "tidy-clear", "harness": run.harness,
                "from": old, "sid": new, "ts": int(time.time())}

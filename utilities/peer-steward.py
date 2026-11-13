@@ -3932,7 +3932,7 @@ def cmd_watch_run(args):
             steward_sid = steward.get("session_id")
             if steward.get("harness") and steward_sid:
                 steward_life = native_lifetime(steward["harness"], steward_sid)
-                if steward_life == "ended":
+                if steward_life == "ended" and _steward_session_gone(watch_id, arm):
                     terminal_reason = "steward-exited"
                 elif steward_life == "live" and isinstance(steward_seat.get("native"), dict):
                     native = steward_seat["native"]
@@ -6186,6 +6186,45 @@ def _watch_receipt_question_fields(state, agent):
     return {"question_id": question_id} if question_id else {}
 
 
+def _steward_session_gone(watch_id, arm):
+    """A watch's steward session is ended; its watch ends only if no live holder took over.
+
+    After the steward's `/clear` or a handover, the sid the watch was armed under is
+    ended while the seat's current holder is alive; the seat relation is read first, as
+    `_watch_close_reason` does. An unreadable relation keeps the plain ended judgment."""
+    seat = (arm or {}).get("steward_seat") or {}
+    if not seat.get("key"):
+        return True
+    try:
+        import dispatch_seat_handover as handover
+        relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
+        holder = (relation or {}).get("holder") or {}
+        harness, sid = holder.get("harness"), holder.get("sid")
+        if (relation and isinstance(harness, str) and harness and isinstance(sid, str) and sid
+                and native_lifetime(harness, sid) != "ended"):
+            return False
+    except Exception:  # noqa: BLE001 - an unreadable relation keeps the ended judgment
+        pass
+    return True
+
+
+def _session_changed_in_place(harness, sid, expected):
+    """The armed process (same pid and birth) is still alive and now runs a different session."""
+    try:
+        import peer_address
+        pid = expected.get("pid")
+        if type(pid) is not int or pid <= 1:
+            return False
+        for row in peer_address.native_sessions():
+            if (row.get("pid") == pid and row.get("harness") == harness
+                    and row.get("sid") and row["sid"] != sid):
+                return native_lifetime(harness, sid, pid=pid, pid_start=expected.get("pid_start"),
+                                       pid_namespace=expected.get("pid_namespace")) != "ended"
+    except Exception:  # noqa: BLE001 - an unreadable census says nothing
+        return False
+    return False
+
+
 def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
     """Read each armed native target once per runner pass and wake its observer."""
     root = snapshot.get("watch_root") if isinstance(snapshot, dict) else None
@@ -6257,6 +6296,17 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                                "observed_ts": _utc_now()}
                     _write_json_atomic(paths.observation, current)
                     _wake_watch_observer(_read_json(paths.arm) or arm)
+                    changed = True
+                elif (previous.get("state") != "terminal_pending"
+                        and previous.get("reason") != "target-session-changed-unconfirmed"
+                        and _session_changed_in_place(harness, sid, expected)):
+                    # The armed process now runs another session and no lineage confirms
+                    # it is this one's successor: say so in the observation (no receipt,
+                    # no wake, no new deadline); `status` shows the reason.
+                    _write_json_atomic(paths.observation, {
+                        **previous, "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+                        "reason": "target-session-changed-unconfirmed", "server": server,
+                        "observed_ts": _utc_now()})
                     changed = True
                 continue
             current_pid, current_start = observed.get("pid"), observed.get("pid_start")
