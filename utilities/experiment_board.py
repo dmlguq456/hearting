@@ -78,6 +78,7 @@ def _row(cond: Mapping[str, Any], group: Mapping[str, Any]) -> Dict[str, Any]:
         "condition_id": cond["id"], "name": cond.get("display_name") or None, "status": state,
         "failed": failed, "stagnant": stagnant, "unknown_flag": unknown_flag, "waiting": bool(waiting),
         "unknown_reasons": reasons, "run_status": run_status, "run_id": (cond.get("current_run") or {}).get("run_id"),
+        "started_at": (cond.get("current_run") or {}).get("started_at"),
         "progress": cond.get("progress"),
         "latest": ({"value": latest.get("value"), "epoch": latest.get("epoch"), "key": latest.get("key"),
                     "nonfinite": bool(latest.get("nonfinite"))} if latest else None),

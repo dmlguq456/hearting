@@ -3031,6 +3031,24 @@ def _print_run_gpu_observation(observation):
               "(idle at probe time)")
 
 
+def _progress_declaration_note(command, workdir, host, config, resource_parent):
+    """One line when this launch declares no progress file or output folder; None otherwise.
+    It never stops the launch (resource_progress.declaration_note)."""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import resource_progress
+        resource = resource_parent if isinstance(resource_parent, dict) else {}
+        route = resource.get("route_file") or None
+        return resource_progress.declaration_note({
+            "command": list(command), "cwd": workdir, "path_namespace": host.get("path_namespace"),
+            "run_root": str(config["run_root"]), "output_dir": resource.get("output_dir"),
+            "observation": resource.get("observation"), "route": route, "node": resource.get("node")})
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def cmd_run(args):
     config = load_config()
     _refuse_namespace_self(config, "run")
@@ -3137,6 +3155,7 @@ def cmd_run(args):
         "HEARTING_COMPUTE_HOST": name,
         "HEARTING_GPU_LEASE_RELEASE": "",
     })
+    declaration_note = _progress_declaration_note(command, workdir, host, config, resource_parent)
     options = {"state_path": str(gpu_leases.state_path()), "observation": gpu_observation,
                "requested": requested, "share": share, "owner": lease_owner,
                "task": args.name or rendered, "run_id": run_id, "run_dir": str(run_dir),
@@ -3154,6 +3173,8 @@ def cmd_run(args):
               f"agent_home_reason: {agent_home_reason}\n"
               f"would run: {rendered}\nsetup: {preamble}")
         _print_run_gpu_observation(gpu_observation)
+        if declaration_note:
+            print(declaration_note, file=sys.stderr)
         return 0
 
     namespaced = "path_namespace" in host
@@ -3223,6 +3244,8 @@ def cmd_run(args):
     except OSError as exc:
         print(f"note: could not record run metadata: {exc}", file=sys.stderr)
     watching = _spawn_completion_watch(run_dir, meta)
+    if declaration_note:
+        print(declaration_note, file=sys.stderr)
     if args.json:
         print(json.dumps(meta, ensure_ascii=False, sort_keys=True))
     else:
@@ -3251,15 +3274,15 @@ QUIET_RUN_MARKER = ".observation-unknown"
 QUIET_PROBE_SECONDS = 3600
 
 
-def _run_last_activity(run_dir):
-    """Newest change among the run's own top-level files, never the observer's."""
+def _run_last_activity(run_dir, exclude=frozenset()):
+    """Newest change among the run's own top-level files, never the observer's (nor `exclude`)."""
     newest = None
     try:
         entries = list(os.scandir(run_dir))
     except OSError:
         return None
     for entry in entries:
-        if entry.name.startswith(".observation-"):
+        if entry.name.startswith(".observation-") or entry.name in exclude:
             continue
         try:
             changed = entry.stat(follow_symlinks=False).st_mtime
@@ -3267,6 +3290,29 @@ def _run_last_activity(run_dir):
             continue
         newest = changed if newest is None else max(newest, changed)
     return newest
+
+
+# Files in a run directory that Hearting itself writes (the launch record, which a later claim or
+# completion rewrites): their change is not the run's own sign of life.
+_RUN_METADATA_FILES = frozenset({"meta.json"})
+
+
+def _run_alive_at(run_dir, now):
+    """When the run's own files (its log, under the shared run root) last changed, if within the
+    window the LAB board allows an observation (`experiment_catalog.STALE_OBSERVATION_SECONDS`),
+    else None. This is the evidence the watcher vouches with: the public record is refreshed up to
+    this moment, never to "now", so a host that stopped writing turns stale 900 s after its last
+    write, as it did before refreshing existed (RV-PR1619-1114). Hearting's own files (the
+    observer's `.observation-*`, the launch record `meta.json`) are not the run's."""
+    newest = _run_last_activity(run_dir, exclude=_RUN_METADATA_FILES)
+    try:
+        import experiment_catalog
+        window = experiment_catalog.STALE_OBSERVATION_SECONDS
+    except Exception:  # noqa: BLE001 -- without the window nothing is vouched for
+        return None
+    if newest is None or not 0 <= float(now) - float(newest) <= window:
+        return None
+    return float(newest)
 
 
 def _run_quiet_since(run_dir, now):
@@ -3392,13 +3438,15 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
     }
     if not artifact_root:
         return None
+    alive_at = None if final else _run_alive_at(run_dir, now)
     try:
         import resource_progress
         return resource_progress.observe_experiment(record, Path(run_dir) / "meta.json", now,
             root=output_dir, row_key=record.get("row_id") or record["run_id"],
             row_scoped=bool(record.get("row_id")), started_at=started,
             planned_seconds=record["planned_seconds"], final=final,
-            status=record["status"], notify_events=not final)
+            status=record["status"], notify_events=not final,
+            alive=alive_at is not None, alive_at=alive_at)
     except Exception:  # noqa: BLE001 -- observation must never change run completion
         return None
 
