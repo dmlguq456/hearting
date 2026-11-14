@@ -2568,6 +2568,16 @@ def _main(argv=None, *, controller=None):
         if args.cmd == "observe":
             start_observer(registry, args, route, route_file, command)
             return
+        # One note, never a refusal, when the run declares no progress file or output folder
+        # its notices could read (BC-AMI-CHILD-FAIL-NO-WAKE-1111 observation 3).
+        import resource_progress
+        note = resource_progress.declaration_note({
+            "command": list(command), "cwd": str(cwd), "route": str(route_file), "node": args.node,
+            "log": str(Path(args.log).resolve()),
+            "observation": node.get("observation") if isinstance(node.get("observation"), dict) else None,
+            "output_dir": node.get("output_dir")})
+        if note:
+            print(note, file=sys.stderr)
         resume = RESOURCE_RESUME.route_selected(route) and node.get("resource_policy") == "verified-resume"
         if resume and not SAFE_RUN_ID.fullmatch(args.run_id): fail("invalid --run-id")
         # A sealed GPU-free host payload carries no training attestation; it still passes

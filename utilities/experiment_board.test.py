@@ -9,8 +9,12 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import datetime
 import importlib.util
+import json
+import subprocess
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -283,6 +287,229 @@ class ReadCache(T.Base):
         self.assertTrue(result["visible"])
         self.assertEqual((result["catalog"]["status"], result["strip"]), ("unreadable", "?1LB"))
         self.assertTrue(watch)  # a later change to the catalog still wakes the screen
+
+
+class ObserverWatching(T.Base):
+    """BC-LAB-OBSERVATION-STALE-FLICKER-1114: a run whose observer is watching it is not "unknown"
+    between two measurements, however long an epoch is; a run nobody can vouch for still is."""
+
+    def setup_root(self):
+        root = self.make_root()
+        self.register(root, {"groups": [T.group_spec()], "conditions": [condition("긴 에폭", "run-long")]})
+        return root
+
+    def look(self, root, now, state, *, alive):
+        run = {"run_id": "run-long", "started_at": NOW - 3600, "artifact_root": str(root), "status": "running"}
+        with mock.patch.object(B.rp, "_observation_state_path", return_value=state):
+            B.rp.observe_experiment(run, root / "registry.json", now, row_key="run", started_at=NOW - 3600,
+                                    status="running", notify_events=False, alive=alive)
+
+    def watch(self, alive):
+        """Forty minutes of 60 s looks with nothing new measured; the board read at every look."""
+        root = self.setup_root()
+        state = self.base / f"state-{alive}.json"
+        stale_at, writes = [], 0
+        real = B.rp.write_public_run_record
+
+        def counted(*args, **kwargs):
+            nonlocal writes
+            writes += 1
+            return real(*args, **kwargs)
+        with mock.patch.object(B.rp, "write_public_run_record", side_effect=counted):
+            for minute in range(41):
+                now = NOW + 60 * minute
+                self.look(root, now, state, alive=alive)
+                row = B.read(root, now=now, cache={})[0]["groups"][0]["rows"][0]
+                if "observation-stale" in row["anomalies"]:
+                    stale_at.append(minute)
+        return stale_at, writes
+
+    def test_a_watching_observer_keeps_a_long_epoch_observed(self):
+        stale_at, writes = self.watch(alive=True)
+        self.assertEqual(stale_at, [])
+        # The cost: one public record write per PUBLIC_REFRESH_SECONDS while nothing changes.
+        self.assertEqual(writes, 1 + 40 * 60 // B.rp.PUBLIC_REFRESH_SECONDS)
+
+    def test_an_observer_that_cannot_vouch_for_the_run_still_reads_stale(self):
+        stale_at, writes = self.watch(alive=False)
+        self.assertEqual(stale_at[0], 16)            # past the 900 s mark, as before
+        self.assertEqual(stale_at, list(range(16, 41)))
+        self.assertEqual(writes, 1)
+
+    def test_a_local_run_published_as_working_is_a_running_row(self):
+        # A local resource run's observer publishes `working`; the board counts it running and
+        # applies the same stale rule to it.
+        root = self.setup_root()
+        self.write_run(root, "run-long", status="working", at=NOW - 60, stagnation=HEALTHY)
+        row = B.read(root, now=NOW, cache={})[0]["groups"][0]["rows"][0]
+        self.assertEqual((row["run_status"], row["status"]), ("running", "running"))
+        self.write_run(root, "run-long", status="working", at=NOW - 1000, stagnation=HEALTHY)
+        row = B.read(root, now=NOW, cache={})[0]["groups"][0]["rows"][0]
+        self.assertIn("observation-stale", row["anomalies"])
+
+
+class StoppedRunsStayVisible(T.Base):
+    """RV-PR1619-1114: keeping a watched run "observed" must not hide a run that stopped.
+
+    The observer's own look (observed time) and the run's last valid progress (progress time) are kept
+    apart: a live process whose progress file stopped turns stagnant by the existing two-hour rule, a
+    declared progress source that can no longer be read is not vouched for, and a compute run whose
+    files stopped is vouched for only up to its last own evidence, never again from "now"."""
+
+    def setup_root(self, run_id):
+        root = self.make_root()
+        self.register(root, {"groups": [T.group_spec()], "conditions": [condition("멈춘 실행", run_id)]})
+        return root
+
+    def row(self, root, now):
+        return B.read(root, now=now, cache={})[0]["groups"][0]["rows"][0]
+
+    def live_child(self):
+        child = subprocess.Popen(["sleep", "600"], start_new_session=True)
+
+        def stop():
+            child.terminate()
+            child.wait(timeout=5)
+        self.addCleanup(stop)
+        return child
+
+    def local_run(self, root, progress_file):
+        import resource_run_registry as RR
+        run_id = "frozen-" + uuid.uuid4().hex
+        child = self.live_child()
+        run = {"run_id": run_id, "artifact_root": str(root), "started_at": NOW - 600, "status": "running",
+               "node": "train", "cwd": str(self.base), "progress_file": str(progress_file)}
+        identity = RR.launched_identity(child, attempts=500)    # cmdline can be empty just after exec
+        self.assertIsNotNone(identity)
+        run.update(identity)
+        run["pid_namespace"] = os.readlink("/proc/self/ns/pid")
+        return RR, run
+
+    def write_counter(self, path, run_id, completed, updated_at):
+        path.write_text(json.dumps({"schema_version": 1, "run_id": run_id, "node": "train",
+                                    "updated_at": updated_at, "completed": completed, "total": 60,
+                                    "unit": "epoch"}))
+
+    def test_a_live_process_whose_progress_file_stopped_turns_stagnant(self):
+        progress_file = self.base / "progress.json"
+        root = self.make_root()
+        RR, run = self.local_run(root, progress_file)
+        self.register(root, {"groups": [T.group_spec()], "conditions": [condition("멈춘 실행", run["run_id"])]})
+        self.write_counter(progress_file, run["run_id"], 12, NOW)
+        state = self.base / "obs.json"
+        seen = {}
+        with mock.patch.object(B.rp, "_observation_state_path", return_value=state), \
+                mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            for sec in range(0, 9001, 60):
+                view = RR.observe_run_if_due(run["run_id"], run, root / "registry.json", now=NOW + sec)
+                self.assertEqual(view["liveness"], "working")            # the process really is alive
+                if sec in (600, 1800, 7200, 9000):
+                    observed = B.rp._read_observation_state(state)
+                    row = self.row(root, NOW + sec)
+                    text = "; ".join(B.rp._notice_texts(run, "checkpoint", observed["observation"], None, []))
+                    seen[sec] = (row, observed, text)
+        for sec, (row, observed, text) in seen.items():
+            with self.subTest(seconds=sec):
+                # The progress moment is the file's, kept across every refresh of the observed time.
+                self.assertEqual(B.age_seconds(row, NOW + sec, "last_progress_at"), sec)
+                self.assertEqual(observed["progress_tracker"]["first_observed_at"], NOW)
+                self.assertIn("진행 12/60 epoch", text)
+                self.assertNotIn("stagnation=unknown", text)
+                self.assertNotIn("observation-stale", row["anomalies"])   # the observer is watching it
+        self.assertEqual(seen[600][0]["status"], "running")
+        self.assertEqual(seen[1800][0]["status"], "running")              # inside the two-hour window
+        self.assertIn("마지막 갱신 30m 전", seen[1800][2])
+        for sec in (7200, 9000):
+            row, observed, _text = seen[sec]
+            self.assertEqual(row["status"], "stagnant")
+            self.assertIn("stagnant", row["anomalies"])
+            notices = [item for item in observed["outbox"] if item["kind"] == "attention"]
+            self.assertEqual(len(notices), 1)                              # said once, still standing at 9000 s
+            self.assertIn("no observed increase for 2h00m", notices[0]["text"])
+
+    def test_a_declared_progress_source_that_can_no_longer_be_read_is_not_vouched_for(self):
+        progress_file = self.base / "progress.json"
+        root = self.make_root()
+        RR, run = self.local_run(root, progress_file)
+        self.register(root, {"groups": [T.group_spec()], "conditions": [condition("멈춘 실행", run["run_id"])]})
+        state = self.base / "obs.json"
+        statuses = {}
+        with mock.patch.object(B.rp, "_observation_state_path", return_value=state):
+            for minute in range(41):
+                now = NOW + 60 * minute
+                if minute <= 10:
+                    self.write_counter(progress_file, run["run_id"], 12 + minute, now)
+                elif progress_file.exists():
+                    progress_file.unlink()                               # the counter is gone at minute 11
+                RR.observe_run_if_due(run["run_id"], run, root / "registry.json", now=now)
+                statuses[minute] = self.row(root, now)["status"]
+        self.assertEqual({statuses[m] for m in range(0, 11)}, {"running"})
+        # The last record was written when the counter went missing (minute 11); nobody vouches after it.
+        self.assertEqual(statuses[26], "running")
+        self.assertEqual({statuses[m] for m in range(27, 41)}, {"unknown"})
+
+    # -- compute runs: the watcher's evidence is the run's own files on the shared run root -------------
+
+    def compute(self):
+        spec = importlib.util.spec_from_file_location("compute_hosts_for_board", HERE / "compute-hosts.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def compute_timeline(self, kind, minutes=151):
+        """One synthetic compute run looked at every 60 s; the board's status at every minute."""
+        module = self.compute()
+        run_id = "remote-" + uuid.uuid4().hex
+        root = self.setup_root(run_id)
+        run_dir = self.base / run_id
+        run_dir.mkdir()
+        meta = {"run_id": run_id, "host": "gpu-x", "artifact_root": str(root),
+                "started_at": datetime.datetime.fromtimestamp(NOW - 600, datetime.timezone.utc).isoformat()}
+        (run_dir / "meta.json").write_text(json.dumps(meta))
+        os.utime(run_dir / "meta.json", (NOW - 600, NOW - 600))
+        log = run_dir / "log"
+        log.write_text("epoch 1\n")
+        os.utime(log, (NOW, NOW))
+        state = self.base / f"{kind}.json"
+        writes, statuses = [], []
+        real = B.rp.write_public_run_record
+
+        def counted(*args, **kwargs):
+            writes.append(current[0])
+            return real(*args, **kwargs)
+        current = [0]
+        with mock.patch.object(B.rp, "_observation_state_path", return_value=state), \
+                mock.patch.object(B.rp, "write_public_run_record", side_effect=counted):
+            for minute in range(minutes):
+                current[0] = minute
+                now = NOW + 60 * minute
+                if kind == "healthy":
+                    os.utime(log, (now - 5, now - 5))                    # the run keeps writing its log
+                if kind == "metadata-only":
+                    os.utime(run_dir / "meta.json", (now, now))         # Hearting rewrites meta.json; the run is silent
+                if kind != "observer-stopped" or minute == 0:
+                    module._observe_compute_experiment(meta, run_dir, now)
+                statuses.append(self.row(root, now)["status"])
+        return statuses, writes
+
+    def test_a_compute_run_whose_files_stopped_turns_unknown_when_it_did_before(self):
+        statuses, writes = self.compute_timeline("remote-stopped", minutes=40)
+        self.assertEqual(statuses.index("unknown"), 16)                   # base: 16 min; not 31
+        self.assertEqual(set(statuses[16:]), {"unknown"})
+        self.assertEqual(writes, [0])                                     # no refresh vouched past t=0
+
+    def test_a_compute_run_whose_observer_stopped_still_turns_unknown_at_sixteen_minutes(self):
+        statuses, _writes = self.compute_timeline("observer-stopped", minutes=40)
+        self.assertEqual(statuses.index("unknown"), 16)
+
+    def test_a_compute_run_with_only_its_metadata_changing_is_not_vouched_for(self):
+        statuses, _writes = self.compute_timeline("metadata-only", minutes=40)
+        self.assertEqual(statuses.index("unknown"), 16)
+
+    def test_a_healthy_compute_run_writing_its_log_never_reads_unknown(self):
+        statuses, writes = self.compute_timeline("healthy", minutes=121)
+        self.assertEqual(set(statuses), {"running"})
+        self.assertLessEqual(len(writes), 1 + 120 * 60 // B.rp.PUBLIC_REFRESH_SECONDS)
 
 
 class Review(T.Base):

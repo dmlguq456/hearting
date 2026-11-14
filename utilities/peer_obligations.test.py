@@ -3821,6 +3821,44 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         self.assertTrue(all(pending.read(self.root, recipient["session_id"], record["delivery_id"])["state"] == "acked"
                             for record in records[1:]))
 
+    def _end_attempt(self, meta, status):
+        """Close the one registry row of this fixture attempt as `status` (a worker that ended)."""
+        lines = self.jobs.read_text().splitlines()
+        self.jobs.write_text("\n".join(
+            line.replace("\topen\t", "\t" + status + "\t", 1) if "attempt_id=" + meta["attempt_id"] + "," in line
+            else line for line in lines) + "\n")
+
+    def test_the_parent_of_an_attempt_is_found_however_the_attempt_ended_its_own_session_is_not(self):
+        import dispatch_completion_join as join
+        from dispatch_contract import dispatch_state_root
+        from dispatch_seat_handover import record_recipient_binding, resolve_recipient
+        for index, status in enumerate(("open", "running", "done", "killed", "cancelled", "failed", "unknown")):
+            with self.subTest(status=status):
+                sid = "ended-" + status
+                meta = self.parent_row(sid, index=40 + index)
+                state = dispatch_state_root(self.jobs) / "supervisor-state" / (meta["attempt_id"] + ".json")
+                join._write_supervisor_state_unlocked(state, meta["attempt_id"], set(),
+                    resource={"session_id": sid, "delivered": [], "outbox": None})
+                self._end_attempt(meta, status)
+                parent, = self.notices(sid=sid, label="parent-" + status, lineage={
+                    "kind": "attempt-parent", "harness": "claude", "session_id": sid, "attempt_id": meta["attempt_id"]})
+                owner, = self.notices(sid=sid, label="owner-" + status, lineage={
+                    "kind": "owner-session", "harness": "claude", "session_id": sid, "attempt_id": meta["attempt_id"]})
+                # the parent is a fact of the launch; a confirmed hand-over of that seat is still followed
+                self.assertEqual(record_recipient_binding(parent, sid, harness="claude", jobs=self.jobs),
+                                 ("claude", sid))
+                self.edge("claude", sid, "next-" + status)
+                self.assertEqual(record_recipient_binding(parent, sid, harness="claude", jobs=self.jobs),
+                                 ("claude", "next-" + status))
+                # the attempt's own session has nobody to read it once the attempt ended
+                self.assertEqual(record_recipient_binding(owner, sid, harness="claude", jobs=self.jobs),
+                                 ("claude", sid) if status in {"open", "running", "done"} else None)
+        # no row at all: nothing to resolve, as before
+        for question in ("attempt-parent", "owner-session"):
+            answer = resolve_recipient(question, metadata={"session_id": "gone", "harness": "claude",
+                "attempt_id": "att-never-registered"}, jobs=self.jobs, session="gone", harness="claude")
+            self.assertEqual((answer.state, answer.reason), ("unreadable", "handover-unreadable:notice-attempt-unavailable"))
+
     def test_owner_session_keeps_exact_native_consumer_after_tidy(self):
         import dispatch_completion_join as join
         from dispatch_contract import dispatch_state_root

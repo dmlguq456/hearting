@@ -1838,7 +1838,9 @@ def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness
             from dispatch_contract import dispatch_state_root
             from harness_capabilities import parent_completion
             row = current_attempt_row(jobs, metadata["attempt_id"], read_context=read_context) if jobs is not None else None
-            if row is None or row.status not in {"open", "running", "done"}:
+            # The parent is a fact recorded at launch, so how the child ended never hides it; only
+            # the attempt's own session (nobody is left to read it once it ended) needs a live row.
+            if row is None or (question == "owner-session" and row.status not in {"open", "running", "done"}):
                 raise ValueError("notice-attempt-unavailable")
             if question == "owner-session":
                 if row.metadata.get("harness") != original_harness:

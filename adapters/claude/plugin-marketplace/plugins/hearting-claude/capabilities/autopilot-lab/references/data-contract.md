@@ -73,6 +73,36 @@ separate; `compaction` only says what this file left out.
   `remote-unmapped` (the run declared or referenced a path on its host that the
   observer cannot map to a visible folder: outside the host's `path_namespace` and
   the shared run root, or through a namespace source this observer does not mount).
+  With nothing to read, a run's notices say so once (`no progress file declared`, or
+  the folder is not visible here) instead of listing each missing metric, and a launch
+  (`compute-hosts run`, `resource-runner start`) that declares no folder prints one
+  note naming the way to declare it (a `--config` whose `output_dir`, `output_folder`
+  or `save_dir` names it) and starts all the same. A progress file read at any age is
+  a declaration. With a folder or a progress file, notices carry the step or epoch
+  reached (an old value too), the latest metrics and the time since the files last
+  changed.
+- **Observed time.** `last_checkpoint.at` is when the run was last seen: a change the
+  observer measured, or its evidence that the run is alive (a local process confirmed
+  at that look, or the moment a compute run's own files under the shared run root last
+  changed; Hearting's `meta.json` and `.observation-*` files are not the run's). With
+  such evidence the record is refreshed up to it at least every 300 s
+  (`PUBLIC_REFRESH_SECONDS`) even when nothing new was measured, never past it; without
+  evidence it is written only on news. So a running record older than 900 s
+  (`observation-stale`) means nobody could vouch for the run (an observer gone, a host
+  that stopped writing 900 s ago), never just a long epoch. A local resource run's live
+  status `working` reads as `running`.
+- **Progress time.** The observed time never stands in for progress. The last increase
+  (or first comparable value) is kept in `stagnation` (`seconds_since_anchor`, measured
+  at the observed time) across every refresh; a progress value that stops changing,
+  even in a file that stops being written, turns `stagnant` under the two-hour rule. A
+  value older than 600 s gives no rate or ETA but keeps that clock. A tracked progress
+  source that can no longer be read leaves stagnation `unknown` and is not vouched
+  for, so its record turns stale.
+  A live run whose progress stops stays running with its progress age (`마지막 갱신 N 전`)
+  up to two hours and turns `stagnant` at two hours; the age of a progress file alone never
+  makes it `unknown` (`unknown` is for when liveness cannot be seen). A progress file the
+  run names counts as declared even before it exists or while it cannot be read, as at
+  launch; only the runner's own default place, never written, reads as not declared.
   A run without a declaration is filled only from its exact evidence: the
   observation metadata's `path`, the hash-bound `--request` or the `--config`
   output keys. Without such evidence it stays `unknown`/`not-declared`; no folder
