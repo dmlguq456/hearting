@@ -1901,11 +1901,13 @@ class ExperimentObservationTest(unittest.TestCase):
                 english = progress.declaration_note(run)
             self.assertIn(default, english)
             self.assertNotIn("carry no", english)
-            # The workload writes 12/60 at that place: no note, and the notice carries it.
+            # The workload writes 12/60 at that place afterwards: the notice carries it, and the note's
+            # "or the run writes progress there" still holds. The note opens no file (a value written
+            # earlier changes nothing in it: the same line).
             Path(default).write_text(json.dumps({"schema_version": 1, "run_id": "default-run", "node": "train",
                                                  "updated_at": now - 60, "completed": 12, "total": 60,
                                                  "unit": "epoch"}))
-            self.assertIsNone(progress.declaration_note(run, now))
+            self.assertEqual(progress.declaration_note(run), note)
             observation, text = notice("written")
             self.assertIsNone(observation["undeclared"])
             self.assertIn("진행 12/60 epoch", text)
@@ -1913,7 +1915,7 @@ class ExperimentObservationTest(unittest.TestCase):
             for declared in ({**run, "progress_file": str(base / "other.json")},
                              {**run, "output_dir": str(base / "out")}):
                 with self.subTest(declared=declared):
-                    self.assertIsNone(progress.declaration_note(declared, now))
+                    self.assertIsNone(progress.declaration_note(declared))
 
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
