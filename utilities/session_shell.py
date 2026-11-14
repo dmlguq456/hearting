@@ -1135,10 +1135,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         panel["request_error"] = request_errors[0]
     if harness == "claude":
         from fleet.session_panel import notice_line
-        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time(), upgrade_note=upgrade_note))
-        # A waiting-release line stands only for this host: the next one starts without it.
-        panel["notice_upgrade"] = upgrade_note == "pending" and not notice_line(
-            values, panel["routes"], board, display, time.time())
+        # Only what the person must do now (2026-11-14); a waiting release stays in the tidy slot above.
+        panel["notice"] = styled(notice_line(values, panel["routes"], board))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.

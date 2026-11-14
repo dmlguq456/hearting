@@ -223,16 +223,15 @@ def session_brief(values):
     return items
 
 
-NOTICE_NEWS_SECONDS = 600
-
-
-def notice_line(values, routes, questions, display, now, upgrade_note=""):
+def notice_line(values, routes, questions):
     """The one line under Claude's input while the panel paints the status area.
 
-    Only what the person must know now, one item by priority: an answer this
-    session owes, a warning already computed elsewhere, then fresh news. No
-    item means an empty line. Values, glyphs and colors are the panel's own;
-    nothing here collects, judges or authorizes anything new.
+    Only what the person must do now, one item by priority: an answer this session
+    owes, compaction imminent, a context or usage reading at Fleet's red level, then
+    a failed, attention-needing or blocked route. No item means an empty line. News
+    (a received report, a route's result) and the release lines stand in MESSAGES,
+    the ROUTE box and the panel's tidy-notice slot instead. Values, glyphs and colors
+    are the panel's own; nothing here collects, judges or authorizes anything new.
     """
     from .render_cells import _LIVE_GLYPH
     waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
@@ -257,27 +256,6 @@ def notice_line(values, routes, questions, display, now, upgrade_note=""):
             # its "answer needed" wording, not a failure.
             return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"), (ui_text("fleet.session_block.open"), "lvl_y"),
                     (" · " + (route.get("title") or route.get("id") or ""), "loc_repo")]
-    human = (display or {}).get("human") or {}
-    since = human.get("at") if type(human.get("at")) in (int, float) else 0
-    news = []
-    for row in (display or {}).get("received") or ():
-        at = row.get("at")
-        if type(at) in (int, float) and at > since and 0 <= now - at <= NOTICE_NEWS_SECONDS:
-            news.append((at, [("⇄ ", "loc_repo"), (sanitize_title(str(row.get("sender") or "peer"))[:48] + " · ", "loc_repo"),
-                              (sanitize_title(str(row.get("text") or ""))[:160], "dim")]))
-    for route in routes or ():
-        at = route.get("result_at")
-        if (route.get("state") == "done" and route.get("outcome") and type(at) in (int, float)
-                and at > since and 0 <= now - at <= NOTICE_NEWS_SECONDS):
-            news.append((at, [(_LIVE_GLYPH["done"] + " ", "lvl_g"),
-                              (ui_text("fleet.session_panel.ready") + " · ", "lvl_g"),
-                              (route.get("title") or route.get("id") or "", "loc_repo"),
-                              (" · " + route["outcome"], "dim")]))
-    if news:
-        return max(news, key=lambda item: item[0])[1]
-    # Below everything above: a newer release this window has not taken yet, or a switch without scrollback.
-    if upgrade_note in ("pending", "scrollback"):
-        return [(ui_text("session_shell.upgrade_" + upgrade_note), "dim")]
     return []
 
 

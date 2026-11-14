@@ -816,12 +816,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
     }
     const rows=height-2;
-    // Routes: the current ones the statusline counts, one row each.
-    const shown=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    // Routes: the current ones the statusline counts, one row each, then the recent results
+    // the producer keeps after them (a finished route with its outcome, at most two): the
+    // notice line under Claude's input no longer carries them (2026-11-14).
+    const countedRoutes=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    const shown=countedRoutes.length?[...countedRoutes,...routes.slice(countedRoutes.length).filter(r=>r&&r.state==='done'&&r.outcome)]:countedRoutes;
     // The whole count is the producer's. Spec rule 23: every current route gets a
     // row; a count the producer did not send rows for shows only in the box's lower border.
-    const total=Number.isInteger(model.route_total)&&model.route_total>=shown.length?model.route_total:shown.length;
-    const listed=shown,unsent=shown.length?total-listed.length:0;
+    const total=Number.isInteger(model.route_total)&&model.route_total>=countedRoutes.length?model.route_total:countedRoutes.length;
+    const listed=shown,unsent=countedRoutes.length?total-countedRoutes.length:0;
     // Requests this session sent (→) or received (◂): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
