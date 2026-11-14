@@ -203,8 +203,9 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   `PostToolUse` carries no completion; the turn's `Stop` carries any the transcript
   does not show received, and the SessionStart/UserPromptSubmit sweep re-delivers any
   SD-111 pending record at the next prompt as the durable backstop (the one way a turn
-  Esc cut or an API error ended is made up). The runner's peer-body copy reaches only a
-  resting session, through the pane courier. Registered Claude
+  Esc cut or an API error ended is made up). The runner holds a completion only for a Hearting
+  shell resting with an empty input, which injects it; anywhere else the record stays
+  pending for `Stop` and the next prompt. Registered Claude
   owners keep one `--input-format stream-json` process for the route and submit
   each non-terminal joined receipt immediately. When the current rows and exact
   sealed markers prove every declared terminal node complete, the supervisor

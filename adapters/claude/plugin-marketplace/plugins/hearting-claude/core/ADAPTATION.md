@@ -898,15 +898,20 @@ boundary could not show whole through Claude's documented `decision: block`, as 
 `Stop` does, so a completion that closed during a busy turn reaches that turn before it
 ends; only what the reason shows whole is ACKed. A turn Esc cuts or an API error ends runs no
 `Stop`, and the next prompt's sweep carries the completion. The runner's peer-body copy of a
-registered completion reaches only a resting session with an empty input, through the pane
-courier; no hook carries it. When nothing more is owed `Stop` applies the one follow-through
+registered completion is held only for a Hearting shell that is resting with an empty input,
+which injects it; no hook carries it. Anywhere else (no shell, a busy turn, typed input) the
+runner leaves the record pending, so the turn's `Stop` or the next input carries it. When
+nothing more is owed `Stop` applies the one follow-through
 pass with Codex's rule and state (`codex_turn_carrier.follow_through`): the prompt sweep,
 the tool boundary and the Stop record what each showed, or what the transcript shows the
 rewake delivered, under the turn's `prompt_id` (hooks reference, common input fields),
 every tool is counted, and the first Stop that finds an owed action unmet continues the turn
 once (PG-44). The price of never leaving a completion to a queue that may lose it is two
 shows in two orders (a completion still queued when the turn ends, and a person's typed
-prompt that overtakes it); no order shows it nowhere without a person.
+prompt that overtakes it). Four orders still wait for a person: Esc (the prompt that follows),
+an API error that ends the turn (outside a shell, the next input; inside one a resting shell
+may inject it), `Stop`'s continuation limit reached by blocks with no tool between them, and
+an arm the runtime refused together with an Esc or an API error.
 
 While a Codex turn runs, an ordinary session notice belongs to the in-turn carrier alone:
 the peer courier (`peer-steward` session-notice pass) leaves an unprepared notice pending

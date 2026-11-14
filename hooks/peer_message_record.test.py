@@ -291,8 +291,9 @@ class NativeContextReceiptTest(_BaseTest):
                          hashlib.sha256(b"[steer] recorded from subagent").hexdigest())
 
     def test_a_hook_never_carries_the_runners_copy_of_a_completion(self):
-        # One completion reaches the model once: the copy waits for the pane courier, and the
-        # completion record itself is carried by the rewake, Stop or the next prompt.
+        # The runner holds a completion only while a resting shell is injecting its copy
+        # (anywhere else it leaves the record pending for Stop). The injected prompt is the
+        # one send: no hook carries the copy meanwhile, and the prompt's receipt acks it.
         text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(runtime=True)
         for mode, payload in (("prompt", {"prompt": ""}), ("post-tool", {"tool_name": "Bash"})):
             with self.subTest(mode=mode):
@@ -301,7 +302,9 @@ class NativeContextReceiptTest(_BaseTest):
         with mock.patch.dict(os.environ, self.env, clear=True):
             self.assertEqual(peer_message._read_pending(ref)["state"], "pending")
             self.assertTrue(peer_message._runtime_completion_copy(peer_message._read_pending(ref)))
-            self.assertEqual(pending_delivery.read(root, sid, delivery_id)["state"], "claimed")
+            self.assertEqual(peer_message.receive_peer_message(
+                text, {"harness": "claude", "session_id": sid}), 0)
+            self.assertEqual(pending_delivery.read(root, sid, delivery_id)["state"], "acked")
 
     def test_the_runners_copy_of_anything_but_a_completion_is_still_carried(self):
         text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(
