@@ -463,7 +463,15 @@ class ProcessRolesTest(unittest.TestCase):
                  "22 opencode 01:00 opencode",
                  "30 codex 01:00 codex app-server --listen unix:///tmp/managed-sessions/x/app-server.sock",
                  "40 claude 01:00 claude -p work"]
-        with mock.patch.object(procscan, "_ps_lines", return_value=lines), \
+        # The fixture's PIDs are synthetic: Claude's process observation reads an empty
+        # proc root, never this host's /proc, where the same numbers may be real processes.
+        identity = procscan.claude_process_identity
+        real_observe = identity.observe_process
+        empty_proc = tempfile.TemporaryDirectory()
+        self.addCleanup(empty_proc.cleanup)
+        with mock.patch.object(identity, "observe_process",
+                               side_effect=lambda pid: real_observe(pid, proc_root=empty_proc.name)), \
+                mock.patch.object(procscan, "_ps_lines", return_value=lines), \
                 mock.patch.object(procscan, "_pid_ttys", return_value={
                     10: "?", 11: "?", 12: "?", 20: "pts/1", 21: "pts/2", 22: "pts/3", 30: "?", 40: "?"}), \
                 mock.patch.object(procscan, "_detached_ttys", return_value=set()), \
