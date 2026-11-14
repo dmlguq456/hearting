@@ -1860,13 +1860,18 @@ def notice_line(info: Mapping[str, Any], lang: Optional[str] = None) -> str:
                                            info.get("metric_key"))))
 
 
-def notice_metric(info: Optional[Mapping[str, Any]], lang: Optional[str] = None) -> str:
-    """The results table's metric line for a linked run's notice (`metric_head`); "" without a name."""
+def notice_metric(info: Optional[Mapping[str, Any]], lang: Optional[str] = None, room: Optional[int] = None) -> str:
+    """The results table's metric line for a linked run's notice (`metric_head`), in at most `room`
+    characters: the whole line, else without the split and scoring; "" without a name or room."""
     if not info or not info.get("name") or "metric" not in info:
         return ""
     target = info.get("target") if isinstance(info.get("target"), Mapping) else {}
-    return metric_head({"metric": info.get("metric"), "target": target},
-                       {target.get("condition"): info.get("base_name")}, _translator(lang))
+    for short in (False, True):
+        line = metric_head({"metric": info.get("metric"), "target": target},
+                           {target.get("condition"): info.get("base_name")}, _translator(lang), short=short)
+        if room is None or len(line) <= room:
+            return line
+    return ""
 
 
 def notice_words(info: Optional[Mapping[str, Any]], room: int, lang: Optional[str] = None) -> str:
@@ -1874,7 +1879,7 @@ def notice_words(info: Optional[Mapping[str, Any]], room: int, lang: Optional[st
     if not info or not info.get("name"):
         return ""
     t = _translator(lang)
-    texts = [notice_line(info, lang), notice_metric(info, lang)]
+    texts = [notice_line(info, lang), notice_metric(info, lang, None)]
     return words_line(texts, info.get("terms") or [], [(info["name"], info.get("other_names") or [])],
                       [info.get("metric") or {}], t, budget=room, signs=False, size=len)
 

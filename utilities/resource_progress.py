@@ -1637,8 +1637,8 @@ def _experiment_lines(context, *, first, final):
 def _experiment_optional(context, *, first, final):
     """The catalog's optional notice pieces, most useful first: `[(place, text or fn(room) -> text)]`.
 
-    A named run gets the results table's metric line and words beside its name line (`front`) and the
-    command that prints the table at the end (`end`).  A run with no name, on its first and final
+    A named run gets the command that prints its results table at the end (`end`), then the table's
+    metric line (shortened when short of room) and words beside its name line (`front`).  A run with no name, on its first and final
     notice, gets the command that names it, including in a project with no catalog yet once the run
     reports values.  `_notice_texts` adds a piece only while the notice stays one part, so none of them
     ever makes a notice longer than it was split before."""
@@ -1648,9 +1648,8 @@ def _experiment_optional(context, *, first, final):
         catalog = _catalog_module()
         info = context.get("info")
         if info is not None:
-            pieces = [("front", catalog.notice_metric(info)), ("end", catalog.notice_tail(info)),
-                      ("front", lambda room: catalog.notice_words(info, room))]
-            return [(place, text) for place, text in pieces if text]
+            return [("end", catalog.notice_tail(info)), ("front", lambda room: catalog.notice_metric(info, None, room)),
+                    ("front", lambda room: catalog.notice_words(info, room))]
         if (first or final) and (context["catalog"] == "ok" or context["has_decision_metric"]
                                  or (context["catalog"] == "missing" and context.get("has_metrics"))):
             line = catalog.register_line(context.get("run_id"))
