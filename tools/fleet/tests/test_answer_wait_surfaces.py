@@ -350,6 +350,24 @@ try {
                 rows.setdefault((item["harness"], item["session_id"]), []).append(item["kind"])
         self.assertEqual(sum(map(len, rows.values())), 3)
         self.assertEqual(sorted(rows), [("claude", "c"), ("codex", "a"), ("opencode", "q")])
+        # Rule 5 (11-14): an answer the person sent (the existing record's ``submitted``) leaves
+        # the head, the view's counts and its session index at once; it stays listed as sent.
+        cached = human_wait_state._read_cache_file()
+        cached["selected_responses"] = {"fixture": {
+            "identity": {"harness": "claude", "session_id": "c", "request_id": "s4",
+                         "turn_id": None, "question_id": "message-response"},
+            "selected_id": "s4", "state": "submitted", "action_id": "fixture-action",
+            "draft": "", "updated_at": 101}}
+        self.assertTrue(human_wait_state._write_cache_value(
+            human_wait_state._republish_answer_marks(cached)))
+        view = human_wait_state.cached_fleet_view(now=101, request=False)
+        self.assertEqual([item["id"] for item in view["items"] if item.get("answer") == "sent"], ["s4"])
+        self.assertEqual(view["total"], 3)
+        self.assertNotIn("claude\0c", human_wait_state._read_cache_file()["by_session"])
+        summary = job_summary(SimpleNamespace(jobs=[], sessions=[], answer_waits=fleet_answer_wait_view(view),
+                                              compute_hosts=None))
+        self.assertIn("답변 필요 2", summary)
+        self.assertEqual(fleet_answer_wait_view(view)["items"][-1].get("answer"), "sent")
 
     def test_fleet_reader_does_not_fall_back_to_private_projection_cache(self):
         private_path = human_wait_state._cache_path()

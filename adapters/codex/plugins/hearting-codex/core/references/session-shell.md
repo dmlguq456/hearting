@@ -734,7 +734,13 @@ place is one dim guidance line beside the count saying where
 (`questions 1 · answer below`), and the notice line names `Ctrl+]` only when the
 panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
-parent holds the worker's exact acknowledged completion receipt.
+parent holds the worker's exact acknowledged completion receipt. Once the person
+sends an answer it has left their hands: while it travels (the existing answer
+record's `submitted`/`received`) the question box folds to one dim line
+(`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice),
+`Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
+it as sent); the line goes when its session takes the answer, and a failed
+delivery brings the question back with its existing word.
 A registered question belongs to its session id: the same session in a new
 process (a native resume, a restart, a compaction) still answers it, and only
 another session that took the seat ends it. Long questions remain readable

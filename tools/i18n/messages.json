@@ -1350,6 +1350,10 @@
    "en": "Enter send",
    "ko": "Enter 제출"
   },
+  "fleet.session_block.sent": {
+   "en": "✓ answer sent",
+   "ko": "✓ 답 보냄"
+  },
   "fleet.session_block.submitted": {
    "en": "sending · not consumed",
    "ko": "전송 중 · 소비 전"

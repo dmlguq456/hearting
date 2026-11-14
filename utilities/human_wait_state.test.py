@@ -3458,6 +3458,68 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.direct(b, "answer B")
         self.assertEqual(state._read_cache_file()["items"], [])
 
+    def test_a_sent_answer_leaves_every_count_while_it_travels_and_comes_back_if_it_fails(self):
+        # Rule 5 (11-14): a person answered a busy session's question from the panel; the answer
+        # waited for the turn to end while Fleet, `questions list` and the status line still
+        # counted it. The existing answer record (`submitted`) now marks that wait sent at once:
+        # listed, in no count or session index, its panel row the receipt with what was sent.
+        # The session taking it removes it; a failed delivery counts it again.
+        import contextlib, io
+        import questions as board_cli
+        import session_shell
+        def item(signal):
+            return {"id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+                    "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+        def surfaces(harness, sid):
+            private = state._read_cache_file()
+            fleet = json.loads(state._fleet_cache_path().read_text())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(state, "read_selected_request", return_value=None):
+                board_cli.main(["list"])
+            return {"private": private["total"], "fleet": fleet["total"],
+                    "index": len(private["by_session"].get(harness + "\0" + sid, ())),
+                    "statusline": state.cached_statusline(harness, sid)[0][1],
+                    "list": out.getvalue().splitlines()[0].split(" · ")[0],
+                    "sent": sorted(row["id"] for row in fleet["items"] if row.get("answer") == "sent")}
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, ea = self.f.ask(harness, "session-a", "question A", choices=["Alpha", "Beta"])
+                b, _eb = self.f.ask(harness, "session-b", "question B")
+                self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+                self.assertEqual(surfaces(harness, "session-a"),
+                                 {"private": 2, "fleet": 2, "index": 1, "statusline": 1,
+                                  "list": "questions: 2 current", "sent": []})
+                self.assertEqual(self.f.submit(ea, "Beta")["state"], "submitted")
+                sent = {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
+                        "list": "questions: 1 current", "sent": [a["id"]]}
+                self.assertEqual(surfaces(harness, "session-a"), sent)
+                # The panel still holds it as its receipt, with what was sent.
+                panel = session_shell.session_questions(harness, "session-a", view=state.cached_view(request=False))
+                self.assertEqual([(row["id"], row.get("request_state"), row.get("sent")) for row in panel],
+                                 [(a["id"], "submitted", ["Beta"])])
+                # The next collection says the same (the source is still open while it travels).
+                self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+                self.assertEqual(surfaces(harness, "session-a"), sent)
+                # Its session takes the answer: it leaves the list too.
+                wire, _, _ = self.f.prepare(a)
+                self.f.consume(a, wire)
+                self.assertEqual(surfaces(harness, "session-a"),
+                                 {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
+                                  "list": "questions: 1 current", "sent": []})
+                # A delivery that could not be confirmed brings the wait back into every count.
+                c, ec = self.f.ask(harness, "session-c", "question C")
+                self.assertTrue(state.publish_cache({"items": [item(b), item(c)], "complete": True}))
+                self.f.submit(ec, "answer C")
+                self.assertEqual(surfaces(harness, "session-c")["sent"], [c["id"]])
+                entry = state._selected_entry(ec)
+                self.assertTrue(state._store_selected_entry(ec, dict(
+                    entry, state="unknown", result={"reason": "message-answer-delivery-unconfirmed"})))
+                self.assertEqual(surfaces(harness, "session-c"),
+                                 {"private": 2, "fleet": 2, "index": 1, "statusline": 1,
+                                  "list": "questions: 2 current", "sent": []})
+
     def test_a_collection_read_before_the_answer_does_not_publish_the_answered_question(self):
         # Review 1597-1 (11-13): one pass read A, A was answered from the panel and the same
         # session registered B, then the pass published what it had read — the answered A came

@@ -189,7 +189,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sent,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
   // Spec rule 49: a folded panel is the eight-cell strip beside the native area or one row under it.
   folded=folded===true&&!settings;
   width=Math.max(folded&&side?5:12,width);height=Math.max(folded?side?3:1:4,height);
@@ -1417,6 +1417,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const row of q.slice(1))ask.push(boxRow({parts:accent(row),action:'question'},key));
       ask.push(boxBottom(key,[],'question'));
     }
+    // Rule 5 (11-14): an answer on its way is one dim line where its box stood, cut to fit.
+    for(const row of typeof sent==='function'?sent()||[]:[])ask.push({parts:cut(row,inner),action:'question'});
     // Short of rows (spec rule 34 (b), which orders rules 14, 19, 23, 24, 29 (c) and 31):
     // empty rows; the messages' extra rows (past three, and a body's rows after its first:
     // they only ever take rows the routes leave in their full form); opened details

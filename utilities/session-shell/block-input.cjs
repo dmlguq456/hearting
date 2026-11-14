@@ -2,17 +2,26 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 module.exports=function({changed,answer,action,page}) {
-  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true;
+  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer;
   let labels={},styles={},help='';
   const entries=new Map();
-  const flat=()=>items.flatMap(item=>(item.questions||[]).map(question=>({item,question})));
-  const current=()=>frozen||flat()[index];
   const key=item=>item.id+'@'+item.revision;
   const state=item=>{
     if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},notice:'',state:null});
     return entries.get(key(item));
   };
+  // Rule 5 (11-14): the moment the person's answer is sent it has left their hands. While it
+  // travels (`submitted`) the question is one dim line, never one to choose again; once its
+  // session has it (`received`, `applied`) the line goes too. A failed delivery leaves these
+  // states and the question comes back with its existing word.
+  const phase=item=>{
+    const local=state(item).state,remote=item.request_state;
+    if(['received','applied'].includes(remote)||['received','applied'].includes(local))return 'done';
+    return remote==='submitted'||local==='submitted'?'sent':null;
+  };
+  const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
+  const current=()=>frozen||flat()[index];
   const text=(name,fallback)=>labels[name]||fallback;
   const span=(value,style='dim')=>({text:String(value),...(styles[style]||{dim:style==='dim'})});
   const choices=row=>row.item.answer_kind==='decision'?['approve','reject','defer']:row.question.choices||[];
@@ -44,8 +53,12 @@ module.exports=function({changed,answer,action,page}) {
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
+      }else if(item.request_state==='unknown'&&state(item).state==='submitted'&&!state(item).sending){
+        // The delivery could not be confirmed: the question returns with its existing word.
+        state(item).state='unknown';
       }
     }
+    items=items.filter(item=>phase(item)!=='done');
     release();
     const listed=flat();
     const found=previous?listed.findIndex(row=>key(row.item)===key(previous.item)&&row.question.id===previous.question.id):-1;
@@ -69,8 +82,10 @@ module.exports=function({changed,answer,action,page}) {
     changed();
   }
   function leave(){focused=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
+    moves++;seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
@@ -98,7 +113,7 @@ module.exports=function({changed,answer,action,page}) {
   function preview({budget=10,columns=100}={}) {
     const row=current();if(!row)return focused?[[span(help||text('navigate','Tab next · Esc/Ctrl+] back'))]]:[];
     const local=state(row.item),id=row.question.id,view=row.question.display;
-    const status=local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
+    const status=local.sending?'submitted':local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
     let head=view?.head||[span('◑ '+(index+1)+'/'+flat().length+' · '+text(status,status),'g_blocked')];
     if(view){head=head.map((part,i)=>i===3?span(text(status,status),status==='applied'?'lvl_g':status==='open'?'g_blocked':'dim'):part);}
     if(focused)head=[span('› ','g_blocked'),...head];
@@ -163,6 +178,24 @@ module.exports=function({changed,answer,action,page}) {
       return number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...words]:[span('  ',''),...words];
     });
   }
+  // Rule 5: one dim line per answer on its way, `✓ answer sent · <what was sent>` (the
+  // name-tag grey); the panel draws it where the question box stood, never boxed.
+  function sentLines(){
+    return items.filter(item=>phase(item)==='sent').map(item=>{
+      const local=state(item),shown=[];
+      for(const question of item.questions||[]){
+        for(const v of local.answers[question.id]||[]){
+          if(question.secret){shown.push('•••');continue;}
+          const listed=item.answer_kind==='decision'?[]:question.choices||[];
+          const choice=listed.find(c=>value(c)===v);
+          shown.push(String(typeof choice==='object'?choice.label||choice.value:v));
+        }
+      }
+      if(!shown.length&&Array.isArray(item.sent))shown.push(...item.sent.map(String));
+      const said=shown.join(', ').replace(/\s+/g,' ').trim();
+      return [span(text('sent','✓ answer sent')+(said?' · '+said:''),'dim')];
+    });
+  }
   async function submit(){
     const row=current();if(!row)return;
     const local=state(row.item),id=row.question.id;
@@ -176,13 +209,25 @@ module.exports=function({changed,answer,action,page}) {
     }
     const values=formValues(row);local.answers=values;
     if(!complete(row,values)){local.notice=text('complete','answer every field · Tab next');changed();return;}
-    busy=true;local.state='submitted';local.notice='';changed();
+    busy=true;local.sending=true;local.notice='';changed();
+    let sent=false;const started=moves;
     try{
       const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
-      if(['submitted','received','applied'].includes(result.state))local.state=result.state;
+      if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;}
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}
-    finally{busy=false;changed();}
+    finally{
+      busy=false;local.sending=false;
+      // Rule 5: the answered question folds and the person is back at the native input; the
+      // next question to answer is the panel's first one (Ctrl+] opens on it), so a second
+      // Enter never answers it unseen. Had the person moved to another question while this
+      // one was sent, they stay there. A refused answer stays in sight with its word.
+      const at=sent&&moves!==started&&seat?flat().findIndex(r=>seatOf(r)===seat):-1;
+      if(sent&&at<0&&focused){index=Math.max(0,flat().findIndex(r=>active(r)));leave();return;}
+      if(at>=0)index=at;
+      else if(!sent&&moves===started){const back=flat().findIndex(r=>seatOf(r)===seatOf(row));if(back>=0)index=back;}
+      changed();
+    }
   }
   function character(c){
     const row=current(),local=row&&state(row.item),id=row?.question.id;
@@ -238,5 +283,5 @@ module.exports=function({changed,answer,action,page}) {
     }
     changed();return Buffer.alloc(0);
   }
-  return {get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,references};
+  return {get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,sent:sentLines,references};
 };

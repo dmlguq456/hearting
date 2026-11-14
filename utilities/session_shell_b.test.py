@@ -156,8 +156,8 @@ for(const [state,reason,word] of [['answer_below','marker-has-no-bound-native-re
     def test_an_answered_question_leaves_the_panel_once_focus_returns(self):
         # Correction 3 (11-13): after a panel answer the question stayed in the panel for good
         # (`✓ consumed`): the editor held it, so the backend kept returning it as a retained
-        # reference. While focused the receipt stays readable; leaving focus, or a settled one
-        # arriving while unfocused, lets it go, and it is no longer asked for.
+        # reference. Rule 5 (11-14): the moment it is sent the box folds to one dim line and
+        # focus returns; once its session has it the line goes and it is no longer asked for.
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
@@ -165,11 +165,11 @@ const open={id:'S4:q',revision:'r',answerable:true,questions:[{id:'q',question:'
 const done={...open,answerable:false,request_state:'applied'};
 const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 b.update([open]);b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);
-b.update([done]);
-assert(JSON.stringify(b.detail()).includes('applied'),'the receipt reads while focused');
+assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);
+assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · a']);
 assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);
-b.leave();
-assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
+b.update([done]);
+assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
 // The backend no longer asks for it; were it still sent while unfocused, it stays out.
 b.update([done]);assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
 // An open question beside it stays, and so does one only sent (not settled).
@@ -198,8 +198,9 @@ b.input(Buffer.from('\t\t'));assert.ok(JSON.stringify(b.detail()).includes('seco
 b.input(Buffer.from('\t'));assert.ok(JSON.stringify(b.detail()).includes('한글 j/k'));
 b.input(Buffer.from('\r'));await new Promise(setImmediate);
 assert.deepEqual(sent,[{question_id:'form',revision:'revision',answers:{choice:['second'],text:['한글 j/k\nline2']}}]);
-b.update([{...item,request_state:'applied',answerable:false}]);assert.ok(JSON.stringify(b.detail()).includes('applied'));
-const rest=b.input(Buffer.from('\x1dnative\r'));assert.equal(rest.toString(),'native\r');
+// Rule 5: once its session has the answer, nothing of it stays and keys go to the native input.
+b.update([{...item,request_state:'applied',answerable:false}]);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
+const rest=b.input(Buffer.from('native\r'));assert.equal(rest.toString(),'native\r');
 })();''')
 
     def test_whole_form_collects_all_latest_text_drafts_after_tab_or_reediting(self):
@@ -207,13 +208,14 @@ const rest=b.input(Buffer.from('\x1dnative\r'));assert.equal(rest.toString(),'na
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
 for(const edited of [false,true]){
- const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
+ const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([{id:'exact',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
  if(edited){b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t-EDIT'));}
  else b.input(Buffer.from('first'));
  b.input(Buffer.from('\tsecond\r'));await new Promise(setImmediate);
  assert.deepEqual(sent,[{question_id:'exact',revision:'r',answers:{first:[edited?'first-EDIT':'first'],second:['second']}}]);
- b.input(Buffer.from('\x1b[Z'));assert.ok(JSON.stringify(b.detail()).includes(edited?'first-EDIT':'first'));
+ // Rule 5: the one line of the sent answer carries the latest drafts.
+ assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · '+(edited?'first-EDIT':'first')+', second']);
 }
 const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
 b.update([{id:'cleared',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
@@ -247,7 +249,8 @@ assert.equal(sent.length,1);assert.ok(JSON.stringify(b.detail()).includes('pendi
 release({state:'received'});await new Promise(setImmediate);
 b.input(Buffer.from('\r'));assert.equal(sent.length,2);assert.deepEqual(sent[1].answers,{B:['two']});
 release({state:'received'});await new Promise(setImmediate);
-b.input(Buffer.from('\t\t'));assert.ok(JSON.stringify(b.detail()).includes('received'));
+// Rule 5: B was sent where the person stood, so focus returns; both are with their session.
+assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
 assert.ok(!JSON.stringify(b.detail()).includes('consumed'));
 })();''')
 

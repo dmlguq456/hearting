@@ -57,11 +57,13 @@ block.update([{id:'original',revision:'old-revision',answerable:true,questions:[
 block.enter();block.input(Buffer.from('2\r'));
 setImmediate(()=>{
  assert.deepEqual(sent,[{question_id:'original',revision:'old-revision',answers:{q:['No']}}]);
+ // Rule 5 (11-14): a sent answer returns the person to the native input.
+ assert.equal(block.focused,false);
  block.update([{id:'replacement',answerable:true,questions:[{id:'new-q',question:'New?',choices:[]}]}]);
- block.input(Buffer.from('t한글\r'));
+ block.enter();block.input(Buffer.from('t한글\r'));
  setImmediate(()=>{
   assert.equal(sent[1].question_id,'replacement');assert.deepEqual(sent[1].answers,{'new-q':['한글']});
-  block.input(Buffer.from('\x1d'));assert.equal(block.focused,false);
+  assert.equal(block.focused,false);block.enter();block.input(Buffer.from('\x1d'));assert.equal(block.focused,false);
   console.log('PASS');
  });
 });'''
@@ -99,8 +101,10 @@ const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){}
 const receipt={id:'sent',revision:'r0',answerable:false,request_state:'submitted',questions:[{id:'q',question:'SENT_BEFORE',choices:['A']}]};
 const open={id:'open',revision:'r1',answerable:true,questions:[{id:'q',question:'ANSWER_ME',choices:['A','B']}]};
 block.update([receipt,open]);
+// Rule 5: the sent one is no box but its one line; the box shows the one to answer.
 let text=JSON.stringify(block.detail({budget:8,columns:40}));
-assert(text.includes('SENT_BEFORE'),text);
+assert(!text.includes('SENT_BEFORE')&&text.includes('ANSWER_ME'),text);
+assert.deepEqual(block.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent'],JSON.stringify(block.sent()));
 block.enter();
 text=JSON.stringify(block.detail({budget:8,columns:40}));
 assert(text.includes('ANSWER_ME')&&text.includes('▸'),text);
@@ -222,6 +226,102 @@ console.log('PASS');"""
                     else:
                         self.assertNotIn('notice',panel)
 
+    def test_a_sent_answer_folds_to_one_dim_line_and_is_never_chosen_again(self):
+        # Rule 5 (11-14): the moment the answer is sent the box folds: one dim line of what was
+        # sent, focus back at the native input, the next question first (Ctrl+] opens on it,
+        # never on the answered one), a second Enter answers nothing unseen; its session taking
+        # the answer removes the line; a failed delivery brings the question back.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
+const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
+(async()=>{
+ const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'FIRST_Q',choices:['Alpha','Beta']}]};
+ const n={id:'n',revision:'r',answerable:true,questions:[{id:'q',question:'NEXT_Q',choices:['One']}]};
+ const sent=[],b=create({changed(){},answer:async v=>{sent.push(v);return {state:'submitted'};},action(){}});
+ b.update([a,n]);b.enter();b.input(Buffer.from('\x1b[B\r\r'));await tick();
+ assert.deepEqual(sent,[{question_id:'a',revision:'r',answers:{q:['Beta']}}],'a second Enter sends nothing');
+ assert.equal(b.focused,false);
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);
+ assert(!shown(b).includes('FIRST_Q')&&shown(b).includes('NEXT_Q'),shown(b));
+ assert.deepEqual(b.input(Buffer.from('\r')),Buffer.from('\r'),'Enter goes to the native input');
+ b.enter();assert(shown(b).includes('NEXT_Q')&&!shown(b).includes('FIRST_Q'),shown(b));
+ for(let i=0;i<3;i++){b.input(Buffer.from('\t'));assert(!shown(b).includes('FIRST_Q'),shown(b));}
+ b.leave();
+ // The backend's record says the same; the line stays while it travels.
+ b.update([{...a,answerable:false,request_state:'submitted',sent:['Beta']},n]);
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);assert(!shown(b).includes('FIRST_Q'));
+ assert.deepEqual(b.references().map(x=>x.id),['a','n']);
+ // Its session has it: the line goes and the panel stops asking for it.
+ b.update([{...a,answerable:false,request_state:'received'},n]);
+ assert.deepEqual(lines(b),[]);assert.deepEqual(b.references().map(x=>x.id),['n']);
+ // Sent from elsewhere (Fleet, the CLI): the backend's own words for it.
+ const f=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ f.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}]);
+ assert.deepEqual(lines(f),['✓ answer sent · Alpha']);assert.deepEqual(f.detail(),[]);
+ // A secret stays hidden on the line.
+ const s=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}]);
+ s.enter();s.input(Buffer.from('tFAKE_SECRET\r'));await tick();
+ assert.deepEqual(lines(s),['✓ answer sent · •••']);
+ // A delivery that failed brings the question back with its existing word.
+ const x=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ x.update([a]);x.enter();x.input(Buffer.from('\r'));await tick();
+ x.update([{...a,answerable:false,request_state:'unknown',reason:'message-answer-delivery-unconfirmed',answer_state:'answer_below'}]);
+ assert.deepEqual(lines(x),[]);assert(shown(x).includes('FIRST_Q')&&shown(x).includes('unknown'),shown(x));
+ // ... or open again, to answer anew.
+ const y=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ y.update([a]);y.enter();y.input(Buffer.from('\r'));await tick();
+ y.update([{...a,revision:'r2'}]);assert.deepEqual(lines(y),[]);assert(shown(y).includes('FIRST_Q'));
+ y.enter();assert(JSON.stringify(y.detail()).includes('▸'),'it can be chosen again');
+ // A refused answer keeps the person on it with its word.
+ const z=create({changed(){},answer:async()=>({state:'unknown',reason:'refused-here'}),action(){}});
+ z.update([a,n]);z.enter();z.input(Buffer.from('\r'));await tick();
+ assert.equal(z.focused,true);assert(JSON.stringify(z.detail()).includes('refused-here'));
+ console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+    def test_a_sent_answer_leaves_the_panel_count_and_the_notice_line_in_each_harness(self):
+        # Rule 5 (11-14), the panel's half: what the shared cache gives for a sent answer (listed,
+        # marked, out of the session index) is no wait in the panel's head, folded strip or notice
+        # line; a question still open beside it keeps them, `Ctrl+]` included.
+        import session_tidy
+        from fleet.session_line import answer_wait_word
+        def describe(item,**kw):
+            row=dict(id=item['id'],source='S4',owner=item['owner'],state='current',
+                     questions=[dict(id='message-response',question=item['id'],choices=['Alpha','Beta'])])
+            if item.get('answer')=='sent':
+                return dict(row,answerable=False,request_state='submitted',sent=['Beta'])
+            return dict(row,answerable=True,revision='r')
+        text=lambda parts:''.join(part['text'] for part in parts or ())
+        for harness in ('claude','codex','opencode'):
+            sid='sid-'+harness
+            owner=dict(harness=harness,session_id=sid)
+            sent=dict(id='S4:sent',source='S4',kind='message',since=1,stale=False,owner=owner,answer='sent')
+            open_=dict(id='S4:open',source='S4',kind='message',since=2,stale=False,owner=owner)
+            for name,items,count,notice in (('sent alone',[sent],0,''),
+                                            ('sent beside an open one',[sent,open_],1,answer_wait_word()+' 1 │ Ctrl+]')):
+                with self.subTest(harness=harness,case=name):
+                    view={'items':items,'by_session':{(harness,sid):[i['id'] for i in items if i.get('answer')!='sent']},
+                          'total':count,'complete':True}
+                    with mock.patch.object(hws,'cached_view',return_value=view), \
+                         mock.patch.object(hws,'cached_statusline',return_value=((count,count),'')), \
+                         mock.patch.object(questions,'describe',side_effect=describe), \
+                         mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}):
+                        result=shell.panel_projection(harness,sid,columns=40)
+                    self.assertEqual(result['panel']['wait'],answer_wait_word()+' '+str(count) if count else '')
+                    self.assertEqual([(row['id'],row.get('request_state'),row.get('sent')) for row in result['questions']],
+                                     [(i['id'],'submitted' if i is sent else None,['Beta'] if i is sent else None)
+                                      for i in sorted(items,key=lambda i:i is sent)])
+                    self.assertEqual(result['panel']['wait_guide'],'')
+                    if harness=='claude':
+                        self.assertEqual(text(result['panel']['notice']),notice)
+
     def test_page_keys_read_a_long_question_from_its_first_row_and_keep_the_choice(self):
         # PR #1532 R2: PgUp/PgDn read the body to its first and last rows; the page stays
         # where reading left it, the highlighted choice stays, and ↑↓/numbers follow the choice.
@@ -299,9 +399,11 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
  assert.ok(JSON.stringify(block.detail()).includes('draft'));
  block.input(Buffer.from('\r'));await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(sent[0],{question_id:'a',revision:'one',answers:{q:['draft']}});
- // A new open request, rather than the submitted request, owns this draft.
+ // A new open request, rather than the submitted request, owns this draft. Rule 5 (11-14):
+ // the sent answer returned the person to the native input; Ctrl+] opens the new one.
+ assert.equal(block.focused,false);
  const fresh={...a,id:'fresh'};block.update([fresh]);
- block.input(Buffer.from('tpreserved'));
+ block.enter();block.input(Buffer.from('tpreserved'));
  block.update([{...fresh,revision:'two'}]);block.input(Buffer.from('\r'));
  await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,1);
  assert.ok(JSON.stringify(block.detail()).includes('preserved'));

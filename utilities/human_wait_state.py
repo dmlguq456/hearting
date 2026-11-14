@@ -101,15 +101,19 @@ def wait_fold(since, now, *, owner_state=None):
 
 
 def person_wait(item):
-    """Whether this wait is a person's to answer: every wait but a blocked owner (S3).
+    """Whether this wait is a person's to answer: every wait but a blocked owner (S3) and one
+    whose answer the person already sent.
 
     A blocked owner takes its correction from its parent agent
     (``owner-correction-native-parent-context-required``), not from a person. Every other wait
     holds its session until a person answers it, wherever the answer is given (the panel, a
     Claude native request in its own window, a marker question in that session's input), so
-    every surface counts it (11-14).
+    every surface counts it (11-14). Once the person's answer is recorded and on its way
+    (``answer: sent``, from the existing answer record) it has left the person's hands: no
+    surface counts it while it travels, and a failed delivery counts it again.
     """
-    return isinstance(item, dict) and str(item.get("source") or "") != "S3"
+    return (isinstance(item, dict) and str(item.get("source") or "") != "S3"
+            and item.get("answer") != "sent")
 
 
 def wait_counts(items):
@@ -128,6 +132,67 @@ def wait_counts(items):
         else:
             current += 1
     return {"total": current, "older": folded, "ownerless": ownerless}
+
+
+# The answer record's states while the person's answer travels to its session (rule 5, 11-14).
+_ANSWER_IN_TRANSIT = frozenset(("submitted", "received"))
+
+
+def _answers_in_transit(selected):
+    """Wait ids whose person's answer is recorded and on its way: the existing answer record
+    (``selected_responses``) holds its action in ``submitted`` or ``received`` and its source
+    has not ended. A failed delivery leaves these states (``unknown``, ``expired``, ...)."""
+    return {entry["selected_id"] for entry in (selected or {}).values()
+            if isinstance(entry, dict) and isinstance(entry.get("selected_id"), str)
+            and entry.get("action_id") and entry.get("state") in _ANSWER_IN_TRANSIT
+            and not entry.get("source_terminal")}
+
+
+def _mark_answers(projection, sent, *, private=True):
+    """Mark the published waits whose answer is on its way and recount (rule 5, 11-14).
+
+    A marked wait stays listed (Fleet shows it as sent, the panel as one dim line), leaves
+    every count and this session's wait index; nothing else in the projection changes.
+    """
+    items = [row for row in projection.get("items") or () if isinstance(row, dict)]
+    for row in items:
+        if row.get("id") in sent:
+            row["answer"] = "sent"
+        else:
+            row.pop("answer", None)
+    counts = wait_counts(items)
+    projection.update(total=counts["total"], older=counts["older"], ownerless=counts["ownerless"])
+    if private:
+        projection["stale_total"] = counts["older"]
+        by_session = {}
+        for row in items:
+            owner = row.get("owner") or {}
+            if owner.get("harness") and owner.get("session_id") and not row.get("stale") and person_wait(row):
+                by_session.setdefault(str(owner["harness"]) + "\0" + str(owner["session_id"]), []).append(
+                    str(row.get("id") or ""))
+        projection["by_session"] = by_session
+    return projection
+
+
+def _republish_answer_marks(projection):
+    """After the answer record changed: the private projection (written by the caller) and
+    the Fleet view say the same at once. Best effort; the next collection writes the same."""
+    sent = _answers_in_transit(projection.get("selected_responses"))
+    _mark_answers(projection, sent)
+    try:
+        path = _fleet_cache_path()
+        meta = os.lstat(path) if path.exists() else None
+        fleet = (json.loads(path.read_text(encoding="utf-8"))
+                 if meta and stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
+                 and not stat.S_IMODE(meta.st_mode) & 0o077 and meta.st_size <= _CACHE_MAX_BYTES else None)
+        if isinstance(fleet, dict) and fleet.get("schema_version") == 1 and isinstance(fleet.get("items"), list):
+            before = [row.get("answer") for row in fleet["items"] if isinstance(row, dict)]
+            _mark_answers(fleet, sent, private=False)
+            if before != [row.get("answer") for row in fleet["items"] if isinstance(row, dict)]:
+                _write(path, fleet)
+    except (OSError, ValueError, TypeError):
+        pass
+    return projection
 
 
 def state_root() -> Path:
@@ -1154,7 +1219,7 @@ def publish_cache(result: dict) -> bool:
         items.append(row)
         # A blocked owner is its parent agent's to answer (``person_wait``): its route row says
         # it waits, no session's question block or count does. The private board keeps it.
-        if harness and sid and not item.get("stale") and item.get("source") != "S3":
+        if harness and sid and not item.get("stale") and person_wait(item):
             key = str(harness) + "\0" + str(sid)
             by_session.setdefault(key, []).append(str(item.get("id") or ""))
     counts = wait_counts(items)
@@ -1294,6 +1359,11 @@ def publish_cache(result: dict) -> bool:
                     projection["unattributed"] = [ref for ref in projection["unattributed"]
                                                    if ref not in removed]
                 value["stale_total"] = value["older"]
+            # An answer the person sent and that still travels (rule 5, 11-14): listed, uncounted.
+            sent = _answers_in_transit(selected)
+            if sent:
+                _mark_answers(value, sent)
+                _mark_answers(fleet_value, sent, private=False)
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)
@@ -1586,7 +1656,7 @@ def _store_selected_entry(envelope, entry):
                         entry["draft"] = ""
             overlay[key] = entry
             projection["selected_responses"] = overlay
-            return _write_cache_value(projection)
+            return _write_cache_value(_republish_answer_marks(projection))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -1640,7 +1710,7 @@ def _claim_selected_action(envelope, action_id, response, *, answer_attachment=N
                 return False, None
             overlay[key] = claimed
             projection["selected_responses"] = overlay
-            if not _write_cache_value(projection):
+            if not _write_cache_value(_republish_answer_marks(projection)):
                 return False, None
             return True, dict(claimed)
     except (OSError, ValueError, TypeError):
@@ -1664,7 +1734,7 @@ def _release_unsubmitted_selected_action(envelope, action_id, result):
             entry.pop(name, None)
         overlay[key] = entry
         projection["selected_responses"] = overlay
-        return _write_cache_value(projection)
+        return _write_cache_value(_republish_answer_marks(projection))
 
 
 def _proc_start_ticks(pid):
@@ -3441,6 +3511,9 @@ def _selected_envelope(base, resolved):
                 envelope["state"] = entry["state"]
             if entry.get("action_id"):
                 envelope["action_id"] = entry["action_id"]
+        # What the person sent, for their own panel's one line while it travels (rule 5).
+        if envelope["state"] in _ANSWER_IN_TRANSIT and isinstance(entry.get("response"), dict):
+            envelope["sent"] = entry["response"]
     if envelope["state"] == "open" and support:
         envelope["actions"] = _selected_actions(kind, envelope.get("detail"), native_ref)
     else:

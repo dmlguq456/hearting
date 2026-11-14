@@ -730,7 +730,9 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     Only what the person can answer here now is a question in this panel (11-14): the
     answerable ones first, then the person's own answers still showing their receipt. A wait
     not answerable here (its existing ``answerable``/``reason``) is no question in the block;
-    ``elsewhere`` (a list, when given) receives it, for the one guidance line.
+    ``elsewhere`` (a list, when given) receives it, for the one guidance line. An answer the
+    person sent and that still travels (``answer: sent``) is out of the session's wait index
+    and in no count, yet comes here as its receipt: the panel's one dim line (rule 5).
     """
     import time
     import human_wait_state
@@ -740,7 +742,7 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     answerable, receipts, current = [], [], set()
     for item in view.get("items", ()):
         owner = item.get("owner") or {}
-        if (item.get("id") in ids and not item.get("stale")
+        if ((item.get("id") in ids or item.get("answer") == "sent") and not item.get("stale")
                 and owner.get("harness") == harness and owner.get("session_id") == sid):
             current.add(item.get("id"))
             described = questions.describe(item, now=time.time())
@@ -1101,7 +1103,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
               "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose",
-        "more_page")}
+        "more_page", "sent")}
     if columns < 64:
         for key in states:
             labels[key] = ui_text("fleet.session_block.compact_" + key)
