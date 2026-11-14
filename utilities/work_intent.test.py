@@ -292,7 +292,7 @@ class CompletionSummaryTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
                       "artifact_root": str(self.root),
-                      "work_request": {"text": '의도: 의도를 고정한다\n\nBody.\n사용자: "의도가 맞는지 체크하는 건 중요해"', "owner_harness": None}}
+                      "work_request": {"text": '의도: 의도를 고정한다\n\nBody. PR #12의 후속.\n사용자: "의도가 맞는지 체크하는 건 중요해"', "owner_harness": None}}
         record = self.root / ".runtime/intent/rt-5555555555555555.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
@@ -499,6 +499,16 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertEqual(lines[7], f"산출물: {self.report} · PR https://github.com/o/r/pull/12")
         self.assertNotIn("\n\n", text)
 
+    def test_a_pr_the_report_names_is_carried_only_when_the_request_names_it(self):
+        # The report's follow-up line links pull/12; no verdict line or title names a PR.
+        text = WI.completion_summary(self.route, self.report, route_file=self.route_file)
+        self.assertTrue(text.splitlines()[-1].endswith(" · PR https://github.com/o/r/pull/12"))
+        for request in ("Fix the summary", "PR #12와 PR #13 비교"):
+            with self.subTest(request=request):
+                route = {**self.route, "work_request": {"text": request, "owner_harness": None}}
+                lines = WI.completion_summary(route, self.report, route_file=self.route_file).splitlines()
+                self.assertEqual(lines[-1], f"산출물: {self.report}")
+
     def test_the_first_user_cycle_adds_the_artifact_list_line_before_the_artifact_line(self):
         cycle = self.root / "campaigns/2026-01-02_c/2026-01-02_alpha/artifacts"
         cycle.mkdir(parents=True)
@@ -604,7 +614,7 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
                       "artifact_root": str(self.root),
-                      "work_request": {"text": 'Intent: Seal the intent\n\nBody.\nUser: "check the intent"', "owner_harness": None}}
+                      "work_request": {"text": 'Intent: Seal the intent\n\nBody. Follows PR #12.\nUser: "check the intent"', "owner_harness": None}}
         record = self.root / ".runtime/intent/rt-5555555555555555.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],

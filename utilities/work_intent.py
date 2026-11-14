@@ -703,8 +703,10 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             normalized_cells = [re.sub(r"[*:]", "", cell).strip().casefold() for cell in cells]
             if len(normalized_cells) >= 2 and normalized_cells[:2] in (["검사", "결과"], ["check", "result"], ["item", "result"]):
                 continue
-            label = re.sub(r"[*:]", "", cells[0]).strip() if cells else ""
-            field = _section_field(label, numbered=numbered)
+            # Only a two-cell `| label | value |` row is a field; a wider table's first cell is a row
+            # name, and its other cells are data (`| 시험·점검 | 12% | 6% |` is not the checks).
+            label = re.sub(r"[*:]", "", cells[0]).strip() if len(cells) == 2 else ""
+            field = _section_field(label, numbered=numbered) if label else None
             if field:
                 value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
                 if value:
@@ -748,8 +750,7 @@ def report_verdict(text: str) -> str:
 
 def _verdict_pr(text: str) -> str | None:
     """The PR this report is about: the one its verdict line names (``_VERDICT_PR``), else
-    the one its first heading names (a review's closed verdict line cannot carry a PR number
-    but its title does), else None."""
+    the one its title (the first level-1 heading) names, else None."""
     match = _verdict_match(text)
     if match is not None:
         found = _VERDICT_PR.search(match["verdict"])
@@ -761,26 +762,23 @@ def _verdict_pr(text: str) -> str | None:
         if len(bare) == 1 and bare <= named:
             return bare.pop()
     for raw in _unfenced_lines(text):
-        line = raw.strip()
-        if line.startswith("#"):
-            found = _VERDICT_PR.search(line)
+        if raw.startswith("# "):
+            found = _VERDICT_PR.search(raw)
             return next(value for value in found.groups() if value) if found else None
     return None
 
 
-_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])", re.I)
+def _request_pr(request) -> str | None:
+    """The one PR the route's request names, else None (none, or more than one)."""
+    named = {next(value for value in found.groups() if value) for found in _VERDICT_PR.finditer(str(request or ""))}
+    return next(iter(named)) if len(named) == 1 else None
 
 
-def _hexes(text: str) -> set[str]:
-    return {value.lower() for value in _HEX.findall(text.replace("`", ""))}
-
-
-def _verdict_head(text: str) -> set[str]:
-    """Every commit the verdict line names when it states a head, else empty."""
-    match = _verdict_match(text)
-    if match is None or not _PUBLICATION_FIELDS[0].search(match["verdict"]):
-        return set()
-    return _hexes(match["verdict"])
+def _report_pr(text: str, request=None) -> str | None:
+    """The one PR the summary may carry: what the verdict line or title names, else the one PR
+    the request names. Never a PR guessed from the report's other lines; the caller carries it
+    only if the report has a line or link for that number."""
+    return _verdict_pr(text) or _request_pr(request)
 
 
 def _pr_number(line: str) -> str | None:
@@ -788,44 +786,26 @@ def _pr_number(line: str) -> str | None:
     return (found["url"] or found["number"]) if found else None
 
 
-def _other_head(line: str, verdict_head: set[str]) -> bool:
-    """A line that states a head, none of whose commits is one the verdict line names (a
-    merge makes the verdict's head and the PR line's head differ while naming each other's;
-    a line with no head is kept)."""
-    if not verdict_head or not _PUBLICATION_FIELDS[0].search(line.replace("`", "")):
-        return False
-    return not any(a.startswith(b) or b.startswith(a) for a in _hexes(line) for b in verdict_head)
-
-
-def _publication_lines(text: str):
-    """Lines naming a PR with its head, CI or mergeability, outside fenced blocks. When
-    the verdict line names this work's PR, only lines about that PR."""
-    own = _verdict_pr(text)
-    verdict_head = set() if own else _verdict_head(text)
+def _publication_lines(text: str, request=None):
+    """Lines naming this work's PR with its head, CI or mergeability, outside fenced blocks."""
+    own = _report_pr(text, request)
+    if own is None:
+        return
     for raw in _unfenced_lines(text):
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (line and not line.startswith(("#", "|")) and not _VERDICT_LINE.match(line.replace("**", ""))
                 and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)
-                and own in (None, _pr_number(line.replace("`", "")))
-                and not _other_head(line, verdict_head)):
+                and own == _pr_number(line.replace("`", ""))):
             yield line
 
 
-def report_pr_urls(text: str, limit: int = 3) -> list[str]:
-    """PR links outside fenced blocks; only this work's PR when the verdict line or title
-    names it. Otherwise the PR lines' own judgment: the link of a PR named only on lines
-    whose head is not the verdict line's head is not this work's."""
-    own = _verdict_pr(text)
-    verdict_head = set() if own else _verdict_head(text)
-    kept: set[str] = set()
-    other: set[str] = set()
-    for raw in _unfenced_lines(text):
-        if verdict_head and _PUBLICATION_FIELDS[0].search(raw.replace("`", "")):
-            for found in _PUBLICATION_LINE.finditer(raw):
-                (other if _other_head(raw, verdict_head) else kept).add(found["url"] or found["number"])
-    skip = other - kept
+def report_pr_urls(text: str, limit: int = 3, request=None) -> list[str]:
+    """This work's PR links outside fenced blocks (``_report_pr``); none when no PR is known."""
+    own = _report_pr(text, request)
+    if own is None:
+        return []
     urls = [url for raw in _unfenced_lines(text) for url in _PR_URL.findall(raw)
-            if (own is None or url.rsplit("/", 1)[-1] == own) and url.rsplit("/", 1)[-1] not in skip]
+            if url.rsplit("/", 1)[-1] == own]
     return list(dict.fromkeys(urls))[:limit]
 
 
@@ -833,9 +813,9 @@ def is_publication_line(line: str) -> bool:
     return bool(_PUBLICATION_LINE.search(line or "") and _PUBLICATION_WORDS.search(line or ""))
 
 
-def report_publication(text: str) -> str:
+def report_publication(text: str, request=None) -> str:
     """``#<n> · head <sha12> · CI <state> · <mergeability>`` from the report's PR line, else ""."""
-    for line in _publication_lines(text):
+    for line in _publication_lines(text, request):
         plain = line.replace("`", "")
         found = _PUBLICATION_LINE.search(plain)
         parts = ["#" + (found["url"] or found["number"])]
@@ -1135,10 +1115,11 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         lines.append(t("completion.unreadable"))
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
-    published = report_publication(text)
+    asked = request.get("text")
+    published = report_publication(text, asked)
     if published:
         lines.append(t("completion.publication", line=published))
-    prs = [] if published else report_pr_urls(text)
+    prs = [] if published else report_pr_urls(text, request=asked)
     entrance = _entrance_line(route, primary, t)
     if entrance:
         lines.append(entrance)
