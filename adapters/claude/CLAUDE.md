@@ -27,6 +27,7 @@ harness root above. Read documents only as needed.
   question; a helper never owns user input or approvals.
 - Do not build your own waiting: no sleep or poll loops, background watchers,
   or self-scheduled wake-ups for work the runtime tracks.
+  For experiments, runtime notices bring failures, warnings and new results, the LAB board shows normal progress, steward check handles periodic checks, and `experiment_catalog.py status` gives a one-time view.
 - Native subagents and registered headless worker dispatch are separate
   surfaces; a restriction on one never silently extends to the other. Preserve
   model role, intensity, dispatch depth, tests, safety, and validation on
@@ -146,8 +147,8 @@ Portable behavior contract = `roles/response-policy.md`.
 - Register ordinary questions with `hearting run questions ask`; use the
   shared response policy. Ask structured exceptions, including the §0.4 card, with `AskUserQuestion`
   (options 진행(권장) / 수정 / 중단); a plain-text card is the fallback.
-- CronCreate, ScheduleWakeup, Monitor, and backgrounded waits are not ways to
-  watch Hearting work; the runtime hooks wake this session.
+- CronCreate, ScheduleWakeup, Monitor, and backgrounded waits follow the
+  shared "Do not build your own waiting" guidance above.
 - A Codex job the openai-codex plugin detaches runs in the plugin's own queue,
   not in `jobs.log` (Fleet shows it read-only); send Codex work that needs
   tracking or gates through registered dispatch.

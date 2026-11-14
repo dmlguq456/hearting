@@ -2764,7 +2764,10 @@ out) — and prints each as a `next=` action (for example
 duty's own earlier observations. `changes=none` does not mean nothing remains: while
 any next action exists the request names those actions (`assign-next`) and leaves release
 or stop advice out; it repeats each interval while a target is live and unfinished and is
-otherwise sent once per changed state. Only when the role has no targets, every
+otherwise sent once per changed state. LAB summary changes mean increases in a group’s
+unknown count or a root’s unlinked count above its previously notified level;
+failures and stalls are display-only, while decreases and unreadable summaries
+are silent. Only when the role has no targets, every
 target is finished or the sessions are ready to tidy, and no open work or queued peer
 request remains, one short request recommends closing ended sessions and releasing the
 flag through the ordinary `steward off` path; while that state is unchanged the next due
