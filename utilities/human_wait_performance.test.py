@@ -191,8 +191,11 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(cold_state)}):
                 cold_cache = wait_state._read_cache()
             self.assertIsNotNone(cold_cache)
-            result = {"total": cold_cache["total"]}
-            self.assertEqual(result["total"], 1)
+            # The blocked owner is listed for its parent agent and counted by no person surface
+            # (11-14): the producer still finds exactly it.
+            result = {"total": sum(1 for item in cold_cache["items"]
+                                   if item["source"] == "S3" and not item["stale"])}
+            self.assertEqual((result["total"], cold_cache["total"]), (1, 0))
 
             def projection():
                 # Exercise the same read + private atomic publish as each loop pass.
