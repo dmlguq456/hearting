@@ -796,6 +796,15 @@ def _panel_common_rows(panel, columns):
     return [row for row in rows + [quota] if row]
 
 
+def messages_since_input(messages, display):
+    """Spec E9 rule 49 (c): the folded strip's `MESSAGES ←N`, the kept messages received since
+    the person's last input in this session (every kept one before any input). Display only."""
+    human_at = ((display or {}).get("human") or {}).get("at")
+    human_at = human_at if type(human_at) in (int, float) else 0
+    return sum(1 for row in messages or () if isinstance(row, dict) and row.get("way") == "←"
+               and type(row.get("at")) in (int, float) and row["at"] > human_at)
+
+
 _SENT_CACHE: dict = {}
 _REQUEST_BODIES: dict = {}  # a sealed body never changes, so its text is kept by transfer ref
 _REQUEST_BODY_BYTES = 16 * 1024
@@ -1168,6 +1177,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
     panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8)
+    panel["messages_new"] = messages_since_input(panel["messages"], display)
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).
     request_errors = []

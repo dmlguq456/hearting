@@ -1,4 +1,4 @@
-"""Spec E9 rule 49: the gear inside the panel, folding and unfolding, and folding by itself when narrow."""
+"""Spec E9 rule 49: the gear inside the panel, folding and unfolding, folding by itself when narrow, and the folded strip under the native area."""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
@@ -48,6 +48,12 @@ assert(!text(draw({settings:{index:0,value:v.defaults}})).join('').includes('»'
 const bottom=text(v.render({width:80,height:14,side:false,model,state:'idle',configuration:{layout:'bottom'},questions:()=>[]}));
 assert(bottom.at(-2).endsWith('▾   ⚙ │'),bottom.join('\n'));
 assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('«   ⚙ │'));
+// A side panel opened by hand where it cannot stand beside opens under the native area: `▾`
+// there too (the host draws it with `side:false`; the configured layout stays `side`).
+for(const position of ['right','left']){
+ const under=v.render({width:90,height:14,side:false,model,state:'idle',configuration:{layout:'side',position},questions:()=>[]});
+ assert(text(under).at(-2).endsWith('▾   ⚙ │')&&!text(under).join('').match(/[»«]/),text(under).join('\n'));
+}
 """)
 
     def test_the_last_row_keeps_the_model_quota_and_gives_way_in_order(self):
@@ -66,65 +72,175 @@ const want=[[60,'5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 70%'],[40,'5h 12% �
 for(const [w,s] of want){const t=text(last(w));assert(t.startsWith('│ '+s+(s?' ':''))&&t.endsWith('»   ⚙ │')&&!t.includes('…'),w+' '+t);}
 // The model word keeps its model color; nothing of the row is cut mid-value.
 assert.equal(last(40).find(x=>x.text==='fable ').foreground,176);
-// The folded strip has no quota.
-const strip=v.render({width:8,height:20,side:true,folded:true,model:{...model,route_total:2},state:'idle',questions:()=>[]}).rows.map(text).join('\n');
-assert(!/fable|7d|5h/.test(strip),strip);
+// Folded, the strip's session row carries the same values, giving way in the same order after
+// the reset times (spec rule 49 (c)).
+const strip=w=>v.render({width:w,height:4,folded:true,model:{...model,tag:'[e9]'},state:'idle',questions:()=>[]}).rows.map(text)[1].trimEnd();
+assert.equal(strip(120),'● [e9] hearting/ │ Checking │ 5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 70%');
+assert.equal(strip(60),'● [e9] hearting/ │ Checking │ 5h 12% │ 7d 66% │ fable 70%');
+assert.equal(strip(48),'● [e9] │ Checking │ 5h 12% │ 7d 66% │ fable 70%');
+assert.equal(strip(40),'● [e9] │ Checking │ 7d 66% │ fable 70%');
+assert.equal(strip(30),'● [e9] │ Checking │ 7d 66%');
 """)
 
-    def test_the_folded_strip_carries_the_core_values_only(self):
+    def test_the_folded_strip_stands_under_the_native_area(self):
+        # 11-14 night ("접는게 하단창으로", "접는건 아래에 3~4줄 정도"): one folded form, the strip under
+        # the native area: a thin rule with `▴`, then the session, what to do now, and the routes.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
-const styles={g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},dim:{dim:true},loc_repo:{foreground:252},tag_steward:{foreground:219,bold:true}};
-const strip=(model={},o={})=>v.render({width:8,height:12,side:true,folded:true,model:{tag:'[e9]',styles,...model},state:'working',frame:3,harness:'claude',questions:()=>{throw Error('no question in the strip');},...o});
+const styles={g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},dim:{dim:true},loc_repo:{foreground:252},
+ g_idle:{foreground:186},g_dead:{foreground:210},lvl_r:{foreground:210},lvl_y:{foreground:186},tag_steward:{foreground:219,bold:true}};
+const P=(t,k)=>({text:t,...(k?styles[k]||{}:{})});
+const model={tag:'[e9]',styles,repo_side:[P('hearting','loc_repo')],selected:[P('Opus 5.5'),P(' '),P('xhigh')],context_side:[P('━━━━━━────'),P(' 58%')],
+ quota:[P('5h ','dim'),P('12%'),P('(↻ 2h 0m)','dim'),P(' │ ','dim'),P('7d ','dim'),P('66%'),P('(↻ 5d 0h)','dim')],wait:'◑답 대기 1',
+ route_label:'route 3 ⠏2 ✕1',route_count:3,route_total:3,messages_new:2,
+ routes:[{title:'패널 자동 접힘 기준 60칸',kind:'working',paint:{glyph:P('⠸','g_spin')}},{title:'LAB 표 칸 정리',kind:'working',paint:{glyph:P('⠸','g_spin')}},
+  {title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕','g_dead')}}],lab:{strip:[P('!1','lvl_r'),P('LB','dim')],strip_attention:true}};
+const question=()=>[[P('◑ QUESTIONS 1 · 1/1','g_blocked')],[P('접힌 모양을 어느 안으로 할까요?','loc_repo')],[P('Ctrl+] · 답 필요','dim')]];
+const strip=(o={},m={})=>v.render({width:120,height:4,folded:true,model:{...model,...m},state:'working',frame:3,harness:'claude',questions:question,...o});
 const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
-// (c) Eight cells: two borders, a blank cell inside each, four content cells; the state glyph
-// with the number, an empty row, the route count, the answer waits, and the unfold mark on the
-// last row inside.
-let r=strip({route_total:2,wait:'◑답 대기 1'}),rows=text(r);
-assert.deepEqual(rows,['┌──────┐','│ ⠸ e9 │','│      │','│ 2 RT │','│ ◑ 1  │','│      │','│      │','│      │','│      │','│      │','│  «   │','└──────┘']);
-assert(rows.every(s=>[...s].length===8));
-// An absent value draws no row; from ten `9+RT` (routes) and `◑ 9+` (waits); an unknown wait count its glyph alone.
-assert.deepEqual(text(strip({route_total:0,wait:''})).slice(1,4),['│ ⠸ e9 │','│      │','│      │']);
-assert.deepEqual(text(strip({route_total:12,wait:'◑답 대기 10'})).slice(2,5),['│      │','│ 9+RT │','│ ◑ 9+ │']);
-assert.deepEqual(text(strip({route_total:0,wait:'◑답 대기 ?'})).slice(2,4),['│      │','│ ◑    │']);
-// The route count's label is dim beside its number (as the panel's labels).
-const rt=r.rows[3];assert(rt.find(x=>x.text===' RT').dim&&rt.find(x=>x.text==='2').foreground===252);
-// The border takes the session's state color (the open panel's frame), the glyph spins only
-// while it runs; waiting `◑`, idle `●` (idle and unknown: the plain line, the number unmoved).
-for(const [state,glyph,color] of [['working','⠸',230],['blocked','◑',217],['idle','●',undefined],['unknown',' ',undefined]]){
- const s=strip({},{state}),frame=s.rows.flatMap(row=>[row[0],row.at(-1)]);
- assert.equal(text(s)[1],'│ '+glyph+' e9 │',state);
- assert(frame.every(x=>(x.foreground??undefined)===color&&(color===undefined?x.dim===true:x.dim!==true)),state+JSON.stringify(frame[0]));
- assert.equal(s.animated,state==='working',state);assert.deepEqual(s.spins,state==='working'?[1]:[]);
-}
-// Only the glyph turns: no steward mark, gear, beat or moving rule; a steward's number keeps its pink.
-r=strip({steward:true});
-assert(!text(r).join('').match(/[⚑⚙]/)&&r.motion===null&&!r.rows.flat().some(x=>x.beat||x.scan));
-assert.equal(r.rows[1].find(x=>x.text==='e9').foreground,219);
-// A press on any cell opens the panel.
-assert.equal(r.hits.length,12);assert(r.hits.every((h,i)=>h.row===i&&h.left===0&&h.right===7&&h.action==='unfold'));
-// Short of rows the empty row goes first, then the route count, the waits; the glyph row and `«` stay.
-for(const [h,want] of [[6,['│ ⠸ e9 │','│ 2 RT │','│ ◑ 1  │','│  «   │']],[5,['│ ⠸ e9 │','│ ◑ 1  │','│  «   │']],[4,['│ ⠸ e9 │','│  «   │']],[3,['│  «   │']]])
- assert.deepEqual(text(strip({route_total:2,wait:'◑답 대기 1'},{height:h})).slice(1,-1),want,String(h));
-// A left panel's strip unfolds with `»`; every harness gets the same strip.
-assert.equal(text(strip({},{configuration:{position:'left'}}))[10],'│  »   │');
-for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({},{harness})),text(strip()));
-// No color keeps the shapes.
-assert.deepEqual(text(strip({no_color:true,route_total:2})),text(strip({route_total:2})));
+let r=strip(),rows=text(r);
+// Four rows the window's width, one placement for every harness (side or not, left or right).
+assert.deepEqual(rows.map(s=>s.trimEnd()),['─'.repeat(118)+' ▴',
+ '⠸ [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━━━──── 58% │ 5h 12%(↻ 2h 0m) │ 7d 66%(↻ 5d 0h)',
+ '◑답 대기 1 · 접힌 모양을 어느 안으로 할까요?',
+ '3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2 │ !1 LAB']);
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+assert(rows.every(s=>cells(s)===120),rows.join('\n'));
+for(const o of [{side:true},{side:true,configuration:{position:'left'}},{harness:'codex'},{harness:'opencode'},{configuration:{layout:'bottom'}}])
+ assert.deepEqual(text(strip(o)),rows,JSON.stringify(o));
+// The rule takes the messages' line color, `▴` and the labels are dim; no frame, gear, beat or moving rule:
+// only the session's glyph turns. A press anywhere opens the panel.
+assert.equal(r.rows[0][0].role,'messages');assert(r.rows[0].at(-1).text==='▴'&&r.rows[0].at(-1).dim);
+for(const word of ['CTX ','MESSAGES',' LAB'])assert(r.rows.flat().find(x=>x.text===word).dim===true,word);
+assert(!/[┌┐└┘⚙⚑]/.test(rows.join(''))&&r.motion===null&&!r.rows.flat().some(x=>x.beat||x.motion),rows.join('\n'));
+assert.deepEqual([r.spins,r.animated],[[1],true]);
+assert.deepEqual(r.hits,[0,1,2,3].map(row=>({row,left:0,right:119,action:'unfold'})));
+// Only failed routes' titles; none failed, the running ones'.
+const running=text(strip({},{route_label:'route 2 ⠏2',routes:model.routes.slice(0,2),route_count:2,route_total:2}))[3].trimEnd();
+assert.equal(running,'2 ROUTE ⠏2 │ ⠸ 패널 자동 접힘 기준 60칸 │ ⠸ LAB 표 칸 정리 │ MESSAGES ←2 │ !1 LAB');
+// No answer wait: what to do is compaction imminent, then a tidy notice; nothing to do, no row: the
+// routes row moves up and the last row stays empty.
+assert.equal(text(strip({},{wait:'',warning:'압축 임박',tidy_notice:'새 판 대기'}))[2].trimEnd(),'⚠ 압축 임박 │ ⚠ 새 판 대기');
+// A wait answered elsewhere says where, dim, after the wait (#1633's `wait_guide`); alone without a wait here.
+assert.equal(text(strip({},{wait_guide:'QUESTIONS 1 · 아래 입력창에 답'}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? │ QUESTIONS 1 · 아래 입력창에 답');
+assert.equal(text(strip({},{wait:'',wait_guide:'QUESTIONS 1 · 아래 입력창에 답'}))[2].trimEnd(),'QUESTIONS 1 · 아래 입력창에 답');
+assert(strip({},{wait:'',wait_guide:'QUESTIONS 1 · 아래 입력창에 답'}).rows[2].find(x=>x.text.startsWith('QUESTIONS')).dim);
+const calm=text(strip({},{wait:'',messages_new:0,lab:null}));
+assert.deepEqual(calm.map(s=>s.trimEnd()).slice(2),['3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험','']);
+// The strip's height is the host's alone: the same four rows with and without a question.
+assert.equal(calm.length,4);
+// Every harness, state and color setting keeps the shapes; idle `●`, waiting `◑`, unknown no glyph.
+for(const [state,lead] of [['idle','● [e9]'],['blocked','◑ [e9]'],['unknown','[e9]']])assert(text(strip({state}))[1].startsWith(lead+' hearting'),state);
+assert.deepEqual(text(strip({},{no_color:true})),rows);assert.deepEqual(text(strip({configuration:{theme:'mono'}})),rows);
 """)
 
-    def test_folded_under_the_native_area_one_row_and_its_unfold_mark(self):
+    def test_each_strip_row_gives_way_from_its_end(self):
+        # The most pressing first; short of cells whole items go from the end. The session row: the reset
+        # times, the effort, the project (as draft 다), then 5h, the model windows, 7d, the model, CTX. What
+        # to do: the question's first row is cut with `…` before the wait goes. The routes row: LAB, the
+        # new messages, then the titles (a title cut with `…` while it keeps four cells), the count last.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
-const line=(segments,width=60)=>v.render({width,height:14,side:false,folded:true,segments,model:{},state:'idle',configuration:{layout:'bottom'},questions:()=>[]});
-let r=line([{text:'[e9] hearting │ Opus 5.5 │ context ━━── 58%'}]);
-const row=r.rows[0].map(x=>x.text).join('');
-assert.equal(r.rows.length,1);assert(row.startsWith('[e9] hearting │ Opus 5.5')&&row.endsWith(' ▴')&&[...row].length===60,row);
-assert.deepEqual(r.hits,[{row:0,left:0,right:59,action:'unfold'}]);
-// A status line wider than the row is cut with `…` and keeps `▴` at the right end.
-const long=line([{text:'x'.repeat(100)}],30).rows[0].map(x=>x.text).join('');
-assert(long.endsWith('… ▴')&&[...long].length===30,long);
+const P=t=>({text:t});
+const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5'),P(' '),P('xhigh')],context_side:[P('━━━━━━────'),P(' 58%')],
+ quota:[P('5h '),P('12%'),P('(↻ 2h 0m)'),P(' │ '),P('7d '),P('66%'),P('(↻ 5d 0h)')],wait:'◑답 대기 1',
+ route_label:'route 3 ⠏2 ✕1',route_count:3,messages_new:2,routes:[{title:'a',kind:'working'},{title:'b',kind:'working'},{title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕')}}],
+ lab:{strip:[P('!1'),P('LB')],strip_attention:true}};
+const question=()=>[[P('◑ head')],[P('접힌 모양을 어느 안으로 할까요?')],[P('Ctrl+]')]];
+const rows=w=>v.render({width:w,height:4,folded:true,model,state:'idle',harness:'claude',questions:question}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+// (A row keeps one blank cell at its right end: `w` columns hold `w - 1` cells.)
+const session=[[90,'● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━━━──── 58% │ 5h 12%(↻ 2h 0m) │ 7d 66%(↻ 5d 0h)'],
+ [89,'● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━━━──── 58% │ 5h 12% │ 7d 66%'],[71,'● [e9] hearting │ Opus 5.5 │ CTX ━━━━━━──── 58% │ 5h 12% │ 7d 66%'],
+ [65,'● [e9] │ Opus 5.5 │ CTX ━━━━━━──── 58% │ 5h 12% │ 7d 66%'],[56,'● [e9] │ Opus 5.5 │ CTX ━━━━━━──── 58% │ 7d 66%'],
+ [47,'● [e9] │ Opus 5.5 │ CTX ━━━━━━──── 58%'],[38,'● [e9] │ CTX ━━━━━━──── 58%'],[27,'● [e9]']];
+for(const [w,want] of session)assert.equal(rows(w)[1],want,String(w));
+const todo=[[45,'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요?'],[40,'◑답 대기 1 · 접힌 모양을 어느 안으로 …'],[21,'◑답 대기 1 · 접힌 …'],[15,'◑답 대기 1']];
+for(const [w,want] of todo)assert.equal(rows(w)[2],want,String(w));
+const routes=[[54,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2 │ !1 LAB'],[53,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2'],
+ [44,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험'],[30,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시…'],[24,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 …'],[23,'3 ROUTE ⠏2 ✕1'],[12,'3 ROUTE ⠏2…']];
+for(const [w,want] of routes)assert.equal(rows(w)[3],want,String(w));
+// No row runs past the window, at any width.
+for(let w=1;w<=200;w++)for(const row of v.render({width:w,height:4,folded:true,model,state:'working',harness:'claude',questions:question}).rows)
+ assert(cells(row.map(x=>x.text).join(''))===w,w+' '+row.map(x=>x.text).join(''));
 """)
+
+    def test_the_strip_is_four_rows_and_fewer_in_a_short_window(self):
+        # The strip's height follows the window's rows alone (never what it shows), so a question coming or
+        # going never moves the native area: four rows from 24 window rows, three from 16, else two; the
+        # routes row goes first, then the session row: what to do stays to the last, and a row with nothing on
+        # it gives its place. A window of two rows keeps one strip row (its own `▴`).
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),d=require(path.join(process.argv[1],'native-display.cjs')),v=require(path.join(process.argv[1],'panel-view.cjs'));
+assert.deepEqual(d.FOLD_ROWS,[24,16]);
+assert.deepEqual([60,40,24,23,16,15,12,6,3,2,1].map(d.foldRows),[4,4,4,3,3,2,2,2,2,1,1]);
+const P=t=>({text:t});
+const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5')],context_side:[P('━━── 58%')],wait:'◑답 대기 1',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]};
+const draw=(height,m={})=>v.render({width:60,height,folded:true,model:{...model,...m},state:'idle',harness:'claude',questions:()=>[[P('head')],[P('Q?')]]}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
+assert.deepEqual(draw(4),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?','1 ROUTE ⠏1 │ · run']);
+assert.deepEqual(draw(3),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?']);
+assert.deepEqual(draw(2),['─'.repeat(58)+' ▴','◑답 대기 1 · Q?']);
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),one='◑답 대기 1 · Q?';
+assert.deepEqual(draw(1),[one+' '.repeat(59-cells(one))+'▴']);
+// Nothing to do: the session row, then the routes, take the places; the height stays.
+assert.deepEqual(draw(3,{wait:''}),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','1 ROUTE ⠏1 │ · run']);
+assert.deepEqual(draw(2,{wait:''}),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%']);
+for(const h of [1,2,3,4])assert.equal(draw(h,{wait:''}).length,h);
+""")
+
+    def test_folded_the_host_gives_the_strip_its_rows_and_claudes_row_the_notice(self):
+        # The host's own paths: folded, the panel's height is native-display's foldRows (the window's
+        # rows alone) and the native keeps the rest at the whole width. Spec rule 49 (c), 11-14 night
+        # ("같은 값을 두 번 보이지 않는다"): while the strip paints its session row, the row under Claude's
+        # input keeps the notice (what to do now) as when the panel is open, so the status values show
+        # once, in the strip; the strip carries no Git or job row. Strip rows with what to do alone
+        # leave Claude its own status row, as an open panel short of rows does.
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const pick=(start,end)=>{const at=text.indexOf(start);assert(at>=0,start);return text.slice(at,text.indexOf(end,at));};
+const code=pick('function geometry(){','function panelColumns(){')+pick('function nativeColumns(){','function panelRow(){')
+ +pick('function maxHeight(){','\n')+pick('function height(){','function schedule()')+pick('function claudePanelPainted(){','// The blanked Claude row');
+const d=require(path.join(process.argv[1],'native-display.cjs'));
+const host=(cols,rows,expanded)=>{
+ const c={nativeDisplay:d,cols,rows,expanded,foldChoice:null,displayConfiguration:{layout:'side',side_width:40,position:'right',bottom_rows:14},settings:undefined,dragging:false,
+  block:{focused:false,leave(){}},fleetView:null,currentDelivery:null,panelContent:()=>Array(30).fill([]),
+  harness:'claude',relay:false,ended:false,activated:true,sid:'s',paintedGroups:new Set(),
+  panelModel:{head:[{text:'[e9] hearting'}],git:[{text:'(main)'}],context:[{text:'context 58%'}],quota:[{text:'5h 12%'}],jobs:[{text:'>_ job'}],wait:'◑ 1',route_count:2}};
+ vm.createContext(c);vm.runInContext(code,c);return c;};
+for(const rows of [60,40,24,23,16,15,12,6]){
+ const c=host(160,rows,false),strip=d.foldRows(rows);
+ assert.deepEqual([c.height(),c.nativeRows(),c.nativeColumns(),c.geometry().side],[strip,rows-strip,160,false],String(rows));
+}
+// Folded beside or under, the native keeps every column.
+for(const position of ['right','left']){const c=host(120,40,false);c.displayConfiguration.position=position;assert.equal(c.nativeColumns(),120);}
+const c=host(160,40,false);
+const painted=(expanded,groups,extra={})=>{Object.assign(c,{expanded,paintedGroups:new Set(groups)},extra);return c.claudePanelPainted();};
+// Folded: the strip's session row takes the status row's place (no Git or job row needed).
+assert.equal(painted(false,['head','context','quota','wait','route']),true);
+assert.equal(painted(false,['head','context']),true);
+// Folded to what to do alone: Claude keeps its own status row.
+assert.equal(painted(false,['wait']),false);
+// Open: every group the row carries, as before (#1635).
+assert.equal(painted(true,['head','context','quota','wait','route']),false);
+assert.equal(painted(true,['head','git','context','quota','jobs','wait','route']),true);
+// Hidden (Fleet over the window) or another harness: Claude's row stays.
+assert.equal(painted(false,['head'],{fleetView:{}}),false);
+assert.equal(painted(false,['head'],{fleetView:null,harness:'codex'}),false);
+""")
+
+    def test_messages_new_counts_what_arrived_since_the_last_input(self):
+        # The strip's `MESSAGES ←N`: kept messages received (`←`) after the person's last input in
+        # this session; every kept one before any input; sent ones never.
+        import importlib, sys as _sys
+        _sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
+        shell = importlib.import_module("session_shell")
+        rows = [{"way": "←", "at": 100}, {"way": "→", "at": 150}, {"way": "←", "at": 200}, {"way": "←", "at": 300}, {"way": "←"}]
+        self.assertEqual(shell.messages_since_input(rows, {"human": {"at": 150}}), 2)
+        self.assertEqual(shell.messages_since_input(rows, {"human": {"at": 300}}), 0)
+        self.assertEqual(shell.messages_since_input(rows, {"human": None}), 3)
+        self.assertEqual(shell.messages_since_input(rows, {}), 3)
+        self.assertEqual(shell.messages_since_input([], {"human": {"at": 1}}), 0)
 
     def test_one_judgment_decides_the_fold_and_the_native_width(self):
         self.node(r"""
@@ -152,12 +268,14 @@ for(const cols of [100,40,140])assert.deepEqual(fold(cols,{folded:false}),{folde
 assert.equal(fold(100,null,true).folded,false);
 assert.equal(d.fold({cols:40,configuration:{...configuration,layout:'bottom'}}).folded,false);
 assert.equal(d.fold({cols:40,choice:{folded:true},configuration:{...configuration,layout:'bottom'}}).folded,true);
-// The sizes the native is told: open beside (cols - width - 2), the strip (cols - 8 - 1), under (cols).
-const at=(cols,expanded,extra={})=>d.layout({cols,rows:40,expanded,configuration:{...configuration,...extra}});
-assert.equal(at(180,true).nativeCols,138);assert.equal(at(180,false).nativeCols,171);assert.equal(at(180,false).panelCols,d.STRIP);
-assert.equal(at(101,false).nativeCols,92);assert.equal(at(102,true).nativeCols,60);
-assert.deepEqual([at(180,false,{position:'left'}).nativeColumn,at(180,false).panelColumn],[9,172]);
-assert.deepEqual([at(180,false,{layout:'bottom'}).side,at(180,false,{layout:'bottom'}).nativeCols],[false,180]);
+// The sizes the native is told: open beside (cols - width - 2); folded, the whole width over the
+// strip (rows - its rows), in every placement; under (cols).
+const at=(cols,expanded,extra={})=>d.layout({cols,rows:40,expanded,panelRows:expanded?1:d.foldRows(40),configuration:{...configuration,...extra}});
+assert.equal(at(180,true).nativeCols,138);assert.equal(at(102,true).nativeCols,60);
+for(const extra of [{},{position:'left'},{layout:'bottom'}])for(const cols of [180,101]){
+ const g=at(cols,false,extra);
+ assert.deepEqual([g.side,g.folded,g.left,g.nativeCols,g.nativeRows,g.panelCols,g.nativeColumn,g.panelColumn,g.gap],[false,true,false,cols,36,cols,0,0,0],JSON.stringify(extra));
+}
 // Opened by hand where the panel cannot stand beside (native under 48), it opens under the native area.
 assert.deepEqual([at(80,true).side,at(80,true).nativeCols],[false,80]);
 """)
@@ -220,16 +338,17 @@ assert.deepEqual([100,70,140,60].map(w=>resize(c,w)),['beside','under','beside',
 
     def test_no_window_size_leaves_the_native_area_without_a_cell(self):
         self.node(r"""
-const assert=require('node:assert/strict'),path=require('node:path'),d=require(path.join(process.argv[1],'native-display.cjs'));
-// A window of nine cells or fewer once left the native beside the strip zero or fewer columns: the
-// PTY refused the size and the panel never came back. The strip stands only where the native beside
-// it keeps STRIP_NATIVE_MIN columns; narrower, the panel folds to the one row under the native.
-assert.equal(d.STRIP_NATIVE_MIN,20);
-const strip=(cols,extra={})=>d.layout({cols,rows:40,expanded:false,configuration:{layout:'side',side_width:40,...extra}});
-assert.deepEqual([strip(29).side,strip(29).nativeCols,strip(29).panelCols],[true,20,d.STRIP]);
-for(const cols of [28,9,1])for(const extra of [{},{position:'left'}]){
- const g=strip(cols,extra);
- assert.deepEqual([g.side,g.folded,g.left,g.nativeCols,g.panelCols,g.nativeColumn,g.panelRow,g.nativeRows],[false,true,false,cols,cols,0,null,39],JSON.stringify({cols,extra,g}));
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),d=require(path.join(process.argv[1],'native-display.cjs'));
+// The eight-cell strip and its rules are gone: one folded form, under the native area.
+assert(!('STRIP' in d)&&!('STRIP_NATIVE_MIN' in d));
+for(const file of ['native-display.cjs','panel-view.cjs','host.cjs'])assert(!/\bSTRIP(_GAP|_NATIVE_MIN)?\b/.test(fs.readFileSync(path.join(process.argv[1],file),'utf8')),file);
+// Folded, at every width 20-200 and height 6-60, in every placement: the native keeps every column and
+// a row, and the strip (the host's foldRows) ends on the window's last row.
+for(const extra of [{},{position:'left'},{layout:'bottom'}])for(let cols=20;cols<=200;cols++)for(let rows=6;rows<=60;rows++){
+ const strip=d.foldRows(rows),g=d.layout({cols,rows,expanded:false,configuration:{layout:'side',side_width:40,...extra},panelRows:strip});
+ const seen=JSON.stringify({cols,rows,extra,g});
+ assert(!g.side&&g.folded&&g.nativeCols===cols&&g.panelCols===cols&&g.nativeRows>=1&&strip>=1,seen);
+ assert.equal(g.nativeRows+strip,rows,seen);
 }
 // Every width 1-40 and height 1-12, open or folded, beside or under: the native keeps a cell and a row.
 for(const extra of [{},{position:'left'},{layout:'bottom'}])for(const expanded of [true,false])
@@ -265,36 +384,28 @@ for(const [queued,stamp,expected] of [[false,place,['question']],[true,place,['q
 """)
 
 
-    def test_the_strip_carries_the_lab_token_under_the_route_count(self):
-        # Draft A: `5 LB` (conditions), `!1LB` (failed or stuck), `?1LB` (unconfirmed or unnamed),
-        # `9+LB`, as the board words them, under `N RT`. Short of rows a plain count goes before
-        # the route count, a `!`/`?` after it, the answer wait last; `!9+LB` keeps `!9+`. The
-        # border stays the session's own color.
+    def test_the_strip_carries_labs_attention_token_at_the_end_of_the_routes_row(self):
+        # Draft A's strip token, now in the strip under the native area: only a LAB that needs a look
+        # (`!1` failed or stuck, `?1` unconfirmed or unnamed, as the board words them) ends the routes
+        # row as `!1 LAB`; a plain count draws nothing there. It goes first when cells run short and
+        # never colors the strip's rule or the session row.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
 const styles={dim:{dim:true},loc_repo:{foreground:252},lvl_r:{foreground:217},lvl_y:{foreground:186},g_spin:{foreground:230}};
 const T=(t,k)=>({text:t,...(styles[k]||{})});
 const token=s=>{const m=/^([!?]?)(\d+\+?)( ?LB)$/.exec(s);return {strip:[T(m[1]+m[2],m[1]==='!'?'lvl_r':m[1]==='?'?'lvl_y':'loc_repo'),T(m[3],'dim')],strip_attention:!!m[1]};};
-const strip=(model={},o={})=>v.render({width:8,height:12,side:true,folded:true,model:{tag:'[e9]',styles,...model},state:'idle',harness:'claude',questions:()=>[],...o});
-const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
-assert.deepEqual(text(strip({route_total:1,lab:token('5 LB')})).slice(1,6),['│ ● e9 │','│      │','│ 1 RT │','│ 5 LB │','│      │']);
-for(const [s,row] of [['!1LB','│ !1LB │'],['?1LB','│ ?1LB │'],['9+LB','│ 9+LB │'],['!9+LB','│ !9+  │'],['?9+LB','│ ?9+  │']])
- assert.deepEqual(text(strip({lab:token(s)})).slice(1,4),['│ ● e9 │','│      │',row],s);
-// With a wait: route count, LAB, wait, in that order.
-assert.deepEqual(text(strip({route_total:2,wait:'◑답 대기 1',lab:token('!1LB')})).slice(1,6),['│ ● e9 │','│      │','│ 2 RT │','│ !1LB │','│ ◑ 1  │']);
-// The mark takes the board's color, `LB` the label's dim.
-const row=strip({lab:token('!1LB')}).rows[3];assert(row.find(x=>x.text==='!1').foreground===217&&row.find(x=>x.text==='LB').dim);
-// Short of rows: blank, then `5 LB`, then `2 RT`, then the wait; a `!` outlasts the route count.
-const rows=(lab,h)=>text(strip({route_total:2,wait:'◑답 대기 1',lab:token(lab)},{height:h})).slice(1,-1);
-assert.deepEqual(rows('5 LB',7),['│ ● e9 │','│ 2 RT │','│ 5 LB │','│ ◑ 1  │','│  «   │']);
-assert.deepEqual(rows('5 LB',6),['│ ● e9 │','│ 2 RT │','│ ◑ 1  │','│  «   │']);
-assert.deepEqual(rows('!1LB',6),['│ ● e9 │','│ !1LB │','│ ◑ 1  │','│  «   │']);
-assert.deepEqual(rows('?1LB',5),['│ ● e9 │','│ ◑ 1  │','│  «   │']);
-// No board, no row; the border is the session's own whatever the board says.
-assert.deepEqual(text(strip({lab:null})).slice(1,3),['│ ● e9 │','│      │']);
+const strip=(model={},o={})=>v.render({width:60,height:4,folded:true,model:{tag:'[e9]',styles,route_label:'route 2 ⠏2',route_count:0,...model},state:'idle',harness:'claude',questions:()=>[],...o});
+const text=r=>r.rows.map(row=>row.map(x=>x.text).join('').trimEnd());
+for(const [s,want] of [['!1LB','2 ROUTE ⠏2 │ !1 LAB'],['?1LB','2 ROUTE ⠏2 │ ?1 LAB'],['!9+LB','2 ROUTE ⠏2 │ !9+ LAB'],['5 LB','2 ROUTE ⠏2'],['9+LB','2 ROUTE ⠏2']])
+ assert.equal(text(strip({lab:token(s)}))[2],want,s);
+// The mark takes the board's color, `LAB` the label's dim.
+const row=strip({lab:token('!1LB')}).rows[2];assert(row.find(x=>x.text==='!1').foreground===217&&row.find(x=>x.text===' LAB').dim);
+// Short of cells LAB goes first.
+assert.equal(text(strip({lab:token('!1LB'),messages_new:3},{width:30}))[2],'2 ROUTE ⠏2 │ MESSAGES ←3');
+// No board, no token; the rule and the session row are the session's own whatever the board says.
+assert(!text(strip({lab:null})).join('').includes('LAB'));
 for(const state of ['idle','working','blocked'])
- assert.deepEqual(strip({lab:token('!3LB')},{state,frame:2}).rows.map(r=>[r[0],r.at(-1)]),strip({},{state,frame:2}).rows.map(r=>[r[0],r.at(-1)]),state);
-// Every harness gets the same strip.
+ assert.deepEqual(strip({lab:token('!3LB')},{state,frame:2}).rows.slice(0,2),strip({},{state,frame:2}).rows.slice(0,2),state);
 for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({lab:token('?2LB')},{harness})),text(strip({lab:token('?2LB')})));
 """)
 
