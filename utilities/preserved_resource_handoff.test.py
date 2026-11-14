@@ -633,6 +633,48 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
         (DC.dispatch_state_root(self.jobs) / "watchdog" / f"{REPLACEMENT}.json").unlink()
         self.assertEqual(self._stall_notices(t0, (0, 601, 1202, 7200)), [0, 1, 1, 1])
 
+    def test_a_collection_pass_is_one_snapshot_of_the_stall_and_the_next_pass_sees_the_change(self):
+        # RV-PR1592-R5 / E9-CORRECT-SPEED-LEG4-2: a Fleet collection pass memoizes the notice's
+        # stall observation, so an outcome cancelled after the first read shows in the next
+        # pass. That is the contract (one pass, one snapshot), kept safe because every path that
+        # acts on a notice observes outside a pass; a direct call and another thread see it now.
+        import dispatch_supervision as SUPERVISION
+        from tools.fleet import pass_scope
+        self._park_successor_on_the_inherited_run()
+        original = self._outcome_path().read_text()
+        cancelled = json.loads(original)
+        cancelled["summary"] = "cancelled"
+        cancelled = json.dumps(cancelled)
+        t0 = time.time()
+        self._outcome_path().write_text(cancelled, encoding="utf-8")
+        self.assertEqual(self._stall_notices(t0, (0, 601)), [0, 1])   # long-quiet stall on record
+        self._outcome_path().write_text(original, encoding="utf-8")   # the proven handoff again
+        with mock.patch.object(SUPERVISION.time, "time", return_value=t0 + 1202):
+            row = SUPERVISION._rows(self.jobs, {REPLACEMENT})[REPLACEMENT]
+
+            def seen():
+                return SUPERVISION._stall_observation_for_notice(self.jobs, REPLACEMENT, row)
+
+            def direct():
+                return SUPERVISION.update_attempt_stall_observation(
+                    self.jobs, REPLACEMENT, persist=False, row=row)
+
+            with pass_scope.collection_pass():
+                first = seen()
+                self._outcome_path().write_text(cancelled, encoding="utf-8")   # lands after the read
+                self.assertEqual((first["state"], first["reason"]), ("active", "supervised-owner-parked"))
+                self.assertEqual(seen(), first)                  # the same pass: the same value
+                self.assertEqual(seen(), first)
+                self.assertEqual(direct()["state"], "stalled")   # a call outside the memo sees it now
+                other_thread = []
+                worker = threading.Thread(target=lambda: other_thread.append(seen()))
+                worker.start()
+                worker.join()
+                self.assertEqual(other_thread[0]["state"], "stalled")   # the scope is thread-local
+            with pass_scope.collection_pass():
+                self.assertEqual(seen()["state"], "stalled")     # the next pass reflects the change
+            self.assertEqual(seen()["state"], "stalled")         # outside a pass every call observes
+
     def test_one_observation_pass_reads_the_predecessor_close_journal_once(self):
         # RV-PR1592-R3: the handoff proof answers its intent, result, parent-close entries
         # and workflow state from one read of the predecessor's close journal. It used to

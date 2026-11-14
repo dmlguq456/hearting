@@ -1039,6 +1039,15 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         view = slot["view"] or {}
         record = slot["record"] or {}
         jobs = slot["jobs"]
+        # The fast first pass left this route's record for the detail pass (the projection
+        # says so): no record here is "not read yet", not "nothing runs". A detail pass that
+        # tried it and did not bring it leaves it unread: unknown as well, no longer to come.
+        deferred = not view and not record and any(
+            getattr(_work(entity), "_details_deferred", False) is True
+            for entity in jobs + slot["sessions"])
+        unread = not view and not record and not deferred and any(
+            getattr(_work(entity), "_details_unread", False) is True
+            for entity in jobs + slot["sessions"])
         expected_owner = _text(record.get("owner_attempt_id"))
         if expected_owner == "-":
             expected_owner = None
@@ -1269,6 +1278,13 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             if isinstance(verification, Mapping) and verification.get("closed_at"):
                 route["closed"] = True
                 route["resume"] = None
+        if deferred or unread:
+            # Not known: whether it runs, its state and its stages. Never ended, 0 or an empty
+            # rail, never counted or drawn in a running colour. It reads "details wait" only
+            # while the details are still to come (``details_wait``); once tried and not
+            # brought, Fleet's usual unknown marks (``·``, ``?``) stand for it.
+            route.update(state="wait", activity="wait", current=None, stages=None, legs=[],
+                         resume=None, details_wait=deferred)
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -1445,13 +1461,19 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
                     and (doc is None or found["mtime"] > doc["mtime"])):
                 doc = found
         open_routes = sum(1 for route in routes if route["repo"] == name and route.get("current"))
+        # Routes not known (details to come, or tried and not brought): never counted, never a 0.
+        route_wait = unknown_kind([unknown_route_kind(route) for route in routes if route["repo"] == name]
+                                  + [row.get("route_wait") for row in session_rows
+                                     if row["repo_id"] == name])
         asked = sum(1 for item in questions if item.get("project") == name and not item.get("older"))
         result = (results or {}).get(name) or {}
         done_at = _num(result.get("at")) if result.get("result") == "success" else None
-        if doc is None and not (open_routes or asked or repo.get("done")):
+        if doc is None and not (open_routes or route_wait or asked or repo.get("done")):
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        if route_wait:
+            status["routes_wait"] = route_wait
         question_lines = []
         for question in questions:
             if question.get("project") != name or question.get("older"):
@@ -2323,6 +2345,36 @@ def current_session_activity(model, candidate, snapshot):
 
 # Display cells one collection may fail to observe; groups move together.
 _UNOBSERVED_CELL_GROUPS = (("model", "effort"), ("context", "window", "context_detail"), ("title",))
+
+
+# A late source in one of these states was tried this generation (it is not "to come").
+_TRIED_STATES = frozenset(("failed", "partial", "timeout", "error", "unavailable"))
+
+
+def mark_details_wait(model, readiness):
+    """A frame shown on the basic collection alone: say which cells are still to come.
+
+    The required details are not in yet, so a cell they fill is marked, never left looking
+    empty (or filled). Session rows with no title carry ``title_wait`` and the TITLE header
+    says "details wait" while any required source is pending. Nothing else changes, and the
+    model is not the last complete one (``mark_published`` and persistence never see it).
+    """
+    pending = (tuple(readiness.get("details_pending") or ())
+               if isinstance(readiness, Mapping) else ())
+    # Only a source not tried yet is "to come": one that ran and failed, timed out or brought a
+    # part leaves its cells to the usual unknown mark (``·``), never a lasting wait.
+    sources = readiness.get("sources") if isinstance(readiness, Mapping) else None
+    sources = sources if isinstance(sources, Mapping) else {}
+    pending = tuple(name for name in pending
+                    if str((sources.get(name) or {}).get("state") or "pending").lower()
+                    not in _TRIED_STATES)
+    if model is None or not pending:
+        return model
+    rows = [dict(row, title_wait=True) if row.get("title") is None
+            and row.get("state") not in {"dead", "stale"} else row for row in model.sessions]
+    system = dict(model.system) if isinstance(model.system, Mapping) else {}
+    system["details_wait"] = True
+    return model.with_updates(sessions=rows, system=system)
 
 
 def retain_unobserved_cells(candidate, published):
@@ -3330,12 +3382,58 @@ def route_marker_state(route):
     Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
     working. A route its reader found with nothing running reads as no response and never
     spins, as the session tree's mark already reads it."""
+    if route.get("state") == "wait":
+        return "wait"                 # not known (details to come or unread): neither working nor ended
     state = str(route.get("state") or "")
     if state == "stale":
         return "stale"
     if route.get("activity") == "running":
         return "working"
     return state if state in ("working", "blocked", "dead", "done") else "idle"
+
+
+def unknown_route_kind(route):
+    """``"wait"`` while a route's details are still to come, ``"unread"`` once a detail pass
+    tried and did not bring them, None for a route that is known."""
+    if route.get("state") != "wait":
+        return None
+    return "wait" if route.get("details_wait") else "unread"
+
+
+def unknown_kind(kinds):
+    """The one unknown mark several routes share: ``"wait"`` while any is still to come, else
+    ``"unread"`` when any was not read, else None (``True`` is an older spelling of wait)."""
+    kinds = [kind for kind in kinds if kind]
+    if not kinds:
+        return None
+    return "unread" if all(kind == "unread" for kind in kinds) else "wait"
+
+
+def route_waits(routes, session_rows, session_index):
+    """Mark the session rows whose route count is not known (``route_wait``: wait or unread).
+
+    A route not known counts for the session it is bound to. One not bound yet may belong to
+    any session whose own route binding is not known either (deferred or unread), so those rows
+    carry it too: no route count reads as a current value (0) before the details are in."""
+    unknown = [(route, unknown_route_kind(route)) for route in routes if unknown_route_kind(route)]
+    if not unknown:
+        return
+    bound = {}
+    for route, kind in unknown:
+        if route.get("session_tag"):
+            bound.setdefault(route["session_tag"], []).append(kind)
+    unbound = unknown_kind([kind for route, kind in unknown if not route.get("session_tag")])
+    for row in session_rows:
+        session = session_index[row["tag"]]["session"]
+        work = _work(session)
+        own = (getattr(work, "_details_deferred", False) is True
+               or getattr(work, "_details_unread", False) is True)
+        kinds = list(bound.get(row["tag"], ()))
+        if unbound and own and row.get("state") not in ("dead", "stale"):
+            kinds.append(unbound)
+        kind = unknown_kind(kinds)
+        if kind:
+            row["route_wait"] = kind
 
 
 def route_state_counts(routes):
@@ -3594,6 +3692,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         sid_of = {row["tag"]: session_index[row["tag"]]["sid"] for row in session_rows}
         session_rows.sort(key=lambda row: position.get(str(sid_of.get(row["tag"])), len(position)))
     routes, nodes = _route_records(snapshot, session_rows, session_index, resolver, clock)
+    route_waits(routes, session_rows, session_index)
     results = _repo_results(snapshot, resolver, clock)
     repos = _repo_records(session_rows, routes, results, clock)
     if not order:

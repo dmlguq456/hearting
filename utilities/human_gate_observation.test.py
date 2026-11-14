@@ -278,6 +278,53 @@ class PendingWaitTest(unittest.TestCase):
         self.assertEqual({key: one["items"][0][key] for key in ("route_id", "since", "owner")},
                          {key: selected[key] for key in ("route_id", "since", "owner")})
 
+    def test_last_pass_route_paths_follow_the_latest_full_pass_only(self):
+        """The wake list is built from the routes the latest full pass saw, not from ``_WAIT_MEMO``."""
+        route, _attempt, _lease, metadata = self._blocked_owner_fixture()
+        files = []
+        rows = []
+        for name in ("att-a", "att-b"):
+            route_file = self.root / (name + ".route.json")
+            route_file.write_text(json.dumps(route), encoding="utf-8")
+            files.append(str(route_file))
+            row = (metadata.replace("attempt_id=att-owner", "attempt_id=" + name)
+                   .replace("route_file=" + str(self.root / "owner.route.json"),
+                            "route_file=" + str(route_file)))
+            rows.append("300\tdone\t/repo\t/wt\towner\t%s,note=dead-worker-blocked,"
+                        "failure_class=blocked\n" % row)
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        H._WAIT_MEMO.clear()
+        H.read_answer_waits(jobs_paths=[self.jobs], now=400)
+        both = H.last_pass_route_paths()
+        self.assertEqual(both, tuple(sorted(both)))
+        self.assertTrue(set(files) <= set(both))
+        # The second full pass sees route B only: A is no longer a wake source.
+        self.jobs.write_text(rows[1], encoding="utf-8")
+        H.read_answer_waits(jobs_paths=[self.jobs], now=401)
+        only_b = H.last_pass_route_paths()
+        self.assertIn(files[1], only_b)
+        self.assertNotIn(files[0], only_b)
+        # An ``only_id`` pass never replaces the list, even though it reads route B.
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        H.read_answer_waits(jobs_paths=[self.jobs], now=402, only_id="S3:att-a")
+        self.assertEqual(H.last_pass_route_paths(), only_b)
+        # A full pass over another registry that cannot be read names nothing (the first one is
+        # no longer listed), while the memo keeps its old entries.
+        H.read_answer_waits(jobs_paths=[self.jobs], now=403)
+        self.assertTrue(set(files) <= set(H.last_pass_route_paths()))
+        self.assertTrue(H._WAIT_MEMO)
+        H.read_answer_waits(jobs_paths=[self.root / "missing" / "jobs.log"], now=404)
+        self.assertEqual(H.last_pass_route_paths(), ())
+        self.assertTrue(H._WAIT_MEMO, "the accessor must not mirror the memo")
+        # A listed registry this pass cannot read confirms none of its routes settled: the paths
+        # it named last stay.
+        H.read_answer_waits(jobs_paths=[self.jobs], now=405)
+        named = H.last_pass_route_paths()
+        self.assertTrue(set(files) <= set(named))
+        with mock.patch("dispatch_registry_cache.registry_snapshot", side_effect=OSError("synthetic")):
+            H.read_answer_waits(jobs_paths=[self.jobs], now=406)
+        self.assertEqual(H.last_pass_route_paths(), named)
+
     def test_later_owner_on_different_route_file_does_not_close_wait(self):
         route, _attempt, _lease, metadata = self._blocked_owner_fixture()
         route_file = self.root / "same-route-other-file.json"

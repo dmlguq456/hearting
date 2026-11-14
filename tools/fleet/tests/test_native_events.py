@@ -40,6 +40,28 @@ class NativeEventTests(unittest.TestCase):
         self.assertTrue(self.events._dirty.wait(2), 'atomic source replacement was missed')
         self.assertTrue(self.events.take_changed())
 
+    def test_rebuild_dirty_is_clearable_and_wait_changed_sees_real_events(self):
+        # The producer clears the post-registration dirty after each configure so a
+        # rebuild never schedules the next pass; a real write must still be seen.
+        path = self.root / 'feed'; path.write_text('first')
+        self.assertFalse(self.events.available)
+        self.events.configure((str(path),))
+        self.assertTrue(self.events.ready.wait(2))
+        self.assertTrue(self.events.available)
+        self.assertTrue(self.events.take_changed())          # rebuild's post-registration dirty
+        self.assertFalse(self.events.take_changed())
+        self.assertFalse(self.events.wait_changed(.3))      # nothing written: no wake
+        built = []
+        original = self.events._rebuild
+        self.events._rebuild = lambda *a, **k: (built.append(1), original(*a, **k))[1]
+        self.events.configure((str(path),))                  # same sources: no rebuild, no dirty
+        self.assertTrue(self.events.ready.is_set())
+        self.assertFalse(self.events.wait_changed(.3))
+        self.assertEqual(built, [])
+        path.write_text('second')
+        self.assertTrue(self.events.wait_changed(2.0))       # cleared dirty does not hide events
+        self.assertFalse(self.events.take_changed())
+
     def test_a_missing_parent_is_followed_when_it_appears(self):
         path = self.root / 'new' / 'nested' / 'feed'
         self.watch([path])

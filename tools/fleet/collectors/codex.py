@@ -445,19 +445,61 @@ def _advance_pending_input(open_calls, lifecycle, row):
         open_calls.pop(call_id, None)
 
 
+# A row can change the lifecycle or the open question calls only if it names one of these (the
+# writer emits plain ASCII keys and values; none of them is ever JSON-escaped). Every other row,
+# the bulk of a long rollout (tool calls and their outputs), is passed over without decoding it, so
+# the first full read of a large rollout costs a byte search instead of a JSON parse per row. A tool
+# result matters only while a question call is open (`pending_calls`): it may close that call, so
+# from the first open call on, every row of the chunk is looked at as before.
+_LIFECYCLE_TOKENS = (b"task_started", b"task_complete", b"turn_aborted", b"item_completed",
+                     b"request_user_input", b"send_user_message_question_reply")
+
+
+def _lifecycle_hits(body):
+    """Sorted offsets in ``body`` of every lifecycle token (a row naming none is no event)."""
+    found = []
+    for token in _LIFECYCLE_TOKENS:
+        at = body.find(token)
+        while at >= 0:
+            found.append(at)
+            at = body.find(token, at + 1)
+    found.sort()
+    return found
+
+
+def _consume_lifecycle_row(lifecycle, raw_line, pending_calls):
+    # One decode serves both observers; a trailing CR is JSON whitespace.
+    try:
+        row = json.loads(raw_line)
+    except Exception:
+        row = None
+    if pending_calls is not None:
+        _advance_pending_input(pending_calls, lifecycle, row)
+    return _advance_task_lifecycle_row(lifecycle, row)
+
+
 def _consume_lifecycle_bytes(lifecycle, carry, data, pending_calls=None):
     """Consume complete newline-delimited rows, retaining an incomplete suffix."""
-    parts = (carry + data).split(b"\n")
-    carry = parts.pop()
-    for raw_line in parts:
-        # One decode serves both observers; a trailing CR is JSON whitespace.
-        try:
-            row = json.loads(raw_line)
-        except Exception:
-            row = None
-        if pending_calls is not None:
-            _advance_pending_input(pending_calls, lifecycle, row)
-        lifecycle = _advance_task_lifecycle_row(lifecycle, row)
+    buffer = carry + data
+    cut = buffer.rfind(b"\n")
+    if cut < 0:
+        return lifecycle, buffer
+    body, carry = buffer[:cut], buffer[cut + 1:]
+    position, length = 0, len(body)
+    for hit in _lifecycle_hits(body):
+        if pending_calls:
+            break
+        if hit < position:
+            continue                      # another token of a row already consumed
+        newline = body.rfind(b"\n", position, hit)
+        start = position if newline < 0 else newline + 1
+        end = body.find(b"\n", hit)
+        end = length if end < 0 else end
+        lifecycle = _consume_lifecycle_row(lifecycle, body[start:end], pending_calls)
+        position = end + 1
+    if pending_calls and position <= length:
+        for raw_line in body[position:].split(b"\n"):
+            lifecycle = _consume_lifecycle_row(lifecycle, raw_line, pending_calls)
     return lifecycle, carry
 
 

@@ -44,6 +44,13 @@ class HumanWaitStateTests(unittest.TestCase):
                                      return_value={"complete": True, "pending": {}})
         rollouts.start()
         self.addCleanup(rollouts.stop)
+        # Tests with an injected clock wait by stat beat; the kernel-notification wake has
+        # its own tests (WakeSourceTests), which turn it back on.
+        for name, value in (("_WAKE_FAILED", True), ("_WAKE_EVENTS", None), ("_NEXT_WAKE", None),
+                            ("_WATCH_STAT", ())):
+            patch = mock.patch.object(state, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.addCleanup(self.tmp.cleanup)
 
     def test_only_explicit_first_line_markers_open_private_signal(self):
@@ -3222,6 +3229,11 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, XDG_STATE_HOME=self.tmp.name)
         env.start()
         self.addCleanup(env.stop)
+        for name, value in (("_WAKE_FAILED", True), ("_WAKE_EVENTS", None), ("_NEXT_WAKE", None),
+                            ("_WATCH_STAT", ())):
+            patch = mock.patch.object(state, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def test_wait_and_route_badges_share_one_read_and_keep_exact_sessions(self):
         now = time.time()
@@ -4149,6 +4161,709 @@ class MessageCompletionTests(unittest.TestCase):
         self.assertIsNone(self.f.record(signal))
         self.assertEqual(self.source(signal)["lifecycle"], "open")
 
+
+class WakeSourceTests(unittest.TestCase):
+    """The producer wakes on sources outside the registry, and never on its own writes.
+
+    Real descriptors and real time (kernel notifications, pidfd, a real producer loop);
+    every wait is bounded far below the 30 second cadence it replaces.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        env = mock.patch.dict(os.environ, {
+            "XDG_STATE_HOME": str(self.base / "state"),
+            "FLEET_INTERACTION_STATE_DIR": str(self.base / "interactions"),
+            "PATH": str(self.base / "empty-bin")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.root = state.state_root()
+        self.root.mkdir(parents=True, mode=0o700)
+        (self.root / ".demand").touch()
+        self.registry = self.base / "reg" / "jobs.log"
+        self.registry.parent.mkdir()
+        self.registry.write_text("open\n", encoding="utf-8")
+        self.stream = self.base / "reg" / "logs" / "e2e.claude.jsonl"
+        self.stream.parent.mkdir()
+        self.stream.write_text("{}\n", encoding="utf-8")
+        interactions = self.base / "interactions" / "claude"
+        interactions.mkdir(parents=True)
+        self.interactions = interactions
+        import tools.fleet.collectors.dispatch as dispatch
+        for patch in (
+                mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(self.registry)]),
+                mock.patch.object(observation, "_codex_rollout_waits",
+                                  return_value={"complete": True, "pending": {}}),
+                mock.patch.object(state, "_request_producer"),
+                mock.patch.object(state, "_WAKE_FAILED", False),
+                mock.patch.object(state, "_WAKE_EVENTS", None),
+                mock.patch.object(state, "_NEXT_WAKE", None),
+                mock.patch.object(state, "_WATCH_STAT", ())):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.addCleanup(state._stop_wake_events)
+        self.sleepers = []
+        self.addCleanup(self._reap)
+
+    def _reap(self):
+        for process in self.sleepers:
+            process.kill()
+            process.wait()
+
+    def sleeper(self):
+        from tools.fleet.collectors.procscan import read_proc_start
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.sleepers.append(process)
+        return process, read_proc_start(process.pid)
+
+    def snapshot(self, *, pid=None, start=None):
+        job = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.stream),
+                              pid=pid, proc_start=start)
+        return SimpleNamespace(jobs=[job], sessions=[])
+
+    def arm(self, snapshot=None):
+        state._remember_wake_sources(snapshot)
+        state._arm_wake_events()
+        events = state._wake_events()
+        self.assertIsNotNone(events)
+        return events
+
+    def slept(self, cause, *, delay=30.0):
+        """Seconds `_sleep_until_registry_change` took when `cause` ran 0.3 s into it."""
+        generation = state._source_generation()
+        timer = threading.Timer(0.3, cause)
+        timer.start()
+        began = time.monotonic()
+        state._sleep_until_registry_change(delay, generation, 0.0)
+        timer.join()
+        return time.monotonic() - began
+
+    def test_a_worker_stream_append_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_s4_signal_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        def signal():
+            value = state.signal_value("claude", "sid-wake", "seat-wake", "[답변 필요] 깨움?", sequence=1)
+            self.assertTrue(state.write_signal(value))
+        self.assertLess(self.slept(signal), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_s1_state_file_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        self.assertLess(self.slept(lambda: (self.interactions / "sid-s1.json").write_text("{}")), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_owner_process_ending_wakes_the_producer(self):
+        process, start = self.sleeper()
+        self.arm(self.snapshot(pid=process.pid, start=start))
+        self.assertIn((process.pid, start), state._NEXT_WAKE[2])
+        self.assertLess(self.slept(process.terminate), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_a_network_file_is_stat_watched_not_notification_watched(self):
+        import claude_process_identity as identity
+        remote = str(self.base / "reg" / "logs")
+        real = identity.is_local_path
+        with mock.patch.object(identity, "is_local_path",
+                               side_effect=lambda path, **kw: not str(path).startswith(remote) and real(path, **kw)):
+            events = self.arm(self.snapshot())
+        self.assertIn(str(self.stream), state._NEXT_WAKE[3])
+        self.assertNotIn(str(self.stream), state._NEXT_WAKE[0])
+        self.assertIn(str(self.stream), state._WATCH_STAT)
+        self.assertNotIn(str(self.stream), events._sources[0])
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "stat")
+
+    def test_the_producers_own_writes_do_not_wake_it(self):
+        events = self.arm(self.snapshot())
+        self.assertFalse(events.wait_changed(0.3))
+        now = time.time()
+        for index in range(3):
+            self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now + index,
+                                                 "route_sessions": {}, "route_status": {}}))
+            state._write(self.root / ".demand", {"claude\0sid": now})   # a display's demand
+            (self.root / ".demand").touch()
+            with state._cache_write_lock():
+                pass
+        self.assertTrue((self.root / "fleet.json").exists() or (self.root / "projection.json").exists())
+        self.assertFalse(events.wait_changed(1.0), "a cache write, demand update or lock woke the producer")
+
+    def test_without_a_notification_the_whole_delay_is_slept(self):
+        self.arm(self.snapshot())
+        self.assertGreaterEqual(self.slept(lambda: None, delay=2.0), 1.9)
+        self.assertEqual(state._LAST_WAKE_REASON, "cadence")
+
+    def test_a_missing_kernel_notification_falls_back_to_the_stat_beat(self):
+        from tools.fleet import native_events
+        with mock.patch.object(native_events.ctypes, "CDLL", side_effect=OSError("no inotify")):
+            events = self.arm(self.snapshot())
+            self.assertFalse(events.available)
+            state._remember_wake_sources(self.snapshot())
+        self.assertIn(str(self.stream), state._WATCH_STAT)
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "stat")
+
+    def test_stopping_leaves_no_thread_or_descriptor(self):
+        process, start = self.sleeper()
+        before = len(os.listdir("/proc/self/fd"))
+        self.arm(self.snapshot(pid=process.pid, start=start))
+        self.assertTrue(any(t.name == "fleet-native-events" for t in threading.enumerate()))
+        state._stop_wake_events()
+        self.assertFalse(any(t.name == "fleet-native-events" and t.is_alive() for t in threading.enumerate()))
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    # (S-d) the source list is a pure, stable function of what the pass read
+    def test_wake_sources_are_stable_sorted_and_keep_missing_streams(self):
+        process, start = self.sleeper()
+        dead = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.base / "gone" / "x.jsonl"),
+                               pid=process.pid, proc_start="not-its-start")
+        live = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.stream),
+                               pid=process.pid, proc_start=start)
+        ended = SimpleNamespace(status="done", harness="claude", _transcript_path=str(self.base / "old.jsonl"),
+                                pid=None, proc_start=None)
+        first = state._wake_sources(SimpleNamespace(jobs=[dead, live, ended], sessions=[]))
+        again = state._wake_sources(SimpleNamespace(jobs=[ended, live, dead], sessions=[]))
+        self.assertEqual(first, again)
+        self.assertEqual(first[2], ((process.pid, start),))              # the process that is no longer the one is left out
+        self.assertIn(str(self.base / "gone" / "x.jsonl"), first[0])     # a stream not there yet stays listed
+        self.assertNotIn(str(self.base / "old.jsonl"), first[0])         # a finished job is not watched
+        for part in first:
+            self.assertEqual(list(part), sorted(part))
+        self.assertEqual(state._wake_sources(None), state._wake_sources(None))
+
+    # the cost of naming the sources must not grow with how many directories the pass read
+    def test_a_pass_with_many_directories_reads_the_mount_table_once(self):
+        import claude_process_identity as identity
+        jobs = []
+        for index in range(60):
+            directory = self.base / "many" / f"d{index}"
+            directory.mkdir(parents=True)
+            jobs.append(SimpleNamespace(status="open", harness="claude", pid=None, proc_start=None,
+                                        _transcript_path=str(directory / "s.jsonl")))
+        reads = []
+        real = identity.read_mount_table
+        with mock.patch.object(identity, "read_mount_table", side_effect=lambda *a, **k: reads.append(1) or real(*a, **k)):
+            sources = state._wake_sources(SimpleNamespace(jobs=jobs, sessions=[]))
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(sum(1 for path in sources[0] if "/many/" in path), 60)
+        reads.clear()
+        with mock.patch.object(identity, "read_mount_table", side_effect=lambda *a, **k: reads.append(1) or real(*a, **k)):
+            state._wake_sources(SimpleNamespace(jobs=jobs, sessions=[]))
+        self.assertEqual(len(reads), 1)       # nothing is kept: the next call reads the table again
+
+    def test_the_mount_table_gives_the_same_answer_as_the_one_path_read(self):
+        import claude_process_identity as identity
+        net, inner, spaced = self.base / "net", self.base / "net" / "inner", self.base / "with space"
+        for directory in (net / "x", inner / "y", spaced / "z", self.base / "plain"):
+            directory.mkdir(parents=True, exist_ok=True)
+        mounts = self.base / "mounts"
+        mounts.write_text("\n".join([
+            "rootfs / ext4 rw 0 0", f"srv:/a {net} nfs4 rw 0 0", f"/dev/b {inner} ext4 rw 0 0",
+            f"tmpfs {str(spaced).replace(' ', chr(92) + '040')} tmpfs rw 0 0",
+            f"dup {net} ext4 rw 0 0", "short row", ""]), encoding="utf-8")
+        table = identity.read_mount_table(mounts)
+        link = self.base / "link"
+        link.symlink_to(net / "x")
+        cases = {self.base / "plain": True, net / "x": False, net: False, inner / "y": True, inner: True,
+                 spaced / "z": True, link: False, self.base / "missing" / "q": False}
+        for path, local in cases.items():
+            with self.subTest(path=str(path)):
+                self.assertEqual(identity.is_local_path(path, mounts_path=mounts), local)
+                self.assertEqual(identity.is_local_path(path, mount_table=table), local)
+        # a table that could not be read, and a path no row holds, are not local
+        self.assertIsNone(identity.read_mount_table(self.base / "absent"))
+        self.assertFalse(identity.is_local_path(self.base / "plain", mounts_path=self.base / "absent"))
+        self.assertFalse(identity.is_local_path(self.base / "plain", mount_table={"/nowhere": "ext4"}))
+
+    # the producer's own passes: the number of passes is the cadence's, not the wakes'
+    def _run_producer(self, seconds, *, delay=None, vary=False, snapshot=None):
+        """Run the real producer loop (real passes, real listener) for `seconds`.
+
+        Returns (pass start times, rebuild times). `delay` replaces the sleep length; `vary`
+        makes the next pass's wake sources differ from the last one's every time."""
+        lock = os.open(self.base / "producer.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        began = time.monotonic()
+        passes, rebuilds = [], []
+        original_refresh, original_sleep = state._timed_refresh, state._sleep_until_registry_change
+        original_remember = state._remember_wake_sources
+        from tools.fleet import native_events
+        original_rebuild = native_events.NativeDisplayEvents._rebuild
+        counter = [0]
+
+        def timed():
+            passes.append(time.monotonic() - began)
+            return original_refresh()
+
+        def sleep(wait, generation, ready_at):
+            return original_sleep(wait if delay is None else delay, generation, ready_at)
+
+        def remember(snap=None):
+            original_remember(snapshot if snapshot is not None else snap)
+            if vary:
+                counter[0] += 1
+                local = state._NEXT_WAKE[0] + (str(self.base / ("varying-%d" % counter[0])),)
+                state._NEXT_WAKE = (tuple(sorted(local)),) + state._NEXT_WAKE[1:]
+
+        def rebuild(this, *args):
+            rebuilds.append(time.monotonic() - began)
+            return original_rebuild(this, *args)
+
+        def run():
+            state._producer_loop(lock)
+        with mock.patch.object(state, "_timed_refresh", timed), \
+             mock.patch.object(state, "_sleep_until_registry_change", sleep), \
+             mock.patch.object(state, "_remember_wake_sources", remember), \
+             mock.patch.object(native_events.NativeDisplayEvents, "_rebuild", rebuild):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            time.sleep(seconds)
+            kept = (list(passes), list(rebuilds))   # before the teardown below rebuilds too
+            shutil.rmtree(self.root)          # the producer ends when its root is gone
+            thread.join(65)
+            self.assertFalse(thread.is_alive())
+        return kept
+
+    def test_S_b_the_first_listener_setup_starts_no_extra_pass(self):
+        process, start = self.sleeper()
+        passes, _ = self._run_producer(5.0, snapshot=self.snapshot(pid=process.pid, start=start))
+        self.assertEqual(len(passes), 1, passes)
+
+    def test_S_c_changing_sources_do_not_make_wakes_chain(self):
+        # Every pass hands the listener a different source list (a rebuild each time). The pass
+        # count stays the cadence's: 1 + floor(15 / 3).
+        passes, rebuilds = self._run_producer(15.0, delay=3.0, vary=True)
+        self.assertGreaterEqual(len(rebuilds), len(passes) - 1)   # it did rebuild on the passes
+        self.assertLessEqual(len(passes), 1 + 15 // 3, passes)
+
+    def test_S_a_a_resting_producer_runs_only_its_cadence(self):
+        # 59 seconds with nothing changing: passes at t~0 and t~30, the real publish writes
+        # (projection, fleet cache, locks, demand) wake nothing, and the listener is built for the
+        # first pass's sources, then once more when that pass added the stream and the process
+        # (the sources differ); after the second pass's setup it is never rebuilt.
+        process, start = self.sleeper()
+        passes, rebuilds = self._run_producer(59.0, snapshot=self.snapshot(pid=process.pid, start=start))
+        self.assertEqual(len(passes), 2, passes)
+        self.assertLessEqual(len(rebuilds), 2, rebuilds)
+        self.assertEqual([t for t in rebuilds if t > passes[1] + 0.5], [])
+        self.assertLessEqual(len([t for t in rebuilds if t > 1.0]), 1)
+
+
+
+class FinishedRouteWakeTests(unittest.TestCase):
+    """Only open work wakes the producer: a finished route stays history for the periodic pass.
+
+    The real registry reader and listener over synthetic routes that ended normally
+    (``open -> done/PASS``, a matching ``closed_at``/``terminal_gate_proven`` outcome and a
+    completed journal), the way they stay in a registry as its history.
+    """
+
+    def setUp(self):
+        from route_identity import route_hash, route_id_from_hash
+        import tools.fleet.collectors.dispatch as dispatch
+        self.route_hash, self.route_id_from_hash = route_hash, route_id_from_hash
+        self.tmp = tempfile.TemporaryDirectory(prefix="fin-")
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.jobs = self.base / "jobs.log"
+        self.jobs.touch()
+        env = mock.patch.dict(os.environ, {
+            "HOME": str(self.base), "XDG_STATE_HOME": str(self.base / "state"),
+            "FLEET_INTERACTION_STATE_DIR": str(self.base / "interaction"),
+            "AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_PEER_LEDGER_ROOT": str(self.base),
+            "PATH": str(self.base / "empty-bin")})
+        env.start()
+        self.addCleanup(env.stop)
+        state.state_root().mkdir(parents=True, mode=0o700)
+        for patch in (
+                mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(self.jobs)]),
+                mock.patch.object(observation, "_codex_rollout_waits",
+                                  return_value={"complete": True, "pending": {}}),
+                mock.patch.object(observation, "_session_liveness_probe", return_value=lambda *a: "ended"),
+                mock.patch.object(observation, "_LAST_PASS_ROUTE_PATHS", ()),
+                mock.patch.object(state, "_request_producer"),
+                mock.patch.object(state, "_WAKE_FAILED", False),
+                mock.patch.object(state, "_WAKE_EVENTS", None),
+                mock.patch.object(state, "_NEXT_WAKE", None),
+                mock.patch.object(state, "_WATCH_STAT", ())):
+            patch.start()
+            self.addCleanup(patch.stop)
+        observation._WAIT_MEMO.clear()
+        self.addCleanup(observation._WAIT_MEMO.clear)
+        self.addCleanup(state._stop_wake_events)
+        self.count = 0
+
+    def route(self, *, finished=True, journal_complete=True):
+        """One route in the registry; ``finished`` closes it the way a normal completion does."""
+        index = self.count
+        self.count += 1
+        folder = self.base / str(index)
+        (folder / "artifacts").mkdir(parents=True)
+        record = {"artifact_root": str(folder / "artifacts"), "nodes": []}
+        record["route_hash"] = self.route_hash(record)
+        record["route_id"] = self.route_id_from_hash(record["route_hash"])
+        route_file = folder / "route.json"
+        route_file.write_text(json.dumps(record), encoding="utf-8")
+        journal = self.base / "workflow" / record["route_id"] / "journal.jsonl"
+        journal.parent.mkdir(parents=True)
+        journal.write_text("", encoding="utf-8")
+        meta = ",".join(("attempt_id=att-fin-%s-%d" % (self.base.name, index), "worker_type=owner",
+                         "harness=claude", "parent_sid=synthetic", "route_file=" + str(route_file),
+                         "route_id=" + record["route_id"], "route_hash=" + record["route_hash"]))
+        self.append("100\topen\t/synthetic\t/synthetic\towner\t" + meta + "\n")
+        if finished:
+            self.close(record, route_file, journal if journal_complete else None)
+            self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + meta + ",verdict=PASS\n")
+        return {"record": record, "file": route_file, "journal": journal, "meta": meta}
+
+    def close(self, record, route_file, journal):
+        route_file.with_name("route.outcome.json").write_text(json.dumps({
+            "route_id": record["route_id"], "route_hash": record["route_hash"],
+            "closed_at": "2026-11-13T00:00:00Z", "terminal_gate_proven": True}), encoding="utf-8")
+        if journal is not None:
+            journal.write_text(json.dumps({
+                "at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                "route_hash": record["route_hash"], "workflow_state": "COMPLETE"}) + "\n", encoding="utf-8")
+
+    def append(self, line):
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+    def pass_once(self):
+        """One producer pass: read the waits, then arm what it would wake on."""
+        observed = observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertTrue(observed["complete"])
+        state._remember_wake_sources(SimpleNamespace(jobs=[], sessions=[]))
+        state._arm_wake_events()
+        return observed, set(state._NEXT_WAKE[0])
+
+    def test_finished_routes_add_no_watch_however_many_stay_in_the_registry(self):
+        _observed, idle = self.pass_once()             # nothing open: the base sources only
+        routes = [self.route() for _ in range(30)]
+        observed, after_30 = self.pass_once()
+        self.assertEqual(observed["items"], [])
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(after_30, idle)
+        routes += [self.route() for _ in range(30)]
+        _observed, after_60 = self.pass_once()
+        self.assertEqual(after_60, idle)
+        self.assertFalse({str(route["file"]) for route in routes} & after_60)
+
+    def test_only_the_open_routes_sources_are_watched(self):
+        opened = [self.route(finished=False) for _ in range(3)]
+        finished = [self.route() for _ in range(60)]
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        for route in opened:
+            self.assertIn(str(route["file"]), watched)
+            self.assertIn(str(route["journal"]), watched)
+        for route in finished:
+            self.assertNotIn(str(route["file"]), watched)
+            self.assertNotIn(str(route["journal"]), watched)
+        self.assertTrue(all(path.startswith(tuple(str(route["file"].parent) for route in opened))
+                            or path.startswith(str(self.base / "workflow"))
+                            for path in watched))
+        self.assertLessEqual(len(watched), 4 * len(opened))
+        self.assertTrue({str(route["file"]) for route in opened} <= local)
+
+    def test_a_finished_routes_file_change_does_not_wake_the_producer(self):
+        finished = self.route()
+        opened = self.route(finished=False)
+        self.pass_once()
+        events = state._wake_events()
+        self.assertIsNotNone(events)
+        self.assertFalse(events.wait_changed(0.2))
+        finished["file"].write_text(finished["file"].read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        with finished["journal"].open("a", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        self.assertFalse(events.wait_changed(1.0), "a finished route's file woke the producer")
+        with opened["journal"].open("a", encoding="utf-8") as handle:   # an open route still does
+            handle.write("{}\n")
+        self.assertTrue(events.wait_changed(5.0))
+
+    def test_a_route_opened_again_is_watched_from_the_next_pass_and_wakes(self):
+        # Closed by its outcome (the journal records no end): finished, not watched.
+        route = self.route(journal_complete=False)
+        self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        # It opens again: the closure is withdrawn and a new attempt starts on the same route.
+        route["file"].with_name("route.outcome.json").unlink()
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-again-") + "\n")
+        _observed, local = self.pass_once()
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(route["journal"]), local)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        self.assertTrue(events.wait_changed(5.0))
+        self.assertLess(time.monotonic() - began, 5.0)      # an event, well inside the 30 s cadence
+
+    # Rule B: only a route this pass confirms closed now leaves the watch. A terminal state in its
+    # history, "no answer wait", or a read that failed confirms nothing.
+
+    def assert_watched_and_wakes(self, route, touched, *, observed_waits=None):
+        observed, local = self.pass_once()
+        if observed_waits is not None:
+            self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], observed_waits)
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(touched), local | set(observation.last_pass_route_paths()))
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        with Path(touched).open("a", encoding="utf-8") as handle:
+            handle.write(" \n")
+        self.assertTrue(events.wait_changed(5.0), "a change on %s did not wake the producer" % touched)
+
+    def test_a_route_reopened_after_complete_is_watched_and_wakes(self):
+        route = self.route()                                   # COMPLETE, closed, done/PASS
+        self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        # Its closure is withdrawn and a new attempt runs it again; the COMPLETE stays in history.
+        route["file"].with_name("route.outcome.json").unlink()
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-reopen-") + "\n")
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": "2026-11-14T00:00:00Z", "route_id": route["record"]["route_id"],
+                                     "route_hash": route["record"]["route_hash"],
+                                     "workflow_state": "RUNNING"}) + "\n")
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_complete_with_its_closure_pending_is_watched_and_the_finish_wakes(self):
+        route = self.route(finished=False)
+        record = route["record"]
+        finish = Path(record["artifact_root"]) / ".runtime" / "inline-finish" / "v1" / record["route_id"] / "finish.json"
+        finish.parent.mkdir(parents=True)
+        finish.write_text(json.dumps({"schema": "inline_finish_v1", "state": "closure-pending",
+                                      "route_id": record["route_id"]}), encoding="utf-8")
+        route["journal"].write_text(json.dumps({"at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                                                "route_hash": record["route_hash"],
+                                                "workflow_state": "COMPLETE"}) + "\n", encoding="utf-8")
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+        self.assert_watched_and_wakes(route, finish)
+
+    def test_a_failed_route_waiting_for_a_decision_is_watched_and_wakes(self):
+        route = self.route(finished=False)
+        record = route["record"]
+        route["journal"].write_text(json.dumps({"at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                                                "route_hash": record["route_hash"],
+                                                "workflow_state": "FAILED_TERMINAL"}) + "\n", encoding="utf-8")
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] +
+                    ",verdict=FAIL,note=dead-worker-blocked\n")
+        self.assert_watched_and_wakes(route, route["journal"], observed_waits=[("S3", "decision")])
+
+    def test_a_route_that_cannot_be_read_stays_watched_and_its_repair_wakes(self):
+        unreadable = self.route()
+        with mock.patch.object(observation, "_route_outcome", side_effect=OSError("synthetic unreadable")):
+            observed = observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertIn(str(unreadable["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(unreadable["journal"]), observation.last_pass_route_paths())
+        self.assertTrue(any(item.get("reason") == "OSError" for item in observed["health"]))
+        observation._WAIT_MEMO.clear()
+        broken = self.route()
+        good = broken["file"].read_text(encoding="utf-8")
+        broken["file"].write_text("{broken", encoding="utf-8")
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(broken["file"]), watched)            # a broken record is not "closed"
+        self.assertIn(str(broken["journal"]), watched)
+        self.assertNotIn(str(unreadable["file"]), watched)     # readable again and closed: settled
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        broken["file"].write_text(good, encoding="utf-8")     # repaired
+        self.assertTrue(events.wait_changed(5.0))
+        _observed, _local = self.pass_once()                   # and settled once it reads closed
+        self.assertNotIn(str(broken["file"]), observation.last_pass_route_paths())
+
+    def test_a_pass_that_could_not_read_a_registry_keeps_the_paths_it_knew(self):
+        opened = self.route(finished=False)
+        self.pass_once()
+        self.assertIn(str(opened["file"]), observation.last_pass_route_paths())
+        import dispatch_registry_cache
+        with mock.patch.object(dispatch_registry_cache, "registry_snapshot",
+                               side_effect=OSError("synthetic registry")):
+            observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertIn(str(opened["file"]), observation.last_pass_route_paths())
+
+    def test_settled_routes_add_nothing_and_old_format_routes_stay_watched(self):
+        _observed, idle = self.pass_once()
+        settled = [self.route() for _ in range(60)]
+        old = []
+        for _ in range(60):                                    # closure evidence absent: no outcome, no end
+            route = self.route(finished=False)
+            self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+            old.append(route)
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertFalse({str(route["file"]) for route in settled} & (watched | local))
+        self.assertFalse({str(route["journal"]) for route in settled} & watched)
+        for route in old:
+            self.assertIn(str(route["file"]), watched)
+        self.assertLessEqual(len(watched), 4 * len(old))       # at most four files per such route
+
+
+    # Rule 2 (RV-PR1622-R3 §2): a route is settled only when its journal's last record is the
+    # terminal one; a closed outcome does not settle a route whose journal went on after it.
+
+    def journal_row(self, route, at="2026-11-13T01:00:00Z", **row):
+        record = route["record"]
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": at, "route_id": record["route_id"],
+                                     "route_hash": record["route_hash"], **row}) + "\n")
+
+    def raise_gate(self, route, at="2026-11-13T01:00:00Z"):
+        """The reviewer's gate: a frame-review raised on the route (an interview not answered)."""
+        artifact = Path(route["record"]["artifact_root"]) / "interview.json"
+        artifact.write_text("{}", encoding="utf-8")
+        self.journal_row(route, at=at, workflow_state="BLOCKED_HUMAN_GATE",
+                         evidence={"gate": "frame-review", "artifact": str(artifact)})
+        return artifact
+
+    def test_a_gate_raised_after_the_closure_is_watched_and_wakes(self):
+        route = self.route()                                   # COMPLETE, closed, done/PASS
+        self.raise_gate(route)
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_anything_written_after_the_end_keeps_a_closed_route_watched(self):
+        route = self.route()
+        self.journal_row(route, actor="parent-close", evidence={"parent_close_result": {"state": "cancelled"}})
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_a_route_its_outcome_closed_is_watched_once_its_journal_goes_on(self):
+        before = self.route(journal_complete=False)            # outcome closed at 2026-11-13T00:00
+        self.journal_row(before, at="2026-11-12T23:00:00Z", workflow_state="RUNNING")
+        after = self.route(journal_complete=False)
+        self.journal_row(after, at="2026-11-12T23:00:00Z", workflow_state="RUNNING")
+        self.raise_gate(after, at="2026-11-13T01:00:00Z")       # written after the closure
+        self.pass_once()
+        self.assertNotIn(str(before["file"]), observation.last_pass_route_paths())
+        self.assert_watched_and_wakes(after, after["journal"])
+
+    def test_a_route_closed_with_nothing_after_its_end_adds_no_watch(self):
+        _observed, idle = self.pass_once()
+        routes = [self.route() for _ in range(30)]
+        _observed, after = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(after, idle)
+        self.assertFalse({str(route["journal"]) for route in routes} & after)
+
+    # Rule 3 (RV-PR1622-R3 §3): the wake watch only shortens the delay. An unsettled route nothing
+    # of which moved for a week is left to the periodic pass, unless a person is asked on it now
+    # or work runs on it.
+
+    def age(self, route, days):
+        """Move every file of ``route`` (record, outcome, journal, gate files) ``days`` into the past."""
+        when = time.time() - days * 86400
+        folder = route["file"].parent
+        for path in [*folder.rglob("*"), route["journal"]]:
+            if path.is_file():
+                os.utime(path, (when, when))
+
+    def old_format(self):
+        """A route with no closure evidence (no outcome, an empty journal) whose attempt ended."""
+        route = self.route(finished=False)
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+        return route
+
+    def test_quiet_unsettled_routes_add_no_watch_however_many(self):
+        _observed, idle = self.pass_once()
+        settled = [self.route() for _ in range(60)]
+        old = [self.old_format() for _ in range(60)]
+        for route in old:
+            self.age(route, 30)
+        _observed, at_60 = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(at_60, idle)
+        more = [self.old_format() for _ in range(140)]
+        missing = self.old_format()                             # its record deleted, then quiet
+        missing["file"].unlink()
+        for route in more + [missing]:
+            self.age(route, 30)
+        _observed, at_200 = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(at_200, idle)
+        self.assertFalse({str(route["file"]) for route in settled + old + more} & at_200)
+
+    def test_an_old_format_route_that_moved_yesterday_is_watched(self):
+        quiet = self.old_format()
+        self.age(quiet, 30)
+        moved = self.old_format()
+        self.age(moved, 1)
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(moved["file"]), watched)
+        self.assertIn(str(moved["journal"]), watched)
+        self.assertNotIn(str(quiet["file"]), watched)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        self.journal_row(moved, workflow_state="RUNNING")
+        self.assertTrue(events.wait_changed(5.0))
+
+    def test_a_new_attempt_on_a_quiet_route_wakes_and_is_watched_from_the_next_pass(self):
+        route = self.old_format()
+        self.age(route, 30)
+        _observed, local = self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(self.jobs), local)                   # the registry wakes the producer
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-again-") + "\n")
+        self.assertTrue(events.wait_changed(5.0), "a new attempt in the registry did not wake the producer")
+        _observed, local = self.pass_once()                    # the next pass watches it
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(route["journal"]), local | set(observation.last_pass_route_paths()))
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        self.journal_row(route, workflow_state="RUNNING")
+        self.assertTrue(events.wait_changed(5.0))
+        self.assertLess(time.monotonic() - began, 5.0)          # an event, well inside the 30 s cadence
+
+    def test_an_answer_wait_raised_forty_days_ago_stays_watched_and_its_answer_wakes(self):
+        route = self.route(finished=False)
+        artifact = self.raise_gate(route, at=datetime.fromtimestamp(time.time() - 40 * 86400, timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.age(route, 40)
+        observed, local = self.pass_once()
+        self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], [("S2", "decision")])
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(route["file"]), watched)
+        self.assertIn(str(artifact.parent / "answers.json"), watched)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        (artifact.parent / "answers.json").write_text("{}", encoding="utf-8")   # the answer arrives
+        self.assertTrue(events.wait_changed(5.0), "the answer to a forty-day wait did not wake the producer")
+        self.assertLess(time.monotonic() - began, 5.0)
+
+    def test_a_quiet_routes_change_is_read_by_the_periodic_pass(self):
+        route = self.old_format()
+        self.age(route, 30)
+        observed, _local = self.pass_once()
+        self.assertEqual(observed["items"], [])
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        events = state._wake_events()
+        self.raise_gate(route)                                  # not watched: no event ...
+        self.assertFalse(events.wait_changed(0.5))
+        observed, _local = self.pass_once()                     # ... the next periodic pass reads it
+        self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], [("S2", "decision")])
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertLessEqual(observation._WATCH_QUIET_SECONDS, 7 * 86400)
 
 if __name__ == "__main__":
     unittest.main()

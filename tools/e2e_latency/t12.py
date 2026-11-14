@@ -130,7 +130,11 @@ class Children:
     # -- demand marker keeps the producer alive and gives the panels something to show
     def write_demand(self) -> None:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.root, 0o700)
+        # Like the product's ``_request_producer``: a chmod raises a directory attribute event
+        # even when the mode is right, and the producer watches this directory, so a demand
+        # refresh every 20 s would wake an idle producer each time.
+        if (os.stat(self.root).st_mode & 0o7777) != 0o700:
+            os.chmod(self.root, 0o700)
         value = {f"claude\0{s['session_id']}": time.time() for s in self.fixture["sessions"]}
         tmp = self.root / ".demand.tmp"
         tmp.write_text(json.dumps(value), encoding="utf-8")
@@ -463,7 +467,17 @@ def drawn_detail(fleet: list[dict]) -> dict:
 
 
 def _publisher_pass(passes: list[dict], detect_ns: int):
-    done = [p for p in passes if p["t1"] <= detect_ns + 5_000_000]
+    """The pass that published the value seen at ``detect_ns``.
+
+    The publish is not the last thing a pass does (the producer then learns its next wake
+    sources), so the detect can fall inside the publishing pass: that pass is the one whose
+    span holds the detect. Otherwise it is the last pass that ended before it.
+    """
+    slack = 5_000_000
+    inside = [p for p in passes if p["t0"] <= detect_ns <= p["t1"] + slack]
+    if inside:
+        return inside[-1]
+    done = [p for p in passes if p["t1"] <= detect_ns + slack]
     return done[-1] if done else None
 
 

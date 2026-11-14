@@ -4,7 +4,7 @@ import math
 from collections.abc import Mapping
 from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
-from .tables import ROUTE_WORD, answer_wait_word, repo_label, route_counts
+from .tables import ROUTE_WORD, answer_wait_word, repo_label, route_count_label, route_tally
 from .style import steward_flag_key
 
 NAV_WIDTH = 32
@@ -558,22 +558,23 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             mine = tuple(item for item in sessions
                          if item.get("repo_id", item.get("repo")) == scope_id)
             mine_routes = tuple(item for item in routes if str(item.get("repo") or "") == scope_id)
-            status = (f"{count_word(len(mine), 'session')} · "
-                      f"{sum(1 for item in mine_routes if item.get('state') != 'done')} open · "
-                      f"{sum(1 for item in mine_routes if item.get('state') == 'done')} done")
+            _open, no_response, _stopped, done, _mark = route_tally(mine_routes)
+            status = (f"{count_word(len(mine), 'session')} · {route_count_label(mine_routes)} · "
+                      + (f"no response {no_response} · " if no_response else "")
+                      + f"{done} done")
         elif scope_kind in ("session", "route"):
             status = "esc: back up"
         elif state.view == "OVERVIEW" and state.scope == "-":
             # The same current count as the QUESTIONS tab: older waits are not counted here.
             current = answer_wait_count(vm)
-            open_routes, no_response, _stopped = route_counts(routes)
+            _open, no_response, _stopped, _done, _mark = route_tally(routes)
             status = (f"{count_word(len(sessions), 'session')} │ "
-                      f"{ROUTE_WORD} {open_routes} │ "
+                      f"{ROUTE_WORD} {route_count_label(routes, word='')} │ "
                       + (f"no response {no_response} │ " if no_response else "")
                       + f"{answer_wait_word()} {current if current is not None else '?'}")
         elif state.view == "ROUTES":
-            open_routes, no_response, stopped = route_counts(routes)
-            status = (f"{open_routes} open · "
+            _open, no_response, stopped, _done, _mark = route_tally(routes)
+            status = (f"{route_count_label(routes)} · "
                       + (f"no response {no_response} · " if no_response else "")
                       + f"{stopped} stopped")
         elif state.view == "QUESTIONS":
@@ -700,7 +701,7 @@ def draw_explorer(grid: CellGrid, vm, state):
     peer_count = (len(vm.peer_edges.get("links", ()))
                   if peers.get("state") == "success" else None)
     counts = {"PEERS": peer_count,
-              "ROUTES": route_counts(vm.routes)[0],
+              "ROUTES": route_count_label(vm.routes, word="", mark_text="?"),
               "QUESTIONS": question_count, "HISTORY": len(vm.seats or ())}
     views = ("OVERVIEW", "PEERS", "ROUTES", "QUESTIONS", "HISTORY", "COMPUTE")
     y = 6 if getattr(state, "usage_open", False) else 4
@@ -720,6 +721,9 @@ def draw_explorer(grid: CellGrid, vm, state):
             shown_count, count_key = str(count), "blocked" if count else "dim"
         elif view == "PEERS" and count is None:
             shown_count, count_key = "?", "dim"
+        elif view == "ROUTES":
+            # The known count and the routes-not-known mark (``route_tally``), as every place reads it.
+            shown_count, count_key = (count, "dim") if count != "0" else (None, "dim")
         elif count:
             count_key = "dim"
             shown_count = f"{count}/{count}" if view == "COMPUTE" else str(count)
@@ -912,7 +916,8 @@ def draw_explorer(grid: CellGrid, vm, state):
                 rh = route.get("harness") or "·"
                 label_x = branch_x + 3
                 mark, mark_key = {"running": ("⠏", "g_spin_dim"), "working": ("⠏", "g_spin_dim"),
-                                  "blocked": ("●", "lvl_r_dim"), "stale": ("◌", "dim")}.get(
+                                  "blocked": ("●", "lvl_r_dim"), "stale": ("◌", "dim"),
+                                  "wait": ("·", "dim")}.get(
                     "stale" if route.get("state") == "stale" else
                     route.get("activity", route.get("state")), ("●", "idle"))
                 route_suffix = ": " + str(rh) + " " + mark

@@ -1337,7 +1337,15 @@ def _stall_observation_for_notice(jobs, aid, row):
     ``notice_is_current`` asks twice (its obligation revision, then whether it is still pending). Inside
     one Fleet collection pass the first observation is that pass's observation and the second reads
     it (the observation depends on the clock and on the attempt's processes, so the next pass
-    observes again). Outside a pass (a carrier, a hook) every call observes afresh."""
+    observes again). Outside a pass (a carrier, a hook) every call observes afresh.
+
+    Contract: one collection pass is one snapshot. Inside it this attempt has one value; a change
+    that lands after the first observation (an outcome cancelled, a run ended) shows in the next
+    pass, not in the same one. That is safe only because a pass is passive display: the collectors
+    read and never write, and every path that acts on a notice (carrier, hook, delivery, settlement,
+    question) runs outside any pass, on its own thread or process, and observes afresh. The pass
+    scope is thread-local; do not open one around an acting path, and do not add the attempt's
+    execution state to this key (the observation reads too many inputs to name them exactly)."""
     # Fleet is imported as ``fleet`` or as ``tools.fleet``; the pass that is open is in whichever
     # copy of the module its collectors use, so look for an open one instead of importing a new copy.
     pass_scope = next((module for module in (sys.modules.get("fleet.pass_scope"),

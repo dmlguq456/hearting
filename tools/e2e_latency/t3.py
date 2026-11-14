@@ -13,7 +13,12 @@ Times (seconds after the spawn, one CLOCK_MONOTONIC for parent and child):
 
 * ``first_byte_s``       first byte of any output
 * ``replay_s``           first replay frame (only when a saved model exists)
-* ``first_observed_s``   T3: first live, ready, non-replay, non-loading frame
+* ``first_observed_s``   T3: first live, non-replay, non-loading frame that is either ready
+                         (every required source in: the old definition) or observed (basic in)
+                         with the late-cell word on screen ("details wait" / "세부 아직");
+                         a tree that never records ``observed`` gives the old definition
+* ``first_ready_s``      the old ``first_observed_s``: first live, ready, non-replay frame, so a
+                         before/after pair can be compared on one definition
 * ``details_complete_s`` first such frame whose every source is new (``all_new``)
 * ``source_ready_s``     per source, when it first stopped being pending
 
@@ -50,7 +55,8 @@ HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parents[1]
 COLS, ROWS = 120, 40
 CONDITIONS = ("cold-empty", "second-launch")
-SCREEN_WORDS = ("details wait", "아직", "loading", "불러오는 중")
+SCREEN_WORDS = ("details wait", "세부 아직", "아직", "loading", "불러오는 중")
+DETAILS_WORDS = ("details wait", "세부 아직")
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 _TOOLS = ("python3", "node", "sh", "bash", "git", "sleep", "ps", "tput", "stty", "env",
           "cat", "uname", "id", "hostname")
@@ -85,6 +91,8 @@ def _readiness(mod):
     carried = sorted(n for n, s in sources.items() if isinstance(s, dict)
                      and (str(s.get("state", "")).lower() == "continued" or s.get("all_new") is False))
     return {"ready": bool(r.get("ready")), "all_new": bool(r.get("all_new")),
+            "observed": r.get("observed"),
+            "details_pending": [str(x) for x in (r.get("details_pending") or ())],
             "pending": [str(x) for x in (r.get("pending") or ())], "carried": carried,
             "states": {str(n): str(s.get("state")) for n, s in sources.items() if isinstance(s, dict)}}
 
@@ -249,9 +257,26 @@ def analyze(chunks, records, t0_ns):
         return None, None
 
     live = lambda p: not p.get("loading") and not p.get("replay")        # noqa: E731
+
+    def shown_text(paint):
+        """The PTY text from this paint's first chunk to the next paint's: what that frame put on screen."""
+        start = visible(paint)
+        if start is None:
+            return ""
+        later = [p for p in paints if p["t_ns"] > paint["t_ns"]]
+        stop = visible(later[0]) if later else None
+        stop = len(chunks) if stop is None else stop
+        return strip_ansi(b"".join(data for _t, data in chunks[start:max(start + 1, stop)]))
+
+    def observed_with_mark(paint):
+        # Basic is in, a late source is not: it counts only while the screen says so.
+        return (live(paint) and not paint.get("ready") and paint.get("observed") is True
+                and any(word in shown_text(paint) for word in DETAILS_WORDS))
+
     nonloading, nl_idx = first(lambda p: not p.get("loading"))
     replay, rp_idx = first(lambda p: p.get("replay") and not p.get("loading"))
-    observed, ob_idx = first(lambda p: live(p) and p.get("ready"))
+    ready, rd_idx = first(lambda p: live(p) and p.get("ready"))
+    observed, ob_idx = first(lambda p: (live(p) and p.get("ready")) or observed_with_mark(p))
     complete, cp_idx = first(lambda p: live(p) and p.get("ready") and p.get("all_new"))
 
     def at(idx):
@@ -273,6 +298,9 @@ def analyze(chunks, records, t0_ns):
         "first_nonloading_s": at(nl_idx),
         "replay_s": at(rp_idx),
         "first_observed_s": at(ob_idx),
+        "first_ready_s": at(rd_idx),
+        "observed_by": ("ready" if (observed or {}).get("ready") else
+                        "details-wait" if observed else None),
         "details_complete_s": at(cp_idx),
         "source_ready_s": source_ready,
         "paints": len(paints),
@@ -473,7 +501,7 @@ def measure(fixture, *, reps=5, scratch, launch_timeout=LAUNCH_TIMEOUT_S, linger
 
     def run_condition(cond):
         samples = {k: [] for k in ("first_byte_s", "first_nonloading_s", "replay_s",
-                                   "first_observed_s", "details_complete_s")}
+                                   "first_observed_s", "first_ready_s", "details_complete_s")}
         for i in range(reps):
             tag = "%s-t3-%s-%d" % (marker, cond, i)
             tags.append(tag)
@@ -548,8 +576,10 @@ def measure(fixture, *, reps=5, scratch, launch_timeout=LAUNCH_TIMEOUT_S, linger
             except TimeoutError as exc:
                 leftovers.append(str(exc))
     leftover_now = sorted({pid for tag in tags for pid in fproc.marked_processes(tag)})
-    notes.append("first_observed = first paint that is live, ready and not loading/replay; "
-                 "replay_s exists only in second-launch")
+    notes.append("first_observed = first live, non-loading, non-replay paint that is ready (old definition) "
+                 "or observed with 'details wait'/'세부 아직' on screen (new definition; a tree that does "
+                 "not record 'observed' gives the old one); first_ready_s = the old definition on every "
+                 "tree; replay_s exists only in second-launch")
     return {"metric": "T3", "events": events, "segments": segments, "passes": passes,
             "notes": notes, "not_measured": not_measured,
             "cleanup": {"leftover_processes": leftover_now, "reap_errors": leftovers}}

@@ -2854,6 +2854,33 @@ def _explorer_view(snapshot):
     return _ExplorerView(snapshot, **extras) if extras else snapshot
 
 
+def _basic_source_events():
+    """Kernel notification for the files whose change the basic collection reads: the dispatch
+    registries and the producer's ``projection.json`` (exact names). None when it cannot be had
+    or a source is on a network mount (those keep the 2 s tick)."""
+    try:
+        from .native_events import NativeDisplayEvents
+        from .collectors import dispatch
+        import human_wait_state
+        from claude_process_identity import is_local_path
+        paths = [str(path) for path in dispatch.human_gate_registry_paths()]
+        paths.append(str(human_wait_state.state_root() / "projection.json"))
+        local = []
+        for path in paths:
+            directory = os.path.dirname(os.path.abspath(path))
+            while directory and not os.path.isdir(directory) and os.path.dirname(directory) != directory:
+                directory = os.path.dirname(directory)
+            if is_local_path(directory):
+                local.append(path)
+        if not local:
+            return None
+        events = NativeDisplayEvents()
+        events.configure(tuple(local))
+        return events
+    except Exception:
+        return None
+
+
 def _explorer_runtime():
     global _EXPLORER_RUNTIME
     if _EXPLORER_RUNTIME is None:
@@ -6301,6 +6328,14 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                 frame = _explorer_frame_from_model(live_model, state, w, h,
                                                    beat=1 if _EXPLORER_REPLAY_ACTIVE else int(_BLINK_ON))
                 _EXPLORER_SHOWN = True
+            elif runtime.observed_only(readiness) and candidate_model is not None:
+                # Nothing saved to replay, the basic collection is in and the required details
+                # are not: show what is observed with its late cells marked "details wait". This
+                # frame is shown only; it is never published or kept as the last complete model.
+                from .explorer.live import mark_details_wait
+                _EXPLORER_MODEL = mark_details_wait(candidate_model, readiness)
+                frame = runtime.draw_frame(_EXPLORER_MODEL, state, w, h, beat=int(_BLINK_ON))
+                _EXPLORER_SHOWN = True
             else:
                 _EXPLORER_MODEL = None
                 frame = runtime.loading_frame(w, h)
@@ -6897,8 +6932,18 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         # alone request this bounded reader. Normal census cadence stays intact.
         display_pump = RefreshPump(collect_native_display, interval,
                                    name="fleet-native-display", adaptive_cadence=True)
+        # The basic collection also starts when the registry or the answer-wait producer's
+        # projection changes, not only at its 2 s tick (the tick's phase was most of what a
+        # route start or an answer wait waited for). Fleet writes neither file, so this cannot
+        # wake itself; the pump's adaptive rest still bounds the cadence, and without kernel
+        # notification (or on a network file) the 2 s tick alone remains. It is armed once the
+        # first basic snapshot is in (below): the modules it needs are loaded by that collection,
+        # and building it before the first frame put their import (~0.4 s) in front of the saved
+        # model's replay.
+        basic_events, basic_events_pending = None, True
     else:
         _EXPLORER_NATIVE_DISPLAY = None
+        basic_events, basic_events_pending = None, False
     selection_feed = None
     sessions, jobs = snapshot.sessions, snapshot.jobs
     resources = snapshot.resources
@@ -6991,6 +7036,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 if (display_pump is not None and generation > 0
                         and display_events.take_changed()):
                     display_pump.request(force=True)
+                if basic_events is not None and basic_events.take_changed():
+                    pump.request_soon(now=now_mono)
             if install_pump is not None and background_started:
                 install_pump.request_due(now=now_mono)
                 install_update = install_pump.poll(install_generation)
@@ -7010,6 +7057,9 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 generation, basic_snapshot = update
                 if _EXPLORER_ENABLED:
                     detail_pump.request(force=True)
+                if basic_events_pending:
+                    basic_events_pending = False
+                    basic_events = _basic_source_events()
             detail_update = detail_pump.poll(detail_generation)
             if detail_update is not None:
                 detail_generation, next_detail = detail_update
@@ -7193,6 +7243,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             display_pump.stop(join_timeout=1.0)
         if display_events is not None:
             display_events.stop(join_timeout=1.0)
+        if basic_events is not None:
+            basic_events.stop(join_timeout=1.0)
         _EXPLORER_NATIVE_DISPLAY = None
         pump.stop(join_timeout=1.0)
         detail_pump.stop(join_timeout=1.0)

@@ -7469,6 +7469,15 @@ def _trust_unchanged_ledgers():
         pass
 
 
+
+def _owner_scan_proofs(settlement_context, owner_scan):
+    """The proofs an unfinished owner scan has made so far, else None (a runner wait signal part)."""
+    metrics = getattr(settlement_context, "metrics", None)
+    if not owner_scan or not callable(metrics):
+        return None
+    return metrics().get("historical_checks")
+
+
 def cmd_obligation_runner(args):
     """Existing peer steward, scoped to accepted duties and stopped when they settle."""
     _trust_unchanged_ledgers()
@@ -7713,8 +7722,12 @@ def cmd_obligation_runner(args):
         # Keep the same owner and bounded wait even before legacy duty recovery.
         # An unfinished owner proof changes this signature on each pass, so it
         # resumes on the next short wait instead of the growing idle backoff.
+        # While an owner scan is unfinished its row list is fixed; the proofs it has made so far
+        # (historical_checks) are what moves, so they are part of the signature or a drain that
+        # proves one owner per pass would back off to the 15 s wait instead of the short one.
         signature = (notice_discovery_observed,
-                     _runner_duty_signature(current_duties), external_signature, owner_scan)
+                     _runner_duty_signature(current_duties), external_signature, owner_scan,
+                     _owner_scan_proofs(settlement_context, owner_scan))
         if previous_signature is None or signature != previous_signature:
             delay = 1.0
         else:

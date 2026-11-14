@@ -733,6 +733,62 @@ class UnpublishedEventTests(unittest.TestCase):
         self.assertNotIn("not_visible", reasons[0])
 
 
+class DemandWriteTests(unittest.TestCase):
+    """The fixture's display demand must not wake the idle producer (a chmod does, even to the same mode)."""
+
+    def children(self, tmp):
+        c = t12.Children.__new__(t12.Children)
+        c.root, c.fixture = Path(tmp) / "waits", {"sessions": [{"session_id": "s1"}]}
+        return c
+
+    def test_a_demand_refresh_leaves_the_directory_mode_alone_when_it_is_right(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            c = self.children(tmp)
+            c.write_demand()
+            with mock.patch.object(t12.os, "chmod", wraps=os.chmod) as chmod:
+                c.write_demand()
+            self.assertNotIn(str(c.root), [str(call.args[0]) for call in chmod.call_args_list])
+            self.assertTrue((c.root / ".demand").exists())
+
+    def test_a_wrong_directory_mode_is_corrected(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            c = self.children(tmp)
+            c.write_demand()
+            os.chmod(c.root, 0o755)
+            c.write_demand()
+            self.assertEqual(os.stat(c.root).st_mode & 0o7777, 0o700)
+
+
+class PublisherPassTests(unittest.TestCase):
+    """The publish is followed by the producer's wake-source bookkeeping inside the same pass."""
+
+    def passes(self):
+        return [{"root": "human_wait_state._refresh_cache", "index": 1, "t0": 1_000_000_000, "t1": 2_000_000_000, "seg": {}},
+                {"root": "human_wait_state._refresh_cache", "index": 2, "t0": 2_600_000_000, "t1": 3_700_000_000, "seg": {}}]
+
+    def test_a_detect_inside_a_pass_names_that_pass(self):
+        self.assertEqual(t12._publisher_pass(self.passes(), 3_500_000_000)["index"], 2)
+
+    def test_a_detect_between_passes_names_the_one_that_ended(self):
+        self.assertEqual(t12._publisher_pass(self.passes(), 2_300_000_000)["index"], 1)
+
+    def test_a_detect_just_after_the_end_still_names_the_pass(self):
+        self.assertEqual(t12._publisher_pass(self.passes(), 3_702_000_000)["index"], 2)
+
+    def test_a_detect_before_every_pass_names_none(self):
+        self.assertIsNone(t12._publisher_pass(self.passes(), 500_000_000))
+
+    def test_the_segments_of_a_detect_inside_the_publishing_pass(self):
+        ev = {"kind": "route-start", "seq": 1, "t_ns": 2_300_000_000, "t_start_ns": 2_299_000_000,
+              "detect_ns": 3_500_000_000, "projection_s": 0.01, "expect": {"route_id": "a", "attempt_id": "att-1"}}
+        report = t12._assemble({"sessions": []}, ["route-start"], [ev], self.passes(), [], 0.5, 0.025, [], [], {},
+                               "/nonexistent/producer.jsonl")
+        segments = next(r for r in report["results"] if r["metric"] == "T1")["segments"]["route-start"]
+        self.assertEqual(segments["pass_s"]["median_s"], 1.1)           # the pass that published, not the one before
+        self.assertEqual(segments["publish_s"]["median_s"], 0.0)
+        self.assertEqual([p["index"] for p in report["passes"] if p["kind"] == "after-route-start"], [2])
+
+
 class ReplaceSamplesTests(unittest.TestCase):
     """The pass right after a whole-registry replacement is a median of several, not one noisy pass."""
 

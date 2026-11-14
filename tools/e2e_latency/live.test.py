@@ -55,6 +55,107 @@ class Case(unittest.TestCase):
         return sampler
 
 
+class OtherSourcesTest(Case):
+    """Streams, S4 signals and owner processes: stat/listing only, paired like a registry change."""
+
+    def setUp(self):
+        super().setUp()
+        self.logs = self.root / "logs"
+        self.logs.mkdir()
+        self.proc = self.root / "proc"
+        self.proc.mkdir()
+
+    def proc_entry(self, pid, start, state="S"):
+        (self.proc / str(pid)).mkdir(exist_ok=True)
+        (self.proc / str(pid) / "stat").write_text(
+            "%d (sleep) %s %s\n" % (pid, state, " ".join(["0"] * 18 + [str(start)] + ["0"] * 5)), encoding="ascii")
+
+    def sampler(self, **kw):
+        sampler = live.Sampler([self.registry], self.cache, stream_dirs=[self.logs], stream_every=1,
+                               proc_every=1, proc_root=str(self.proc), **kw)
+        sampler.poll(1000.5)
+        return sampler
+
+    def test_a_stream_append_is_a_change_at_its_mtime_and_pairs_with_the_next_publication(self):
+        stream = self.logs / "a.claude.jsonl"
+        put(stream, b"{}\n", 900.0)                       # old file already there: not an event
+        s = self.sampler()
+        put(stream, b"{}\n", 1005.0, "ab")
+        s.poll(1005.1)
+        self.publish("projection", 1006.0, 1006.5)
+        s.poll(1006.6)
+        self.assertEqual([c["source"] for c in s.other_changes], ["stream"])
+        paired, unpaired = s.source_lags("stream", "projection")
+        self.assertEqual((len(paired), unpaired), (1, 0))
+        self.assertAlmostEqual(paired[0], 1.5, places=3)
+
+    def test_an_old_file_listed_late_and_non_jsonl_files_are_not_events(self):
+        s = self.sampler()
+        put(self.logs / "late.claude.jsonl", b"x", 100.0)  # appears now, but not a current stream
+        put(self.logs / "note.txt", b"x", 1005.0)
+        s.poll(1005.1)
+        self.assertEqual(s.other_changes, [])
+
+    def test_an_s4_signal_is_a_sha256_named_json_in_the_cache_directory(self):
+        s = self.sampler()
+        put(self.cache / ("a" * 64 + ".json"), b"{}", 1005.0)
+        put(self.cache / "projection.json.tmp", b"{}", 1005.0)
+        put(self.cache / "notes.json", b"{}", 1005.0)
+        s.poll(1005.1)
+        self.assertEqual([c["source"] for c in s.other_changes], ["s4"])
+
+    def test_an_owner_process_that_ends_is_one_change_when_first_missed(self):
+        self.proc_entry(4242, 777)
+        s = self.sampler(owners=[(4242, "777")])
+        s.poll(1001.0)
+        self.assertEqual(s.other_changes, [])
+        (self.proc / "4242" / "stat").unlink()
+        s.poll(1002.0)
+        s.poll(1003.0)
+        self.assertEqual(s.other_changes, [{"t": 1002.0, "source": "owner"}])
+
+    def test_another_process_with_the_pid_and_a_process_that_never_matched_are_no_exit(self):
+        self.proc_entry(4242, 999)                      # the pid is another process now (other start ticks)
+        s = self.sampler(owners=[(4242, "777"), (5151, "1")])   # never alive: gone from the start
+        s.poll(1001.0)
+        self.assertEqual(s.other_changes, [])
+
+    def test_a_zombie_counts_as_ended(self):
+        self.proc_entry(4242, 777)
+        s = self.sampler(owners=[(4242, "777")])
+        self.proc_entry(4242, 777, state="Z")
+        s.poll(1001.0)
+        self.assertEqual([c["source"] for c in s.other_changes], ["owner"])
+
+    def test_the_report_names_counts_and_times_only(self):
+        s = self.sampler()
+        put(self.logs / "a.claude.jsonl", b"{}\n", 1005.0)
+        s.poll(1005.1)
+        out = json.dumps(s.report())
+        self.assertIn('"stream"', out)
+        self.assertNotIn("a.claude", out)
+        self.assertNotIn(str(self.root), out)
+        self.assertIn("registry 밖", live.to_markdown(dict(live.run([self.registry], self.cache, duration=0.0,
+                                                                      period=0.1, sleep=lambda _s: None))))
+
+    def test_default_owners_keeps_only_two_numbers_of_the_open_owner_rows(self):
+        put(self.registry, ("t\topen\t/r\t/w\towner\tworker_type=owner,pid=111,pid_start=222,attempt_id=SECRET\n"
+                           "t\tdone\t/r\t/w\towner\tworker_type=owner,pid=333,pid_start=444\n"
+                           "t\topen\t/r\t/w\tstage\tworker_type=stage,pid=555,pid_start=666\n").encode(), 1000.0)
+        self.assertEqual(live.default_owners([self.registry]), [(111, "222")])
+        self.assertEqual(live.default_owners([self.root / "absent.log"]), [])
+
+    def test_the_guard_still_refuses_signals_while_sampling_other_sources(self):
+        self.proc_entry(4242, 777)
+        result = live.run([self.registry], self.cache, duration=0.0, period=0.1, sleep=lambda _s: None,
+                          owners=[(4242, "777")], stream_dirs=[self.logs], proc_root=str(self.proc))
+        self.assertEqual(result["violations"], [])
+        with live.ReadOnlyGuard() as guard:
+            with self.assertRaises(PermissionError):
+                os.kill(os.getpid(), 0)
+        self.assertEqual([v["kind"] for v in guard.violations], ["signal"])
+
+
 class SamplerTest(Case):
     def test_append_then_replace_are_told_apart(self):
         s = self.sampler()

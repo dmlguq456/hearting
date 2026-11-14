@@ -1,6 +1,6 @@
 """Overview and list-view tables for the immutable explorer projection."""
 from collections.abc import Mapping
-from .live import current_route_counts, route_marker_state
+from .live import current_route_counts, route_marker_state, unknown_kind, unknown_route_kind
 from .grid import CellGrid
 from .style import recede_key
 from ..config import ui_text
@@ -49,7 +49,9 @@ def repo_status_segments(status, room, narrow=False):
     """Count-only pieces on OVERVIEW; project prose and recent results stay on its page.
 
     A narrow screen keeps only the counts waiting on the person (answers, then decisions);
-    the route count gives way first."""
+    the route count gives way first. The mark for routes not known (``details wait`` or
+    ``?``) takes only room nothing else needs: the line is first laid out without it, and it
+    is added only where the whole line still fits."""
     room = int(room)
     person = []
     if int(status.get("questions") or 0):
@@ -57,8 +59,16 @@ def repo_status_segments(status, room, narrow=False):
     decisions = int(status.get("decisions") or 0)
     if status.get("line") is not None and decisions:
         person.append((f"{decisions} to decide", "lvl_y"))
-    routes = [route_count_segment(status)] if int(status.get("routes") or 0) and not narrow else []
-    pieces = routes + person
+    known = int(status.get("routes") or 0) and not narrow
+    out = _fit_pieces(([route_count_segment(status, unknown=False)] if known else []) + person, room)
+    if status.get("routes_wait") and not narrow:
+        marked = [route_count_segment(status)] + person
+        if sum(_seg_width(text) for text, _key in marked) + _seg_width(BUNDLE_SEP) * (len(marked) - 1) <= room:
+            out = _fit_pieces(marked, room)
+    return out
+
+
+def _fit_pieces(pieces, room):
     out = []
     for text, key in pieces:
         addition = ([(BUNDLE_SEP, "dim")] if out else []) + [(text, key)]
@@ -71,18 +81,48 @@ def repo_status_segments(status, room, narrow=False):
 BUNDLE_SEP = " │ "
 
 
-def route_count_segment(status):
+def unknown_mark(kind):
+    """Fleet's mark for routes not known: ``details wait`` while their details are still to
+    come, the usual unknown ``?`` once a detail pass tried and did not bring them."""
+    if not kind:
+        return None
+    return "?" if kind == "unread" else ui_text("fleet.details_wait")
+
+
+def route_count_segment(status, unknown=True):
     """``route 3 ⠏2 ✕1``: the project's current routes and how many run or stopped.
 
     The by-state counts appear only when the status carries them; a bare count stays
-    ``route N`` and no zero is drawn."""
-    text = f"{ROUTE_WORD} {int(status['routes'])}"
+    ``route N`` and no zero is drawn. Routes not known add their mark (``details wait`` or
+    ``?``; ``route details wait`` alone when none is known), never a 0; ``unknown=False``
+    leaves the mark out."""
+    count = int(status.get("routes") or 0)
+    mark = unknown_mark(status.get("routes_wait")) if unknown else None
+    text = f"{ROUTE_WORD} {count}" if count or not mark else ROUTE_WORD
     for key, glyph in (("routes_running", "⠏"), ("routes_waiting", "●"),
                        ("routes_stopped", "✕")):
         value = status.get(key)
         if type(value) is int and value > 0:
             text += f" {glyph}{value}"
+    if mark:
+        text += (" · " if count else " ") + mark
     return (text, "dim")
+
+
+def session_route_tail(session, count):
+    """A folded session row's ``route N`` (known routes only); empty without one."""
+    return f"{ROUTE_WORD} {count}" if count else ""
+
+
+def session_route_mark(session, count):
+    """What a folded row adds for its routes not known, in room nothing else needs:
+    `` · details wait`` after a count, `` route details wait`` without one (``?`` once tried).
+
+    A row whose title cell itself reads ``details wait`` says it for the whole cell already."""
+    mark = unknown_mark(session.get("route_wait"))
+    if not mark or (session.get("title_wait") and not session.get("title")):
+        return ""
+    return (" · " if count else f" {ROUTE_WORD} ") + mark
 
 
 def gauge_cells(cells, pct):
@@ -216,6 +256,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()),
                           *(([(c["now"], "NOW")] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
+        if label == "TITLE" and isinstance(vm.system, Mapping) and vm.system.get("details_wait"):
+            waiting = "TITLE · " + ui_text("fleet.details_wait")    # basic frame: the late cells are not in yet
+            label = waiting if _seg_width(waiting) <= c["title_w"] else _clip(ui_text("fleet.details_wait"), c["title_w"])
         if label == "MODEL" and harn_end is None or label == "CTX" and not c.get("ctx_w", 1):
             continue                      # a table this narrow has no room for the harness cell
         grid.put(x + offset, y, label, "head", tint=234, limit=right)
@@ -314,13 +357,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                                     narrow=c["narrow"], bare=c["bare"])
             title_whole = False
             if c["title_w"]:
-                title = str(session.get("title") or "·")
+                title = str(session.get("title") or (ui_text("fleet.details_wait") if session.get("title_wait") else "·"))
                 # The checkout follows the title in parentheses (12 cells at most); the title gives way
                 # first, and a row whose branch is unknown draws no parentheses at all.
                 branch = session.get("branch")
                 tail = " (%s)" % _clip(str(branch), 12) if branch not in (None, "") else ""
-                route_count = current_routes.get(tag, 0)
-                route_tail = f" {ROUTE_WORD} {route_count}" if route_count and state.opened != tag else ""
+                route_count = session_route_tail(session, current_routes.get(tag, 0))
+                route_tail = " " + route_count if route_count and state.opened != tag else ""
                 # Current work remains visible while the session is folded.
                 # Reserve its cells before a long CJK title or branch is drawn.
                 if route_tail and _seg_width(route_tail) > c["title_w"]:
@@ -341,8 +384,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 title_whole = (_seg_width(title) <= room and (
                     not branch_tail or tail.startswith(branch_tail) and branch_tail == " (%s)" % branch))
                 title_text = _clip(title, room)
-                bold_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
-                            "opencode": ("l", 1, 0)}.get(harness, "unknown")
+                bold_key = ("dim" if session.get("title_wait") and not session.get("title") else
+                            {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
+                             "opencode": ("l", 1, 0)}.get(harness, "unknown"))
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:
@@ -361,6 +405,12 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                             route_key = "g_work" if getattr(grid, "beat", 1) else "g_work_off"
                         grid.put(route_x, y, route_tail, route_key,
                                  limit=x + c["title"] + c["title_w"])
+                # Routes not known are said only in the room the title, checkout and count
+                # left: with or without this mark they are drawn the same.
+                mark = session_route_mark(session, current_routes.get(tag, 0)) if state.opened != tag else ""
+                mark_x = title_end + _seg_width(tail)
+                if mark and mark_x + _seg_width(mark) <= x + c["title"] + c["title_w"]:
+                    grid.put(mark_x, y, mark, "dim", limit=x + c["title"] + c["title_w"])
             grid.put(x + use - len(str(session.get("age") or "")), y,
                      str(session.get("age") or ""), "dim")
             if c["now"] is not None:
@@ -554,15 +604,52 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
 
 def route_counts(routes):
     """``(open, no_response, stopped)``: a route nothing of which runs (no response) is not open."""
+    open_routes, no_response, stopped, _done, _mark = route_tally(routes)
+    return open_routes, no_response, stopped
+
+
+def route_tally(routes):
+    """The one count of routes every place on the screen draws: ``(open, no_response, stopped,
+    done, mark)``. The OVERVIEW ROUTES rule, the OVERVIEW and ROUTES status rows, a project's
+    status row and the ROUTES tab all read it, so a number reads the same everywhere.
+
+    A route not known (``wait``) is in no count: neither open, nor no response, nor stopped,
+    nor done. ``mark`` stands for such routes (``details wait`` or ``?``), None when all are known."""
+    routes = tuple(routes or ())
     states = [str(route.get("state") or "") for route in routes]
     return (sum(1 for route, state in zip(routes, states)
-                if state not in ("done", "stale") and not route.get("closed")),
+                if state not in ("done", "stale", "wait") and not route.get("closed")),
             states.count("stale"),
-            sum(1 for route in routes if route.get("state") == "dead" and not route.get("closed")))
+            sum(1 for route, state in zip(routes, states) if state == "dead" and not route.get("closed")),
+            states.count("done"),
+            unknown_mark(unknown_kind([unknown_route_kind(route) for route in routes])))
+
+
+def route_open_text(open_routes, mark, word="open"):
+    """``2 open``: the known count; with none known open and routes not known, their mark in its
+    place (``details wait``, ``? open``), never a 0."""
+    if open_routes or not mark:
+        return f"{open_routes} {word}".rstrip()
+    return mark if mark != "?" else f"? {word}".rstrip()
+
+
+def route_count_label(routes, word="open", mark_text=None):
+    """``2 open · ?``: ``route_open_text`` and, when some routes are known open, the mark after
+    the count. ``mark_text`` replaces the mark's words where the room is one cell (the tab)."""
+    open_routes, _no_response, _stopped, _done, mark = route_tally(routes)
+    if mark and mark_text:
+        mark = mark_text
+    text = route_open_text(open_routes, mark, word)
+    return text + (f" · {mark}" if open_routes and mark else "")
 
 
 def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
-    open_routes, no_response, stopped = route_counts(route_rows)
+    # Counted by the one rule the status rows and the ROUTES tab use (``route_tally``): the routes
+    # this section lists, and every route not known (one not bound yet may be one of theirs).
+    listed = {id(route) for route in route_rows}
+    open_routes, no_response, stopped, _done, mark = route_tally(
+        [*route_rows, *(route for route in (vm.routes or ())
+                        if id(route) not in listed and unknown_route_kind(route))])
     grid.put(x, y, "── ", "line")
     label_x = grid.put(x + 3, y, "ROUTES", "head")
     # Open routes pulse on the shared working beat (the same g_work/g_work_off pair as the
@@ -570,17 +657,25 @@ def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
     lit = bool(getattr(grid, "beat", 1))
     count_key = ("g_work" if lit else "g_work_off") if open_routes else "dim"
     count_x = grid.put(label_x, y, "  ", "dim", limit=right)
-    count_end = grid.put(count_x, y, f"{open_routes} open", count_key, limit=right)
+    # Routes not known: their mark stands for the count only when none is known (never a
+    # 0 open), and otherwise follows everything else in the room left (``· details wait``/``· ?``).
+    count_text = route_open_text(open_routes, mark)
+    count_end = grid.put(count_x, y, count_text, count_key, limit=right)
     meta = ((f" · no response {no_response}" if no_response else "") +
             (f" · {stopped} stopped" if stopped else ""))
     meta_end = grid.put(count_end, y, meta, "dim", limit=right) if meta else count_end
-    grid.put(meta_end, y, " ", "branch_s")
-    for cell_x in range(meta_end + 1, right):
-        grid.put(cell_x, y, "─", "line")
     mix = _harness_mix(route_rows)
     mix_width = sum(len(text) for text, _key in mix)
     mix_x = x + use - 2 - mix_width
-    if mix_x - x >= 40 and mix_x > meta_end + 1:     # only where it clears the section's own title
+    show_mix = mix_x - x >= 40 and mix_x > meta_end + 1     # only where it clears the section's own title
+    if mark and open_routes:
+        tail = f" · {mark}"
+        if meta_end + _seg_width(tail) + 1 <= (mix_x - 1 if show_mix else right):
+            meta_end = grid.put(meta_end, y, tail, "dim", limit=right)
+    grid.put(meta_end, y, " ", "branch_s")
+    for cell_x in range(meta_end + 1, right):
+        grid.put(cell_x, y, "─", "line")
+    if show_mix:
         cursor = mix_x
         for text, key in mix:
             cursor = grid.put(cursor, y, text, key, limit=right)
@@ -598,7 +693,7 @@ def _recent_row(grid, repo, x, use, y):
 def _harness_mix(routes):
     counts = {"claude": 0, "codex": 0, "opencode": 0}
     for route in routes:
-        if route.get("state") in ("dead", "done", "stale"):
+        if route.get("state") in ("dead", "done", "stale", "wait"):     # a route not known is in no count
             continue
         owner = str(route.get("harness") or "")
         if owner in counts:
@@ -789,7 +884,8 @@ def _draw_overview_route(grid, x, use, y, route, steward=False, repo_w=None, sho
 
 
 _ROUTE_MARK = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"), "blocked": ("●", "g_blocked"),
-               "done": ("✓", "grp_live"), "stale": ("◌", "dim"), "idle": ("●", "g_work_off")}
+               "done": ("✓", "grp_live"), "stale": ("◌", "dim"), "idle": ("●", "g_work_off"),
+               "wait": ("·", "dim")}
 
 
 def route_doer_cells(route):
@@ -1076,7 +1172,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     state = route_marker_state(route)
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
-                          "stale": ("◌", "dim")}.get(state, ("●", "g_work_off"))
+                          "stale": ("◌", "dim"), "wait": ("·", "dim")}.get(state, ("●", "g_work_off"))
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
     if repo_w:
@@ -1112,6 +1208,11 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 
 
 def _draw_route_progress(grid, x, end, y, route, card=True):
+    if route.get("state") == "wait":
+        # Not known: its stages are to come ("details wait"), or were tried and not read (·).
+        grid.put(x, y, ui_text("fleet.details_wait") if route.get("details_wait") else "·", "dim",
+                 limit=end)
+        return
     if route.get("state") == "stale" and x < end:
         # Still marked in flight, but nothing of it runs: said in words before its stages.
         x = grid.put(x, y, "no response ", "lvl_y", limit=end)

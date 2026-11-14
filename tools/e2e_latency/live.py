@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Production read-only sampler: registry change -> producer cache publication lag.
+"""Production read-only sampler: registry (and other source) change -> producer cache publication lag.
 
 It watches, and never touches, the operator's dispatch registry and the producer's
 two caches (``projection.json``, ``fleet.json``). Per ``--period`` it ``os.stat``s
@@ -9,6 +9,15 @@ mtime/inode changed is one publication; the only value taken from it is
 ``observed_at`` (the rest of the JSON is parsed and dropped). The lag of a change is
 the first publication whose ``observed_at`` is at or after the change, minus the
 change time. Output carries counts and times only: no path, no row, no cache content.
+
+Besides the registry it watches the sources the producer wakes on since speed leg 3, by the
+same means (``os.stat``/directory listing, a mtime or a name is all it takes, no content): a
+worker stream (a ``*.jsonl`` in the registry's ``logs`` directory that was written within the last
+few minutes), an S4 answer-wait signal (a sha256-named ``.json`` in the cache directory) and an owner
+process ending (``/proc/<pid>/stat`` of the pids of the registry's open rows, read once, existence and
+start ticks only, no signal). Each is paired to the first publication that observed it, like a
+registry change; an owner exit is told at the poll that first misses the process, so its lag is
+a lower bound by up to ``--proc-period``.
 
 Read-only is enforced for the sampling loop and for the output write, not for the whole
 process: an audit hook armed around those two refuses (and records as ``violations``)
@@ -29,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -37,6 +47,9 @@ sys.dont_write_bytecode = True      # also set by measure_e2e_latency.py before 
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parents[1]
 CACHE_NAMES = ("projection", "fleet")
+SOURCES = ("stream", "s4", "owner")
+_S4_NAME = re.compile(r"^[0-9a-f]{64}\.json$")
+STREAM_RECENT_S = 300.0         # a stream written within this long is a worker's current one
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 _REFUSED = {
     "os.kill": "signal", "os.killpg": "signal", "signal.pthread_kill": "signal",
@@ -138,9 +151,20 @@ def _observed_at(path):
 class Sampler:
     """Feed it ``poll(now)``; it only calls ``os.stat`` and opens cache files to read."""
 
-    def __init__(self, registries, cache_dir):
+    def __init__(self, registries, cache_dir, *, stream_dirs=None, s4_dir=None, owners=(),
+                 stream_every=5, proc_every=10, proc_root="/proc"):
         self.registries = [str(p) for p in registries]
         self.cache_paths = {name: str(Path(cache_dir) / (name + ".json")) for name in CACHE_NAMES}
+        # Other sources (None: not watched). Streams: the registries' ``logs`` directories.
+        self.stream_dirs = ([str(Path(p).parent / "logs") for p in self.registries]
+                            if stream_dirs is None else [str(p) for p in stream_dirs])
+        self.s4_dir = str(cache_dir) if s4_dir is None else (str(s4_dir) if s4_dir else None)
+        self.owners = [(int(pid), str(start)) for pid, start in owners]
+        self.stream_every, self.proc_every, self.proc_root = stream_every, proc_every, proc_root
+        self.other_changes = []                 # {"t", "source"}: counts and times only
+        self._stream_seen = {}                  # file -> mtime_ns (never exposed)
+        self._s4_seen = {}
+        self._owners_alive = {}
         self._reg = {}
         self._cache = {}
         self.changes = []                       # {"t", "kind", "registry"}
@@ -149,8 +173,69 @@ class Sampler:
         self.polls = 0
         self._latest = {}
 
+    def _poll_streams(self, now):
+        for directory in self.stream_dirs:
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.name.endswith(".jsonl"):
+                    continue
+                try:
+                    mtime = entry.stat().st_mtime_ns
+                except OSError:
+                    continue
+                key = entry.path
+                old = self._stream_seen.get(key)
+                self._stream_seen[key] = mtime
+                if self.polls == 1 or now - mtime / 1e9 > STREAM_RECENT_S:
+                    continue            # the state at the start, or not a worker's current stream
+                if old is None or mtime > old:
+                    self.other_changes.append({"t": mtime / 1e9, "source": "stream"})
+
+    def _poll_s4(self, now):
+        try:
+            entries = list(os.scandir(self.s4_dir))
+        except OSError:
+            return
+        for entry in entries:
+            if not _S4_NAME.match(entry.name):
+                continue
+            try:
+                mtime = entry.stat().st_mtime_ns
+            except OSError:
+                continue
+            old = self._s4_seen.get(entry.path)
+            self._s4_seen[entry.path] = mtime
+            if self.polls > 1 and (old is None or mtime > old):
+                self.other_changes.append({"t": mtime / 1e9, "source": "s4"})
+
+    def _proc_start(self, pid):
+        try:
+            with open("%s/%d/stat" % (self.proc_root, pid), encoding="ascii", errors="replace") as fh:
+                text = fh.read()
+            fields = text[text.rindex(")") + 2:].split()
+            return fields[19] if fields[0] not in ("Z", "X") else None
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _poll_owners(self, now):
+        for pid, start in self.owners:
+            alive = self._proc_start(pid) == start
+            was = self._owners_alive.get(pid)
+            self._owners_alive[pid] = alive
+            if was is True and not alive:
+                self.other_changes.append({"t": now, "source": "owner"})
+
     def poll(self, now):
         self.polls += 1
+        if self.stream_dirs and (self.polls == 1 or self.polls % self.stream_every == 0):
+            self._poll_streams(now)
+        if self.s4_dir:
+            self._poll_s4(now)
+        if self.owners and (self.polls == 1 or self.polls % self.proc_every == 0):
+            self._poll_owners(now)
         for index, path in enumerate(self.registries):
             try:
                 st = os.stat(path)
@@ -201,6 +286,19 @@ class Sampler:
                                "observed_lag_s": hit["observed_at"] - change["t"]})
         return paired, unpaired
 
+    def source_lags(self, source, name):
+        """Like ``lags`` for a change that is not a registry change: ``(paired, unpaired)``."""
+        pubs = sorted(self.publications[name], key=lambda p: p["published_at"])
+        paired, unpaired = [], 0
+        for change in (c for c in self.other_changes if c["source"] == source):
+            hit = next((p for p in pubs if p["observed_at"] >= change["t"]
+                        and p["published_at"] >= change["t"]), None)
+            if hit is None:
+                unpaired += 1
+            else:
+                paired.append(hit["published_at"] - change["t"])
+        return paired, unpaired
+
     def report(self):
         latency = {}
         for name in CACHE_NAMES:
@@ -216,11 +314,19 @@ class Sampler:
         counts = {"append": 0, "replace": 0}
         for change in self.changes:
             counts[change["kind"]] += 1
+        sources = {}
+        for source in SOURCES:
+            block = {"changes": sum(1 for c in self.other_changes if c["source"] == source)}
+            for name in CACHE_NAMES:
+                paired, unpaired = self.source_lags(source, name)
+                block[name] = {**summarize(paired), "unpaired_changes": unpaired}
+            sources[source] = block
         return {
             "polls": self.polls,
             "registry": {"watched": len(self.registries), "changes": counts,
                          "change_times": [round(c["t"], 3) for c in self.changes][:5000]},
             "latency": latency,
+            "sources": sources,
             "cache_age": {n: summarize(self.cache_age[n]) for n in CACHE_NAMES},
         }
 
@@ -257,15 +363,38 @@ def default_registries():
         sys.path.remove(str(WORKTREE / "tools"))
 
 
+def default_owners(registries, *, tail_bytes=2_000_000, limit=64):
+    """``(pid, start ticks)`` of the open owner rows at the end of each registry (read once, only
+    those two numbers are kept; nothing is written and no process is signalled)."""
+    found = []
+    for path in registries:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - tail_bytes))
+                text = fh.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            fields = line.split("\t")
+            if len(fields) < 6 or fields[1] != "open" or "worker_type=owner" not in line:
+                continue
+            pid = re.search(r"(?:^|,)pid=(\d+)(?:,|$)", fields[5])
+            start = re.search(r"(?:^|,)pid_start=(\d+)(?:,|$)", fields[5])
+            if pid and start:
+                found.append((int(pid.group(1)), start.group(1)))
+    return found[-limit:]
+
+
 def default_cache_dir():
     xdg = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
     return str(Path(xdg) / "hearting" / "human-waits")
 
 
 def run(registries, cache_dir, *, duration, period, outputs=(), clock=time.time,
-        sleep=time.sleep, mono=time.monotonic):
+        sleep=time.sleep, mono=time.monotonic, owners=(), **sampler_options):
     """Sample for ``duration`` seconds under the guard. Returns the result dict."""
-    sampler = Sampler(registries, cache_dir)
+    sampler = Sampler(registries, cache_dir, owners=owners, **sampler_options)
     lock = str(Path(cache_dir) / ".projection.lock")
     started = clock()
     with ReadOnlyGuard(allowed_writes=outputs) as guard:
@@ -307,6 +436,17 @@ def to_markdown(result):
         lines.append("| %s 짝 못 찾은 변화 | %s | | | |" % (name, block["unpaired_changes"]))
     for name in CACHE_NAMES:
         lines.append(row("%s cache 나이" % name, result["cache_age"][name]))
+    names = {"stream": "작업자 stream", "s4": "답 대기 signal", "owner": "owner 생존(탐지 시각 기준, 하한)"}
+    lines += ["", "## registry 밖 원천 → projection 게시 지연", "",
+              "| 원천 | 변화 수 | n | 중앙 s | p95 s | 최대 s | 짝 못 찾은 변화 |", "|---|---|---|---|---|---|---|"]
+    for source in SOURCES:
+        block = result.get("sources", {}).get(source)
+        if block is None:
+            continue
+        s = block["projection"]
+        lines.append("| %s | %s | %s | %s | %s | %s | %s |" % (
+            names[source], block["changes"], s["n"], s["median_s"], s["p95_s"], s["max_s"],
+            s["unpaired_changes"]))
     return "\n".join(lines) + "\n"
 
 
@@ -332,7 +472,9 @@ def main(argv=None):
         sys.stderr.write("live: cannot resolve registries: %s: %s\n" % (type(exc).__name__, exc))
         return 2
     cache_dir = args.cache_dir or default_cache_dir()
-    result = run(registries, cache_dir, duration=args.duration, period=args.period, outputs=outputs)
+    owners = default_owners(registries) if args.registry is None else []
+    result = run(registries, cache_dir, duration=args.duration, period=args.period, outputs=outputs,
+                 owners=owners)
     text = json.dumps(result, ensure_ascii=False, indent=1) + "\n"
     with ReadOnlyGuard(allowed_writes=outputs) as guard:
         try:

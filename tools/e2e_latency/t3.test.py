@@ -27,9 +27,13 @@ _spec.loader.exec_module(t3)
 MS = 1_000_000
 
 
-def paint(ms, *, loading=False, replay=False, ready=False, all_new=False, pending=(), carried=()):
-    return {"k": "paint", "t_ns": ms * MS, "loading": loading, "replay": replay, "ready": ready,
-            "all_new": all_new, "pending": list(pending), "carried": list(carried)}
+def paint(ms, *, loading=False, replay=False, ready=False, all_new=False, pending=(), carried=(),
+          observed=None):
+    row = {"k": "paint", "t_ns": ms * MS, "loading": loading, "replay": replay, "ready": ready,
+           "all_new": all_new, "pending": list(pending), "carried": list(carried)}
+    if observed is not None:          # a tree that records it: the basic collection is in
+        row["observed"] = observed
+    return row
 
 
 def compose(ms, states):
@@ -38,6 +42,48 @@ def compose(ms, states):
 
 def chunk(ms, text=""):
     return (ms * MS, text.encode())
+
+
+class ObservedDefinitionTest(unittest.TestCase):
+    """The new first_observed_s (basic in + the late-cell word on screen) against first_ready_s."""
+
+    def run_story(self, *, mark, observed=True):
+        text = "\x1b[1mTITLE · details wait\x1b[0m" if mark else "TITLE"
+        chunks = [chunk(105, "loading"), chunk(2010, text), chunk(3010, "all done")]
+        records = [paint(100, loading=True, pending=["basic"]),
+                   paint(2000, pending=["required-details"], observed=observed),
+                   paint(3000, ready=True, all_new=True, observed=observed)]
+        return t3.analyze(chunks, records, 0)
+
+    def test_an_observed_frame_with_the_word_counts_and_ready_keeps_the_old_definition(self):
+        out = self.run_story(mark=True)
+        self.assertEqual(out["first_observed_s"], 2.01)
+        self.assertEqual(out["observed_by"], "details-wait")
+        self.assertEqual(out["first_ready_s"], 3.01)
+        self.assertEqual(out["details_complete_s"], 3.01)
+
+    def test_an_observed_frame_without_the_word_does_not_count(self):
+        out = self.run_story(mark=False)
+        self.assertEqual(out["first_observed_s"], 3.01)      # the same as first_ready_s
+        self.assertEqual(out["first_observed_s"], out["first_ready_s"])
+        self.assertEqual(out["observed_by"], "ready")
+
+    def test_a_tree_that_does_not_record_observed_gives_the_old_definition(self):
+        out = self.run_story(mark=True, observed=None)
+        self.assertEqual(out["first_observed_s"], 3.01)
+        self.assertEqual(out["first_ready_s"], 3.01)
+
+    def test_the_korean_word_counts_too(self):
+        chunks = [chunk(105, "loading"), chunk(1010, "제목 · 세부 아직"), chunk(3010, "done")]
+        records = [paint(100, loading=True), paint(1000, pending=["required-details"], observed=True),
+                   paint(3000, ready=True, all_new=True, observed=True)]
+        self.assertEqual(t3.analyze(chunks, records, 0)["first_observed_s"], 1.01)
+
+    def test_a_replay_or_loading_frame_never_counts(self):
+        chunks = [chunk(105, "loading"), chunk(510, "details wait"), chunk(3010, "done")]
+        records = [paint(100, loading=True, observed=True), paint(500, replay=True, observed=True),
+                   paint(3000, ready=True, all_new=True, observed=True)]
+        self.assertEqual(t3.analyze(chunks, records, 0)["first_observed_s"], 3.01)
 
 
 class AnalyzeTest(unittest.TestCase):

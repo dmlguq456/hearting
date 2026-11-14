@@ -236,6 +236,7 @@ class RefreshPump:
         self._pending = False
         self._stopped = False
         self._next_due = self._clock()
+        self._soonest = self._next_due      # the earliest a woken run may start (the adaptive rest)
         self._generation = 0
         self._latest = None
         self._last_error = None
@@ -268,6 +269,22 @@ class RefreshPump:
 
     def request_due(self, now=None):
         return self.request(force=False, now=now)
+
+    def request_soon(self, now=None):
+        """Bring the next periodic run forward to the end of the adaptive rest.
+
+        A source changed: waiting out the rest of the interval only adds the phase of the
+        periodic tick to what the person sees. The rest that protects the CPU (a run's own
+        duration, four times its CPU time, the failure back-off) is kept, so a source that
+        keeps changing still gets at most the cadence the producer can afford. Returns True
+        only when this call starts a worker.
+        """
+        current = self._clock() if now is None else float(now)
+        with self._lock:
+            if self._stopped:
+                return False
+            self._next_due = min(self._next_due, max(self._soonest, current))
+            return self.request(force=False, now=current)
 
     def request(self, force=False, now=None):
         """Schedule a run without waiting for the producer.
@@ -418,6 +435,13 @@ class RefreshPump:
                 # Preserve the original shared-pump cadence for board callers.
                 delay = self._interval
             self._next_due = finished_at + delay
+            if self._adaptive_cadence:
+                # What the rest is when the interval itself is not part of it: the run's duration
+                # and four times its CPU time (the failure back-off stays whole).
+                self._soonest = finished_at + (
+                    max(cooldown if self._failure_streak else 0.0, self._last_duration, 4 * cpu_duration))
+            else:
+                self._soonest = self._next_due
             if self._pending and not self._stopped:
                 self._pending = False
                 self._running = True

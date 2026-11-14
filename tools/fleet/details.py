@@ -764,6 +764,14 @@ def _enrich(snapshot, *, include_report_verification=True, required=True,
                 only_entities=detail_entities if continued else None)
         except Exception:
             projection_ready = False
+        # This pass tried every row in its scope. A row whose route it did not bring (the read
+        # failed or timed out, or only a part of the rows came) is unread now, not "to come":
+        # the wait marker stands only before the details were tried.
+        for entity in (detail_entities if continued else sessions + jobs + route_entities):
+            work = getattr(entity, "work_projection", None)
+            if getattr(work, "_details_deferred", False) is True:
+                entity.work_projection = replace(
+                    work, _details_deferred=False, _details_unread=True)
         detail_ready = (route_chain_ready and degradations_ready and projection_ready
                         and projection.required_projection_details_complete(
                             sessions + jobs + route_entities))
