@@ -1780,7 +1780,8 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
             entity.work_projection = WorkProjection(
                 source="registry-exact" if rid else "none", route_id=rid,
                 route_hash=rhash, route_node=_field(entity, "route_node"),
-                attempt_id=_field(entity, "attempt_id"), node_state="unknown")
+                attempt_id=_field(entity, "attempt_id"), node_state="unknown",
+                _details_deferred=True)
             if isinstance(entity, DispatchJob):
                 entity.stage = None
                 observed = ((_field(entity, "state_evidence") or {}).get("inputs") or {}).get(

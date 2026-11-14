@@ -1032,6 +1032,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         view = slot["view"] or {}
         record = slot["record"] or {}
         jobs = slot["jobs"]
+        # The fast first pass left this route's record for the detail pass (the projection
+        # says so): no record here is "not read yet", not "nothing runs".
+        deferred = not view and not record and any(
+            getattr(_work(entity), "_details_deferred", False) is True
+            for entity in jobs + slot["sessions"])
         expected_owner = _text(record.get("owner_attempt_id"))
         if expected_owner == "-":
             expected_owner = None
@@ -1262,6 +1267,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             if isinstance(verification, Mapping) and verification.get("closed_at"):
                 route["closed"] = True
                 route["resume"] = None
+        if deferred:
+            # Whether it runs, its state and its stages come with the details: they read
+            # "details wait" until then, never ended, 0 or an empty rail.
+            route.update(state="wait", activity="wait", current=None, stages=None, legs=[],
+                         resume=None, details_wait=True)
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -1438,13 +1448,18 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
                     and (doc is None or found["mtime"] > doc["mtime"])):
                 doc = found
         open_routes = sum(1 for route in routes if route["repo"] == name and route.get("current"))
+        # Routes whose details are still to come: the count is not known yet (never a 0).
+        route_wait = (any(route.get("details_wait") and route["repo"] == name for route in routes)
+                      or any(row.get("route_wait") and row["repo_id"] == name for row in session_rows))
         asked = sum(1 for item in questions if item.get("project") == name and not item.get("older"))
         result = (results or {}).get(name) or {}
         done_at = _num(result.get("at")) if result.get("result") == "success" else None
-        if doc is None and not (open_routes or asked or repo.get("done")):
+        if doc is None and not (open_routes or route_wait or asked or repo.get("done")):
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        if route_wait:
+            status["routes_wait"] = True
         question_lines = []
         for question in questions:
             if question.get("project") != name or question.get("older"):
@@ -3317,12 +3332,32 @@ def route_marker_state(route):
     Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
     working. A route its reader found with nothing running reads as no response and never
     spins, as the session tree's mark already reads it."""
+    if route.get("details_wait"):
+        return "wait"                 # its details are not in yet: neither working nor ended
     state = str(route.get("state") or "")
     if state == "stale":
         return "stale"
     if route.get("activity") == "running":
         return "working"
     return state if state in ("working", "blocked", "dead", "done") else "idle"
+
+
+def route_waits(routes, session_rows, session_index):
+    """Mark the session rows whose route count is still to come (``route_wait``).
+
+    A route whose details were deferred counts for the session it is bound to. One not bound
+    yet may belong to any session whose own route binding was deferred as well, so those rows
+    wait too: no route count reads as a current value (0) before the details are in."""
+    waiting = [route for route in routes if route.get("details_wait")]
+    if not waiting:
+        return
+    bound = {route.get("session_tag") for route in waiting if route.get("session_tag")}
+    unbound = any(not route.get("session_tag") for route in waiting)
+    for row in session_rows:
+        session = session_index[row["tag"]]["session"]
+        if row["tag"] in bound or (unbound and row.get("state") not in ("dead", "stale")
+                                   and getattr(_work(session), "_details_deferred", False) is True):
+            row["route_wait"] = True
 
 
 def route_state_counts(routes):
@@ -3581,6 +3616,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         sid_of = {row["tag"]: session_index[row["tag"]]["sid"] for row in session_rows}
         session_rows.sort(key=lambda row: position.get(str(sid_of.get(row["tag"])), len(position)))
     routes, nodes = _route_records(snapshot, session_rows, session_index, resolver, clock)
+    route_waits(routes, session_rows, session_index)
     results = _repo_results(snapshot, resolver, clock)
     repos = _repo_records(session_rows, routes, results, clock)
     if not order:

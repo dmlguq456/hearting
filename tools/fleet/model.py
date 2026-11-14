@@ -401,6 +401,9 @@ class WorkProjection:
     _route_view: Optional[dict] = field(default=None, repr=False, compare=False)
     report_verification: Optional[dict] = field(default=None, compare=False)
     result: Optional[dict] = None  # recorded task result and event time; never file mtime
+    # The first fast pass left this row's route details for the detail pass: an
+    # absent _route_view then means "not read yet", never "no route record".
+    _details_deferred: bool = field(default=False, repr=False, compare=False)
 
     def to_dict(self):
         payload = _public_value(self)

@@ -912,7 +912,8 @@ def draw_explorer(grid: CellGrid, vm, state):
                 rh = route.get("harness") or "·"
                 label_x = branch_x + 3
                 mark, mark_key = {"running": ("⠏", "g_spin_dim"), "working": ("⠏", "g_spin_dim"),
-                                  "blocked": ("●", "lvl_r_dim"), "stale": ("◌", "dim")}.get(
+                                  "blocked": ("●", "lvl_r_dim"), "stale": ("◌", "dim"),
+                                  "wait": ("·", "dim")}.get(
                     "stale" if route.get("state") == "stale" else
                     route.get("activity", route.get("state")), ("●", "idle"))
                 route_suffix = ": " + str(rh) + " " + mark
