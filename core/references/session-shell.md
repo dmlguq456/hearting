@@ -734,7 +734,7 @@ a finished one (closed, replaced, expired, an answer on its way) are not counted
 The question block holds what the person can answer here now (answerable ones
 first; `Ctrl+]` opens on the first of them); a counted wait answered in another
 place is one dim guidance line beside the count saying where
-(`questions 1 · answer below`), and the notice line names `Ctrl+]` only when the
+(`QUESTIONS 1 · answer below`), and the notice line names `Ctrl+]` only when the
 panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
 parent holds the worker's exact acknowledged completion receipt. Once the person
