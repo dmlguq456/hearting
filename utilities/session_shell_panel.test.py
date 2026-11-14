@@ -453,7 +453,7 @@ const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],se
  quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:217},g_dead:{foreground:217,bold:true}},
  session_title:'SESSION_TITLE',now:'NOW_LINE',messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
 const question=[[p('◑ Q_HEAD')],[p('Q_BODY')],[p('› A')],[p('2 B')],[p('↑↓ choose · Enter send · t text')]];
-const paint=(o={})=>view.render({width:40,height:o.height||30,side:true,sid:'s',harness:'claude',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
+const paint=(o={})=>view.render({width:40,height:o.height||30,side:true,sid:'s',harness:'claude',configuration:o.cfg||{},model:{...model,...o.model},state:o.state,frame:o.frame,since:o.since,
  settings:o.settings,questions:q=>(o.q||[]).slice(0,q.budget)});
 const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
 // Spec rule 29 (a): Fleet's session-row head on the left of the top border (glyph,
@@ -488,11 +488,17 @@ const top=paint({state:'idle',model:{tag:'[e9]',styles:{...model.styles,hb_claud
 assert.equal(top.find(x=>x.text==='●').foreground,150);
 assert.equal(top.find(x=>x.text==='e9').foreground,150);assert.equal(top.find(x=>x.text==='claude').foreground,116);
 // Spec rule 25: the whole frame takes that word's color, running and waiting their
-// session keys, idle and an unknown state the neutral line, in the same paint.
+// session keys, idle and an unknown state the neutral line, in the same paint. Standing still
+// (rule motion off) it keeps that color; moving (spec rule 47) a running frame is the neutral
+// line with an arc whose head is that color, and a waiting one starts its breath at it.
 for(const [state,want] of [['working',230],['submitting',230],['blocked',217],['idle',undefined],['unknown',undefined]]){
- const v=paint({state}),frame=v.rows.flatMap(r=>[r[0],r.at(-1)]);
+ const v=paint({state,cfg:{rule_motion:'off'}}),frame=v.rows.flatMap(r=>[r[0],r.at(-1)]);
  assert(frame.every(x=>(x.foreground??undefined)===want&&(want===undefined?x.dim===true:x.dim!==true)),state+' '+JSON.stringify(frame[0]));
  assert(!v.rows.flat().some(x=>x.text==='╭'&&x.foreground===217),state+' no route failure here');
+ const moving=paint({state,frame:0,since:0}).rows.flatMap(r=>[r[0],r.at(-1)]),lines=paint({state,frame:0,since:0}).rows.flat().filter(x=>['frame','frame-state','orbit'].includes(x.role)&&/^[─┌┐└┘│]+$/.test(x.text));
+ if(want===217)assert(lines.every(x=>x.foreground===217&&x.dim!==true),state+' '+JSON.stringify(moving[0]));
+ else if(want)assert(lines.every(x=>x.role==='frame'&&x.dim===true||x.role==='orbit'&&view.FACES.dark.orbit.includes(x.foreground))&&lines.some(x=>x.foreground===want),state);
+ else assert.deepEqual(moving,frame,state);
 }
 // A failed route turns only its own box line to the failure color; the frame stays the session's.
 const failed=paint({state:'idle',model:{routes:[route(0),{...route(1),state:'dead',kind:'dead'}]}});
@@ -1881,152 +1887,159 @@ for(const open of [[],['lab:grp_1']])for(const folded of [false,true]){
 """
         self.node(script, "panel-view.cjs")
 
-    def test_the_head_rule_follows_the_sessions_own_state(self):
-        # Spec E9 rule 47 (the user's final values, 11-13) as rules 51 and 52 retune it: every cell
-        # of the rule is the thin `─` in every state (no heavy `━` anywhere on it). Running, a light
-        # passes over it, its middle five cells brightest and four on each side one shade down
-        # each, from fully outside one end to fully outside the other and back at one speed in 26
-        # frames (2.6 s); once it has left on the side it came in from, the dark rule rests 10
-        # frames (1 s, its turn beat included) and the light comes in again on that side; at the
-        # far end it turns after one dark beat. Waiting, the whole thin red rule breathes every 36
-        # frames (3.6 s) through eight shades in 24-bit color (six in 256), one shade at a time,
-        # each an equal stretch; idle, the plain thin rule. Only that row changes between frames;
-        # the host gets the row at any frame and the next frame it changes at, so through the rest
-        # it neither wakes for the rule nor writes it. Rule motion off, mono, NO_COLOR and eight
-        # colors move nothing; a panel short of rows that drops the rule adds nothing.
+    def test_the_outer_frame_carries_the_sessions_moving_state(self):
+        # Spec E9 rule 47 (11-14: the outer frame instead of the head rule), rules 51, 52 and 25 as
+        # it retunes them. Running (and while an answer is typed in), a bright arc goes round the
+        # outer frame clockwise without rest: its head the brightest (the running frame's vanilla),
+        # its tail four shades down into the neutral frame gray, a quarter of the frame's cells
+        # long (it grows with the panel), once round every 60 frames (6 s) whatever the size; the
+        # cells of the head's words are passed behind. Waiting, the whole frame breathes red every
+        # 48 frames (4.8 s), three shades in 256 colors and six in 24-bit, one at a time. Idle and
+        # an unknown state, rule motion off, mono, NO_COLOR, eight colors and the settings screen:
+        # the still frame in the state's color. The head rule is the plain thin rule in every
+        # state. Between frames only the frame's line cells (and the spinner glyph) change; the
+        # host gets those cells, their paint at any frame and the next frame they change at.
         script = self.FIXTURE + r"""
 const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},
  tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}};
-const run=(o={})=>view.render({width:40,height:o.height||40,side:true,fill:true,harness:o.harness||'claude',model:{...head,routes:[],route_count:0,messages:[],styles,...(o.model||{})},
- state:o.state,frame:o.frame||0,configuration:o.cfg||{},background:o.background||'',questions:()=>[]});
+const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'claude',
+ model:{...head,tag:'[e9]',routes:[],route_count:0,messages:[],styles,...(o.model||{})},state:o.state,frame:o.frame||0,since:o.since,
+ configuration:o.cfg||{},background:o.background||'',questions:()=>[],...(o.extra||{})});
 const text=r=>r.map(p=>p.text).join('');
-const ruleAt=v=>{const c=v.rows.findIndex(r=>text(r).startsWith('│ CTX'));return c>0&&/^│ [─━]+ │$/.test(text(v.rows[c+1]))?c+1:-1;};
-const cellsOf=(v,i)=>v.rows[i].slice(2,-2).flatMap(p=>[...p.text].map(ch=>({ch,p})));
-assert.deepEqual(view.RULE,{PEAK:5,FADE:4,SCAN:26,REST:10,BREATHE:36,WAIT_STEPS:8,WAIT_STEPS_256:6});
-const ramp=view.FACES.dark.scan;assert.deepEqual(ramp,[243,101,144,187,230]);
-const CYCLE=26+10-1;
-// A frame's light: each cell's shade (0: the dark rule), read back from the paint.
-const shades=frame=>{const v=run({state:'working',frame}),cs=cellsOf(v,ruleAt(v));
- // (a) Running, every cell the thin rule (spec rule 52: no heavy cell).
- assert(cs.length===36&&cs.every(c=>c.ch==='─'),frame+' '+text(v.rows[ruleAt(v)]));
- return cs.map(c=>c.p.role==='messages'&&c.p.dim?0:ramp.indexOf(c.p.foreground)+1);};
-let full=0,ends={left:[],right:[]};
-for(let f=0;f<2*CYCLE;f++){
- const sh=shades(f),lit=sh.map((x,i)=>x?i:-1).filter(i=>i>=0);
- assert(sh.every(x=>x>=0&&x<=5),String(f));
- if(!lit.length){full++;continue;}
- // (c) From the brightest cells outward one shade at a time, never a jump.
- for(let i=1;i<36;i++)assert(Math.abs(sh[i]-sh[i-1])<=1,f+' '+sh.join(''));
- // (b) Where the light stands whole inside the rule: five brightest cells in its middle, thirteen lit.
- const peak=sh.map((x,i)=>x===5?i:-1).filter(i=>i>=0);
- if(lit[0]>0&&lit.at(-1)<35){assert.equal(peak.length,5,f+' '+sh.join(''));assert.equal(lit.length,13,f+' '+sh.join(''));
-  assert.deepEqual(sh.slice(lit[0],lit.at(-1)+1),[1,2,3,4,5,5,5,5,5,4,3,2,1],f+' '+sh.join(''));}
- if(lit[0]===0)ends.left.push(f);if(lit.at(-1)===35)ends.right.push(f);
+assert.deepEqual(view.BORDER,{LAP:60,ARC:1/4,SHADES:4,BREATHE:48,BREATHE_STEPS:6,BREATHE_STEPS_256:3});
+assert.deepEqual(view.FACES.dark.orbit,[230,187,144,101]);assert.deepEqual(view.FACES.light.orbit,[22,65,108,151]);
+assert.deepEqual(view.FACES.dark.breath,[217,210,174]);assert.deepEqual(view.FACES.light.breath,[88,124,131]);
+// Every cell of a painted panel, by row and column, with the part it stands in.
+const grid=v=>v.rows.map(r=>{const out=[];for(const p of r)for(const ch of p.text){out.push({ch,p});if(cells(ch)>1)out.push(null);}return out;});
+// The frame's cells clockwise from the top-left corner, as [row, column].
+const around=(W,H)=>{const out=[];for(let x=0;x<W;x++)out.push([0,x]);for(let y=1;y<H-1;y++)out.push([y,W-1]);
+ for(let x=W-1;x>=0;x--)out.push([H-1,x]);for(let y=H-2;y>0;y--)out.push([y,0]);return out;};
+// Each frame cell's look: 'text' (the head's words), 'base' (the neutral frame), or its arc shade 0..3.
+const ramp=view.FACES.dark.orbit;
+const looks=v=>{const g=grid(v),W=g[0].length,H=g.length;return around(W,H).map(([y,x])=>{const c=g[y][x];
+ if(!'┌┐└┘─│'.includes(c.ch))return 'text';
+ if(c.p.role==='frame')return 'base';
+ assert(c.p.role==='orbit'&&ramp.includes(c.p.foreground)&&c.p.dim!==true,JSON.stringify(c.p));return ramp.indexOf(c.p.foreground);});};
+const lit=l=>l.map((x,i)=>typeof x==='number'?i:-1).filter(i=>i>=0);
+// The arc's head: a brightest cell whose next cell clockwise is no arc cell (null while it is behind the head's words).
+const headOf=l=>{const n=l.length,h=l.findIndex((x,i)=>x===0&&l[(i+1)%n]==='base');return h<0?null:h;};
+// (a) Running: every frame shows one arc, a quarter of the frame long, its head the brightest and
+// four shades down to its tail; behind it the neutral frame. One lap is 60 frames for every size.
+for(const [o,W,H] of [[{},40,40],[{width:60},60,40],[{side:false,width:100,height:14},100,0]]){
+ const rowsOf=run({...o,state:'working'}).rows.length,P=2*W+2*((H||rowsOf)-2),arc=Math.round(P/4),heads=[];
+ for(let f=0;f<=120;f++){
+  const v=run({...o,state:'working',frame:f}),l=looks(v);assert.equal(l.length,P);
+  // The glyphs stay the frame's own on every frame.
+  const g=grid(v);assert(g[0][0].ch==='┌'&&g[0].at(-1).ch==='┐'&&g.at(-1)[0].ch==='└'&&g.at(-1).at(-1).ch==='┘',String(f));
+  const on=lit(l),h=headOf(l);heads.push(h);
+  if(h!==null&&!l.slice(0).some((x,i)=>x==='text'&&((h-i+P)%P)<arc)){
+   // Walking back from the head: shades 0, 1, 2, 3 in order, each a quarter of the arc (within a cell), then the neutral frame.
+   const back=Array.from({length:arc+1},(_,k)=>l[(h-k+P)%P]);
+   assert.equal(back[arc],'base',f+' '+back.join(''));
+   for(let k=1;k<arc;k++)assert(back[k]>=back[k-1]&&back[k]-back[k-1]<=1,f+' '+back.join(''));
+   for(let s=0;s<4;s++){const n=back.filter(x=>x===s).length;assert(Math.abs(n-arc/4)<=1,f+' '+s+' '+back.join(''));}
+   assert.equal(on.length,arc,f+' '+P);
+  }
+  assert(on.length<=arc&&on.length>=arc-15,f+' '+on.length);
+ }
+ // The head moves on clockwise every frame by the same step (within a cell), never back, and
+ // comes round to where it was after exactly 60 frames; half a lap later it is half the frame on.
+ const steps=[];for(let f=0;f<120;f++)if(heads[f]!==null&&heads[f+1]!==null)steps.push((heads[f+1]-heads[f]+P)%P);
+ assert(steps.length>60&&steps.every(s=>s>=Math.floor(P/60)&&s<=Math.ceil(P/60)),JSON.stringify(steps));
+ for(let f=0;f<60;f++)assert.deepEqual(run({...o,state:'working',frame:f}).rows,run({...o,state:'working',frame:f+60}).rows,String(f));
+ const half=[0,10,20].find(f=>heads[f]!==null&&heads[f+30]!==null);assert(Math.abs((heads[half+30]-heads[half]+P)%P-P/2)<=1,String(half));
+ // (b) One passage a lap: each cell lights once, brightest first, then steps down to the neutral
+ // frame, in 256 colors too (a turning arc, never a blink).
+ const seq=Array.from({length:60},(_,f)=>looks(run({...o,state:'working',frame:f})));
+ for(let i=0;i<P;i++){if(seq[0][i]==='text')continue;
+  const s=seq.map(l=>l[i]);const from=s.findIndex((x,k)=>x==='base'&&s[(k+1)%60]!=='base');
+  const turn=[...s.slice(from+1),...s.slice(0,from+1)];const end=turn.indexOf('base');
+  assert(end>0&&turn.slice(end).every(x=>x==='base'),i+' '+s.join(''));
+  for(let k=1;k<end;k++)assert(turn[k]>=turn[k-1],i+' '+s.join(''));
+  assert(turn[0]===0&&turn[end-1]===3,i+' '+s.join(''));}
 }
-// (d) The light leaves the rule whole at each end (a frame with the dark rule only) and comes back in on the same side.
-const dark=f=>shades(f).every(x=>x===0);
-assert(dark(0)&&dark(13)&&dark(CYCLE),'the rule is dark at the turns');
-assert(!dark(12)&&!dark(14),'one dark beat at the far end');
-assert(shades(1)[0]>0&&shades(25)[0]>0&&shades(12)[35]>0&&shades(14)[35]>0,'out and back in on the same side');
-// Spec rule 51 (b): having left on its first side the light rests 1 s (10 frames of the dark rule,
-// its turn beat included), then comes in again on that side; the round trip is 2.6 s.
-const darkRun=from=>{let n=0;while(dark(from+n))n++;return n;};
-assert.equal(darkRun(26),10);assert.equal(darkRun(13),1);assert(!dark(25)&&!dark(CYCLE+1));
-for(const f of [0,5,13,20,26,30])assert.deepEqual(shades(f),shades(f+CYCLE),'one rest per round trip '+f);
-assert(full>=2*11&&ends.left.length&&ends.right.length);
-// One speed: the light's middle moves the same number of cells every frame, end to end.
-const middle=f=>{const sh=shades(f),p=sh.map((x,i)=>x===5?i:-1).filter(i=>i>=0);return p.length===5?p[2]:null;};
-const steps=[];for(let f=1;f<25;f++)if(f!==13&&f!==12&&middle(f)!==null&&middle(f+1)!==null)steps.push(Math.abs(middle(f+1)-middle(f)));
-assert(steps.length>4&&Math.max(...steps)-Math.min(...steps)<=1,JSON.stringify(steps));
-// The host's row: its index, the row at any frame is that frame's painted row, the next change is the next frame.
+// (c) The arc starts with the state: at `since` its head is the first line cell right of the head's words.
+for(const since of [0,7,59,1000]){const v=run({state:'working',frame:since,since}),l=looks(v);
+ const words=text(v.rows[0]).indexOf(' ─')+1;assert.equal(headOf(l),words,since+' '+text(v.rows[0]));
+ assert.deepEqual(looks(run({state:'working',frame:since+13,since})),looks(run({state:'working',frame:13})),'the same arc, '+since+' frames on');}
+// (d) The host's cells: the frame's line cells (never the head's words), their paint at any frame as painted, the next change.
 const v3=run({state:'working',frame:3});
-assert(v3.animated&&!v3.blinks&&v3.motion&&v3.motion.row===ruleAt(v3)&&v3.motion.next(3)===4);
-for(const f of [3,17,30,40])assert.deepEqual(v3.motion.at(f),run({state:'working',frame:f}).rows[v3.motion.row]);
-// Spec rule 51 (c): through the rest the row stays the same and the host's next frame for it is
-// the moment the light comes back in (one wake at the rest's end); a whole period wakes it once
-// per changing frame and never in the rest.
-assert.equal(v3.motion.next(25),26);
-for(let f=26;f<=CYCLE;f++){assert.equal(v3.motion.next(f),CYCLE+1,String(f));assert.deepEqual(v3.motion.at(f),v3.motion.at(26),String(f));}
-assert.equal(v3.motion.next(CYCLE+26),2*CYCLE+1);
-{let t=1,wakes=[];while(t<1+CYCLE){t=v3.motion.next(t);wakes.push(t);}
- assert(wakes.every(w=>{const q=((w%CYCLE)+CYCLE)%CYCLE;return q===26||q===1||q>0&&q<26;}),JSON.stringify(wakes));
- assert.equal(wakes.filter(w=>{const q=w%CYCLE;return q>26||q===0;}).length,0,JSON.stringify(wakes));}
-// Between two frames only the spinner's row and the rule's row change.
-const a=run({state:'working',frame:5}),b=run({state:'working',frame:6});
-assert.deepEqual(a.rows.map((r,i)=>JSON.stringify(r)===JSON.stringify(b.rows[i])?-1:i).filter(i=>i>=0),[0,ruleAt(a)]);
-// Claude, Codex and OpenCode draw the same rule on the same frame (one renderer, one beat).
-for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f}));
- assert(all[0].motion?.row===all[1].motion?.row&&all[1].motion?.row===all[2].motion?.row);
- for(const v of all.slice(1))assert.deepEqual(v.rows.slice(1),all[0].rows.slice(1),state);}
-// (e) Waiting: the whole heavy red rule breathes, one shade at a time; eight shades in 24-bit color, six in 256.
-for(const [colors,count] of [[1<<24,8],[256,6]]){
- const seen=[],seq=[];
- for(let f=0;f<36;f++){const v=run({state:'blocked',frame:f,model:{colors}}),parts=v.rows[ruleAt(v)].slice(2,-2);
-  assert.equal(text(parts),'─'.repeat(36));assert(parts.length===1&&parts[0].motion===true&&!parts[0].beat&&parts[0].role==='rule',String(f));
-  seq.push(parts[0].step);if(!seen.includes(parts[0].foreground))seen.push(parts[0].foreground);}
- assert.equal(seen.length,count,colors+' '+JSON.stringify(seen));
- for(let f=1;f<=36;f++)assert(Math.abs(seq[f%36]-seq[f-1])<=1,colors+' '+seq.join(','));
+assert(v3.animated&&!v3.blinks&&v3.motion&&v3.motion.cells.length===156-text(v3.rows[0]).indexOf(' ─'));
+{const g=grid(v3);for(const c of v3.motion.cells)assert.equal(g[c.row][c.col].ch,c.ch,JSON.stringify(c));
+ assert(!v3.motion.cells.some(c=>c.row===0&&c.col>0&&c.col<text(v3.rows[0]).indexOf(' ─')+1));
+ for(const f of [3,17,30,59]){const g=grid(run({state:'working',frame:f}));
+  v3.motion.at(f).forEach((p,i)=>{const c=v3.motion.cells[i],q=g[c.row][c.col].p;assert(p.text===c.ch&&p.foreground===q.foreground&&!!p.dim===!!q.dim,f+' '+i);});}}
+for(const f of [0,3,59,60,1000])assert.equal(v3.motion.next(f),f+1);
+// A small frame (under 60 cells) wakes only on the frames its head moves, once a cell.
+{const s=run({side:false,width:20,height:4,state:'working',frame:0});const P=2*20+2*2;assert(s.motion);
+ let t=0,wakes=0;while(t<60){const n=s.motion.next(t);assert(n>t);for(let k=t+1;k<n;k++)assert.deepEqual(s.motion.at(k),s.motion.at(t),String(k));t=n;wakes++;}
+ assert.equal(wakes,P);}
+// (e) Between two frames only the frame's line cells and the spinner glyph change; the head rule never moves.
+const ruleRow=v=>v.rows.findIndex((r,i)=>i>0&&/^│ ─+ │$/.test(text(r)));
+for(const state of ['working','submitting','blocked']){
+ const a=run({state,frame:5}),b=run({state,frame:state==='blocked'?17:6}),ga=grid(a),gb=grid(b),mc=new Set(a.motion.cells.map(c=>c.row+','+c.col));
+ ga.forEach((r,y)=>r.forEach((c,x)=>{if(!c)return;if(mc.has(y+','+x)||c.p.spin)return;assert.deepEqual(c,gb[y][x],state+' '+y+','+x);}));
+ const i=ruleRow(a);assert(i>0,state);
+ for(const v of [a,b]){const parts=v.rows[i].slice(2,-2);
+  assert(parts.length===1&&parts[0].text==='─'.repeat(36)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].motion&&!parts[0].tone,state+' '+JSON.stringify(parts));}
+}
+// (f) Waiting: the whole frame breathes, one red at a time on every line cell; three shades in
+// 256 colors, six in 24-bit; it starts at its brightest (the frame's waiting red) and the host
+// wakes only at its shade changes.
+for(const [colors,count] of [[256,3],[1<<24,6]]){
+ const seq=[],seen=[];
+ for(let f=0;f<48;f++){const v=run({state:'blocked',frame:f,since:0,model:{colors}}),g=grid(v);
+  const tones=v.motion.cells.map(c=>g[c.row][c.col].p.foreground);
+  assert(tones.every(t=>t===tones[0])&&v.motion.cells.every(c=>g[c.row][c.col].p.role==='orbit'),f+' '+colors);
+  seq.push(g[0][0].p.step);if(!seen.includes(tones[0]))seen.push(tones[0]);}
+ assert.equal(seen.length,count,colors+' '+JSON.stringify(seen));assert.equal(seen[0],colors>256?'#ffafaf':217);
+ if(colors===256)assert.deepEqual(seen,view.FACES.dark.breath);
+ for(let f=1;f<=48;f++)assert(Math.abs(seq[f%48]-seq[f-1])<=1,colors+' '+seq.join(','));
  assert.equal(seq[0],0);assert.equal(Math.max(...seq),count-1);
- // Each shade holds an equal stretch of the breath (within one frame).
- const runs=[];let n=1;for(let f=1;f<36;f++){if(seq[f]===seq[f-1])n++;else{runs.push(n);n=1;}}
+ const runs=[];let n=1;for(let f=1;f<48;f++){if(seq[f]===seq[f-1])n++;else{runs.push(n);n=1;}}
  assert(Math.max(...runs.slice(1))-Math.min(...runs.slice(1))<=1,colors+' '+JSON.stringify(runs));
- // The host wakes for it only when the shade changes: 2 (steps - 1) times a breath.
- const w=run({state:'blocked',frame:0,model:{colors}});let t=0,wakes=0;while(t<36){t=w.motion.next(t);if(t<=36)wakes++;}
+ const w=run({state:'blocked',frame:0,since:0,model:{colors}});let t=0,wakes=0;while(t<48){t=w.motion.next(t);if(t<=48)wakes++;}
  assert.equal(wakes,2*(count-1),colors+' wakes');
+ assert.deepEqual(run({state:'blocked',frame:5,since:0,model:{colors}}).rows,run({state:'blocked',frame:53,since:0,model:{colors}}).rows);
 }
-// (e) Waiting is the thin red rule too (spec rule 52 (b)); the breath keeps its 3.6 s and its shades.
-// The brightest shade is the frame's waiting red; 24-bit shades run from it down a cosine to a dark red.
-assert.equal(run({state:'blocked',frame:0}).rows[ruleAt(run({state:'blocked',frame:0}))][2].foreground,217);
-assert.deepEqual(view.FACES.dark.wait,[217,210,174,167,131,95]);
-const rgb=run({state:'blocked',frame:0,model:{colors:1<<24}});assert.equal(rgb.rows[ruleAt(rgb)][2].foreground,'#ffafaf');
 // The steward `⚑` keeps its own blink.
-for(const [f,lit] of [[0,true],[10,false]]){const v=run({state:'blocked',frame:f,model:{tag:'[e9]',steward:true}});
- assert.equal(v.rows[0].find(p=>p.text==='⚑').bold===true,lit);assert(v.blinks);}
-// (f) Idle and an unknown state: the plain thin rule as before, nothing kept turning.
+for(const [f,on] of [[0,true],[10,false]]){const v=run({state:'blocked',frame:f,model:{steward:true}});
+ assert.equal(v.rows[0].find(p=>p.text==='⚑').bold===true,on);assert(v.blinks);}
+// (g) Still: idle and an unknown state keep the neutral frame; rule motion off, mono, NO_COLOR,
+// eight colors and the settings screen keep the frame in the state's color (running 230, waiting
+// 217 where color shows). Nothing moves, nothing keeps the beat for the frame.
+const frameOf=v=>{const g=grid(v);return around(g[0].length,g.length).map(([y,x])=>g[y][x]).filter(c=>'┌┐└┘─│'.includes(c.ch));};
 for(const state of ['idle','unknown',undefined]){
- const v=run({state,frame:7}),i=ruleAt(v);
- const parts=v.rows[i].slice(2,-2);
- assert(parts.length===1&&parts[0].text==='─'.repeat(36)&&parts[0].dim===true&&parts[0].role==='messages'&&!parts[0].motion&&!parts[0].beat,JSON.stringify(parts));
- assert.equal(v.motion,null);assert.equal(v.animated,false,String(state));
-}
-// Rule motion off, mono, NO_COLOR, eight colors: nothing moves; running keeps the thin rule, a wait a still thin
-// one (red where color shows, spec rule 52 (d)).
-for(const [cfg,model] of [[{rule_motion:'off'},{}],[{theme:'mono'},{}],[{},{no_color:true}],[{},{colors:8}]]){
- const r=run({state:'working',frame:7,cfg,model}),k=[0,20].map(frame=>run({state:'blocked',frame,cfg,model}));
- assert.equal(text(r.rows[ruleAt(r)]),'│ '+'─'.repeat(36)+' │');assert.equal(r.motion,null);assert(!r.rows.flat().some(p=>p.motion));
- assert.equal(text(k[0].rows[ruleAt(k[0])]),'│ '+'─'.repeat(36)+' │');
- if(!cfg.theme&&!model.no_color)assert(k[0].rows[ruleAt(k[0])].slice(2,-2).every(p=>p.role==='rule'&&p.foreground===217),JSON.stringify(cfg));
- assert.deepEqual(k[0].rows[ruleAt(k[0])],k[1].rows[ruleAt(k[1])],JSON.stringify(cfg));
- assert(!k[0].rows[ruleAt(k[0])].some(p=>p.beat||p.motion),JSON.stringify(cfg));assert.equal(k[0].motion,null);
-}
-// A known face takes its ramps: the dark face's vanilla light and reds, the light face's deep ones.
+ const v=run({state,frame:7});assert.equal(v.motion,null);assert.equal(v.animated,false,String(state));
+ assert(frameOf(v).every(c=>c.p.role==='frame'&&c.p.dim===true),String(state));
+ assert.deepEqual(v.rows,run({state,frame:31}).rows);}
+for(const [cfg,model,extra] of [[{rule_motion:'off'},{}],[{theme:'mono'},{}],[{},{no_color:true}],[{},{colors:8}],[{},{},{settings:{index:0,value:{...view.defaults}}}]]){
+ for(const [state,want] of [['working',230],['blocked',217]]){
+  const a=run({state,frame:7,cfg,model,extra}),b=run({state,frame:37,cfg,model,extra});
+  assert.equal(a.motion,null,JSON.stringify([cfg,model,state]));assert.deepEqual(a.rows,b.rows,JSON.stringify([cfg,model,state]));
+  assert(!a.rows.flat().some(p=>p.role==='orbit'||p.tone),JSON.stringify(cfg));
+  if(cfg.rule_motion||model.colors)assert(frameOf(a).every(c=>c.p.foreground===want),JSON.stringify([cfg,model,state,frameOf(a)[3]]));
+ }}
+// (h) A known face takes its ramps: the dark face's vanilla arc over its frame gray (244), the light
+// face's deep green over 243; a waiting frame starts at the face's waiting red.
 for(const [o,face] of [[{background:'dark'},'dark'],[{cfg:{theme:'light'}},'light']]){
- const v=run({...o,state:'working',frame:8}),cs=cellsOf(v,ruleAt(v)).filter(c=>c.p.role==='rule');
- assert(cs.length===13&&cs.every(c=>view.FACES[face].scan.includes(c.p.foreground))&&cs.some(c=>c.p.foreground===view.FACES[face].scan[4]),face);
- assert.equal(cellsOf(v,ruleAt(v)).filter(c=>c.p.role==='messages')[0].p.foreground,view.FACES[face].messages,face);
- const k=run({...o,state:'blocked',frame:0});assert.equal(k.rows[ruleAt(k)][2].foreground,view.FACES[face].wait[0],face);
+ const v=run({...o,state:'working',frame:8}),cs=frameOf(v);
+ assert(cs.filter(c=>c.p.role==='frame').every(c=>c.p.foreground===view.FACES[face].frame&&c.p.dim===false),face);
+ const arc=cs.filter(c=>c.p.role==='orbit');assert(arc.length>20&&arc.every(c=>view.FACES[face].orbit.includes(c.p.foreground))&&arc.some(c=>c.p.foreground===view.FACES[face].orbit[0]),face);
+ assert.equal(frameOf(run({...o,state:'blocked',frame:0,since:0}))[0].p.foreground,view.FACES[face].breath[0],face);
 }
-// Short of rows the rule goes and adds nothing (spec rule 34 (c)).
-let dropped=0;
-for(let h=30;h>=8;h--){const v=run({state:'working',frame:7,height:h});
- if(ruleAt(v)<0){dropped++;assert.equal(v.motion,null,String(h));assert(!v.rows.flat().some(p=>p.motion),String(h));}}
-assert(dropped>0);
-// Correction 8 (11-13): the rule follows the state the moment it changes. `since` is the frame the
-// state began: the light is already coming in on that very paint (never waiting out a rest or a
-// dark turn), and the breath starts at its brightest; both run on from there.
-for(const since of [0,7,26,30,34,1000]){
- const v=run({state:'working',frame:since,model:{}}),at=f=>view.render({width:40,height:40,side:true,fill:true,harness:'claude',
-  model:{...head,routes:[],route_count:0,messages:[],styles},state:'working',frame:f,since,questions:()=>[]});
- const lit=f=>{const w=at(f),i=ruleAt(w);return cellsOf(w,i).map(c=>c.p.role==='rule'?ramp.indexOf(c.p.foreground)+1:0);};
- const first=lit(since);assert(first[0]>0&&first.slice(6).every(x=>x===0),since+' '+first.join(''));
- // The whole round trip and its rest follow from there.
- assert.deepEqual(lit(since+CYCLE),first);assert(lit(since+25).every(x=>x===0)&&lit(since+34).every(x=>x===0));
- const w=at(since);assert.equal(w.motion.next(since),since+1);assert.equal(w.motion.next(since+25),since+CYCLE);
- assert.deepEqual(w.motion.at(since+3),at(since+3).rows[w.motion.row]);
- const k=view.render({width:40,height:40,side:true,fill:true,harness:'claude',model:{...head,routes:[],route_count:0,messages:[],styles,colors:256},
-  state:'blocked',frame:since,since,questions:()=>[]});
- assert.equal(k.rows[ruleAt(k)][2].step,0,String(since));
-}
+// (i) Claude, Codex and OpenCode draw the same frame on the same frame (one renderer, one beat):
+// the same content and breath; the same arc, each starting right after its own head's words.
+const startOf=v=>text(v.rows[0]).indexOf(' ─')+1;
+for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f}));
+ for(const v of all.slice(1)){
+  assert.deepEqual(v.rows.slice(1,-1).map(r=>r.slice(1,-1)),all[0].rows.slice(1,-1).map(r=>r.slice(1,-1)),state);
+  if(state==='blocked'){assert.deepEqual(v.rows.slice(1),all[0].rows.slice(1),state);continue;}
+  const d=startOf(v)-startOf(all[0]),a=looks(v),b=looks(all[0]),P=a.length;assert(d!==0);
+  a.forEach((x,i)=>{const y=b[((i-d)%P+P)%P];if(x!=='text'&&y!=='text')assert.equal(x,y,state+' '+i);});}}
+// (j) Short of rows (the rule goes, spec rule 34 (c)) the frame keeps moving; the bottom layout moves alike.
+for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v.motion&&v.motion.cells.length===2*40+2*(h-2)-text(v.rows[0]).indexOf(' ─'),String(h));}
+{const b=run({side:false,width:100,height:14,state:'working',frame:7});assert(b.motion&&b.motion.cells.some(c=>c.row===b.rows.length-1)&&b.motion.cells.some(c=>c.col===99));}
 // The setting: on by default, `rule_motion` beside `route_line`, `on`/`off`.
 assert.equal(view.defaults.rule_motion,'on');assert.deepEqual(view.options.rule_motion,['on','off']);
 assert.equal(view.change(view.defaults,'rule_motion',1).rule_motion,'off');

@@ -169,8 +169,9 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
  assert.equal(block.waitingForReceipt,false);
  block.input(Buffer.from('\r'));assert.equal(block.waitingForReceipt,false,'in-flight API is not a receipt');
  finish({ok:true,state:'submitted'});await new Promise(resolve=>setImmediate(resolve));
- assert.equal(block.waitingForReceipt,true);
- block.update([item,{...item,id:'new'}]);block.input(Buffer.from('\t'));
+ // Rule 5 (11-14): a sent answer returns the person to the native input, so it holds no delivery.
+ assert.equal(block.focused,false);assert.equal(block.waitingForReceipt,false);
+ block.update([item,{...item,id:'new'}]);block.enter();
  assert.equal(block.waitingForReceipt,false,'another editable question');
  block.input(Buffer.from('tkept'));block.update([{...item,id:'new',revision:'two'}]);
  assert.equal(block.waitingForReceipt,false,'stale draft remains protected');

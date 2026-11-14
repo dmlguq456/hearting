@@ -2099,7 +2099,10 @@ def draw_questions(grid, vm, state, x=34, y=3):
             grid.fill(x - 1, right, y, " ", tint=236)
         marker = str(question.get("marker") or "●")
         marker = "◌" if marker == "◌" else "◑"
-        grid.put(x, y, marker, "dim" if marker == "◌" else "lvl_y")
+        # The person's answer is on its way (rule 5, 11-14): a dim sent row, in no count.
+        sent = bool(question.get("sent"))
+        marker = "✓" if sent else marker
+        grid.put(x, y, marker, "dim" if marker in ("◌", "✓") else "lvl_y")
         tag_text = _clip(shown_tag, 5)
         grid.put(tag_x, y, "[", "dim")
         grid.put(tag_x + 1, y, tag_text, "soft" if question.get("session_tag") or shown_tag == tag
@@ -2140,6 +2143,9 @@ def draw_questions(grid, vm, state, x=34, y=3):
             parts = [(str(question["title"]), "hb_" + str(question.get("h") or "·"))]
         else:
             parts = _question_line(question)
+        if sent:
+            word = ui_text("fleet.session_block.sent").lstrip("✓ ").strip()
+            parts = [(word + " · ", "dim"), *[(text, "dim") for text, _key in parts]]
         put_fit(grid, text_x, y, parts, limit=limit)
         if is_open:
             _tint_row(grid, y, x - 1, right, 236)

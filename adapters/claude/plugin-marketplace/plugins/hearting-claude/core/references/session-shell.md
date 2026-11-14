@@ -237,7 +237,25 @@ idle, a failed one keeps its wait. An Enter alone never claims a turn. Before an
 start, resume, `/clear` or a session switch the state is left blank. The whole
 outer frame takes the state's color in the same paint: running and waiting
 Fleet's session keys, idle and an unknown state the neutral frame gray (the
-terminal's dim on an unknown face), no hue in `mono`. A route's state stays in
+terminal's dim on an unknown face), no hue in `mono`; it stands still that way
+with `rule motion` off, in `mono`, under `NO_COLOR`, in eight colors and on the
+settings screen. Otherwise the open panel's outer frame moves with this
+session's own state (not a route's), beside the native area and under it alike
+(the folded strip keeps its still border). While the session runs (an answer
+being typed in included) a bright arc goes round it clockwise without rest: its
+head the running color (the session spinner's vanilla), its tail four shades
+down into the neutral frame gray, a quarter of the frame's cells long (it grows
+with the panel), once round every six seconds whatever the size; the cells of
+the head's words are passed behind. The arc starts with the state: on the very
+paint that shows the session running its head stands right after the head's
+words. While an answer or a confirmation waits the whole frame breathes red,
+never blinking, once every 4.8 seconds on a cosine through six shades in 24-bit
+color (when `COLORTERM` says the terminal takes it) or three in 256 colors, one
+shade at a time, each for an equal stretch, starting at the frame's waiting red;
+the steward `⚑` keeps its own blink. Idle and an unknown state keep the still
+neutral frame. Every value (the arc's length, its shades and lap, the breath and
+its shade count) is a constant in one place (`BORDER_*` and `FACES.*.orbit`,
+`breath`, `breathRGB` in `panel-view.cjs`). A route's state stays in
 the route box: a failed current route turns that box's line to the failure
 color and a running one pulses `route N`; the question box keeps its rose.
 `HEARTING` names the settings screen alone. What runs shares Fleet's one beat
@@ -245,11 +263,14 @@ color and a running one pulses `route N`; the question box keeps its rose.
 working route's mark, the running stage, the open route count and a steward's
 `⚑` (Fleet's steward pink, lit and receding; bold and plain without color), which
 blinks even while the session is idle; the steward's number does not blink (plain
-weight without color). The host keeps that beat
-only while the painted panel shows one of them; a spinner turn swaps only its own
-cells, the blink repaints the panel once a second (a panel with only a blink
-wakes once a second and changes only the blinking row), and an idle panel with
-nothing to blink paints nothing between native frames.
+weight without color), and the moving frame. The host keeps that beat
+only while the painted panel shows one of them and wakes at the next frame
+anything painted changes (a spinner's frame, the arc's next step, a breath's
+next shade); a spinner turn swaps only its own cells, the moving frame sends
+only its changed cells (a run at a time, the cursor kept where it was), the
+blink repaints the panel once a second (a panel with only a blink wakes once a
+second and changes only the blinking row), and an idle panel with nothing to
+blink paints nothing between native frames.
 Then the metadata, one block. Beside the native area the repository and Git rows
 start with dim labels in the label column of `TITLE` and `NOW` (`REPO`, `GIT`;
 narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
@@ -279,36 +300,9 @@ cells the model name is cut with `…` and the effort stays whole, and narrower
 than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
-then parts it from this session's content. The rule follows this session's own
-state, from the frame's source (not a route's), and stays the thin `─` in
-every state (no heavy cell anywhere on it; state is told by the frame's color
-and the head's state glyph). While the session runs the rule is dark and a
-light passes over it, its middle five cells brightest (the session spinner's
-color) and four cells on each side one shade down each (thirteen cells, five
-shades); the light runs at one speed from fully outside one end to fully
-outside the other and back every 2.6 seconds, turning at the far end after one
-dark beat; once it has left on the side it came in from the dark rule rests
-for one second (its turn beat included) and the light comes in again on that
-side. The light starts with the state: on the very paint that shows the
-session running it is already coming in (it never waits out a rest), and a
-wait's breath starts at its brightest. While an answer or a confirmation waits the whole
-rule is red and breathes, never blinking, once every 3.6 seconds on
-a cosine through eight shades in 24-bit color (when `COLORTERM` says the
-terminal takes it) or six in 256 colors, one shade at a time, each for an equal
-stretch, the brightest the frame's waiting red and the darkest still showing;
-the steward `⚑` keeps its own blink. Otherwise it is the plain dark rule.
-Every value (the five
-bright cells, the four fading ones, the shades, the round trip, the rest, the
-breath and its shade count) is a constant in one place (`RULE_*` in `panel-view.cjs`). It moves on the beat the spinner already
-keeps: the host wakes at the next frame anything painted changes (a spinner's
-frame, the rule's next step: every frame while the light is inside, then the
-end of its rest, nothing in between; at each shade change of a breath),
-repaints the whole panel only for a one-second blink, and otherwise sends only
-the changed cells (the spinner glyphs, the rule's changed cells); idle, nothing
-wakes and nothing is sent. `rule motion` off, `mono`, `NO_COLOR` and eight
-colors move nothing (running keeps the plain rule, a wait a still red one where
-color shows), and
-a panel short of rows that drops the rule adds nothing. The
+then parts it from this session's content: the plain thin `─` in every state,
+standing still (the session's state is told by the outer frame and the head's
+state glyph). The
 content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,
@@ -649,7 +643,7 @@ The header's settings change only Hearting's existing session-shell policy:
 side/bottom layout, panel position (right, the default, or left), side width,
 narrow-window behavior, auxiliary detail, theme, shade, `route line`
 (`time`, the default, or `model`) and `rule motion` (`on`, the default, or
-`off`: the head's rule stays still). One placement rule
+`off`: the outer frame stays still in the state's color). One placement rule
 serves every harness. Themes are `terminal` (the default: the shared palette),
 `light` (a light terminal: the reviewed deep hues) and `mono` (no hue; weight,
 glyphs and words remain). Shade is `none` (the default), `light` or `medium`:
@@ -725,8 +719,32 @@ parent` (`부모 창에서 답`) for a blocked worker's answer whose parent coul
 confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
 (`닫힘`) for a request already gone (an existing state word such as expired
 stays). The head carries the short form under 64 columns and the body row the
-whole words; the `◑ N` count still counts every wait. Long questions remain readable
-with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
+whole words. Every count of answer waits (Fleet's head and session rows, the
+`questions list` head, the status line, the panel's `◑ N`, the notice line under
+the input and the folded strip) counts every wait a person must answer, wherever
+it is answered: a question the panel answers, a Claude native request, a marker
+question and a human gate. Only a blocked worker's wait (its parent agent's) and
+a finished one (closed, replaced, expired, an answer on its way) are not counted.
+The question block holds what the person can answer here now (answerable ones
+first; `Ctrl+]` opens on the first of them); a counted wait answered in another
+place is one dim guidance line beside the count saying where
+(`QUESTIONS 1 · answer below`), and the notice line names `Ctrl+]` only when the
+panel answers one. A blocked worker's wait is in no count or question block (the
+route row shows the route blocked), and it closes once the route closes or its
+parent holds the worker's exact acknowledged completion receipt. Once the person
+sends an answer it has left their hands: while it travels (the existing answer
+record's `submitted`/`received`) the question box folds to one dim line
+(`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice),
+`Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
+it as sent); the line goes when its session takes the answer, and a failed
+delivery brings the question back with its existing word. Answering returns
+focus to the native input, and one lone Esc within ten seconds of the answer is
+taken by the shell (never the native's interrupt of a running turn).
+A registered question belongs to its session id: the same session in a new
+process (a native resume, a restart, a compaction) still answers it, and only
+another session that took the seat ends it. Long questions remain readable
+with focused scrolling (PgUp/PgDn while choosing, named before focus too) and an
+explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields. The former rows/3 estimate does
 not hide a question or require another user decision at 80 columns.
