@@ -1732,6 +1732,24 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
         self.assertIn("source jsonl=경로 없음", checkpoint)
 
+    def test_a_short_or_metric_less_normal_end_and_a_bare_checkpoint_are_quiet(self):
+        metric = {"summary": {"latest": {"value": 0.5, "epoch": 3}}}
+        cases = [
+            ("final", {"elapsed_seconds": 30}, "succeeded", True),            # short
+            ("final", {"elapsed_seconds": 7200}, "succeeded", True),          # no metric
+            ("final", {**metric, "elapsed_seconds": 7200}, "succeeded", False),
+            ("final", {**metric, "elapsed_seconds": 30}, "succeeded", True),  # short with a value
+            ("final", {"elapsed_seconds": 30}, "failed", False),              # never a failure
+            ("final", {"elapsed_seconds": 30}, None, False),                  # nor an unknown end
+            ("checkpoint", {}, "working", True),
+            ("checkpoint", {"reached": 12}, "working", False),                # a progress count
+            ("checkpoint", metric, "working", False),
+            ("attention", {}, "working", False),
+        ]
+        for kind, observation, status, quiet in cases:
+            with self.subTest(kind=kind, observation=observation, status=status):
+                self.assertIs(progress._quiet_event(kind, observation, status), quiet)
+
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_terminal_observation_keeps_durable_live_checkpoint_and_adds_one_final_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1754,8 +1772,10 @@ class ExperimentObservationTest(unittest.TestCase):
                 terminal = progress.observe_experiment({**run, "status": "succeeded",
                     "ended_at": 7201}, root / "registry.json", 7201,
                     root=str(output), row_key="run", started_at=0, final=True)
+            # A checkpoint with neither a metric nor a progress count is quiet (one routine line);
+            # the final's status was not given, so it is not called quiet.
             self.assertEqual([item["subject"] for item in notices], [
-                "experiment checkpoint (1/1)", "experiment checkpoint (1/1)",
+                "experiment checkpoint, quiet (1/1)", "experiment checkpoint, quiet (1/1)",
                 "experiment final (1/1)"])
             self.assertEqual(notices[0]["key"], notices[1]["key"])
             self.assertNotEqual(notices[1]["key"], notices[2]["key"])
@@ -1829,7 +1849,7 @@ class ExperimentObservationTest(unittest.TestCase):
                 notices = []
 
                 def send(*args, **kwargs):
-                    state = (final_receipt if kwargs["subject"].startswith("experiment final ")
+                    state = (final_receipt if kwargs["subject"].startswith("experiment final")
                              else "acked")
                     notices.append({"args": args, **kwargs})
                     return {"state": state}
@@ -1849,7 +1869,7 @@ class ExperimentObservationTest(unittest.TestCase):
                     first_final_event = next((item for item in first_state["outbox"]
                                               if item.get("kind") == "final"), None)
                     initial_final_calls = [item.copy() for item in notices
-                        if item["subject"].startswith("experiment final ")]
+                        if item["subject"].startswith("experiment final")]
                     final_delivery = next(item for item in first["delivery"]
                                           if item.get("key") == "final:run")
 
@@ -1903,7 +1923,7 @@ class ExperimentObservationTest(unittest.TestCase):
                         self.assertIn("final:run", first_state["event_keys"])
                         self.assertIn("final:run", changed_state["event_keys"])
                         self.assertEqual(len([item for item in notices
-                            if item["subject"].startswith("experiment final ")]),
+                            if item["subject"].startswith("experiment final")]),
                             len(initial_final_calls))
 
                     first_attention_key = next(item["key"] for item in first["delivery"]
@@ -1916,7 +1936,7 @@ class ExperimentObservationTest(unittest.TestCase):
                     repeated = observe(22, 1050, 1121)
                     equal_fresh = observe(22, 1170, 1183)
                     final_calls = [item for item in notices
-                        if item["subject"].startswith("experiment final ")]
+                        if item["subject"].startswith("experiment final")]
                     initial_final_signatures = [(initial["args"], initial["key"],
                         initial["subject"], initial["text"], initial["route_id"],
                         initial["required_action"], initial["lineage"])
@@ -1981,7 +2001,7 @@ class ExperimentObservationTest(unittest.TestCase):
                 enabled_state = progress._read_observation_state(fixture["state"])
                 self.assertEqual([item["key"] for item in enabled["delivery"]], ["final:run"])
                 self.assertEqual(notify.call_count, 1)
-                self.assertTrue(notify.call_args.kwargs["subject"].startswith("experiment final "))
+                self.assertTrue(notify.call_args.kwargs["subject"].startswith("experiment final"))
                 self.assertIn("raw counter=finished_items:32", notify.call_args.kwargs["text"])
                 self.assertEqual(enabled_state["event_keys"], ["final:run"])
                 repeated = progress.observe_experiment(fixture["run"], fixture["registry"],

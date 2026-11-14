@@ -6751,17 +6751,26 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # runner-local selection cursor so an open first group cannot starve later
     # recipients. It carries no delivery or authorization evidence; candidates
     # and every record/target are re-read through the normal path each pass.
-    # d6: terminal (failure/completion) notices go first, both in group order
-    # and inside the batch; progress notices share the batch or wait one pass.
-    # A question answer is the person's own reply: it ranks with terminal.
+    # d6: attention (a failure, a new attention), then terminal (completion)
+    # notices go first, both in group order and inside the batch; progress and
+    # routine notices share the batch or wait one pass. A question answer is the
+    # person's own reply: it ranks with attention.
+    ranks = {}
+
     def _terminal_rank(item):
-        try:
-            receipt = item[4].get("receipt")
-            if isinstance(receipt, dict) and "answer_binding" in receipt:
-                return 0
-            return 0 if session_notice.classify(item[4].get("receipt")) == session_notice.TERMINAL else 1
-        except (TypeError, ValueError, AttributeError):
-            return 1
+        key = id(item[4])
+        if key not in ranks:
+            try:
+                receipt = item[4].get("receipt")
+                if isinstance(receipt, dict) and "answer_binding" in receipt:
+                    ranks[key] = 0
+                else:
+                    kind = session_notice.classify(receipt)
+                    ranks[key] = (0 if kind == session_notice.ATTENTION
+                                  else 1 if kind == session_notice.TERMINAL else 2)
+            except (TypeError, ValueError, AttributeError):
+                ranks[key] = 2
+        return ranks[key]
 
     import session_resume
     candidates.sort(key=lambda item: (item[1], item[3], _terminal_rank(item),
@@ -6769,9 +6778,22 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     groups = {}
     for item in candidates:
         groups.setdefault((item[1], item[3]), []).append(item)
+    # A quiet routine notice to the supervisor of the run's owner (a short or metric-less
+    # normal end, a metric-less checkpoint) starts no turn of its own: a recipient whose
+    # every open notice is such waits, and they ride its next delivery or next input.
+    def _waits(item):
+        source = peer_obligations._notice_duty_source(item[0], root)
+        return bool(source) and session_notice.waits_for_next_delivery(
+            item[4], source[0], source[1], source[3])
+
+    for key in list(groups):
+        if all(_waits(item) for item in groups[key]):
+            del groups[key]
+    if not groups:
+        return
     group_keys = sorted(groups)
     terminal_groups = {key for key in group_keys
-                       if any(_terminal_rank(item) == 0 for item in groups[key])}
+                       if any(_terminal_rank(item) < 2 for item in groups[key])}
     state_root = str(root.resolve())
     if selection is not None:
         if (selection.get("state_root") != state_root
