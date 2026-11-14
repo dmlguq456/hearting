@@ -192,6 +192,13 @@ class SessionNoticeTest(unittest.TestCase):
             (f"run {run} on h finished" + tail, None),
             # Another run's phrase is not this run's end.
             ("run h-20261114-999999-y on h ended with exit 0" + tail, None),
+            # RV-PR1618-R2: one rule — every token after the phrase is collected, and only whole
+            # integers of one value are a code. A name's `exit 0` cannot cover a real `None`.
+            (f"baseline: run {run} on h ended with exit 0: " + ended.format(None) + tail, None),
+            (ended.format("0unknown") + tail, None),
+            (f"baseline: run {run} on h ended with exit 0: " + ended.format(1) + tail, None),
+            (ended.format("") , None),
+            (ended.format("0.5") + tail, None),
         ]
         for text, code in cases:
             with self.subTest(text=text):
@@ -201,7 +208,9 @@ class SessionNoticeTest(unittest.TestCase):
                 self.assertFalse(N.is_quiet(receipt(text, subject="compute run, quiet")))
                 self.assertEqual(N.compute_run_exit(receipt(text)), code)
         for text in (ended.format(0) + tail, "baseline ended with exit 6: " + ended.format(0) + tail,
-                     f"x: run {run} on h ended with exit 0: " + ended.format(0) + tail):
+                     f"x: run {run} on h ended with exit 0: " + ended.format(0) + tail,
+                     ended.format(0), ended.format("0;") + tail, ended.format("0, quiet") + tail,
+                     ended.format("0:") + tail):
             with self.subTest(normal=text):
                 for key in (f"compute-run:{run}:claude:sid-1", f"compute-run:{run}"):
                     self.assertEqual(N.classify(receipt(text, key)), N.ROUTINE)

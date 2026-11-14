@@ -262,24 +262,32 @@ def classify(receipt: dict) -> str:
 # attention again at a periodic checkpoint as `attention-checkpoint:`, which is not this.
 EXPERIMENT_ATTENTION_KEY = re.compile(r"^experiment:[^:]+:attention:")
 EXPERIMENT_CHECKPOINT_KEY = re.compile(r"^experiment:[^:]+:checkpoint:")
-# `compute-hosts` words a run's end `[<catalog name>: ]run <id> on <host> ended with exit <n>`,
+# `compute-hosts` words a run's end `[<catalog name>: ]run <id> on <host> ended with exit <code>`,
 # the id being the one its key `compute-run:<id>[:…]` carries. The name in front is free text and
-# may hold the same words, so only this exact phrase of this run is read (`compute_run_exit`).
-COMPUTE_RUN_EXIT = r"(?:^|: )run {run_id} on [^\s;]+ ended with exit (?P<exit>-?[0-9]+)(?![0-9])"
+# may hold the same words, so every token after that phrase of this run is collected, number or not
+# (a token runs to the next space, `;`, `,`, `:` or the end), and `compute_run_exit` accepts only
+# the one case where all of them are whole integers of one value.
+COMPUTE_RUN_EXIT = r"run {run_id} on [^\s;]+ ended with exit (?P<token>[^\s;,:]*)"
+WHOLE_INTEGER = re.compile(r"-?[0-9]+")
 
 
 def compute_run_exit(receipt: dict) -> int | None:
     """The exit code a compute run's end notice states for its own run, or ``None``.
 
-    ``None`` when the phrase is missing, or when the text holds it more than once with
-    different codes (a name that repeats the phrase cannot pass for the real end). A signal
-    end (`exit -9`) is read as the negative code it is.
+    Every token after the run's end phrase is collected. The code is returned only when there
+    is at least one, all are whole integers, and all have the same value; anything else
+    (no phrase, a token that is not an integer such as `None` or `0unknown`, differing values)
+    is ``None``, so a name that repeats the phrase cannot pass for the real end. A signal end
+    (`exit -9`) is read as the negative code it is.
     """
     parts = str(receipt.get("key") or "").split(":")
     if len(parts) < 2 or parts[0] != "compute-run" or not parts[1]:
         return None
     pattern = re.compile(COMPUTE_RUN_EXIT.format(run_id=re.escape(parts[1])))
-    codes = {int(match.group("exit")) for match in pattern.finditer(str(receipt.get("text") or ""))}
+    tokens = [match.group("token") for match in pattern.finditer(str(receipt.get("text") or ""))]
+    if not tokens or not all(WHOLE_INTEGER.fullmatch(token) for token in tokens):
+        return None
+    codes = {int(token) for token in tokens}
     return codes.pop() if len(codes) == 1 else None
 
 

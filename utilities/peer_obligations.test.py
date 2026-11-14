@@ -3491,6 +3491,26 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         self.assertEqual(body.count("HEARTING_RECEIPT_V1 "), 8)
         self.assertTrue(all(record["delivery_id"] in body for record in records))
 
+    def test_a_names_exit_zero_cannot_hide_an_unreadable_real_end(self):
+        # RV-PR1618-R2: the name repeats this run's end phrase with exit 0, the real end says `None`.
+        import session_notice
+        records = self.notices(count=1)
+        run = "host-20261025-120000-named"
+        with mock.patch.object(obligations, "ensure_normal_runner", return_value=False):
+            records.append(session_notice.notify("claude", "canonical-A", key="compute-run:" + run,
+                subject="compute run", jobs=self.jobs,
+                text=f"baseline: run {run} on host ended with exit 0: run {run} on host ended with exit None; "
+                     f"read it with: compute-hosts tail {run}"))
+        self.assertEqual(session_notice.classify(records[1]["receipt"]), session_notice.ATTENTION)
+        self.assertTrue(session_notice.wakes_resting_recipient(records[1]))
+        with self.courier("claude", "canonical-A", receive=True) as sent:
+            peer_steward._reconcile_obligations(self.store, self.duties())
+        self.assertEqual(len(sent), 1)
+        body = sent[0]["text"]
+        self.assertIn("Needs attention (1), shown first:", body)
+        self.assertIn(f"run {run} on host ended with exit None", body)
+        self.assertTrue(all(record["delivery_id"] in body for record in records))
+
     def test_a_supervisors_quiet_notices_wait_and_ride_its_next_attention(self):
         import dispatch_pending_delivery as pending
         meta = self.parent_row("A")
