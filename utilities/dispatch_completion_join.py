@@ -720,31 +720,41 @@ class NoticeOwnerObservation:
     attempt id); anything else -- an unreadable, missing, broken-link or
     directory path, a torn last line or invalid UTF-8, a row that did not
     parse -- leaves it ``None``: nothing was observed, so no owner is absent.
-    The archive is read lazily, after the live file, with the same rule: the
-    archive writes and syncs a row before the live file drops it, so a row is
-    always in one of the two reads.
+    ``owner_rows`` keeps each observed attempt's latest status beside its id,
+    so the eligibility rule can tell a row the notice can still be delivered
+    through from one it cannot. The archive is
+    read lazily, after the live file, with the same rule: the archive writes
+    and syncs a row before the live file drops it, so a row is always in one
+    of the two reads.
     """
 
     def __init__(self, root: Path, lines) -> None:
         self.root = root
-        self.attempts = self._attempts(lines)
+        self.attempts, self.owner_rows = self._rows(lines)
         self._archived: frozenset | None = None
         self._archive_read = False
 
     @staticmethod
-    def _attempts(lines):
+    def _rows(lines):
         if lines is None:
-            return None
-        attempts = set()
+            return None, None
+        attempts, rows = set(), {}
         for line in lines:
             fields = line.split("\t") if isinstance(line, str) else ()
             if len(fields) != 6:
-                return None
-            attempt_id = parse_registry_metadata(fields[5]).get("attempt_id", "")
+                return None, None
+            metadata = parse_registry_metadata(fields[5])
+            attempt_id = metadata.get("attempt_id", "")
             if not attempt_id:
-                return None
+                return None, None
             attempts.add(attempt_id)
-        return frozenset(attempts)
+            rows[attempt_id] = fields[1]  # the last row wins, as the resolver reads it
+        return frozenset(attempts), rows
+
+    @staticmethod
+    def _attempts(lines):
+        attempts, _rows = NoticeOwnerObservation._rows(lines)
+        return attempts
 
     def archived_attempts(self):
         if not self._archive_read:
@@ -787,11 +797,20 @@ def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
 
     True only when a successful, valid registry observation confirms that no
     owner the record names (its attempt ids, parent attempt, or session-notice
-    lineage binding) has a row, live or archived. Every other case -- an
-    unobserved registry or archive, a record or lineage that does not parse, a
-    lineage naming another registry, a named owner whose row exists (the
-    dead-recipient rule alone decides it), a person's question answer, a
-    claimed or ambiguous delivery -- keeps the record.
+    lineage binding) has a row the notice could still be delivered through.
+    Every other case -- an unobserved registry or archive, a record or lineage
+    that does not parse, a lineage naming another registry, a named owner
+    whose row can still receive, a person's question answer, a claimed or
+    ambiguous delivery -- keeps the record.
+
+    A row the notice can no longer be delivered through does not block: for an
+    ``owner-session`` lineage the resolver refuses a terminally ended row and
+    a done row whose waiting supervisor is gone for good, so such a row counts
+    as absent; a row only the archive still holds left the live view the
+    notice resolution reads, so an ``owner-session`` or ``attempt-parent``
+    lineage naming it has no recipient left to find. A provenance lineage and
+    a live ``attempt-parent`` row keep the older rule: the dead-recipient rule
+    alone decides them.
     """
     try:
         if observation.attempts is None or not isinstance(record, dict):
@@ -808,6 +827,7 @@ def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
                 or not all(isinstance(name, str) and name for name in names)):
             return False
         names = set(names) | ({parent} if parent else set())
+        lineage_kind, lineage_attempt = "", ""
         for entry in lineage:
             if not isinstance(entry, str) or not entry.startswith(NOTICE_LINEAGE_PREFIX):
                 return False
@@ -826,16 +846,59 @@ def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
                 if not isinstance(attempt_id, str) or not attempt_id:
                     return False
                 names.add(attempt_id)
+                lineage_kind, lineage_attempt = kind, attempt_id
             elif kind != "provenance":
                 return False
         if not names:
             return True
-        if names & observation.attempts:
+        present = names & observation.attempts
+        if present:
+            # Only a row the owner-session resolution can still pass blocks:
+            # a live or running owner, or a done one whose waiting supervisor
+            # state still names the session. A row it refuses for good -- a
+            # terminally ended one, or a done one whose waiting supervisor is
+            # gone -- no longer keeps the notice; the live row is the latest
+            # read, so no archive confirmation is needed for it.
+            if lineage_kind == "owner-session" and all(
+                    _notice_owner_row_unreceivable(attempt, observation)
+                    for attempt in present):
+                return True
             return False
         archived = observation.archived_attempts()
-        return archived is not None and not names & archived
+        if archived is None:
+            return False
+        left = names & archived
+        if not left:
+            return True
+        # A row only the archive holds is settled history: the live view the
+        # notice resolution reads has no row for it, so an owner-session or
+        # attempt-parent lineage can never name a recipient again. A lineage
+        # without an attempt keeps the older rule and stays.
+        return lineage_kind in {"owner-session", "attempt-parent"}
     except Exception:  # noqa: BLE001 -- an unjudged record is kept
         return False
+
+
+def _notice_owner_row_unreceivable(attempt_id: str, observation: NoticeOwnerObservation) -> bool:
+    """Whether the owner-session delivery of one observed attempt is refused for good.
+
+    Mirrors the resolver's own ``owner-session`` gate from the registry row
+    alone: a row outside the live set is a recorded end; a done row is refused
+    once its waiting supervisor state is gone (it is never written again), and
+    an open or running row, or a done row the state still names, can still
+    receive.
+    """
+    row = (observation.owner_rows or {}).get(attempt_id)
+    if row is None:
+        return False
+    status = row
+    if status in {"open", "running"}:
+        return False
+    if status != "done":
+        return True
+    state = read_supervisor_phase_state(
+        observation.root / "supervisor-state" / (attempt_id + ".json"), attempt_id)
+    return state is None
 
 
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
