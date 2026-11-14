@@ -121,6 +121,10 @@ assert.equal(running,'2 ROUTE ⠏2 │ ⠸ 패널 자동 접힘 기준 60칸 │
 // No answer wait: what to do is compaction imminent, then a tidy notice; nothing to do, no row: the
 // routes row moves up and the last row stays empty.
 assert.equal(text(strip({},{wait:'',warning:'압축 임박',tidy_notice:'새 판 대기'}))[2].trimEnd(),'⚠ 압축 임박 │ ⚠ 새 판 대기');
+// A wait answered elsewhere says where, dim, after the wait (#1633's `wait_guide`); alone without a wait here.
+assert.equal(text(strip({},{wait_guide:'QUESTIONS 1 · 아래 입력창에 답'}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? │ QUESTIONS 1 · 아래 입력창에 답');
+assert.equal(text(strip({},{wait:'',wait_guide:'QUESTIONS 1 · 아래 입력창에 답'}))[2].trimEnd(),'QUESTIONS 1 · 아래 입력창에 답');
+assert(strip({},{wait:'',wait_guide:'QUESTIONS 1 · 아래 입력창에 답'}).rows[2].find(x=>x.text.startsWith('QUESTIONS')).dim);
 const calm=text(strip({},{wait:'',messages_new:0,lab:null}));
 assert.deepEqual(calm.map(s=>s.trimEnd()).slice(2),['3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험','']);
 // The strip's height is the host's alone: the same four rows with and without a question.

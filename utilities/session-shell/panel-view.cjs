@@ -280,8 +280,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // by whole item from its end:
   //   1. the session: the state glyph and number, the project, model and effort, `CTX` and its
   //      gauge, 5h, 7d (short of cells the reset times go first, then the effort, the project);
-  //   2. what to do now: the answer wait with its question's first row, compaction imminent, a
-  //      tidy notice;
+  //   2. what to do now: the answer wait with its question's first row, where a wait answered
+  //      elsewhere is answered, compaction imminent, a tidy notice;
   //   3. the routes: `N ROUTE ⠏2 ✕1`, the failed routes' titles (else the running ones'),
   //      `MESSAGES ←N` (received since the person's last input) and LAB's attention token.
   // Short of rows the routes row goes first, then the session row: what to do stays to the last;
@@ -347,8 +347,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return rows.length>1&&Array.isArray(rows[1])?P(rows[1]).map(p=>({...p,text:clean(p.text)})).filter(p=>p.text.trim()):[];
     })();
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
+    // A wait answered elsewhere (#1633): where, dim, after the wait (never part of its count).
+    const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
     const todo=[
       ...(model.wait?[{head:[text(clean(model.wait),'g_blocked')],tail:first.length?[text(' · ','dim'),...first]:[]}]:[]),
+      ...(guide?[{titled:true,head:[],tail:[text(guide,'dim')]}]:[]),
       ...(model.warning?[{head:[text('⚠ ','lvl_r')],tail:[text(clean(model.warning),'lvl_r')]}]:[]),
       ...(tidy&&!model.answerable?[{head:[text('⚠ ','lvl_y')],tail:[text(tidy,'lvl_y')]}]:[])];
     // 3. The routes, the new messages, LAB.
