@@ -3696,7 +3696,15 @@ def _report_run_end(run_dir, code, last_observation, now):
     if here not in sys.path:
         sys.path.insert(0, here)
     try:
-        from session_notice import notify
+        import session_notice
+        notify = session_notice.notify
+        # A normal end that took under about a minute or reported no metric is quiet: the
+        # delivered text counts it on the one routine line instead of giving it its own.
+        subject = "compute run"
+        quiet_seconds = getattr(session_notice, "QUIET_RUN_SECONDS", None)
+        if code == 0 and quiet_seconds and (not _observation_has_metric(final_observation)
+                                            or _run_seconds(meta, now()) < quiet_seconds):
+            subject = "compute run, quiet"
         for target in notice_targets:
             if isinstance(target, dict):
                 harness, session_id = target.get("harness"), target.get("session_id")
@@ -3706,11 +3714,26 @@ def _report_run_end(run_dir, code, last_observation, now):
                 lineage = None
             notify(harness, session_id,
                    key=f"compute-run:{run_id}:{harness}:{session_id}",
-                   subject="compute run", text=text, route_id=route.get("route_id") or "route-free",
+                   subject=subject, text=text, route_id=route.get("route_id") or "route-free",
                    required_action="report-to-user", lineage=lineage)
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
+
+
+def _observation_has_metric(result):
+    observation = result.get("observation") if isinstance(result, dict) else None
+    summary = observation.get("summary") if isinstance(observation, dict) else None
+    return isinstance(summary, dict) and bool(summary.get("latest") or summary.get("latest_metrics"))
+
+
+def _run_seconds(meta, now):
+    """How long the run took by its recorded start, or infinity when that is unknown."""
+    try:
+        started = datetime.datetime.fromisoformat(str(meta.get("started_at"))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    return max(0.0, float(now) - started)
 
 
 def _run_state(config, run_id):

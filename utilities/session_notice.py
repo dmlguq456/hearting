@@ -19,7 +19,14 @@ LINEAGE_PREFIX = "session-notice-lineage-v1:"
 # supersede check read only these receipt fields; nothing here is new state.
 EXPERIMENT_FINAL_KEY = re.compile(r"^experiment:(?P<run_id>[^:]+):final:")
 TERMINAL_ACTIONS = frozenset({"report-to-user"})
+# The four classes of a notice (`classify`). `attention` needs a decision (a failure, a new
+# or changed experiment attention): it wakes a resting recipient and is shown first.
+# `routine` is an experiment's normal checkpoint or normal end: it never wakes, and a
+# delivery shows such notices together on one line. `terminal` is any other completion to
+# report; `progress` is everything else (an attention re-posted at a checkpoint included).
+ATTENTION = "attention"
 TERMINAL = "terminal"
+ROUTINE = "routine"
 PROGRESS = "progress"
 
 
@@ -221,20 +228,32 @@ def consumer_text(receipt: dict) -> str:
 
 
 def classify(receipt: dict) -> str:
-    """Terminal (failure/completion) or progress, from existing receipt fields only.
+    """`attention`, `terminal`, `routine` or `progress`, from existing receipt fields only.
 
-    One helper for the whole notice path: the runner's group selection and the
-    batch ordering both ask this, so a notice cannot be "terminal" for one and
-    "progress" for the other.
+    One helper for the whole notice path: the runner's group selection and batch order,
+    the delivered text's order and its one routine line, and whether a resting recipient
+    is woken (`wakes_resting_recipient`) all ask this, so a notice cannot be urgent for one
+    and routine for another. An experiment final reads the runner-published run state
+    (`_run_state`); a final whose outcome is not known yet is `attention`, never routine.
     """
     try:
         receipt = validate(receipt)
     except ValueError:
         return PROGRESS
-    key = receipt["key"]
-    if (receipt["required_action"] in TERMINAL_ACTIONS
-            or EXPERIMENT_FINAL_KEY.match(key) is not None
-            or receipt["subject"].startswith("experiment final")):
+    key, subject = receipt["key"], receipt["subject"]
+    if EXPERIMENT_ATTENTION_KEY.match(key):
+        return ATTENTION
+    if EXPERIMENT_FINAL_KEY.match(key):
+        if QUIET_SUBJECT.fullmatch(subject):
+            return ROUTINE  # its producer saw it succeed (`quiet_subject`)
+        run = _run_state({"receipt": receipt})
+        return ROUTINE if isinstance(run, dict) and run.get("status") == "succeeded" else ATTENTION
+    if key.startswith("compute-run:"):
+        # Only a run's own end phrase says how it ended; one that cannot be read is no normal end.
+        return ROUTINE if compute_run_exit(receipt) == 0 else ATTENTION
+    if EXPERIMENT_CHECKPOINT_KEY.match(key):
+        return ROUTINE
+    if receipt["required_action"] in TERMINAL_ACTIONS or subject.startswith("experiment final"):
         return TERMINAL
     return PROGRESS
 
@@ -242,29 +261,89 @@ def classify(receipt: dict) -> str:
 # A new or changed attention only. The producer (`resource_progress`) posts the same
 # attention again at a periodic checkpoint as `attention-checkpoint:`, which is not this.
 EXPERIMENT_ATTENTION_KEY = re.compile(r"^experiment:[^:]+:attention:")
+EXPERIMENT_CHECKPOINT_KEY = re.compile(r"^experiment:[^:]+:checkpoint:")
+# `compute-hosts` words a run's end `[<catalog name>: ]run <id> on <host> ended with exit <code>`,
+# the id being the one its key `compute-run:<id>[:…]` carries. The name in front is free text and
+# may hold the same words, so every token after that phrase of this run is collected, number or not
+# (a token runs to the next space, `;`, `,`, `:` or the end), and `compute_run_exit` accepts only
+# the one case where all of them are whole integers of one value.
+COMPUTE_RUN_EXIT = r"run {run_id} on [^\s;]+ ended with exit (?P<token>[^\s;,:]*)"
+WHOLE_INTEGER = re.compile(r"-?[0-9]+")
+
+
+def compute_run_exit(receipt: dict) -> int | None:
+    """The exit code a compute run's end notice states for its own run, or ``None``.
+
+    Every token after the run's end phrase is collected. The code is returned only when there
+    is at least one, all are whole integers, and all have the same value; anything else
+    (no phrase, a token that is not an integer such as `None` or `0unknown`, differing values)
+    is ``None``, so a name that repeats the phrase cannot pass for the real end. A signal end
+    (`exit -9`) is read as the negative code it is.
+    """
+    parts = str(receipt.get("key") or "").split(":")
+    if len(parts) < 2 or parts[0] != "compute-run" or not parts[1]:
+        return None
+    pattern = re.compile(COMPUTE_RUN_EXIT.format(run_id=re.escape(parts[1])))
+    tokens = [match.group("token") for match in pattern.finditer(str(receipt.get("text") or ""))]
+    if not tokens or not all(WHOLE_INTEGER.fullmatch(token) for token in tokens):
+        return None
+    codes = {int(token) for token in tokens}
+    return codes.pop() if len(codes) == 1 else None
+
+
+# A normal end of a run shorter than this, or a normal checkpoint or end that carries no
+# metric, is quiet. The observer looks every 60 s, and a run's end is seen at the next look,
+# so a run that took under about a minute is seen ending within two looks.
+QUIET_RUN_SECONDS = 120
+QUIET_SUBJECT = re.compile(
+    r"(?:experiment (?:final|checkpoint)|compute run), quiet(?: \([0-9]+/[0-9]+\))?")
+
+
+def quiet_subject(subject: str) -> str:
+    """The subject a producer gives a quiet routine notice (it must already know it is routine:
+    a checkpoint, or an end it saw succeed). `experiment final (1/1)` → `experiment final, quiet (1/1)`."""
+    head, sep, part = subject.partition(" (")
+    return f"{head}, quiet{sep}{part}"
+
+
+def is_quiet(receipt: dict) -> bool:
+    """A routine notice its producer called quiet: a short run's normal end, or a normal
+    checkpoint or end with no metric. It is never shown on its own line."""
+    try:
+        return (classify(receipt) == ROUTINE
+                and QUIET_SUBJECT.fullmatch(validate(receipt)["subject"]) is not None)
+    except ValueError:
+        return False
 
 
 def wakes_resting_recipient(record: dict) -> bool:
     """Whether a resting recipient is woken for this notice instead of waiting for its next input.
 
-    Only what needs a decision: an experiment's new or changed attention, and a final that
-    did not succeed (or whose outcome is not known). A normal finish, a periodic checkpoint
-    and the same attention re-posted at a checkpoint wait for the next input as before, so
-    an unchanged attention costs no further model turn. This reads the same receipt
-    `classify` reads and changes none of its answers; leg 1 (alarm classification) may
-    move this rule into it.
+    Exactly the `attention` class: an experiment's new or changed attention, a final that did
+    not succeed (or whose outcome is not known) and a compute run whose own end phrase does not
+    say exit 0 (a nonzero or negative exit, or none it can read).
+    A normal finish, a periodic checkpoint and the same attention re-posted at a checkpoint wait
+    for the next input as before, so an unchanged attention costs no further model turn.
     """
     receipt = record.get("receipt") if isinstance(record, dict) else None
-    try:
-        key = validate(receipt)["key"]
-    except ValueError:
+    return classify(receipt) == ATTENTION
+
+
+def waits_for_next_delivery(record: dict, harness: str, storage: str, jobs=None) -> bool:
+    """A quiet notice to the session that supervises the run's owner starts no turn of its own.
+
+    It stays owed and rides the next delivery to that session (inside its one routine line)
+    or the session's next input. A session that started the run itself (`provenance`) or the
+    owner (`owner-session`) still gets it as before: it may be waiting for exactly this end.
+    """
+    receipt = record.get("receipt") if isinstance(record, dict) else None
+    if not is_quiet(receipt):
         return False
-    if EXPERIMENT_ATTENTION_KEY.match(key):
-        return True
-    if EXPERIMENT_FINAL_KEY.match(key):
-        run = _run_state(record)
-        return not (isinstance(run, dict) and run.get("status") == "succeeded")
-    return False
+    try:
+        _jobs, lineage = pending_lineage(record, harness, storage, jobs)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return False
+    return lineage.get("kind") == "attempt-parent"
 
 
 def _run_state(record: dict):

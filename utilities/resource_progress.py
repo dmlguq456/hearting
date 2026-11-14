@@ -1644,6 +1644,24 @@ def _quiet_checkpoint(context, previous, samples):
     return told == mark
 
 
+def _quiet_event(event_kind, observation, status):
+    """A routine event that carries nothing to read on its own line (`session_notice.is_quiet`):
+    a normal end of a run shorter than `QUIET_RUN_SECONDS` or with no metric, and a checkpoint
+    with neither a metric nor a progress count. An attention, a failed or unknown end, and
+    anything with a value are never quiet."""
+    from session_notice import QUIET_RUN_SECONDS
+    summary = observation.get("summary") if isinstance(observation.get("summary"), dict) else {}
+    metrics = bool(summary.get("latest") or summary.get("latest_metrics"))
+    if event_kind == "checkpoint":
+        return not metrics and observation.get("reached") is None
+    if event_kind != "final" or status != "succeeded":
+        return False
+    elapsed = observation.get("elapsed_seconds")
+    short = (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+             and math.isfinite(float(elapsed)) and float(elapsed) < QUIET_RUN_SECONDS)
+    return short or not metrics
+
+
 def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
     t = _ui_translator()
     undeclared = observation.get("undeclared")
@@ -2206,7 +2224,8 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                 _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
             outbox.append({"key": event_key, "kind": event_kind,
                            "recipients": _notice_targets(run),
-                           "texts": notice_texts, "text": notice_texts[0]})
+                           "texts": notice_texts, "text": notice_texts[0],
+                           "quiet": _quiet_event(event_kind, observation, status)})
             known.add(event_key)
         previous_observation = previous.get("observation") if isinstance(previous.get("observation"), dict) else {}
         previous_stagnation = previous_observation.get("stagnation") \
@@ -2329,7 +2348,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                           or new_event)
         if notify_events and outbox and should_deliver:
             try:
-                from session_notice import notify
+                from session_notice import notify, quiet_subject
                 attempted_delivery = False
                 for event in outbox:
                     delivered_to = []
@@ -2348,10 +2367,13 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                             else:
                                 harness, session_id = target
                                 lineage = None
+                            subject = f"experiment {event['kind']} ({part_index}/{len(texts)})"
+                            if event.get("quiet") is True:
+                                subject = quiet_subject(subject)
                             try:
                                 receipt = notify(harness, session_id,
                                     key=f"experiment:{run_id}:{event['key']}:{part_index}:{harness}:{session_id}",
-                                    subject=f"experiment {event['kind']} ({part_index}/{len(texts)})",
+                                    subject=subject,
                                     text=part_text, route_id=run.get("route_id") or "route-free",
                                     required_action="read-notice", lineage=lineage,
                                     jobs=(run.get("jobs")

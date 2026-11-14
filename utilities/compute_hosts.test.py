@@ -3524,6 +3524,10 @@ class CompletionWatchTest(unittest.TestCase):
             parents, _ = sweep.sweep_deliver(state / "dispatch", "claude-parent-runtime", "sid-parent")
         self.assertEqual((len(mine), len(parents)), (0, 1))          # the parent, not the worker's own session
         self.assertIn("started by attempt att-worker-1 in route rt-0123456789abcdef",
+                      parents[0]["receipt"]["text"])
+        # A normal end with no metric is quiet: the parent reads it on the one routine line.
+        self.assertEqual(parents[0]["receipt"]["subject"], "compute run, quiet")
+        self.assertIn("Routine, nothing to do (1 run): 1 ended normally (1 short or without metrics) -- here-1",
                       sweep.delivery_context([(state / "dispatch", parents)]))
 
     def _make_quiet(self, module):
@@ -3720,14 +3724,18 @@ class CatalogNameTest(unittest.TestCase):
 
         def record(run_id, name):
             text = f"{name}: run {run_id} on here ended with exit 0; read it with: compute-hosts tail {run_id}"
-            return {"receipt": {"kind": "notice", "key": f"compute-run:{run_id}", "subject": "compute run",
-                                "text": text, "required_action": "report-to-user"}}
+            return {"receipt": {"schema_version": 1, "kind": "notice", "key": f"compute-run:{run_id}",
+                                "subject": "compute run", "text": text, "required_action": "report-to-user"}}
         same = [record(run_id, "잔향 줄임") for run_id in runs]
         keys = sweep._render_keys([("/r", same)])
-        self.assertEqual({keys[id(item)][:2] for item in same}, {(1, 1)})   # three of one name: one folded summary
+        self.assertEqual({keys[id(item)][:2] for item in same}, {(1, 2)})   # normal ends: the one routine line
         mixed = [record(runs[0], "잔향 줄임"), record(runs[1], "잡음 줄임"), record(runs[2], "잔향 줄임")]
         keys = sweep._render_keys([("/r", mixed)])
-        self.assertEqual({keys[id(item)][:2] for item in mixed}, {(1, 0)})  # two and one: nobody folds
+        self.assertEqual({keys[id(item)][:2] for item in mixed}, {(1, 2)})  # whatever their names
+        # Within the line the order is by name: 잔향 줄임 twice, then 잡음 줄임.
+        self.assertEqual(sorted(mixed, key=lambda item: keys[id(item)]), [mixed[0], mixed[2], mixed[1]])
+        line = sweep._notice_layout([("/r", item) for item in mixed])["routine_line"]
+        self.assertEqual(line, "Routine, nothing to do (3 runs): 3 ended normally -- 잔향 줄임, 잡음 줄임")
 
 
 class ProbeCommandHashTest(unittest.TestCase):
@@ -3940,6 +3948,34 @@ class PathNamespaceInventoryTest(unittest.TestCase):
                 module._tmux_session_alive(host, "fixture-run", transport=state["meta"]["tmux_transport"])
         self.assertEqual(captured[0], captured[2])
         self.assertEqual(captured[1], captured[3])
+
+    def test_a_short_or_metric_less_normal_end_is_sent_as_quiet(self):
+        module = self.module
+        run_dir = Path(self.tmp.name) / "run"
+        run_dir.mkdir()
+        started = datetime.datetime.fromtimestamp(1000.0).isoformat(timespec="seconds")
+        config = {"run_root": Path(self.tmp.name), "hosts": {}}
+        observed = {"observation": {"summary": {"latest": {"value": 0.5, "epoch": 3}}}}
+        cases = [(0, 1030.0, None, "compute run, quiet"),       # under a minute, no metric
+                 (0, 9000.0, None, "compute run, quiet"),       # long, but no metric
+                 (0, 9000.0, observed, "compute run"),          # long, with a metric
+                 (0, 1030.0, observed, "compute run, quiet"),   # short, even with a metric
+                 (6, 1030.0, None, "compute run")]              # a failure is never quiet
+        for code, now, observation, subject in cases:
+            with self.subTest(code=code, now=now, observation=bool(observation)):
+                (run_dir / "exit_code").write_text(f"{code}\n")
+                (run_dir / "meta.json").write_text(json.dumps({
+                    "run_id": "fixture-run", "host": "gpu-c", "started_at": started,
+                    "provenance": {"notify": {"harness": "codex", "id": "session-1"}}}))
+                notice = mock.Mock()
+                fake = SimpleNamespace(notify=notice, QUIET_RUN_SECONDS=120)
+                with mock.patch.object(module, "load_config", return_value=config), \
+                     mock.patch.object(module, "_observe_compute_experiment", return_value=observation), \
+                     mock.patch.dict(sys.modules, {"session_notice": fake}):
+                    self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(run_dir)),
+                                                          now=lambda: now), 0)
+                notice.assert_called_once()
+                self.assertEqual(notice.call_args.kwargs["subject"], subject)
 
     def test_namespace_refusal_record_is_terminal_to_state_and_watch(self):
         module = self.module

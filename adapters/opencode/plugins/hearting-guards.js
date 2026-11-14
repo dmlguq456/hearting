@@ -2264,6 +2264,15 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, "resend-limit-deferred", { deliveries: [...held] })
         return
       }
+      if (claimed.records.every(record => record.waits === true)) {
+        // Only quiet notices to a supervising session (a short or metric-less normal end):
+        // no turn of their own; they ride the next natural turn (session_notice).
+        if (!deferred.has(sid)) deferred.set(sid, new Set())
+        for (const record of claimed.records) deferred.get(sid).add(record.delivery_id)
+        await command("release", sid, { records: claimed.records })
+        log("skip", sid, "quiet-waits-for-next-turn", { deliveries: claimed.records.map(record => record.delivery_id) })
+        return
+      }
       const canSend = await nativeIdle()
       // A second native read is the final output/send recheck. If another
       // carrier's exact receipt appeared after our first read, settle it here
