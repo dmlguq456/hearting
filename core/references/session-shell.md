@@ -164,8 +164,9 @@ or under the native area by choice). Spec E9 rule 49 folds and unfolds it: the
 fold button `»` (`«` for a left panel, `▾` in the bottom layout) on the panel's
 last row inside folds it into an eight-cell strip at its edge (two borders, a
 blank cell inside each and four content cells: the state glyph with the session
-number, the route count `2 RT`, the answer waits `◑ 1` and `«`; its border in
-the session's state color, only the glyph turning), and
+number, the route count `2 RT`, the experiment board's `5 LB` (`!1LB` failed or
+stuck, `?1LB` unconfirmed or unnamed, `9+LB`), the answer waits `◑ 1` and `«`;
+its border in the session's state color, only the glyph turning), and
 the native area takes the freed columns through the same PTY resize a window
 resize uses; folded under the native area it is one row (the status line and
 `▴`). A press anywhere on the strip or that row opens it. Where the open panel
@@ -334,7 +335,33 @@ start of its snippet) in the body color on at most two rows ending in `…`; no
 body, and no section without a journal row. The journal is read again only
 when it changed, the two records come from that one read, and their headlines
 come with the open work's query. A backend that sends only the earlier one-row
-pieces gives that one record, without its type; the head carries no `MEM` row. They
+pieces gives that one record, without its type; the head carries no `MEM` row.
+Beside the native area the LAB section stands right under the route box (one
+parting row after the box, as before a question box): this project's experiment
+board (`utilities/experiment_board.py`), worded by `tools/fleet/session_lab.py`
+with the Fleet LAB table's own cells, so the panel and Fleet read a condition
+alike. Collapsed it is `5 LAB 20:40` (the selected group's condition count
+first, the word a dim label, the board's read time) with its most pressing
+counts at the right (`failed 1`, `stuck 1`, `unknown 1`, `unnamed 1`,
+`waiting 1`, else `running 5`), the goal, and the one condition to look at (the
+board's choice: failed, stuck, unconfirmed, then unnamed runs, not comparable
+or waiting, else the best latest value with its baseline). A press on it opens
+the condition table in place (40 cells: name, progress, latest, difference; 32:
+name, progress, state; under each row the values that row does not show and
+why it is not plain) and a press closes it. A value is whole or its column (its
+piece) leaves; only a name ends in `…`, read whole under it. No experiments and
+no problem: no section and no strip token; a broken catalog or a run with no
+name is an unconfirmed warning, never "no experiments". An experiment's failure
+never colors the frame, the glyph or the strip's border. Its catalog and its
+run-record folders join the panel's file watch last (no poller): a folder is
+watched whole (a path ending in the separator), so any record written, replaced,
+added or removed in it redraws, at most once a second with the last change
+always drawn (a watched file keeps its 25 ms batch); a folder deleted or moved
+and made again at the same path is watched again, and a run-record folder's watch that keeps failing
+is made again at most once a second. Past four folders the rest are
+an unconfirmed note. A board that cannot be read or worded is LAB's own unconfirmed state and
+keeps its watch; the rest of the panel draws on. Ages count from the
+projection's clock. They
 differ by place and color only, all from the panel's theme and shade: the
 question's border, `◑` and `›` rose (its words are body text), route plain,
 messages dim. An opened route carries what Fleet's ROUTES row unfolds, from the
@@ -448,18 +475,20 @@ short, the question (its body and choices) and the top groups stay, and the
 others give way first, in this order: empty rows; the messages' extra rows
 (past three, and a body's rows after its first); an opened route detail (and an
 opened message) shortens and closes; the MEM section (two records, one, its
-headline on one row, none: before any of the messages); a value on several rows
+headline on one row, none: before any of the messages); the opened LAB table
+loses its per-row values, then closes to its summary; a value on several rows
 (title, NOW, a route title) keeps one row ending in `…`; the empty row under the
 route box,
 then the one inside the metadata (structural rows, not spare ones: the messages'
 extra rows leave them); then the head's rule (it is not an empty row: it goes
-only once TITLE and NOW are one row each); the messages fold
+only once TITLE and NOW are one row each); LAB's notes, then LAB keeps its head
+row alone; the messages fold
 to one row each (three of them); the routes' context row folds into their first
 row; their kind row goes, then their title row (one-row form);
 fewer messages show (three down to one, `+N` at the end of the lower rule); only
 then does the route box scroll in place, showing fewer
 routes (down to one) without dropping any; then the Git row, the route box and
-running jobs go; the messages section goes only last, then 5h/7d. Rows a later
+running jobs go; then the LAB head; the messages section goes only last, then 5h/7d. Rows a later
 step frees beyond its need go back to the steps before it, the most important
 first, so no row stays empty that an earlier value could fill. A section is
 placed whole or not at all.

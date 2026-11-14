@@ -44,7 +44,8 @@ import session_shell
 from fleet import native_display
 from fleet.collectors import claude
 from fleet.collectors.procscan import read_proc_start
-kids=[subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']) for _ in range(2)]
+# In the fixture folder: the session's project is the fixture's, never this checkout (its experiment board).
+kids=[subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],cwd=str(R)) for _ in range(2)]
 try:
   sid='11111111-2222-3333-4444-555555555555';pid=kids[0].pid;start=read_proc_start(pid)
   tap=Path(claude._home())/'.statusline'/(sid+'.json');tap.parent.mkdir(parents=True)
