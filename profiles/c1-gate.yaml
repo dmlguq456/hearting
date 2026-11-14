@@ -6,5 +6,5 @@ model_role: fast reviewer
 fragments: []
 expose:
   skills: [draft-strategy, code-test, autopilot-code, autopilot-draft]
-  agents: []
+  agents: [light, balanced, deep]
   triggers: []
