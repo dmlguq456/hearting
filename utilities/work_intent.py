@@ -747,17 +747,32 @@ def report_verdict(text: str) -> str:
 
 
 def _verdict_pr(text: str) -> str | None:
-    """The PR number the report's verdict line names (``_VERDICT_PR``), else None."""
+    """The PR this report is about: the one its verdict line names (``_VERDICT_PR``), else
+    the one its first heading names (a review's closed verdict line cannot carry a PR number
+    but its title does), else None."""
     match = _verdict_match(text)
-    if match is None:
-        return None
-    found = _VERDICT_PR.search(match["verdict"])
-    if found:
-        return next(value for value in found.groups() if value)
-    bare = set(_BARE_NUMBER.findall(match["verdict"]))
-    named = {next(value for value in found.groups() if value)
-             for raw in _unfenced_lines(text) for found in _PUBLICATION_LINE.finditer(raw)}
-    return bare.pop() if len(bare) == 1 and bare <= named else None
+    if match is not None:
+        found = _VERDICT_PR.search(match["verdict"])
+        if found:
+            return next(value for value in found.groups() if value)
+        bare = set(_BARE_NUMBER.findall(match["verdict"]))
+        named = {next(value for value in found.groups() if value)
+                 for raw in _unfenced_lines(text) for found in _PUBLICATION_LINE.finditer(raw)}
+        if len(bare) == 1 and bare <= named:
+            return bare.pop()
+    for raw in _unfenced_lines(text):
+        line = raw.strip()
+        if line.startswith("#"):
+            found = _VERDICT_PR.search(line)
+            return next(value for value in found.groups() if value) if found else None
+    return None
+
+
+def _verdict_head(text: str) -> str | None:
+    """The head the verdict line names, else None."""
+    match = _verdict_match(text)
+    found = _PUBLICATION_FIELDS[0].search(match["verdict"]) if match else None
+    return found["value"].lower() if found else None
 
 
 def _pr_number(line: str) -> str | None:
@@ -765,20 +780,29 @@ def _pr_number(line: str) -> str | None:
     return (found["url"] or found["number"]) if found else None
 
 
+def _other_head(line: str, verdict_head: str | None) -> bool:
+    """A line whose head is not the verdict line's head (a line with no head is kept)."""
+    found = _PUBLICATION_FIELDS[0].search(line.replace("`", "")) if verdict_head else None
+    head = found["value"].lower() if found else None
+    return bool(head and not (head.startswith(verdict_head) or verdict_head.startswith(head)))
+
+
 def _publication_lines(text: str):
     """Lines naming a PR with its head, CI or mergeability, outside fenced blocks. When
     the verdict line names this work's PR, only lines about that PR."""
     own = _verdict_pr(text)
+    verdict_head = None if own else _verdict_head(text)
     for raw in _unfenced_lines(text):
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (line and not line.startswith(("#", "|")) and not _VERDICT_LINE.match(line.replace("**", ""))
                 and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)
-                and own in (None, _pr_number(line.replace("`", "")))):
+                and own in (None, _pr_number(line.replace("`", "")))
+                and not _other_head(line, verdict_head)):
             yield line
 
 
 def report_pr_urls(text: str, limit: int = 3) -> list[str]:
-    """PR links outside fenced blocks; only this work's PR when the verdict line names it."""
+    """PR links outside fenced blocks; only this work's PR when the verdict line or title names it."""
     own = _verdict_pr(text)
     urls = [url for raw in _unfenced_lines(text) for url in _PR_URL.findall(raw)
             if own is None or url.rsplit("/", 1)[-1] == own]

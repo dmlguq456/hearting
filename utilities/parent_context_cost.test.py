@@ -454,9 +454,9 @@ class UnfinishedOwnerVerdictTest(unittest.TestCase):
 
 class SummaryContentTest(unittest.TestCase):
     def test_verdict_and_publication_come_from_the_report(self):
-        text = ("# 보고\n\n**최종 판정: 수정 후 병합 — head abcdef012345**\n\n## 해결하지 못한 것\n- P1\n\n"
+        text = ("# 보고\n\n**최종 판정: 수정 후 병합 — head 0123456789ab**\n\n## 해결하지 못한 것\n- P1\n\n"
                 "- PR #1640 · head `0123456789abcdef0123` · CI 15/15 통과 · GitHub mergeable `MERGEABLE`\n")
-        self.assertEqual(work_intent.report_verdict(text), "수정 후 병합 — head abcdef012345")
+        self.assertEqual(work_intent.report_verdict(text), "수정 후 병합 — head 0123456789ab")
         self.assertEqual(work_intent.report_publication(text),
                          "#1640 · head 0123456789ab · CI 15/15 통과 · MERGEABLE")
         self.assertEqual(work_intent.report_verdict("## 바꾼 것\n- x\n"), "")
@@ -486,9 +486,34 @@ class SummaryContentTest(unittest.TestCase):
         own = report + "- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과 · MERGEABLE\n"
         self.assertEqual(work_intent.report_publication(own), "#1637 · head 350a5b428243 · CI 15/15 통과 · MERGEABLE")
         self.assertEqual((work_intent.report_publication(report), work_intent.report_pr_urls(report)), ("", []))
-        # A verdict line that names no PR keeps the first PR line, as before.
-        self.assertTrue(work_intent.report_publication(own.replace("PR #1637 head 350a5b4", "head 350a5b4", 1))
-                        .startswith("#1636"))
+
+    def test_a_closed_review_verdict_still_keeps_the_other_pr_out(self):
+        # A review's first line is the closed `최종 판정: … — head <hex>` and cannot name a PR.
+        evidence = ("- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- https://github.com/o/r/pull/1636\n"
+                    "- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n")
+        closed = "최종 판정: 병합 가능 — head 350a5b4\n\n"
+        own = "#1637 · head 350a5b428243 · CI 15/15 통과"
+        # No PR in the verdict line: the head it names picks this work's PR line.
+        report = closed + "# 검토\n\n## 근거\n" + evidence
+        self.assertEqual(work_intent.report_publication(report), own)
+        with tempfile.TemporaryDirectory(prefix="scc-summary-") as temporary:
+            path = Path(temporary) / "report.md"
+            path.write_text(report, encoding="utf-8")
+            summary = work_intent.completion_summary(
+                {"capability": "review", "work_request": {"text": "x"}}, str(path))
+        self.assertIn("\nPR: #1637 · head 350a5b428243", summary)
+        self.assertNotIn("PR: #1636", summary)
+        # The title names this work's PR: it wins, and the other PR's link goes too.
+        titled = closed + "# 검토 — PR #1637\n\n## 근거\n" + evidence
+        self.assertEqual(work_intent.report_publication(titled), own)
+        self.assertEqual(work_intent.report_pr_urls(titled), [])
+        self.assertEqual(work_intent.report_publication(
+            closed + "# 검토 — PR #1637\n\n## 근거\n- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n"), "")
+        # A title naming a PR beats a head that matches no line.
+        self.assertEqual(work_intent.report_publication(
+            "최종 판정: 병합 가능 — head 9999999\n\n# 검토 — PR #1637\n" + evidence), own)
+        # No PR in the verdict line or title, no head either: the first PR line, as before.
+        self.assertTrue(work_intent.report_publication("# 검토\n\n" + evidence).startswith("#1636"))
 
     def test_the_check_counts_survive_a_long_prose_line(self):
         prose = "검증은 격리 HOME과 사설 tmux에서 loopback 모델로 세 하네스 각각 돌렸고 보고서 기록에 남김 — " * 3
