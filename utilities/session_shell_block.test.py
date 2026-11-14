@@ -195,7 +195,7 @@ console.log('PASS');"""
         text=lambda parts:''.join(part['text'] for part in parts or ())
         wait=lambda n:answer_wait_word()+' '+str(n)
         below=ui_text('fleet.session_block.compact_answer_below')
-        guide=lambda n:ui_text('fleet.session_block.questions')+' '+str(n)+' · '+below
+        guide=lambda n:str(n)+' '+ui_text('fleet.session_block.questions')+' · '+below
         for harness in ('claude','codex','opencode'):
             sid='sid-'+harness
             owner=dict(harness=harness,session_id=sid)
