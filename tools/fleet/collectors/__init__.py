@@ -636,7 +636,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             key = (getattr(session, "harness", None), getattr(session, "session_id", None))
             ids = {item.get("id") for item in answer_waits.get("items", ())
                    if item.get("session_id") == key[1] and item.get("harness") == key[0]
-                   and item.get("stale") == "current"}
+                   and item.get("stale") == "current" and item.get("answer") != "sent"}
             if ids:
                 session.interaction_observations.extend(
                     {"kind": {"human gate": "decision", "blocked owner": "decision",
@@ -907,7 +907,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             by_attempt = {}
             for item in answer_waits.get("items", ()):
                 attempt = item.get("attempt_id")
-                if attempt and item.get("stale") == "current":
+                # An answer the person already sent waits on no one (rule 5, 11-14).
+                if attempt and item.get("stale") == "current" and item.get("answer") != "sent":
                     by_attempt.setdefault(attempt, []).append(
                         {"kind": {"human gate": "decision", "blocked owner": "decision",
                                   "marker": "decision"}.get(item.get("kind"), item.get("kind")),

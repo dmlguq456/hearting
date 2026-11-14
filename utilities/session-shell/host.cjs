@@ -374,7 +374,7 @@ function panelViewNow(){
     model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:ruleMotionSince(shown),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
     cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
-    routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
+    routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options),sent:()=>block.sent()});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   routePageCount=view.routePages;return view;
@@ -1072,6 +1072,9 @@ function inputBytes(data) {
     const page=!!routeDetail&&readPageShown();
     if(page&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
     if(page&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
+    // Rule 5 (11-14): a sent answer returns focus to the native input. The lone Esc a person
+    // presses right after it, to leave the block as before, is not the native's interrupt.
+    if(!block.focused&&!relay&&block.answeredEscape?.(data)){data=data.subarray(1);queueDisplay();continue;}
     if(currentDelivery&&(!block.focused||relay)){
       inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
       if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
