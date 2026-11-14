@@ -61,6 +61,11 @@ ceiling; detached processes end too), or register it as a dispatch-depth-2 attem
 end a turn with such work running. Raise `--memory-budget` only to a value the task or
 receipt names.
 
+Leave wide reading, searching, and copying into a given template to the harness's light-tier
+subagents; compare, design, judge, and verify yourself. What a subagent gathers is evidence,
+not a passed check. Wait for outside CI or a release with one blocking command (for example
+`gh pr checks <n> --watch` under the lease above), not a repeated sleep.
+
 Consume the receipt's `required_action` literally: complete an open PASS row, inspect a
 terminal failure row, or advance a completed row with the exact status named; never retry a
 default `status=open` selector against a terminal row. The owner-level route binding has no
