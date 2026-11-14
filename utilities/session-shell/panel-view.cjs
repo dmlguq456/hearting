@@ -77,7 +77,9 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // (Fleet's session key, the light face's deep counterpart) at full strength.
     else if(role==='frame-state')dim=false;
     // A failed route's box line: its face's failure color, at full strength.
-    else if(role==='route-dead'){if(known)foreground=F.dead;dim=false;}
+    // (On the dark face without a shade that is the glyph's and word's own red, Fleet's g_dead:
+    // 11-15 design F 9.)
+    else if(role==='route-dead'){if(known&&(shade||known==='light'))foreground=F.dead;dim=false;}
     // The steward mark's two beats on a known face: Fleet's pink, then a receding pink
     // (no dim on top, so a shade keeps the hue); the light face takes the deep pair.
     // The steward's number does not blink (spec rule 35 (a)): it keeps the lit pink.
@@ -160,7 +162,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sent,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false}){
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,brief,sent,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false}){
   // Spec rule 49 (c): a folded panel is the strip under the native area, in every placement.
   folded=folded===true&&!settings;
   width=Math.max(folded?1:12,width);height=Math.max(folded?1:4,height);
@@ -172,6 +174,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
   let inner=width-4;const content=[],hits=[],edge=[];
+  // 11-15 (popup design A): the question the person would answer next, as its summary (the
+  // shell's editor reads it whole in the popup): `count` boxes, `rows` (its first row and its
+  // choices on one row, or its first two rows), `one` (its first row), `line` (its whole first
+  // line, for the folded strip), `choices` (how many).
+  const summary=(()=>{if(typeof brief!=='function')return null;try{const b=brief();return b&&b.count>0?b:null;}catch{return null;}})();
   // `groups` names the statusline groups a row paints (head, git, context, wait, jobs, route, quota).
   const contentGroups=[];
   function add(parts,action,groups){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
@@ -272,8 +279,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const pack=items=>{
       const out=[];let used=0;
       for(const item of items){
-        const gap=out.length?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
+        const gap=out.length&&!item.choices?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
         if(used+size(head)+size(tail)<=room){out.push(...head,...tail);used+=size(head)+size(tail);continue;}
+        // The choices after the question's first line: whole, else their count, else nothing; the
+        // question's line keeps its cells (it never gives them to its choices).
+        if(item.choices){if(used+size(item.short)<=room){out.push(...item.short);used+=size(item.short);}continue;}
         const left=room-used-size(head);
         if(tail.length&&left>=5)out.push(...head,...cut(tail,left));
         else if(left>=0&&!item.titled)out.push(...head);
@@ -312,16 +322,16 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return cut(lead,room);
     };
     // 2. What to do now.
-    const first=(()=>{
-      if(!model.wait||typeof questions!=='function')return [];
-      let rows=[];try{rows=questions({budget:3,columns:Math.max(20,width-4)})||[];}catch{rows=[];}
-      return rows.length>1&&Array.isArray(rows[1])?P(rows[1]).map(p=>({...p,text:clean(p.text)})).filter(p=>p.text.trim()):[];
-    })();
+    const first=model.wait&&summary?P(summary.line).map(p=>({...p,text:clean(p.text)})).filter(p=>p.text.trim()):[];
+    // 11-15 (popup design E): where cells are left, the choices follow on the same row, whole or as
+    // their count alone (`· +4`).
+    const choiceRow=summary&&Array.isArray(summary.rows)&&summary.choices>0?P(summary.rows[1]).filter((p,i)=>i>0||String(p.text).trim()):[];
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
     // A wait answered elsewhere (#1633): where, dim, after the wait (never part of its count).
     const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
     const todo=[
       ...(model.wait?[{head:[text(clean(model.wait),'g_blocked')],tail:first.length?[text(' · ','dim'),...first]:[]}]:[]),
+      ...(first.length&&choiceRow.length?[{choices:true,head:[text(' · ','dim'),...choiceRow],short:[text(' · +'+summary.choices,'dim')]}]:[]),
       ...(guide?[{titled:true,head:[],tail:[text(guide,'dim')]}]:[]),
       ...(model.warning?[{head:[text('⚠ ','lvl_r')],tail:[text(clean(model.warning),'lvl_r')]}]:[]),
       ...(tidy&&!model.answerable?[{head:[text('⚠ ','lvl_y')],tail:[text(tidy,'lvl_y')]}]:[])];
@@ -343,12 +353,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const strip=height>=2,count=strip?height-1:1;
     const chosen=new Set(['todo','session','routes'].filter(name=>rowsOf[name].length).slice(0,count));
     const order=['session','todo','routes'].filter(name=>chosen.has(name));
-    const out=[],hits=[],groups=[];
+    const out=[],hits=[],groups=[],named=[];
     const pad=parts=>[...parts,text(' '.repeat(Math.max(0,width-size(parts))))];
     const withMark=parts=>{const body=cut(parts,Math.max(0,width-2));return [...body,text(' '.repeat(Math.max(0,width-1-size(body)))),text('▴','dim')];};
     if(strip)out.push(width>=3?[{...text('─'.repeat(width-2),'dim'),role:'messages'},text(' '),text('▴','dim')]:withMark([]));
     for(const name of order){
       const parts=rowsOf[name];
+      named[out.length]=name;
       out.push(strip?pad(parts):withMark(parts));
       if(name==='session')groups.push('head',...(parts.includes(ctxLabel)?['context']:[]),...(parts.some(part=>quotaParts.has(part))?['quota']:[]));
       if(name==='todo'&&model.wait)groups.push('wait');
@@ -356,7 +367,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     if(!strip&&!out.length)out.push(withMark([]));
     while(out.length<height)out.push(pad([]));
-    for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:'unfold'});
+    // 11-15 (popup design E): the row of what to do opens the question popup while it carries the
+    // question; the rule with `▴` and every other row open the panel.
+    for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:named[i]==='todo'&&first.length?'question':'unfold'});
     const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
     const spins=out.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0);
     return {rows:painted,hits,color,routePages:1,routeDetail,routeArea:null,groups:[...new Set(groups)],animated:spins.length>0,spins,motion:null,folded:true};
@@ -1046,16 +1059,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(!out.length)push([text(t('checking','Checking'))]);
       return out;
     }
-    // Spec rule 14: every group is one box of the same thin rounded line; the
-    // question box is the person's and sits at the bottom. Strength of color
-    // tells the boxes apart: question the answer-needed color, route plain,
-    // messages dim, all from the panel's own styles.
-    // Spec rule 22: each line keeps its own role, so a shade colors it without a dim on top;
-    // the question's border is rose.
+    // Spec rule 14: the route box is the one thin rounded box (11-15: the questions section has
+    // none, its count and `◑` keep the question's rose). Strength of color tells the sections
+    // apart: route plain, messages dim, all from the panel's own styles.
+    // Spec rule 22: each line keeps its own role, so a shade colors it without a dim on top.
     // Spec rule 25: a route's state stays inside the route box. A failed current route
     // turns the box line to the failure color; a running one pulses `route N` (below).
     const failedRoute=!stale&&shown.some(r=>r.kind==='dead');
-    const tone={route:failedRoute?{key:'g_dead',role:'route-dead'}:{key:'plain',role:'route'},messages:'dim',question:{key:asking?'lvl_y':'dim',role:'accent-line'}};
+    const tone={route:failedRoute?{key:'g_dead',role:'route-dead'}:{key:'plain',role:'route'},messages:'dim'};
     const L=(v,k)=>typeof k==='object'?{...text(v,k.key),role:k.role}:text(v,k);
     const box=4;
     // Box content is laid out at the box's inner width, so nothing is cut by the frame.
@@ -1424,24 +1435,28 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const requestHead=requestList.length?[text(side?requestList.length+' REQUEST':'request '+requestList.length,'dim')]:[];
     const routeTitle=routeHead.length||requestHead.length?[...routeHead,...(routeHead.length&&requestHead.length?[text(' │ ','dim')]:[]),...requestHead]:null;
     const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
-    // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
-    // Running jobs keep their row beside a question: its editor pages its own content.
-    const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-1),columns:inner-box});
-    const ask=[];
-    if(q.length){
-      const key=tone.question;
-      const accent=parts=>parts.flatMap(part=>{
-        const s=String(part.text??''),m=/^(\s*)([◑›])(.*)$/su.exec(s);
-        if(!m)return [part];
-        return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
-      });
-      ask.push(boxTop(accent(q[0]),key,{action:'question',ellipsis:true}));
-      for(const row of q.slice(1))ask.push(boxRow({parts:accent(row),action:'question'},key));
-      ask.push(boxBottom(key,[],'question'));
-    }
-    // Rule 5 (11-14): an answer on its way is one dim line where its box stood, cut to fit.
-    for(const row of typeof sent==='function'?sent()||[]:[])ask.push({parts:cut(row,inner),action:'question'});
+    // 11-15 (popup design A): no box. The questions section is its label row, the count leading
+    // its name tag and a thin rule on to `›` (`3 QUESTIONS ──── ›`, as `MESSAGES +2 ───`), the
+    // answers on their way (rule 5: one dim line each), then the next question's summary: its
+    // first row (`◑ …`) and its choices on one row (`1 label (recommended) · 2 … · +2`), or its
+    // first two rows. Short of rows the summary keeps its first row. A press on any of these rows
+    // (or Ctrl+]) opens the popup where the question reads whole; nothing is answered in place.
+    const accent=parts=>parts.flatMap(part=>{
+      const s=String(part.text??''),m=/^(\s*)([◑›])(.*)$/su.exec(s);
+      if(!m)return [part];
+      return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
+    });
+    const sentRows=(typeof sent==='function'?sent()||[]:[]).map(row=>({parts:cut(row,inner),action:'question'}));
+    let briefTwo=true;
+    const questionLabel=()=>{
+      const head=[{...text(String(summary.count),'g_blocked'),role:'accent'},text(' '),{...text(summary.label||'QUESTIONS','dim'),role:'title'}];
+      const rest=inner-size(head)-2;
+      return rest>=2?[...head,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'},text(' '),text('›','dim')]:cut(head,inner);
+    };
+    const askRows=()=>summary?[{parts:questionLabel(),action:'question'},...sentRows,
+      ...(P(briefTwo?summary.rows:summary.one)).map(row=>({parts:cut(accent(P(row)),inner),action:'question'}))]:sentRows;
+    let ask=askRows();
     // Short of rows (spec rule 34 (b), which orders rules 14, 19, 23, 24, 29 (c) and 31):
     // empty rows; the messages' extra rows (a body's rows after its first: they only ever
     // take rows the routes leave in their full form); opened details
@@ -1510,10 +1525,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Spec rule 35 (c): beside the native area one empty row parts the route box from what
     // follows it (the question box, else the messages rule); the messages' extra rows leave it.
     // The LAB section stands right under the route box and takes the same parting row after it.
-    const lower=()=>ask.length>0||keepMessages&&messages.length>0||memShown();
+    const lower=()=>askRows().length>0||keepMessages&&messages.length>0||memShown();
     const routeGap=()=>side&&keepRouteGap&&keepRoutes&&(lower()||labRows().length>0)?1:0;
     const labGap=()=>keepRouteGap&&labRows().length>0&&lower()?1:0;
-    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+labRows().length+labGap()+messageSection()+1;
+    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+askRows().length+routeBox()+routeGap()+labRows().length+labGap()+messageSection()+1;
     const budget=rows;
     const baseCount=messageCount;
     // Each step is taken only while rows are short; a later step that frees more rows than
@@ -1557,12 +1572,16 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     // The head alone outlasts the route box; it goes before any message.
     give(()=>keepLab,()=>{keepLab=false;},()=>{keepLab=true;});
+    // The question's summary (11-15) is three rows at most, so it pushes no section out of a 20-row
+    // window; it keeps them as the question box kept its rows (LAB takes none of them), and gives up
+    // its choices' row before the messages go. Its label row and first row stay to the last.
+    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
     give(()=>keepMessages,()=>{keepMessages=false;},()=>{keepMessages=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const kept=()=>[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab];
+    const kept=()=>[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab,briefTwo];
     for(const undo of gave.reverse()){
       const was=kept();undo();
-      if(need()>budget)[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab]=was;
+      if(need()>budget)[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab,briefTwo]=was;
     }
     // Rows to spare beside the native area once everything above the messages' extra rows
     // stands whole (the routes in their three-row form, details, values on all their rows,
@@ -1626,6 +1645,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       messageBlock.push({parts:[{...text('─'.repeat(inner),key),role:'messages'}]});
     }
     // Each section is placed whole or not at all; the empty row under the route box goes first.
+    ask=askRows();
     const tail=ask.length+messageBlock.length+1;
     let labBlock=labRows();
     let gap=routeBlock.length?routeGap():0,lgap=labBlock.length?labGap():0;
@@ -1759,5 +1779,61 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,blinks:blinks&&!settings,spins,motion};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,
+// 11-15 (popup design, 공통): one frame for every popup (the questions now; the routes, LAB and
+// sessions use it as it is). It stands in the middle of the window, the native area and the panel
+// together; with the folded strip under the native area, in the middle of the rows above it (the
+// strip is never covered). A thin grey rounded line, one empty cell away from what it covers (a
+// native that paints its own background, or a wide character on the edge, ends there). The top
+// line carries the title and `✕`, the bottom line the sections (the current one bright), and the
+// row above it the keys (the content's last row). Width: text wraps at 76 cells; narrower than 80
+// cells the window less 4; narrower than 28 the whole window. Height: the content's, at most the
+// rows above the strip less 2 (the content then pages inside). Display only: the keys go to the
+// popup's owner (the host) while it stands; nothing here reads input.
+const POPUP_TEXT=76,POPUP_TABLE=116;
+function popupWidth(cols,kind='text'){
+  if(cols<28)return Math.max(4,cols);
+  if(cols<80)return cols-4;
+  return kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
+}
+// The rows the content may take inside the frame.
+function popupRoom(rows,band=0){const space=Math.max(1,rows-band);return Math.max(0,(space>=4?space-2:space)-2);}
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+  function clip(parts,limit){let out=[],used=0;for(const part of parts){let t='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;t+=c;used+=w;}if(t)out.push({...part,text:t});if(used>=limit)break;}return {parts:out,used};}
+  const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,{...text('…','dim')}];
+  const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
+  const maxH=Math.max(2,space>=4?space-2:space),list=body.slice(0,Math.max(0,maxH-2)),H=Math.min(maxH,list.length+2);
+  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-H)/2));
+  const line=v=>({...text(v,'dim'),role:'messages'});
+  // The top line: `╭─ title ──… ✕ ─╮`; a title too long ends in `…`, the `✕` stays.
+  const room=Math.max(0,W-10),name=room>=4?cut(title.map(p=>({...p,text:clean(p.text)})),room):[];
+  const head=name.length?[line('╭─ '),...name,line(' ')]:[line('╭─')];
+  const close=W>=8?[text(' ','dim'),text('✕','dim'),line(' ─╮')]:[line('╮')];
+  const top=[...head,line('─'.repeat(Math.max(0,W-size(head)-size(close)))),...close];
+  // The bottom line: the sections, the current one bright.
+  const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(s,i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
+  const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
+  const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];
+  const frame=[top];
+  for(const row of list){const fit=clip(Array.isArray(row)?row:[],inner);frame.push([line('│ '),...fit.parts,text(' '.repeat(Math.max(0,inner-fit.used))),line(' │')]);}
+  frame.push(bottom);
+  // One empty cell round the frame where the window has it.
+  const left=x>0?1:0,right=x+W<cols?1:0,above=y>0?1:0,below=y+H<space?1:0;
+  const blank=n=>({text:' '.repeat(n)});
+  const out=[];
+  if(above)out.push([blank(W+left+right)]);
+  for(const row of frame)out.push([...(left?[blank(1)]:[]),...row,...(right?[blank(1)]:[])]);
+  if(below)out.push([blank(W+left+right)]);
+  const cfg={...defaults,...configuration,shade:'none'};
+  const painted=appearance(out,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
+  // Presses, in window cells: `✕` closes, a section's name opens its popup.
+  const hits=[];
+  if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});
+  let at=x+3;for(let i=0;i<sections.length&&listed.length>2;i++){const n=measure(sections[i]);hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
+  return {rows:painted,left:x-left,top:y-above,width:W+left+right,height:out.length,frame:{left:x,top:y,width:W,height:H},inner,body:list.length,hits};
+}
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,
   BORDER:{LAP:BORDER_LAP,ARC:BORDER_ARC,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};

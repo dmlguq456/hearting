@@ -113,14 +113,15 @@ for(const [styles,colored] of [[color,true],[plain,false]]){
  // The chosen choice moves with the arrows, the form with it.
  b.input(Buffer.from('\x1b[B'));const moved=options(b);assert.equal(moved[4][0].text,'▸');assert.equal(moved[1][0].text,'  ');
 }
-// The panel: `▸` keeps the harness color on the terminal's own background and on a known face; it is not rose.
-{const b=make(color);b.enter();b.input(Buffer.from('\x1b[B'));const q=o=>b.detail(o);
+// The popup the editor draws in (11-15): `▸` keeps the harness color on the terminal's own background
+// and on a known face; it is not rose.
+{const b=make(color);b.enter();b.input(Buffer.from('\x1b[B'));const rows=b.detail({budget:20,columns:72});
+ const pop=(configuration,background)=>view.popup({cols:120,rows:30,title:rows[0],body:rows.slice(1),sections:['QUESTIONS'],
+   model:{styles:color,colors:256},configuration,background}).rows.flat();
  for(const [cfg,background] of [[{},''],[{},'dark'],[{shade:'medium'},'dark']]){
-  const r=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:cfg,background,questions:q});
-  const mark=r.rows.flat().find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
+  const mark=pop(cfg,background).find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
   assert.notEqual(mark.foreground,view.FACES.dark.accent,JSON.stringify(cfg));assert.equal(mark.foreground,173,JSON.stringify(cfg));assert.equal(mark.bold,true);}
- const mono=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:{theme:'mono'},questions:q}).rows.flat();
- assert.equal(mono.find(p=>p.text==='▸').bold,true);
+ assert.equal(pop({theme:'mono'},'').find(p=>p.text==='▸').bold,true);
 }
 """)
 

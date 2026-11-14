@@ -30,8 +30,10 @@ small attach template. This is controlled global input, distinct from native
 project instructions, which remain. Codex reads one global file, so when the
 user keeps an `AGENTS.override.md` the worker home gets a read-only copy of the
 user's own text followed by the attach template instead of the main bootstrap. User credentials/config/hooks stay linked;
-launch overrides disable apps, MCP servers, custom agents, native collaboration
-and enabled plugins, and disable discovered system skills by documented path.
+launch overrides disable apps, MCP servers, the user's custom agents, native
+collaboration (an owner keeps it and gets the `light`/`balanced`/`deep` agents,
+see Native Custom Agent Surface) and enabled plugins, and disable discovered
+system skills by documented path.
 The assigned contract remains in the prompt. Native or managed input outside
 these controls must be reported from actual runtime evidence.
 
@@ -308,6 +310,18 @@ Activation owns each of the two keys separately: a key the user changes is left
 as theirs, and a line still holding Hearting's value is removed when the default
 no longer applies and on deactivation. Measured with
 `utilities/harness_behavior_scenarios.py --scenario subagent-model`.
+
+Registered owner workers. A worker's `CODEX_HOME` still leaves out the user's
+own role catalog (the `[agents.<name>]` tables and `agents/` files), but an
+owner's home gets `agents/light.toml`, `balanced.toml` and `deep.toml` as
+regular files, rendered by the same renderer from the `models.conf` the user's
+home selects (`tools/profile/build-home.py`), so an owner that names one of
+them runs that tier. The owner keeps the scalar `[agents]` keys, so the role
+default above reaches it only where activation could write it; elsewhere a
+spawn that names no agent keeps the owner's own model (PG-13). Other worker
+types keep `multi_agent` off and get no agent files. Measured with
+`subagent-model` on Codex 0.163.0: each named spawn in the owner home asked
+for its file's model.
 
 parity caveat: Codex custom agents can carry model/reasoning/sandbox settings,
 but they are not Claude Code Agent frontmatter. Runtime discovery, UI surfacing,

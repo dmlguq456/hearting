@@ -326,7 +326,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
             if session.get("answer_wait_marker") == "●":
                 marker, marker_key = "●", "blocked"
             elif session.get("answer_wait_marker") == "◑":
-                marker, marker_key = "◑", "lvl_y"
+                marker, marker_key = "◑", "blocked"
             grid.put(x + IND + 1, y, marker, marker_key)
             tag_x = x + IND + 3
             age_text = str(session.get("age") or "")
@@ -833,7 +833,7 @@ def _session_unfold(grid, vm, x, use, y, session, c, now_shown=False, title_whol
     question = next((item for item in mine if not item.get("older")), mine[0] if mine else None)
     if question:
         marker = str(question.get("marker") or "●")
-        lead = [(marker, "lvl_y" if marker == "◑" else "blocked"),
+        lead = [(marker, "blocked"),
                 (" " + str(question_about(question)), "blocked"),
                 (" · waiting " + str(question.get("wait")) + " · ", "dim")]
         from .pages import _fit, _segs
@@ -2102,7 +2102,7 @@ def draw_questions(grid, vm, state, x=34, y=3):
         # The person's answer is on its way (rule 5, 11-14): a dim sent row, in no count.
         sent = bool(question.get("sent"))
         marker = "✓" if sent else marker
-        grid.put(x, y, marker, "dim" if marker in ("◌", "✓") else "lvl_y")
+        grid.put(x, y, marker, "dim" if marker in ("◌", "✓") else "blocked")
         tag_text = _clip(shown_tag, 5)
         grid.put(tag_x, y, "[", "dim")
         grid.put(tag_x + 1, y, tag_text, "soft" if question.get("session_tag") or shown_tag == tag

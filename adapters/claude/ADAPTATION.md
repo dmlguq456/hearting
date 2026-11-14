@@ -449,6 +449,20 @@ definition whose model is main-session-only in that config is not projected. The
 hook still decides unpinned spawns and denies main-only models. Keep your own
 agents under other names.
 
+A registered worker's config home (`tools/profile/build-home.py`) gets the
+`light`, `balanced` and `deep` definitions as regular files under its
+`agents/`, rendered by the same renderer from the `models.conf` the user's home
+selects, so a worker that names one of them runs that tier (a main-session-only
+model gets no file). `general-purpose` and `memory-scout` are not placed: a
+worker spawn that names no agent keeps the built-in, and the spawn hook still
+sends such a spawn from a worker to `light` (see above). A definition that cannot
+be placed (an existing file, link or folder on its path, an unwritable `agents/`)
+is skipped without touching what is there; the worker still starts. A profile declaration's
+`expose.agents` picks a subset of the three. Measured with
+`utilities/harness_behavior_scenarios.py --scenario subagent-model`: the worker
+session's start record lists the three, and each named spawn asks for its
+definition's model.
+
 An explicit eligible per-invocation model or eligible agent-definition pin is
 preserved. A config-declared interactive-main-only model, explicit `inherit`,
 fork inheritance, or a missing eligibility policy returns a typed PreToolUse

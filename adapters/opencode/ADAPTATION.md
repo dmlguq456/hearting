@@ -93,6 +93,14 @@ symlink, a differing one is written as an activation-owned regular file, and an 
 whose model is main-session-only in that config gets no file. Keep your own agents
 under other names.
 
+Registered workers reach the `light`, `balanced` and `deep` agents by name. A V2
+worker's shared service owns config, so it reads the agents the user's home
+already holds (measured on OpenCode 2.0.32 with `subagent-model`: each named
+spawn asked for its file's model). A V1 worker reads only its own config home,
+so `tools/profile/build-home.py` writes the three there as regular files from
+the same renderer and selected `models.conf` (structural test only; no V1
+binary was run). `general-purpose` is not added to a V1 worker home.
+
 Sub-agent role default (PG-13, limit). OpenCode gives a subagent with no
 configured model the parent session's model, and its `subagent` tool takes no
 model (https://opencode.ai/docs/agents/, https://opencode.ai/docs/tools/).
