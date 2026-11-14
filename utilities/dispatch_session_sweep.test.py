@@ -2276,10 +2276,10 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
     def seed_turn(self, **overrides):
         return self._seed(self.SID, recipient_kind="opencode-turn", **overrides)
 
-    def _compute_notice(self, run_id, host, code=0, session_id=None, name=None):
+    def _compute_notice(self, run_id, host, code=0, session_id=None, name=None, summary=""):
         import session_notice
         text = ((f"{name}: " if name else "") + f"run {run_id} on {host} ended with exit {code}"
-                f"; read it with: compute-hosts tail {run_id}")
+                f"{summary}; read it with: compute-hosts tail {run_id}")
         row = session_notice.notify(
             "opencode", session_id or self.SID, key=f"compute-run:{run_id}", subject="compute run",
             text=text, required_action="report-to-user", jobs=self.root / "jobs.log")
@@ -2321,6 +2321,17 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         self.assertNotIn("Needs attention", forward)
         self.assertEqual(forward.count("run gpu-a-20261024-120011-sweep"), 0)
         self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
+
+    def test_a_named_run_that_carries_metrics_is_named_by_its_catalog_name_not_its_run_id(self):
+        # The observation summary `compute-hosts` appends after a run's metrics must not hide the name.
+        summary = ("; 마지막 val_loss=0.31 (step 900); 최고 val_loss=0.30 (step 800); 추세 개선"
+                   "; 실제 2h05m / 계획 3h00m; run 기록 /a/b/c.json")
+        records = [self._compute_notice(f"gpu-a-20261024-12000{i}-fit", "gpu-a", name="잔향 줄임", summary=summary)
+                   for i in (1, 2)]
+        self.assertEqual({SWEEP._notice_run(record) for record in records},
+                         {("gpu-a-20261024-120001-fit", "잔향 줄임"), ("gpu-a-20261024-120002-fit", "잔향 줄임")})
+        unnamed = self._compute_notice("gpu-a-20261024-120003-fit", "gpu-a", summary=summary)
+        self.assertEqual(SWEEP._notice_run(unnamed), ("gpu-a-20261024-120003-fit",) * 2)
 
     def test_the_notice_pattern_takes_an_optional_name_and_nothing_else_in_front(self):
         tail = "run gpu-a-20261024-120001-x on gpu-a ended with exit 0; read it with: compute-hosts tail gpu-a-20261024-120001-x"
