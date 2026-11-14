@@ -21,19 +21,21 @@ spec.loader.exec_module(F)
 
 
 class NoLineageSettlementTest(unittest.TestCase):
-    def fixture(self, harness="codex"):
-        f = F.PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
-        f.setUp()
-        self.addCleanup(f.doCleanups)
+    def fixture(self, harness="codex", f=None):
+        if f is None:
+            f = F.PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
+            f.setUp()
+            self.addCleanup(f.doCleanups)
+            f.activate()
         owner = "att-" + uuid.uuid4().hex
-        report = f.root / "inputs" / "report.md"
-        report.parent.mkdir()
+        report = f.root / "inputs" / (owner + ".md")
+        report.parent.mkdir(exist_ok=True)
         report.write_text("# Result\nVerified external report.\n")
-        f.activate()
         R = F.PRODUCER_FIXTURE.R
         route = R.compose_route(capability="autopilot-code", capability_mode="dev",
             shape="solo", graph=None, slug="no-lineage-fixture", cwd=R.ROOT, artifact_root=f.root,
             intensity="quick", unassigned=True,
+            work_request={"text": owner, "owner_harness": harness},
             registered_headless_evidence=F.PRODUCER_FIXTURE.registered_headless())
         path = Path(F.PRODUCER_FIXTURE.L.admit_runtime_route(f.root, route).route_file)
         jobs = f.jobs
@@ -44,17 +46,18 @@ class NoLineageSettlementTest(unittest.TestCase):
             route_file=str(path), route_id=route["route_id"], route_hash=route["route_hash"],
             route_node=node["id"], registry_digest=route["registry_digest"],
             write_scope=";".join(node["write_scope"]), completion_gate=node["completion_gate"])
-        jobs.write_text(f"2026-11-14T00:00:00Z\topen\t{R.ROOT}\t{R.ROOT}\towner\t" +
+        with jobs.open("a") as stream:
+            stream.write(f"2026-11-14T00:00:00Z\topen\t{R.ROOT}\t{R.ROOT}\towner\t" +
             ",".join(f"{k}={v}" for k,v in metadata.items()) + "\n")
         cycle = P.begin(f.root, route_file=path, capability="autopilot-code", intensity="quick",
                         jobs=jobs, owner_attempt_id=owner)
         request = T.TerminalCommitRequest(path, owner, jobs, f.root)
         text = f"artifact: {report}\nverdict: PASS\nblocker: none"
-        log = jobs.parent / "owner.jsonl"
+        log = jobs.parent / (owner + ".jsonl")
         log.write_text("\n".join(json.dumps(r) for r in
             F.OwnerTerminalPlacementReplayTest.NATIVE[harness](text)) + "\n")
-        jobs.write_text(jobs.read_text().replace("worker_type=owner",
-            f"attempt_schema_version=2,worker_type=owner,log_file={log},workflow_completion=runtime-v1"))
+        jobs.write_text(jobs.read_text().replace(f"attempt_id={owner},worker_type=owner",
+            f"attempt_id={owner},attempt_schema_version=2,worker_type=owner,log_file={log},workflow_completion=runtime-v1"))
         f._closed_owner(jobs, owner)
         env = mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
                                           "AGENT_ARTIFACT_ROOT": str(f.root)})
@@ -117,7 +120,7 @@ class NoLineageSettlementTest(unittest.TestCase):
         self.assertEqual(second.result, "completed", second)
         self.assertEqual(T._commit_state_path(request).read_bytes(), commit)
 
-    def test_no_lineage_requires_exact_identity_and_absence_on_live_and_historical_reads(self):
+    def test_no_lineage_requires_exact_identity_on_live_and_historical_reads(self):
         f, route, jobs, cycle, request, report, meta = self.checkpoint()
         binding = T.load_producer_binding(artifact_root=f.root, route_id=route["route_id"],
             owner_attempt_id=request.owner_attempt_id).binding
@@ -139,27 +142,82 @@ class NoLineageSettlementTest(unittest.TestCase):
                     record_path.write_bytes(invalid)
                 self.assert_refused(f, cycle, binding)
                 record_path.write_bytes(original)
-        directory = Path(cycle["cycle_dir"])
-        for kind in ("empty-directory", "manifest", "output", "dangling-symlink"):
-            with self.subTest(kind=kind):
-                if kind == "dangling-symlink":
-                    directory.symlink_to(directory.parent / "absent-target")
-                else:
-                    directory.mkdir()
-                    if kind != "empty-directory":
-                        (directory / ("manifest.json" if kind == "manifest" else "output.md")).write_text("{}")
-                self.assert_refused(f, cycle, binding)
-                if directory.is_symlink():
-                    directory.unlink()
-                else:
-                    for path in directory.iterdir():
-                        path.unlink()
-                    directory.rmdir()
         for verify in (P.verify_finalized_cycle, P.observe_finalized_cycle):
             result = verify(f.root, cycle_id=cycle["cycle_id"], expected_binding=binding)
             self.assertEqual(result["status"], "no-lineage")
             self.assertIs(result["lineage_committed"], False)
         self.assertEqual(T.settle_owner_completion(jobs, "done", meta).result, "completed")
+
+    def assert_complete(self, jobs, meta):
+        self.assertEqual(T.owner_completion_state(jobs, "done", meta).state, "complete")
+        self.assertFalse(T.owner_completion_pending(jobs, "done", meta))
+        self.assertIsNotNone(T.completed_owner_handoff(jobs, "done", meta))
+        result = T.settle_owner_completion(jobs, "done", meta)
+        self.assertEqual(result.result, "completed", result)
+
+    def test_same_slug_reuse_preserves_completion_for_every_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            for second_output in (False, True):
+                with self.subTest(harness=harness, second_output=second_output):
+                    f, route, jobs, cycle, request, report, meta = self.fixture(harness)
+                    self.assertEqual(T.settle_owner_completion(jobs, "done", meta).result, "completed")
+                    self.assert_complete(jobs, meta)
+                    _, route2, _, cycle2, _, _, meta2 = self.fixture(harness, f=f)
+                    self.assertNotEqual(route["route_id"], route2["route_id"])
+                    self.assertEqual(cycle["cycle_dir"], cycle2["cycle_dir"])
+                    output = Path(cycle2["cycle_dir"]) / "artifacts" / "second.md"
+                    output.write_text("second cycle output\n")
+                    self.assert_complete(jobs, meta)
+                    if not second_output:
+                        output.unlink()
+                    result = T.settle_owner_completion(jobs, "done", meta2)
+                    self.assertEqual(result.result, "completed", result)
+                    self.assert_complete(jobs, meta2)
+                    self.assert_complete(jobs, meta)
+
+    def test_ignored_entries_close_once_for_every_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            for kind in ("hidden", "symlink", "empty-directory"):
+                with self.subTest(harness=harness, kind=kind):
+                    f, route, jobs, cycle, request, report, meta = self.fixture(harness)
+                    artifacts = Path(cycle["cycle_dir"]) / "artifacts"
+                    if kind == "hidden":
+                        (artifacts / ".hidden").write_text("ignored\n")
+                    elif kind == "symlink":
+                        (artifacts / "link").symlink_to(f.root / "missing")
+                    else:
+                        (artifacts / "empty").mkdir()
+                    result = T.settle_owner_completion(jobs, "done", meta)
+                    self.assertEqual(result.result, "completed", result)
+                    self.assertEqual(P.read_cycle_record(f.root, cycle["cycle_id"])["state"], "no-lineage")
+                    self.assert_complete(jobs, meta)
+
+    def test_checkpoint_rejects_sealable_output_but_history_does_not_rescan(self):
+        f, route, jobs, cycle, request, report, meta = self.checkpoint()
+        directory = Path(cycle["cycle_dir"])
+        (directory / "artifacts").mkdir(parents=True)
+        output = directory / "artifacts" / "late.md"
+        output.write_text("sealable output\n")
+        result = T.settle_owner_completion(jobs, "done", meta)
+        self.assertNotEqual(result.result, "completed", result)
+        self.assertIn("no-lineage-output", result.detail)
+        output.unlink()
+        result = T.settle_owner_completion(jobs, "done", meta)
+        self.assertEqual(result.result, "completed", result)
+        (directory / "artifacts").mkdir(parents=True, exist_ok=True)
+        output.write_text("later output does not undo completion\n")
+        self.assert_complete(jobs, meta)
+
+    def test_checkpoint_reuse_does_not_count_the_next_cycles_output(self):
+        f, route, jobs, cycle, request, report, meta = self.checkpoint()
+        _, _, _, cycle2, _, _, meta2 = self.fixture(f=f)
+        self.assertEqual(cycle["cycle_dir"], cycle2["cycle_dir"])
+        (Path(cycle2["cycle_dir"]) / "artifacts" / "second.md").write_text("second\n")
+        result = T.settle_owner_completion(jobs, "done", meta)
+        self.assertEqual(result.result, "completed", result)
+        self.assert_complete(jobs, meta)
+        self.assertEqual(T.settle_owner_completion(jobs, "done", meta2).result, "completed")
+        self.assert_complete(jobs, meta)
 
     def assert_refused(self, f, cycle, binding):
         for verify in (P.verify_finalized_cycle, P.observe_finalized_cycle):
