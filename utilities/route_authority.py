@@ -3164,10 +3164,17 @@ _TAIL_BLANK = r"(?:\n[ \t]*)*"
 _TAIL_LINE = _TAIL_EDGE + r"[^\n]+"
 _TAIL_FENCE_BODY = r"(?:" + _TAIL_EDGE + r"[^\n]*\n)*?"
 _TAIL_FENCE = r"[ \t]*```[^\n]*\n" + _TAIL_FENCE_BODY + r"[ \t]*```"
+# A PASS may carry a memo on the verdict line (`PASS (…)`, `PASS — …`, `PASS: …`, `PASS - …`):
+# it is a PASS plus a remark, as `blocker: none (…)` is. FAIL and BLOCKED take none, and a word
+# that merely starts with PASS (`PASSED`, `PASS-ish`) is not a PASS.
+_VERDICT_FIELD = (
+    r"verdict: (?P<verdict>PASS|FAIL|BLOCKED)"
+    r"(?:(?<=PASS)(?P<verdict_note>[ \t]*[(（—–:][^\n]*\S|[ \t]+-[ \t]+[^\n]*\S))?\n"
+)
 HANDOFF_RE = re.compile(
     r"(?:\A|\n)artifact: (?P<artifact>[^\n]+)\n"
-    r"verdict: (?P<verdict>PASS|FAIL|BLOCKED)\n"
-    r"blocker: (?P<blocker>[^\n]+)"
+    + _VERDICT_FIELD
+    + r"blocker: (?P<blocker>[^\n]+)"
     + r"(?:" + _TAIL_GAP
     + r"(?:" + _TAIL_FENCE + r"(?:" + _TAIL_GAP + _TAIL_LINE + r"(?:" + _TAIL_GAP + _TAIL_LINE + r")?)?"
     + r"|" + _TAIL_LINE + r"(?:" + _TAIL_GAP + _TAIL_LINE + r")?"
@@ -3192,7 +3199,7 @@ _DISPOSITION_VERDICTS = (
     ("PASS", ("병합 가능", "mergeable")),
 )
 _DISPOSITION_HANDOFF_RE = re.compile(HANDOFF_RE.pattern.replace(
-    r"verdict: (?P<verdict>PASS|FAIL|BLOCKED)\n", r"verdict: (?P<verdict>[^\n]{1,160})\n", 1))
+    _VERDICT_FIELD, r"verdict: (?P<verdict>[^\n]{1,160})\n", 1))
 assert _DISPOSITION_HANDOFF_RE.pattern != HANDOFF_RE.pattern
 
 
@@ -3236,22 +3243,23 @@ def _finished_review(artifact: str, blocker: str) -> bool:
         return False
 
 
-_PASS_NOTE_RE = re.compile(r"none\s*\((?P<note>.+)\)\s*")
+_PASS_NOTE_RE = re.compile(
+    r"none(?:\s*\((?P<paren>.+)\)|\s*[—–:]\s*(?P<tail>\S.*?)|\s+-\s+(?P<hyphen>\S.*?))\s*")
 
 
 def pass_blocker_note(blocker) -> str | None:
-    """What a PASS envelope's `blocker: none (...)` adds: "" for a bare `none`, the
-    parenthesized note for `none (...)`, None for any other blocker text. The note
-    is kept as a remark; it never changes the verdict (RA-8)."""
+    """What a PASS envelope's `blocker: none ...` adds: "" for a bare `none`, the note for
+    `none (...)`, `none — ...`, `none: ...` and `none - ...`, None for any other blocker text.
+    The note is kept as a remark; it never changes the verdict (RA-8)."""
     if blocker == "none":
         return ""
     match = _PASS_NOTE_RE.fullmatch(blocker) if isinstance(blocker, str) else None
-    return match.group("note").strip() if match else None
+    return next(value for value in match.group("paren", "tail", "hyphen") if value is not None).strip() if match else None
 
 
 def pass_blocker_violation(verdict, blocker) -> str | None:
-    """A PASS envelope's blocker is `none`, optionally with a note in parentheses;
-    any other blocker text breaks the contract."""
+    """A PASS envelope's blocker is `none`, optionally followed by a note; any other blocker
+    text breaks the contract."""
     if verdict == "PASS" and pass_blocker_note(blocker) is None:
         return "pass-blocker-not-none"
     return None
