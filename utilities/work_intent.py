@@ -768,11 +768,19 @@ def _verdict_pr(text: str) -> str | None:
     return None
 
 
-def _verdict_head(text: str) -> str | None:
-    """The head the verdict line names, else None."""
+_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])", re.I)
+
+
+def _hexes(text: str) -> set[str]:
+    return {value.lower() for value in _HEX.findall(text.replace("`", ""))}
+
+
+def _verdict_head(text: str) -> set[str]:
+    """Every commit the verdict line names when it states a head, else empty."""
     match = _verdict_match(text)
-    found = _PUBLICATION_FIELDS[0].search(match["verdict"]) if match else None
-    return found["value"].lower() if found else None
+    if match is None or not _PUBLICATION_FIELDS[0].search(match["verdict"]):
+        return set()
+    return _hexes(match["verdict"])
 
 
 def _pr_number(line: str) -> str | None:
@@ -780,18 +788,20 @@ def _pr_number(line: str) -> str | None:
     return (found["url"] or found["number"]) if found else None
 
 
-def _other_head(line: str, verdict_head: str | None) -> bool:
-    """A line whose head is not the verdict line's head (a line with no head is kept)."""
-    found = _PUBLICATION_FIELDS[0].search(line.replace("`", "")) if verdict_head else None
-    head = found["value"].lower() if found else None
-    return bool(head and not (head.startswith(verdict_head) or verdict_head.startswith(head)))
+def _other_head(line: str, verdict_head: set[str]) -> bool:
+    """A line that states a head, none of whose commits is one the verdict line names (a
+    merge makes the verdict's head and the PR line's head differ while naming each other's;
+    a line with no head is kept)."""
+    if not verdict_head or not _PUBLICATION_FIELDS[0].search(line.replace("`", "")):
+        return False
+    return not any(a.startswith(b) or b.startswith(a) for a in _hexes(line) for b in verdict_head)
 
 
 def _publication_lines(text: str):
     """Lines naming a PR with its head, CI or mergeability, outside fenced blocks. When
     the verdict line names this work's PR, only lines about that PR."""
     own = _verdict_pr(text)
-    verdict_head = None if own else _verdict_head(text)
+    verdict_head = set() if own else _verdict_head(text)
     for raw in _unfenced_lines(text):
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (line and not line.startswith(("#", "|")) and not _VERDICT_LINE.match(line.replace("**", ""))
@@ -802,10 +812,20 @@ def _publication_lines(text: str):
 
 
 def report_pr_urls(text: str, limit: int = 3) -> list[str]:
-    """PR links outside fenced blocks; only this work's PR when the verdict line or title names it."""
+    """PR links outside fenced blocks; only this work's PR when the verdict line or title
+    names it. Otherwise the PR lines' own judgment: the link of a PR named only on lines
+    whose head is not the verdict line's head is not this work's."""
     own = _verdict_pr(text)
+    verdict_head = set() if own else _verdict_head(text)
+    kept: set[str] = set()
+    other: set[str] = set()
+    for raw in _unfenced_lines(text):
+        if verdict_head and _PUBLICATION_FIELDS[0].search(raw.replace("`", "")):
+            for found in _PUBLICATION_LINE.finditer(raw):
+                (other if _other_head(raw, verdict_head) else kept).add(found["url"] or found["number"])
+    skip = other - kept
     urls = [url for raw in _unfenced_lines(text) for url in _PR_URL.findall(raw)
-            if own is None or url.rsplit("/", 1)[-1] == own]
+            if (own is None or url.rsplit("/", 1)[-1] == own) and url.rsplit("/", 1)[-1] not in skip]
     return list(dict.fromkeys(urls))[:limit]
 
 

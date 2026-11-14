@@ -515,6 +515,43 @@ class SummaryContentTest(unittest.TestCase):
         # No PR in the verdict line or title, no head either: the first PR line, as before.
         self.assertTrue(work_intent.report_publication("# 검토\n\n" + evidence).startswith("#1636"))
 
+    def test_a_merge_makes_the_verdict_head_and_the_pr_line_head_differ_for_the_same_pr(self):
+        # The verdict line and the PR line each name the commit the other calls "head" (a merge).
+        base = "- PR #1637 · head {line} · CI 15/15 통과 · MERGEABLE\n"
+        forms = {
+            "verdict has my commit, line has the merge and names mine": (
+                "최종 판정: 완료 — head 2b1d684\n\n"
+                + base.format(line="7002da8af (내 commit 2b1d684fb + main 병합 7002da8af)")),
+            "verdict has the merge, line has mine and names the merge": (
+                "최종 판정: 완료 — head 7002da8\n\n"
+                + base.format(line="2b1d684fb (+ main 병합 commit 7002da8af)")),
+            "verdict names both, line has mine": (
+                "최종 판정: 완료 — head 7002da8 (내 commit 2b1d684 + 병합)\n\n" + base.format(line="2b1d684fb")),
+        }
+        for label, report in forms.items():
+            with self.subTest(label):
+                self.assertTrue(work_intent.report_publication(report).startswith("#1637 · head "), label)
+        # A line sharing no commit with the verdict line is still another PR's.
+        other = "- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n"
+        report = forms["verdict has my commit, line has the merge and names mine"]
+        self.assertTrue(work_intent.report_publication(
+            report.replace("\n\n", "\n\n" + other, 1)).startswith("#1637 · head "))
+
+    def test_a_pr_link_the_pr_lines_rule_out_is_not_carried_either(self):
+        other = "- base main = PR #1636 (https://github.com/o/r/pull/1636) merge, head 54922faf6 (CI 15/15)\n"
+        closed = "최종 판정: 병합 가능 — head 350a5b4\n\n## 근거\n"
+        # The only PR named is on a line whose head is not the verdict's: no link at all.
+        for tail in ("- 대상 head 350a5b428243 · CI 15/15\n",
+                     "- https://github.com/o/r/pull/1636\n- 대상: 브랜치 x, head 350a5b428243 · CI 15/15\n"):
+            with self.subTest(tail):
+                self.assertEqual(work_intent.report_pr_urls(closed + other + tail), [])
+        # The same PR also named on a line with the verdict's head keeps its link.
+        kept = closed + other + "- PR #1636 · head 350a5b428243 · CI 15/15\n"
+        self.assertEqual(work_intent.report_pr_urls(kept), ["https://github.com/o/r/pull/1636"])
+        # A link on a line that states no head is kept, as before.
+        self.assertEqual(work_intent.report_pr_urls(closed + "- https://github.com/o/r/pull/1636\n"),
+                         ["https://github.com/o/r/pull/1636"])
+
     def test_the_check_counts_survive_a_long_prose_line(self):
         prose = "검증은 격리 HOME과 사설 tmux에서 loopback 모델로 세 하네스 각각 돌렸고 보고서 기록에 남김 — " * 3
         lines = [prose, "python3 tools/run-tests.py --select a.test.py: 21 passed",
