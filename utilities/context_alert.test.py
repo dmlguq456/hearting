@@ -39,19 +39,51 @@ class ContextAlertTest(unittest.TestCase):
                       "cache_read_input_tokens": count - 30, "output_tokens": 900000}}}) + "\n")
         return path
 
-    def test_strict_boundaries_and_once_even_after_same_session_compaction(self):
+    URGENT = ("입력 문맥 약 703K — 지금 하는 일 하나를 넘긴 경계(없으면 즉시)에서 /session-tidy "
+              "기본 정리(같은 세션 압축 — 세션 번호·감독 역할·기다리는 완료 알림 유지) · "
+              "'정리만'은 문맥을 줄이지 않음 · 자동 압축 여유 보장 아님")
+
+    def test_strict_boundaries_and_once_while_the_session_stays_above(self):
         for count in (499999, 500000):
             self.assertEqual(self.notice(count), "")
         self.assertIn("작업 상태 저장 권장", self.notice(500001))
         self.assertEqual(self.notice(600000), "")
         self.assertEqual(self.notice(699999), "")
         self.assertEqual(self.notice(700000), "")
-        self.assertIn("지금", self.notice(700001))
+        self.assertIn("기본 정리", self.notice(700001))
+        # Zero is no observation; a dip that stays above 500K is not a compaction.
         for count in (0, 500001, 800000):
             self.assertEqual(self.notice(count), "")
 
+    def test_compaction_back_at_or_below_500k_lets_each_threshold_speak_once_more(self):
+        self.assertEqual(self.notice(703000), self.URGENT)
+        self.assertEqual(self.notice(720000), "")
+        self.assertEqual(self.notice(500000), "")       # the session's own compaction
+        self.assertEqual(self.notice(30000), "")
+        self.assertIn("작업 상태 저장 권장", self.notice(512000))
+        self.assertEqual(self.notice(530000), "")
+        self.assertEqual(self.notice(703000), self.URGENT)
+        self.assertEqual(self.notice(710000), "")
+        self.assertEqual(self.notice(40000), "")        # compacted again: a jump is one urgent line
+        self.assertEqual(self.notice(703000), self.URGENT)
+        self.assertEqual(self.notice(512000), "")
+
+    def test_rearm_keeps_corrupt_state_and_excluded_sessions_silent(self):
+        self.assertTrue(self.notice(703000))
+        record = next(self.state.glob("*.json"))
+        self.assertEqual(self.notice(30000, env={"AGENT_SESSION_ROLE": "owner"}), "")
+        self.assertEqual(json.loads(record.read_text()), [500000, 700000])
+        self.assertEqual(self.notice(703000), "")
+        record.write_text("not json")
+        for count in (30000, 703000):
+            self.assertEqual(self.notice(count), "")
+        self.assertEqual(record.read_text(), "not json")
+        # Below both with no record touches no state at all.
+        self.assertEqual(self.notice(30000, sid="fresh"), "")
+        self.assertEqual(len(list(self.state.glob("*.json"))), 1)
+
     def test_jump_emits_only_urgent_line_and_native_new_session_resets(self):
-        self.assertEqual(self.notice(703000), "입력 문맥 약 703K — 지금 /session-tidy로 정리하세요 · 자동 압축 여유 보장 아님")
+        self.assertEqual(self.notice(703000), self.URGENT)
         self.assertEqual(self.notice(512000), "")
         self.assertEqual(self.notice(512000, sid="after-clear"),
                          "입력 문맥 약 512K — /session-tidy로 작업 상태 저장 권장 · 자동 압축 여유 보장 아님")
@@ -271,10 +303,70 @@ class ContextAlertTest(unittest.TestCase):
         payload.pop("agent_id")
         payload["session_id"] = "after-clear"
         payload["transcript_path"] = str(self.transcript(703000, "after-clear"))
-        self.assertIn("지금", json.loads(run().stdout)["systemMessage"])
+        self.assertIn("기본 정리", json.loads(run().stdout)["systemMessage"])
         payload["session_id"] = "without-transcript"
         payload.pop("transcript_path")
         self.assertEqual(run().stdout, "")
+
+    def test_claude_prompt_hook_speaks_again_after_its_compact_boundary(self):
+        path = self.transcript(703000)
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": "sid",
+                   "transcript_path": str(path), "cwd": str(self.temp)}
+
+        def append(row):
+            with path.open("a") as handle:
+                handle.write(json.dumps(row) + "\n")
+
+        def run():
+            result = subprocess.run(["bash", str(ROOT / "hooks/session-card-inject.sh")],
+                                    input=json.dumps(payload), text=True, capture_output=True,
+                                    env=self.env, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)["systemMessage"] if result.stdout.strip() else ""
+
+        def usage(count):
+            return {"type": "assistant", "sessionId": "sid", "message": {"usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": count - 30}}}
+
+        self.assertIn("기본 정리", run())
+        self.assertEqual(run(), "")
+        append({"type": "system", "subtype": "compact_boundary", "sessionId": "sid"})
+        self.assertEqual(run(), "")      # no request in the compacted context yet
+        append(usage(30000))
+        self.assertEqual(run(), "")
+        append(usage(512000))
+        self.assertIn("작업 상태 저장 권장", run())
+        append(usage(703000))
+        self.assertIn("기본 정리", run())
+        self.assertEqual(run(), "")
+
+    def test_codex_notice_speaks_again_after_its_compacted_row(self):
+        path = self.codex_rollout(count=703000)
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": "codex-session-id",
+                   "transcript_path": str(path)}
+
+        def append(row):
+            with path.open("a") as handle:
+                handle.write(json.dumps(row) + "\n")
+
+        def count(value):
+            return {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "last_token_usage": {"input_tokens": value}}}}
+
+        with patch.dict(os.environ, {**self.env, "HOME": str(self.temp)}, clear=True):
+            self.assertIn("기본 정리", alert.codex_notice(payload))
+            append({"type": "compacted", "payload": {"message": "summary"}})
+            self.assertEqual(alert.codex_notice(payload), "")
+            append(count(0))            # Codex's empty count after compaction observes nothing
+            self.assertEqual(alert.codex_notice(payload), "")
+            append(count(30000))
+            self.assertEqual(alert.codex_notice(payload), "")
+            append(count(512000))
+            self.assertIn("작업 상태 저장 권장", alert.codex_notice(payload))
+            append(count(720000))
+            self.assertIn("기본 정리", alert.codex_notice(payload))
+            self.assertEqual(alert.codex_notice(payload), "")
 
     def test_claude_session_start_does_not_claim_threshold(self):
         with patch.dict(os.environ, self.env, clear=True):
@@ -343,8 +435,14 @@ assert(continued.system.includes(lines[0])); assert.equal(toasts.length,1)
 plugin.dispose(); plugin=await make() // state survives plugin/server restart
 for (count of [512000,699999,700000]) assert.deepEqual(await prompt(), [])
 count=703000; lines=await prompt()
-assert.equal(lines.length,1); assert.match(lines[0],/지금/); assert.equal(toasts[1].message,lines[0])
+assert.equal(lines.length,1); assert.match(lines[0],/기본 정리/); assert.equal(toasts[1].message,lines[0])
 assert.deepEqual(await prompt(),[])
+// The session's own compaction brings its latest request back under 500K: both speak once more.
+count=30000; assert.deepEqual(await prompt(),[])
+count=512000; lines=await prompt()
+assert.deepEqual(lines, ["입력 문맥 약 512K — /session-tidy로 작업 상태 저장 권장 · 자동 압축 여유 보장 아님"])
+count=703000; lines=await prompt(); assert.equal(lines.length,1); assert.match(lines[0],/'정리만'은 문맥을 줄이지 않음/)
+assert.deepEqual(await prompt(),[]); assert.equal(toasts.length,4)
 count=512000; assert.equal((await prompt("ses_after_clear")).length,1)
 child=true; const before=calls; assert.deepEqual(await prompt("ses_child"),[]); assert.equal(calls,before)
 child=false; synthetic=true; assert.deepEqual(await prompt("ses_aux"),[]); synthetic=false
