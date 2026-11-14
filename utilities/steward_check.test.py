@@ -264,6 +264,39 @@ class StewardCheckLabTest(CheckBase):
                 SC.advance(self.store.get(duty["id"]), self.store, now=now + 100)
         return outcomes
 
+    def test_real_reused_run_id_after_failure_or_disappearance_wakes_once(self):
+        for ends in (True, False):
+            with self.subTest(ends=ends):
+                def write(started, age, status="running"):
+                    self.fixture.write_run(self.root, "small", status=status, started=started,
+                                           at=self.now - age,
+                                           ended=self.now - age if status == "failed" else None,
+                                           stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+                old = self.now - 7200
+                new = self.now - 600
+                actions = [lambda: write(old, 300), lambda: write(old, 1200)]
+                if ends:
+                    actions.append(lambda: write(old, 3000, "failed"))
+                actions += [lambda: write(new, 120), lambda: write(new, 1200), lambda: None]
+                outcomes = self.walk_real("reuse-" + str(ends), actions)
+                self.assertEqual(outcomes, [True, True] + ([False] if ends else []) +
+                                 [False, True, False])
+
+    def test_real_vanish_return_same_run_is_quiet(self):
+        path = self.root / "resource-runs" / "small.json"
+        def stale():
+            if path.exists():
+                path.chmod(0o600)
+            self.fixture.write_run(self.root, "small", started=self.now - 7200,
+                                   at=self.now - 1200,
+                                   stagnation={"state": "ok", "seconds_since_anchor": 60.0})
+        try:
+            outcomes = self.walk_real("vanish-one", [stale] + [action for _ in range(8)
+                                      for action in (lambda: path.chmod(0), stale)])
+        finally:
+            path.chmod(0o600)
+        self.assertEqual(outcomes, [True] + [False] * 16)
+
     def test_real_vanish_return_two_linked_runs_wakes_once(self):
         self.catalog.run_write(self.root, lambda ctx: self.catalog.op_link(
             ctx, "작은 모델", "small2"), now=self.now)
@@ -2027,13 +2060,10 @@ class LabRegressionTest(CheckBase):
         lab = self.labs(unknown=1)
         self.tick(lab)
         before = self.obs()["lab_notified"]
-        self.seen["lab_roots"] = ["/synthetic"]
         self.assertEqual(self.tick({}), 0)
         self.assertEqual(self.obs()["lab_notified"], before)
-        self.seen["lab_roots"] = []
         self.assertEqual(self.tick({}), 0)
         self.assertEqual(self.obs()["lab_notified"], before)
-        self.seen["lab_roots"] = ["/synthetic"]
         self.assertEqual(self.tick(lab), 0)
 
     def test_new_unknown_group_precedes_runtime_failures(self):
@@ -2179,6 +2209,43 @@ class LabRegressionTest(CheckBase):
         self.assertEqual(self.tick(self.labs()), 0)
         self.assertEqual(self.tick(self.labs(unknown=1)), 1)
         self.assertEqual(self.tick(self.labs(unknown=1)), 0)
+
+    def test_legacy_nameplate_only_wakes_for_current_unknown(self):
+        self.tick(self.labs())
+        lab = self.labs(unknown=1)
+        row = lab["/synthetic"]["groups"][0]["rows"][0]
+        row["started_at"] = 123.0
+        old = SC._lab_id("/synthetic", "condition", row["condition_id"], row["run_id"])
+        observation = self.obs()
+        observation["lab_notified"] = [[old, 1]]
+        self.store.update(self.duty()["id"], observation=observation)
+        self.assertEqual(self.tick(self.labs()), 0)
+        self.assertEqual(self.tick({}), 0)
+        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
+
+    def test_missing_started_at_is_stable_and_unlinked_keeps_old_identity(self):
+        lab = self.labs(unknown=1, unlinked=1)
+        row = lab["/synthetic"]["groups"][0]["rows"][0]
+        self.assertEqual(self.tick(lab), 1)
+        row["started_at"] = None
+        self.assertEqual(self.tick(lab), 0)
+        row["started_at"] = 123.0
+        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
+        self.assertIn(SC._lab_id("/synthetic", "unlinked", "loose-0"),
+                      dict(self.obs()["lab_notified"]))
+
+    def test_restarted_run_waits_for_readable_start(self):
+        lab = self.labs(unknown=1)
+        row = lab["/synthetic"]["groups"][0]["rows"][0]
+        row["started_at"] = 123.0
+        self.assertEqual(self.tick(lab), 1)
+        row["started_at"] = None  # New execution, but its start is unreadable.
+        self.assertEqual(self.tick(lab), 0)
+        row["started_at"] = 456.0
+        self.assertEqual(self.tick(lab), 1)
+        self.assertEqual(self.tick(lab), 0)
 
     def test_long_tidy_names_are_removed_whole_before_lab_counts(self):
         self.seen["targets"] = [target("대" * 150 + str(i), state="done") for i in range(5)]

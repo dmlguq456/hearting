@@ -488,7 +488,7 @@ def _observe_lab(cwds) -> dict:
                                **{key: group["counts"][key] for key in ("failed", "stagnant", "unknown")},
                                "headline_name": headline["name"],
                                "rows": [{key: row[key] for key in
-                                         ("condition_id", "run_id", "unknown_flag")}
+                                         ("condition_id", "run_id", "started_at", "unknown_flag")}
                                         for row in group["rows"]]})
             lab[root] = {**{key: board["totals"][key] for key in ("failed", "stagnant", "unknown")},
                          "unlinked": board["unlinked"]["count"],
@@ -514,8 +514,14 @@ def _lab_id(root: str, *identity) -> str:
 
 
 def _lab_run_ids(root: str, group: dict) -> list[str]:
-    return [_lab_id(root, "condition", row["condition_id"], row.get("run_id"))
-            for row in group.get("rows", []) if row["unknown_flag"]]
+    ids = []
+    for row in group.get("rows", []):
+        if row["unknown_flag"]:
+            identity = ("condition", row["condition_id"], row.get("run_id"))
+            ids.append(_lab_id(root, *identity))
+            if row.get("started_at") is not None:
+                ids.append(_lab_id(root, *identity, row["started_at"]))
+    return ids
 
 
 def _lab_summary(observation: dict, notified) -> tuple[str, str, dict]:
