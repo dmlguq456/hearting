@@ -313,16 +313,16 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!/«   ⚙ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
    if(/⚙/.test(row(38).slice(42)))throw Error('panel painted twice');
-   // #1586 review follow-up 7: folded at the left the native stands nine cells right (the strip
-   // and its blank cell): a press in the native area reaches the native at its own column, a press
-   // on the strip opens the panel.
+   // #1586 review follow-up 7, spec rule 49 (c): folded, a left panel's strip stands under the native
+   // area, which takes the whole width again from the first column (four rows fewer): a press in the
+   // native area reaches the native at the same column, a press on the strip opens the panel.
    const pinnedLeft=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
    await rpc(pinnedLeft.socket,{...pinnedLeft,op:'panel',expanded:false});
    await rpc(cfg.inlet,{batch:Buffer.from('mouse-on\r').toString('base64')});await waitFor(/DONE_mouse-on/);
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry-strip\r').toString('base64')});await waitFor(/GEOMETRY_geometry-strip_171x40/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-strip\r').toString('base64')});await waitFor(/GEOMETRY_geometry-strip_180x36/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;12;5M\x1b[<0;12;5mMOUSE_AT\r').toString('base64')});
-   await waitFor(/NATIVE_ESC_\^\[<0;3;5M\^\[<0;3;5mMOUSE_AT/);
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;4;10M\x1b[<0;4;10m').toString('base64')});await new Promise(r=>setTimeout(r,150));
+   await waitFor(/NATIVE_ESC_\^\[<0;12;5M\^\[<0;12;5mMOUSE_AT/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;4;38M\x1b[<0;4;38m').toString('base64')});await new Promise(r=>setTimeout(r,150));
    await rpc(cfg.inlet,{batch:Buffer.from('geometry-opened\r').toString('base64')});await waitFor(/GEOMETRY_geometry-opened_138x40/);
  }
  if(cfg.scenario==='side-layout'){
@@ -331,18 +331,19 @@ function existing(file){return new Promise((resolve,reject)=>{
    const geometry=async(name,size)=>{await rpc(cfg.inlet,{batch:Buffer.from(name+'\r').toString('base64')});await waitFor(new RegExp('GEOMETRY_'+name+'_'+size));};
    const resize=async(c,r)=>{child.resize(c,r);await new Promise(r=>setTimeout(r,80));};
    // Spec rule 49 (d): where the open panel would leave the native under 60 columns it folds by
-   // itself into the eight-cell strip (one blank cell apart), and it opens again three columns past it.
+   // itself into the strip under the native area (the native keeps the whole width, four rows
+   // fewer: rule 49 (c)), and it opens again three columns past it.
    await resize(102,24);await geometry('geometry2','60x24');
-   await resize(101,24);await geometry('geometry2a','92x24');
-   await resize(104,24);await geometry('geometry2b','95x24');
+   await resize(101,24);await geometry('geometry2a','101x20');
+   await resize(104,24);await geometry('geometry2b','104x20');
    await resize(105,24);await geometry('geometry2c','63x24');
-   await resize(80,24);await geometry('geometry2d','71x24');
+   await resize(80,24);await geometry('geometry2d','80x20');
    await resize(180,40);await geometry('geometry3','138x40');
    // The fold button `»` (the last row inside, three cells left of the gear) folds by hand; a hand fold stays folded when wider.
-   await press(174,39);await geometry('geometry4','171x40');
-   await resize(200,40);await geometry('geometry5','191x40');
-   // Any cell of the strip opens it.
-   await press(198,10);await geometry('geometry6','158x40');
+   await press(174,39);await geometry('geometry4','180x36');
+   await resize(200,40);await geometry('geometry5','200x36');
+   // Any cell of the strip (the window's last four rows) opens it.
+   await press(198,38);await geometry('geometry6','158x40');
    // Opened by hand it stays open however the window is resized: beside while the native keeps 48
    // columns (here where it would fold by itself), under the native area narrower, and beside
    // again once the width returns.
@@ -358,10 +359,10 @@ function existing(file){return new Promise((resolve,reject)=>{
    const pinnedFold=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
    raw='';await press(178,39);await waitFor(/rule motion/);
    await rpc(pinnedFold.socket,{...pinnedFold,op:'panel',expanded:false});await new Promise(r=>setTimeout(r,150));
-   await geometry('geometry11','171x40');
+   await geometry('geometry11','180x36');
    const after=await rpc(pinnedFold.socket,{...pinnedFold,op:'status'});
    if(after.expanded!==false||after.focused!==false)throw Error('the editor outlived the fold '+JSON.stringify(after));
-   await press(177,10);await geometry('geometry12','138x40');
+   await press(177,38);await geometry('geometry12','138x40');
    // #1586 review follow-up 3: a width set in the settings editor counts as opening the panel by
    // hand (as a drag does): applying a wider panel that would fold keeps it open, at the next
    // window width too.

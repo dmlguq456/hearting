@@ -20,11 +20,11 @@ assert.equal(g.side,true);assert.equal(g.nativeCols,138);assert.equal(g.panelCol
 assert.equal(d.layout({cols:131,rows:40,configuration}).side,true);
 assert.equal(d.layout({cols:89,rows:40,configuration}).side,false);assert.equal(d.layout({cols:90,rows:40,configuration}).side,true);
 assert.equal(d.layout({cols:180,rows:7,configuration}).side,false);
-// Folded beside the native area: the eight-cell strip, one blank cell apart, the native takes the rest.
-g=d.layout({cols:180,rows:40,configuration,expanded:false});
-assert.deepEqual([g.side,g.folded,g.panelCols,g.nativeCols,g.panelColumn,g.nativeColumn,g.gap],[true,true,8,171,172,0,1]);assert.equal(d.STRIP,8);
-g=d.layout({cols:180,rows:40,configuration:{...configuration,position:'left'},expanded:false});
-assert.deepEqual([g.left,g.panelColumn,g.nativeColumn,g.nativeCols],[true,0,9,171]);
+// Folded, in every placement: the strip under the native area, which keeps the whole width (spec rule 49 (c)).
+g=d.layout({cols:180,rows:40,configuration,expanded:false,panelRows:d.foldRows(40)});
+assert.deepEqual([g.side,g.folded,g.panelCols,g.nativeCols,g.nativeRows,g.panelColumn,g.nativeColumn,g.gap,g.panelRow],[false,true,180,180,36,0,0,0,null]);
+g=d.layout({cols:180,rows:40,configuration:{...configuration,position:'left'},expanded:false,panelRows:d.foldRows(40)});
+assert.deepEqual([g.left,g.panelColumn,g.nativeColumn,g.nativeCols],[false,0,0,180]);
 for(const configuration of [null,{}, {layout:'side',side_width:-1,side_min_columns:132}])
  assert.equal(d.layout({cols:100,rows:24,configuration}).side,false);
 assert.equal(d.layout({cols:180,rows:40,configuration:{...configuration,layout:'bottom'}}).side,false);

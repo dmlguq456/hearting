@@ -289,9 +289,10 @@ class CrossPresentation(T.Base):
         self.assertIn(GROUP + " — 실패 조건", fallback)
         script = r"""
 const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.parse(process.argv[2]);
-const draw=(open,folded)=>v.render({width:folded?8:40,height:60,side:true,fill:true,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},expandedKeys:open?[lab.key]:[],questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+const draw=(open,folded)=>v.render({width:folded?120:40,height:folded?4:60,side:!folded,fill:!folded,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},expandedKeys:open?[lab.key]:[],questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 for(const open of [false,true]){const lines=draw(open,false).join('\n');assert(lines.includes('실패 조건'),lines);assert(lines.includes('3 LAB'),lines);}
-assert(draw(false,true).join('\n').includes('!2LB'));
+// Folded, the strip under the native area ends its routes row with LAB's attention token (spec rule 59 (g)).
+assert(draw(false,true).some(s=>/^!2 LAB +$/.test(s)),draw(false,true).join('\n'));
 const head=draw(true,false).join('\n');assert(head.includes('3 LAB')&&head.includes('실패 1 정체 1'),head);
 """
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),

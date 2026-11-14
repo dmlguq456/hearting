@@ -345,21 +345,16 @@ function openColumns(){return nativeDisplay.layout({cols,rows,expanded:true,conf
 function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,panelRows:height()}).nativeRows;}
 function panelRow(){return geometry().side?0:rows-height();}
-function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
+// Spec rule 49 (c): folded, the strip's rows follow the window's rows alone (native-display's foldRows).
+function maxHeight(){if(!expanded)return nativeDisplay.foldRows(rows);return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
 // The opened route page's owner output (Fleet's `attempts`), read once per opening.
 let routeRaw;
 function readRouteRaw(){
   const selected=selection,who=sid;routeRaw=undefined;
   readAction({action:'raw'},'action',true).then(r=>{if(selected===selection&&who===sid&&routeDetail===true&&r?.ok&&Array.isArray(r.attempts)){routeRaw={sid:who,attempts:r.attempts};queueDisplay();}});
 }
-// Spec rule 49 (e): the folded bottom row is the session's status line (the earlier collapsed
-// footer), with what is being delivered.
+// What is being delivered: it takes the panel's last row, open or folded.
 function deliveryNote(){return currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';}
-function foldedSegments(){
-  if(expanded||geometry().side)return [];
-  const note=deliveryNote();
-  return [...(footerSegments.length?footerSegments:[{text:footer||`${harness} · CTX ?`}]),...(note?[{text:note}]:[])];
-}
 // Correction 8 (11-13): the frame the shown state's frame motion began (running sends the arc
 // round, a wait breathes), so the motion starts with the state on the same paint.
 let motionKind='',motionBegan=0;
@@ -373,7 +368,7 @@ function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
-    cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
+    cellWidth,background:terminalBackground,folded:!expanded,
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options),sent:()=>block.sent()});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
@@ -478,7 +473,7 @@ function motionSpan(y,screen,column){
 // A row whose other cells stand as last written: its spinner glyphs and its changed moving cells.
 function cellSpan(y,screen,column){return (paintedSpins.has(y)?spinSpan(screen,panelRows[y],column):'')+motionSpan(y,screen,column);}
 // The gap beside the panel: the terminal's own background, or the native's own at its edge cell.
-// Two cells beside the open panel, one beside the folded strip (spec rule 49 (c)).
+// Two cells beside the open panel (the folded strip stands under the native area).
 function gapText(){return '\x1b[0m'+' '.repeat(geometry().gap);}
 // An inverse edge cell shows its foreground as its background (#1583 review follow-up (다)): the
 // gap takes that color, the terminal's own where that foreground is the default.
@@ -578,7 +573,7 @@ function readPageShown(){
 function height(){
   if(fleetView)return 0;
   if(geometry().side)return rows;
-  if(!expanded)return 1;
+  if(!expanded)return maxHeight();
   const content=panelContent();
   return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
 
@@ -734,8 +729,9 @@ function rebuildDisplay() {
     if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else{
-    // Spec rule 49 (c), (e): folded, the strip beside the native area or the one row under it.
-    lines=panelContent();spins=viewSpins;animated=viewAnimated;
+    // Spec rule 49 (c): folded, the strip under the native area.
+    lines=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
+    if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }
   const editParts=edit>=0?lines[edit]:[];
   const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
@@ -891,9 +887,12 @@ async function projection() {
 // the answer wait, the route count, 5h/7d and running jobs. A group the panel
 // paints counts even when its row is cut to the panel's width; only a group
 // the panel does not paint at all (short of rows, a read page, settings) keeps
-// the native rows, so no value leaves the screen.
+// the native rows, so no value leaves the screen. Spec rule 49 (c): the folded
+// strip takes that row's place while it paints its session row (the strip carries
+// no Git or job row), so a value never shows twice; the row keeps the notice.
 function claudePanelPainted(){
-  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
+  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||settings||!height())return false;
+  if(!expanded)return paintedGroups.has('head');
   const has=parts=>(Array.isArray(parts)?parts:[]).some(part=>String(part.text).trim());
   const wanted=[['head',has(panelModel.head)],['git',has(panelModel.git)],['context',has(panelModel.context)],['quota',has(panelModel.quota)],
     ['jobs',has(panelModel.jobs)],['wait',!!panelModel.wait],['route',!!panelModel.route_count]].filter(([,shown])=>shown).map(([name])=>name);
@@ -1029,7 +1028,7 @@ function panelAction(action){
   epoch++;empty=false;
   if(settings?.saving)return;
   if(action==='settings'){openSettings();return;}
-  // Spec rule 49 (b), (c): the fold button folds the panel; a press on the strip or the folded row opens it.
+  // Spec rule 49 (b), (c): the fold button folds the panel; a press on the folded strip opens it.
   if(action==='fold'||action==='unfold'){foldByHand(action==='fold');applyLayout();return;}
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}

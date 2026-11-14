@@ -171,12 +171,12 @@ enable` enables it explicitly;
 disable` restores native launch behavior. Existing sessions keep running.
 
 Claude shows the same status area inside the panel as Codex and OpenCode, and its
-own statusline is one row under the input. While the panel shows the status area,
-that row is a notice row that stays empty unless you must act now: an answer you
-owe, compaction about to happen, a red context or usage reading, or a failed or
-blocked route. News stays in the panel: messages in MESSAGES, a finished route's
-result in the ROUTE box. With the panel hidden or folded the row shows the status
-line itself, keeping what is urgent first on a narrow screen.
+own statusline is one row under the input. While the panel, or its folded strip,
+shows the status area, that row is a notice row that stays empty unless you must
+act now: an answer you owe, compaction about to happen, a red context or usage
+reading, or a failed or blocked route. News stays in the panel: messages in
+MESSAGES, a finished route's result in the ROUTE box. With the panel hidden the
+row shows the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
 state's color the moment the native screen changes (running, waiting; idle stays
@@ -185,7 +185,9 @@ context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
 Below the route and any question, the panel always shows the rest of the
 statusline: folder, title, branch and Git state, usage and running jobs, then
-messages, as rows allow. Click a route for its stages and
+messages, as rows allow. Each section stands right under the one before it, and
+spare rows stay at the bottom; beside the native area `MESSAGES` and `MEM` each
+lead a thin rule across the panel. Click a route for its stages and
 result. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
@@ -215,15 +217,20 @@ look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
 the previous view, and Defaults previews the defaults. Drag the side boundary
 to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
-The default is a 40-column side panel. **»** beside the gear folds it into a
-eight-cell strip (state, session number, route count, answer waits) and gives
-the native area the freed columns; a press on the strip opens it again. Where
-the open panel would leave the native area under 60 columns (a 40-column panel
-in a terminal under 102 columns) it folds by itself and opens again with room;
-a choice made by hand holds at every width (a panel opened by hand in a window
-too narrow to stand beside sits under the native area until the window widens).
-The bottom layout folds to one row
-(**▾** / **▴**). Existing explicit layout choices are retained. OpenCode uses
+The default is a 40-column side panel. **»** beside the gear (**▾** under the
+native area) folds it into a strip under the native area, which gets the whole
+width back: a thin rule with **▴**, then three rows: the session (state,
+number, project, model, context, 5h and 7d), what to do now (an answer you owe
+with the question's first line, compaction about to happen), and the routes
+(their count, the failed or running titles, new messages, an experiment board
+that needs a look). Each row drops whole items from its end when narrow. The
+strip keeps its height whatever it shows (a short window gets fewer rows: three
+from 24 rows, two from 16, else one, with what to do kept longest); a press on
+it, or **Ctrl+]**, opens the panel again. Where the open panel would leave the
+native area under 60 columns (a 40-column panel in a terminal under 102
+columns) it folds by itself into the same strip and opens again with room; a
+choice made by hand holds at every width (a panel opened by hand in a window
+too narrow to stand beside sits under the native area until the window widens). Existing explicit layout choices are retained. OpenCode uses
 the same panel and settings; its own sidebar is hidden in the shell window
 (OpenCode's toggle still opens it), with Context in its footer and its MCP
 server count in the panel. Installation affects new wrapped terminals;
