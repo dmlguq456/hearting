@@ -86,7 +86,7 @@ class Consumers(T.Base):
                                  {"display_name": OLD_A, "group": GROUP, "refs": {"runs": [{"run_id": "run-a"}]}},
                                  {"display_name": OLD_B, "group": GROUP, "refs": {"runs": [{"run_id": "run-b"}]}}]})
         self.write_run(root, "run-a", series={"wer": [(12, 20.0)]}, stagnation=HEALTHY)
-        self.write_run(root, "run-b", series={"wer": [(epoch_b, 20.5)]}, stagnation=HEALTHY)
+        self.write_run(root, "run-b", series={"wer": [(epoch_b - 1, 19.5), (epoch_b, 20.5)]}, stagnation=HEALTHY)
         E.run_write(root, lambda ctx: E.op_rename(ctx, OLD_A, NEW_A), now=NOW + 1)
         E.run_write(root, lambda ctx: E.op_rename(ctx, OLD_B, NEW_B), now=NOW + 2)
         return root
@@ -156,6 +156,7 @@ class Consumers(T.Base):
             self.assertIn("+0.5%p", texts[consumer], consumer)
             self.assertIn(NEW_A, texts[consumer], consumer)                      # the control carries its new name too
             self.assertNotIn(OLD_A, texts[consumer], consumer)
+        self.assertIn(f"| {NEW_B} | run-b | 20.50%@12 | 19.50%@11 |", texts["leaderboard"])  # latest and best are different values
         self.assertIn(f"run-b (= {NEW_B})", texts["card"])                          # the bare run id got its name, the id stays
         self.assertEqual(texts["question-advice"], f"run-b={NEW_B}")
 
@@ -250,13 +251,24 @@ class CrossPresentation(T.Base):
                          {"failed": 1, "stagnant": 1, "unknown": 0, "waiting": 1})
         self.assertEqual({key: second["counts"][key] for key in ("failed", "stagnant", "unknown", "waiting")},
                          {"failed": 0, "stagnant": 0, "unknown": 1, "waiting": 1})
+        summary = lab_table.summary(board, NOW)                                  # Fleet's header: the first group's numbers
+        self.assertIn("조건 3 · 실패 1 · 정체 1", summary)
+        self.assertNotIn("미확인", summary)
+        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행")
+        self.assertEqual(lab_table.cells(rows["관측 끊긴 조건"], second, NOW)["state"][0], "미확인")
         second_view = session_lab.view({**board, "selected": second["id"]}, NOW)
+        self.assertEqual([p[0]["text"] for p in second_view["counts"]], ["미확인 1", "이름 없음 1", "대기 1"])
         for row, shown in zip(second["rows"], second_view["rows"]):
             self.assertEqual(shown["cells"]["state"]["text"], lab_table.cells(row, second, NOW)["state"][0])
         fleet = self.fleet_page(board)
         for name in ("실패 조건", "정체 조건", "관측 끊긴 조건", "긴 에폭 정상"):
             self.assertIn(name, fleet)
+        lines = fleet.splitlines()
+        self.assertIn("진행", next(line for line in lines if "긴 에폭 정상" in line))
+        self.assertNotIn("미확인", next(line for line in lines if "긴 에폭 정상" in line))
+        self.assertIn("미확인", next(line for line in lines if "관측 끊긴 조건" in line))
         view = session_lab.view(board, NOW)
+        self.assertEqual([p[0]["text"] for p in view["counts"]], ["실패 1", "정체 1", "이름 없음 1", "대기 1"])
         self.assertEqual(view["headline"]["left"][0]["text"], first["headline"]["name"])
         for row, shown in zip(first["rows"], view["rows"]):
             cells = lab_table.cells(row, first, NOW)
@@ -274,6 +286,7 @@ const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.p
 const draw=(open,folded)=>v.render({width:folded?8:40,height:60,side:true,fill:true,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},expandedKeys:open?[lab.key]:[],questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 for(const open of [false,true]){const lines=draw(open,false).join('\n');assert(lines.includes('실패 조건'),lines);assert(lines.includes('3 LAB'),lines);}
 assert(draw(false,true).join('\n').includes('!2LB'));
+const head=draw(true,false).join('\n');assert(head.includes('3 LAB')&&head.includes('실패 1 정체 1'),head);
 """
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                  json.dumps(view, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
