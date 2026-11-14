@@ -393,9 +393,9 @@ from history, and only the existing 120 s claim lease, once expired, makes it de
 again. After `CARRIER_UNOBSERVED_SEND_LIMIT` (2) such sends of the same record in a row the
 carrier opens no further turn for it (log `resend_limit_reached`, then
 `resend-limit-deferred`): the record stays owed, and the session's next natural turn
-carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
-it in that turn's context, a completed tool of a running turn appends it to the result,
-and either acks it there. A natural turn that comes while the limited send's claim is
+carries it (Claude's `Stop` and `UserPromptSubmit` carry what its rewake did not deliver in the
+same way: one send, one supplement): a user prompt puts it in that turn's context, a completed
+tool of a running turn appends it to the result, and either acks it there. A natural turn that comes while the limited send's claim is
 still live takes that exact claim over (the shared `settle` revalidates owner, lease and
 recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
 limit again; nothing is dropped. Measured with the history read forced empty: before the

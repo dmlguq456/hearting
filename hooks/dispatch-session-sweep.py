@@ -103,6 +103,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         return 0
     seen: set[Path] = set()
     batches: list[tuple[Path, list[dict]]] = []
+    received: list[dict] = []
     receipt_observer = (claude_receipt_observer(payload, session_id)
                         if _event_name(payload) == "UserPromptSubmit" else None)
     from dispatch_notice_state import NoticeReadContext
@@ -135,7 +136,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
             else:
                 records, _entries = sweep_deliver(
                     root, RECIPIENT_KIND, session_id,
-                    notice_context=notice_context, deadline_ns=deadline_ns,
+                    notice_context=notice_context, deadline_ns=deadline_ns, received_out=received,
                     **({"receipt_observer": receipt_observer} if receipt_observer else {}))
         except Exception:  # noqa: BLE001 -- fail-open (§13.33.1-(3))
             continue
@@ -159,6 +160,10 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         # (peer-message-record.py stop) or the next prompt.
         context, batches, rest = fit_inline(batches, CLAUDE_CONTEXT_CHARS)
     prompt = _event_name(payload) == "UserPromptSubmit"
+    if received and prompt and str(payload.get("prompt") or "").lstrip().startswith("<task-notification>"):
+        # A notification woke this turn and is in its own prompt: received, and owed its
+        # follow-through like a carried record (PG-44). A typed prompt owes nothing for them.
+        _note_turn_received(payload, session_id, [(None, received)])
     if rest and prompt:
         release_claims(session_id, rest, RECIPIENT_KIND, reason="claude-prompt-context-over-limit")
     if not context:

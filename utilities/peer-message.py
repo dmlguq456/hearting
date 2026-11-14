@@ -4364,11 +4364,38 @@ def _fit_claude_context(claims, context):
         row["shown_text"] = shown
 
 
+def _runtime_completion_copy(row):
+    """Whether this stored row is the runner's peer-body copy of a registered completion.
+
+    Such a copy reaches a Claude session only through the pane courier (a resting
+    session, an empty input); a hook boundary never carries it, because the
+    asyncRewake sends the completion and the turn's Stop and the next prompt carry
+    what it did not deliver. A copy that also holds a gate or supervision notice is
+    carried as before. Unreadable means not a copy (fail-soft: carried).
+    """
+    bindings = row.get("dispatch_notices") or [row.get("dispatch_notice")]
+    if not bindings or not all(isinstance(item, dict) for item in bindings):
+        return False
+    try:
+        import dispatch_pending_delivery as pending
+        from dispatch_session_sweep import is_completion_record
+        for item in bindings:
+            record = pending.read(Path(item["jobs"]).parent, item["storage_recipient"],
+                                  item["delivery_id"])
+            if not record or not is_completion_record(record):
+                return False
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                       native_delivery=False, deadline=None):
     """Use an existing native context boundary, settling only exact native delivery.
 
-    Claude delivers bodies here at every boundary. OpenCode delivers them only at
+    Claude delivers bodies here at every boundary, except the runner's copy of a
+    registered completion (``_runtime_completion_copy``): that one waits for the pane
+    courier, since the hook carriers send the completion record itself. OpenCode delivers them only at
     its native post-tool boundary (the plugin appends the text to the finished
     tool result, as Claude's PostToolUse additionalContext does), so a report that
     arrives while the session is working reaches the model during that work; its
@@ -4415,6 +4442,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             if len(claims) >= claim_limit() or expired():
                 break
             if not _same_transfer_session(pending_delivery_recipient(row), recipient):
+                continue
+            if recipient["harness"] == "claude" and _runtime_completion_copy(row):
                 continue
             # The sole no-trailer context is the booked session-tidy continue;
             # ordinary peer bodies still require their exact sealed trailer.

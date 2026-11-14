@@ -2123,15 +2123,14 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                         text, {"harness": harness, "session_id": "session-1"}, include_ref=True
                     )["transfer_ref"]
                     if harness == "claude":
-                        # Claude's existing UserPromptSubmit context carrier emits the exact
-                        # pending row; context emission is still not receiver acknowledgement.
+                        # No Claude hook carries the runner's copy of a completion (the rewake
+                        # sends the completion; the copy is for a resting session). The pane
+                        # courier types it, and the prompt hook receives that prompt.
                         stream = io.StringIO()
                         steward.peer_message.emit_peer_context(
                             {"harness": harness, "session_id": "session-1"},
                             "UserPromptSubmit", stream=stream)
-                        emitted = json.loads(stream.getvalue())["hookSpecificOutput"]["additionalContext"]
-                        self.assertIn(text, emitted)
-                        text = emitted
+                        self.assertEqual(stream.getvalue(), "")
                     elif harness == "opencode":
                         # Match the plugin's existing promptAsync acceptance transition.
                         message_id = "opencode-item-" + ref
