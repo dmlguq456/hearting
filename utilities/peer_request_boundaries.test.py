@@ -431,5 +431,118 @@ class CallerTest(Boundary):
             self.assertEqual((found.harness, found.session_id), expected)
 
 
+class ReservationLifeTest(Boundary):
+    """A reservation is dropped only when its seal is absent; a sealed one is finished."""
+
+    def failing_confirm(self, work):
+        """``work`` with the record step after the seal failing (the seal and pending row exist)."""
+        with mock.patch.object(pr, "confirm", side_effect=OSError("disk full")):
+            return work()
+
+    def die_before_seal(self, work):
+        def child():
+            pc._send = _die  # dies after the reservation is written, before anything is sealed
+            work()
+        self.assertEqual(os.WTERMSIG(self.in_child(child)), signal.SIGKILL)
+
+    def test_a_new_request_sealed_but_not_confirmed_is_kept_and_finished(self):
+        self.failing_confirm(lambda: self.request(A, "bee", "SEALED-NEW", title="kept"))
+        (record,) = self.request_files()
+        self.assertEqual(len(record["sending"]), 1)
+        self.assertEqual([r["id"] for r in pr.session_requests(*A)["out"]], [record["id"]])
+        self.assertEqual(pr.load(record["id"])["state"], "open")
+        rc, shown = self.show(B, record["id"])
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("SEALED-NEW", shown)
+
+    def test_a_new_revision_sealed_but_not_confirmed_is_kept_and_finished(self):
+        request_id, _ = self.new_request()
+        self.failing_confirm(lambda: self.request(A, request_id, "SEALED-REV2", rev="head2"))
+        self.assertEqual(len(pr.load(request_id)["sending"]), 1)
+        rc, shown = self.show(B, request_id, rev=2)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("SEALED-REV2", shown)
+        record = pr.load(request_id)
+        self.assertEqual([r["n"] for r in record["revisions"]], [1, 2])
+        self.assertEqual(record["sending"], [])
+
+    def test_a_final_report_sealed_but_not_confirmed_is_kept_and_its_number_is_not_reused(self):
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.failing_confirm(lambda: self.report(B, request_id, result="ORIGINAL-FINAL", rev=1))
+        self.assertEqual(len(pr.load(request_id)["sending"]), 1)
+        rc, shown = self.show(A, request_id, report=1)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("ORIGINAL-FINAL", shown)
+        self.assertEqual(pr.load(request_id)["state"], "final")
+        rc, again = self.report(B, request_id, result="NEW-FINAL", rev=1)
+        self.assertIn("number=2", again)
+        rc, first = self.show(A, request_id, report=1)
+        body = first.split("--- report 1 (sealed body) ---", 1)[1]  # the header also lists report 2
+        self.assertIn("ORIGINAL-FINAL", body)
+        self.assertNotIn("NEW-FINAL", body)
+
+    def test_a_final_report_sealed_but_not_confirmed_is_finished_by_the_runner_pass_too(self):
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.failing_confirm(lambda: self.report(B, request_id, result="ORIGINAL-FINAL", rev=1))
+        self.assertEqual(pr.maintain()["settled"], 1)
+        self.assertEqual(pr.load(request_id)["state"], "final")
+
+    def test_a_seal_that_really_failed_still_drops_its_reservation(self):
+        failed = (5, "unverified", None, None, "seal-failed")
+        with mock.patch.object(pc, "_send", return_value=failed):
+            rc, out = self.request(A, "bee", "x", title="never sealed")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.request_files(), [])
+        request_id, _ = self.new_request()
+        with mock.patch.object(pc, "_send", return_value=failed):
+            rc, out = self.request(A, request_id, "y", rev="head2")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(pr.load(request_id)["sending"], [])
+
+    def test_the_same_new_revision_sent_again_after_a_death_before_its_seal_takes_its_place(self):
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.die_before_seal(lambda: self.request(A, request_id, "FIRST-TRY", rev="head2"))
+        (reserved,) = pr.load(request_id)["sending"]
+        self.assertEqual((reserved["what"], reserved["n"]), ("revision", 2))
+        rc, out = self.request(A, request_id, "SECOND-TRY", rev="head2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=2", out)
+        self.assertNotIn("followup", out)
+        record = pr.load(request_id)
+        self.assertEqual([r["n"] for r in record["revisions"]], [1, 2])
+        self.assertEqual(record["revisions"][1]["followups"], [])
+        self.assertEqual(record["sending"], [])
+        rc, shown = self.show(B, request_id, rev=2)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("SECOND-TRY", shown)
+        self.assertEqual(pr.load_settled(request_id)["sending"], [])
+
+    def test_another_revision_after_an_unsealed_one_still_gets_a_new_number(self):
+        request_id, _ = self.new_request()
+        self.die_before_seal(lambda: self.request(A, request_id, "lost", rev="head2"))
+        rc, out = self.request(A, request_id, "other", rev="head3")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=3", out)
+        self.assertEqual([e["n"] for e in pr.load(request_id)["sending"]], [2])
+
+    def test_a_request_never_confirmed_is_not_removed_by_age_until_it_is_cancelled(self):
+        self.die_before_seal(lambda: self.request(A, "bee", "lost", title="unsealed"))
+        (record,) = self.request_files()
+        self.assertEqual(record["state"], "preparing")
+        later = record["created"] + pr.RETENTION_SECONDS + 1
+        self.assertEqual(pr.prune(later), [])
+        self.assertEqual(pr.maintain(later)["pruned"], 0)
+        self.assertEqual([r["id"] for r in pr.session_requests(*A)["out"]], [record["id"]])
+        self.assertEqual([r["id"] for r in pr.session_requests(*B)["in"]], [record["id"]])
+        rc, out = self.request(A, record["id"], cancel=True, reason="gave up")
+        self.assertEqual(rc, 0, out)
+        stamp = pr.load(record["id"])["updated"]
+        self.assertEqual(pr.prune(stamp + pr.RETENTION_SECONDS - 1), [])
+        self.assertEqual(pr.prune(stamp + pr.RETENTION_SECONDS + 1), [record["id"]])
+
+
 if __name__ == "__main__":
     unittest.main()

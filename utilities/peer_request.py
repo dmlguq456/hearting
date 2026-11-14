@@ -388,9 +388,11 @@ def _sending(record, what=None):
 
 
 def _latest_revision(record):
-    """``(n, label)`` of the newest revision, confirmed or still reserved."""
+    """``(n, label)`` of the newest revision that exists: applied, or sealed and about
+    to be. A reservation without a seal is not a revision (nothing went to the recipient)."""
     entries = [(r["n"], r.get("label", "")) for r in record["revisions"]]
-    entries += [(r["n"], r.get("label", "")) for r in _sending(record, "revision")]
+    entries += [(r["n"], r.get("label", "")) for r in _sending(record, "revision")
+                if _sealed(record["id"], r)]
     return max(entries) if entries else (0, "")
 
 
@@ -525,7 +527,10 @@ def confirm(request_id, reserved_ref, transfer_ref=None):
 
 
 def abort(request_id, reserved_ref):
-    """Drop a reservation whose seal failed. A new request with nothing else is removed."""
+    """Drop a reservation whose seal failed. A new request with nothing else is removed.
+
+    A reservation whose seal exists is never dropped: the message is sealed, so the
+    next ordinary access finishes it (:func:`settle`)."""
     with request_lock(request_id):
         try:
             record = _read_json(_record_path(request_id))
@@ -533,10 +538,10 @@ def abort(request_id, reserved_ref):
             return False
         if not _valid_record(record, request_id):
             return False
-        before = len(_sending(record))
-        record["sending"] = [e for e in _sending(record) if e.get("ref") != reserved_ref]
-        if len(record["sending"]) == before:
+        mine = [e for e in _sending(record) if e.get("ref") == reserved_ref]
+        if not mine or any(_sealed(request_id, e) for e in mine):
             return False
+        record["sending"] = [e for e in _sending(record) if e.get("ref") != reserved_ref]
         if record["state"] == "preparing" and not record["revisions"] and not record["sending"]:
             with contextlib.suppress(OSError):
                 _record_path(request_id).unlink()
@@ -606,8 +611,6 @@ def commit_open(request_id, transfer_ref, *, label=None):
         raise ValueError("request-unknown")
     first = next((e for e in _sending(record, "revision") if e.get("n") == 1), None)
     if first is None:
-        if record["revisions"] and record["revisions"][0].get("transfer_ref") == transfer_ref:
-            return record
         raise ValueError("request-not-preparing")
     if label is not None:
         with request_lock(request_id):
@@ -652,8 +655,17 @@ def reserve_message(request_id, *, label=None):
             raise ValueError("request-closed")
         newest, newest_label = _latest_revision(record)
         if label is not None and label != newest_label:
-            entry = _reservation(record, "revision", "request", newest + 1, newest + 1,
-                                 label=clean(label, 80))
+            # The same revision sent again after a death before its seal: nothing reached
+            # the recipient, so it takes that reservation over (same number, same ref).
+            entry = next((e for e in sorted(_sending(record, "revision"),
+                                            key=lambda e: e.get("seq", 0), reverse=True)
+                          if e["n"] > newest and e.get("label", "") == clean(label, 80)
+                          and not _sealed(record["id"], e)), None)
+            if entry is None:
+                top = max([r["n"] for r in record["revisions"]]
+                          + [e["n"] for e in _sending(record, "revision")] + [0])
+                entry = _reservation(record, "revision", "request", top + 1, top + 1,
+                                     label=clean(label, 80))
         else:
             target = revision_of(record, newest)
             serial = (len(target["followups"]) if target else 0) + len(
@@ -868,8 +880,9 @@ def message_kind(text="", transfer=None):
 # --- retention --------------------------------------------------------------
 
 def prune(now=None, *, examine=64):
-    """Remove records closed (or never sealed) for more than the retention period.
-    An open request is never removed for its age. Returns the removed ids.
+    """Remove records closed for more than the retention period. An open request, or
+    one not yet confirmed (`preparing`), is never removed for its age: it stays until it
+    is cancelled. Returns the removed ids.
     A removed record leaves the index by itself (the index follows the files)."""
     now = time.time() if now is None else now
     try:
@@ -885,12 +898,12 @@ def prune(now=None, *, examine=64):
         if record is None:
             continue
         stamp = record.get("updated") or record.get("created") or now
-        if record["state"] in _OPEN_STATES or now - stamp < RETENTION_SECONDS:
+        if record["state"] not in _CLOSED_STATES or now - stamp < RETENTION_SECONDS:
             continue
         with contextlib.suppress(OSError, ValueError):
             with request_lock(request_id):
                 current = load(request_id)
-                if (current is None or current["state"] in _OPEN_STATES
+                if (current is None or current["state"] not in _CLOSED_STATES
                         or now - (current.get("updated") or stamp) < RETENTION_SECONDS):
                     continue
                 _record_path(request_id).unlink()
