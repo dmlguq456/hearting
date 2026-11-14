@@ -748,7 +748,12 @@ outside the shell) reads `[e9] hearting (main 🚧 3) │ Fable 5.2 xhigh │ co
 outside the shell Claude's second (`>_ running:`) and third (tidy notice) rows are
 unchanged; inside it Claude's statusline is that one line (below).
 Narrow layouts shorten words before numeric values, routes and waits (the
-answer wait shortens to `◑ N`). Its title and guidance use Fleet's
+answer wait shortens to `◑ N`); running jobs at the line's end go whole before
+another group shortens. Where even the shortened line does not fit, it keeps what
+the person must act on, the most urgent last to go: the answer wait, compaction
+imminent, a context or usage reading at Fleet's red level, then the route count;
+calm readings go, and the kept readings lose their reset time, then the context
+gauge, before any of them goes. Its title and guidance use Fleet's
 shared message catalog and language preference. Fleet owns the values, palette, glyph meanings, separators and
 unknown-value rules. Native display callbacks and exact-session telemetry are
 valid sources for these display values, including Claude's statusline JSON.
@@ -797,8 +802,13 @@ a failed, blocked or attention-needing route. News and release lines are not on
 it: a received peer report stands in MESSAGES, a finished route's result in the
 ROUTE box (the producer's recent results follow the current routes), and a
 waiting release or a switch without scrollback in the panel's tidy-notice slot.
+A finished result's row leads its title with the result word (`FAIL · title`),
+takes Fleet's failure mark `✕` and color when the result did not pass, and leaves
+the box after the person's next input or ten minutes, the bound the notice row's
+news used.
 It reuses Fleet's glyphs and colors and adds no collection, setting or judgment.
-A hidden, collapsed, focused or not-yet-bound panel and a that native row unchanged; unwrapped sessions keep their complete native rows.
+A hidden, collapsed, focused or not-yet-bound panel and a lost display host show
+that native row unchanged; unwrapped sessions keep their complete native rows.
 Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only

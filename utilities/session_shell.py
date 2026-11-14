@@ -1080,7 +1080,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             pass  # Optional metadata cannot interrupt this terminal's display.
     native_footer = None
     native_owned = (native_badges or {}).get("owned", ()) if isinstance(native_badges, dict) else ()
-    panel = presentation(values, view, harness, sid, columns, native_owned=native_owned)
+    panel = presentation(values, view, harness, sid, columns, native_owned=native_owned,
+                         display=display, now=time.time())
     # A result line (a continue that was not sent) otherwise waits for the next hook,
     # which in a cleared window is the person's next input. Display only. Its own
     # field: Claude's `notice` below is the native status row's segments.

@@ -650,7 +650,16 @@ def quota_row(values):
     return parts
 
 
-def presentation(values, view, harness, sid, columns, *, native_owned=()):
+# A finished route's result row (the producer keeps the two most recent after the current
+# routes) is news: it stays until the person's next input, ten minutes at most (the bound the
+# notice line's news used), and a result that did not pass takes Fleet's failure mark.
+RESULT_SECONDS = 600
+PASSED = re.compile(r"(?i)pass(ed)?|success(ful)?|succeeded|ok|done|complete(d)?")
+
+
+def presentation(values, view, harness, sid, columns, *, native_owned=(), display=None, now=None):
+    """``display`` and ``now`` (the session's prompt display and the clock) let a finished
+    route's result leave the ROUTE box after the person's next input or ten minutes."""
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
     routes = []
@@ -686,6 +695,19 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                        "doer_worker": row.get("doer_worker") is True,
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
+    if now is not None:
+        human = (display or {}).get("human") or {}
+        since = human.get("at") if type(human.get("at")) in (int, float) else 0
+        routes = [route for route in routes if not (route["state"] == "done" and route["outcome"])
+                  or route["result_at"] is not None and route["result_at"] > since
+                  and 0 <= now - route["result_at"] <= RESULT_SECONDS]
+    for route in routes:
+        if route["state"] == "done" and route["outcome"]:
+            passed = PASSED.fullmatch(route["outcome"].strip()) is not None
+            route["outcome_key"] = "lvl_g" if passed else "g_dead"
+            if not passed and route.get("kind") == "done":
+                from .session_line import route_glyph
+                route["glyph"], route["glyph_key"] = route_glyph("dead")
     model = values.get("model")
     model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
     effort = _effort_text(values.get("effort"))

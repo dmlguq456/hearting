@@ -105,6 +105,64 @@ class ClaudeStatuslineRowTest(unittest.TestCase):
         self.assertIn("5h 12% 7d 42%", outputs[False])
 
 
+class NarrowLineKeepsTheUrgentTest(unittest.TestCase):
+    """The common line's last narrow-width step (Claude's one row, the folded panel strip,
+    Fleet's line, Codex and OpenCode): what the person must act on stays, urgent first."""
+
+    def values(self, *, urgent=True, wait=0):
+        now = time.time()
+        pressure = {"state": "observed", "usage_at": now, "observed_at": now, "fresh_until": now + 600,
+                    "scope_tokens": 190000, "limit_tokens": 200000, "scope": "Total", "token_limit_reached": True}
+        values = {"tag": "[e9]", "cwd": "/synthetic/hearting", "model": "Opus 5.5", "effort": "xhigh",
+                  "branch": "main", "git": {"repo": 1, "operation": "none", "ahead": 0, "behind": 0,
+                                            "extra_worktrees": 3},
+                  "route_label": "route 2 ⠏1", "answer_wait": wait}
+        if urgent:
+            values.update(ctx_pct=96, compaction_pressure=pressure,
+                          quota_windows=[("5h", 97, now + 3 * 3600), ("7d", 91, now + 3 * 86400)])
+        else:
+            values.update(ctx_pct=40, quota_windows=[("5h", 30, now + 7200), ("7d", 50, now + 5 * 86400)])
+        return values
+
+    def line(self, values, columns):
+        text = plain(session_line.line_segments(values, columns))
+        self.assertLessEqual(cell_width(text), columns)
+        return text
+
+    def test_compaction_and_red_readings_outlast_the_route_count(self):
+        imminent = ui_text("fleet.context.compaction_imminent")
+        for wait in (0, 1):
+            for columns in (80, 70, 60, 50, 40):
+                with self.subTest(wait=wait, columns=columns):
+                    text = self.line(self.values(wait=wait), columns)
+                    kept = [bool(wait) and re.search(r"◑(답 대기| to answer)? 1", text) is not None,
+                            imminent in text, "96%" in text, "5h 97%" in text, "7d 91%" in text,
+                            "route 2" in text]
+                    # Measured before the change: `route 2 ⠏1` alone at 70-40 (with a wait from 80).
+                    self.assertTrue(kept[1] and kept[2], text)
+                    if wait:
+                        self.assertTrue(kept[0], "the answer wait stays: " + text)
+                    # Nothing less urgent stays while something more urgent went.
+                    self.assertEqual(kept[1:], sorted(kept[1:], reverse=True), text)
+                    if columns == 80:
+                        self.assertTrue(all(kept[1:]), text)
+        # The answer wait is the last to go.
+        self.assertEqual(self.line(self.values(wait=1), 12), "◑ 1")
+
+    def test_with_nothing_urgent_the_narrow_line_is_unchanged(self):
+        for columns in (60, 50, 40):
+            with self.subTest(columns=columns):
+                self.assertEqual(self.line(self.values(urgent=False), columns), "route 2 ⠏1")
+                self.assertEqual(self.line(self.values(urgent=False, wait=1), columns), "◑ 1 route 2 ⠏1")
+
+    def test_running_jobs_go_before_the_folder_shortens(self):
+        values = {**self.values(urgent=False), "jobs": "oncall-watcher pytest"}
+        text = plain(session_line.line_segments(values, 120, jobs=True))
+        self.assertIn("[e9] hearting/ (main", text)
+        self.assertNotIn(">_", text)
+        self.assertIn(">_ oncall-watcher pytest", plain(session_line.line_segments(values, 200, jobs=True)))
+
+
 class NoticeLineTest(unittest.TestCase):
     def setUp(self):
         patch = mock.patch.object(session_panel, "compaction_imminent", side_effect=lambda pressure: pressure == "imminent")
@@ -142,9 +200,9 @@ class NoticeLineTest(unittest.TestCase):
 
 
 class RemovedNoticeKindsStayInThePanelTest(unittest.TestCase):
-    def project(self, *, routes, label, upgrade_note="", news=True):
+    def project(self, *, routes, label, upgrade_note="", news=True, human_ago=300):
         now = time.time()
-        display = {"human": {"at": now - 300, "text": "earlier input", "sequence": 1, "source": "real"},
+        display = {"human": {"at": now - human_ago, "text": "earlier input", "sequence": 1, "source": "real"},
                    "human_state": "real",
                    "received": [{"at": now - 60, "sender": "[e7]", "text": "#1445 merge ready", "sequence": 1,
                                  "harness": "claude", "sid": SID, "source": "peer"}] if news else []}
@@ -185,6 +243,39 @@ process.stdout.write(v.rows.map(r=>r.map(s=>s.text).join('')).join('\n'));
                 self.assertIn("#1445 merge ready", text, "the received report stays in MESSAGES")
                 self.assertIn("Working route", text)
                 self.assertIn("Finished route", text, "the result stays in the ROUTE box beside a current route")
+
+    def results(self, ago):
+        now = time.time()
+        working = {"id": "rt-working", "title": "Working route", "state": "working", "marker": "working", "stages": []}
+        passed = {"id": "rt-pass", "title": "Passed route", "state": "done", "marker": "done", "outcome": "success",
+                  "result_at": now - ago, "stages": []}
+        failed = {"id": "rt-fail", "title": "Failed route", "state": "done", "marker": "done", "outcome": "FAIL",
+                  "result_at": now - ago - 5, "stages": []}
+        return [working, passed, failed]
+
+    def test_a_result_that_did_not_pass_takes_the_failure_mark_and_its_word(self):
+        panel = self.project(routes=self.results(60), label="route 1", news=False)
+        shown = {row["id"]: row for row in panel["routes"]}
+        self.assertEqual((shown["rt-pass"]["glyph"], shown["rt-pass"]["outcome_key"]), ("✓", "lvl_g"))
+        self.assertEqual((shown["rt-fail"]["glyph"], shown["rt-fail"]["outcome_key"]), ("✕", "g_dead"))
+        for width, height in ((40, 40), (100, 30)):
+            with self.subTest(width=width):
+                text = self.render(panel, width, height)
+                self.assertIn("✓ success · Passed route", text)
+                self.assertIn("✕ FAIL · Failed route", text, "not `✓`, and the folded row keeps the word")
+
+    def test_a_result_leaves_the_route_box_after_the_next_input_or_ten_minutes(self):
+        for name, ago, human_ago in (("ten minutes", 11 * 60, 3600), ("next input", 60, 30)):
+            with self.subTest(name):
+                panel = self.project(routes=self.results(ago), label="route 1", news=False, human_ago=human_ago)
+                self.assertEqual([row["id"] for row in panel["routes"]], ["rt-working"])
+                text = self.render(panel, 40, 40)
+                self.assertIn("Working route", text)
+                self.assertNotIn("Passed route", text)
+                self.assertNotIn("Failed route", text)
+        # With no current route, the box shows the fresh results alone.
+        panel = self.project(routes=self.results(60)[1:], label="", news=False)
+        self.assertEqual([row["id"] for row in panel["routes"]], ["rt-pass", "rt-fail"])
 
     def test_release_lines_leave_the_notice_line_and_stay_in_the_tidy_slot(self):
         for note in ("pending", "scrollback"):

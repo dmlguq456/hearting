@@ -170,10 +170,13 @@ enable` enables it explicitly;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
-Claude shows the same status area inside the panel as Codex and OpenCode; while
-the panel shows it, Claude's own statusline row below becomes a notice row that
-stays empty unless you owe an answer, a warning applies or news just arrived.
-The full statusline returns whenever the panel is hidden.
+Claude shows the same status area inside the panel as Codex and OpenCode, and its
+own statusline is one row under the input. While the panel shows the status area,
+that row is a notice row that stays empty unless you must act now: an answer you
+owe, compaction about to happen, a red context or usage reading, or a failed or
+blocked route. News stays in the panel: messages in MESSAGES, a finished route's
+result in the ROUTE box. With the panel hidden or folded the row shows the status
+line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
 state's color the moment the native screen changes (running, waiting; idle stays
