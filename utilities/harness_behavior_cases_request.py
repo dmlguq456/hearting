@@ -151,7 +151,7 @@ def answer(ctx, record, earlier):
         # Everything B has received so far: the whole conversation, this turn, and every earlier turn.
         inputs = "\n".join([text, last] + [turn(r) for r in earlier if B_MARK in r["text"] and A_MARK not in r["text"]])
         return _answer_b(ctx, text, last, kind, _shells(earlier, B_MARK), nonce, inputs)
-    return _answer_a(ctx, text, last, kind, _shells(earlier, A_MARK), nonce)
+    return _answer_a(ctx, text, last, kind, _shells(earlier, A_MARK), nonce, record.get("last_text") or "")
 
 
 def _answer_b(ctx, text, last, kind, shells, nonce, inputs=""):
@@ -197,10 +197,17 @@ def _answer_b(ctx, text, last, kind, shells, nonce, inputs=""):
     return Reply("B initialized.")
 
 
-def _answer_a(ctx, text, last, kind, shells, nonce):
+def _answer_a(ctx, text, last, kind, shells, nonce, newest=""):
     sent = lambda needle: any(needle in shell for shell in shells)  # noqa: E731
     if kind == "tool":
         return Reply("A step done.")
+    # A step the driver just gave (the newest input) comes first: Codex can steer it into the
+    # turn a report line woke, and that turn's text then carries both.
+    for marker, command in ctx["a_steps"]:
+        if marker in newest:
+            if not sent(command(ctx, text)):
+                return Reply(shell=command(ctx, text))
+            break
     reported = REPORT_LINE.search(last)
     if reported:
         return Reply("A saw the report.")
