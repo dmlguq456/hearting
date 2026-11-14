@@ -404,6 +404,9 @@ class WorkProjection:
     # The first fast pass left this row's route details for the detail pass: an
     # absent _route_view then means "not read yet", never "no route record".
     _details_deferred: bool = field(default=False, repr=False, compare=False)
+    # A detail pass tried this row and did not bring its route (an error, a timeout or a
+    # part of the rows): still unknown, but no longer "to come" (_details_deferred is off).
+    _details_unread: bool = field(default=False, repr=False, compare=False)
 
     def to_dict(self):
         payload = _public_value(self)

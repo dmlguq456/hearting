@@ -720,6 +720,8 @@ def draw_explorer(grid: CellGrid, vm, state):
             shown_count, count_key = str(count), "blocked" if count else "dim"
         elif view == "PEERS" and count is None:
             shown_count, count_key = "?", "dim"
+        elif view == "ROUTES" and not count and any(route.get("state") == "wait" for route in vm.routes or ()):
+            shown_count, count_key = "?", "dim"     # routes not known yet: no count, never a 0
         elif count:
             count_key = "dim"
             shown_count = f"{count}/{count}" if view == "COMPUTE" else str(count)
