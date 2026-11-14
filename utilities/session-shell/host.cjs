@@ -166,8 +166,8 @@ let routeScroll=0,routeArea=null;
 // Route and message rows opened in place by a press. Display only: a press
 // here is not typing, so it moves neither the input epoch nor `empty`.
 const panelOpen=new Set();
-// Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`,
-// or `{folded:false,cols}` opened by hand at that width); `expanded` follows it and the width.
+// Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`
+// folded or `{folded:false}` opened by hand, at every width); without one `expanded` follows the width.
 let foldChoice=null;
 let displaySequence=0,nativeMcp;
 // Hand-over between host generations (plan §3.0): `succeeding` is the frozen window of the old
@@ -328,15 +328,15 @@ function refold(){
 }
 // #1586 review follow-up 3: when what kept the panel open ends, the judgment is the same for all
 // three: a width the person set (a drag, or the settings editor applying a new width) counts as
-// opening it by hand at this window width; otherwise (a question answered, the editor closed) the
-// width is judged once again, now.
+// opening it by hand; otherwise (a question answered, the editor closed) the width is judged once
+// again, now.
 let wasPinned=false;
 function pinLapsed(){const now=pinned(),lapsed=wasPinned&&!now;wasPinned=now;return lapsed;}
 // #1586 review follow-up 6: folding by hand closes an open settings editor first (it never
 // stands squeezed into the strip with the keys going to it).
 function foldByHand(folded){
   if(folded&&settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;}
-  foldChoice=folded?{folded:true}:{folded:false,cols};
+  foldChoice={folded};
 }
 function panelColumns(){return geometry().panelCols;}
 // The open panel's width: the projection is laid out for it while the panel is folded, so
@@ -1014,7 +1014,7 @@ function panelMouse(code,x,y,release){
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
     if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
-    // A width set by hand is the person's choice to keep the panel open at this window width.
+    // A width set by hand is the person's choice to keep the panel open.
     else{dragging=false;foldByHand(false);schedule();source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
@@ -1525,7 +1525,8 @@ async function commitSuccessor(file) {
     rootNative=root;native=row;
     sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
     submitted=seed.submitted;lastEnter=seed.lastEnter;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
-    const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&(choice.folded===true||Number.isInteger(choice.cols))?{folded:choice.folded===true,...(choice.folded===true?{}:{cols:choice.cols})}:null;
+    // An earlier release's open-by-hand choice also carried its width (`{folded:false,cols}`).
+    const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&typeof choice.folded==='boolean'?{folded:choice.folded}:null;
     displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;
     for(const key of seed.panelOpen.slice(0,16))if(typeof key==='string')panelOpen.add(key);
     for(const [ref,value] of seed.deliveries)deliveries.set(ref,value);

@@ -1339,8 +1339,8 @@
    "ko": "답변 필요"
   },
   "fleet.session_block.questions": {
-   "en": "questions",
-   "ko": "질문"
+   "en": "QUESTIONS",
+   "ko": "QUESTIONS"
   },
   "fleet.session_block.received": {
    "en": "sent · not consumed",

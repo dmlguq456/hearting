@@ -30,14 +30,14 @@ for(const configuration of [null,{}, {layout:'side',side_width:-1,side_min_colum
 assert.equal(d.layout({cols:180,rows:40,configuration:{...configuration,layout:'bottom'}}).side,false);
 assert.equal(d.layout({cols:180,rows:40,configuration:{...configuration,layout:'bottom'},expanded:false}).side,false);
 assert.equal(d.layout({cols:180,rows:40,configuration:{...configuration,side_width:48}}).nativeCols,130);
-// The one judgment: 80 native columns beside the open panel, a hand's choice winning at its width.
-assert.equal(d.NATIVE_MIN,80);
+// The one judgment: 60 native columns beside the open panel, a hand's choice winning at every width.
+assert.equal(d.NATIVE_MIN,60);
 const f=(cols,choice=null,extra={})=>d.fold({cols,choice,configuration,...extra});
-assert.equal(f(122).folded,false);assert.equal(f(121).folded,true);
-assert.equal(f(121,null,{pinned:true}).folded,false);
+assert.equal(f(102).folded,false);assert.equal(f(101).folded,true);
+assert.equal(f(101,null,{pinned:true}).folded,false);
 assert.deepEqual(f(200,{folded:true}),{folded:true,choice:{folded:true}});
-assert.deepEqual(f(100,{folded:false,cols:100}),{folded:false,choice:{folded:false,cols:100}});
-assert.deepEqual(f(101,{folded:false,cols:100}),{folded:true,choice:null});
+assert.deepEqual(f(100,{folded:false}),{folded:false,choice:{folded:false}});
+assert.deepEqual(f(60,{folded:false}),{folded:false,choice:{folded:false}});
 assert.equal(d.fold({cols:60,configuration:{...configuration,layout:'bottom'}}).folded,false);
 '''
         result=subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],text=True,capture_output=True,timeout=5)
