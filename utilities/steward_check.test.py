@@ -1914,22 +1914,36 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         ("w2", "unresolved-obligation", "[]", f"완료를 받지 못한 일 {ROUTE_FINISHED}"),
         ("w3", "unresolved-obligation", "[]", "주인 없이 열린 일"),
         ("w4", "unresolved-obligation", "[]", f"사용자 결정 대기: {ROUTE_RUNNING} 병합"))
+    ROUTE_OTHER = "rt-" + "c" * 16
+    MIXED_ROWS = (
+        ("m1", "unresolved-obligation", "[]", f"다른 세션 route {ROUTE_OTHER} 검토에서 나온 후속"),
+        ("m2", "unresolved-obligation", "[]",
+         f"{ROUTE_FINISHED} 결과 받지 못함 — 받아서 정리, 그리고 {ROUTE_RUNNING}은 진행 중"),
+        ("m3", "unresolved-obligation", "[]", f"{ROUTE_RUNNING}과 같은 일을 맡은 {ROUTE_RUNNING}"))
 
     def test_work_handed_to_a_running_route_is_not_the_sessions_remaining_work(self):
         """2026-11-14: "work remains" counted work already handed to a route whose worker ran."""
         asked = []
 
-        def live(ids):
-            asked.append(set(ids))
+        def live(ids, session_id):
+            asked.append((set(ids), session_id))
             return {self.ROUTE_RUNNING} & set(ids)
         with mock.patch.object(SC, "_running_routes", live):
             work, decisions = self.real_open_work(rows=self.HANDED_ROWS)
         self.assertEqual(sorted(work), sorted([f"완료를 받지 못한 일 {self.ROUTE_FINISHED}", "주인 없이 열린 일"]))
         self.assertEqual(decisions, [f"사용자 결정 대기: {self.ROUTE_RUNNING} 병합"])  # a person's decision stays
-        self.assertEqual(asked, [{self.ROUTE_RUNNING, self.ROUTE_FINISHED}])
+        self.assertEqual(asked, [({self.ROUTE_RUNNING, self.ROUTE_FINISHED}, SID)])
+
+    def test_a_record_stays_open_unless_every_route_it_names_is_this_sessions_running_route(self):
+        """RV-PR1645-1115: another session's route, or a record that also names a finished route,
+        is still this session's work; only a record naming running routes alone is handed off."""
+        with mock.patch.object(SC, "_running_routes",
+                               lambda ids, sid: {self.ROUTE_RUNNING} & set(ids)):
+            work, _ = self.real_open_work(rows=self.MIXED_ROWS)
+        self.assertEqual(sorted(work), sorted(row[3] for row in self.MIXED_ROWS[:2]))
 
     def test_the_same_work_counts_again_once_its_routes_worker_is_gone(self):
-        with mock.patch.object(SC, "_running_routes", lambda ids: set()):
+        with mock.patch.object(SC, "_running_routes", lambda ids, sid: set()):
             work, _ = self.real_open_work(rows=self.HANDED_ROWS)
         self.assertEqual(len(work), 3)
 

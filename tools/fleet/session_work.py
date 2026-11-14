@@ -43,13 +43,14 @@ def route_ids(row):
 
 
 def delegated(rows, running_routes):
-    """Rows whose work sits with a route that is running now (a hand-off, not this session's
-    remaining work): ``running_routes(ids)`` names which of the ids run. A route that finished
-    without its result received, or a record naming no route, is not delegated."""
+    """Rows whose work sits wholly with routes that run now (a hand-off, not this session's
+    remaining work): ``running_routes(ids)`` names which of the ids are this session's running
+    routes. A record naming a route that is not running (a finished route's unreceived result,
+    another session's route), or no route at all, stays open work."""
     named = {id(row): route_ids(row) for row in rows}
     candidates = set().union(*named.values()) if named else set()
     live = set(running_routes(candidates)) if candidates else set()
-    return [row for row in rows if named[id(row)] & live]
+    return [row for row in rows if named[id(row)] and named[id(row)] <= live]
 
 
 def recent_memory(cwd, limit=2):

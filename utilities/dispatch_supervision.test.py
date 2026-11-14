@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import uuid
 import time
@@ -1728,7 +1729,28 @@ class OwnerProgressAlarmTest(unittest.TestCase):
             elif harness == "codex":
                 lines.append({"type": "item.completed", "item": {"type": "agent_message", "id": "i-turn"}})
             else:
-                lines.append({"type": "step_finish", "part": {"type": "step-finish", "id": "p-turn"}})
+                # The rows a supervised OpenCode owner's turn really leaves: the supervisor
+                # (`run_turn`) over a native binary that streams one tool-less step.
+                import opencode_session_runtime
+                script = self.root / "native-oc.py"
+                script.write_text(
+                    "import json, sys\nsys.stdin.read()\n"
+                    "def event(kind, **values):\n"
+                    " print(json.dumps(dict(type=kind, sessionID='ses_native', **values)), flush=True)\n"
+                    "event('step_start', part={})\n"
+                    "event('text', part={'text': 'x'})\n"
+                    "event('step_finish', part={'reason': 'stop', 'tokens': {'input': 5, 'output': 1}})\n",
+                    encoding="utf-8")
+                args = types.SimpleNamespace(
+                    worktree=str(self.root), jobs=str(self.root / "jobs.log"),
+                    parent_attempt_id="att-native", turn_timeout=20,
+                    opencode_command=shlex.join([sys.executable, str(script)]),
+                    model="opencode-go/glm-5.3-flash", variant="runtime-default", opencode_agent="build")
+                with mock.patch.object(opencode_session_runtime.opencode_runtime, "is_v2",
+                                       return_value=True), \
+                     self.log.open("a", encoding="utf-8") as handle:
+                    opencode_session_runtime.run_turn(
+                        args, "q", emit=lambda row: handle.write(json.dumps(row) + "\n"))
         with self.log.open("a", encoding="utf-8") as handle:
             handle.writelines(json.dumps(line) + "\n" for line in lines)
 
@@ -1763,9 +1785,12 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                         count += self.alarms(self.t0 + step * 400)
                 self.assertEqual(count, 0)
 
-    def test_g_one_blocking_command_that_is_still_running_is_not_a_stall(self):
+    def test_g_one_blocking_command_is_a_wait_only_up_to_the_limit_of_one_command(self):
         # A worker waiting on one CI watch for 20+ minutes: the command started after its last
-        # event and lives. Its call row may already read finished (or never be seen).
+        # event and lives. Its call row may already read finished (or never be seen). One
+        # command that never ends is quiet once it outlives the longest command a worker may
+        # run (BLOCKING_COMMAND_MAX_SECONDS); then one alarm names its program.
+        limit = int(supervision.BLOCKING_COMMAND_MAX_SECONDS)
         for harness in self.DELIVERY:
             for rows in (True, False):
                 with self.subTest(harness=harness, call_rows=rows):
@@ -1778,11 +1803,17 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                         self.assertEqual(self.alarms(self.t0), 0)
                         with mock.patch.object(supervision, "_running_tool_command",
                                                return_value=(self.t0 + 5, "gh")):
-                            count = sum(self.alarms(self.t0 + window * 300) for window in range(1, 25))
-                            observation = self.state(self.t0 + 24 * 300)
-                    self.assertEqual(count, 0)
-                    self.assertEqual((observation["state"], observation["reason"]),
+                            before = sum(self.alarms(self.t0 + window * 300)
+                                         for window in range(1, limit // 300))
+                            running = self.state(self.t0 + limit - 300)
+                            after = self.alarms(self.t0 + limit + 301)
+                            stalled = self.state(self.t0 + limit + 301)
+                    self.assertEqual(before, 0)
+                    self.assertEqual((running["state"], running["reason"]),
                                      ("active", "tool-command-running"))
+                    self.assertEqual(after, 1)
+                    self.assertEqual((stalled["state"], stalled["reason"]),
+                                     ("stalled", "no-comparable-progress"))
 
     def test_h_a_worker_that_is_alive_but_silent_with_no_command_still_alarms(self):
         for harness in self.DELIVERY:
@@ -1826,6 +1857,12 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                     self.tool_rows(harness, [("call-a", "start", "m1"), ("call-a", "end", "m1")])
                     with mock.patch.object(supervision.time, "time", return_value=self.t0):
                         self.assertEqual(supervision.running_route_ids(self.jobs, {route, "rt-other"}), {route})
+                        # Only the session that launched the route owns it as a hand-off.
+                        self.assertEqual(supervision.running_route_ids(
+                            self.jobs, {route}, "parent-test"), {route})
+                        self.assertEqual(supervision.running_route_ids(
+                            self.jobs, {route}, "other-session"), set())
+                        self.assertEqual(supervision.running_route_ids(self.jobs, {route}, ""), set())
                         self.assertEqual(supervision.running_route_ids(self.jobs, {"rt-other"}), set())
                     # Alive but silent past the windows is the stalled case: not running.
                     self.alarms(self.t0)

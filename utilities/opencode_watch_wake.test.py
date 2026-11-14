@@ -9,7 +9,9 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import shutil
+import signal
 import subprocess
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,9 +34,12 @@ if sys.argv[1:2] == ["status"]:
         "receipt": "/r/%(watch)s.receipt.json"}]
     print(json.dumps({"watch_root": watches, "watches": rows}))
 elif sys.argv[1:2] == ["ack"]:
-    with open(os.path.join(watches, sys.argv[2] + ".ack.json"), "w") as out:
-        out.write("{}")
-    print("ack=created")
+    if os.environ.get("STUB_ACK") == "refuse":   # the real `cmd_ack` exits 0 and says it did not
+        print("watch_id=" + sys.argv[2] + " ack=not-recipient")
+    else:
+        with open(os.path.join(watches, sys.argv[2] + ".ack.json"), "w") as out:
+            out.write("{}")
+        print("watch_id=" + sys.argv[2] + " ack=created carrier=" + sys.argv[4])
 ''' % {"watch": WATCH}
 
 JS = r'''
@@ -42,8 +47,12 @@ import { pathToFileURL } from "node:url";
 const { AgentHarnessGuards } = await import(pathToFileURL(PLUGIN));
 const prompts = [];
 const accept = ACCEPT;
+const store = STORE;   // does the session's native history ever show what was sent?
 const session = {
-  messages: async () => ({data: []}), prompt: async () => ({data: null}),
+  messages: async () => ({data: store ? prompts.map(request => ({
+    info: {sessionID: request.path.id, role: "user"},
+    parts: [{type: "text", text: request.body.parts[0].text}]})) : []}),
+  prompt: async () => ({data: null}),
   promptAsync: async (request) => {
     prompts.push(request);
     return accept ? {data: undefined, response: {ok: true, status: 204}}
@@ -57,7 +66,7 @@ await hooks["shell.env"]({sessionID: SID}, out);
 const settle = async (ms) => { await new Promise(r => setTimeout(r, ms)); };
 for (let round = 0; round < ROUNDS; round++) {
   await hooks.event({event: {type: "session.idle", properties: {sessionID: SID}}});
-  await settle(300);
+  await settle(GAP);
 }
 hooks.dispose();
 console.log(JSON.stringify({prompts}));
@@ -72,6 +81,7 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         self.rt, self.state = base / "rt", base / "state"
         (self.state / "peer-watches").mkdir(parents=True)
         (self.state / "jobs.log").touch()
+        self.addCleanup(self.reap_helpers)
         plugins = self.rt / "adapters/opencode/plugins"
         plugins.mkdir(parents=True)
         shutil.copy2(ROOT / "adapters/opencode/plugins/hearting-guards.js", plugins)
@@ -87,18 +97,41 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         stub.write_text(STUB)
         stub.chmod(0o755)
 
+    def reap_helpers(self):
+        """The plugin starts detached helpers (summary trigger, tidy) from its idle events; they
+        outlive the node process. Stop the ones that run from this test's private runtime copy."""
+        marker = str(self.rt).encode()
+        for _ in range(3):
+            mine = []
+            for entry in Path("/proc").iterdir():
+                if entry.name.isdigit() and int(entry.name) != os.getpid():
+                    try:
+                        if marker in (entry / "cmdline").read_bytes():
+                            mine.append(int(entry.name))
+                    except OSError:
+                        pass
+            if not mine:
+                return
+            for pid in mine:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.2)
+
     def arm_receipt(self, steward_sid=SID, harness="opencode"):
         watches = self.state / "peer-watches"
         (watches / f"{WATCH}.json").write_text(json.dumps(
             {"watch_id": WATCH, "steward": {"harness": harness, "session_id": steward_sid}}))
         (watches / f"{WATCH}.receipt.json").write_text(json.dumps({"state": "idle"}))
 
-    def run_plugin(self, *, accept=True, rounds=2):
+    def run_plugin(self, *, accept=True, rounds=2, store=True, ack="ok", gap=300):
         js = JS.replace("PLUGIN", json.dumps(str(self.rt / "adapters/opencode/plugins/hearting-guards.js"))
                         ).replace("ACCEPT", "true" if accept else "false").replace(
+            "STORE", "true" if store else "false").replace("GAP", str(gap)).replace(
             "SID", json.dumps(SID)).replace("ROUNDS", str(rounds))
         env = dict(os.environ, HARNESS_STATE_ROOT=str(self.state), AGENT_DISPATCH_JOBS=str(self.state / "jobs.log"),
-                   AGENT_HOME=str(self.rt), STUB_STATE=str(self.state))
+                   AGENT_HOME=str(self.rt), STUB_STATE=str(self.state), STUB_ACK=ack)
         for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
                     "OPENCODE_DISPATCH_SLUG", "FLEET_TITLE_REFRESH"):
             env.pop(key, None)
@@ -144,6 +177,23 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         result = self.run_plugin(accept=False, rounds=4)
         self.assertEqual(len(result["prompts"]), 2)
         self.assertEqual([call for call in self.calls() if call["argv"][:1] == ["ack"]], [])
+        self.assertFalse((self.state / "peer-watches" / f"{WATCH}.ack.json").exists())
+
+    def test_a_prompt_that_never_shows_in_the_session_history_is_not_acked_and_is_sent_twice_at_most(self):
+        """RV-PR1645-1115: the ACK came on acceptance, so a prompt lost before it was stored
+        left an `acked` receipt nothing showed again."""
+        self.arm_receipt()
+        result = self.run_plugin(store=False, rounds=3, gap=4000)  # a look takes ~3 s
+        self.assertEqual(len(result["prompts"]), 2)
+        self.assertEqual([call for call in self.calls() if call["argv"][:1] == ["ack"]], [])
+        self.assertFalse((self.state / "peer-watches" / f"{WATCH}.ack.json").exists())
+
+    def test_an_ack_the_helper_refuses_never_opens_more_than_the_send_limit_of_turns(self):
+        """RV-PR1645-1115: `ack=not-recipient` (exit 0) used to forget the send, so every idle tick
+        opened a new turn with the same receipt."""
+        self.arm_receipt()
+        result = self.run_plugin(ack="refuse", rounds=6)
+        self.assertEqual(len(result["prompts"]), 2)
         self.assertFalse((self.state / "peer-watches" / f"{WATCH}.ack.json").exists())
 
     def test_an_acked_receipt_is_not_sent_again(self):

@@ -3386,11 +3386,11 @@ def _codex_queue_present():
 
 
 def _opencode_carrier_present():
-    """This OpenCode session's plugin carrier is armed: the plugin puts
-    ``AGENT_PARENT_COMPLETION_CARRIER=opencode-turn:<session>`` on its tool commands, and the
-    same plugin wakes an idle session with its steward watch receipts (the carrier `wake=opencode`
-    names). An older plugin leaves it unset: unknown is not a carrier."""
-    return os.environ.get("AGENT_PARENT_COMPLETION_CARRIER", "").startswith("opencode-turn:")
+    """This OpenCode session's plugin can wake it with its watch receipts: that plugin puts
+    ``AGENT_STEWARD_WATCH_WAKE=opencode`` on its tool commands (beside the completion carrier
+    value an older plugin sets too, which says nothing of a watch wake). Unset is no carrier:
+    the watch prints the bounded wait, as before."""
+    return os.environ.get("AGENT_STEWARD_WATCH_WAKE", "") == "opencode"
 
 
 def _codex_turn_in_progress(thread_id):

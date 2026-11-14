@@ -1430,6 +1430,7 @@ async function setupOpenCodeV2(ctx) {
       if (v2WorkerSessions.has(sessionID)) {
         for (const key of inheritedIdentityEnv) env[key] = ""
         env[CARRIER_ENV] = ""
+        env[WATCH_WAKE_ENV] = ""
         env[ROOT_SESSION_ENV] = ""
         if (sessionID) env.OPENCODE_SESSION_ID = sessionID
         return
@@ -2013,6 +2014,9 @@ function commitDeferred(helper, command, pending) {
 // a runtime that has this carrier from one that predates it. Fail-open: a carrier
 // problem never blocks or throws into a turn.
 const CARRIER_ENV = "AGENT_PARENT_COMPLETION_CARRIER"
+// Said only by a plugin that can wake an idle session with its steward watch receipts: an
+// older plugin puts CARRIER_ENV on its commands too, but has no such wake.
+const WATCH_WAKE_ENV = "AGENT_STEWARD_WATCH_WAKE"
 const CARRIER_KIND = "opencode-turn"
 const CARRIER_INTERVAL_MS = 5000
 const CARRIER_ROOTS_RETRY_MS = 60000
@@ -2036,7 +2040,10 @@ function knownChildSession(sid) {
 // Steward watch receipts (Codex's `codex_turn_carrier` WATCH_HEADER meaning). A session that
 // armed `peer-steward watch` with `wake=opencode` ends its turn; when the watch writes its
 // receipt, this plugin (not the model) finds it and starts the idle session's next turn with
-// it through promptAsync, then acknowledges it with the same exact-recipient ACK. Only the
+// it through promptAsync, then acknowledges it with the same exact-recipient ACK once the sent
+// text shows in the session's native history (an accepted prompt alone is not receipt: it
+// may never be stored, and then the receipt stays and is sent again, WATCH_SEND_LIMIT times
+// at most per receipt, whether or not the ACK itself succeeds). Only the
 // helper's own bounded read decides what is undelivered; the file look here just keeps an idle
 // tick from spawning anything when this session has no receipt waiting. Fail-open.
 const WATCH_HEADER = "[peer-steward] undelivered watch receipts:"
@@ -2086,6 +2093,19 @@ function watchReceiptWaiting(roots, sid) {
     }
   }
   return false
+}
+
+// Is this exact text one of the session's own user messages in its native history?
+function userTextShown(messages, sid, text) {
+  if (!Array.isArray(messages)) return false
+  return messages.some((row) => {
+    if (row?.info?.sessionID !== sid || row?.info?.role !== "user") return false
+    const content = row?.message && typeof row.message === "object" ? row.message.content : row?.parts
+    const body = typeof content === "string" ? content
+      : Array.isArray(content) ? content.filter(item => item && (item.type === "text" || item.type === "input_text")
+        && typeof item.text === "string").map(item => item.text).join("\n") : ""
+    return body === text
+  })
 }
 
 function watchReceiptLine(row) {
@@ -2230,9 +2250,19 @@ function createCompletionCarrier(ctx) {
       } catch (error) { promptReason = error?.message === "carrier-timeout" ? "timeout" : "error" }
       log("watch-prompt", sid, promptReason, { watches: rows.map(row => row.watch_id) })
       if (!taken) return
+      // OpenCode 2 accepts the prompt before its user message is stored: look again briefly,
+      // as the completion carrier does, before taking it as never stored.
+      let shown = false
+      for (let look = 0; look < 7 && !shown; look++) {
+        if (look) await new Promise((resolve) => setTimeout(resolve, 500))
+        shown = userTextShown(await compactMessages(ctx, sid), sid, text)
+      }
+      if (!shown) { log("watch-prompt", sid, "sent-unobserved", { watches: rows.map(row => row.watch_id) }); return }
       for (const row of rows) {
-        await stewardCommand(["ack", row.watch_id, "--carrier", CARRIER_KIND], sid)
-        watchSent.delete(row.watch_id)
+        const acked = await stewardCommand(["ack", row.watch_id, "--carrier", CARRIER_KIND], sid)
+        // Only a recorded ACK ends the send count's use; a refused one keeps counting, so a
+        // receipt that cannot be acknowledged opens no more than WATCH_SEND_LIMIT turns.
+        if (/\back=(created|already)\b/.test(acked || "")) watchSent.delete(row.watch_id)
       }
     } finally { clearTimeout(timeout); busy.delete(sid) }
   }
@@ -3888,6 +3918,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const rootSid = sid ? await rootSessionId(ctx, sid) : ""
     output.env[ROOT_SESSION_ENV] = rootSid && rootSid !== sid ? rootSid : ""
     output.env[CARRIER_ENV] = completionCarrier.env(sid) || ""
+    output.env[WATCH_WAKE_ENV] = output.env[CARRIER_ENV] ? "opencode" : ""
   },
   // The two kept write gates (hooks/core-write-guard.py): installed release copies
   // and the shared checkout seen from a linked worktree. Anything else is allowed.

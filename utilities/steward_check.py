@@ -453,10 +453,12 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         open_rows.append((row, headline))
     # Work handed to a route whose worker runs now is the route's, not this session's to do:
     # it comes back as the route's own completion. A finished route's unreceived result and
-    # a record with no running route stay open work.
+    # a record with no running route, or one that also names another session's or a finished
+    # route, stay open work.
     try:
         from fleet.session_work import delegated
-        handed = {id(row) for row in delegated([row for row, _ in open_rows], _running_routes)}
+        handed = {id(row) for row in delegated(
+            [row for row, _ in open_rows], lambda ids: _running_routes(ids, session_id))}
     except Exception:  # noqa: BLE001
         handed = set()
     work, decisions = [], []
@@ -468,11 +470,13 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
     return work, decisions
 
 
-def _running_routes(route_ids) -> set:
-    """Which of these route ids have a live worker, from the existing dispatch observer."""
+def _running_routes(route_ids, session_id) -> set:
+    """Which of these route ids this session launched and still have a live worker, from the
+    existing dispatch observer."""
     import dispatch_supervision
     import session_notice
-    return dispatch_supervision.running_route_ids(session_notice._registry(None), route_ids)
+    return dispatch_supervision.running_route_ids(
+        session_notice._registry(None), route_ids, session_id or "")
 
 
 def _pending_count(module, harness: str, session_id) -> int:

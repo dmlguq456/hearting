@@ -2200,13 +2200,19 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
         self.assertEqual((result["queued"], result["kind"]), (True, "message"), result)
         self.assertEqual(result["to"]["harness"], "codex")
 
-    def _opencode_env(self, with_carrier):
+    def _opencode_env(self, with_carrier, *, wake_marker=None):
+        """``with_carrier``: the completion carrier value every plugin since v3.2.10 puts on its
+        commands. ``wake_marker`` (default: with it): what only a plugin that can wake an idle
+        session with its watch receipts adds."""
         env = self._env("idle")
         env.pop("CLAUDE_CODE_SESSION_ID", None)
         env["OPENCODE_SESSION_ID"] = "ses-oc-steward"
         env.pop("AGENT_PARENT_COMPLETION_CARRIER", None)
+        env.pop("AGENT_STEWARD_WATCH_WAKE", None)
         if with_carrier:
             env["AGENT_PARENT_COMPLETION_CARRIER"] = "opencode-turn:ses-oc-steward"
+        if wake_marker if wake_marker is not None else with_carrier:
+            env["AGENT_STEWARD_WATCH_WAKE"] = "opencode"
         return env
 
     _OPENCODE_SEAT = {"kind": "pane", "key": "opencode-seat-k", "pane": "%7@/tmp/hbt-x/s",
@@ -2221,16 +2227,24 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
         self.assertEqual(directive.get("parent_next"), "end-turn", proc.stdout)
         self.assertEqual(directive.get("parent_next_reason"), "carrier-steward-watch-opencode-turn")
 
-    def test_an_opencode_watch_without_the_carrier_or_a_proven_seat_still_waits(self):
-        for label, run in (
-                ("no plugin carrier on the command",
-                 lambda: self._codex_watch_with_seat(self._opencode_env(False), self._OPENCODE_SEAT)),
-                ("seat unproven", lambda: self._codex_watch_with_seat(self._opencode_env(True), None))):
-            with self.subTest(label):
-                proc = run()
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertIn("wake=none", proc.stdout)
-                self.assertEqual(self._directive(proc.stdout).get("parent_next"), "bounded-wait")
+    def _assert_opencode_watch_waits(self, env, seat):
+        # One watch per test: a second `watch` of the same target reports the first one's arm.
+        proc = self._codex_watch_with_seat(env, seat)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("state=armed", proc.stdout)
+        self.assertIn("wake=none", proc.stdout)
+        self.assertEqual(self._directive(proc.stdout).get("parent_next"), "bounded-wait")
+
+    def test_an_opencode_watch_without_the_plugin_carrier_still_waits(self):
+        self._assert_opencode_watch_waits(self._opencode_env(False), self._OPENCODE_SEAT)
+
+    def test_an_opencode_watch_of_an_older_plugin_keeps_the_bounded_wait(self):
+        """RV-PR1645-1115: a plugin installed before the wake existed puts the completion carrier
+        value on its commands too, and cannot wake a session: the watch must not promise one."""
+        self._assert_opencode_watch_waits(self._opencode_env(True, wake_marker=False), self._OPENCODE_SEAT)
+
+    def test_an_opencode_watch_with_an_unproven_seat_still_waits(self):
+        self._assert_opencode_watch_waits(self._opencode_env(True), None)
 
     def test_an_opencode_watch_receipt_leaves_no_queued_notice_to_hide_it_from_the_sweep(self):
         import peer_steward_watch

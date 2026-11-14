@@ -68,9 +68,9 @@ STEWARD_CARRIER_WAKE = "hook"
 # an idle Codex for completions and peer reports) carries it into a turn. Chosen
 # by `watch --wake auto` only while that queue socket exists.
 STEWARD_QUEUE_WAKE = "queue"
-# An OpenCode steward's watch: its plugin (`opencode-turn` carrier) wakes the idle session
-# with the receipt through `promptAsync`. Chosen by `watch --wake auto` only while that
-# plugin's carrier env is on the calling command.
+# An OpenCode steward's watch: its plugin wakes the idle session with the receipt through
+# `promptAsync`. Chosen by `watch --wake auto` only while a plugin that can do so says it on the
+# calling command (`AGENT_STEWARD_WATCH_WAKE=opencode`; an older plugin does not).
 STEWARD_OPENCODE_WAKE = "opencode"
 STEWARD_WAKES = {STEWARD_CARRIER_WAKE: "carrier-steward-watch",
                  STEWARD_QUEUE_WAKE: "carrier-steward-watch-codex-queue",
