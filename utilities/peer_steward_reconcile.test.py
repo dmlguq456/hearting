@@ -38,6 +38,7 @@ import dispatch_recipient_inbox as inbox  # noqa: E402
 import dispatch_supervision as supervision  # noqa: E402
 import herdr_observation  # noqa: E402
 import peer_obligations  # noqa: E402
+import peer_steward_native  # noqa: E402
 import session_notice  # noqa: E402
 import session_tidy as tidy  # noqa: E402
 from route_identity import route_hash  # noqa: E402
@@ -265,6 +266,221 @@ class TerminalFirstDeliveryTest(IsolatedCase):
             peer_steward._resume_session_notice_obligations(self.duties(), self.store)
         self.assertEqual(len(sent), 2)
         self.assertIn("routine progress", sent[1]["body"])
+
+
+class EndedOwnerNoticeTest(IsolatedCase):
+    """A run notice whose owner session ended is never re-sent; it closes by TTL.
+
+    The producer (``resource_progress._notice_targets``) makes one notice per
+    destination at the start: one for the owner session and one for the
+    owner's parent, the parent's own copy. So when the owner has ended, the
+    parent already holds the failure, and the owner's copy has nowhere to go:
+    the resolver refuses it, nobody is woken for it, and the existing notice
+    TTL (plus the dead-lease reclaim) closes it.
+    """
+
+    DAY = 86400
+
+    def world(self, token, *, harness="claude", status="done", attention=True,
+              owner="sid-owner", supervisor="sid-supervisor",
+              supervisor_harness="claude", waiting_supervisor=False,
+              with_parent=True):
+        """One isolated state root: the owner's row and the producer's notices."""
+        import resource_progress
+        from harness_capabilities import parent_completion
+        state = self.root / f"world-{token}"
+        state.mkdir()
+        jobs = state / "jobs.log"
+        store = peer_obligations.ObligationStore(state)
+        self.assertTrue(store.ensure_directory())
+        sup_carrier = parent_completion(supervisor_harness)["carrier"]
+        attempt = f"att-{token}"
+        meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}",
+                         "dispatch_depth=1", "worker_type=owner", f"harness={harness}",
+                         f"parent_sid={supervisor}", f"parent_harness={supervisor_harness}",
+                         f"parent_completion_delivery={sup_carrier}", "registered_worker=1",
+                         f"route_id=rt-{token}", f"route_hash={'h' * 8}", "route_node=execute"))
+        world = SimpleNamespace(state=state, jobs=jobs, store=store, attempt=attempt,
+                                owner=owner, supervisor=supervisor, harness=harness,
+                                meta=meta, run=f"run-{token}", records={})
+        self.set_status(world, status)
+        if waiting_supervisor:
+            join._write_supervisor_state_unlocked(
+                state / "supervisor-state" / (attempt + ".json"), attempt, set(),
+                resource={"session_id": owner, "delivered": [], "outbox": None})
+        if attention:
+            subject, text = "compute run", (
+                f"run {world.run} on here ended with exit 6; read it with: "
+                f"compute-hosts tail {world.run}")
+        else:
+            subject, text = "compute run, quiet", (
+                f"run {world.run} on here ended with exit 0; read it with: "
+                f"compute-hosts tail {world.run}")
+        # The producer's own destinations, then one notify per destination --
+        # exactly what the resource-progress sender does for one event.
+        targets = resource_progress._notice_targets({"jobs": str(jobs), "owner_wait": {
+            "harness": harness, "session_id": owner, "parent_attempt_id": attempt,
+            "jobs": str(jobs)}})
+        kinds = {target["lineage"]["kind"] if isinstance(target, dict) else None
+                 for target in targets}
+        self.assertEqual(kinds, {"owner-session", "attempt-parent"})
+        for target in targets:
+            kind = target["lineage"]["kind"]
+            if kind == "attempt-parent" and not with_parent:
+                continue
+            record = session_notice.notify(
+                target["harness"], target["session_id"],
+                key=f"compute-run:{world.run}:{target['harness']}:{target['session_id']}",
+                subject=subject, text=text, lineage=target["lineage"], jobs=jobs)
+            world.records[kind] = (target["session_id"], record)
+        for duty in store.list(kinds={"run-notice"}):
+            self.backdate(world, duty, hours=1.0)
+        return world
+
+    def set_status(self, world, status):
+        world.jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt",
+                                         "owner", world.meta)) + "\n")
+        import dispatch_seat_handover as handover
+        handover._LINEAGE_GRAPH_CACHE.clear()
+
+    def backdate(self, world, duty, *, hours):
+        path = world.store._record_path(duty["id"])
+        value = json.loads(path.read_text("utf-8"))
+        value["accepted_at"] = time.time() - hours * 3600
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def record_state(self, world, kind):
+        sid, record = world.records[kind]
+        return pending.read(world.state, sid, record["delivery_id"])
+
+    def age_record(self, world, kind, *, days):
+        sid, record = world.records[kind]
+        old = time.time() - days * self.DAY
+        os.utime(pending.record_path(world.state, sid, record["delivery_id"]), (old, old))
+
+    def _pass(self, world, *, sent=None, lifetime=None, recipient=None):
+        context = mock.patch.object(peer_steward_native, "native_lifetime",
+                                    return_value=lifetime) if lifetime is not None else contextlib.nullcontext()
+        with context, self.transport(recipient or world.supervisor, sent=sent):
+            peer_steward._resume_session_notice_obligations(
+                world.store.list(kinds={"run-notice"}), world.store)
+
+    def failures_to(self, sent, world):
+        return [entry for entry in sent if f"run {world.run} on here ended with exit 6" in entry["body"]]
+
+    def test_the_parent_gets_the_failure_exactly_once_when_both_notices_wait(self):
+        # Same pass: the owner ended while both of the producer's notices are
+        # still pending. The parent's own copy is delivered; the owner's copy is
+        # not re-sent to the parent, so the parent is woken once for the failure.
+        for status, lifetime in (("killed", "live"), ("cancelled", "live"), ("done", "ended")):
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(status=status, harness=harness):
+                    world = self.world(f"same-{status}-{harness}", harness=harness, status=status)
+                    sent = []
+                    self._pass(world, sent=sent, lifetime=lifetime)
+                    self._pass(world, sent=sent, lifetime=lifetime)
+                    self.assertEqual(len(self.failures_to(sent, world)), 1)
+                    self.assertEqual(sent[0]["recipient"], ("claude", world.supervisor))
+                    self.assertEqual(self.record_state(world, "owner-session")["state"], "pending")
+                    self.assertEqual(self.record_state(world, "attempt-parent")["state"], "sent-ambiguous")
+
+    def test_the_parent_gets_the_failure_exactly_once_when_its_copy_was_read_first(self):
+        # The owner is still alive (no waiting supervisor yet) when the failure
+        # lands: the parent's copy is delivered and read. Only afterwards the
+        # owner is killed; the parent is not woken a second time for the owner's copy.
+        world = self.world("read-first", status="open")
+        sent = []
+        self._pass(world, sent=sent)
+        self.assertEqual(len(self.failures_to(sent, world)), 1)
+        sid, record = world.records["attempt-parent"]
+        pending.ack(world.state, sid, record["delivery_id"], acked_by="fixture-receipt")
+        self.set_status(world, "killed")
+        self._pass(world, sent=sent)
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(len(self.failures_to(sent, world)), 1)
+        self.assertEqual(self.record_state(world, "owner-session")["state"], "pending")
+
+    def test_an_ended_owners_notice_wakes_nobody_and_closes_by_the_seven_day_ttl(self):
+        for attention in (True, False):
+            with self.subTest(attention=attention):
+                world = self.world(f"ttl-{attention}", status="killed",
+                                   attention=attention, with_parent=False)
+                sent = []
+                self._pass(world, sent=sent)
+                self.assertEqual(sent, [])
+                duty, = world.store.list(kinds={"run-notice"})
+                self.assertEqual(duty["state"], "pending")
+                self.assertEqual((duty.get("observation") or {}).get("reason"),
+                                 "recipient-lineage-unavailable")
+                # Before the age limit nothing closes; at eight days the notice TTL does.
+                self.age_record(world, "owner-session", days=6)
+                self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 0)
+                self.age_record(world, "owner-session", days=8)
+                self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 1)
+                self.assertEqual(self.record_state(world, "owner-session")["state"], "expired")
+                self._pass(world, sent=sent)
+                self.assertEqual(sent, [])
+                self.assertEqual(world.store.list(kinds={"run-notice"}), [])
+
+    def test_an_owner_that_cannot_receive_is_neither_served_nor_redirected(self):
+        # Every way the owner-session answer is refused keeps its notice
+        # pending with nobody woken: no waiting supervisor, an unproven end, a
+        # confirmed successor of the owner's seat.
+        cases = {
+            "done-without-waiting-supervisor": dict(status="done", lifetime="ended"),
+            "done-session-not-provably-ended": dict(status="done", lifetime="unknown"),
+            "killed-with-successor": dict(status="killed", lifetime="live", successor=True),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                world = self.world(f"refused-{name}", status=case["status"], with_parent=False)
+                if case.get("successor"):
+                    self.edge(world.owner, "sid-next")
+                sent = []
+                self._pass(world, sent=sent, lifetime=case["lifetime"])
+                self.assertEqual(sent, [])
+                duty, = world.store.list(kinds={"run-notice"})
+                self.assertEqual(duty["state"], "pending")
+
+    def test_a_live_owner_keeps_its_own_notice(self):
+        # An owner whose waiting supervisor still names it receives its notice
+        # itself, as before; the parent's copy is the parent's own.
+        world = self.world("alive", status="open", waiting_supervisor=True, with_parent=False)
+        sent = []
+        self._pass(world, sent=sent, recipient=world.owner)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["recipient"], ("claude", world.owner))
+
+    def _claim(self, world, *, lease_seconds):
+        sid, record = world.records["owner-session"]
+        claimed = pending.claim(world.state, sid, record["delivery_id"],
+                                claim_owner="dead-runner", lease_seconds=lease_seconds)
+        self.assertEqual(claimed["state"], "claimed")
+
+    def test_a_dead_lease_on_an_unresolvable_notice_is_reclaimed_then_expires(self):
+        world = self.world("lease-dead", status="killed", with_parent=False)
+        self._claim(world, lease_seconds=0.001)
+        time.sleep(0.05)
+        sent = []
+        self._pass(world, sent=sent)
+        self.assertEqual(sent, [])
+        record = self.record_state(world, "owner-session")
+        self.assertEqual(record["state"], "pending")
+        self.assertIsNone(record["claim_owner"])
+        # Reclaimed, it ends like any other unreachable notice.
+        self.age_record(world, "owner-session", days=8)
+        self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 1)
+        self.assertEqual(self.record_state(world, "owner-session")["state"], "expired")
+
+    def test_a_live_lease_on_an_unresolvable_notice_is_left_alone(self):
+        world = self.world("lease-live", status="killed", with_parent=False)
+        self._claim(world, lease_seconds=600)
+        sent = []
+        self._pass(world, sent=sent)
+        self.assertEqual(sent, [])
+        record = self.record_state(world, "owner-session")
+        self.assertEqual(record["state"], "claimed")
+        self.assertEqual(record["claim_owner"], "dead-runner")
 
 
 class RunNoticeSupersedeTest(IsolatedCase):
