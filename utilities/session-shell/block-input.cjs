@@ -2,8 +2,8 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 module.exports=function({changed,answer,action,page}) {
-  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0;
-  let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer;
+  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
+  let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
   let labels={},styles={},help='';
   const entries=new Map();
   const key=item=>item.id+'@'+item.revision;
@@ -41,7 +41,7 @@ module.exports=function({changed,answer,action,page}) {
   }
   // ↑↓ choose only while this question takes a choice; otherwise they scroll as before.
   function choosing(row){return !!row&&focused&&active(row)&&!state(row.item).typing[row.question.id]&&choices(row).length>0;}
-  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;}
+  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;skipTail=false;}
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
   // longer asked for as a retained reference and leaves the panel.
@@ -67,7 +67,14 @@ module.exports=function({changed,answer,action,page}) {
     else if(found>=0){index=found;frozen=undefined;stale=false;}
     else if(previous&&focused&&!state(previous.item).state&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length||Object.keys(state(previous.item).cursor).length)){
       frozen=previous;stale=true;state(previous.item).notice=text('changed','question changed · Tab next');
-    }else{frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;}
+    }else{
+      frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;
+      // The question being read left with nothing typed to it and another stands in its place:
+      // say so once, and the first Enter after only clears the word, never answers the new one.
+      if(previous&&focused&&listed.length&&!state(previous.item).sending){
+        state(listed[index].item).notice=text('changed','question changed · Tab next');changeArmed=true;
+      }
+    }
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
@@ -76,16 +83,16 @@ module.exports=function({changed,answer,action,page}) {
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
   function enter(){
-    focused=true;scroll=0;follow=true;answeredAt=0;
+    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
-  function leave(){focused=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
-    moves++;seat=seatOf(flat()[index]);
+    moves++;changeArmed=false;seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
@@ -245,6 +252,7 @@ module.exports=function({changed,answer,action,page}) {
     if(c==='\t'){move(1);return;}
     if(c==='\r'||c==='\n'){
       if(!row){action('\r');return;}
+      if(changeArmed){changeArmed=false;local.notice='';changed();return;}
       // Enter sends the highlighted choice, the same value its number key picks.
       if(choosing(row)&&cursorOf(row)>=0){
         local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
@@ -267,10 +275,21 @@ module.exports=function({changed,answer,action,page}) {
     for(let i=0;i<data.length;i++){
       if(!focused){changed();return data.subarray(i);}
       const byte=data[i],c=String.fromCharCode(byte);
+      if(skipTail){if((byte&0xc0)===0x80)continue;skipTail=false;}
       if(escape){
         clearTimeout(escapeTimer);escapeTimer=undefined;
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
-        if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){if(pasting){escape='';character('\x1b');character(c);continue;}leave();return data.subarray(i);}
+        if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
+          if(pasting){escape='';character('\x1b');character(c);continue;}
+          // Whatever follows an Esc in this read (or within the Esc window) other than `[` or `O` (an arrow or
+          // function key) is a combination this editor has no meaning for: Alt+letter, Shift/Alt+Enter,
+          // Esc then a control byte. It is dropped, never the native's (an Enter there would submit its
+          // text, a ^C interrupt its turn); the popup stands. Only a second Esc closes it, and is dropped.
+          escape='';
+          if(byte===0x1b){leave();escapedAt=Date.now();return data.subarray(i+1);}
+          if(byte>=0xc0)skipTail=true;
+          continue;
+        }
         escape+=c;
         if(escape==='\x1b[200~'){pasting=true;escape='';}
         else if(escape==='\x1b[201~'){pasting=false;escape='';}
@@ -286,17 +305,35 @@ module.exports=function({changed,answer,action,page}) {
           }
           escape='';
         }else if(escape.length>64)escape='';
-      }else if(byte===0x1b){escape=c;if(!pasting)escapeTimer=setTimeout(()=>{if(escape==='\x1b')leave();},25);}
+      }else if(byte===0x1b){escape=c;if(!pasting)escapeTimer=setTimeout(()=>{if(escape==='\x1b'){leave();escapedAt=Date.now();}},25);}
       else if(byte===0x1d&&!pasting){leave();return data.subarray(i+1);}
       else for(const char of decoder.write(data.subarray(i,i+1)))character(char);
     }
     changed();return Buffer.alloc(0);
   }
   // The first input after an answer returned focus: a lone Esc within a few seconds was meant
-  // for the block it left (rule 5), so it is taken here; any other input goes on as typed.
+  // for the popup it left (rule 5), so it is taken here, and so is a lone Enter (11-15: the
+  // second press of an Enter meant for the popup never submits the native input's text); any
+  // other input goes on as typed. The same goes for the lone Esc within a second of the Esc that closed
+  // the popup (a second press of the key that closed it is no interrupt or cancel of the native's).
   function answeredEscape(data){
-    const fresh=answeredAt&&Date.now()-answeredAt<10000;answeredAt=0;
-    return !!fresh&&data.length===1&&data[0]===0x1b;
+    const now=Date.now(),fresh=answeredAt&&now-answeredAt<10000,closed=escapedAt&&now-escapedAt<1000;answeredAt=escapedAt=0;
+    return data.length===1&&(!!fresh&&[0x1b,0x0d,0x0a].includes(data[0])||!!closed&&data[0]===0x1b);
   }
-  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,sent:sentLines,references};
+  // 11-15 (popup design A): the panel's summary of the question Ctrl+] opens on (the one shown,
+  // else the first answerable one): how many there are, its two-row and one-row forms and its
+  // whole first line, from the backend's rows at the panel's width. The popup reads it whole.
+  function summary(){
+    const listed=flat();if(!listed.length)return null;
+    let row=current();
+    if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}
+    const view=(row||listed[0]).question.display||{};
+    const fallback=[[span('◑ ','g_blocked'),span((row||listed[0]).question.question||'?','loc_repo')]];
+    return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),
+      line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length};
+  }
+  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
+    get question(){return !!current();},enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+    // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
+    wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};
 };

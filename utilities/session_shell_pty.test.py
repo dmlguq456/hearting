@@ -491,6 +491,9 @@ function existing(file){return new Promise((resolve,reject)=>{
    // Esc closes the page (no native Esc), then the draft goes to the native as typed.
    raw='';
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
+   // The page is gone only once the lone Esc has been flushed (8 ms): an Enter sent before that would be
+   // read with it as one key (Alt+Enter), not as the Enter that follows an Esc.
+   for(let n=0;n<120&&screen().join('\n').includes('REQ_BODY_NONCE');n++){await new Promise(resolve=>setTimeout(resolve,50));await new Promise(resolve=>sideTerm.write('',resolve));}
    await shows('REQ_TITLE');await settled();
    await rpc(cfg.inlet,{batch:Buffer.from('\r').toString('base64')});await waitFor(/DONE_REQ_DRAFT/);
    if(/NATIVE_ESC_/.test(raw))throw Error('the page keys reached the native');

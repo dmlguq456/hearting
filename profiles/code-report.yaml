@@ -7,5 +7,5 @@ fragments:
   - profiles/fragments/code-report.md
 expose:
   skills: [code-report, autopilot-code, analyze-project]
-  agents: []
+  agents: [light, balanced, deep]
   triggers: []

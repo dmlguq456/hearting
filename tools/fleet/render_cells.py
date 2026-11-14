@@ -143,7 +143,7 @@ _LIVE_GLYPH = {"working": "●", "idle": "●", "unused": "◌", "blocked": "◑
                "stale": "·", "dead": "✕", "queued": "◦", "unknown": "·"}
 _DETACHED_GLYPH = "○"   # Ring means no attached client; idle uses a filled dim-green dot.
 _GLYPH_KEY = {"working": "g_work", "idle": "g_work_off", "unused": "g_unused",
-              "blocked": "g_blocked", "done": "green",   # F-60: red, on its own key
+              "blocked": "g_blocked", "done": "grp_live",   # F-60: red, on its own key
               "stale": "g_stale", "dead": "g_dead", "degraded": "lvl_y", "queued": "dim", "unknown": "dim"}
 _INTERACTION_LABEL = {
     "decision": "answer needed",
