@@ -626,7 +626,12 @@ so it is called from the dispatch-depth-0 session in the final worktree; inside
 a registered owner (`AGENT_DISPATCH_DEPTH` ≠ 0) it needs `--dispatch-evidence`
 or `--registered-headless-evidence` from the parent, exactly like `compile`.
 The stderr `[경로]` notice (§0.4) keeps the campaign choice observed before
-compose starts, and accompanies an admitted first leg. A no-wait snapshot is
+compose starts, and accompanies an admitted first leg. When the owner that
+started is not the harness the work asked for (`--owner`/owner pin), the notice
+adds one line naming the request, the harness and model that started, and why
+(`담당 변경: 요청 codex → opencode <model>(deep) — codex 사용 한도 소진(<reset> 재설정)`),
+and the per-harness owner advisory follows the harness that started. The
+switch itself is unchanged and needs no approval. A no-wait snapshot is
 pending; only an elapsed bounded wait is a timeout.
 
 Start receipts for open work include `runtime.run_command` and, when the adapter
@@ -1032,7 +1037,8 @@ plan says a later leg remains), one cost line (time from the route's first
 registered attempt to the seal, and the session tokens its owner, workers and
 retries wrote into their own attempt logs, summed; a session that wrote none is
 counted as `unknown`, and one whose started turn or step left no count makes
-the total `at least`; the line shows token counts, not a share of a plan), what
+the total `at least`; the line shows token counts, not a share of a plan), the
+owner harness and model that ran when they differ from the requested owner, what
 changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
 artifact path, in the shared UI-text catalog's language (English by default,

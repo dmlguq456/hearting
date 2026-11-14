@@ -2092,7 +2092,8 @@ def _first_leg_bound(route, path, jobs, result, root, record, output, record_pat
     if not _first_leg_started(leg_result, jobs, leg_route):
         return None, leg_result
     print(module.compose_card(leg_route, RP.display_plan(decision["proposal"]["legs"]),
-                              owner_harness=context.get("owner")), file=sys.stderr)
+                              owner_harness=context.get("owner"), launches=leg_result.get("launches")),
+          file=sys.stderr)
     _checkpoint("after-first-start")
     encoded = json.dumps(leg_result, sort_keys=True, ensure_ascii=False)
     decision_record = _bind(record_path, start_receipt=json.loads(encoded),
@@ -3204,6 +3205,10 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
                 "owns the result; only the final result or inability to continue follows the existing delivery path. "
                 "Automatic replacements use the existing controller timing, without a persisted per-generation delay. "
                 "If the correction changes the requested work, ask the user before changing that work.")
+    import work_intent
+    started_owner = work_intent.launched_owner(result.get("launches")).get("harness")
+    if started_owner:  # the prospective owner advisory follows the harness that started, not the request
+        result["advisories"] = OWNER_WRITE_ADVISORY.advisories(route, owner_harness=started_owner)
     for launch in result.get("launches", []):
         for advisory in OWNER_WRITE_ADVISORY.receipt_advisories(launch.get("receipt", "")):
             if advisory not in result["advisories"]:
