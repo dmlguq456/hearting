@@ -3524,7 +3524,14 @@ received (else delivered), so when reporting an older revision's work use the `-
 is not sent; a delivered one is not recalled, and the cancel notice reaches the receiver
 at its next boundary. A request follows only a successor that Hearting's lineage confirms,
 and an unconfirmed same-name session neither inherits nor may report it. A report is not
-approval, release or a user answer.
+approval, release or a user answer. Running the same `report` command again sends a new
+report with the next number; a transfer retry of one report keeps it one report.
+The seal keeps a revision's or report's body from changing after it is sent; it is not a
+read barrier between sessions or workers of the same OS user, and `show` names its caller
+exactly as `prompt` does. The request record is the one source of truth: each message's
+number and transfer ref are fixed in it before the message is sealed, and when a writer
+stops after the seal, the next list, `show`, `report` or runner pass completes the record
+from that seal; a message with no seal stays listed as not confirmed on both sides.
 
 A lost native response is reconciled from exact persisted history before continuing
 the same ref. Duplicate or ambiguous matches are left pending without resubmitting

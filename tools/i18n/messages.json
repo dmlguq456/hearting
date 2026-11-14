@@ -1608,27 +1608,27 @@
   },
   "fleet.session_panel.request_label_delivery": {
    "en": "DELIVERY",
-   "ko": "전달"
+   "ko": "DELIVERY"
   },
   "fleet.session_panel.request_label_last": {
    "en": "LAST",
-   "ko": "변화"
+   "ko": "LAST"
   },
   "fleet.session_panel.request_label_remaining": {
    "en": "LEFT",
-   "ko": "남은 것"
+   "ko": "LEFT"
   },
   "fleet.session_panel.request_label_reports": {
    "en": "REPORTS",
-   "ko": "보고"
+   "ko": "REPORTS"
   },
   "fleet.session_panel.request_label_revision": {
    "en": "REV",
-   "ko": "판"
+   "ko": "REV"
   },
   "fleet.session_panel.request_label_work": {
    "en": "WORK",
-   "ko": "일"
+   "ko": "WORK"
   },
   "fleet.session_panel.request_late": {
    "en": "late",
@@ -1661,6 +1661,10 @@
   "fleet.session_panel.request_state_partial": {
    "en": "partial answer",
    "ko": "일부 답"
+  },
+  "fleet.session_panel.request_state_preparing": {
+   "en": "not confirmed",
+   "ko": "확정 안 됨"
   },
   "fleet.session_panel.request_state_rejected": {
    "en": "rejected",

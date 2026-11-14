@@ -907,13 +907,15 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             self.assertEqual([(v["side"], v["record"]["id"]) for v in views], [("out", request_id)])
             received, _ = shell._request_views("codex", theirs["session_id"], time.time())
             self.assertEqual([(v["side"], v["record"]["id"]) for v in received], [("in", request_id)])
-            # The files whose change repaints the panel: the session's index and the record.
-            self.assertTrue(any(path.endswith(mine["session_id"] + ".json") for path in watched))
+            # The files whose change repaints the panel: the request index and the record.
+            self.assertIn(str(peer_request.index_path()), watched)
             self.assertTrue(any(path.endswith(request_id + ".json") for path in watched))
             # No sent-message shard exists, yet the open request is listed.
             self.assertEqual(shell._sent_peer_messages(mine["session_id"]), ([], []))
-            # A session with no requests costs one small read and shows nothing.
-            self.assertEqual(shell._request_views("claude", "absent-session", time.time()), ([], []))
+            # A session with no requests shows nothing and still watches the index, so its
+            # first request repaints the panel.
+            self.assertEqual(shell._request_views("claude", "absent-session", time.time()),
+                             ([], [str(peer_request.index_path())]))
 
     def test_z_a_requests_transfers_stand_in_the_request_line_not_in_the_message_lists(self):
         # R29: one line of work is counted once. The request, its report and its cancel notice are
@@ -2261,6 +2263,16 @@ for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
 }
 const none=text(render(37,30,{},{...base,requests:[]}));
 assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
+// Spec rules 57, 58: `REQUEST` is a dark gray name tag (as MESSAGES and MEM), never the route
+// count's state color.
+const styled={...base,routes:[{...routes[0],state:'idle',kind:'idle'}],styles:{dim:{dim:true},g_idle:{fg:186}}};
+for(const width of [32,38]){
+ const parts=render(width,30,{},styled).rows.flat();
+ const tag=parts.find(p=>/^\d+ REQUEST$/.test(p.text));
+ assert(tag&&tag.dim===true&&tag.fg===undefined,JSON.stringify(tag));
+ const count=parts.find(p=>/^\d+ ROUTE$/.test(p.text));
+ assert(count&&count.fg===186,JSON.stringify(count));
+}
 """)
 
     def test_a_long_status_cuts_the_title_first_and_keeps_the_other_session(self):

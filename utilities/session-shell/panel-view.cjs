@@ -1392,10 +1392,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const label=upper(clean(model.route_label||'').trim());
     // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
     const running=shown.some(live);
-    // `N ROUTE │ M REQUEST`: the request count follows the route count in the same title.
+    // `N ROUTE │ M REQUEST`: the request count follows the route count in the same title. The
+    // route count keeps its state color; `REQUEST` is a name tag like `MESSAGES`, `MEM` and the
+    // info labels: dark gray upper case (spec rules 57, 58), never a state color.
     const routeHead=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:[];
-    const requestHead=requestList.length?[text(side?requestList.length+' REQUEST':'request '+requestList.length,'g_idle')]:[];
-    const routeTitle=routeHead.length||requestHead.length?[...routeHead,...(routeHead.length&&requestHead.length?[text(' │ ','g_idle')]:[]),...requestHead]:null;
+    const requestHead=requestList.length?[text(side?requestList.length+' REQUEST':'request '+requestList.length,'dim')]:[];
+    const routeTitle=routeHead.length||requestHead.length?[...routeHead,...(routeHead.length&&requestHead.length?[text(' │ ','dim')]:[]),...requestHead]:null;
     const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;

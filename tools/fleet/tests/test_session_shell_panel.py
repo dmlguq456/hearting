@@ -73,7 +73,7 @@ class RequestRowsTest(unittest.TestCase):
         view['rows'] = {'r1': {'state': 'received'}}
         row, = self.rows([view])
         self.assertEqual(row['status'], '열림')
-        self.assertIn(['전달', '보임', 'dim'], row['details'])
+        self.assertIn(['DELIVERY', '보임', 'dim'], row['details'])
         for line in self.rows([view]) + self.rows([_request('partial')]):
             self.assertNotIn('진행', str(line))
 
@@ -102,13 +102,13 @@ class RequestRowsTest(unittest.TestCase):
         view['rows'] = {'r1': {'state': 'received'}, 'n1': {'state': 'queued'}}
         row, = self.rows([view])
         self.assertEqual((row['glyph'], row['status'], row['kind']), ('✕', '취소됨', 'request-rejected'))
-        self.assertIn(['전달', '보임', 'dim'], row['details'])
+        self.assertIn(['DELIVERY', '보임', 'dim'], row['details'])
 
     def test_a_confirmed_ended_peer_changes_only_the_delivery_word(self):
         view = _request(); view['gone'] = True; view['rows'] = {'r1': {'state': 'queued'}}
         row, = self.rows([view])
         self.assertEqual(row['state'], 'open')
-        self.assertIn(['전달', '상대 끝남', 'dim'], row['details'])
+        self.assertIn(['DELIVERY', '상대 끝남', 'dim'], row['details'])
 
     def test_late_reports_name_their_superseded_revision_and_overflow_is_bounded(self):
         late = {'n': 1, 'kind': 'final', 'at': NOW - 20, 'revision': 1, 'late': True, 'result': 'old verdict',

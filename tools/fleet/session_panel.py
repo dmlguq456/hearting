@@ -400,7 +400,7 @@ def route_row(row, now=None, *, cells=None):
     return shown
 
 
-_REQUEST_STATES = ("open", "partial", "final", "rejected", "cancelled")
+_REQUEST_STATES = ("preparing", "open", "partial", "final", "rejected", "cancelled")
 _REQUEST_BODY_LINES = 200
 
 
@@ -469,6 +469,8 @@ def request_rows(views, now, tag_of):
                                      gone=bool(view.get("gone")))
         word = lambda key: ui_text("fleet.session_panel." + key)  # noqa: E731
         work = word("request_state_" + state)
+        # A reserved message whose seal is not there is shown, never dropped (not confirmed).
+        unconfirmed = [e for e in record.get("sending") or () if isinstance(e, dict)]
         # Folded: what this session still waits to see (a sent request not yet seen), else the work.
         status = (word("request_delivery_" + delivery)
                   if side == "out" and state in ("open", "partial") and delivery in ("sent", "delivered")
@@ -496,6 +498,8 @@ def request_rows(views, now, tag_of):
                 work_text += " · %s %s" % (word("request_label_remaining"), tail["remaining"])
             if state == "rejected" and tail.get("result"):
                 work_text += " · " + tail["result"]
+        if unconfirmed and state != "preparing":
+            work_text += " · %s %d" % (word("request_state_preparing"), len(unconfirmed))
         details.append([word("request_label_work"), work_text,
                         "lvl_r" if state in ("rejected", "cancelled") else "loc_repo"])
         details.append([word("request_label_last"), _request_age(now - (record.get("updated") or now)), "dim"])
