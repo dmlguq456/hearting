@@ -6718,6 +6718,17 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         if message and message.get("state") == "received":
                             peer_obligations.acknowledge_session_notice_delivery(message, roots=[root])
                             continue
+                    # A lease whose deadline passed cannot deliver either; the
+                    # same reclaim the send stage uses returns the record to
+                    # pending so the notice TTL can end it like any other.
+                    if (record.get("state") == "claimed"
+                            and type(record.get("claim_deadline_ns")) is int
+                            and time.monotonic_ns() >= record["claim_deadline_ns"]):
+                        try:
+                            pending.reclaim(root, storage_sid, record["delivery_id"],
+                                            now_ns=time.monotonic_ns())
+                        except (pending.PendingDeliveryError, OSError, ValueError):
+                            pass
                     store.update(duty["id"], state="pending", observation={
                         **(duty.get("observation") or {}), "reason": "recipient-lineage-unavailable"},
                         expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},

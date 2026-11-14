@@ -3859,6 +3859,26 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
                 "attempt_id": "att-never-registered"}, jobs=self.jobs, session="gone", harness="claude")
             self.assertEqual((answer.state, answer.reason), ("unreadable", "handover-unreadable:notice-attempt-unavailable"))
 
+    def test_an_ended_owners_notice_is_refused_not_re_resolved_to_its_parent(self):
+        # The owner and its parent are different sessions. The producer gives the
+        # parent its own copy, so an owner that cannot receive its copy gets
+        # nothing re-resolved to the parent: the answer is a refusal.
+        from dispatch_seat_handover import record_recipient_binding
+        for index, status in enumerate(("killed", "cancelled", "failed", "done")):
+            with self.subTest(status=status):
+                parent_sid, owner_sid = "sup-" + status, "own-" + status
+                meta = self.parent_row(parent_sid, index=60 + index)
+                self._end_attempt(meta, status)
+                parent, = self.notices(sid=parent_sid, label="parent-" + status, lineage={
+                    "kind": "attempt-parent", "harness": "claude", "session_id": parent_sid,
+                    "attempt_id": meta["attempt_id"]})
+                owner, = self.notices(sid=owner_sid, label="owner-" + status, lineage={
+                    "kind": "owner-session", "harness": "claude", "session_id": owner_sid,
+                    "attempt_id": meta["attempt_id"]})
+                self.assertEqual(record_recipient_binding(parent, parent_sid, harness="claude", jobs=self.jobs),
+                                 ("claude", parent_sid))
+                self.assertIsNone(record_recipient_binding(owner, owner_sid, harness="claude", jobs=self.jobs))
+
     def test_owner_session_keeps_exact_native_consumer_after_tidy(self):
         import dispatch_completion_join as join
         from dispatch_contract import dispatch_state_root
