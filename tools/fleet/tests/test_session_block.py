@@ -25,6 +25,21 @@ class SessionBlockTest(unittest.TestCase):
         self.assertEqual(display['source'], [])
         self.assertEqual(item['questions'][0]['choices'], choices)
 
+    def test_box_heads_count_one_to_n_after_a_question_with_choices(self):
+        # 11-14 night: the choices' own numbering overwrote the box number, so the boxes after a
+        # four-choice question read `QUESTIONS 3 · 5/3`, `6/3`. Each head reads `i/N`, 1 to N.
+        from tools.fleet.session_block import question_presentations
+        item = {'id': 'many', 'answerable': True, 'age': '0m', 'questions': [
+            {'id': 'a', 'question': 'Pick one', 'choices': ['one', 'two', 'three', 'four'], 'recommended': 1},
+            {'id': 'b', 'question': 'Then this'}, {'id': 'c', 'question': 'And this', 'choices': ['yes', 'no']}]}
+        question_presentations([item], 80)
+        heads = [''.join(text for text, _ in question['display']['head']) for question in item['questions']]
+        self.assertEqual([head.split(' · ')[1] for head in heads], ['1/3', '2/3', '3/3'], heads)
+        # The choices keep their own numbers and the recommended mark.
+        options = [''.join(text for text, _ in line) for line in item['questions'][0]['display']['options']]
+        self.assertEqual([line.split(' ')[0] for line in options], ['1', '2', '3', '4'])
+        self.assertIn('2 two (', options[1])
+
     def test_question_body_preserves_decision_lines_at_wide_and_narrow_widths(self):
         from tools.fleet.session_block import question_presentations
         text = "[결정 필요] 로그 보관 기간\n- 30일: 기존 설정 유지\n- 90일: 저장 공간 3배\n추천: 30일 — 되돌리기 쉬움\n답이 없으면: 보류"
