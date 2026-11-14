@@ -2,7 +2,7 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 module.exports=function({changed,answer,action,page}) {
-  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null;
+  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer;
   let labels={},styles={},help='';
   const entries=new Map();
@@ -76,7 +76,7 @@ module.exports=function({changed,answer,action,page}) {
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
   function enter(){
-    focused=true;scroll=0;follow=true;
+    focused=true;scroll=0;follow=true;answeredAt=0;
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
@@ -223,7 +223,7 @@ module.exports=function({changed,answer,action,page}) {
       // Enter never answers it unseen. Had the person moved to another question while this
       // one was sent, they stay there. A refused answer stays in sight with its word.
       const at=sent&&moves!==started&&seat?flat().findIndex(r=>seatOf(r)===seat):-1;
-      if(sent&&at<0&&focused){index=Math.max(0,flat().findIndex(r=>active(r)));leave();return;}
+      if(sent&&at<0&&focused){index=Math.max(0,flat().findIndex(r=>active(r)));answeredAt=Date.now();leave();return;}
       if(at>=0)index=at;
       else if(!sent&&moves===started){const back=flat().findIndex(r=>seatOf(r)===seatOf(row));if(back>=0)index=back;}
       changed();
@@ -283,5 +283,11 @@ module.exports=function({changed,answer,action,page}) {
     }
     changed();return Buffer.alloc(0);
   }
-  return {get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,sent:sentLines,references};
+  // The first input after an answer returned focus: a lone Esc within a few seconds was meant
+  // for the block it left (rule 5), so it is taken here; any other input goes on as typed.
+  function answeredEscape(data){
+    const fresh=answeredAt&&Date.now()-answeredAt<10000;answeredAt=0;
+    return !!fresh&&data.length===1&&data[0]===0x1b;
+  }
+  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,sent:sentLines,references};
 };

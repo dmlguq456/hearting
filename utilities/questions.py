@@ -188,11 +188,15 @@ def render(board, rows, folded):
         counts["total"] if board.get("complete") else "?", counts["older"])
     if counts["ownerless"]:
         head += " (%d ownerless)" % counts["ownerless"]
-    # Listed but not counted: a blocked owner is its parent agent's to answer, not a person's.
-    agents = sum(1 for item in board.get("items") or ()
-                 if isinstance(item, dict) and not item.get("stale") and not HWS.person_wait(item))
+    # Listed but not counted: a blocked owner is its parent agent's to answer, not a person's;
+    # an answer the person sent is on its way (rule 5).
+    current = [item for item in board.get("items") or () if isinstance(item, dict) and not item.get("stale")]
+    agents = sum(1 for item in current if item.get("source") == "S3")
     if agents:
         head += " · %d blocked owner%s for the parent agent" % (agents, "" if agents == 1 else "s")
+    sent = sum(1 for item in current if item.get("answer") == "sent")
+    if sent:
+        head += " · %d answer%s on the way" % (sent, "" if sent == 1 else "s")
     head += " · observed %s ago" % _age(observed) if observed >= 60 else " · observed now"
     if not board.get("complete"):
         head += " · observation incomplete"

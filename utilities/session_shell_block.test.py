@@ -245,6 +245,9 @@ const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
  assert.equal(b.focused,false);
  assert.deepEqual(lines(b),['✓ answer sent · Beta']);
  assert(!shown(b).includes('FIRST_Q')&&shown(b).includes('NEXT_Q'),shown(b));
+ // The lone Esc a person presses right after answering (to leave the block, as before) is
+ // taken by the shell, never the native's interrupt of a running turn; only that first one.
+ assert.equal(b.answeredEscape(Buffer.from('\x1b')),true);assert.equal(b.answeredEscape(Buffer.from('\x1b')),false);
  assert.deepEqual(b.input(Buffer.from('\r')),Buffer.from('\r'),'Enter goes to the native input');
  b.enter();assert(shown(b).includes('NEXT_Q')&&!shown(b).includes('FIRST_Q'),shown(b));
  for(let i=0;i<3;i++){b.input(Buffer.from('\t'));assert(!shown(b).includes('FIRST_Q'),shown(b));}
@@ -265,6 +268,7 @@ const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
  s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}]);
  s.enter();s.input(Buffer.from('tFAKE_SECRET\r'));await tick();
  assert.deepEqual(lines(s),['✓ answer sent · •••']);
+ assert.equal(s.answeredEscape(Buffer.from('x')),false);assert.equal(s.answeredEscape(Buffer.from('\x1b')),false,'typing first: Esc is the native\'s');
  // A delivery that failed brings the question back with its existing word.
  const x=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  x.update([a]);x.enter();x.input(Buffer.from('\r'));await tick();

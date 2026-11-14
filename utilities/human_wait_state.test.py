@@ -3495,6 +3495,12 @@ class MessageCompletionTests(unittest.TestCase):
                 sent = {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
                         "list": "questions: 1 current", "sent": [a["id"]]}
                 self.assertEqual(surfaces(harness, "session-a"), sent)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(state, "read_selected_request", return_value=None):
+                    board_cli.main(["list"])
+                head = out.getvalue().splitlines()[0]
+                self.assertIn(" · 1 answer on the way", head)
+                self.assertNotIn("blocked owner", head)
                 # The panel still holds it as its receipt, with what was sent.
                 panel = session_shell.session_questions(harness, "session-a", view=state.cached_view(request=False))
                 self.assertEqual([(row["id"], row.get("request_state"), row.get("sent")) for row in panel],
