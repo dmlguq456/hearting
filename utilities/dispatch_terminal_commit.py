@@ -556,20 +556,30 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
         if (slot / work_intent.SUMMARY_NAME).exists():
             return
         from dispatch_owner_input import completion_corrections
-        assessment = None
+        assessment = owner = None
+        if work_intent.requested_owner(route):
+            # Only work that asked for an owner harness can differ from it; the owner row names
+            # the harness and model that ran, and without it the summary omits that line.
+            try:
+                from dispatch_completion_join import exact_attempt_row
+                owner = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
+            except Exception:  # noqa: BLE001
+                owner = None
         # A finished review whose subject did not pass: an audit, or any owner that
         # closed on a review disposition (`수정 후 병합`, route_authority.handoff_search).
         try:
-            from dispatch_completion_join import exact_attempt_row
-            row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id)
-            if row.metadata.get("reconcile_reason") == "completed-audit-with-findings":
+            row = owner
+            if row is None:
+                from dispatch_completion_join import exact_attempt_row
+                row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
+            if row.get("reconcile_reason") == "completed-audit-with-findings":
                 assessment = "FAIL"
         except Exception:  # noqa: BLE001 -- an unreadable row only leaves the assessment unnamed
             assessment = None
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,
                                               cost=_completion_cost(request, route),
                                               corrections=completion_corrections(request.jobs, request.owner_attempt_id),
-                                              assessment=assessment, publication=publication)
+                                              assessment=assessment, publication=publication, owner=owner)
         _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return

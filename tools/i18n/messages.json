@@ -98,6 +98,10 @@
    "en": "Unverified or remaining work could not be extracted reliably; see the report",
    "ko": "미검증·남은 일을 확실히 추출하지 못함 · 보고서 확인"
   },
+  "completion.owner_changed": {
+   "en": "Owner: {actual} — differs from the request ({requested})",
+   "ko": "담당: {actual} — 요청({requested})과 다름"
+  },
   "completion.publication": {
    "en": "PR: {line}",
    "ko": "PR: {line}"
@@ -1977,6 +1981,34 @@
   "open.viewer": {
    "en": "Viewer: {url}",
    "ko": "뷰어: {url}"
+  },
+  "owner.changed": {
+   "en": "Owner changed: requested {requested} → {actual} — {reason}",
+   "ko": "담당 변경: 요청 {requested} → {actual} — {reason}"
+  },
+  "owner.reason.limited": {
+   "en": "{harness} usage limit reached",
+   "ko": "{harness} 사용 한도 소진"
+  },
+  "owner.reason.limited_reset": {
+   "en": "{harness} usage limit reached (resets {when})",
+   "ko": "{harness} 사용 한도 소진({when} 재설정)"
+  },
+  "owner.reason.model_unavailable": {
+   "en": "{harness} model unavailable",
+   "ko": "{harness} 모델 사용 불가"
+  },
+  "owner.reason.selected": {
+   "en": "automatic selection ({source})",
+   "ko": "자동 선택({source})"
+  },
+  "owner.reason.state": {
+   "en": "{harness} unavailable ({state})",
+   "ko": "{harness} 사용 불가({state})"
+  },
+  "owner.tier_changed": {
+   "en": "tier {sealed}→{actual}",
+   "ko": "등급 {sealed}→{actual}"
   },
   "questions.registered": {
    "en": "Waiting for your answer. Reply in Fleet or in this session.",
