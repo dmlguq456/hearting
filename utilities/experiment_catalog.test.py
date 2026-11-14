@@ -734,6 +734,8 @@ class Observation(Base):
         summary = summary_of({"wer": [(12, 20.4)]})
         self.assertIsNone(E.describe_observation(root, "mpwav-20261111-stray", None, summary))
         self.assertEqual(E.unregistered_line("ko"), "정본 이름 없음: run을 정본에 등록")
+        self.assertEqual(E.register_line("mpwav-1", "ko"), "`hearting run experiment_catalog register --group-name <묶음> "
+                                                           "--condition-name <조건> --run mpwav-1`로 등록하면 이후 알림과 결과 표가 그 이름을 쓴다")
         self.assertIsNone(E.describe_observation(self.make_root("none", "z"), "run-a", None, summary))
         path = E.catalog_path(root)       # a hand edit the writer would refuse: a second condition answers to run-a
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -788,7 +790,7 @@ class Leaderboard(Base):
         self.assertIn("-1.99%p", text)                                  # percent values subtract into percentage points
         self.assertIn("+0.41%p", text)
         self.assertIn("fix 19.99%", text)
-        self.assertIn("최근 값 아직 없음", text)                       # no value: a word, not a zero
+        self.assertIn("| 값 없는 조건 | 미확인 | 12/40 ep | 아직 없음 |", text)   # no value: Fleet's word, not a zero
         first, second = text.split("### 다른 묶음")
         self.assertNotIn("다른 묶음의 조건", first)                     # groups are not mixed
         self.assertNotIn("빠른 조건", second)
@@ -831,7 +833,7 @@ class Leaderboard(Base):
         empty = subprocess.run([sys.executable, str(SCRIPT), "leaderboard", "--artifact-root", str(self.make_root("e", "x")), "--lang", "ko"],
                                capture_output=True, text=True, env=clean_env(self.home))
         self.assertEqual(empty.returncode, 0)
-        self.assertIn("순위표에 올릴 조건이 없음", empty.stdout)
+        self.assertIn("실험 정본 아직 없음: `hearting run experiment_catalog register", empty.stdout)   # how to start one
 
 
 class Values(Base):
@@ -854,8 +856,8 @@ class Values(Base):
         mine = next(text for text in board.splitlines() if "0.3초" in text)
         for wrong in ("0.7%", "0.5%"):
             self.assertNotIn(wrong, mine)
-        self.assertIn("| 0.7 (loss)@2 | 0.5 (loss)@1 |", mine)
-        self.assertIn("| 18.00%@2 | 18.00%@2 |", next(text for text in board.splitlines() if "짧은 발화 제외" in text))
+        self.assertIn("| 0.7 (loss) | 0.5 (loss) |", mine)                  # Fleet's cell: the metric named, no unit
+        self.assertIn("| 18.00@2 | 18.00@2 |", next(text for text in board.splitlines() if "짧은 발화 제외" in text))
         status_line = next(text for text in E.render_status(report, "ko").splitlines() if text.startswith("- 0.3초"))
         self.assertNotIn("0.7%", status_line)
         self.assertIn("0.7 (loss)@2", status_line)
@@ -875,7 +877,7 @@ class CardNames(Base):
         E.run_write(root, lambda ctx: E.op_rename(ctx, "잡음 줄임", "잡음 섞기"), now=NOW + 1)   # `잡음 줄임` is now a former name
         return root, E.load(root).doc
 
-    def test_the_brief_shrinks_in_steps_and_ends_at_the_location_line(self):
+    def test_the_brief_shrinks_in_steps_and_ends_at_the_table_command(self):
         root, doc = self.setup_root(extra=40)
         path = str(E.catalog_path(root))
         full = E.catalog_brief(doc, path, 4000, "ko")
@@ -890,8 +892,10 @@ class CardNames(Base):
             self.assertIn("외 ", brief)                                    # the names left out are counted
             sizes.append(len(brief.encode("utf-8")))
         self.assertLessEqual(sizes[0], sizes[1])
-        only = E.catalog_brief(doc, path, len(("실험 정본: " + path).encode("utf-8")), "ko")
-        self.assertEqual(only, "실험 정본: " + path)                       # no room for names: the location only
+        table = "결과 표(그대로 붙인다): hearting run experiment_catalog leaderboard"
+        self.assertTrue(all(table in E.catalog_brief(doc, path, n, "ko") for n in (360, 600, 4000)))
+        only = E.catalog_brief(doc, path, len(table.encode("utf-8")), "ko")
+        self.assertEqual(only, table)                                      # no room for names: the table command only
         self.assertEqual(E.catalog_brief(doc, path, 5, "ko"), "")
         self.assertEqual(E.catalog_brief({"groups": [{"id": "g"}], "conditions": []}, path, 600, "ko"), "")
 

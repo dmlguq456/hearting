@@ -111,7 +111,8 @@ class Consumers(T.Base):
         epoch = 12 if row["comparison_state"] == "ok" else 10
         context = rp._experiment_context({"artifact_root": str(root), "run_id": "run-b"}, "run-b",
                                          {"summary": T.summary_of({"wer": [(epoch, 20.5)]})}, True)
-        out["notice"] = "\n".join(rp._experiment_lines(context, first=True, final=False))
+        out["notice"] = "\n".join(rp._experiment_lines(context, first=True, final=False) + [
+            piece(600) if callable(piece) else piece for _place, piece in rp._experiment_optional(context, first=True, final=False)])
         hosts = load_hyphen("compute_hosts_consumers", "compute-hosts.py")
         info = hosts._catalog_identity(str(root), "run-b")
         out["compute-hosts"] = f"{info['name']} {info['goal']}" if info else ""
@@ -135,7 +136,7 @@ class Consumers(T.Base):
         for harness in ("claude", "codex", "opencode"):
             with iso.patched_environ({"HERDR_PANE_ID": f"test:{harness}"}):
                 text = st.run_hook(harness, "start", f"sid-{harness}", cwd=str(root.parent))
-            blocks[harness] = text[text.index("실험 정본:"):] if "실험 정본:" in text else ""
+            blocks[harness] = text[text.index("결과 표"):] if "결과 표" in text else ""
         return blocks
 
     def test_a_renamed_condition_and_its_comparison_are_the_same_in_every_consumer(self):
@@ -149,14 +150,17 @@ class Consumers(T.Base):
         shown = next(item for item in view["rows"] if item["name"]["text"] == NEW_B)
         self.assertEqual(shown["cells"]["delta"]["text"], lab_table.cells(row, board["groups"][0], NOW + 3)["delta"][0])
         self.assertIn("+0.5", shown["cells"]["delta"]["text"])
+        # A former name shows only as the way to the current one (`old → new` in the words line).
+        bare = {k: v.replace(f"{OLD_B} → {NEW_B}", "").replace(f"{OLD_A} → {NEW_A}", "") for k, v in texts.items()}
         for consumer in ("board", "fleet", "notice", "compute-hosts", "leaderboard", "card"):
             self.assertIn(NEW_B, texts[consumer], consumer)
-            self.assertNotIn(OLD_B, texts[consumer], consumer)
+            self.assertNotIn(OLD_B, bare[consumer], consumer)
+        self.assertIn(f"{OLD_B} → {NEW_B}", texts["notice"])
         for consumer in ("fleet", "notice", "leaderboard"):                      # the three that show the comparison
             self.assertIn("+0.5%p", texts[consumer], consumer)
             self.assertIn(NEW_A, texts[consumer], consumer)                      # the control carries its new name too
-            self.assertNotIn(OLD_A, texts[consumer], consumer)
-        self.assertIn(f"| {NEW_B} | run-b | 20.50%@12 | 19.50%@11 |", texts["leaderboard"])  # latest and best are different values
+            self.assertNotIn(OLD_A, bare[consumer], consumer)
+        self.assertIn(f"| {NEW_B} | 진행 | 12/40 ep | 20.50@12 | 19.50@11 |", texts["leaderboard"])  # latest and best are different values
         self.assertIn(f"run-b (= {NEW_B})", texts["card"])                          # the bare run id got its name, the id stays
         self.assertEqual(texts["question-advice"], f"run-b={NEW_B}")
 
@@ -177,7 +181,7 @@ class Consumers(T.Base):
         blocks = self.start_blocks(root)
         for harness, block in blocks.items():
             self.assertIn(NEW_B, block, harness)
-            self.assertNotIn(OLD_B, block, harness)
+            self.assertNotIn(OLD_B, block.replace(f"{OLD_B} → {NEW_B}", ""), harness)
             self.assertLessEqual(len(block.encode("utf-8")), st.LAB_BLOCK_BYTES, harness)
         self.assertEqual(len({blocks["claude"], blocks["codex"], blocks["opencode"]}), 1, blocks)
 
@@ -193,7 +197,7 @@ class Consumers(T.Base):
         text = "\n".join(rp._notice_texts(run, "checkpoint", observation, None, [],
                                           rp._experiment_lines(context, first=True, final=False)))
         self.assertTrue(text.startswith(NEW_B + " — "), text)
-        self.assertIn("run=run-b", text)                                   # the trace stays
+        self.assertIn("실행=run-b", text)                                  # the trace stays
         self.assertEqual(E.scan_text(text, doc), [])
         self.assertEqual({w["token"] for w in E.scan_text("run-b 결과를 확인한다", doc)}, {"run-b"})
 

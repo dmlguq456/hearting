@@ -430,6 +430,10 @@
    "en": "conditions: {names}",
    "ko": "조건: {names}"
   },
+  "experiment.card.missing": {
+   "en": "no experiment catalog yet; {count} run(s) show by id only. `{command}` names a run, and the results table and its words follow (advice)",
+   "ko": "실험 정본 아직 없음; run {count}건이 id로만 보임. `{command}`로 이름을 붙이면 결과 표와 낱말이 따라온다(권고)"
+  },
   "experiment.card.more": {
    "en": ", … and {n} more",
    "ko": ", … 외 {n}개"
@@ -437,6 +441,10 @@
   "experiment.card.rule": {
    "en": "call each condition by this catalog name",
    "ko": "조건은 이 이름으로 부른다"
+  },
+  "experiment.card.table": {
+   "en": "results table (paste it as printed): {command}",
+   "ko": "결과 표(그대로 붙인다): {command}"
   },
   "experiment.direction.max": {
    "en": "higher is better",
@@ -482,49 +490,17 @@
    "en": "latest value @{epoch} is not a finite number",
    "ko": "최근 값@{epoch}이 유한한 숫자가 아님"
   },
-  "experiment.leaderboard.col.baseline": {
-   "en": "Baseline",
-   "ko": "기준"
-  },
-  "experiment.leaderboard.col.best": {
-   "en": "Best",
-   "ko": "최고"
-  },
-  "experiment.leaderboard.col.delta": {
-   "en": "Diff",
-   "ko": "차이"
-  },
   "experiment.leaderboard.col.group": {
    "en": "Group",
    "ko": "묶음"
   },
-  "experiment.leaderboard.col.latest": {
-   "en": "Latest",
-   "ko": "최근"
-  },
-  "experiment.leaderboard.col.name": {
-   "en": "Condition",
-   "ko": "조건"
-  },
-  "experiment.leaderboard.col.relative": {
-   "en": "Relative %",
-   "ko": "상대 %"
-  },
-  "experiment.leaderboard.col.run": {
-   "en": "Run",
-   "ko": "실행"
-  },
-  "experiment.leaderboard.col.state": {
-   "en": "State / reason",
-   "ko": "상태·사유"
-  },
-  "experiment.leaderboard.comparable": {
-   "en": "comparable",
-   "ko": "비교 가능"
-  },
   "experiment.leaderboard.empty": {
    "en": "no conditions to rank",
    "ko": "순위표에 올릴 조건이 없음"
+  },
+  "experiment.leaderboard.missing": {
+   "en": "no experiment catalog yet: `{command}` registers a condition and its run",
+   "ko": "실험 정본 아직 없음: `{command}`로 조건과 run을 등록한다"
   },
   "experiment.leaderboard.note": {
    "en": "Order within one group by the latest value against the target; not a final winner or a pass/fail call.",
@@ -554,6 +530,14 @@
    "en": "{name} — {goal}; {values}",
    "ko": "{name} — {goal}; {values}"
   },
+  "experiment.notice.register": {
+   "en": "name it with `{command}`; later notices and the results table use that name",
+   "ko": "`{command}`로 등록하면 이후 알림과 결과 표가 그 이름을 쓴다"
+  },
+  "experiment.notice.table": {
+   "en": "table: {command}",
+   "ko": "표: {command}"
+  },
   "experiment.notice.unregistered": {
    "en": "no catalog name for this run: register it in the experiment catalog",
    "ko": "정본 이름 없음: run을 정본에 등록"
@@ -565,6 +549,14 @@
   "experiment.observed_unknown": {
    "en": "observation time unknown",
    "ko": "관측 시각 미확인"
+  },
+  "experiment.placeholder.condition": {
+   "en": "condition",
+   "ko": "조건"
+  },
+  "experiment.placeholder.group": {
+   "en": "group",
+   "ko": "묶음"
   },
   "experiment.progress": {
    "en": "progress {reached}/{total} {unit}",
@@ -650,6 +642,10 @@
    "en": "term {term}: {meaning}",
    "ko": "용어 {term}: {meaning}"
   },
+  "experiment.tables_more": {
+   "en": "{n} more results table(s) in the report",
+   "ko": "결과 표 {n}개 더: 보고서에 있음"
+  },
   "experiment.unlinked": {
    "en": "{count} unnamed run(s): {ids} (register in the catalog)",
    "ko": "이름 없는 실행 {count}건: {ids} (정본에 등록 필요)"
@@ -725,6 +721,18 @@
   "experiment.warning.term-conflict": {
    "en": "name collides with a vocabulary term",
    "ko": "용어집의 용어와 이름이 겹침"
+  },
+  "experiment.words": {
+   "en": "terms: {items}",
+   "ko": "낱말: {items}"
+  },
+  "experiment.words.other_names": {
+   "en": "{names} → {name}",
+   "ko": "{names} → {name}"
+  },
+  "experiment.words.pp": {
+   "en": "%p percentage points",
+   "ko": "%p 퍼센트포인트"
   },
   "fleet.context.compaction_imminent": {
    "en": "compaction imminent",
@@ -2062,6 +2070,30 @@
    "en": "actual={actual}; planned={plan}",
    "ko": "실제={actual}; 계획={plan}"
   },
+  "resource.key.attention": {
+   "en": "attention={items}",
+   "ko": "주의={items}"
+  },
+  "resource.key.record": {
+   "en": "public run record={record}",
+   "ko": "실행 기록={record}"
+  },
+  "resource.key.row": {
+   "en": "row={row}",
+   "ko": "행={row}"
+  },
+  "resource.key.run": {
+   "en": "run={run}",
+   "ko": "실행={run}"
+  },
+  "resource.key.source": {
+   "en": "source {format}={path}",
+   "ko": "출처 {format}={path}"
+  },
+  "resource.key.status": {
+   "en": "status={status}; exit={exit}",
+   "ko": "상태={status}; 종료 코드={exit}"
+  },
   "resource.last_update": {
    "en": "last update {age} ago",
    "ko": "마지막 갱신 {age} 전"
@@ -2086,6 +2118,22 @@
    "en": "no record path",
    "ko": "기록 경로 없음"
   },
+  "resource.part.chunk": {
+   "en": "part {index}/{total}",
+   "ko": "조각 {index}/{total}"
+  },
+  "resource.part.metrics": {
+   "en": "metrics",
+   "ko": "지표"
+  },
+  "resource.part.record": {
+   "en": "record",
+   "ko": "기록"
+  },
+  "resource.part.run": {
+   "en": "run",
+   "ko": "실행"
+  },
   "resource.progress": {
    "en": "progress {reached}/{total} {unit}",
    "ko": "진행 {reached}/{total} {unit}"
@@ -2101,6 +2149,26 @@
   "resource.progress_word_folder": {
    "en": "folder",
    "ko": "폴더"
+  },
+  "resource.source_unavailable": {
+   "en": "source metrics unavailable",
+   "ko": "지표 출처 없음"
+  },
+  "resource.stagnant": {
+   "en": "no observed increase for {duration} since {anchor}",
+   "ko": "{anchor} 뒤 {duration} 동안 오름 없음"
+  },
+  "resource.stagnant.first_observation": {
+   "en": "first comparable observation",
+   "ko": "처음 비교 가능한 관측"
+  },
+  "resource.stagnant.last_increase": {
+   "en": "last actual increase",
+   "ko": "마지막 실제 증가"
+  },
+  "resource.stagnation_unknown": {
+   "en": "progress stagnation=unknown",
+   "ko": "정체 여부=미확인"
   },
   "resource.trend.flat": {
    "en": "flat",

@@ -521,7 +521,7 @@ else:
         "conditions": [{"display_name": name, "group": "소리 분리 개선"}]}), now=1_790_000_000.0)
 PY
 }
-lab_block() { sed -n '/^experiment catalog:/,$p'; }
+lab_block() { sed -n '/^results table/,$p'; }
 
 P=$(proj lab-names)
 lab_catalog "$P" "잔향 줄임"
@@ -536,8 +536,9 @@ else bad "claude/codex catalog block differs [claude=$(tr '\n' '|' < "$TMP/l1.bl
 lab_catalog "$P" "잔향 줄임" "잔향 제거 켬"
 claude_hook UserPromptSubmit lab-C2 "$P" > "$TMP/l3.out"
 codex_run "$CODEX_PROMPT" UserPromptSubmit lab-X2 "$P" "" "hi" > "$TMP/l4.out"
-if context_of "$TMP/l3.out" | grep -Fq "잔향 제거 켬" && ! context_of "$TMP/l3.out" | grep -Fq "잔향 줄임" \
-    && context_of "$TMP/l4.out" | grep -Fq "잔향 제거 켬" && ! context_of "$TMP/l4.out" | grep -Fq "잔향 줄임"; then
+# The former name appears only as the way to the current one (`잔향 줄임 → 잔향 제거 켬` in the words line).
+if context_of "$TMP/l3.out" | grep -Fq "잔향 제거 켬" && ! context_of "$TMP/l3.out" | sed 's/잔향 줄임 → 잔향 제거 켬//g' | grep -Fq "잔향 줄임" \
+    && context_of "$TMP/l4.out" | grep -Fq "잔향 제거 켬" && ! context_of "$TMP/l4.out" | sed 's/잔향 줄임 → 잔향 제거 켬//g' | grep -Fq "잔향 줄임"; then
   ok "claude and codex: a renamed condition shows its new name on the next session"
 else bad "renamed catalog name must reach the next claude/codex session"; fi
 if [ "${OPENCODE_NODE_CHILD_BLOCKED:-0}" = 1 ]; then
@@ -550,7 +551,7 @@ const output = { system: [] }
 await plugin["experimental.chat.system.transform"]({ sessionID: "lab-O1", model: {} }, output)
 const text = output.system.join("\n")
 console.log("new=" + text.includes("잔향 제거 켬"))
-console.log("old=" + text.includes("잔향 줄임"))
+console.log("old=" + text.split("잔향 줄임 → 잔향 제거 켬").join("").includes("잔향 줄임"))
 console.log("rule=" + text.includes("call each condition by this catalog name"))
 EOF
 then

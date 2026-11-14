@@ -623,25 +623,25 @@ class ExperimentNamesTest(TidyCase):
     def test_the_start_context_carries_a_small_catalog_block_inside_the_budget(self):
         self.lab_project()
         got = self.hook("claude", "start", "sid-B")
-        self.assertIn("실험 정본:", got)
+        self.assertIn("결과 표(그대로 붙인다): hearting run experiment_catalog leaderboard", got)
         self.assertIn("[소리 분리 개선] 목표: 잔향에서 기준보다 높은가", got)
         self.assertIn("조건: 잔향 줄임", got)
         self.assertIn("조건은 이 이름으로 부른다", got)
-        block = got[got.index("실험 정본:"):]
+        block = got[got.index("결과 표"):]
         self.assertLessEqual(len(block.encode("utf-8")), st.LAB_BLOCK_BYTES)
         self.assertLessEqual(len(got.encode("utf-8")), st.INJECTION_MAX_BYTES)
-        self.assertNotIn("실험 정본:", self.hook("claude", "start", "sid-B", cwd=self.iso.root))   # a folder without one: none
+        self.assertNotIn("결과 표", self.hook("claude", "start", "sid-B", cwd=self.iso.root))   # a folder without one: none
 
     def test_the_first_prompt_after_a_start_gets_the_block_once_and_later_prompts_do_not(self):
         self.lab_project()
         first = self.hook("claude", "prompt", "sid-P")
-        self.assertIn("실험 정본:", first)
-        self.assertNotIn("실험 정본:", self.hook("claude", "prompt", "sid-P"))
+        self.assertIn("결과 표", first)
+        self.assertNotIn("결과 표", self.hook("claude", "prompt", "sid-P"))
 
     def test_a_big_catalog_shrinks_to_names_and_a_full_card_still_fits_2400_bytes(self):
         self.lab_project(extra_conditions=30)
         got = self.hook("claude", "start", "sid-B")
-        block = got[got.index("실험 정본:"):]
+        block = got[got.index("결과 표"):]
         self.assertLessEqual(len(block.encode("utf-8")), st.LAB_BLOCK_BYTES)
         self.assertIn("외", block)                                       # "… 외 N개": the rest are counted, not dropped silently
         self.card("sid-A", "가나다라 " * 900)
