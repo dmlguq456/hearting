@@ -212,13 +212,12 @@ def _prompt_inventory_panes(agents):
             and isinstance(agent.get("pane_id"), str) and agent["pane_id"]}
 
 
-def _prompt_message_kind(body):
-    first = body.strip().splitlines()[0] if body.strip() else ""
-    for prefix, value in (("[steer]", "steer"), ("[handoff]", "handoff"),
-                          ("[gate]", "gate-relay")):
-        if first.startswith(prefix):
-            return value
-    return "steer"
+def _prompt_message_kind(body, request=None):
+    """The ledger kind: a sealed request role first, then the body's first line
+    (the one table in ``peer_request.message_kind``)."""
+    import peer_request
+    transfer = {"request": request["seal"]} if request else None
+    return peer_request.message_kind(body, transfer)[0]
 
 
 def _herdr_missing():
@@ -226,7 +225,11 @@ def _herdr_missing():
 
 
 def _unavailable(reason):
-    print(f"herdr-unavailable reason={reason} fallback={_fallback()}")
+    """A refused observation or arm. The word names the cause's source: a Herdr call that
+    failed (`herdr-*` reasons) keeps `herdr-unavailable`; a native-record failure, which is
+    every other reason, is `native-unavailable`. Exit 4 for both."""
+    word = "herdr-unavailable" if str(reason).startswith("herdr-") else "native-unavailable"
+    print(f"{word} reason={reason} fallback={_fallback()}")
     return 4
 
 

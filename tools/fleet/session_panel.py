@@ -400,6 +400,132 @@ def route_row(row, now=None, *, cells=None):
     return shown
 
 
+_REQUEST_STATES = ("preparing", "open", "partial", "final", "rejected", "cancelled")
+_REQUEST_BODY_LINES = 200
+
+
+def _request_age(seconds):
+    seconds = int(max(0, seconds))
+    if seconds < 90:
+        return "%ds" % seconds
+    if seconds < 90 * 60:
+        return "%dm" % round(seconds / 60)
+    if seconds < 48 * 3600:
+        return "%dh" % round(seconds / 3600)
+    return "%dd" % round(seconds / 86400)
+
+
+def _request_delivery(row, gone=False):
+    """The delivery word of one message's pending row (never the work state)."""
+    state = (row or {}).get("state")
+    word = {"pending": "sent", "unverified": "sent", "queued": "delivered",
+            "received": "seen"}.get(state)
+    if gone and word in ("sent", "delivered"):
+        word = "gone"
+    return word
+
+
+def request_rows(views, now, tag_of):
+    """The panel's lines for requests this session sent (``out``) and received (``in``).
+
+    ``views`` are plain dicts made by the host (a ``peer-request-v1`` record, which side this
+    session is on, the pending rows its messages are in, whether the receiver is confirmed
+    ended, the sealed body): this function only words them, so Fleet's later request list
+    can reuse it. Delivery (``sent``/``delivered``/``seen``) and the work state (``open``,
+    ``partial``, ``final``, ``rejected``, ``cancelled``) are two columns and are never mixed;
+    no ``in progress`` word appears (a route is what would say it). A closed request stays
+    ``DONE_AFTERGLOW_MIN`` minutes after it closed, and longer while its last answer (or
+    cancel notice) has not been seen by this session. A value that is unknown is left out.
+    """
+    from .model import DONE_AFTERGLOW_MIN
+    rows = []
+    for view in views or ():
+        record = view.get("record") if isinstance(view, dict) else None
+        if not isinstance(record, dict) or record.get("state") not in _REQUEST_STATES:
+            continue
+        state = record["state"]
+        side = "out" if view.get("side") == "out" else "in"
+        deliveries = view.get("rows") or {}
+        revisions = record.get("revisions") or []
+        reports = [r for r in record.get("reports") or () if isinstance(r, dict)]
+        current = next((r for r in reversed(revisions) if r.get("state") == "current"),
+                       revisions[-1] if revisions else {})
+        closed = state in ("final", "rejected", "cancelled")
+        if closed:
+            if side == "in":
+                continue  # received work is shown while it is open
+            closed_at = ((record.get("cancel") or {}).get("at") if state == "cancelled"
+                         else max((r.get("at") or 0 for r in reports if not r.get("late")), default=0)) \
+                or record.get("updated") or 0
+            last_ref = ((record.get("cancel") or {}).get("notice_ref") if state == "cancelled"
+                        else next((r.get("transfer_ref") for r in reversed(reports) if not r.get("late")), None))
+            unseen = bool(last_ref) and (deliveries.get(last_ref) or {}).get("state") != "received"
+            if now - closed_at >= DONE_AFTERGLOW_MIN * 60 and not unseen:
+                continue
+        other = record.get("recipient" if side == "out" else "requester") or {}
+        tag = tag_of(other.get("harness"), other.get("session_id"))
+        who = "[" + str(tag).strip("[]") + "]" if tag else str(other.get("name") or "")
+        delivery = _request_delivery(deliveries.get(current.get("transfer_ref")),
+                                     gone=bool(view.get("gone")))
+        word = lambda key: ui_text("fleet.session_panel." + key)  # noqa: E731
+        work = word("request_state_" + state)
+        # A reserved message whose seal is not there is shown, never dropped (not confirmed).
+        unconfirmed = [e for e in record.get("sending") or () if isinstance(e, dict)]
+        # Folded: what this session still waits to see (a sent request not yet seen), else the work.
+        status = (word("request_delivery_" + delivery)
+                  if side == "out" and state in ("open", "partial") and delivery in ("sent", "delivered")
+                  else work)
+        glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "◂")
+        kind = ("request-rejected" if state in ("rejected", "cancelled")
+                else "request-done" if closed else "request-in" if side == "in" else "request-out")
+        title = " ".join(str(record.get("title") or "").split())
+        details = []
+        head = ("%s %s %s · %s" % (str((record.get("requester") or {}).get("name") or ""), "→",
+                                  str((record.get("recipient") or {}).get("name") or ""), record["id"])).strip()
+        details.append(["", head, "dim"])
+        label = str(current.get("label") or "")
+        revision = ("%d %s" % (current.get("n", 1), label)).strip()
+        superseded = [r for r in revisions if r.get("state") == "superseded"]
+        if superseded:
+            revision += " · " + ", ".join("%d %s" % (r["n"], word("request_superseded")) for r in superseded[-2:])
+        details.append([word("request_label_revision"), revision, "loc_repo"])
+        if delivery:
+            details.append([word("request_label_delivery"), word("request_delivery_" + delivery), "dim"])
+        work_text = work
+        if state in ("partial", "final", "rejected") and reports:
+            tail = reports[-1]
+            if tail.get("remaining"):
+                work_text += " · %s %s" % (word("request_label_remaining"), tail["remaining"])
+            if state == "rejected" and tail.get("result"):
+                work_text += " · " + tail["result"]
+        if unconfirmed and state != "preparing":
+            work_text += " · %s %d" % (word("request_state_preparing"), len(unconfirmed))
+        details.append([word("request_label_work"), work_text,
+                        "lvl_r" if state in ("rejected", "cancelled") else "loc_repo"])
+        details.append([word("request_label_last"), _request_age(now - (record.get("updated") or now)), "dim"])
+        for report in reports[-4:]:
+            kind_word = word("request_report_" + str(report.get("kind")))
+            mark = "%d %s" % (report.get("n", 0), kind_word)
+            if report.get("late"):
+                rev = next((r for r in revisions if r.get("n") == report.get("revision")), {})
+                mark += " · %d(%s)" % (report.get("revision", 0), word(
+                    "request_superseded" if rev.get("state") == "superseded" else "request_state_cancelled"))
+            result = str(report.get("result") or "")
+            details.append([word("request_label_reports"), (mark + (" · " + result if result else "")), "dim"])
+        body = str(view.get("body") or "")
+        body_lines = body.splitlines()
+        rows.append({
+            "id": record["id"], "way": "→" if side == "out" else "◂", "glyph": glyph,
+            "who": who, "title": title, "status": status, "age": _request_age(now - (record.get("updated") or now)),
+            "kind": kind, "state": state, "side": side, "delivery": delivery or "",
+            "details": details, "body": body_lines[:_REQUEST_BODY_LINES],
+            "body_more": len(body_lines) > _REQUEST_BODY_LINES,
+            "body_label": word("request_body")})
+    order = {"request-in": 0, "request-rejected": 1, "request-out": 2, "request-done": 4}
+    rows.sort(key=lambda row: order.get(row["kind"], 2))
+    return rows
+
+
 def _git_part(part):
     return part[1] == "dim" and str(part[0]).startswith(" (")
 

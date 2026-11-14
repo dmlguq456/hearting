@@ -894,6 +894,88 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             self.assertIs(shell._sent_peer_messages(sid)[0], sent)  # unchanged file: no reparse
             self.assertEqual(shell._sent_peer_messages("absent-session"), ([], []))
 
+    def test_requests_come_from_the_request_records_not_the_recent_message_tail(self):
+        import time
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            import peer_request
+            mine = {"harness": "claude", "session_id": "00000000-0000-4000-8000-0000000000e9", "name": "e9"}
+            theirs = {"harness": "codex", "session_id": "00000000-0000-4000-8000-0000000000e7", "name": "e7"}
+            request_id = peer_request.reserve(mine, theirs, title="검토 요청")
+            peer_request.commit_open(request_id, "a" * 32, label="판1")
+            views, watched = shell._request_views("claude", mine["session_id"], time.time())
+            self.assertEqual([(v["side"], v["record"]["id"]) for v in views], [("out", request_id)])
+            received, _ = shell._request_views("codex", theirs["session_id"], time.time())
+            self.assertEqual([(v["side"], v["record"]["id"]) for v in received], [("in", request_id)])
+            # The files whose change repaints the panel: the request index and the record.
+            self.assertIn(str(peer_request.index_path()), watched)
+            self.assertTrue(any(path.endswith(request_id + ".json") for path in watched))
+            # No sent-message shard exists, yet the open request is listed.
+            self.assertEqual(shell._sent_peer_messages(mine["session_id"]), ([], []))
+            # A session with no requests shows nothing and still watches the index, so its
+            # first request repaints the panel.
+            self.assertEqual(shell._request_views("claude", "absent-session", time.time()),
+                             ([], [str(peer_request.index_path())]))
+
+    def test_z_a_requests_transfers_stand_in_the_request_line_not_in_the_message_lists(self):
+        # R29: one line of work is counted once. The request, its report and its cancel notice are
+        # shown by the route box's request line; ordinary messages stay in MESSAGES.
+        import time
+        from unittest import mock
+        import peer_request
+        shell.registry_root()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            for harness in ("claude", "codex", "opencode"):
+                sid = "00000000-0000-4000-8000-0000000000e9"
+                other = "00000000-0000-4000-8000-0000000000e7"
+                peer = shell._peer_message()
+                shard = peer._ledger_path(sid)
+                shard.parent.mkdir(parents=True, exist_ok=True)
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                record = lambda text, refs, n: {"ts": stamp, "from": {"session_id": sid},  # noqa: E731
+                    "to": {"harness": harness, "session_id": other, "name": "n"}, "kind": "steer",
+                    "summary": text, "message_id": "m%d" % n, "delivery": {"status": "queued"}, "refs": refs}
+                rows = [record("ORDINARY_NOTE", [], 1),
+                        record("[요청 rq-aaaaaa] REQUEST_LINE", ["peer-request:rq-aaaaaa:1:request"], 2),
+                        record("[요청 취소 rq-aaaaaa] CANCEL_LINE", ["peer-request:rq-aaaaaa:1:cancel"], 3)]
+                shard.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+                shell._SENT_CACHE.clear()
+                sealed = {"schema": peer_request.REF_SCHEMA, "id": "rq-bbbbbb", "revision": 1, "role": "report"}
+                received = [{"source": "peer", "text": "RECEIVED_REPORT", "ref": "b" * 32, "at": time.time(),
+                             "sender": "n", "sender_harness": harness, "sender_session_id": other},
+                            {"source": "peer", "text": "RECEIVED_ORDINARY", "ref": "c" * 32, "at": time.time(),
+                             "sender": "n", "sender_harness": harness, "sender_session_id": other}]
+                transfers = {"b" * 32: {"request": sealed}, "c" * 32: {}}
+                import session_tidy
+                with mock.patch.object(session_tidy, "prompt_display", return_value={"received": received}), \
+                        mock.patch.object(peer, "_read_transfer_record", side_effect=lambda ref, **k: transfers[ref]):
+                    messages = shell.panel_projection(harness, sid, columns=60, rows=30)["panel"]["messages"]
+                texts = [row["text"] for row in messages]
+                self.assertEqual(sorted(texts), ["ORDINARY_NOTE", "RECEIVED_ORDINARY"], harness)
+
+    def test_z_a_failed_request_read_is_kept_beside_the_panel_not_swallowed(self):
+        from unittest import mock
+        import peer_request
+        errors = []
+        with mock.patch.object(peer_request, "session_requests", side_effect=ValueError("peer-request-directory-symlink")):
+            self.assertEqual(shell._request_views("claude", "a-session", 0, errors), ([], []))
+        self.assertEqual(errors, ["ValueError: peer-request-directory-symlink"])
+
+    def test_z_every_harness_lists_its_requests_in_the_panel(self):
+        import tempfile as _t
+        from unittest import mock
+        import peer_request
+        shell.registry_root()
+        with _t.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            for harness in ("claude", "codex", "opencode"):
+                mine = {"harness": harness, "session_id": "00000000-0000-4000-8000-0000000000a%d" % len(harness), "name": "a1"}
+                theirs = {"harness": harness, "session_id": "00000000-0000-4000-8000-0000000000b%d" % len(harness), "name": "b1"}
+                request_id = peer_request.reserve(mine, theirs, title="검토 제목")
+                peer_request.commit_open(request_id, "a" * 32, label="판1")
+                panel = shell.panel_projection(harness, mine["session_id"], columns=40, rows=30)["panel"]
+                self.assertEqual([row["id"] for row in panel["requests"]], [request_id], harness)
+                self.assertNotIn("request_error", panel)
+
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''
 const assert=require('node:assert/strict'),d=require(process.argv[1]);
@@ -2144,6 +2226,141 @@ for(const position of ['top',undefined,'right'])assert.equal(d.layout({cols:133,
 assert.equal(d.layout({cols:80,rows:24,configuration:{...cfg,position:'left'}}).left,false);
 '''
         self.node(script, "native-display.cjs")
+
+
+class RequestPanelTest(unittest.TestCase):
+    """R27 in the route box: sent and received requests stand beside the routes, open in
+    place, read whole on their own page, and leave the question, messages and draft alone."""
+
+    HEAD = r"""
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const q=(id,glyph,who,title,status,kind,age='3m')=>({id,way:glyph==='◂'?'◂':'→',glyph,who,title,status,age,kind,
+ details:[['','e9 → e7 · '+id,'dim'],['판','2 head d2d92ec · 1 대체됨','loc_repo'],['전달','전달됨','dim'],['일','열림','loc_repo'],
+  ['변화','3m','dim'],['보고','1 일부 · 1(대체됨) · '+'긴결과 '.repeat(6),'dim']],
+ body:['BODY_NONCE 첫 줄','둘째 줄','https://example.com/'+'x'.repeat(60)],body_label:'본문'});
+const requests=[q('rq-aaaaaa','◂','[e7]','같은 시각 요청 A 한글 제목','열림','request-in'),
+ q('rq-bbbbbb','→','[52]','같은 시각 요청 B','전달됨','request-out'),q('rq-cccccc','✓','[e1]','끝난 일','최종 답','request-done')];
+const routes=[{id:'rt-a',title:'Actual route',state:'working',kind:'working',paint:{glyph:{text:'⠏'}}}];
+const base={route_count:1,routes,requests,messages:[{way:'←',who:'[e7]',text:'MSG_KEPT',when:'1m',kind:'steer',harness:'claude'}],styles:{dim:{dim:true}}};
+const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const render=(width,height,extra={},model=base)=>view.render({width,height,side:width<80,model,sid:'x',configuration:{},questions:()=>[],...extra});
+"""
+
+    def node(self, body):
+        result = subprocess.run(["node", "-e", self.HEAD + body, str(ROOT / "utilities/session-shell/panel-view.cjs")],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_title_counts_routes_then_requests_and_no_hourglass_stands_anywhere(self):
+        self.node(r"""
+for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
+ const lines=text(render(width,height));
+ assert(lines.some(s=>s.includes(width<80?'1 ROUTE │ 3 REQUEST':'route 1 │ request 3')),lines.join('\n'));
+ for(const mark of ['◂','→','✓'])assert(lines.some(s=>s.includes(mark)),mark+width);
+ assert(!lines.join('').includes('⏳')&&!lines.join('').includes('⌛'));
+ assert(lines.some(s=>s.includes('MSG_KEPT')),'messages stay at '+width);
+ assert(lines.length<=height);
+}
+const none=text(render(37,30,{},{...base,requests:[]}));
+assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
+// Spec rules 57, 58: `REQUEST` is a dark gray name tag (as MESSAGES and MEM), never the route
+// count's state color.
+const styled={...base,routes:[{...routes[0],state:'idle',kind:'idle'}],styles:{dim:{dim:true},g_idle:{fg:186}}};
+for(const width of [32,38]){
+ const parts=render(width,30,{},styled).rows.flat();
+ const tag=parts.find(p=>/^\d+ REQUEST$/.test(p.text));
+ assert(tag&&tag.dim===true&&tag.fg===undefined,JSON.stringify(tag));
+ const count=parts.find(p=>/^\d+ ROUTE$/.test(p.text));
+ assert(count&&count.fg===186,JSON.stringify(count));
+}
+""")
+
+    def test_a_long_status_cuts_the_title_first_and_keeps_the_other_session(self):
+        # r3: `◂ 검토 제목 1c… · partial answer` lost its `[6e]`; the title is what gives way.
+        self.node(r"""
+for(const width of [32,37,38])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9','review title 1c9036d9'])for(const [glyph,kind] of [['◂','request-in'],['✓','request-done']]){
+ const model={...base,requests:[q('rq-aaaaaa',glyph,'[6e]',title,status,kind)]};
+ const lines=text(render(width,30,{},model));
+ const row=lines.find(s=>s.includes(glyph)&&s.includes('· '+status));
+ assert(row,'the row stands: '+width+status+'\n'+lines.join('\n'));
+ assert(row.includes('[6e]'),'the other session stays: '+row);
+ if(width>=37||status==='open')assert(row.includes('…')||row.includes(title),'the title is cut with an ellipsis: '+row);
+}
+// A title that fits stays whole beside the session and the status.
+const whole=text(render(38,30,{},{...base,requests:[q('rq-aaaaaa','◂','[6e]','짧은 일','final answer','request-in')]}));
+assert(whole.some(s=>s.includes('[6e] 짧은 일 · final answer')),whole.join('\n'));
+""")
+
+    def test_a_request_opens_in_place_whole_then_its_overflow_leads_to_the_read_page(self):
+        self.node(r"""
+for(const width of [32,37,38]){
+ const open=render(width,40,{expandedKeys:['request:rq-aaaaaa']});
+ const lines=text(open).join('\n');
+ assert(lines.includes('rq-aaaaaa'),'the number is in the detail');
+ assert(lines.includes('+ 본문 ›'));
+ assert(open.hits.some(h=>h.action==='read:request:rq-aaaaaa'));
+ // Two requests of the same time keep distinct, whole numbers when both open.
+ const both=text(render(width,60,{expandedKeys:['request:rq-aaaaaa','request:rq-bbbbbb']})).join('\n');
+ assert(both.includes('rq-aaaaaa')&&both.includes('rq-bbbbbb'));
+ // Short of rows the detail keeps whole items and a `+N lines ›` row to the page.
+ const short=render(width,22,{expandedKeys:['request:rq-aaaaaa']});
+ assert(short.hits.some(h=>h.action==='read:request:rq-aaaaaa'));
+ assert(text(short).some(s=>s.includes('MSG_KEPT')),'the messages are kept');
+}
+""")
+
+    def test_the_read_page_carries_every_value_and_the_body_and_back_returns(self):
+        self.node(r"""
+for(const [width,height] of [[32,26],[38,26],[80,24]]){
+ const parts=[];let pages=1;
+ for(let page=0;page<pages;page++){
+  const v=render(width,height,{routeDetail:'request:rq-aaaaaa',routePage:page});
+  pages=v.routePages;parts.push(text(v).join('\n'));assert(v.rows.length<=height);
+  assert(text(v)[1].toUpperCase().includes('REQUEST')||text(v)[0].toUpperCase().includes('REQUEST'));
+ }
+ const all=parts.join('\n').replace(/[│┌┐└┘\s]/g,'');
+ for(const needle of ['rq-aaaaaa','BODY_NONCE','1(대체됨)','전달됨','둘째줄'])assert(all.includes(needle),needle+' at '+width);
+}
+// A request that no longer exists closes its page instead of showing nothing.
+const gone=render(37,24,{routeDetail:'request:rq-zzzzzz'});
+assert.equal(gone.routeDetail,false);
+""")
+
+    def test_the_question_box_and_messages_keep_their_rows_when_requests_open(self):
+        self.node(r"""
+const asking={...base,answerable:true};
+for(const [width,height] of [[37,26],[80,24]]){
+ const v=render(width,height,{expandedKeys:['request:rq-aaaaaa','request:rq-bbbbbb'],
+  questions:()=>[[{text:'◑ Where should this go?'}],[{text:'1 · Current project'}],[{text:'Ctrl+] answer'}]]},asking);
+ const lines=text(v);
+ assert(lines.some(s=>s.includes('Where should this go?')),'question at '+width);
+ assert(lines.some(s=>s.includes('Current project')));
+ assert(lines.some(s=>s.includes('MSG_KEPT')),'messages at '+width);
+ assert(lines.length<=height);
+}
+""")
+
+    def test_short_of_rows_the_box_scrolls_and_puts_work_to_answer_first(self):
+        self.node(r"""
+const many=Array.from({length:9},(_,i)=>q('rq-00000'+i,i===5?'◂':'→','[e'+i+']','일 '+i,'전달됨',i===5?'request-in':'request-out'));
+const v=render(37,16,{},{...base,requests:many});
+const lines=text(v);
+assert(lines.some(s=>s.includes('↓')||s.includes('↑')),'the border counts the rows it hides');
+assert(v.hits.some(h=>h.action==='request:rq-000005'),'the received work to answer is among the first shown');
+assert(lines.some(s=>s.includes('MSG_KEPT')));
+const wheel=render(37,16,{routeScroll:1},{...base,requests:many});
+assert.notDeepEqual(text(wheel),lines);
+""")
+
+    def test_a_request_alone_still_draws_the_box_and_a_long_url_title_is_cut_whole(self):
+        self.node(r"""
+const lone=text(render(32,24,{},{...base,routes:[],route_count:0,requests:[
+ q('rq-dddddd','→','[52]','https://example.com/'+'a'.repeat(80),'전달됨','request-out')]}));
+assert(lone.some(s=>s.includes('1 REQUEST')),lone.join('\n'));
+const row=lone.find(s=>s.includes('→'));
+assert(row.includes('…')&&row.includes('전달됨'),row);
+assert(lone.every(s=>[...s].length<=32));
+""")
 
 
 if __name__ == "__main__":

@@ -3097,7 +3097,10 @@ def _received_prompt_line(prompt_text: str, origin: dict) -> str:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             payload = module.read_peer_payload(ref)
-            if isinstance(payload, dict) and isinstance(payload.get("body"), str):
+            if (isinstance(payload, dict) and isinstance(payload.get("body"), str)
+                    and (payload.get("descriptor") or {}).get("presentation_mode") != "request-body"):
+                # A request's sealed body is not a preview: the display keeps the
+                # one-line notice the conversation received.
                 return prompt_first_line(payload["body"])
         except (OSError, ValueError, TypeError, ImportError, AttributeError):
             pass
