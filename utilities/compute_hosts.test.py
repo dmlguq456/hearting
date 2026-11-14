@@ -4119,6 +4119,34 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         notice.assert_called_once()
         self.assertIn("exit 125", notice.call_args.kwargs["text"])
 
+    def test_a_watcher_vouches_for_a_run_only_while_its_own_files_change(self):
+        module = self.module
+        run_dir = Path(self.tmp.name) / "run"
+        run_dir.mkdir()
+        log = run_dir / "log"
+        log.write_text("epoch 1\n")
+        os.utime(log, (5000.0, 5000.0))
+        # The evidence is the moment the run's own file changed, not the moment the watcher looked.
+        self.assertEqual(module._run_alive_at(run_dir, 5000.0 + 600), 5000.0)
+        self.assertEqual(module._run_alive_at(run_dir, 5000.0 + 900), 5000.0)
+        self.assertIsNone(module._run_alive_at(run_dir, 5000.0 + 901))
+        (run_dir / ".observation-watch.lock").write_text("")   # the observer's own file is not the run's
+        (run_dir / "meta.json").write_text("{}")               # nor is the launch record a claim rewrites
+        for name in (".observation-watch.lock", "meta.json"):
+            os.utime(run_dir / name, (5000.0 + 901, 5000.0 + 901))
+        self.assertIsNone(module._run_alive_at(run_dir, 5000.0 + 901))
+        self.assertIsNone(module._run_alive_at(Path(self.tmp.name) / "missing", 5000.0))
+
+    def test_a_launch_note_names_a_missing_declaration_once(self):
+        module = self.module
+        cwd = Path(self.tmp.name)
+        (cwd / "cfg.json").write_text(json.dumps({"output_dir": "out"}))
+        config = {"run_root": cwd / "runs"}
+        self.assertIn("--config", module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config, None))
+        self.assertIsNone(module._progress_declaration_note(["python", "train.py", "--config", "./cfg.json"],
+                                                            str(cwd), {}, config, None))
+        self.assertIsNone(module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config,
+                                                            {"output_dir": "/declared"}))
 
 if __name__ == "__main__":
     unittest.main()

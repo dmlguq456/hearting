@@ -1148,6 +1148,125 @@ class TestProgressLaunch(unittest.TestCase):
             self.assertEqual(R.read_sentinel(row["sentinel"]), 0)
 
 
+class LaunchNoteFromRunnerStartTest(unittest.TestCase):
+    """The launch note, through the runner's own start path (RV-PR1619-R4-1114): the note states
+    facts and conditions, shows the real default place, and opens no progress file."""
+
+    def _start(self, root, name, route, payload, language, *, attest=True):
+        import resource_progress
+        log = root / f"{name}.log"
+        argv = ["--registry", str(root / f"{name}-runs.json"), "start", "--run-id", name, "--cwd", str(root),
+                "--log", str(log), "--route", str(route), "--node", "eval-run"]
+        if attest:
+            smoke_spec = importlib.util.spec_from_file_location("note_smoke_fixture", SMOKE)
+            smoke = importlib.util.module_from_spec(smoke_spec)
+            smoke_spec.loader.exec_module(smoke)
+            seed = root / f"{name}-smoke-input"
+            seed.write_text("note fixture\n")
+            attestation = smoke.payload([seed], [sys.executable, "-c", payload], root)
+            attestation.update(status="passed", exit_code=0)
+            attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+                attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            smoke.verify(attestation)
+            (root / f"{name}-smoke.json").write_text(json.dumps(attestation))
+            argv += ["--smoke-attestation", str(root / f"{name}-smoke.json")]
+        argv += ["--", sys.executable, "-c", payload]
+        children, opened, reads = [], [], []
+        real_popen, real_open = subprocess.Popen, open
+        real_note, real_read = resource_progress.declaration_note, resource_progress.read_progress
+
+        def spawn(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        def spying_open(file, *args, **kwargs):
+            if ".progress.json" in str(file):
+                opened.append(str(file))
+            return real_open(file, *args, **kwargs)
+
+        def spying_read(*args, **kwargs):
+            reads.append(args)
+            return real_read(*args, **kwargs)
+
+        def watched_note(run):
+            # Only the runner's own call to the note is watched: any open of a progress file
+            # or any read_progress during it is recorded.
+            with mock.patch("builtins.open", side_effect=spying_open), \
+                 mock.patch.object(resource_progress, "read_progress", side_effect=spying_read):
+                return real_note(run)
+
+        err, code = io.StringIO(), None
+        with mock.patch.object(R.subprocess, "run"), mock.patch.object(R, "register_registry"), \
+             mock.patch.object(R.subprocess, "Popen", side_effect=spawn), mock.patch("sys.stdout"), \
+             mock.patch.object(resource_progress, "declaration_note", side_effect=watched_note), \
+             mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "", "FLEET_NOW_LANG": language}), \
+             contextlib.redirect_stderr(err):
+            try:
+                R.main(argv)
+            except SystemExit as exc:
+                code = exc.code
+            for child in children:
+                child.wait(timeout=10)
+        return {"stderr": err.getvalue(), "code": code, "opened": opened, "reads": reads, "log": log,
+                "registry": root / f"{name}-runs.json"}
+
+    def _route(self, root, **node):
+        route = root / "route.json"
+        route.write_text(json.dumps({"capability": "autopilot-lab", "artifact_root": str(root), "nodes": [
+            {"id": "eval-run", "kind": "resource-runner", "resource_transport": "detached-process", **node}]}))
+        return route
+
+    def test_the_start_note_states_the_place_and_conditions_and_opens_no_progress_file(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            route = self._route(root)
+            writes = (f"import sys; sys.path.insert(0, {str(ROOT / 'utilities')!r}); "
+                      "from resource_progress import write_progress; write_progress(12, 'epoch', total=60)")
+            for language, name, condition in (("Korean", "ko", "실행이 "), ("English", "en", "if the run writes progress to ")):
+                with self.subTest(language=language):
+                    if name == "en":
+                        # The place is a folder nobody can read as a file: the start goes on all the same.
+                        (root / "en.log.progress.json").mkdir()
+                    got = self._start(root, name, route, writes, language)
+                    self.assertIsNone(got["code"], got["stderr"])
+                    place = str(got["log"].resolve()) + ".progress.json"
+                    notes = [line for line in got["stderr"].splitlines() if place in line]
+                    self.assertEqual(len(notes), 1, got["stderr"])          # one line, the real place
+                    self.assertIn(condition, notes[0])
+                    self.assertIn("--config", notes[0])                     # both conditions named
+                    self.assertNotIn("실리지 않습니다", notes[0])
+                    self.assertNotIn("carry no", notes[0])
+                    self.assertEqual((got["opened"], got["reads"]), ([], []))   # zero reads at the start
+                    self.assertIn(name, json.loads(got["registry"].read_text())["runs"])  # and it started
+            # After the note, the run writes 12/60 at that place: the notice shows it, and the
+            # note's "if the run writes progress there" still holds.
+            row = json.loads((root / "ko-runs.json").read_text())["runs"]["ko"]
+            self.assertEqual(R.read_sentinel(row["sentinel"]), 0)
+            import resource_progress as progress
+            now = time.time()
+            read = progress.read_progress(row, now)
+            self.assertEqual((read["completed"], read["total"], read["unit"]), (12, 60, "epoch"))
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}), \
+                 mock.patch.object(progress, "_observation_state_path", return_value=root / "state.json"):
+                result = progress.observe_experiment(row, root / "registry.json", now, progress=read,
+                                                     alive=True, status="running", notify_events=False)
+                text = "; ".join(progress._notice_texts(row, "checkpoint", result["observation"],
+                                                        None, result["metrics"]))
+            self.assertIsNone(result["observation"]["undeclared"])
+            self.assertIn("진행 12/60 epoch", text)
+
+    def test_a_declared_output_folder_gets_no_note(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            got = self._start(root, "decl", self._route(root, output_dir=str(root / "out")),
+                              "pass", "Korean", attest=False)
+            self.assertEqual(got["code"], 65)                                # the unrelated attestation guard
+            self.assertIn("hash-bound smoke attestation required", got["stderr"])
+            self.assertNotIn("참고:", got["stderr"])
+            self.assertEqual((got["opened"], got["reads"]), ([], []))
+
+
 class PayloadSessionEnvironmentTest(unittest.TestCase):
     def test_gpu_payload_uses_lease_owner_and_explicit_cpu_keeps_environment(self):
         from session_identity import session_env

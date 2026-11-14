@@ -1092,7 +1092,9 @@ def _record_view(root: Path, ref: Mapping[str, Any], now: float, key: Optional[s
         return view
     view["readable"] = True
     status = record.get("status")
-    view["status"] = status if isinstance(status, str) else None
+    # A local resource run's observer publishes its live process as `working`; the board's word
+    # for a live run is `running` (and only a running record can read as observation-stale).
+    view["status"] = ("running" if status == "working" else status) if isinstance(status, str) else None
     view["started_at"] = _ts(record.get("started_at"))
     source: Mapping[str, Any] = record
     if row_id is not None:
