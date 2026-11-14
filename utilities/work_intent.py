@@ -876,6 +876,24 @@ _AFTER_FIX = (r"(?:고친|수정한|패치한|적용한|구현한|변경한|수�
 _BEFORE_CLAUSE = re.compile("(?:" + _BEFORE_FIX.pattern + r").*?(?=" + _AFTER_FIX + r"|$)", re.I)
 
 
+# A row that opens with a code span a particle follows ("`name`은 이 사본에서 …") is prose about it,
+# not a command, whatever its backtick suggests.
+_NOUN_SPAN = re.compile(r"`[^`\n]*`[가-힣]")
+# A result statement inside the before-the-fix phrase: a pass/fail word with a count other than 0. A
+# bracket right after it ("FAIL (PASS 21·FAIL 1)", "FAIL(2건)") belongs to it; so do the error names
+# that follow ("FAIL — … PermissionError"), which are not result words.
+_RESULT_STATEMENT = re.compile(r"\b(?:pass(?:ed)?|fail(?:ed)?(?![-_][a-z])|통과|실패)\b", re.I)
+_ZERO_RESULT = re.compile(r"\b0\s*(?:pass(?:ed)?|통과)\b|\b(?:pass(?:ed)?|통과)\s*[=:：]?\s*0(?![\w가-힣]|[.,]\d)", re.I)
+_RESULT_DETAIL = re.compile(
+    r"(?<=[A-Za-z가-힣])\s*(?:\d+\s*(?:건|개)?\s*)?[(（][^()（）]*[)）]")
+
+
+def _result_statements(clause: str) -> int:
+    text = _ZERO_RESULT.sub(" ", _unnegated(clause))
+    text = _RESULT_DETAIL.sub(" ", text)
+    return len(_RESULT_STATEMENT.findall(text))
+
+
 def _command_failures(line) -> int:
     """Fail words on one command row; an error word alone counts once, never as zero."""
     rest = _unnegated(line)
@@ -965,10 +983,15 @@ def _failure_kind(line, *, verified=False) -> str | None:
         if _BEFORE_FIX.search(text):
             # What the check did before the fix is not a failure now; a failure word outside that
             # clause, or a row that says it still fails, is: it points at the report.
+            # The text outside it reads as the same row without the phrase would. More than one
+            # result inside the phrase ("FAIL 3 → FAIL 1") cannot be told apart from a failure now.
+            clauses = [match.group(0) for match in _BEFORE_CLAUSE.finditer(text)]
             outside = _unnegated(_BEFORE_CLAUSE.sub(" ", text))
-            failed = (_STILL_FAILING.search(text) or _ERROR_WORD.search(outside)
-                      or any(match.group(0).lower() in {"fail", "failed", "실패"} for match in _COMMAND_RESULT.finditer(outside)))
-            return "check" if failed else None
+            if _STILL_FAILING.search(text) or any(_result_statements(c) > 1 for c in clauses):
+                return "check"
+            if _COMMAND_LINE.search(text) and not _NOUN_SPAN.match(text):
+                return "check" if _command_failures(outside) else None
+            return "check" if _failure_kind(_UNRUN_WORD.sub(" ", outside)) == "failure" else None
         if _COMMAND_LINE.search(text):
             return "check" if _command_failures(text) else None
         return "check" if _failure_kind(_UNRUN_WORD.sub(" ", text)) == "failure" else None
