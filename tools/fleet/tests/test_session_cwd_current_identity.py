@@ -68,6 +68,7 @@ class NativeCurrentTest(unittest.TestCase):
 
         with mock.patch.object(procscan, "read_proc_start", return_value=self.start), \
                 mock.patch.object(procscan, "_comm_of", return_value="claude"), \
+                mock.patch.object(procscan, "provenance", return_value="herdr"), \
                 mock.patch.object(procscan, "_read_cwd", return_value=("/repo", False)), \
                 mock.patch.object(herdr, "list_panes", return_value=[pane]) as list_panes, \
                 mock.patch.object(herdr, "pane_evidence", side_effect=bind_observed_pane):

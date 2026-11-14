@@ -832,6 +832,29 @@ class PeerHistoryCleanupTest(IsolatedCase):
         self.assertTrue(old_pending.exists())
         self.assertTrue(transfer.exists())
 
+    def test_queued_and_native_pending_rows_are_not_closed_by_the_seven_day_window(self):
+        # #1576 review follow-up F9: the 7-day window closes only received rows. A row
+        # accepted by a native carrier but never received (`claude-pty-continue-submitted`,
+        # `queued`) or one still waiting for its native callback (`native-pending`) stays:
+        # dropping it would drop the sender's still-unreceived sealed request, which is not a
+        # one-condition extension of this sweep. Recorded, not changed.
+        pending_dir = peer_steward.peer_message._pending_dir()
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        kept = {}
+        for index, (state, receipt) in enumerate((("queued", "claude-pty-continue-submitted"),
+                                                   ("pending", "native-pending"),
+                                                   ("unverified", "hook-context-inflight"))):
+            ref = f"{index + 1:032x}"
+            row = self._row(ref, state, now - 30 * 86400)
+            row["receipt"] = receipt
+            path = pending_dir / (ref + ".json")
+            path.write_text(json.dumps(row))
+            kept[ref] = path
+        result = peer_steward._prune_received_peer_history(now=now)
+        self.assertEqual(result["removed"], 0)
+        self.assertTrue(all(path.exists() for path in kept.values()))
+
     def _lock(self, ref, mtime):
         path = peer_steward.peer_message._pending_dir() / (".lock-" + ref)
         path.touch(mode=0o600)

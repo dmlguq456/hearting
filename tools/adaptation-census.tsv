@@ -72,6 +72,7 @@ shared-utility-deferred	harness_behavior_cases_subagent_model.py
 shared-utility-deferred	harness_behavior_cases_tidy.py
 shared-utility-deferred	harness_behavior_cases_token_budget.py
 shared-utility-deferred	harness_behavior_cases_tidy_compact.py
+shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py
@@ -326,6 +327,8 @@ utility-deferred	peer_steward_status.py
 utility-deferred	peer_steward_watch.py
 utility-deferred	peer_obligations.py
 utility-deferred	peer_read_context.py
+utility-deferred	peer_request.py
+utility-deferred	peer_request_cmd.py
 utility-deferred	registered_parent_park.test.py
 utility-deferred	replica_batch_contract.py
 utility-deferred	resource-observers.py

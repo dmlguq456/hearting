@@ -267,11 +267,12 @@ def _resolve_target(target):
     return harness, sid, agent.get("name") or None
 
 
-def _prompt_agent_inventory():
+def _prompt_agent_inventory(tmux=None):
     """Read the selected herdr endpoint's complete agent inventory, or explain why not.
 
-    Without herdr, the tmux server this process runs in answers the same shape."""
-    tmux = _tmux_inventory()
+    Without herdr, the tmux server this process runs in answers the same shape;
+    ``tmux`` is a tmux server an address already named."""
+    tmux = tmux if tmux is not None else _tmux_inventory()
     if tmux is not None:
         payload = tmux.agents()
         if payload is None:
@@ -397,9 +398,17 @@ def _prompt_current_candidate(pane, *, expected_harness=None, expected_sid=None,
 
 def _prompt_candidate_snapshot(target, *, wanted_tag=None):
     """Discover address candidates before proving their exact native identities."""
-    agents, inventory_error = _prompt_agent_inventory()
+    # A tmux pane address (`%N` or `%N@/socket`) is answered by its own tmux
+    # server alone; only a Herdr window address or a name/tag asks Herdr.
+    named_tmux = None
+    if terminal_surface.is_tmux_pane(target):
+        named_tmux = terminal_surface.pane_surface(target)
+        if named_tmux is None or not named_tmux.answers():
+            return None, "pane-census-unavailable", [target]
+    agents, inventory_error = (_prompt_agent_inventory(named_tmux) if named_tmux is not None
+                               else _prompt_agent_inventory())
     endpoint = herdr_observation.endpoint_name(_HERDR_SESSION)
-    census = (_tmux_census(agents, endpoint) if _tmux_inventory() is not None
+    census = (_tmux_census(agents, endpoint) if (named_tmux or _tmux_inventory()) is not None
               else herdr_observation.pane_census(session=_HERDR_SESSION))
     if census is None:
         return None, "pane-census-unavailable", sorted(_prompt_inventory_panes(agents))
@@ -3932,7 +3941,7 @@ def cmd_watch_run(args):
             steward_sid = steward.get("session_id")
             if steward.get("harness") and steward_sid:
                 steward_life = native_lifetime(steward["harness"], steward_sid)
-                if steward_life == "ended":
+                if steward_life == "ended" and _steward_session_gone(watch_id, arm):
                     terminal_reason = "steward-exited"
                 elif steward_life == "live" and isinstance(steward_seat.get("native"), dict):
                     native = steward_seat["native"]
@@ -5405,6 +5414,18 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
                     return
         checkpoint(state="unknown", observation={"ref": ref, "reason": "pending-row-missing"})
         return
+    if peer_message._request_withdrawn(row):
+        # The sender superseded or cancelled this request revision before it was
+        # delivered. Close the delivery attempt; no sender notice is owed for it.
+        status = peer_message.cancel_message_obligation(
+            ref, duty_id=duty_id, expected_revision=duty.get("revision"),
+            identity=intent.get("identity") or {}, message=row,
+            evidence={"kind": "request-withdrawn",
+                      "server": (intent.get("identity") or {}).get("server") or "default"})
+        if status == "cancelled":
+            checkpoint(state="cancelled", delivery="failed", cleanup="complete",
+                       observation={"ref": ref, "reason": "request-withdrawn"})
+            return
     if peer_message._unresolved_target(row.get("to")) and not row.get("bound_to"):
         if row.get("receipt") == "target-identity-changed" or "ambiguous" in row.get("receipt", ""):
             # Delivery stays refused; the sender's one-hour notice is still owed.
@@ -6174,6 +6195,45 @@ def _watch_receipt_question_fields(state, agent):
     return {"question_id": question_id} if question_id else {}
 
 
+def _steward_session_gone(watch_id, arm):
+    """A watch's steward session is ended; its watch ends only if no live holder took over.
+
+    After the steward's `/clear` or a handover, the sid the watch was armed under is
+    ended while the seat's current holder is alive; the seat relation is read first, as
+    `_watch_close_reason` does. An unreadable relation keeps the plain ended judgment."""
+    seat = (arm or {}).get("steward_seat") or {}
+    if not seat.get("key"):
+        return True
+    try:
+        import dispatch_seat_handover as handover
+        relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
+        holder = (relation or {}).get("holder") or {}
+        harness, sid = holder.get("harness"), holder.get("sid")
+        if (relation and isinstance(harness, str) and harness and isinstance(sid, str) and sid
+                and native_lifetime(harness, sid) != "ended"):
+            return False
+    except Exception:  # noqa: BLE001 - an unreadable relation keeps the ended judgment
+        pass
+    return True
+
+
+def _session_changed_in_place(harness, sid, expected):
+    """The armed process (same pid and birth) is still alive and now runs a different session."""
+    try:
+        import peer_address
+        pid = expected.get("pid")
+        if type(pid) is not int or pid <= 1:
+            return False
+        for row in peer_address.native_sessions():
+            if (row.get("pid") == pid and row.get("harness") == harness
+                    and row.get("sid") and row["sid"] != sid):
+                return native_lifetime(harness, sid, pid=pid, pid_start=expected.get("pid_start"),
+                                       pid_namespace=expected.get("pid_namespace")) != "ended"
+    except Exception:  # noqa: BLE001 - an unreadable census says nothing
+        return False
+    return False
+
+
 def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
     """Read each armed native target once per runner pass and wake its observer."""
     root = snapshot.get("watch_root") if isinstance(snapshot, dict) else None
@@ -6245,6 +6305,17 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                                "observed_ts": _utc_now()}
                     _write_json_atomic(paths.observation, current)
                     _wake_watch_observer(_read_json(paths.arm) or arm)
+                    changed = True
+                elif (previous.get("state") != "terminal_pending"
+                        and previous.get("reason") != "target-session-changed-unconfirmed"
+                        and _session_changed_in_place(harness, sid, expected)):
+                    # The armed process now runs another session and no lineage confirms
+                    # it is this one's successor: say so in the observation (no receipt,
+                    # no wake, no new deadline); `status` shows the reason.
+                    _write_json_atomic(paths.observation, {
+                        **previous, "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+                        "reason": "target-session-changed-unconfirmed", "server": server,
+                        "observed_ts": _utc_now()})
                     changed = True
                 continue
             current_pid, current_start = observed.get("pid"), observed.get("pid_start")
@@ -7196,6 +7267,16 @@ def _runner_maintenance_pass(store):
                                 + int(PEER_HISTORY_TIME_BUDGET_S * 1_000_000_000)),
                 start_after=cursor if isinstance(cursor, str) else None)
             result["peer_history"] = counts
+            # Peer requests on the same due pass: a confirmation a writer left after its
+            # seal is finished from that seal, then requests closed (or never sealed) for
+            # 14 days go; an open request is never removed for its age.
+            try:
+                import peer_request
+                request_counts = peer_request.maintain()
+                result["peer_requests_settled"] = request_counts["settled"]
+                result["peer_requests_pruned"] = request_counts["pruned"]
+            except (OSError, ValueError, ImportError):
+                pass
             peer_obligations.write_runner_duty_state(
                 root, "peer-history", {
                     "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
@@ -7865,7 +7946,7 @@ def _codex_shell_start_gate(binding):
 
 def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
                        expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
-                       binding=None, pane=None, native_owner=None, sender_row=None):
+                       binding=None, pane=None, native_owner=None, sender_row=None, request=None):
     """Native-session address using the existing sealed message and carrier.
 
     Delivery never types into a window: a shell attachment takes it through its host
@@ -7891,7 +7972,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE)
+            namespace=_PEER_NAMESPACE, request=request)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -7955,7 +8036,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
         _schedule_message_obligation(current, f"{harness}:{sid}")
     surface = "codex-queue" if harness == "codex" else harness + "-native"
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body),
+    _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body, request),
             summary_text=text, to_session_id=sid, to_pane=None, ref=args.ref,
             status=_PROMPT_LEDGER_STATUS[outcome],
             receipt=(("native-process:" if native_owner is not None else
@@ -7964,7 +8045,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             from_identity=from_identity, from_name=from_name, transfer_ref=ref,
             surface=surface, producer_binding=producer_binding)
     print(f"prompted={outcome} target={args.target} to_harness={harness} "
-          f"to_alias={peer_message.peer_alias(harness, sid)} kind={_prompt_message_kind(body)} "
+          f"to_alias={peer_message.peer_alias(harness, sid)} kind={_prompt_message_kind(body, request)} "
           f"ref={ref} via={'session-shell' if binding is not None else surface} "
           f"ms={elapsed_ms} reason={reason}")
     _prompt_carrier_note(ref, args.target, outcome)
@@ -8018,7 +8099,7 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None, sender=None):
+               handoff=None, resolved_recipient=None, sender=None, request=None):
     """Seal a peer message and route it through the recipient's native carrier.
 
     ``sender`` is the observed predecessor identity for a supervisor-issued
@@ -8072,6 +8153,13 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     unresolved = dict(from_identity=from_identity, from_name=from_name, from_harness=from_harness,
                       from_sid=from_sid, on_prepared=on_prepared,
                       producer_binding=producer_binding, handoff=handoff)
+    unresolved_reply = _prompt_unresolved
+    if request is not None:
+        # A request is bound to one exact session; an unresolved address is
+        # refused here and nothing is sealed or kept pending for it.
+        def unresolved_reply(_args, _body, why, **_unused):
+            print(f"prompted=false reason={why}")
+            return 5
 
     if resolved_recipient is not None:
         identity = {"harness": resolved_recipient.get("harness"),
@@ -8081,7 +8169,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     else:
         identity, reason = peer_address.resolve(args.target, server=_HERDR_SESSION)
     if identity is None or reason:
-        return _prompt_unresolved(args, body, reason or "target-observation-unavailable",
+        return unresolved_reply(args, body, reason or "target-observation-unavailable",
                                   **unresolved)
     t_harness, t_sid = identity["harness"], identity["session_id"]
     if expected_recipient is not None and (t_harness, t_sid) != expected_recipient:
@@ -8092,16 +8180,32 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         return 5
     binding, binding_reason = _current_shell_binding(t_harness, t_sid)
     if binding_reason in {"attachment-ambiguous", "target-identity-changed"}:
-        return _prompt_unresolved(args, body, binding_reason, **unresolved)
+        return unresolved_reply(args, body, binding_reason, **unresolved)
     native_owner = None
     if binding is None and t_harness == "codex":
         native_owner = _prompt_codex_native_owner(t_sid)
         if native_owner is None and _prompt_codex_owner_conflict(t_sid):
-            return _prompt_unresolved(args, body, "target-identity-changed", **unresolved)
+            return unresolved_reply(args, body, "target-identity-changed", **unresolved)
     return _cmd_prompt_native(args, body, t_harness, t_sid, binding=binding,
         native_owner=native_owner, from_identity=from_identity, from_name=from_name,
         expected_recipient=expected_recipient, on_prepared=on_prepared,
-        producer_binding=producer_binding, handoff=handoff, sender_row=sender_row)
+        producer_binding=producer_binding, handoff=handoff, sender_row=sender_row,
+        request=request)
+
+
+def cmd_request(args):
+    import peer_request_cmd
+    return peer_request_cmd.request(args, sys.modules[__name__])
+
+
+def cmd_report(args):
+    import peer_request_cmd
+    return peer_request_cmd.report(args, sys.modules[__name__])
+
+
+def cmd_show(args):
+    import peer_request_cmd
+    return peer_request_cmd.show(args, sys.modules[__name__])
 
 
 def _shell_seat(target, harness=None, info=None):
@@ -8942,6 +9046,37 @@ def build_parser():
     p_prompt.add_argument("--no-trailer", action="store_true")
     p_prompt.add_argument("--ref", action="append", default=[])
     p_prompt.set_defaults(func=cmd_prompt)
+
+    p_request = sub.add_parser("request", help="ask another session for work (a peer request)")
+    p_request.add_argument("target", help="a session address, or an existing request id (rq-xxxxxx)")
+    p_request.add_argument("text", nargs="?", default=None)
+    p_request.add_argument("--body-file", default=None)
+    p_request.add_argument("--body-stdin", action="store_true")
+    p_request.add_argument("--title", default=None)
+    p_request.add_argument("--rev", default=None, help="label of this revision; a new label supersedes")
+    p_request.add_argument("--cancel", action="store_true")
+    p_request.add_argument("--reason", default=None)
+    p_request.set_defaults(func=cmd_request)
+
+    p_report = sub.add_parser("report", help="report on a request you received (final unless --partial)")
+    p_report.add_argument("rq", nargs="?", default=None)
+    p_report.add_argument("--partial", action="store_true")
+    p_report.add_argument("--reject", default=None, metavar="REASON")
+    p_report.add_argument("--result", default=None)
+    p_report.add_argument("--remaining", default=None)
+    p_report.add_argument("--artifact", default=None)
+    p_report.add_argument("--file", default=None)
+    p_report.add_argument("--body-file", default=None)
+    p_report.add_argument("--body-stdin", action="store_true")
+    p_report.add_argument("--rev", type=int, default=None)
+    p_report.set_defaults(func=cmd_report)
+
+    p_show = sub.add_parser("show", help="open a request's sealed body; no id lists open requests")
+    p_show.add_argument("rq", nargs="?", default=None)
+    p_show.add_argument("--rev", type=int, default=None)
+    p_show.add_argument("--report", type=int, default=None)
+    p_show.add_argument("--all", action="store_true")
+    p_show.set_defaults(func=cmd_show)
 
     p_clear = sub.add_parser("clear")
     p_clear.add_argument("target")

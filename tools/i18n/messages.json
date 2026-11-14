@@ -1602,6 +1602,98 @@
    "en": "Result ready",
    "ko": "결과 준비"
   },
+  "fleet.session_panel.request_body": {
+   "en": "body",
+   "ko": "본문"
+  },
+  "fleet.session_panel.request_delivery_delivered": {
+   "en": "delivered",
+   "ko": "전달됨"
+  },
+  "fleet.session_panel.request_delivery_gone": {
+   "en": "peer ended",
+   "ko": "상대 끝남"
+  },
+  "fleet.session_panel.request_delivery_seen": {
+   "en": "seen",
+   "ko": "보임"
+  },
+  "fleet.session_panel.request_delivery_sent": {
+   "en": "sent",
+   "ko": "보냄"
+  },
+  "fleet.session_panel.request_label_delivery": {
+   "en": "DELIVERY",
+   "ko": "DELIVERY"
+  },
+  "fleet.session_panel.request_label_last": {
+   "en": "LAST",
+   "ko": "LAST"
+  },
+  "fleet.session_panel.request_label_remaining": {
+   "en": "LEFT",
+   "ko": "LEFT"
+  },
+  "fleet.session_panel.request_label_reports": {
+   "en": "REPORTS",
+   "ko": "REPORTS"
+  },
+  "fleet.session_panel.request_label_revision": {
+   "en": "REV",
+   "ko": "REV"
+  },
+  "fleet.session_panel.request_label_work": {
+   "en": "WORK",
+   "ko": "WORK"
+  },
+  "fleet.session_panel.request_late": {
+   "en": "late",
+   "ko": "늦은 답"
+  },
+  "fleet.session_panel.request_report_final": {
+   "en": "final",
+   "ko": "최종"
+  },
+  "fleet.session_panel.request_report_partial": {
+   "en": "partial",
+   "ko": "일부"
+  },
+  "fleet.session_panel.request_report_reject": {
+   "en": "rejected",
+   "ko": "거절"
+  },
+  "fleet.session_panel.request_state_cancelled": {
+   "en": "cancelled",
+   "ko": "취소됨"
+  },
+  "fleet.session_panel.request_state_final": {
+   "en": "final answer",
+   "ko": "최종 답"
+  },
+  "fleet.session_panel.request_state_open": {
+   "en": "open",
+   "ko": "열림"
+  },
+  "fleet.session_panel.request_state_partial": {
+   "en": "partial answer",
+   "ko": "일부 답"
+  },
+  "fleet.session_panel.request_state_preparing": {
+   "en": "not confirmed",
+   "ko": "확정 안 됨"
+  },
+  "fleet.session_panel.request_state_rejected": {
+   "en": "rejected",
+   "ko": "거절"
+  },
+  "fleet.session_panel.request_superseded": {
+   "en": "superseded",
+   "ko": "대체됨"
+  },
+  "fleet.session_panel.request_unseen_answer": {
+   "en": "answer {state}",
+   "ko": "답 {state}"
+  },
   "fleet.session_panel.results": {
    "en": "Results & connected work",
    "ko": "결과 · 연결된 일"

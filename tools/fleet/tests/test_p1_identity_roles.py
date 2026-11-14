@@ -309,6 +309,20 @@ class CurrentSessionTest(unittest.TestCase):
                 mock.patch.object(herdr, "list_panes", return_value=None):
             self.assertIsNone(claude.session_id_of_process(self.pid, str(self.home)))
 
+    def test_standalone_claude_outside_herdr_asks_herdr_nothing(self):
+        # A Claude TUI under tmux or a bare terminal has no Herdr pane to
+        # observe: a request, report or redelivery that only re-reads its own
+        # native identity must not run `herdr pane list`.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(procscan, "_comm_of", return_value="claude"), \
+                mock.patch.object(procscan, "provenance", return_value="terminal"), \
+                mock.patch.object(procscan, "read_environ", return_value={}), \
+                mock.patch.object(procscan, "read_proc_start", return_value=self.start), \
+                mock.patch.object(procscan, "_read_cwd", return_value=(self.cwd, False)), \
+                mock.patch.object(herdr, "list_panes", side_effect=AssertionError("herdr pane probe")):
+            claude.session_id_of_process(self.pid, str(self.home))
+
     def _enrich_failed_agent_list(self, lineage, bound=False):
         s = Session(harness="claude", pid=self.pid, proc_start=self.start, cwd=self.cwd)
         panes = [{"pane_id": "wB:p3N", "agent": "claude", "cwd": self.cwd,
@@ -449,7 +463,15 @@ class ProcessRolesTest(unittest.TestCase):
                  "22 opencode 01:00 opencode",
                  "30 codex 01:00 codex app-server --listen unix:///tmp/managed-sessions/x/app-server.sock",
                  "40 claude 01:00 claude -p work"]
-        with mock.patch.object(procscan, "_ps_lines", return_value=lines), \
+        # The fixture's PIDs are synthetic: Claude's process observation reads an empty
+        # proc root, never this host's /proc, where the same numbers may be real processes.
+        identity = procscan.claude_process_identity
+        real_observe = identity.observe_process
+        empty_proc = tempfile.TemporaryDirectory()
+        self.addCleanup(empty_proc.cleanup)
+        with mock.patch.object(identity, "observe_process",
+                               side_effect=lambda pid: real_observe(pid, proc_root=empty_proc.name)), \
+                mock.patch.object(procscan, "_ps_lines", return_value=lines), \
                 mock.patch.object(procscan, "_pid_ttys", return_value={
                     10: "?", 11: "?", 12: "?", 20: "pts/1", 21: "pts/2", 22: "pts/3", 30: "?", 40: "?"}), \
                 mock.patch.object(procscan, "_detached_ttys", return_value=set()), \
