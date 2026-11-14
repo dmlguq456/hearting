@@ -1867,6 +1867,49 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                 count += self.alarms(self.t0 + window * 300)
         self.assertEqual(count, 0)
 
+    def claude_owner_with_subagents(self):
+        from claude_project_dir import encode_project_dir
+        self.owner("claude")
+        cwd, home = self.root / "work", self.root / "home"
+        cwd.mkdir()
+        self.owner_meta["runtime_home"] = str(home)
+        self.rows()
+        transcript = home / "projects" / encode_project_dir(str(cwd)) / "sid-owner.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "text", "text": "x"}]}}) + "\n", encoding="utf-8")
+        self.log.write_text(json.dumps({"type": "dispatch.supervisor.session", "session_id": "sid-owner",
+                                        "cwd": str(cwd)}) + "\n", encoding="utf-8")
+        folder = transcript.parent / "sid-owner" / "subagents"
+        folder.mkdir(parents=True)
+        return folder / "agent-1.jsonl"
+
+    def test_k_a_worker_waiting_on_its_own_subagent_is_not_stalled(self):
+        # 11-15 06:05/06:09: the main transcript sat quiet 15 minutes while its subagent wrote.
+        subagent = self.claude_owner_with_subagents()
+        subagent.write_text("{}\n", encoding="utf-8")
+        count = 0
+        with self.lease():
+            self.phase("running-turn")
+            self.runtime("active", "runtime-command-live")
+            for step in range(30):
+                with subagent.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"type": "assistant", "n": step}) + "\n")
+                count += self.alarms(self.t0 + step * 400)
+        self.assertEqual(count, 0)
+
+    def test_l_a_silent_worker_and_silent_subagent_still_alarm(self):
+        subagent = self.claude_owner_with_subagents()
+        subagent.write_text("{}\n", encoding="utf-8")
+        with self.lease():
+            self.phase("running-turn")
+            self.runtime("active", "runtime-command-live")
+            self.assertEqual(self.alarms(self.t0), 0)
+            self.assertEqual(self.alarms(self.t0 + 601), 1)
+            observation = self.state(self.t0 + 601)
+        self.assertEqual((observation["state"], observation["reason"]),
+                         ("stalled", "no-comparable-progress"))
+
     def test_r3_a_damaged_announcement_never_reads_another_sessions_tools(self):
         # RV-PR1592 R3: another process's valid announcement B landed first, then this owner's
         # own announcement A arrived damaged. Before the fix B's transcript became the source.

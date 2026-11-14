@@ -273,34 +273,59 @@ _TURN_EVENT_TYPES = frozenset({
 
 
 def runtime_turn_mark(metadata):
-    """Where the worker's own newest turn/step row sits in its event source, or ``None``.
+    """Where the worker's own newest turn/step row sits in its event source, plus what its
+    subagents have written, or ``None``.
 
-    A live worker's new turn is progress even when it ran no tool. Only the byte offset
-    of the newest such row is read; never its prose.
+    A live worker's new turn is progress even when it ran no tool, and so is the activity of
+    a subagent it started and waits on. Only a byte offset and file sizes are read; never prose.
     """
     raw_path = metadata.get("log_file", "")
     if not raw_path or not Path(raw_path).is_absolute():
         return None
+    source = _tool_event_source(metadata, Path(raw_path))
+    mark = None
     try:
-        with _tool_event_source(metadata, Path(raw_path)).open("rb") as handle:
+        with source.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             start = max(0, handle.tell() - 262144)
             handle.seek(start)
             if start:
                 start += len(handle.readline())
             data = handle.read(262144)
+        offset = start
+        for line in data.splitlines(keepends=True):
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                event = None
+            if isinstance(event, dict) and event.get("type") in _TURN_EVENT_TYPES:
+                mark = offset
+            offset += len(line)
+    except OSError:
+        pass
+    subagents = _subagent_signature(source)
+    return [mark, subagents] if subagents else mark
+
+
+def _subagent_signature(source):
+    """(name, size) of the session's subagent transcripts, or ``None`` when it has none.
+
+    Claude writes each subagent of a session to ``<session>/subagents/*.jsonl`` beside the
+    session transcript; a growing file is that subagent's new event. Codex and OpenCode keep
+    a child in its own thread/session, which this attempt's log does not point to, so nothing
+    is read for them here.
+    """
+    try:
+        folder = source.parent / source.stem / "subagents"
+        entries = []
+        for item in folder.iterdir():
+            if item.suffix == ".jsonl" and not item.is_symlink():
+                entries.append((item.name, item.stat().st_size))
+                if len(entries) >= 64:
+                    break
+        return sorted(entries) or None
     except OSError:
         return None
-    mark, offset = None, start
-    for line in data.splitlines(keepends=True):
-        try:
-            event = json.loads(line)
-        except (ValueError, UnicodeDecodeError):
-            event = None
-        if isinstance(event, dict) and event.get("type") in _TURN_EVENT_TYPES:
-            mark = offset
-        offset += len(line)
-    return mark
 
 
 # Retry waits each supervisor writes (`session_supervisor_decisions.wait_transient_retry`,
