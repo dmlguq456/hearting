@@ -568,6 +568,10 @@ def owner_summary_line(route, owner, *, t=None) -> str | None:
 
 SUMMARY_NAME = "completion-summary.md"
 MAX_FIELD_CHARS = 320
+# The checks and the remaining work as the supervisor reads them on every later request:
+# enough to decide the next step, the report holds the rest (its path is the last line).
+MAX_CHECKS_CHARS = 160
+MAX_REMAINING_CHARS = 140
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$")
 _BOLD_FIELD = re.compile(r"^\s*\*\*(?P<title>[^*]+?)\*\*[:：]?\s*(?P<value>.*)$")
@@ -583,8 +587,9 @@ _SECTION_FIELDS = (
     ("limits", (), ("한계", "limitation", "limits", "open risk")),
     # "하지 않은 것" lists what the work left to others on purpose (install, merge): follow-ups.
     ("follow_up", ("6",), ("후속", "하지", "follow-up", "follow up", "follow-ups", "not done")),
-    ("verified", ("4",), ("검증", "시험", "검사", "명령", "qa", "verification", "validation", "checks", "tests",
-                          "testing")),
+    # "근거" and "실행한 것" are where review reports list what they ran and observed.
+    ("verified", ("4",), ("검증", "시험", "검사", "명령", "근거", "qa", "verification", "validation", "checks", "tests",
+                          "testing", "evidence")),
     ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
@@ -642,6 +647,8 @@ def _section_field(title: str, *, numbered: bool) -> str | None:
     lowered = (title[number.end():] if number else title).lower()
     # A finding or historical narrative can mention checks without being the
     # report's checks section. Only a heading that names the field qualifies.
+    if re.match(r"(?:실행한|돌린|수행한)\s*것(?:$|[\s(·:—-])", lowered):
+        return "verified"
     leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
     if not any(leading.startswith(word) and _has_word(leading, word)
                for _field, _numbers, words in _SECTION_FIELDS for word in words):
@@ -719,7 +726,7 @@ def report_verdict(text: str) -> str:
         if fence or not line or line.startswith("#"):
             continue
         match = _VERDICT_LINE.match(line.replace("**", ""))
-        return _line(match["verdict"].strip("* "), 120) if match else ""
+        return _line(match["verdict"].strip("* "), 100) if match else ""
     return ""
 
 
@@ -795,7 +802,7 @@ def _verified_summary(lines, t):
     commands = [line for line in lines if _COMMAND_LINE.search(line.strip())]
     prose = [line for line in lines if line not in commands]
     if not commands:
-        return _joined(lines) or t("completion.no_checks")
+        return _joined(lines, MAX_CHECKS_CHARS) or t("completion.no_checks")
     passed = failures = 0
     for line in commands:
         words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(_unnegated(line))]
@@ -805,7 +812,7 @@ def _verified_summary(lines, t):
         summary = t("completion.command_checks_unmarked", count=len(commands))
     else:
         summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
-    return _joined([*prose, summary])
+    return _joined([*prose, summary], MAX_CHECKS_CHARS)
 
 
 def _review_degraded(route_file) -> list[str]:
@@ -996,7 +1003,7 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         # The supervisor wrote this intent; a short reminder is enough to match the result.
         original = (t("completion.intent_original", original=_line(intent["original"], 60))
                     if intent.get("original") else "")
-        lines.append(t("completion.intent", intent=_line(goal, 120), original=original))
+        lines.append(t("completion.intent", intent=_line(goal, 100), original=original))
     owner_line = owner_summary_line(route, owner, t=t)
     if owner_line:
         lines.append(owner_line)
@@ -1031,7 +1038,7 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         lines.append(t("completion.checks", items=checks))
         rest = [line for field in ("remaining", "limits", "follow_up") for line in sections.get(field) or []
                 if not is_publication_line(line)]
-        lines.append(t("completion.remaining", items=_joined(rest) or t("completion.no_remaining")))
+        lines.append(t("completion.remaining", items=_joined(rest, MAX_REMAINING_CHARS) or t("completion.no_remaining")))
     else:
         lines.append(t("completion.unreadable"))
     if degraded:
