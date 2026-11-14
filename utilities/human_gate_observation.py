@@ -11,6 +11,7 @@ import sys
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "utilities") not in sys.path:
@@ -560,6 +561,7 @@ _LAST_PASS_ROUTE_PATHS = ()
 # The same per registry, as the latest full pass that read it found them: a registry a pass cannot
 # read confirms none of its routes settled, so that pass keeps what this registry last named.
 _REGISTRY_ROUTE_PATHS = {}
+_TERMINAL_STATES = frozenset(("CANCELLED", "COMPLETE", "FAILED_TERMINAL"))
 _WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
 _WAIT_JUDGED = contextvars.ContextVar("human_gate_wait_judged", default=None)
 _METRICS["route_wait_recomputes"] = 0
@@ -611,7 +613,7 @@ def _kept_waits(route_key, path, ledger_root):
     entry = _WAIT_MEMO.get(route_key)
     if entry is None or ledger_root is None or entry[0] != str(path):
         return None
-    _jobs_key, files, stamps, journal, journal_stamp, reads, waits, _closed = entry
+    _jobs_key, files, stamps, journal, journal_stamp, reads, waits, _closed, _ends = entry
     # The same registry path can select another ledger (its directory now links elsewhere): the
     # journal the judgment was made from must still be the one this pass selects.
     if journal != _journal_file(route_key, ledger_root):
@@ -647,8 +649,12 @@ def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_ro
         _WAIT_JUDGED.reset(judged_token)
         _WAIT_READS.reset(token)
     if journal is not None:
+        # The journal's last record, for ``_route_settled`` (the parse this judgment just made).
+        rows = _journal(SimpleNamespace(journal_path=Path(journal)))
+        ends = bool(rows) and rows[-1].get("workflow_state") in _TERMINAL_STATES
         _WAIT_MEMO[route_key] = (str(path), files, stamps, journal, journal_stamp, tuple(reads),
-                                 tuple(dict(wait) for wait in waits), judged.get("closed") is True)
+                                 tuple(dict(wait) for wait in waits), judged.get("closed") is True,
+                                 ends)
     return waits
 
 
@@ -657,13 +663,14 @@ def _route_settled(route_key, path, row, waits, deciding):
 
     All of it must be confirmed by this pass, else the route stays watched (a read that
     failed confirms nothing): its registry and route record were read (the kept judgment
-    exists for this registry); the route is closed now and its closure is finished (latest
-    lifecycle state terminal or the matched closed outcome, no ``closure-pending``); no
-    attempt is open on it after that (its latest registry row is not live); and nothing on it
-    waits for a person (no answer wait, no owner decision). "No answer wait" alone is not
-    "nothing left to watch"."""
+    exists for this registry); the route is closed now and its closure is finished (no
+    ``closure-pending``), and the journal's last record is a terminal one
+    (CANCELLED/COMPLETE/FAILED_TERMINAL) with nothing written after it: a closed outcome does
+    not settle a route whose journal went on after the closure; no attempt is open on it after
+    that (its latest registry row is not live); and nothing on it waits for a person (no answer
+    wait, no owner decision). "No answer wait" alone is not "nothing left to watch"."""
     entry = _WAIT_MEMO.get(route_key)
-    return (entry is not None and entry[0] == str(path) and entry[7] is True
+    return (entry is not None and entry[0] == str(path) and entry[7] is True and entry[8] is True
             and not waits and route_key not in deciding
             and str(getattr(row, "status", "") or "").lower() not in ("open", "running"))
 

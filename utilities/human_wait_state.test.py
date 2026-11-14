@@ -4595,8 +4595,8 @@ class FinishedRouteWakeTests(unittest.TestCase):
         self.assertTrue(events.wait_changed(5.0))
 
     def test_a_route_opened_again_is_watched_from_the_next_pass_and_wakes(self):
-        # Closed by its outcome (the journal records no end): finished, not watched.
-        route = self.route(journal_complete=False)
+        # Closed (its outcome, and the journal ends at COMPLETE): finished, not watched.
+        route = self.route()
         self.pass_once()
         self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
         # It opens again: the closure is withdrawn and a new attempt starts on the same route.
@@ -4715,6 +4715,41 @@ class FinishedRouteWakeTests(unittest.TestCase):
             self.assertIn(str(route["file"]), watched)
         self.assertLessEqual(len(watched), 4 * len(old))       # at most four files per such route
 
+
+    # Rule 2 (RV-PR1622-R3 §2): a route is settled only when its journal's last record is the
+    # terminal one; a closed outcome does not settle a route whose journal went on after it.
+
+    def journal_row(self, route, at="2026-11-13T01:00:00Z", **row):
+        record = route["record"]
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": at, "route_id": record["route_id"],
+                                     "route_hash": record["route_hash"], **row}) + "\n")
+
+    def raise_gate(self, route, at="2026-11-13T01:00:00Z"):
+        """The reviewer's gate: a frame-review raised on the route (an interview not answered)."""
+        artifact = Path(route["record"]["artifact_root"]) / "interview.json"
+        artifact.write_text("{}", encoding="utf-8")
+        self.journal_row(route, at=at, workflow_state="BLOCKED_HUMAN_GATE",
+                         evidence={"gate": "frame-review", "artifact": str(artifact)})
+        return artifact
+
+    def test_a_gate_raised_after_the_closure_is_watched_and_wakes(self):
+        route = self.route()                                   # COMPLETE, closed, done/PASS
+        self.raise_gate(route)
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_anything_written_after_the_end_keeps_a_closed_route_watched(self):
+        route = self.route()
+        self.journal_row(route, actor="parent-close", evidence={"parent_close_result": {"state": "cancelled"}})
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_a_route_closed_with_nothing_after_its_end_adds_no_watch(self):
+        _observed, idle = self.pass_once()
+        routes = [self.route() for _ in range(30)]
+        _observed, after = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(after, idle)
+        self.assertFalse({str(route["journal"]) for route in routes} & after)
 
 if __name__ == "__main__":
     unittest.main()
