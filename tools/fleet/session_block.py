@@ -69,11 +69,12 @@ def question_presentations(items, columns, *, native_wait=None, own=True):
         choices = (["approve", "reject", "defer"] if item.get("answer_kind") == "decision"
                    else question.get("choices") or [])
         options = []
-        for number, choice in enumerate(choices, 1):
+        # The choice's own number; `number` stays the box's `i` of `i/N`.
+        for choice_number, choice in enumerate(choices, 1):
             label = choice.get("label", choice.get("value", "?")) if isinstance(choice, dict) else choice
-            prefix = str(number) + " "
+            prefix = str(choice_number) + " "
             parts = [(str(label), "loc_repo")]
-            if question.get("recommended") == number - 1:
+            if question.get("recommended") == choice_number - 1:
                 parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
             # Two cells stay free before the number for the editor's mark column (spec E9 rule 53).
             for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix) - 2))):
