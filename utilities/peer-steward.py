@@ -6630,6 +6630,11 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
 # same pass tries the next one, at most this many times. Without this, a backlog
 # of never-tried groups for gone sessions was found out one group per pass.
 NOTICE_UNAVAILABLE_SWEEP_LIMIT = 8
+# How long an attention notice to an owner that can no longer receive still
+# rides the ended-owner redirect to its parent. Older duties and every routine
+# notice close through the existing notice TTL instead, so installing this
+# never wakes supervisors for a weeks-old backlog at once.
+NOTICE_REDIRECT_MAX_AGE_SECONDS = 24 * 3600
 # What a group's duties record when nothing could be sent because the recipient
 # is not there: not seen live, or a confirmed native end that keeps the answer.
 NOTICE_RECIPIENT_GONE_REASONS = frozenset({
@@ -6718,6 +6723,17 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         if message and message.get("state") == "received":
                             peer_obligations.acknowledge_session_notice_delivery(message, roots=[root])
                             continue
+                    # A lease whose deadline passed cannot deliver either; the
+                    # same reclaim the send stage uses returns the record to
+                    # pending so the notice TTL can end it like any other.
+                    if (record.get("state") == "claimed"
+                            and type(record.get("claim_deadline_ns")) is int
+                            and time.monotonic_ns() >= record["claim_deadline_ns"]):
+                        try:
+                            pending.reclaim(root, storage_sid, record["delivery_id"],
+                                            now_ns=time.monotonic_ns())
+                        except (pending.PendingDeliveryError, OSError, ValueError):
+                            pass
                     store.update(duty["id"], state="pending", observation={
                         **(duty.get("observation") or {}), "reason": "recipient-lineage-unavailable"},
                         expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},
@@ -6739,6 +6755,29 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         and "answer_binding" not in (record.get("receipt") or {})):
                     store.update(duty["id"], state="pending", observation={
                         **(duty.get("observation") or {}), "reason": "native-opencode-carrier-owns-notice"},
+                        expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},
+                        skip_unchanged=True)
+                    continue
+                redirected_owner = False
+                if intent.get("kind") == "run-notice" and pair[1] != storage_sid:
+                    # The ended-owner fallback answered someone other than the
+                    # notice's own session — the attempt's parent (#1624's
+                    # answer). Only a fresh attention still rides that redirect;
+                    # a normal end and a stale failure to an owner that cannot
+                    # receive close through the existing notice TTL instead of
+                    # waking its parent for them again.
+                    try:
+                        _redirect_jobs, redirect_lineage = session_notice.pending_lineage(
+                            record, source_harness, storage_sid, source_jobs)
+                        redirected_owner = redirect_lineage.get("kind") == "owner-session"
+                    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                        redirected_owner = False
+                if (redirected_owner
+                        and not (session_notice.classify(record.get("receipt")) == session_notice.ATTENTION
+                                 and time.time() - duty.get("accepted_at", 0.0)
+                                 < NOTICE_REDIRECT_MAX_AGE_SECONDS)):
+                    store.update(duty["id"], state="pending", observation={
+                        **(duty.get("observation") or {}), "reason": "ended-owner-notice-awaiting-expiry"},
                         expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},
                         skip_unchanged=True)
                     continue

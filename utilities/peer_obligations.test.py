@@ -3844,13 +3844,20 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
                     "kind": "attempt-parent", "harness": "claude", "session_id": sid, "attempt_id": meta["attempt_id"]})
                 owner, = self.notices(sid=sid, label="owner-" + status, lineage={
                     "kind": "owner-session", "harness": "claude", "session_id": sid, "attempt_id": meta["attempt_id"]})
-                # the parent is a fact of the launch; a confirmed hand-over of that seat is still followed
+                # the parent is a fact of the launch; how the child ended never hides it
                 self.assertEqual(record_recipient_binding(parent, sid, harness="claude", jobs=self.jobs),
                                  ("claude", sid))
+                # the attempt's own session keeps its notice while the attempt is live
+                # or done; a recorded end (killed, cancelled, failed) follows the #1624
+                # answer for an ended owner and names the parent instead
+                self.assertEqual(record_recipient_binding(owner, sid, harness="claude", jobs=self.jobs),
+                                 ("claude", sid) if status in {"open", "running", "done",
+                                                               "killed", "cancelled", "failed"} else None)
                 self.edge("claude", sid, "next-" + status)
                 self.assertEqual(record_recipient_binding(parent, sid, harness="claude", jobs=self.jobs),
                                  ("claude", "next-" + status))
-                # the attempt's own session has nobody to read it once the attempt ended
+                # a confirmed successor of the owner's own seat keeps the refusal:
+                # the notice waits instead of reaching the wrong session
                 self.assertEqual(record_recipient_binding(owner, sid, harness="claude", jobs=self.jobs),
                                  ("claude", sid) if status in {"open", "running", "done"} else None)
         # no row at all: nothing to resolve, as before

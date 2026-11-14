@@ -38,6 +38,7 @@ import dispatch_recipient_inbox as inbox  # noqa: E402
 import dispatch_supervision as supervision  # noqa: E402
 import herdr_observation  # noqa: E402
 import peer_obligations  # noqa: E402
+import peer_steward_native  # noqa: E402
 import session_notice  # noqa: E402
 import session_tidy as tidy  # noqa: E402
 from route_identity import route_hash  # noqa: E402
@@ -265,6 +266,219 @@ class TerminalFirstDeliveryTest(IsolatedCase):
             peer_steward._resume_session_notice_obligations(self.duties(), self.store)
         self.assertEqual(len(sent), 2)
         self.assertIn("routine progress", sent[1]["body"])
+
+
+class EndedOwnerNoticeTest(IsolatedCase):
+    """A notice addressed to an owner session that cannot receive it any more.
+
+    An owner confirmed ended (a recorded-end row, or a done row whose session
+    is proven ended natively) with nothing succeeding it re-resolves a fresh
+    attention to the attempt's parent (#1624's answer for an ended owner);
+    every other notice to such an owner waits for the existing notice TTL
+    instead, so nothing stays pending forever and installing never wakes a
+    supervisor for a weeks-old backlog at once.
+    """
+
+    DAY = 86400
+
+    def world(self, token, *, harness="claude", status="done", attention=True,
+              owner="sid-owner", supervisor="sid-supervisor",
+              supervisor_harness="claude", owner_age_hours=1.0,
+              waiting_supervisor=False):
+        """One isolated state root: the owner's row, its notice and its duty."""
+        import hashlib
+        from harness_capabilities import parent_completion
+        state = self.root / f"world-{token}"
+        state.mkdir()
+        jobs = state / "jobs.log"
+        store = peer_obligations.ObligationStore(state)
+        self.assertTrue(store.ensure_directory())
+        sup_carrier = parent_completion(supervisor_harness)["carrier"]
+        attempt = f"att-{token}"
+        meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}",
+                         "dispatch_depth=1", "worker_type=owner", f"harness={harness}",
+                         f"parent_sid={supervisor}", f"parent_harness={supervisor_harness}",
+                         f"parent_completion_delivery={sup_carrier}", "registered_worker=1",
+                         f"route_id=rt-{token}", f"route_hash={'h' * 8}", "route_node=execute"))
+        jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt",
+                                   "owner", meta)) + "\n")
+        if waiting_supervisor:
+            join._write_supervisor_state_unlocked(
+                state / "supervisor-state" / (attempt + ".json"), attempt, set(),
+                resource={"session_id": owner, "delivered": [], "outbox": None})
+        run = f"run-{token}"
+        if attention:
+            subject, text = "compute run", f"run {run} on here ended with exit 6; read it with: compute-hosts tail {run}"
+        else:
+            subject, text = "compute run, quiet", f"run {run} on here ended with exit 0; read it with: compute-hosts tail {run}"
+        record = session_notice.notify(harness, owner, key=f"compute-run:{run}",
+            subject=subject, text=text,
+            lineage={"kind": "owner-session", "harness": harness,
+                     "session_id": owner, "attempt_id": attempt}, jobs=jobs)
+        duty, = store.list(kinds={"run-notice"})
+        if owner_age_hours:
+            path = store._record_path(duty["id"])
+            value = json.loads(path.read_text("utf-8"))
+            value["accepted_at"] = time.time() - owner_age_hours * 3600
+            path.write_text(json.dumps(value), encoding="utf-8")
+            duty, = store.list(kinds={"run-notice"})
+        record_path = pending.record_path(state, owner, record["delivery_id"])
+        return SimpleNamespace(state=state, jobs=jobs, store=store, record=record,
+                               record_path=record_path, duty=duty, attempt=attempt,
+                               owner=owner, supervisor=supervisor, run=run)
+
+    def _pass(self, world, *, sent=None, lifetime=None, recipient=None):
+        context = mock.patch.object(peer_steward_native, "native_lifetime",
+                                    return_value=lifetime) if lifetime is not None else contextlib.nullcontext()
+        with context, self.transport(recipient or world.supervisor, sent=sent):
+            peer_steward._resume_session_notice_obligations(
+                world.store.list(kinds={"run-notice"}), world.store)
+
+    def test_a_fresh_attention_to_an_ended_owner_reaches_its_parent(self):
+        # A recorded-end owner row redirects its failure notice to the attempt's
+        # parent (the #1624 answer); the parent's carrier may differ.
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                world = self.world(f"attn-{harness}", harness=harness, attention=True)
+                sent = []
+                self._pass(world, sent=sent, lifetime="ended")
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0]["recipient"], ("claude", world.supervisor))
+                self.assertIn(f"run {world.run} on here ended with exit 6", sent[0]["body"])
+                self.assertEqual(
+                    pending.read(world.state, world.owner, world.record["delivery_id"])["state"],
+                    "sent-ambiguous")
+                # Processing the same duty again sends nothing more (one claim,
+                # one body) until its receipt is settled.
+                self._pass(world, sent=sent, lifetime="ended")
+                self.assertEqual(len(sent), 1)
+
+    def test_a_routine_notice_to_an_ended_owner_waits_for_the_existing_ttl(self):
+        world = self.world("routine", harness="claude", attention=False)
+        sent = []
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(sent, [])
+        duty, = world.store.list(kinds={"run-notice"})
+        self.assertEqual(duty["state"], "pending")
+        self.assertEqual((duty.get("observation") or {}).get("reason"),
+                         "ended-owner-notice-awaiting-expiry")
+        # The existing notice TTL ends the record; the next pass closes the duty
+        # and stops reading it.
+        old = time.time() - 8 * self.DAY
+        os.utime(world.record_path, (old, old))
+        self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 1)
+        self.assertEqual(
+            pending.read(world.state, world.owner, world.record["delivery_id"])["state"],
+            "expired")
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(sent, [])
+        self.assertEqual(world.store.list(kinds={"run-notice"}), [])
+        reads = []
+        real_read = pending.read
+
+        def counted(root, recipient, delivery_id, *args, **kwargs):
+            reads.append(delivery_id)
+            return real_read(root, recipient, delivery_id, *args, **kwargs)
+
+        with mock.patch.object(pending, "read", side_effect=counted):
+            self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(reads, [])
+
+    def test_a_stale_attention_to_an_ended_owner_waits_for_the_existing_ttl(self):
+        # The redirect is only for notices made within the last day: installing
+        # this never wakes supervisors for a weeks-old failure at once.
+        world = self.world("stale", harness="claude", attention=True, owner_age_hours=25.0)
+        sent = []
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(sent, [])
+        duty, = world.store.list(kinds={"run-notice"})
+        self.assertEqual(duty["state"], "pending")
+        self.assertEqual((duty.get("observation") or {}).get("reason"),
+                         "ended-owner-notice-awaiting-expiry")
+
+    def test_an_ended_owner_whose_parent_is_gone_waits_for_the_existing_ttl(self):
+        world = self.world("parent-gone", harness="claude", attention=True)
+        # No transport for the supervisor: nothing is sent, the notice waits,
+        # and the existing TTL ends it like every other unroutable notice.
+        sent = []
+        with mock.patch.object(peer_steward_native, "native_lifetime",
+                               return_value="ended"):
+            peer_steward._resume_session_notice_obligations(
+                world.store.list(kinds={"run-notice"}), world.store)
+        self.assertEqual(sent, [])
+        duty, = world.store.list(kinds={"run-notice"})
+        self.assertEqual(duty["state"], "pending")
+        old = time.time() - 8 * self.DAY
+        os.utime(world.record_path, (old, old))
+        self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 1)
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(world.store.list(kinds={"run-notice"}), [])
+
+    def test_a_live_owner_keeps_its_own_notice(self):
+        # An open owner whose waiting supervisor still names it receives its
+        # notice itself, as before; without that supervisor the existing
+        # refusal stands and nothing is redirected or closed.
+        for waiting in (True, False):
+            with self.subTest(waiting_supervisor=waiting):
+                world = self.world(f"alive-{waiting}", harness="claude", status="open",
+                                   attention=True, waiting_supervisor=waiting)
+                sent = []
+                self._pass(world, sent=sent, lifetime="ended",
+                           recipient=world.owner if waiting else None)
+                if waiting:
+                    self.assertEqual(len(sent), 1)
+                    self.assertEqual(sent[0]["recipient"], ("claude", world.owner))
+                else:
+                    self.assertEqual(sent, [])
+                    duty, = world.store.list(kinds={"run-notice"})
+                    self.assertEqual(duty["state"], "pending")
+                    self.assertEqual((duty.get("observation") or {}).get("reason"),
+                                     "recipient-lineage-unavailable")
+
+    def test_a_done_owner_whose_session_cannot_be_proven_ended_waits(self):
+        # Unknown native liveness is not an end: the notice keeps waiting.
+        world = self.world("unknown", harness="claude", attention=True)
+        sent = []
+        self._pass(world, sent=sent, lifetime="unknown")
+        self.assertEqual(sent, [])
+        duty, = world.store.list(kinds={"run-notice"})
+        self.assertEqual(duty["state"], "pending")
+        self.assertEqual((duty.get("observation") or {}).get("reason"),
+                         "recipient-lineage-unavailable")
+
+    def test_a_terminated_owner_row_redirects_without_a_native_proof(self):
+        # killed and cancelled rows are the registry's own end record.
+        for status in ("killed", "cancelled"):
+            with self.subTest(status=status):
+                world = self.world(f"end-{status}", harness="claude", status=status,
+                                   attention=True)
+                sent = []
+                self._pass(world, sent=sent, lifetime="live")
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0]["recipient"], ("claude", world.supervisor))
+
+    def test_a_terminated_owner_with_a_confirmed_successor_waits(self):
+        # The direction keeps a confirmed successor case exactly as before.
+        world = self.world("successor", harness="claude", status="killed",
+                           attention=True)
+        self.edge(world.owner, "sid-next")
+        sent = []
+        self._pass(world, sent=sent, lifetime="live")
+        self.assertEqual(sent, [])
+        duty, = world.store.list(kinds={"run-notice"})
+        self.assertEqual(duty["state"], "pending")
+
+    def test_a_done_owner_redirected_once_per_notice_and_closed_by_the_ttl(self):
+        # Idempotence across passes and the eventual close share one world.
+        world = self.world("idempotent", harness="claude", attention=True)
+        sent = []
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(len(sent), 1)
+        pending.ack(world.state, world.owner, world.record["delivery_id"],
+                    acked_by="fixture-receipt")
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(world.store.list(kinds={"run-notice"}), [])
 
 
 class RunNoticeSupersedeTest(IsolatedCase):
