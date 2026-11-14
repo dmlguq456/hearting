@@ -767,9 +767,15 @@ waking a shell. Shell display and input transport add no model instructions.
 The common line (the collapsed panel row and Claude's statusline, inside and
 outside the shell) reads `[e9] hearting (main 🚧 3) │ Fable 5.2 xhigh │ context
 ━━━━━━──── 58% │ ◑답 대기 1 │ route 3 ⠏2 ✕1 │ 5h 12%(↻ 2h) 7d 66%(↻ 5d)`;
-Claude's second (`>_ running:`) and third (tidy notice) rows are unchanged.
+outside the shell Claude's second (`>_ running:`) and third (tidy notice) rows are
+unchanged; inside it Claude's statusline is that one line (below).
 Narrow layouts shorten words before numeric values, routes and waits (the
-answer wait shortens to `◑ N`). Its title and guidance use Fleet's
+answer wait shortens to `◑ N`); running jobs at the line's end go whole before
+another group shortens. Where even the shortened line does not fit, it keeps what
+the person must act on, the most urgent last to go: the answer wait, compaction
+imminent, a context or usage reading at Fleet's red level, then the route count;
+calm readings go, and the kept readings lose their reset time, then the context
+gauge, before any of them goes. Its title and guidance use Fleet's
 shared message catalog and language preference. Fleet owns the values, palette, glyph meanings, separators and
 unknown-value rules. Native display callbacks and exact-session telemetry are
 valid sources for these display values, including Claude's statusline JSON.
@@ -790,10 +796,11 @@ A value that cannot meet this is compared with retaining that native field.
 While wrapped, Claude's panel shows the common status area in the same place
 and with the same formatter as Codex and OpenCode. Claude keeps its reserved
 statusline row and keeps running its callback, which stays the value source and
-paints every former Hearting field with that formatter on every callback; the
-panel never shortens it. Its first callback at session start reads the same
-shared Git observation as later callbacks, so folder, branch and model show
-before the first input; context and quota readings Claude has not reported yet
+paints the former Hearting fields with that formatter on every callback, as one
+row at the native width: the common line with the running jobs at its end
+(`>_ name`), shortened by the common line's own narrow-width rule. Its first
+callback at session start reads the same shared Git observation as later
+callbacks, so folder, branch and model show before the first input; context and quota readings Claude has not reported yet
 (it sends them after its first response) are left out, as the native statusline
 did, rather than shown as `?`. Only while the panel actually paints the groups
 that row carries (number and project, Git, context, the answer wait, the route
@@ -806,20 +813,25 @@ native rows, so no value leaves the screen. A native screen too short for the wh
 record (the bottom layout's ten native rows) shows only its first rows, running
 to the screen's last line; those rows are the recorded ones and are blanked
 too. A screen without that input box, such
-as the Ctrl+O transcript, keeps every row. Claude has no supported way to
-remove those rows, so as many rows remain as the complete status takes
-(measured: two at 133 and 80 columns, three with a running job); keeping every
-value visible comes first. The first of
-them is a notice row, empty unless the person must know something now, and any
-other stays blank. One function picks a single item by priority from existing
-values: an answer this session owes, then an already computed warning
-(compaction imminent, a context or usage reading at Fleet's red level, a
-failed, blocked or attention-needing route), then news that arrived since the
-last human input within ten minutes (a received peer report or a completed
-route result). It reuses Fleet's glyphs and colors and adds no collection,
-setting or judgment. A hidden, collapsed, focused or not-yet-bound panel, a
-lost display host and unwrapped sessions show the complete native rows
-unchanged. Unwrapped displays remain intact.
+as the Ctrl+O transcript, keeps every row. Claude keeps as many rows as the
+callback's output has, and at least one while a statusline is set; the one row
+leaves two rows under the input box, this row and Claude's own mode row, at
+every width and with running jobs. That row is the notice
+row, empty unless the person must do something now. One function picks a single
+item by priority from existing values: an answer this session owes, then
+compaction imminent, then a context or usage reading at Fleet's red level, then
+a failed, blocked or attention-needing route. News and release lines are not on
+it: a received peer report stands in MESSAGES, a finished route's result in the
+ROUTE box (the producer's recent results follow the current routes), and a
+waiting release or a switch without scrollback in the panel's tidy-notice slot.
+A finished result's row leads its title with the result word (`FAIL · title`),
+takes Fleet's failure mark `✕` and color when the result did not pass, and leaves
+the box after the person's next input or ten minutes, the bound the notice row's
+news used.
+It reuses Fleet's glyphs and colors and adds no collection, setting or judgment.
+A hidden, collapsed, focused or not-yet-bound panel and a lost display host show
+that native row unchanged; unwrapped sessions keep their complete native rows.
+Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only
 store.

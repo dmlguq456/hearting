@@ -1415,7 +1415,7 @@ function buildSeed() {
     // The host's own turn observation (what the panel shows as the state), so the successor shows the same
     // state at its first paint and goes on reading the native's turn record; its marks keep their order.
     turn:{nativeTurn,turnMark,eventMark,clock,seenTurn,turnRecord,formSeen},
-    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
+    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
     terminal:captured.terminal,scrollback:captured.scrollback,
     outer:{cols,rows,last:Array.from(last,value=>value??null),nativeLast:Array.from(nativeLast,value=>value??null),footerLast}};
   let json=JSON.stringify(seed);

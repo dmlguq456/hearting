@@ -88,29 +88,23 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
         sys.path.insert(0, str(ROOT))
         from tools.fleet.session_panel import notice_line
         text = lambda parts: ''.join(t for t, _ in parts)
-        now = 10_000.0
         calm = {'ctx_pct': 40, 'quota_windows': [('5h', 30, None), ('7d', 50, None)]}
-        display = {'human': {'at': now - 300, 'text': 'x'},
-                   'received': [{'at': now - 60, 'sender': '[e7]', 'text': '#1445 병합 가능'}]}
         ask = [{'answerable': True, 'request_state': 'open'}, {'answerable': False}]
         blocked = [{'state': 'attention', 'state_label': 'Needs attention', 'title': 'shell'}]
-        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': now - 10}]
-        self.assertEqual(notice_line(calm, [], [], {}, now), [], 'nothing means an empty line')
-        self.assertIn("1 │ Ctrl+]", text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask, display, now)))
-        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [], display, now)))
-        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [], display, now)))
-        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [], display, now)))
+        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': 10_000.0}]
+        self.assertEqual(notice_line(calm, [], []), [], 'nothing means an empty line')
+        self.assertIn("1 │ Ctrl+]", text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask)))
+        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [])))
+        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [])))
+        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [])))
         # The common reader's blocked route waits on a person: Fleet's ◑ "answer needed".
         waiting = [{'state': 'blocked', 'state_label': '?', 'title': 'review approval'}]
         from tools.fleet.session_panel import ui_text
-        self.assertEqual(text(notice_line(calm, waiting, [], {}, now)),
+        self.assertEqual(text(notice_line(calm, waiting, [])),
                          '◑ ' + ui_text('fleet.session_block.open') + ' · review approval')
-        self.assertEqual(notice_line(calm, [{**waiting[0], 'state': 'working'}], [], {}, now), [], 'a working route is calm')
-        self.assertIn('PASS', text(notice_line(calm, done, [], display, now)), 'newest news first')
-        self.assertIn('[e7] · #1445', text(notice_line(calm, [], [], display, now)))
-        later = {**display, 'human': {'at': now - 5, 'text': 'next'}}
-        self.assertEqual(notice_line(calm, done, [], later, now), [], 'the next input retires news')
-        self.assertEqual(notice_line(calm, done, [], display, now + 3600), [], 'and so does time')
+        self.assertEqual(notice_line(calm, [{**waiting[0], 'state': 'working'}], []), [], 'a working route is calm')
+        # 2026-11-14: news is no item to do; the ROUTE box and MESSAGES carry it.
+        self.assertEqual(notice_line(calm, done, []), [], 'a route result stays off the line')
 
     def test_structured_route_codes_never_promote_report_prose_or_no_response(self):
         import sys

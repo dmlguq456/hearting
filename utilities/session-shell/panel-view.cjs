@@ -388,7 +388,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const stale=model.stale===true;
   const live=r=>!stale&&r?.kind==='working';
   // A route's glyph: a working route spins on the frame like Fleet's route mark.
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind||'idle')};};
+  // A finished result that did not pass (its `outcome_key` is the failure's) takes the failure's mark and hue.
+  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')};};
+  // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
+  const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
   // Spec rule 21: an opened route carries what Fleet's ROUTES row unfolds, from
   // the values Fleet already read: kind and owner, each stage with its doer
@@ -439,7 +442,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Why it stopped: the worker line Fleet reads, and where it resumes.
     if(!live(r)&&(r.reason||r.state_label))items.push([text(r.reason||r.state_label,r.kind==='dead'?'g_dead':'dim')]);
     if(r.resume)items.push([text('resume ','dim'),text(r.resume,'loc_repo')]);
-    if(r.outcome)items.push([text(r.outcome,'lvl_g')]);
+    if(r.outcome)items.push([text(r.outcome,r.outcome_key||'lvl_g')]);
     return items;
   }
   // Each item laid out at the current width: the first row indented two cells,
@@ -818,12 +821,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
     }
     const rows=height-2;
-    // Routes: the current ones the statusline counts, one row each.
-    const shown=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    // Routes: the current ones the statusline counts, one row each, then the recent results
+    // the producer keeps after them (a finished route with its outcome, at most two): the
+    // notice line under Claude's input no longer carries them (2026-11-14).
+    const countedRoutes=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    const shown=countedRoutes.length?[...countedRoutes,...routes.slice(countedRoutes.length).filter(r=>r&&r.state==='done'&&r.outcome)]:countedRoutes;
     // The whole count is the producer's. Spec rule 23: every current route gets a
     // row; a count the producer did not send rows for shows only in the box's lower border.
-    const total=Number.isInteger(model.route_total)&&model.route_total>=shown.length?model.route_total:shown.length;
-    const listed=shown,unsent=shown.length?total-listed.length:0;
+    const total=Number.isInteger(model.route_total)&&model.route_total>=countedRoutes.length?model.route_total:countedRoutes.length;
+    const listed=shown,unsent=countedRoutes.length?total-countedRoutes.length:0;
     // Requests this session sent (→) or received (◂): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
@@ -866,7 +872,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const planBottom=(ow,gw)=>{
       const kinds=listed.map(kindCell),tools=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[];
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
-      const tw=columnWidth(tools),longest=columnWidth(x=>line(x.title||'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
+      const tw=columnWidth(tools),longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
       const levels=widths.kind>widths.full?[['kind',true],['full',true],['full',false],['short',false]]:[['full',true],['full',false],['short',false]];
       for(const [level,tool] of levels){
         if(!widths[level])break;
@@ -881,15 +887,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]),tw3=columnWidth(third);
         const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
         if(plan.level){
-          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(line(r.title||'·','loc_repo'),plan.title);
+          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
           const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
             ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell,...(plan.tool?[pad(plan.width-size(cell)),text(' │ '),...plan.tools(r)]:[])];
           const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
         // The title gives way first, but keeps half of what the tool or stage column would take.
-        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>line(x.title||'')),Math.max(6,avail-tw3,Math.floor(avail/2)));
-        const name=cut(line(r.title||'·','loc_repo'),titleWidth);
+        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-tw3,Math.floor(avail/2)));
+        const name=cut(titleOf(r),titleWidth);
         const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
         // The elapsed time keeps the right edge; the tool or stage gives way first, whole (spec rule 30 (d)).
@@ -904,7 +910,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const drops=routeLine==='model'?[[H,M,C],[H,M],[H],[]]:[[H,C,E],[H,E],[E],[]];
       const join=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
       const right=drops.map(join).find(values=>!values.length||inner-2-size(values)-1>=4)||[];
-      const room=inner-2-size(right)-(right.length?1:0),name=cut(line(r.title||'·','loc_repo'),Math.max(1,room));
+      const room=inner-2-size(right)-(right.length?1:0),name=cut(titleOf(r),Math.max(1,room));
       return cut([...lead,...name,pad(inner-2-size(name)-size(right)),...right],inner);
     }
     // Spec rule 32: an opened route reads like a table. Its rows hang two cells in under
@@ -1018,7 +1024,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(r.visibility?.next)field('NEXT',[text(r.visibility.next)]);
       if(!live(r)&&(r.reason||r.state_label))field('WHY',modelForms(r.reason||r.state_label).map(value=>[text(value,r.kind==='dead'?'g_dead':'loc_repo')]));
       if(r.resume)field('RESUME',[text(r.resume,'loc_repo')]);
-      if(r.outcome)field('OUT',[text(r.outcome,'lvl_g')]);
+      if(r.outcome)field('OUT',[text(r.outcome,r.outcome_key||'lvl_g')]);
       if(r.stage_more){push([text('+'+r.stage_more+' · Fleet','dim')]);item++;}
       if(!out.length)push([text(t('checking','Checking'))]);
       return out;
@@ -1310,7 +1316,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const routeRows=[],detailRows=[];
     within(()=>{
       for(const r of listed){
-        const key='route:'+r.id,title=line(r.title||'·','loc_repo'),glyph=[routeGlyph(r),text(' ')];
+        const key='route:'+r.id,title=titleOf(r),glyph=[routeGlyph(r),text(' ')];
         // Spec rule 36 (c): the title takes at most two rows, the second ending in `…`.
         let names=side?wrapAll(title,inner-2):[];
         if(names.length>2)names=[names[0],ellipsis(names[1],inner-2)];

@@ -2103,7 +2103,8 @@ def main():
         _route_autoclose(artifact_root,"compose",route)
         print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
-                           non_git_decision=non_git_decision),file=sys.stderr)
+                           non_git_decision=non_git_decision,
+                           launches=started.get("launches") if a.start else None),file=sys.stderr)
         if a.start:
             from start_receipt import print_next_line
             print_next_line(started)
