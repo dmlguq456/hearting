@@ -463,17 +463,26 @@ deny before spawn. Malformed or non-Agent payloads remain silent because they
 do not identify an actionable native-worker launch.
 
 Rejected realization — global `CLAUDE_CODE_SUBAGENT_MODEL` env: the official
-subagent model precedence is env > per-invocation `model` param > definition
-frontmatter > session model (official subagents doc, "Choose a model"; since
-v2.1.196 an `inherit` value is treated as unset). The env level is therefore a
-hard override that would kill the `memory-scout` frontmatter pin and per-call
-escalation. The PreToolUse injection sits at the per-invocation level instead
-and yields to frontmatter pins through its own skip logic.
+subagent model precedence is per-invocation `model` param > definition
+frontmatter > `CLAUDE_CODE_SUBAGENT_MODEL` > session model (official subagents
+doc, "Choose a model", rechecked 2026-11-15 against the docs and an installed
+2.1.325). Before v2.1.251 the env var overrode the other two; since then it is
+only a default for subagents nothing else names, and it forces a model only
+together with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (v2.1.257+), which also drops
+definition pins and per-call models. A frontmatter `inherit` value is treated as
+unset (v2.1.196). The original rejection reason (the env hard-overrides the
+`memory-scout` pin) therefore no longer holds for the plain variable. The
+rejection stands anyway: one global model cannot give each call its own tier, and
+the PreToolUse injection sits at the per-invocation level, yielding to
+frontmatter pins through its own skip logic.
 
-Runtime limits: Claude Code exposes no global subagent
-reasoning-effort knob and the Agent tool input has no effort field, so this
-realization controls the model tier only; per-agent effort remains a
-custom-agent frontmatter concern. `CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias>`
+Runtime limits: the Agent tool input has an optional per-invocation `effort`
+field (v2.1.292+; not for forks; it overrides the definition's `effort`, and
+`CLAUDE_CODE_EFFORT_LEVEL` overrides both), and a global default exists too
+(`CLAUDE_CODE_SUBAGENT_EFFORT`, seen in the installed 2.1.325). Both were
+rechecked 2026-11-15. This hook still controls the model tier only; it injects
+no effort, and a definition pin remains how a named type fixes its effort.
+`CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias>`
 forces a different injected model at runtime; `inherit` and main-only aliases
 are rejected without touching config.
 
