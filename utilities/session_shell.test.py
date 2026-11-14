@@ -229,6 +229,10 @@ class SessionShellTest(unittest.TestCase):
         with ExitStack() as patches:
             patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=((2, 1), "route 2")))
             patches.enter_context(mock.patch.object(human_wait_state, "cached_view", return_value={"items": [], "by_session": {("claude", row["sid"]): ["wait-one"]}}))
+            # The panel counts the questions it can answer itself (11-14): two here.
+            patches.enter_context(mock.patch.object(shell, "session_questions", return_value=[
+                {"id": "S4:one", "answerable": True, "questions": []},
+                {"id": "S4:two", "answerable": True, "questions": []}]))
             patches.enter_context(mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "known", "human": {"at": 123, "text": "A real person's private draft"}, "received": []}))
             patches.enter_context(mock.patch.object(session_tags, "assigned_tag", return_value="52"))
             patches.enter_context(mock.patch.object(session_view, "observe", return_value=(observed, [])))

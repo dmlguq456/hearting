@@ -887,7 +887,10 @@ class IdleObserverTests(unittest.TestCase):
                 projected = __import__("human_gate_observation").read_answer_waits(
                     jobs_paths=(), sessions=[type("Session", (), {"harness": harness,
                         "session_id": sid, "started_at": None})()], now=3001)
-                self.assertEqual(projected["total"], 1)
+                # A marker question, answered in its own input, waits for a person: listed and
+                # counted (11-14).
+                self.assertEqual(([item["source"] for item in projected["items"]], projected["total"]),
+                                 (["S4"], 1))
                 reader = sys.modules["human_gate_observation"]
                 observed = []
                 original_reader = reader.read_answer_waits

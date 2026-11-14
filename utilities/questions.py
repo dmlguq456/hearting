@@ -158,6 +158,16 @@ def describe(item, *, now, detail=True):
         row["reason"] = str(reason)
     if envelope.get("state") != "open":
         row["request_state"] = envelope.get("state")
+    sent = envelope.get("sent") if isinstance(envelope.get("sent"), dict) else None
+    if sent:
+        # The answer on its way, for the asking panel's one line (rule 5); a secret stays hidden.
+        secret = {q.get("id") for q in row["questions"] if q.get("secret")}
+        values = ([str(sent["decision"])] if isinstance(sent.get("decision"), str) else
+                  ["•••" if qid in secret else str(value)
+                   for qid, listed in (sent["answers"] if isinstance(sent.get("answers"), dict) else {}).items()
+                   if isinstance(listed, list)
+                   for value in listed][:4])
+        row["sent"] = [value[:200] for value in values]
     return row
 
 
@@ -178,6 +188,15 @@ def render(board, rows, folded):
         counts["total"] if board.get("complete") else "?", counts["older"])
     if counts["ownerless"]:
         head += " (%d ownerless)" % counts["ownerless"]
+    # Listed but not counted: a blocked owner is its parent agent's to answer, not a person's;
+    # an answer the person sent is on its way (rule 5).
+    current = [item for item in board.get("items") or () if isinstance(item, dict) and not item.get("stale")]
+    agents = sum(1 for item in current if item.get("source") == "S3")
+    if agents:
+        head += " · %d blocked owner%s for the parent agent" % (agents, "" if agents == 1 else "s")
+    sent = sum(1 for item in current if item.get("answer") == "sent")
+    if sent:
+        head += " · %d answer%s on the way" % (sent, "" if sent == 1 else "s")
     head += " · observed %s ago" % _age(observed) if observed >= 60 else " · observed now"
     if not board.get("complete"):
         head += " · observation incomplete"
@@ -212,6 +231,9 @@ def render(board, rows, folded):
                 # A file keeps free text (and any secret) out of the process list.
                 how = "--text-file FILE"
             lines.append("  answer: hearting run questions answer %s %s" % (row["id"], how))
+        elif row.get("request_state") == "submitted":
+            # Rule 5 (11-14): the person's answer is on its way; nothing waits on them here.
+            lines.append("  answer sent · waiting for its session to take it")
         elif row.get("reason"):
             lines.append("  answer in that session: %s" % row["reason"])
     for row in folded:

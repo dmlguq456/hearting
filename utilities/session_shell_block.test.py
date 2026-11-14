@@ -57,11 +57,13 @@ block.update([{id:'original',revision:'old-revision',answerable:true,questions:[
 block.enter();block.input(Buffer.from('2\r'));
 setImmediate(()=>{
  assert.deepEqual(sent,[{question_id:'original',revision:'old-revision',answers:{q:['No']}}]);
+ // Rule 5 (11-14): a sent answer returns the person to the native input.
+ assert.equal(block.focused,false);
  block.update([{id:'replacement',answerable:true,questions:[{id:'new-q',question:'New?',choices:[]}]}]);
- block.input(Buffer.from('t한글\r'));
+ block.enter();block.input(Buffer.from('t한글\r'));
  setImmediate(()=>{
   assert.equal(sent[1].question_id,'replacement');assert.deepEqual(sent[1].answers,{'new-q':['한글']});
-  block.input(Buffer.from('\x1d'));assert.equal(block.focused,false);
+  assert.equal(block.focused,false);block.enter();block.input(Buffer.from('\x1d'));assert.equal(block.focused,false);
   console.log('PASS');
  });
 });'''
@@ -88,6 +90,276 @@ console.log('PASS');"""
         result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
                               text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+    def test_focus_opens_on_the_first_answerable_question_and_names_the_page_keys_before_it(self):
+        # 11-14: Ctrl+] opens on a question the person can answer now, even when the one shown
+        # is a receipt; before focus a long question with choices names PgUp/PgDn, the keys
+        # that read it once focused (↑↓ choose there).
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+const receipt={id:'sent',revision:'r0',answerable:false,request_state:'submitted',questions:[{id:'q',question:'SENT_BEFORE',choices:['A']}]};
+const open={id:'open',revision:'r1',answerable:true,questions:[{id:'q',question:'ANSWER_ME',choices:['A','B']}]};
+block.update([receipt,open]);
+// Rule 5: the sent one is no box but its one line; the box shows the one to answer.
+let text=JSON.stringify(block.detail({budget:8,columns:40}));
+assert(!text.includes('SENT_BEFORE')&&text.includes('ANSWER_ME'),text);
+assert.deepEqual(block.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent'],JSON.stringify(block.sent()));
+block.enter();
+text=JSON.stringify(block.detail({budget:8,columns:40}));
+assert(text.includes('ANSWER_ME')&&text.includes('▸'),text);
+block.leave();
+const many=Array.from({length:9},(_,i)=>'CHOICE_'+i);
+block.update([{id:'c',revision:'r2',answerable:true,questions:[{id:'q',question:'Which?',choices:many}]}]);
+text=JSON.stringify(block.detail({budget:6,columns:40}));
+assert(text.includes('more · focus and PgUp/PgDn to read')&&!text.includes('focus and ↑↓'),text);
+console.log('PASS');"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+    def test_the_panel_board_holds_only_what_the_person_can_answer_here(self):
+        # 11-14 (the supervisor's panel): eight blocked owners, an unanswerable question and one
+        # the person can answer, published the normal way. Blocked owners stay out of the
+        # session's index and every count; the block carries the one answerable question,
+        # first; the other is one guidance line, never counted.
+        import tempfile
+        sid='panel-session'
+        owner=dict(harness='claude',session_id=sid)
+        owners=[dict(id='S3:att-%d'%n,source='S3',kind='decision',since=100+n,stale=False,owner=owner)
+                for n in range(8)]
+        old=dict(id='S4:old',source='S4',kind='message',since=200,stale=False,owner=owner)
+        new=dict(id='S4:new',source='S4',kind='message',since=300,stale=False,owner=owner)
+        def describe(item,**kw):
+            if item['id'].startswith('S3:'):
+                return dict(id=item['id'],answerable=False,reason='owner-correction-native-parent-context-required',
+                            questions=[dict(id='q',question='owner waits',choices=[])])
+            if item['id']=='S4:old':
+                return dict(id='S4:old',answerable=False,request_state='unknown',
+                            reason='message-question-no-longer-current',questions=[dict(id='message-response',question='OLD',choices=[])])
+            return dict(id='S4:new',answerable=True,revision='r',questions=[dict(id='message-response',question='NEW',choices=['A'])])
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ,{'XDG_STATE_HOME':tmp}), \
+             mock.patch.object(hws,'_request_producer'), \
+             mock.patch.object(hws,'_message_source_state',return_value='open'), \
+             mock.patch.object(questions,'describe',side_effect=describe):
+            import time
+            self.assertTrue(hws.publish_cache({'items':[*owners,old,new],'observed_at':time.time(),'complete':True}))
+            view=hws.cached_view(request=False)
+            self.assertEqual(view['by_session'],{('claude',sid):['S4:old','S4:new']})
+            self.assertEqual(view['total'],2)
+            elsewhere=[]
+            board=shell.session_questions('claude',sid,view=view,elsewhere=elsewhere)
+        self.assertEqual([row['id'] for row in board],['S4:new'])
+        self.assertEqual([row['id'] for row in elsewhere],['S4:old'])
+
+    def test_the_count_holds_every_wait_a_person_answers_and_ctrl_names_only_the_panel(self):
+        # 11-14 (the supervisor's correction): the panel counts every wait of this session a
+        # person must answer, wherever it is answered; the block holds what the panel answers and
+        # the rest is one line saying where. `Ctrl+]` stands on the notice line only when the
+        # panel answers one. Blocked owners and finished waits count nowhere.
+        import tempfile, time
+        import session_tidy
+        from fleet.session_line import answer_wait_word
+        from fleet.config import ui_text
+        from fleet import herdr_projection
+        native_reason={'claude':'claude-native-response-surface-unavailable',
+                       'codex':'codex-native-request-unsupported','opencode':'opencode-native-request-unsupported'}
+        def describe(item,**kw):
+            ident=item['id']
+            row=dict(id=ident,source=item.get('source'),owner=item.get('owner'),state='current',
+                     questions=[dict(id='q',question=ident,choices=[])])
+            if ident.startswith('S3:'):
+                return dict(row,answerable=False,reason='owner-correction-native-parent-context-required')
+            if ident.startswith('S1:'):
+                return dict(row,answerable=False,reason=native_reason[item['owner']['harness']])
+            if ident=='S4:marker':
+                return dict(row,answerable=False,reason='marker-has-no-bound-native-response-surface')
+            if ident=='S4:closed':
+                return dict(row,answerable=False,request_state='unknown',reason='message-question-no-longer-current')
+            return dict(row,answerable=True,revision='r',questions=[dict(id='message-response',question='NEW',choices=['A'])])
+        def projection(harness,sid,items):
+            with tempfile.TemporaryDirectory() as tmp, \
+                 mock.patch.dict(os.environ,{'XDG_STATE_HOME':tmp}), \
+                 mock.patch.object(hws,'_request_producer'), \
+                 mock.patch.object(hws,'_message_source_state',return_value='open'), \
+                 mock.patch.object(questions,'describe',side_effect=describe), \
+                 mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}), \
+                 mock.patch.object(herdr_projection,'project_panel') as pane:
+                self.assertTrue(hws.publish_cache({'items':items,'observed_at':time.time(),'complete':True}))
+                total=hws.cached_view(request=False)['total']
+                result=shell.panel_projection(harness,sid,columns=40,pane_binding=dict(harness=harness,sid=sid))
+                # The pane's own `Q<n>/◑A<n>` reads the same count: every wait, the panel's answerable ones.
+                _binding,values,shown=pane.call_args.args
+                return total,result,herdr_projection._panel_counts(harness,sid,values,shown)
+        text=lambda parts:''.join(part['text'] for part in parts or ())
+        wait=lambda n:answer_wait_word()+' '+str(n)
+        below=ui_text('fleet.session_block.compact_answer_below')
+        guide=lambda n:ui_text('fleet.session_block.questions')+' '+str(n)+' · '+below
+        for harness in ('claude','codex','opencode'):
+            sid='sid-'+harness
+            owner=dict(harness=harness,session_id=sid)
+            item=lambda ident,source,kind:dict(id=ident,source=source,kind=kind,since=100,stale=False,owner=owner)
+            owners=[item('S3:att-%d'%n,'S3','decision') for n in range(8)]
+            question=item('S4:new','S4','message')
+            native=item('S1:%s:%s:1'%(harness,sid),'S1','approval')
+            cases=(
+                # (waits, shared total, count, block ids, guidance line, notice line)
+                ('eight blocked owners and one question',[*owners,question],1,1,['S4:new'],'',wait(1)+' │ Ctrl+]'),
+                ('a native request and one question',[native,question],2,2,['S4:new'],guide(1),wait(2)+' │ Ctrl+]'),
+                ('a marker question alone',[item('S4:marker','S4','marker')],1,1,[],guide(1),wait(1)+' │ '+below),
+                # A late publication may still list a question its session's next one closed:
+                # finished, it waits for no one here (the next publication drops it).
+                ('a blocked owner and a closed question',[owners[0],item('S4:closed','S4','message')],1,0,[],'',''),
+            )
+            for name,items,shared,count,block,line,notice in cases:
+                with self.subTest(harness=harness,case=name):
+                    total,result,pane=projection(harness,sid,items)
+                    panel=result['panel']
+                    self.assertEqual(total,shared)
+                    self.assertEqual(pane,(count,len(block)))
+                    self.assertEqual(panel['wait'],wait(count) if count else '')
+                    self.assertEqual([row['id'] for row in result['questions']],block)
+                    self.assertEqual(panel['wait_guide'],line)
+                    if harness=='claude':
+                        self.assertEqual(text(panel['notice']),notice)
+                    else:
+                        self.assertNotIn('notice',panel)
+
+    def test_a_sent_answer_folds_to_one_dim_line_and_is_never_chosen_again(self):
+        # Rule 5 (11-14): the moment the answer is sent the box folds: one dim line of what was
+        # sent, focus back at the native input, the next question first (Ctrl+] opens on it,
+        # never on the answered one), a second Enter answers nothing unseen; its session taking
+        # the answer removes the line; a failed delivery brings the question back.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
+const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
+(async()=>{
+ const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'FIRST_Q',choices:['Alpha','Beta']}]};
+ const n={id:'n',revision:'r',answerable:true,questions:[{id:'q',question:'NEXT_Q',choices:['One']}]};
+ const sent=[],b=create({changed(){},answer:async v=>{sent.push(v);return {state:'submitted'};},action(){}});
+ b.update([a,n]);b.enter();b.input(Buffer.from('\x1b[B\r\r'));await tick();
+ assert.deepEqual(sent,[{question_id:'a',revision:'r',answers:{q:['Beta']}}],'a second Enter sends nothing');
+ assert.equal(b.focused,false);
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);
+ assert(!shown(b).includes('FIRST_Q')&&shown(b).includes('NEXT_Q'),shown(b));
+ // The lone Esc a person presses right after answering (to leave the block, as before) is
+ // taken by the shell, never the native's interrupt of a running turn; only that first one.
+ assert.equal(b.answeredEscape(Buffer.from('\x1b')),true);assert.equal(b.answeredEscape(Buffer.from('\x1b')),false);
+ assert.deepEqual(b.input(Buffer.from('\r')),Buffer.from('\r'),'Enter goes to the native input');
+ b.enter();assert(shown(b).includes('NEXT_Q')&&!shown(b).includes('FIRST_Q'),shown(b));
+ for(let i=0;i<3;i++){b.input(Buffer.from('\t'));assert(!shown(b).includes('FIRST_Q'),shown(b));}
+ b.leave();
+ // The backend's record says the same; the line stays while it travels.
+ b.update([{...a,answerable:false,request_state:'submitted',sent:['Beta']},n]);
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);assert(!shown(b).includes('FIRST_Q'));
+ assert.deepEqual(b.references().map(x=>x.id),['a','n']);
+ // Its session has it: the line goes and the panel stops asking for it.
+ b.update([{...a,answerable:false,request_state:'received'},n]);
+ assert.deepEqual(lines(b),[]);assert.deepEqual(b.references().map(x=>x.id),['n']);
+ // Sent from elsewhere (Fleet, the CLI): the backend's own words for it.
+ const f=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ f.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}]);
+ assert.deepEqual(lines(f),['✓ answer sent · Alpha']);assert.deepEqual(f.detail(),[]);
+ // A secret stays hidden on the line.
+ const s=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}]);
+ s.enter();s.input(Buffer.from('tFAKE_SECRET\r'));await tick();
+ assert.deepEqual(lines(s),['✓ answer sent · •••']);
+ assert.equal(s.answeredEscape(Buffer.from('x')),false);assert.equal(s.answeredEscape(Buffer.from('\x1b')),false,'typing first: Esc is the native\'s');
+ // A delivery that failed brings the question back with its existing word.
+ const x=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ x.update([a]);x.enter();x.input(Buffer.from('\r'));await tick();
+ x.update([{...a,answerable:false,request_state:'unknown',reason:'message-answer-delivery-unconfirmed',answer_state:'answer_below'}]);
+ assert.deepEqual(lines(x),[]);assert(shown(x).includes('FIRST_Q')&&shown(x).includes('unknown'),shown(x));
+ // ... or open again, to answer anew.
+ const y=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ y.update([a]);y.enter();y.input(Buffer.from('\r'));await tick();
+ y.update([{...a,revision:'r2'}]);assert.deepEqual(lines(y),[]);assert(shown(y).includes('FIRST_Q'));
+ y.enter();assert(JSON.stringify(y.detail()).includes('▸'),'it can be chosen again');
+ // A refused answer keeps the person on it with its word.
+ const z=create({changed(){},answer:async()=>({state:'unknown',reason:'refused-here'}),action(){}});
+ z.update([a,n]);z.enter();z.input(Buffer.from('\r'));await tick();
+ assert.equal(z.focused,true);assert(JSON.stringify(z.detail()).includes('refused-here'));
+ console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+    def test_the_sent_line_shows_the_answer_that_was_sent_when_another_place_won(self):
+        # Review 1633, follow-up 3: two places answered at almost the same time; the claim the
+        # other place took first sent Alpha, yet this panel's line kept its own pick (Beta). The
+        # record's `sent` comes first; the panel's own pick stands only until it arrives.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
+(async()=>{
+ const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',choices:[{label:'Alpha label',value:'Alpha'},'Beta']}]};
+ const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([a]);b.enter();b.input(Buffer.from('2\r'));await tick();
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);
+ b.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}]);
+ assert.deepEqual(lines(b),['✓ answer sent · Alpha label']);
+ console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+    def test_a_sent_answer_leaves_the_panel_count_and_the_notice_line_in_each_harness(self):
+        # Rule 5 (11-14), the panel's half: what the shared cache gives for a sent answer (listed,
+        # marked, out of the session index) is no wait in the panel's head, folded strip or notice
+        # line; a question still open beside it keeps them, `Ctrl+]` included. The open box's head
+        # numbers the boxes only (`questions 1 · 1/1`) and the pane's `Q<n>/◑A<n>` counts the
+        # panel's own waits (review 1633, required 1: the sent receipt was in both).
+        import session_tidy
+        from fleet.session_line import answer_wait_word
+        from fleet.config import ui_text
+        from fleet import herdr_projection
+        def describe(item,**kw):
+            row=dict(id=item['id'],source='S4',owner=item['owner'],state='current',
+                     questions=[dict(id='message-response',question=item['id'],choices=['Alpha','Beta'])])
+            if item.get('answer')=='sent':
+                return dict(row,answerable=False,request_state='submitted',sent=['Beta'])
+            return dict(row,answerable=True,revision='r')
+        text=lambda parts:''.join(part['text'] for part in parts or ())
+        for harness in ('claude','codex','opencode'):
+            sid='sid-'+harness
+            owner=dict(harness=harness,session_id=sid)
+            sent=dict(id='S4:sent',source='S4',kind='message',since=1,stale=False,owner=owner,answer='sent')
+            open_=dict(id='S4:open',source='S4',kind='message',since=2,stale=False,owner=owner)
+            for name,items,count,notice in (('sent alone',[sent],0,''),
+                                            ('sent beside an open one',[sent,open_],1,answer_wait_word()+' 1 │ Ctrl+]')):
+                with self.subTest(harness=harness,case=name):
+                    view={'items':items,'by_session':{(harness,sid):[i['id'] for i in items if i.get('answer')!='sent']},
+                          'total':count,'complete':True}
+                    with mock.patch.object(hws,'cached_view',return_value=view), \
+                         mock.patch.object(hws,'cached_statusline',return_value=((count,count),'')), \
+                         mock.patch.object(questions,'describe',side_effect=describe), \
+                         mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}), \
+                         mock.patch.object(herdr_projection,'project_panel') as pane:
+                        result=shell.panel_projection(harness,sid,columns=40,pane_binding=dict(harness=harness,sid=sid))
+                    _binding,values,shown=pane.call_args.args
+                    with self.subTest(check='pane Q/A'):
+                        self.assertEqual(herdr_projection._panel_counts(harness,sid,values,shown),(count,count))
+                    heads=[''.join(part['text'] for part in row['questions'][0]['display']['head'])
+                           for row in result['questions'] if row.get('request_state') is None]
+                    with self.subTest(check='box head'):
+                        self.assertEqual([head.split(' · ')[:2] for head in heads],
+                                         [['◑ '+ui_text('fleet.session_block.questions')+' 1','1/1']]*count)
+                    self.assertEqual(result['panel']['wait'],answer_wait_word()+' '+str(count) if count else '')
+                    self.assertEqual([(row['id'],row.get('request_state'),row.get('sent')) for row in result['questions']],
+                                     [(i['id'],'submitted' if i is sent else None,['Beta'] if i is sent else None)
+                                      for i in sorted(items,key=lambda i:i is sent)])
+                    self.assertEqual(result['panel']['wait_guide'],'')
+                    if harness=='claude':
+                        self.assertEqual(text(result['panel']['notice']),notice)
 
     def test_page_keys_read_a_long_question_from_its_first_row_and_keep_the_choice(self):
         # PR #1532 R2: PgUp/PgDn read the body to its first and last rows; the page stays
@@ -166,9 +438,11 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
  assert.ok(JSON.stringify(block.detail()).includes('draft'));
  block.input(Buffer.from('\r'));await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(sent[0],{question_id:'a',revision:'one',answers:{q:['draft']}});
- // A new open request, rather than the submitted request, owns this draft.
+ // A new open request, rather than the submitted request, owns this draft. Rule 5 (11-14):
+ // the sent answer returned the person to the native input; Ctrl+] opens the new one.
+ assert.equal(block.focused,false);
  const fresh={...a,id:'fresh'};block.update([fresh]);
- block.input(Buffer.from('tpreserved'));
+ block.enter();block.input(Buffer.from('tpreserved'));
  block.update([{...fresh,revision:'two'}]);block.input(Buffer.from('\r'));
  await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,1);
  assert.ok(JSON.stringify(block.detail()).includes('preserved'));
