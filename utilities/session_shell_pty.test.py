@@ -155,7 +155,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -451,6 +451,44 @@ function existing(file){return new Promise((resolve,reject)=>{
    await until(async()=>(await rpc(pinned.socket,{...pinned,op:'status'})).projection_state==='current','a current projection');
    lateRoute.done=mark();lateRoute.final=lines().match(/ROUTE_[A-Z]+/g);
  }
+ if(cfg.scenario==='request-panel'){
+   // R27: a request line stands in the route box, a press opens it in place and a second press
+   // opens its read page with the sealed body; a typed draft and the native state stay as they were.
+   await waitFor(/REQ_TITLE/);
+   await new Promise(resolve=>sideTerm.write('',resolve));
+   const pinnedRequest=JSON.parse(fs.readFileSync(file,'utf8'));
+   const screen=()=>Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'');
+   const press=async(needle)=>{
+     let row;
+     for(let n=0;n<60&&!row;n++){
+       await new Promise(resolve=>sideTerm.write('',resolve));
+       screen().forEach((line,y)=>{const x=line.indexOf(needle);if(x>=0&&!line.includes('╭─'))row={x:x+2,y:y+1};});
+       if(!row)await new Promise(resolve=>setTimeout(resolve,50));
+     }
+     if(!row)throw Error('request target absent: '+needle+'\n'+screen().join('\n'));
+     await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${row.x};${row.y}M\x1b[<0;${row.x};${row.y}m`).toString('base64')});
+   };
+   await rpc(cfg.inlet,{batch:Buffer.from('REQ_DRAFT').toString('base64')});
+   await new Promise(resolve=>setTimeout(resolve,300));
+   const before=await rpc(pinnedRequest.socket,{...pinnedRequest,op:'status'});
+   const settled=async()=>{let after;for(let n=0;n<40;n++){after=await rpc(pinnedRequest.socket,{...pinnedRequest,op:'status'});if(after.empty===before.empty)break;await new Promise(resolve=>setTimeout(resolve,50));}
+     for(const key of ['empty','focused','state'])if(after[key]!==before[key])throw Error('a request press changed '+key+' '+JSON.stringify([before,after]));};
+   const opened={};
+   // The panel is painted cell by cell, so its words are read from the terminal screen.
+   // The catalog's language is the machine's (English here, Korean on a Korean one): either word stands.
+   const shows=async(needle)=>{const any=needle.split('|');for(let n=0;n<120;n++){await new Promise(resolve=>sideTerm.write('',resolve));if(any.some(word=>screen().join('\n').includes(word)))return;await new Promise(resolve=>setTimeout(resolve,50));}
+     throw Error('screen never showed '+needle+'\n'+screen().join('\n'));};
+   await press('REQ_TITLE');await shows('+ body|+ 본문');await settled();opened.details=screen().join('\n').includes('rq-');
+   await press(screen().join('\n').includes('+ body')?'+ body':'+ 본문');await shows('REQ_BODY_NONCE');await settled();opened.page=screen().join('\n');
+   // Esc closes the page (no native Esc), then the draft goes to the native as typed.
+   raw='';
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
+   await shows('REQ_TITLE');await settled();
+   await rpc(cfg.inlet,{batch:Buffer.from('\r').toString('base64')});await waitFor(/DONE_REQ_DRAFT/);
+   if(/NATIVE_ESC_/.test(raw))throw Error('the page keys reached the native');
+   opened.panel=screen().join('\n');
+   console.log(JSON.stringify({request_panel:opened,status:before}));return;
+ }
  if(cfg.scenario==='route-pages'){
    const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
    value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
@@ -665,6 +703,22 @@ class SessionShellPTYTest(unittest.TestCase):
                                ' return original(*args,**kwargs)\n'
                                'm.panel_projection=projection\nraise SystemExit(m._backend())\n')
             backend.chmod(0o700)
+        if scenario=='request-panel':
+            # A sent request with a really sealed body, read from the request records by the backend.
+            with mock.patch.dict(os.environ,self.env,clear=True):
+                import importlib.util as _util
+                import peer_request
+                spec=_util.spec_from_file_location('peer_message_pty_seed',ROOT/'utilities/peer-message.py')
+                peer_message=_util.module_from_spec(spec);spec.loader.exec_module(peer_message)
+                me={'harness':'claude','session_id':sid,'name':'e9'}
+                other={'harness':'codex','session_id':'00000000-0000-4000-8000-0000000000e7','name':'e7'}
+                request_id=peer_request.reserve(me,other,title='REQ_TITLE 한글 제목')
+                line=peer_request.render_line(peer_request.load(request_id),'request',revision=1,label='판1',body_lines=2)
+                _text,ref=peer_message.prepare_peer_message(
+                    'REQ_BODY_NONCE\nsecond line',me,other,defer=True,
+                    refs=[peer_request.ref_for(request_id,1,'request')],
+                    request={'seal':peer_request.request_seal(request_id,1,'request'),'line':line})
+                peer_request.commit_open(request_id,ref,label='판1')
         config={'directory':str(directory),'host':str(ROOT/'utilities/session-shell/host.cjs'),
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
                 'entry':str(ROOT/'utilities/session-shell/entry.py'),'hostPidFile':str(directory/'host-pid'),
@@ -693,7 +747,7 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'}:
             config.update(columns=180,rows=40)
         if scenario=='route-pages':config.update(columns=80,rows=24)  # the bottom layout's pages (policy below)
         if scenario=='fleet-modal':
@@ -709,7 +763,7 @@ class SessionShellPTYTest(unittest.TestCase):
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg'}
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'}
                           else '{"enabled":true,"layout":"bottom"}' if scenario=='route-pages' else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
@@ -913,6 +967,13 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)
         self.assertLess(result['ack_ms'],250)
+
+    def test_a_request_line_opens_in_place_and_on_its_read_page_and_the_draft_survives(self):
+        result=self.run_loop('request-panel')['request_panel']
+        self.assertTrue(result['details'])
+        self.assertIn('REQ_BODY_NONCE',result['page'])
+        self.assertIn('REQUEST',result['page'].upper())
+        self.assertIn('REQ_TITLE',result['panel'])
 
     def test_route_detail_pages_keep_navigation_out_of_native_input(self):
         result=self.run_loop('route-pages')

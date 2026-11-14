@@ -28,7 +28,7 @@ if _UTILITIES_DIR not in sys.path:
 
 from dispatch_contract import resolve_dispatch_state_root, stable_state_root  # noqa: E402
 
-_KINDS = ("watch", "steer", "handoff", "gate-relay", "notice")
+_KINDS = ("watch", "steer", "handoff", "gate-relay", "notice", "request", "report")
 _SURFACES = (
     "claude-native", "herdr", "codex-queue", "codex-gateway-steer",
     "opencode-native", "opencode-unknown", "manual-paste", "unresolved",
@@ -432,7 +432,8 @@ def _reference_access_evidence_valid(evidence, recipient):
 
 
 def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
-                          reference_evidence=None, refs=(), producer_binding=None, handoff=None):
+                          reference_evidence=None, refs=(), producer_binding=None, handoff=None,
+                          request=None):
     """Seal a transmission intent before delivery (the receiver may run immediately).
 
     This immutable record shares the ledger's local write trust boundary; it is
@@ -454,6 +455,12 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     if producer_binding is not None and not include_trailer:
         raise ValueError("peer-runtime-producer-requires-receipt-envelope")
     ref = secrets.token_hex(16)
+    if request is not None and request.get("ref") is not None:
+        # A peer request fixed this message's ref (with its number) in the request
+        # record before sealing, so the seal can be found from the record.
+        ref = request["ref"]
+        if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
+            raise ValueError("peer-request-seal-invalid")
     normalized = body.rstrip("\n")
     source_sha256 = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     command = handoff_accept_command(ref) if handoff is not None else ""
@@ -465,7 +472,20 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     body_ref = None
     payload_path = None
     raw_body = body.encode("utf-8")
-    if (include_trailer and len(raw_body) > _BODY_REFERENCE_THRESHOLD
+    if request is not None:
+        # A request or report: the model opens the sealed body through `show`, so
+        # the body is always a payload and the conversation gets one line. There
+        # is no inline fallback (a helper that pastes the body is not the model
+        # opening it), so a payload that cannot be published fails the seal.
+        import peer_request
+        if (not include_trailer or producer_binding is not None or handoff is not None
+                or not peer_request.valid_seal(request.get("seal"))
+                or not isinstance(request.get("line"), str) or not request["line"].strip()):
+            raise ValueError("peer-request-seal-invalid")
+        body_ref, payload_path = _write_body_payload(
+            ref, raw_body, source_sha256, presentation_mode="request-body")
+        wire_body = request["line"].strip()
+    elif (include_trailer and len(raw_body) > _BODY_REFERENCE_THRESHOLD
             and _reference_access_evidence_valid(reference_evidence, recipient)):
         try:
             body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256)
@@ -490,6 +510,8 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
         record["producer_binding"] = dict(producer_binding)
     if body_ref is not None:
         record["body_ref"] = body_ref
+    if request is not None:
+        record["request"] = dict(request["seal"])
     path = _transfer_path(ref)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -546,7 +568,7 @@ def _payload_path(ref, base=None):
     return _payload_dir(base) / (ref + ".txt")
 
 
-def _write_body_payload(ref, raw_body, source_sha256):
+def _write_body_payload(ref, raw_body, source_sha256, presentation_mode="file-reference"):
     path = _payload_path(ref)
     descriptor = {
         "schema_version": 1,
@@ -554,7 +576,7 @@ def _write_body_payload(ref, raw_body, source_sha256):
         "raw_size_bytes": len(raw_body),
         "payload_sha256": hashlib.sha256(raw_body).hexdigest(),
         "source_sha256": source_sha256,
-        "presentation_mode": "file-reference",
+        "presentation_mode": presentation_mode,
     }
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
@@ -622,7 +644,7 @@ def _body_reference_descriptor_valid(descriptor, ref):
         and all(isinstance(descriptor.get(key), str)
                 and re.fullmatch(r"[0-9a-f]{64}", descriptor[key])
                 for key in ("payload_sha256", "source_sha256"))
-        and descriptor.get("presentation_mode") == "file-reference"
+        and descriptor.get("presentation_mode") in ("file-reference", "request-body")
     )
 
 
@@ -963,6 +985,18 @@ def pending_delivery_binding(row, *, include_acked=False):
         except Exception:
             return None
         return binding
+    if any(ref.startswith("peer-request:") for ref in row.get("refs") or () if isinstance(ref, str)):
+        # A request's current receiver is its exact session, or the successor that
+        # Hearting's lineage confirms. An unconfirmed read keeps the original.
+        import peer_request
+        original = row.get("to")
+        if (_valid_transfer_endpoint(original)
+                and any(peer_request.parse_ref(ref) for ref in row.get("refs") or ())):
+            followed = peer_request.follow(original)
+            moved = (followed["harness"], followed["session_id"]) != (
+                original.get("harness"), original.get("session_id"))
+            return {"recipient": ({**followed, "name": None} if moved else dict(original)),
+                    "watches": []}
     bound = row.get("bound_to")
     if _valid_transfer_endpoint(bound):
         original = row.get("to") or {}
@@ -1225,6 +1259,7 @@ def _read_pending(ref, *, roots=None, state_root=None):
             or row.get("to") != transfer.get("to") or row.get("body_sha256") != transfer.get("body_sha256")
             or row.get("body_ref") != transfer.get("body_ref")
             or row.get("producer_binding") != transfer.get("producer_binding")
+            or row.get("request") != transfer.get("request")
             or not _pending_endpoint(row.get("from"), row.get("state"), sender=True,
                                      producer_binding=row.get("producer_binding"),
                                      recipient=row.get("to"), refs=row.get("refs"))
@@ -1282,6 +1317,13 @@ def _read_pending(ref, *, roots=None, state_root=None):
             or hashlib.sha256(text.encode("utf-8")).hexdigest() != row["body_sha256"]):
         raise ValueError("peer-pending-body-invalid")
     body_ref = row.get("body_ref")
+    request_body = isinstance(body_ref, dict) and body_ref.get("presentation_mode") == "request-body"
+    if request_body != (row.get("request") is not None):
+        raise ValueError("peer-pending-request-invalid")
+    if row.get("request") is not None:
+        import peer_request
+        if not peer_request.valid_seal(row["request"]) or no_trailer:
+            raise ValueError("peer-pending-request-invalid")
     if body_ref is not None:
         if no_trailer:
             raise ValueError("peer-pending-reference-without-trailer")
@@ -2132,6 +2174,18 @@ def _received_on_disk(path):
     return isinstance(row, dict) and row.get("state") == "received"
 
 
+def _request_withdrawn(row):
+    """An undelivered revision that was superseded or cancelled is not sent."""
+    if not any(isinstance(ref, str) and ref.startswith("peer-request:")
+               for ref in (row or {}).get("refs") or ()):
+        return False
+    try:
+        import peer_request
+        return peer_request.withdrawn(row)
+    except Exception:  # noqa: BLE001 - an unreadable request record never blocks ordinary delivery
+        return False
+
+
 def _registered_delivery_settled(row, *, read_context=None):
     try:
         from peer_obligations import registered_delivery_settled
@@ -2164,7 +2218,7 @@ def pending_messages(recipient, *, deadline=None):
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
-                         prepared=None, namespace=None):
+                         prepared=None, namespace=None, request=None):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
@@ -2177,6 +2231,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
+    request_seal = dict(request["seal"]) if request is not None else None
     address_namespace = None
     if original_target is not None:
         import peer_address
@@ -2265,6 +2320,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                     and bool(row.get("no_trailer", False)) == (not with_trailer)
                     and row.get("producer_binding") == producer_binding
                     and row.get("handoff") == handoff
+                    and row.get("request") == request_seal
                     and matches_target(row))
 
     def existing():
@@ -2311,7 +2367,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         found = existing()
         return found or _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                               reference_evidence=reference_evidence, refs=refs,
-                                              producer_binding=producer_binding, handoff=handoff)
+                                              producer_binding=producer_binding, handoff=handoff,
+                                              request=request)
     key_parts = [[e.get("harness"), e.get("session_id"),
                   e.get("name") if e.get("session_id") is None else None, e.get("pane_id")]
                  for e in (sender, recipient)]
@@ -2324,6 +2381,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         key = json.dumps(parts, ensure_ascii=False, sort_keys=producer_binding is not None)
         if handoff is not None:
             key += json.dumps(handoff, sort_keys=True)
+        if request_seal is not None:
+            key += json.dumps(request_seal, sort_keys=True)
         return "prepare-" + hashlib.sha256(key.encode()).hexdigest()
 
     keys = {preparation_key(key_parts)}
@@ -2341,7 +2400,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             return found
         text, ref = _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                           reference_evidence=reference_evidence, refs=refs,
-                                          producer_binding=producer_binding, handoff=handoff)
+                                          producer_binding=producer_binding, handoff=handoff,
+                                          request=request)
         if len(text.encode("utf-8")) > _PENDING_BYTES:
             raise ValueError("peer-pending-body-oversized")
         pending = {"schema_version": 2 if _unresolved_target(recipient) else 1,
@@ -2359,6 +2419,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             pending["namespace"] = address_namespace
         if handoff is not None:
             pending["handoff"] = handoff
+        if request_seal is not None:
+            pending["request"] = request_seal
         if producer_binding is not None:
             pending["producer_binding"] = dict(producer_binding)
         if (_valid_pane_bound_endpoint(recipient)
@@ -2478,6 +2540,8 @@ def _reserve_pending_herdr(ref, recipient, *, receipt,
         if (not row or (row["state"] != "pending" and not recover_hook_context)
                 or not _pending_target_matches(row, recipient)):
             return None
+        if _request_withdrawn(row):
+            return None
         if _registered_delivery_settled(row):
             return None
         claim = {"token": secrets.token_hex(16), "pid": claimant.get("pid"),
@@ -2526,7 +2590,10 @@ def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
                 or not exact_recipient
                 or (not claim.get("first_input")
                     and not _pending_target_matches(current, recipient))
-                or _registered_delivery_settled(current)):
+                or _registered_delivery_settled(current)
+                or _request_withdrawn(current)):
+            # A request revision cancelled or superseded after its reservation is
+            # not written; this is the same pending lock a cancel reads it under.
             return None
         if not _registered_submission_current(current):
             return None
@@ -2777,6 +2844,8 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             _observe_continue_receipt(recipient or {}, ref)
             _ack_registered_delivery(row)
             return {"status": "received", "reason": "exact-peer-ref"}
+        if _request_withdrawn(row):
+            return {"status": "not-required", "reason": "request-withdrawn"}
         if _registered_delivery_settled(row):
             return {"status": "not-required", "reason": "dispatch-notice-consumed"}
         if not _valid_transfer_sender(row["from"], row.get("producer_binding"),
@@ -2784,7 +2853,8 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             return {"status": "unverified", "reason": "peer-endpoint-unverified"}
         if recipient["harness"] != "codex":
             return {"status": "unsupported", "reason": "peer-native-queue-unavailable"}
-        if row.get("body_ref") and not _codex_model_read_access(recipient):
+        if (row.get("body_ref") and not row.get("request")
+                and not _codex_model_read_access(recipient)):
             # The submitted wire envelope is immutable. Carry this recovery
             # condition to the existing receiver callback, which adds the
             # verified source as native context instead of changing the queue.
@@ -2812,6 +2882,10 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
                 raise QueueDeliveryError("peer-claim-changed-before-add")
+            if _request_withdrawn(current):
+                # Cancelled or superseded since the check above: not handed over.
+                # A cancel reads this row under this same lock after it is recorded.
+                raise QueueDeliveryError("request-withdrawn-before-add")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-add")
             current = {key: value for key, value in current.items() if key != "steer_turn_id"}
@@ -2827,6 +2901,8 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
                 raise QueueDeliveryError("peer-claim-changed-before-steer")
+            if _request_withdrawn(current):
+                raise QueueDeliveryError("request-withdrawn-before-steer")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-steer")
             _save_pending(dict(current, state="unverified", receipt="native-steer-inflight",
@@ -3250,6 +3326,7 @@ def _validated_pending_transfer(ref, row, *, roots=None):
             or row.get("to") != transfer.get("to")
             or row.get("body_ref") != transfer.get("body_ref")
             or row.get("producer_binding") != transfer.get("producer_binding")
+            or row.get("request") != transfer.get("request")
             or not _valid_transfer_sender(transfer.get("from"), transfer.get("producer_binding"),
                                           transfer.get("to"), transfer.get("refs"))
             or not _valid_transfer_target(transfer.get("to"))):
@@ -3662,6 +3739,12 @@ def cancel_message_obligation(ref, *, duty_id, expected_revision, identity,
                         return "unknown"
                 except Exception:
                     return "unknown"
+            elif evidence.get("kind") == "request-withdrawn":
+                # The request record, read again under the row lock, still names
+                # this revision superseded or cancelled. This cancels the delivery
+                # attempt only; it claims neither receipt nor completion.
+                if not _request_withdrawn(current):
+                    return "changed"
             elif evidence.get("kind") == "first-input-process-dead":
                 if original_process is None:
                     return "unknown"
@@ -3818,6 +3901,8 @@ def _body_reference_guidance(text, recipient):
                     "Do not act on this preview; leave the request unprocessed for its existing continuation.")
         return ""
     ref, transfer = found
+    if (transfer.get("body_ref") or {}).get("presentation_mode") == "request-body":
+        return ""  # a request's body is opened through `show`, never pasted
     identity_matches = _reference_target_matches(transfer, recipient, ref)
     fallback_required = False
     if identity_matches:
@@ -3842,6 +3927,33 @@ def _body_reference_guidance(text, recipient):
             "confer session takeover authority.")
 
 
+def _request_receiver_guidance(text, recipient):
+    """Guidance for a sealed peer request or its report: commands, never the body.
+
+    The same string reaches Claude hook context, Codex and OpenCode. The model
+    opens the sealed body itself with `show` (an ordinary shell tool call), so the
+    body is never pasted here. ``""`` means the text is not a sealed request."""
+    found = _reference_transfer_from_text(text)
+    if not found:
+        return ""
+    ref, transfer = found
+    import peer_request
+    seal = transfer.get("request")
+    if not peer_request.valid_seal(seal) or not _reference_target_matches(transfer, recipient or {}, ref):
+        return ""
+    request_id = seal["id"]
+    show = '%s %s' % (peer_request.SHOW_COMMAND, request_id)
+    if seal["role"] in ("request", "followup"):
+        cmds = peer_request.report_commands(request_id, seal["revision"])
+        return ("Peer request %s (revision %d) from another session. Open its sealed body with this shell "
+                "command (the line above is only a notice):\n`%s`\n"
+                "Start at your next natural pause; do not interrupt current work or the user's draft. "
+                "Report this revision with `%s` (final), `%s` (more to come) or `%s`. "
+                "A report closes only this request and is not approval, release or an answer to a user question."
+                % (request_id, seal["revision"], show, cmds["final"], cmds["partial"], cmds["reject"]))
+    return ("Peer request %s update (read only; nothing to answer). Details: `%s`" % (request_id, show))
+
+
 def receiver_guidance(text="", recipient=None, *, cwd=None):
     """Return ordinary peer guidance, plus an exact accept command only for a live handoff.
 
@@ -3851,6 +3963,9 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
     current_origin = parse_peer_trailer(text, recipient, include_ref=True)
     if isinstance(current_origin, dict) and current_origin.get("source") == "runtime-completion":
         return ""
+    requested = _request_receiver_guidance(text, recipient)
+    if requested:
+        return requested
     ordinary = _ordinary_receiver_guidance()
     body_reference_guidance = _body_reference_guidance(text, recipient)
     guidance = ordinary + ("\n\n" + body_reference_guidance if body_reference_guidance else "")

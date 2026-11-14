@@ -526,7 +526,13 @@ and the text on every row, in every harness); a native on the terminal's own
 background keeps them plain. The panel's own background does not change.
 The route box carries `route N` in its top border (beside the native area
 `N ROUTE`, the count first; the producer's own label alone, over a `Checking`
-row, while its rows are not read yet). Each current
+row, while its rows are not read yet). Peer requests this session sent or
+received follow in the same border as `M REQUEST`, a dark gray upper-case name
+tag like `MESSAGES` (the route count keeps its state color), and their opened
+details use the same upper-case labels. Every open request has a row; a closed
+one sent by this session stays 15 minutes after it closed, or until its last
+answer or cancel notice has been seen (at most 7 days), and then only `show` lists it; a request
+whose message is not confirmed yet stays with `not confirmed`. Each current
 route (the ones the statusline counts) is one folded row: Fleet's route marker
 and judgment (`⠏` while anything of it runs, its owner or a worker; `●`
 waiting, with nothing running or on a person; `✕` stopped; `✓` done; `◌` no

@@ -171,6 +171,17 @@ class StopTest(CarrierCase):
         self.assertIsNone(carrier.peer_body_item("[report] done"))
         self.assertEqual(carrier.peer_body_item("run it")["kind"], "peer-report")
 
+    def test_the_continuation_calls_a_sealed_request_a_request_and_names_show_and_report(self):
+        text = carrier.nudge_text([{"kind": "peer-report", "required_action": "follow-through",
+                                    "request": "rq-6813d5"}])
+        self.assertIn("another session's request rq-6813d5 arrived", text)
+        self.assertNotIn("report arrived", text)
+        self.assertIn('peer-steward.py" show rq-6813d5', text)
+        self.assertIn('peer-steward.py" report rq-6813d5', text)
+        # An ordinary peer message still reads as before.
+        self.assertIn("another session's report arrived",
+                      carrier.nudge_text([{"kind": "peer-report", "required_action": "follow-through"}]))
+
     def test_peer_report_item_names_the_receiving_harness(self):
         import session_tidy
         with mock.patch.object(session_tidy, "_current_request_origin",

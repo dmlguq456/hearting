@@ -590,6 +590,17 @@ def _current_identity(sess, home, record, pane_claim=None):
 _STANDALONE_IDENTITY_WAIT_S = 0.75
 
 
+def _herdr_hosted(pid):
+    """Whether Herdr is this Claude process's host: its launch lineage or its own environment says so.
+
+    The caller's own Herdr variables count too (a hook runs inside the pane it reports)."""
+    if procscan.provenance(pid) == "herdr":
+        return True
+    own = procscan.read_environ(pid)
+    return any(env.get(name) for env in (own, os.environ)
+               for name in ("HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV"))
+
+
 def session_id_of_process(pid, home=None):
     """The same current identity used by Fleet and the pane reporting guard."""
     from ..model import Session
@@ -607,6 +618,10 @@ def session_id_of_process(pid, home=None):
     # collected foreground observation instead of calling this probe per row.
     from . import herdr
     from ..process_identity import pane_process_claims
+    if not _herdr_hosted(pid):
+        # Under tmux or a bare terminal there is no Herdr pane to observe;
+        # the registry and statusline taps already name the native identity.
+        return _current_identity(sess, home, record)[0]
     panes = herdr.list_panes(wait_timeout=_STANDALONE_IDENTITY_WAIT_S)
     if panes is None:
         sess.herdr_attached = True if procscan.provenance(pid) == "herdr" else None

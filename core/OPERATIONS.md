@@ -3513,6 +3513,29 @@ a refusal, unresolved address or identity mismatch exits non-zero.
 `hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
 the send path; reply text addressed to another session reaches nobody.
 
+**Peer requests.** A request for work is `peer-steward.py request <address> --body-file
+<file>` (a new `--rev` label supersedes the revision; `request <rq-id> --cancel` withdraws
+it); its answer is `report [<rq-id>] [--partial | --reject <why>] --result <line>`, and
+`show [<rq-id>]` prints the sealed body (no id: this session's open requests). The line
+that reaches a conversation names the request; the body stays sealed and the model opens
+it with `show`. Delivery and work are separate: a receipt does not change a request's state;
+only a final or reject report, or the requester's cancel, closes it, and a partial report
+keeps it open. A report belongs to the revision it answers; for a superseded one it is
+kept there as late and closes nothing. The guidance and `show` print each report command
+with its revision (`--rev N`); a report without `--rev` is taken for the newest revision
+received (else delivered), so when reporting an older revision's work use the `--rev` given. A revision superseded or cancelled before delivery
+is not sent; a delivered one is not recalled, and the cancel notice reaches the receiver
+at its next boundary. A request follows only a successor that Hearting's lineage confirms,
+and an unconfirmed same-name session neither inherits nor may report it. A report is not
+approval, release or a user answer. Running the same `report` command again sends a new
+report with the next number; a transfer retry of one report keeps it one report.
+The seal keeps a revision's or report's body from changing after it is sent; it is not a
+read barrier between sessions or workers of the same OS user, and `show` names its caller
+exactly as `prompt` does. The request record is the one source of truth: each message's
+number and transfer ref are fixed in it before the message is sealed, and when a writer
+stops after the seal, the next list, `show`, `report` or runner pass completes the record
+from that seal; a message with no seal stays listed as not confirmed on both sides.
+
 A lost native response is reconciled from exact persisted history before continuing
 the same ref. Duplicate or ambiguous matches are left pending without resubmitting
 the body. OpenCode additionally requires the exact selected root SID, native idle
@@ -3595,7 +3618,10 @@ by itself. Unknown observations remain pending and reconnect through the same wa
 A target with no session id cannot arm a new watch (`target-session-unresolved`). A
 protocol-2 arm without native PID birth remains unknown; the observer does not adopt the
 first session later reported in that pane. `prompt` and `retire` keep their existing
-native-turn and screen guards for a pane that has no session yet.
+native-turn and screen guards for a pane that has no session yet. A message cancelled
+because its recipient session provably ended is not delivered again if that session is
+reopened. Watch and the steward check link targets in the caller's own Claude home; a
+session under another `CLAUDE_CONFIG_DIR` is not linked.
 Watcher, lock, receipt, and available wake carriers are runtime-owned
 (`core/ADAPTATION.md §7.3`).
 
@@ -3653,7 +3679,8 @@ Herdr integration state is session-scoped corroboration. Native session identity
 and exact foreground PID birth bind sends and retire; a stale Herdr `working`
 state cannot veto retirement by itself, while live foreground work, registered
 children, native busy state, an open form, or an unreadable draft still protect
-the target. Unknown process or namespace evidence remains unresolved. Peer
+the target; a working OpenCode session, read from any writer of its native status, also
+holds retire back. Unknown process or namespace evidence remains unresolved. Peer
 receipts distinguish native acceptance (`queued`) from exact receiver
 consumption (`received`). OpenCode native status is usable for 15 seconds only
 when its session, pane, foreground PID birth, and PID namespace still match.

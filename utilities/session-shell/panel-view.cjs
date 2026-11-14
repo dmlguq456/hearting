@@ -464,7 +464,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const kept=Array.isArray(model.messages)?model.messages:[],keys=messageKeys(kept);
   const messageKey=m=>keys[kept.indexOf(m)],messageParts=m=>[text(m.way+' '),text(m.who+' ','loc_repo'),text(m.text)];
   const reading=typeof routeDetail==='string'&&routeDetail.startsWith('message:')?kept[keys.indexOf(routeDetail)]:undefined;
-  if(typeof routeDetail==='string'&&!reading)routeDetail=false;
+  // A request too long to read in its rows opens here: its numbers, reports and sealed body.
+  const requestRead=Array.isArray(model.requests)?model.requests:[];
+  const readingRequest=typeof routeDetail==='string'&&routeDetail.startsWith('request:')?requestRead.find(q=>q&&'request:'+q.id===routeDetail):undefined;
+  if(typeof routeDetail==='string'&&!reading&&!readingRequest)routeDetail=false;
   if(settings){
     add(line(t('settings_title','Hearting shell settings'),'loc_repo'));
     const start=Math.max(0,settings.index-Math.max(0,height-7));
@@ -486,10 +489,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     else add(line('Tab ↑↓ · ←/→ · Enter · Esc'));
   }else if(routeDetail){
     // Spec rule 45 (c): beside the native area the page's word is upper case, as its section's head.
-    const word=reading?'messages':t('routes','route');
+    const word=readingRequest?'request':reading?'messages':t('routes','route');
     add(line((side?word.toUpperCase():word)+' · '+t('back','Back'),'loc_repo'),'route');
     const start=content.length;
-    if(reading)wrap(messageParts(reading),Infinity);
+    if(readingRequest){
+      const q=readingRequest;
+      wrap([text(String(q.glyph||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo'),text(' '),text(String(q.who||''),'dim'),text(' '),text(String(q.title||q.id),'loc_repo')],Infinity);
+      for(const [label,value,tone] of Array.isArray(q.details)?q.details:[])
+        wrap(line((label?label+': ':'')+String(value||''),({lvl_r:'lvl_r',lvl_g:'lvl_g',dim:'dim'})[tone]||'loc_repo'),20);
+      if(Array.isArray(q.body)&&q.body.length){
+        wrap(line(String(q.body_label||'body')+' ─','dim'),Infinity);
+        for(const value of q.body)wrap(line(String(value)),Infinity);
+        if(q.body_more)wrap(line('…','dim'),Infinity);
+      }
+    }
+    else if(reading)wrap(messageParts(reading),Infinity);
     else for(const route of routes){
       // The route's whole detail, as it opens in place, then its evidence lines.
       wrap([routeGlyph(route),text(' '),text(route.title||t('checking','Checking'),'loc_repo')],Infinity);
@@ -808,6 +822,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // row; a count the producer did not send rows for shows only in the box's lower border.
     const total=Number.isInteger(model.route_total)&&model.route_total>=shown.length?model.route_total:shown.length;
     const listed=shown,unsent=shown.length?total-listed.length:0;
+    // Requests this session sent (→) or received (◂): lines in the route box after the routes
+    // (R27); each opens in place by its own key and reads whole on its own page.
+    const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
     const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
     const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
     const owner=r=>{const p=r.paint||{};return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
@@ -1248,6 +1265,46 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return size(lead)<=inner?lead:null;
     }
+    // One folded request row: direction mark, the other session, the title and the status (a
+    // sent one not yet seen says so; then the work: open, partial answer, final answer, rejected,
+    // cancelled), then how long ago. A value that does not fit goes whole: the age; then the title
+    // is cut with `…` and, past two cells, gone (the other session and the status stay); the other
+    // session goes only after that (spec rules 29, 30).
+    const requestLine=q=>{
+      const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo');
+      const who=q.who?[text(' '+q.who,'dim')]:[],title=text(' '+String(q.title||q.id),'loc_repo');
+      const status=q.status?[text(' · ','dim'),text(String(q.status),q.kind==='request-rejected'?'lvl_r':'dim')]:[];
+      const age=q.age?[text(' '+q.age,'dim')]:[];
+      for(const form of [[mark,...who,title,...status,...age],[mark,...who,title,...status]])
+        if(size(form)<=inner)return form;
+      // The title gives way first: cut with `…` down to two cells and `…`, and past that gone,
+      // while the other session and the status stay. Only when those two alone do not fit does
+      // the other session go, and the title comes back (cut) in its place.
+      const stay=[mark,...who,...status];
+      if(size(stay)<=inner){
+        const room=inner-size(stay);
+        return room>=4?[mark,...who,...cut([title],room),...status]:stay;
+      }
+      const room=inner-size([mark,...status]);
+      if(room>=4)return [mark,...cut([title],room),...status];
+      return cut([mark,title],inner);
+    };
+    // An opened request: its numbers, revision, delivery, work, last change and reports in
+    // the route detail's guide and label columns, then `+ body ›` to its read page.
+    const requestDetails=q=>{
+      const out=[];let item=0;
+      const guide=[text('  '),{...text('┆','dim'),role:'messages'},text(' ')],W=Math.max(8,inner-4);
+      const names=(Array.isArray(q.details)?q.details:[]).map(d=>measure(String(d[0]||'')));
+      // The label column is as wide as its longest label (a catalog word may be longer than 7 cells).
+      const labels=W>=24,L=labels?Math.min(10,Math.max(7,...names.map(n=>n+1))):0;
+      for(const [label,value,tone] of Array.isArray(q.details)?q.details:[]){
+        const parts=[text(String(value||''),({lvl_r:'lvl_r',lvl_g:'lvl_g',dim:'dim'})[tone]||'loc_repo')];
+        wrapAll(parts,W-L).forEach((row,i)=>{const name=i?'':String(label||'');out.push({parts:[...guide,...(L?[text(name+' '.repeat(Math.max(0,L-measure(name))),'dim')]:[]),...row],item});});
+        item++;
+      }
+      out.push({parts:[...guide,text('+ '+(q.body_label||'body')+' ›','loc_repo')],item,action:'read:request:'+q.id});
+      return out;
+    };
     const routeRows=[],detailRows=[];
     within(()=>{
       for(const r of listed){
@@ -1261,6 +1318,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           ...(tree?{tree,workers,box:workers.length?workerBox(workers):[],gauge:ctxTimed(leadPaint(r),r.elapsed?[text(r.elapsed)]:[],inner-2),
             counted:workers.length?placeRow(r,workers.length):null}:{})});
         if(open.has(key))for(const d of details(r))detailRows.push({...d,action:key,after:r.id});
+      }
+      for(const q of requestList){
+        const key='request:'+q.id;
+        routeRows.push({parts:requestLine(q),two:false,action:key,kind:q.kind||'request-out',request:true});
+        if(open.has(key))for(const d of requestDetails(q))detailRows.push({action:key,...d,after:q.id});
       }
     });
     // Spec rule 31: a message takes two rows: a head (the direction arrow in its color,
@@ -1330,8 +1392,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const label=upper(clean(model.route_label||'').trim());
     // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
     const running=shown.some(live);
-    const routeTitle=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:null;
-    const routeChecking=!shown.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
+    // `N ROUTE │ M REQUEST`: the request count follows the route count in the same title. The
+    // route count keeps its state color; `REQUEST` is a name tag like `MESSAGES`, `MEM` and the
+    // info labels: dark gray upper case (spec rules 57, 58), never a state color.
+    const routeHead=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:[];
+    const requestHead=requestList.length?[text(side?requestList.length+' REQUEST':'request '+requestList.length,'dim')]:[];
+    const routeTitle=routeHead.length||requestHead.length?[...routeHead,...(routeHead.length&&requestHead.length?[text(' │ ','dim')]:[]),...requestHead]:null;
+    const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
     // Running jobs keep their row beside a question: its editor pages its own content.
@@ -1395,7 +1462,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const routeSize=x=>routeForm(x).length;
     // An opened route's detail that outgrows its rows keeps its first whole items and a
     // `+N lines ›` row to the route read page, where every value reads whole.
-    const detailFull=Math.max(0,...listed.map(r=>detailRows.filter(d=>d.after===r.id).length));
+    const detailFull=Math.max(0,...listed.map(r=>detailRows.filter(d=>d.after===r.id).length),...requestList.map(q=>detailRows.filter(d=>d.after===q.id).length));
     let detailCap=detailFull;
     const detailsOf=id=>{
       const rows=detailRows.filter(d=>d.after===id);
@@ -1403,12 +1470,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       let keep=0;
       for(let i=0;i<rows.length&&i<detailCap-1;i++)if(i+1===rows.length||rows[i+1].item!==rows[i].item)keep=i+1;
       keep=Math.max(1,keep||detailCap-1);
-      return [...rows.slice(0,keep),{parts:[text('  '),{...text('┆','dim'),role:'messages'},text(' '),text('+'+(rows.length-keep)+' lines ›','loc_repo')],action:'route',after:id}];
+      return [...rows.slice(0,keep),{parts:[text('  '),{...text('┆','dim'),role:'messages'},text(' '),text('+'+(rows.length-keep)+' lines ›','loc_repo')],action:/^rq-/.test(id)?'read:request:'+id:'route',after:id}];
     };
     // One empty row parts an opened route's detail from the next route.
-    const gapAfter=(x,i,list)=>keepDetails&&i<list.length-1&&detailsOf(x.action.slice(6)).length>0;
-    const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,routeLimit).reduce((n,x,i,list)=>n+routeSize(x)
-      +(keepDetails?detailsOf(x.action.slice(6)).length:0)+(gapAfter(x,i,list)?1:0),0):routeChecking.length):0;
+    const idOf=action=>action.slice(action.indexOf(':')+1);
+    const gapAfter=(x,i,list)=>keepDetails&&i<list.length-1&&detailsOf(idOf(x.action)).length>0;
+    const routeBox=()=>keepRoutes?2+(routeRows.length?routeRows.slice(0,routeLimit).reduce((n,x,i,list)=>n+routeSize(x)
+      +(keepDetails?detailsOf(idOf(x.action)).length:0)+(gapAfter(x,i,list)?1:0),0):routeChecking.length):0;
     // The lower section: the messages' titled rule and rows, then MEM's, then one closing rule.
     const memShown=()=>keepMem&&memItems.length>0;
     const messageSection=()=>{const m=keepMessages&&messages.length>0,k=memShown();return (m?1+visibleMessages().length:0)+(k?1+memRowsOf().length:0)+(m||k?1:0);};
@@ -1495,7 +1563,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // in place (wheel, PgUp/PgDn). A working route comes first, then an answer
       // wait, a stopped one, a finished one; the borders count what is hidden.
       const scrolling=routeLimit<routeRows.length;
-      const rank={working:0,blocked:1,idle:2,dead:3,done:4,stale:4};
+      // A request waiting for this session's answer and a rejected or cancelled one stand with
+      // the working and stopped routes; a sent one with the idle; a closed one with the finished.
+      const rank={working:0,'request-in':0,blocked:1,'request-rejected':1,idle:2,'request-out':2,dead:3,done:4,'request-done':4,stale:4};
       const sorted=scrolling?routeRows.map((x,i)=>[x,i]).sort((a,b)=>((rank[a[0].kind]??2)-(rank[b[0].kind]??2))||a[1]-b[1]).map(([x])=>x):routeRows;
       routeOffset=scrolling?Math.max(0,Math.min(routeRows.length-routeLimit,Math.trunc(Number(routeScroll)||0))):0;
       routeStep=routeLimit;routeMax=scrolling?routeRows.length-routeLimit:0;
@@ -1503,11 +1573,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const above=routeOffset,below=routeRows.length-routeOffset-kept.length+unsent;
       const hiddenNote=n=>[text(n,'loc_repo')];
       routeBlock=[{...boxTop(routeTitle,key,{action:'route',note:above?hiddenNote('↑'+above):[]}),groups:['route']}];
-      (shown.length?kept:routeChecking).forEach((item,i,list)=>{
+      (routeRows.length?kept:routeChecking).forEach((item,i,list)=>{
         // A press on any row of a folded route opens it.
         for(const parts of item.two?routeForm(item):[item.parts])routeBlock.push(boxRow({parts,action:item.action},key));
-        if(keepDetails&&item.action.startsWith('route:')){
-          for(const d of detailsOf(item.action.slice(6)))routeBlock.push(boxRow(d,key));
+        if(keepDetails&&/^(?:route|request):/.test(item.action)){
+          for(const d of detailsOf(idOf(item.action)))routeBlock.push(boxRow(d,key));
           if(gapAfter(item,i,list))routeBlock.push(boxRow({parts:[],action:item.action},key));
         }
       });

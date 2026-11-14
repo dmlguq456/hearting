@@ -183,6 +183,40 @@ def _last_turn(payload: dict, protocol: str):
     return last.get("role", "user"), _flatten_text(last.get("content"))
 
 
+_OUTPUT_TYPES = ("function_call", "custom_tool_call", "local_shell_call", "reasoning", "web_search_call")
+
+
+def _turn_text(payload: dict, protocol: str) -> str:
+    """Everything that reached the model since its own last output, oldest first.
+
+    ``_last_turn`` is the newest item only. Codex puts its developer guidance after the
+    user line of a peer message, so the newest item may be the guidance alone; a scenario
+    that must see the line reads this: every user, developer and tool input after the
+    last assistant output."""
+    def is_output(item):
+        return isinstance(item, dict) and (item.get("role") == "assistant"
+                                           or item.get("type") in _OUTPUT_TYPES)
+    if protocol == "responses":
+        items = payload.get("input") or []
+        if isinstance(items, str):
+            return items
+        pending = []
+        for item in items:
+            if is_output(item):
+                pending = []
+            elif isinstance(item, dict):
+                pending.append(_flatten_text(item.get("output") if "output" in item else item.get("content")))
+        return "\n".join(text for text in pending if text)
+    messages = [m for m in payload.get("messages") or [] if isinstance(m, dict) and m.get("role") != "system"]
+    pending = []
+    for message in messages:
+        if message.get("role") == "assistant":
+            pending = []
+        else:
+            pending.append(_flatten_text(message.get("content")))
+    return "\n".join(text for text in pending if text)
+
+
 def _user_inputs(payload: dict, protocol: str) -> list[dict]:
     """Every person-role input in the request, oldest first: ``{"id", "text"}``.
 
@@ -334,6 +368,7 @@ class ModelFixture:
                 "model": payload.get("model"),
                 "main_index": index if main else None,
                 "last_kind": kind, "last_text": last_text[-4000:],
+                "turn_text": _turn_text(payload, protocol)[-4000:],
                 "text": text, "tools": names[:60],
                 "user_inputs": _user_inputs(payload, protocol),
                 "sha256": hashlib.sha256(raw).hexdigest(),

@@ -130,17 +130,15 @@ def _peer_message_module():
     return _load_module("peer-message", _PEER_MESSAGE_PY, "_peer_message")
 
 
+def _peer_request_module():
+    """`peer_request` (the message-kind table), loaded like the other tools."""
+    return _load_module("peer_request", _UTILITIES_DIR / "peer_request.py", "_peer_request")
+
+
 def _steward_module():
     """`peer-steward.py` in this process: a second interpreter and import per
     prompt cost more than the sweep itself once the machine was loaded."""
     return _load_module("peer-steward", _PEER_STEWARD_PY, "_peer_record_steward")
-
-_PREFIX_KIND = {
-    "[steer]": "steer",
-    "[handoff]": "handoff",
-    "[gate]": "gate-relay",
-}
-
 
 def _read_stdin_json():
     data = sys.stdin.read()
@@ -168,11 +166,9 @@ def _address_session_id(mod, address):
 def _kind_for_body(body, notify_when_idle):
     if notify_when_idle:
         return "watch"
-    first_line = (body or "").splitlines()[0].strip() if body else ""
-    for prefix, kind in _PREFIX_KIND.items():
-        if first_line.startswith(prefix):
-            return kind
-    return "steer"
+    # One table for the ledger kind, the Codex follow-through pass and this hook.
+    table = _peer_request_module()
+    return table.message_kind(body or "")[0] if table else "steer"
 
 
 def handle_post_tool(payload):
