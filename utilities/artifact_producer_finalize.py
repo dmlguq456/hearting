@@ -688,6 +688,8 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
                                 historical: bool = False) -> Dict[str, Any]:
     """Prove a closed cycle's record, current manifest and index agree (§45 D-127).
 
+    A D-9 no-lineage record proves the bound identity. Before the owner envelope
+    is sealed, it also proves there are no files the producer would seal.
     What is checked is identity and consistency: the cycle record, the current
     `manifest.json` and the index row all describe the same document, and the
     terminal record that closed the cycle is in it.  Whether the files still
@@ -697,7 +699,7 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
     finished; it may be an earlier one, and the result then says the cycle was
     updated since (`updated_since`) while still returning that recorded digest.
     """
-    if record.get("state") != "sealed" or not record.get("sealed_on"):
+    if record.get("state") not in {"sealed", "no-lineage"} or not record.get("sealed_on"):
         raise ProducerError("already-sealed-mismatch", "cycle-record")
     if expected_binding is not None:
         for key in ("cycle_id", "producer_id"):
@@ -709,6 +711,25 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
                     record, expected_binding["cycle_record_digest"],
                     campaign_id=expected_binding.get("campaign_id"))):
             raise ProducerError("already-sealed-mismatch", "cycle-identity")
+    if record.get("state") == "no-lineage":
+        # D-9's other successful terminal shape has no manifest or index row.
+        # Never manufacture an empty seal or rejudge completed output inventory.
+        if not expected_binding or not expected_binding.get("cycle_record_digest"):
+            raise ProducerError("already-sealed-mismatch", "cycle-identity")
+        if "manifest_digest" not in record or record["manifest_digest"] is not None:
+            raise ProducerError("already-sealed-mismatch", "manifest")
+        if expected_manifest_digest is not None:
+            raise ProducerError("already-sealed-mismatch", "manifest")
+        if not historical:
+            manifest_path = _record_cycle_manifest_path(root, record, missing_if_reused=True)
+            if manifest_path is not None and _path_entry_present(manifest_path.parent):
+                directory = manifest_path.parent
+                bundles = _scan_directory_bundles(directory)
+                paths, violations = _output_paths(
+                    directory, skip_directories=[tree.directory for tree in bundles])
+                if bundles or paths or violations:
+                    raise ProducerError("already-sealed-mismatch", "no-lineage-output")
+        return {"status": "no-lineage", "cycle_id": record["cycle_id"], "lineage_committed": False}
     manifest_path = _record_cycle_manifest_path(root, record)
     directory = manifest_path.parent
     try:
@@ -887,6 +908,10 @@ def observe_finalized_cycle(root: Path, *, cycle_id: str, expected_binding: Mapp
         raise ProducerError("cycle-unknown", cycle_id)
     if record.get("deleted_at"):
         return _verify_deleted_cycle(record, expected_binding, expected_manifest_digest)
+    if record.get("state") == "no-lineage":
+        # The envelope already proved no output; later locator reuse is unrelated.
+        return _verify_sealed_cycle_locked(root, record, expected_binding,
+            expected_manifest_digest=expected_manifest_digest, historical=True)
     # Cache only the immutable historical consistency proof. Review leases
     # above and the terminal controller's child/process/claim checks remain
     # fresh. Missing optional markers/snapshot directories depend on their
