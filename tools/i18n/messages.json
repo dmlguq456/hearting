@@ -922,10 +922,6 @@
    "en": "unknown {n}",
    "ko": "미확인 {n}"
   },
-  "fleet.lab.n_unlinked": {
-   "en": "unlinked {n}",
-   "ko": "미연결 {n}"
-  },
   "fleet.lab.n_unnamed": {
    "en": "unnamed {n}",
    "ko": "이름 없음 {n}"
@@ -2055,8 +2051,16 @@
    "ko": "진행 {reached}/{total} {unit}"
   },
   "resource.progress_not_visible": {
-   "en": "declared progress folder not visible here",
-   "ko": "선언한 진행 폴더가 여기서 안 보임"
+   "en": "declared progress {what} not visible here",
+   "ko": "선언한 진행 {what} — 여기서 안 보임"
+  },
+  "resource.progress_word_file": {
+   "en": "file",
+   "ko": "파일"
+  },
+  "resource.progress_word_folder": {
+   "en": "folder",
+   "ko": "폴더"
   },
   "resource.trend.flat": {
    "en": "flat",

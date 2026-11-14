@@ -17,7 +17,7 @@ harness root above. Read documents only as needed.
   question; a helper never owns user input or approvals.
 - Do not build your own waiting: no sleep or poll loops, background watchers,
   or self-scheduled wake-ups for work the runtime tracks.
-  For experiments, runtime notices bring failures, warnings and new results, the LAB board shows normal progress, steward check handles periodic checks, and `experiment_catalog.py status` gives a one-time view.
+  For experiments, runtime notices bring failures, warnings and new results, the LAB board shows normal progress, steward check handles periodic checks, and `hearting run experiment_catalog status` gives a one-time view.
 - Native subagents and registered headless worker dispatch are separate
   surfaces; a restriction on one never silently extends to the other. Preserve
   model role, intensity, dispatch depth, tests, safety, and validation on

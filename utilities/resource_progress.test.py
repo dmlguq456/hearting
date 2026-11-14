@@ -1716,7 +1716,7 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("경과 1h02m; 진행 파일 선언 없음", checkpoint)
         unmapped = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "remote-unmapped"},
                                                     None, []))
-        self.assertIn("선언한 진행 폴더가 여기서 안 보임", unmapped)
+        self.assertIn("선언한 진행 폴더 — 여기서 안 보임", unmapped)
         for text in (final, checkpoint, unmapped):
             self.assertNotIn("지표 없음", text)
             self.assertNotIn("판정 불가", text)
@@ -1803,7 +1803,7 @@ class ExperimentObservationTest(unittest.TestCase):
         # RV-PR1619-R2-1114 required fix 2: the launch note counted a named progress file as a
         # declaration, the run's notices only after a first successful read. One judgment now.
         # The place the runner gives every run (log + ".progress.json") stays no declaration.
-        not_visible = "선언한 진행 폴더가 여기서 안 보임"
+        not_visible = "선언한 진행 파일 — 여기서 안 보임"   # a file was declared: say file
         with tempfile.TemporaryDirectory() as tmp:
             base, now = Path(tmp), 1_800_000_000.0
 
@@ -1867,6 +1867,62 @@ class ExperimentObservationTest(unittest.TestCase):
                 self.assertEqual(observation["undeclared"], "not-declared")
                 self.assertIn("진행 파일 선언 없음", text)
                 self.assertNotIn(not_visible, text)
+
+    def test_a_declared_file_and_a_declared_folder_are_named_by_their_own_word(self):
+        # RV-PR1619-R3-1114: a declared progress FILE not there yet was told "folder not visible".
+        bare = {"summary": {}, "elapsed_seconds": 60, "planned_seconds": None, "undeclared": "declared-unresolved"}
+        for lang, file_text, folder_text in (
+                ("Korean", "선언한 진행 파일 — 여기서 안 보임", "선언한 진행 폴더 — 여기서 안 보임"),
+                ("English", "declared progress file not visible here", "declared progress folder not visible here")):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                for name, run, wanted, other in (
+                        ("file", {"run_id": "r", "progress_file": "/data/mine/counter.json"}, file_text, folder_text),
+                        ("folder", {"run_id": "r", "output_dir": "/data/out"}, folder_text, file_text),
+                        ("both", {"run_id": "r", "output_dir": "/data/out",
+                                  "progress_file": "/data/mine/counter.json"}, folder_text, file_text),
+                        ("runner place", {"run_id": "r", "log": "/data/run.log",
+                                          "progress_file": "/data/run.log.progress.json"}, folder_text, file_text)):
+                    with self.subTest(lang=lang, run=name):
+                        text = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, []))
+                        self.assertIn(wanted, text)
+                        self.assertNotIn(other, text)
+
+    def test_the_runners_own_progress_place_is_told_from_a_declaration_by_the_file_not_its_spelling(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp).resolve()
+            (base / "real").mkdir()
+            (base / "link").symlink_to(base / "real")
+            log = base / "real" / "run.log"
+            place = str(log) + ".progress.json"
+            (base / "link-file.json").symlink_to(place)        # a link to the file itself
+            Path(place).write_text("{}")
+            os.link(place, base / "hard.json")
+            other = base / "real" / "other.json"
+            other.write_text("{}")
+            relative = os.path.relpath(place, base / "work")
+            (base / "work").mkdir()
+            cases = (
+                ("same string", {"log": str(log), "progress_file": place}, False),
+                ("a dotted spelling", {"log": str(log), "progress_file": str(base / "real" / "." / "run.log.progress.json")}, False),
+                ("through a linked folder", {"log": str(log), "progress_file": str(base / "link" / "run.log.progress.json")}, False),
+                ("log through the link", {"log": str(base / "link" / "run.log"), "progress_file": place}, False),
+                ("a link to the file", {"log": str(log), "progress_file": str(base / "link-file.json")}, False),
+                ("a hard link", {"log": str(log), "progress_file": str(base / "hard.json")}, False),
+                ("relative to the run's folder", {"log": str(log), "progress_file": relative,
+                                                  "cwd": str(base / "work")}, False),
+                ("relative log", {"log": os.path.relpath(log, base / "work"), "progress_file": place,
+                                  "cwd": str(base / "work")}, False),
+                ("another file", {"log": str(log), "progress_file": str(other)}, True),
+                ("relative to nowhere", {"log": str(log), "progress_file": relative}, True),
+            )
+            for name, run, declared in cases:
+                with self.subTest(case=name):
+                    self.assertEqual(bool(progress._declared_progress_file(dict(run))), declared)
+            # A run on another host: its paths are not this machine's disk, so only spelling counts.
+            remote = {"log": str(log), "progress_file": str(base / "link" / "run.log.progress.json")}
+            self.assertTrue(progress._declared_progress_file({**remote, "host_is_local": False}))
+            self.assertTrue(progress._declared_progress_file({**remote, "path_namespace": {"/r": "/l"}}))
+            self.assertIsNone(progress._declared_progress_file({**remote, "host_is_local": True}))
 
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
     def test_the_launch_note_and_the_notice_come_from_the_same_undeclared_result(self):
