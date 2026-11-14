@@ -3,11 +3,19 @@
 
     python3 tools/fleet/tests/readme_captures.py [--out docs/fleet] [--no-gif]
 
-Draws eight screens with the cell renderer and ``readme_demo.snapshot()`` (English, neutral,
+Draws the Fleet screens with the cell renderer and ``readme_demo.snapshot()`` (English, neutral,
 synthetic rows; no home, registry, herdr or network read; no live Fleet window is opened):
 
     overview.png  routes.png  questions.png  session.png  resources.png  output.png
-    walkthrough.gif (OVERVIEW > ROUTES > session > output)  narrow.png (OVERVIEW at 100 columns)
+    narrow.png (OVERVIEW at 100 columns)
+
+and the session panel of the same demo world with ``readme_panel`` (the shell backend's own
+projection, painted by ``panel-view.cjs`` under node; the conversation beside it is illustrative):
+
+    seat.png (a session with its panel above Fleet's OVERVIEW)  panel.png (one panel with LAB)
+    panel-question.png (the bottom layout, question first)  requests.png (requester and receiver)
+    panel-focus.gif (Ctrl+] > Tab > 1 > Enter > Ctrl+])
+    walkthrough.gif (OVERVIEW > ROUTES > session > that session's panel > output)
 
 PNGs are palette-quantised so the README loads quickly. Unlike ``explorer_capture.py`` (evidence,
 kept outside the repo) these are published assets, so the default output is ``docs/fleet``.
@@ -35,9 +43,12 @@ SCREENS = {
     "output": ("ROUTES", "route:LAB", 160, 45, True),
     "narrow": ("OVERVIEW", "-", 100, 40, False),
 }
-WALK = ("overview", "routes", "session", "output")
+WALK = ("overview", "routes", "session", "panel", "output")   # "panel": the session's own window
 COLOURS = 96
 FRAME_MS = 2600
+PANEL_COLS = 40
+# The first picture: the [4f] window (conversation columns + two + the panel) over Fleet's top rows.
+SEAT_TALK, SEAT_ROWS, SEAT_FLEET_ROWS = 80, 38, 12
 
 
 def isolate():
@@ -93,6 +104,86 @@ def quantised(image):
     return image.quantize(colors=COLOURS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
 
 
+def panel_rows(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), expanded=(),
+               state=None, configuration=None):
+    """One demo session's panel, painted by the shell's own renderer (``readme_panel``)."""
+    from tools.fleet.tests import readme_panel
+    session = world.sessions[sid]
+    state = state or {"working": "working", "blocked": "blocked"}.get(session.liveness, "idle")
+    payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state)
+    if "lab" in expanded:
+        expanded = [key for key in expanded if key != "lab"] + [str((payload["panel"].get("lab") or {}).get("key") or "lab:")]
+    return readme_panel.paint([{"payload": payload, "width": width, "height": height, "side": side,
+                                "state": state, "sid": sid, "harness": session.harness, "frame": 3,
+                                "keys": list(keys), "expanded": list(expanded),
+                                "configuration": configuration or {}}])[0]
+
+
+def session_window(world, sid, cols, rows):
+    """A demo session's terminal: the illustrative conversation, two cells, then its panel."""
+    from tools.fleet.tests import readme_panel as panel
+    talk = cols - PANEL_COLS - 2
+    grid = panel.beside(panel.cells(panel.conversation(sid, talk, rows)),
+                        panel.cells(panel_rows(world, sid, rows)), talk)
+    return panel.image(grid, cols, rows)
+
+
+def seat(render, capture, world):
+    """P1: the ``[4f]`` window with its panel, and Fleet's OVERVIEW top rows under it."""
+    from tools.fleet.tests import readme_panel as panel
+    cols = SEAT_TALK + 2 + PANEL_COLS
+    top = panel.window(session_window(world, panel.API, cols, SEAT_ROWS),
+                       "web-api · claude [4f] — conversation (illustrative) and the Hearting panel")
+    SCREENS["_seat"] = ("OVERVIEW", "-", cols, 45, False)
+    try:
+        fleet = image_of(render, capture, frames(render, ["_seat"])["_seat"])[0]
+    finally:
+        SCREENS.pop("_seat", None)
+    fleet = fleet.crop((0, 0, fleet.size[0], SEAT_FLEET_ROWS * capture.CELL_H))
+    return panel.screen([[top], [panel.window(fleet, "fleet — every session on this machine")]])
+
+
+def panel_pictures(render, capture, with_gif):
+    """``{file name: PIL image or [GIF frames]}`` for the session panel's README pictures."""
+    from tools.fleet.tests import readme_demo
+    from tools.fleet.tests import readme_panel as panel
+    snapshot, _hosts = readme_demo.snapshot()
+    world = panel.World(snapshot, readme_demo.NOW)
+    pictures = {"seat.png": seat(render, capture, world)}
+    pictures["panel.png"] = panel.screen([[panel.window(
+        panel.image(panel.cells(panel_rows(world, panel.ML, 46, expanded=("lab",))), PANEL_COLS, 46),
+        "ml-train · claude [d1]")]])
+    question = panel.beside(panel.cells(panel.conversation(panel.API_NOTES, 100, 9)), [], 100, gap=0)
+    question += panel.cells(panel_rows(world, panel.API_NOTES, 14, width=100, side=False,
+                                       configuration={"layout": "bottom"}))
+    pictures["panel-question.png"] = panel.screen([[panel.window(
+        panel.image(question, 100, 23), "web-api · claude [9c] — a narrow window: the panel below, question first")]])
+    rq = "request:rq-7d21c4"
+    pictures["requests.png"] = panel.screen([[
+        panel.window(panel.image(panel.cells(panel_rows(world, panel.API, 46, expanded=(rq,))), PANEL_COLS, 46),
+                     "claude [4f] — asked"),
+        panel.window(panel.image(panel.cells(panel_rows(world, panel.API_REVIEW, 46, expanded=(rq,))), PANEL_COLS, 46),
+                     "codex [b2] — asked to")]])
+    if with_gif:
+        steps = ((), ("enter",), ("enter", "\t"), ("enter", "\t", "2"), ("enter", "\t", "2", "\r"),
+                 ("enter", "\t", "2", "\r", "\x1d"))
+        words = (("", "keys still go to the agent"),
+                 ("Ctrl+]", "focus the panel"), ("Tab", "the next question"),
+                 ("2", "choose the second option"), ("Enter", "send the answer"),
+                 ("Ctrl+]", "back to the agent"))
+        frames_ = []
+        for keys, (key, text) in zip(steps, words):
+            rows = panel_rows(world, panel.API_NOTES, 30, keys=keys)
+            body = panel.image(panel.cells(rows), PANEL_COLS, 30)
+            from PIL import Image
+            framed = Image.new("RGB", (body.size[0], body.size[1] + 2 * capture.CELL_H), capture.BACKGROUND)
+            framed.paste(body, (0, 0))
+            framed.paste(panel.caption(text, PANEL_COLS, key=key), (0, body.size[1]))
+            frames_.append(panel.screen([[panel.window(framed, "web-api · claude [9c]")]]))
+        pictures["panel-focus.gif"] = frames_
+    return pictures, world
+
+
 def write(out, with_gif):
     from PIL import Image
     from tools.fleet import render
@@ -109,10 +200,25 @@ def write(out, with_gif):
         path = out / f"{name}.png"
         quantised(image).save(path, optimize=True)
         written.append(path)
+    extra, world = panel_pictures(render, capture, with_gif)
+    for name, picture in extra.items():
+        path = out / name
+        if isinstance(picture, list):
+            steps = [quantised(step) for step in picture]
+            steps[0].save(path, save_all=True, append_images=steps[1:], duration=FRAME_MS, loop=0,
+                          optimize=True, disposal=1)
+        else:
+            quantised(picture).save(path, optimize=True)
+        written.append(path)
     if with_gif:
         # One size for every step: the GIF is drawn at the tallest screen's height.
-        walk = frames(render, WALK, rows_override=max(SCREENS[name][3] for name in WALK))
-        steps = [quantised(image_of(render, capture, walk[name])[0]) for name in WALK]
+        fleet_steps = [name for name in WALK if name in SCREENS]
+        rows = max(SCREENS[name][3] for name in fleet_steps)
+        walk = frames(render, fleet_steps, rows_override=rows)
+        # The session page's own window (Fleet opens that session's panel), at the same size.
+        session = session_window(world, "readme-claude-ml", SCREENS["session"][2], rows)
+        steps = [quantised(session if name == "panel" else image_of(render, capture, walk[name])[0])
+                 for name in WALK]
         path = out / "walkthrough.gif"
         steps[0].save(path, save_all=True, append_images=steps[1:], duration=FRAME_MS, loop=0,
                       optimize=True, disposal=1)

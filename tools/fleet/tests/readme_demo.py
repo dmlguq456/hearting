@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import time
 
-VERSION = "v4.0.0"
+VERSION = "v4.32.1"
 
 PROJECTS = ("web-api", "ml-train", "docs-site", "mobile-app")
 HOME = "/home/demo"
@@ -93,9 +93,9 @@ def snapshot(now=None, workdir=None):
           summary="Running the limiter tests"),
         S(harness="codex", pid=71002, cwd=api, session_id="readme-codex-api",
           title="Pagination review", model="gpt-5.5", effort="high",
-          ctx_pct=71, rl_5h=24, rl_7d=41, rl_rs=(now + 2 * 3600 + 10 * 60, now + 4 * 86400), elapsed_min=38, branch="main", liveness="idle",
-          session_tag="b2", herdr_attached=True, mtime=now - 600,
-          summary="Review done; ready for more"),
+          ctx_pct=71, rl_5h=24, rl_7d=41, rl_rs=(now + 2 * 3600 + 10 * 60, now + 4 * 86400), elapsed_min=38, branch="main", liveness="working",
+          session_tag="b2", herdr_attached=True, mtime=now - 20,
+          summary="Re-running the API tests for [4f]"),
         S(harness="claude", pid=71003, cwd=api, session_id="readme-claude-notes",
           title="Release notes 2.4", model="Sonnet 5.5", effort="medium",
           ctx_pct=33, elapsed_min=19, branch="main", liveness="blocked",

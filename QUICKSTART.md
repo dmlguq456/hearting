@@ -1,8 +1,18 @@
 # Quickstart
 
-This walks one small fix through Hearting, from install to a finished result.
-The [README](README.md) explains what Hearting is; this page is the shortest
-path to seeing it work.
+This walks one small fix through Hearting, from install to a finished result,
+then hands a piece of work from one session to another. The
+[README](README.md) explains what Hearting is; this page is the shortest path
+to seeing it work.
+
+| Minute | Step |
+|---|---|
+| 0:00 | [Install and check](#install-and-check) |
+| 1:00 | Open your agent CLI in a Git project: the Hearting panel appears beside it ([Fix one typo](#fix-one-typo)) |
+| 1:30 | Ask for a small fix and follow it in the panel |
+| 3:00 | Open a second session and see both in Fleet ([Watch it in the panel and Fleet](#watch-it-in-the-panel-and-fleet)) |
+| 4:00 | [Hand work to another session](#hand-work-to-another-session) as a request |
+| 5:00 | [Read the result](#read-the-result) |
 
 ## Before you start
 
@@ -44,7 +54,9 @@ walk-through.
 ## Fix one typo
 
 Open your agent CLI inside a Git project that has a small bug and an existing
-test, then ask in your own words:
+test. On a new installation the Hearting panel opens on the right of the new
+terminal (`hearting session shell status` says whether it is on). Then ask in
+your own words:
 
 > Fix the typo in the greeting output, run the existing test, and show me the diff.
 
@@ -63,9 +75,18 @@ the expected change is one line:
 +    return "Hello"
 ```
 
-## Watch it finish
+## Watch it in the panel and Fleet
 
-In a second terminal:
+While the agent works, the panel's `NOW` row says what it is doing, and a
+request that needs a route shows in the panel's route box with the worker
+running its current stage. If the agent asks you something, the question gets
+its own box in the panel: press **Ctrl+]** to focus the panel, then **Tab**,
+**1–9**, and **Enter** to answer, and **Ctrl+]** again to return to typing.
+
+Open a second session in another terminal, on any runtime. In either one press
+**Ctrl+]** and then **f**: Fleet opens in that window and shows both sessions,
+each with its number (`[4f]`, `[b2]`). **Ctrl+]** closes Fleet again. Fleet
+also runs on its own:
 
 ```sh
 ~/.local/bin/fleet --once    # one plain snapshot; no curses needed
@@ -74,6 +95,20 @@ In a second terminal:
 
 For a worker's raw output, ask the agent for its attempt id and run
 `hearting run attempt-view <attempt-id> --follow`.
+
+## Hand work to another session
+
+Tell the first session, using the second session's number:
+
+> Ask session [b2] to re-run the tests and report back.
+
+The request gets a number (`rq-…`) and shows in both panels: `→` in the
+session that asked, `◂` in the one asked. The second session opens the request
+body itself, works, and reports; a partial report keeps the request open, and
+a final report closes it and wakes the first session. Neither herdr nor tmux is
+needed. In a terminal without the panel, an idle Claude Code or OpenCode
+session is reached at its next turn rather than at once
+([details](docs/session-panel.md#requests-and-messages)).
 
 ## Read the result
 
@@ -92,8 +127,9 @@ next stage reads the evidence it holds.
 One measured run per task, not a promise. The numbers below come from
 [`tools/release/first-journey.py`](tools/release/first-journey.md): published
 release v3.82.17 installed into an isolated Linux environment on 2026-11-06,
-one session per runtime, no confirmation card answered. Times are model work only. They leave
-out sign-in and the time you spend reading and replying.
+one session per runtime, no confirmation card answered. That release predates
+the panel and requests, which these runs did not measure. Times are model work
+only. They leave out sign-in and the time you spend reading and replying.
 
 | Runtime | Small fix (typo, focused test, diff) | Medium task (several files) |
 |---|---:|---:|
