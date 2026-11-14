@@ -1264,7 +1264,7 @@
   },
   "fleet.session_block.choose": {
    "en": "↑↓ choose · Enter send · t text",
-   "ko": "↑↓ choose · Enter send · t text"
+   "ko": "↑↓ · Enter 보내기 · t 답 입력"
   },
   "fleet.session_block.compact_answer_below": {
    "en": "answer below",
@@ -1304,11 +1304,11 @@
   },
   "fleet.session_block.compact_received": {
    "en": "sent",
-   "ko": "전송됨"
+   "ko": "보냄"
   },
   "fleet.session_block.compact_submitted": {
    "en": "sending",
-   "ko": "전송 중"
+   "ko": "보내는 중"
   },
   "fleet.session_block.compact_unknown": {
    "en": "unknown",
@@ -1348,11 +1348,11 @@
   },
   "fleet.session_block.navigate": {
    "en": "Tab next · Esc/Ctrl+] back",
-   "ko": "Tab 다음 · Esc/Ctrl+] 복귀"
+   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.open": {
    "en": "answer needed",
-   "ko": "답변 필요"
+   "ko": "답 필요"
   },
   "fleet.session_block.questions": {
    "en": "QUESTIONS",
@@ -1360,7 +1360,7 @@
   },
   "fleet.session_block.received": {
    "en": "sent · not consumed",
-   "ko": "전송됨 · 소비 전"
+   "ko": "보냄 · 소비 전"
   },
   "fleet.session_block.recommended": {
    "en": "recommended",
@@ -1368,7 +1368,7 @@
   },
   "fleet.session_block.send": {
    "en": "Enter send",
-   "ko": "Enter 제출"
+   "ko": "Enter 보내기"
   },
   "fleet.session_block.sent": {
    "en": "✓ answer sent",
@@ -1376,7 +1376,7 @@
   },
   "fleet.session_block.submitted": {
    "en": "sending · not consumed",
-   "ko": "전송 중 · 소비 전"
+   "ko": "보내는 중"
   },
   "fleet.session_block.text": {
    "en": "type answer",
@@ -1396,7 +1396,7 @@
   },
   "fleet.session_panel.answer": {
    "en": "Your answer needed",
-   "ko": "내 답 필요"
+   "ko": "답 필요"
   },
   "fleet.session_panel.apply": {
    "en": "Apply",
@@ -3064,11 +3064,11 @@
   },
   "wait.no_question": {
    "en": "waiting for the user's answer",
-   "ko": "사용자 답 대기"
+   "ko": "답 필요"
   },
   "wait.title": {
    "en": "◑ answer needed",
-   "ko": "◑답변 필요"
+   "ko": "◑답 필요"
   }
  }
 }
