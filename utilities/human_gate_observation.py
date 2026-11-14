@@ -652,13 +652,26 @@ def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_ro
         _WAIT_JUDGED.reset(judged_token)
         _WAIT_READS.reset(token)
     if journal is not None:
-        # The journal's last record, for ``_route_settled`` (the parse this judgment just made).
-        rows = _journal(SimpleNamespace(journal_path=Path(journal)))
-        ends = bool(rows) and rows[-1].get("workflow_state") in _TERMINAL_STATES
+        # For ``_route_settled``, from the journal this judgment just read.
+        ends = _nothing_after_closure(_journal(SimpleNamespace(journal_path=Path(journal))), outcome)
         _WAIT_MEMO[route_key] = (str(path), files, stamps, journal, journal_stamp, tuple(reads),
                                  tuple(dict(wait) for wait in waits), judged.get("closed") is True,
                                  ends)
     return waits
+
+
+def _nothing_after_closure(rows, outcome):
+    """Nothing was written to the route's journal after its closure: the journal's last record is
+    its terminal one (CANCELLED/COMPLETE/FAILED_TERMINAL) or, for a route its outcome alone closed
+    (no terminal record), no record is dated after the outcome's ``closed_at`` (a record whose
+    date cannot be read counts as written after)."""
+    if any(row.get("workflow_state") in _TERMINAL_STATES for row in rows):
+        return rows[-1].get("workflow_state") in _TERMINAL_STATES
+    closed_at = _record_epoch((outcome or {}).get("closed_at"))
+    if closed_at is None:
+        return False
+    return all(_record_epoch(row.get("at")) is not None and _record_epoch(row.get("at")) <= closed_at
+               for row in rows)
 
 
 def _route_settled(route_key, path, row, waits, deciding, *, now, activity, files=None):
@@ -669,9 +682,10 @@ def _route_settled(route_key, path, row, waits, deciding, *, now, activity, file
     Otherwise it leaves the watch when this pass confirms either
 
     - settled: its registry and route record were read (the kept judgment exists for this
-      registry), its closure is finished (no ``closure-pending``), and the journal's last record
-      is a terminal one (CANCELLED/COMPLETE/FAILED_TERMINAL) with nothing written after it. A
-      closed outcome does not settle a route whose journal went on after the closure; or
+      registry), its closure is finished (no ``closure-pending``), and nothing was written to its
+      journal after the closure (``_nothing_after_closure``: the last record is the terminal one,
+      or no record is dated after a closing outcome). A closed outcome does not settle a route
+      whose journal went on after the closure; or
     - quiet: nothing of it moved for ``_WATCH_QUIET_SECONDS`` (its record, outcome, inline
       finish and journal files, and its registry rows). The periodic pass still reads it, and
       the pass after anything on it moves watches it again. ``files`` names the files of a route

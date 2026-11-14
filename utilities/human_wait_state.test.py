@@ -4595,8 +4595,8 @@ class FinishedRouteWakeTests(unittest.TestCase):
         self.assertTrue(events.wait_changed(5.0))
 
     def test_a_route_opened_again_is_watched_from_the_next_pass_and_wakes(self):
-        # Closed (its outcome, and the journal ends at COMPLETE): finished, not watched.
-        route = self.route()
+        # Closed by its outcome (the journal records no end): finished, not watched.
+        route = self.route(journal_complete=False)
         self.pass_once()
         self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
         # It opens again: the closure is withdrawn and a new attempt starts on the same route.
@@ -4742,6 +4742,16 @@ class FinishedRouteWakeTests(unittest.TestCase):
         route = self.route()
         self.journal_row(route, actor="parent-close", evidence={"parent_close_result": {"state": "cancelled"}})
         self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_a_route_its_outcome_closed_is_watched_once_its_journal_goes_on(self):
+        before = self.route(journal_complete=False)            # outcome closed at 2026-11-13T00:00
+        self.journal_row(before, at="2026-11-12T23:00:00Z", workflow_state="RUNNING")
+        after = self.route(journal_complete=False)
+        self.journal_row(after, at="2026-11-12T23:00:00Z", workflow_state="RUNNING")
+        self.raise_gate(after, at="2026-11-13T01:00:00Z")       # written after the closure
+        self.pass_once()
+        self.assertNotIn(str(before["file"]), observation.last_pass_route_paths())
+        self.assert_watched_and_wakes(after, after["journal"])
 
     def test_a_route_closed_with_nothing_after_its_end_adds_no_watch(self):
         _observed, idle = self.pass_once()
