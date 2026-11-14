@@ -740,7 +740,9 @@ record's `submitted`/`received`) the question box folds to one dim line
 (`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice),
 `Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
 it as sent); the line goes when its session takes the answer, and a failed
-delivery brings the question back with its existing word.
+delivery brings the question back with its existing word. Answering returns
+focus to the native input, and one lone Esc within ten seconds of the answer is
+taken by the shell (never the native's interrupt of a running turn).
 A registered question belongs to its session id: the same session in a new
 process (a native resume, a restart, a compaction) still answers it, and only
 another session that took the seat ends it. Long questions remain readable

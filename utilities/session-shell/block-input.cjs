@@ -179,19 +179,28 @@ module.exports=function({changed,answer,action,page}) {
     });
   }
   // Rule 5: one dim line per answer on its way, `✓ answer sent · <what was sent>` (the
-  // name-tag grey); the panel draws it where the question box stood, never boxed.
+  // name-tag grey); the panel draws it where the question box stood, never boxed. The answer
+  // record's `sent` (secrets already hidden) comes first: when another place's claim won, it is
+  // what was sent, not this panel's pick (review 1633, follow-up 3).
   function sentLines(){
+    const label=(item,question,v)=>{
+      const listed=item.answer_kind==='decision'?[]:question.choices||[];
+      const choice=listed.find(c=>value(c)===v);
+      return choice===undefined?undefined:String(typeof choice==='object'?choice.label||choice.value:v);
+    };
     return items.filter(item=>phase(item)==='sent').map(item=>{
       const local=state(item),shown=[];
-      for(const question of item.questions||[]){
+      if(Array.isArray(item.sent)&&item.sent.length){
+        for(const v of item.sent.map(String)){
+          const named=(item.questions||[]).filter(q=>!q.secret).map(q=>label(item,q,v)).find(x=>x!==undefined);
+          shown.push(named??v);
+        }
+      }else for(const question of item.questions||[]){
         for(const v of local.answers[question.id]||[]){
           if(question.secret){shown.push('•••');continue;}
-          const listed=item.answer_kind==='decision'?[]:question.choices||[];
-          const choice=listed.find(c=>value(c)===v);
-          shown.push(String(typeof choice==='object'?choice.label||choice.value:v));
+          shown.push(label(item,question,v)??String(v));
         }
       }
-      if(!shown.length&&Array.isArray(item.sent))shown.push(...item.sent.map(String));
       const said=shown.join(', ').replace(/\s+/g,' ').trim();
       return [span(text('sent','✓ answer sent')+(said?' · '+said:''),'dim')];
     });

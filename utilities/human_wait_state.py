@@ -138,14 +138,23 @@ def wait_counts(items):
 _ANSWER_IN_TRANSIT = frozenset(("submitted", "received"))
 
 
-def _answers_in_transit(selected):
+def _answers_in_transit(selected, observed_at=None):
     """Wait ids whose person's answer is recorded and on its way: the existing answer record
     (``selected_responses``) holds its action in ``submitted`` or ``received`` and its source
-    has not ended. A failed delivery leaves these states (``unknown``, ``expired``, ...)."""
+    has not ended. A failed delivery leaves these states (``unknown``, ``expired``, ...).
+
+    An applied action (a human gate, a native request answered from the panel or Fleet) keeps
+    its mark until a collection observed after it is published (review 1633, follow-up 1):
+    the wait leaves no count before that collection drops it; what that collection still
+    lists is current again. A message question's completion ends its source, so it is gone."""
+    def marked(entry):
+        if entry.get("state") in _ANSWER_IN_TRANSIT:
+            return True
+        return entry.get("state") == "applied" and (
+            observed_at is None or entry.get("updated_at", 0) >= observed_at)
     return {entry["selected_id"] for entry in (selected or {}).values()
             if isinstance(entry, dict) and isinstance(entry.get("selected_id"), str)
-            and entry.get("action_id") and entry.get("state") in _ANSWER_IN_TRANSIT
-            and not entry.get("source_terminal")}
+            and entry.get("action_id") and not entry.get("source_terminal") and marked(entry)}
 
 
 def _mark_answers(projection, sent, *, private=True):
@@ -177,7 +186,7 @@ def _mark_answers(projection, sent, *, private=True):
 def _republish_answer_marks(projection):
     """After the answer record changed: the private projection (written by the caller) and
     the Fleet view say the same at once. Best effort; the next collection writes the same."""
-    sent = _answers_in_transit(projection.get("selected_responses"))
+    sent = _answers_in_transit(projection.get("selected_responses"), projection.get("observed_at"))
     _mark_answers(projection, sent)
     try:
         path = _fleet_cache_path()
@@ -1360,7 +1369,7 @@ def publish_cache(result: dict) -> bool:
                                                    if ref not in removed]
                 value["stale_total"] = value["older"]
             # An answer the person sent and that still travels (rule 5, 11-14): listed, uncounted.
-            sent = _answers_in_transit(selected)
+            sent = _answers_in_transit(selected, observed_at)
             if sent:
                 _mark_answers(value, sent)
                 _mark_answers(fleet_value, sent, private=False)

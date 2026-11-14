@@ -790,6 +790,48 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(value["items"], [])
         self.assertGreater(value["observed_at"], 0)
 
+    def test_an_applied_gate_or_native_answer_stays_out_of_the_counts_until_the_next_collection(self):
+        # Review 1633, follow-up 1: a human gate or an OpenCode/Codex request answered from the
+        # panel or Fleet left the counts while `submitted` and came back once `applied`, until the
+        # next collection dropped it (2 -> 1 -> 2 -> 1). The applied answer keeps its mark until a
+        # collection observed after it is published; that collection decides.
+        owner = {"harness": "opencode", "session_id": "sid-a"}
+        now = time.time()
+        gate = {"id": "S2:rt-1:frame-review:1", "source": "S2", "kind": "decision", "since": now,
+                "stale": False, "owner": owner, "route_id": "rt-1", "gate_id": "frame-review"}
+        native = {"id": "S1:opencode:sid-a:1", "source": "S1", "kind": "approval", "since": now,
+                  "stale": False, "owner": owner, "request_id": "per_1"}
+        def counts():
+            fleet = json.loads(state._fleet_cache_path().read_text())
+            return (state._read_cache_file()["total"], fleet["total"],
+                    state.cached_statusline("opencode", "sid-a")[0])
+        def answer(envelope, action_id):
+            claimed, entry = state._claim_selected_action(envelope, action_id, {"decision": "approve"})
+            self.assertTrue(claimed)
+            sent = counts()
+            self.assertTrue(state._store_selected_entry(envelope, dict(
+                entry, state="applied", result={"status": "applied"})))
+            return sent, counts()
+        self.assertTrue(state.publish_cache({"items": [gate, native], "observed_at": now, "complete": True}))
+        self.assertEqual(counts(), (2, 2, (2, 2)))
+        gate_envelope = {"harness": "opencode", "session_id": "sid-a", "request_id": gate["id"],
+                         "selected_id": gate["id"], "source": "S2", "gate_epoch": 1, "route_id": "rt-1",
+                         "turn_id": None, "native_ref": {"transport": "hearting-human-gate",
+                                                         "gate_epoch": 1, "route_id": "rt-1"}}
+        self.assertEqual(answer(gate_envelope, "act-gate"), ((1, 1, (1, 1)), (1, 1, (1, 1))))
+        # A collection read before the gate was applied may still list it: it stays out.
+        self.assertTrue(state.publish_cache({"items": [gate, native], "observed_at": now, "complete": True}))
+        self.assertEqual(counts(), (1, 1, (1, 1)))
+        # The next collection no longer lists the released gate.
+        self.assertTrue(state.publish_cache({"items": [native], "observed_at": time.time(), "complete": True}))
+        self.assertEqual(counts(), (1, 1, (1, 1)))
+        native_envelope = {"harness": "opencode", "session_id": "sid-a", "request_id": "per_1",
+                           "selected_id": native["id"], "source": "S1", "turn_id": "turn-1",
+                           "kind": "approval"}
+        self.assertEqual(answer(native_envelope, "act-native"), ((0, 0, (0, 0)), (0, 0, (0, 0))))
+        self.assertTrue(state.publish_cache({"items": [], "observed_at": time.time(), "complete": True}))
+        self.assertEqual(counts(), (0, 0, (0, 0)))
+
 
 class _StrictOpenCodeTransport:
     def __init__(self, session_id):

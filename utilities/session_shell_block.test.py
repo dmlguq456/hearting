@@ -290,12 +290,38 @@ const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
                               text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
+    def test_the_sent_line_shows_the_answer_that_was_sent_when_another_place_won(self):
+        # Review 1633, follow-up 3: two places answered at almost the same time; the claim the
+        # other place took first sent Alpha, yet this panel's line kept its own pick (Beta). The
+        # record's `sent` comes first; the panel's own pick stands only until it arrives.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
+(async()=>{
+ const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',choices:[{label:'Alpha label',value:'Alpha'},'Beta']}]};
+ const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([a]);b.enter();b.input(Buffer.from('2\r'));await tick();
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);
+ b.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}]);
+ assert.deepEqual(lines(b),['✓ answer sent · Alpha label']);
+ console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
     def test_a_sent_answer_leaves_the_panel_count_and_the_notice_line_in_each_harness(self):
         # Rule 5 (11-14), the panel's half: what the shared cache gives for a sent answer (listed,
         # marked, out of the session index) is no wait in the panel's head, folded strip or notice
-        # line; a question still open beside it keeps them, `Ctrl+]` included.
+        # line; a question still open beside it keeps them, `Ctrl+]` included. The open box's head
+        # numbers the boxes only (`questions 1 · 1/1`) and the pane's `Q<n>/◑A<n>` counts the
+        # panel's own waits (review 1633, required 1: the sent receipt was in both).
         import session_tidy
         from fleet.session_line import answer_wait_word
+        from fleet.config import ui_text
+        from fleet import herdr_projection
         def describe(item,**kw):
             row=dict(id=item['id'],source='S4',owner=item['owner'],state='current',
                      questions=[dict(id='message-response',question=item['id'],choices=['Alpha','Beta'])])
@@ -316,8 +342,17 @@ const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
                     with mock.patch.object(hws,'cached_view',return_value=view), \
                          mock.patch.object(hws,'cached_statusline',return_value=((count,count),'')), \
                          mock.patch.object(questions,'describe',side_effect=describe), \
-                         mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}):
-                        result=shell.panel_projection(harness,sid,columns=40)
+                         mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}), \
+                         mock.patch.object(herdr_projection,'project_panel') as pane:
+                        result=shell.panel_projection(harness,sid,columns=40,pane_binding=dict(harness=harness,sid=sid))
+                    _binding,values,shown=pane.call_args.args
+                    with self.subTest(check='pane Q/A'):
+                        self.assertEqual(herdr_projection._panel_counts(harness,sid,values,shown),(count,count))
+                    heads=[''.join(part['text'] for part in row['questions'][0]['display']['head'])
+                           for row in result['questions'] if row.get('request_state') is None]
+                    with self.subTest(check='box head'):
+                        self.assertEqual([head.split(' · ')[:2] for head in heads],
+                                         [['◑ '+ui_text('fleet.session_block.questions')+' 1','1/1']]*count)
                     self.assertEqual(result['panel']['wait'],answer_wait_word()+' '+str(count) if count else '')
                     self.assertEqual([(row['id'],row.get('request_state'),row.get('sent')) for row in result['questions']],
                                      [(i['id'],'submitted' if i is sent else None,['Beta'] if i is sent else None)
