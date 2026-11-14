@@ -168,12 +168,6 @@ function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
 // only REOPEN_MARGIN columns past the threshold, so a window dragged across it does not
 // jump back and forth (#1586 review follow-up 2).
 const NATIVE_MIN=60,REOPEN_MARGIN=3;
-// Spec rule 49 (c): the folded strip is eight cells (two borders, a blank cell inside each,
-// four content cells), one blank cell from the native area. Its width is this one constant.
-const STRIP=8,STRIP_GAP=1;
-// The strip stands only where the native beside it keeps this many columns; a narrower window
-// folds the panel to the one row under the native instead (the native never gets zero columns).
-const STRIP_NATIVE_MIN=20;
 const sideWidth=configuration=>{const width=configuration?.side_width;return Number.isInteger(width)&&width>=32&&width<=80?width:0;};
 function fold({cols,choice=null,configuration={},pinned=false,expanded=true}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
@@ -183,21 +177,25 @@ function fold({cols,choice=null,configuration={},pinned=false,expanded=true}) {
   const roomy=!(configuration.layout==='side'&&width)||cols-width-2>=NATIVE_MIN+(expanded?0:REOPEN_MARGIN);
   return {folded:!roomy&&!pinned,choice:null};
 }
+// Spec rule 49 (c): folded, the panel is one strip under the native area in every placement and
+// however it folded (by itself or by hand): a thin rule carrying `▴`, then three rows. Its height
+// follows the window's rows alone, never what it shows, so a question coming or going never
+// moves the native area: three rows from FOLD_ROWS[0] window rows (the native keeps 20 or more),
+// two from FOLD_ROWS[1], else one; a window of two rows or fewer keeps one strip row and the native
+// the rest. The native always keeps its whole width.
+const FOLD_ROWS=[24,16];
+function foldRows(rows){
+  const content=rows>=FOLD_ROWS[0]?3:rows>=FOLD_ROWS[1]?2:1;
+  return Math.max(1,Math.min(content+1,rows-1));
+}
 // `panelRows` is the panel's row count under the native area; the native keeps at least one row.
 function layout({cols,rows,expanded=true,configuration={},panelRows=1}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=sideWidth(configuration),wanted=configuration.layout==='side'&&width>0;
-  // Folded beside the native area: the eight-cell strip at the panel's edge; the native
-  // area takes the rest (spec rule 49 (c)).
-  if(wanted&&!expanded&&cols-STRIP-STRIP_GAP>=STRIP_NATIVE_MIN){
-    const left=configuration.position==='left';
-    return {side:true,folded:true,left,gap:STRIP_GAP,panelCols:STRIP,nativeCols:cols-STRIP-STRIP_GAP,nativeRows:rows,
-      panelColumn:left?0:cols-STRIP,nativeColumn:left?STRIP+STRIP_GAP:0,panelRow:0};
-  }
   // An open panel stands beside the native area when it physically fits (the native area
   // keeps 48 columns, the window 8 rows). Short of that (only a panel opened by hand in a
   // window narrower than the fold judgment above) it opens under the native area, and it
-  // stands beside again once the window is wide enough.
+  // stands beside again once the window is wide enough. Folded, it is the strip under it.
   const side=expanded&&wanted&&cols-width-2>=48&&rows>=8;
   // The one placement rule for every harness: a side panel sits right (the
   // default) or left of the native area, two blank cells apart. Only the
@@ -251,4 +249,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,NATIVE_MIN,REOPEN_MARGIN,STRIP,STRIP_NATIVE_MIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,FOLD_ROWS,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

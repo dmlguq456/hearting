@@ -179,12 +179,13 @@ class ShellLab(LabBase):
         view = session_lab.view(session_lab.read(root.parent, now=NOW)[0], NOW)
         script = r"""
 const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.parse(process.argv[2]);
-const draw=(harness,width,open,folded=false)=>v.render({width:folded?8:width,height:60,side:true,fill:true,folded,harness,state:'idle',configuration:{},
+// Folded, the strip under the native area (spec rule 49 (c)): LAB's attention token ends its routes row.
+const draw=(harness,width,open,folded=false)=>v.render({width:folded?width*3:width,height:folded?4:60,side:!folded,fill:!folded,folded,harness,state:'idle',configuration:{},
  model:{lab,repo:[{text:'proj'}]},expandedKeys:open?[lab.key]:[],questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')).filter(s=>!s.startsWith('┌'));
 for(const width of [40,32])for(const open of [false,true])for(const folded of [false,true]){
  const claude=draw('claude',width,open,folded);
  for(const h of ['codex','opencode'])assert.deepEqual(draw(h,width,open,folded),claude,h);
- if(folded)assert(claude.includes('│ !2LB │'),claude.join('\n'));
+ if(folded)assert(claude.some(s=>/^!2 LAB +$/.test(s)),claude.join('\n'));
  else{assert(claude.some(s=>/^│ 3 LAB /.test(s)),claude.join('\n'));
   // The failed condition is the one to look at, by its catalog name (cut with `…` only when narrow).
   assert(claude.some(s=>/짧은 발화( 제외|…)/.test(s)),claude.join('\n'));}

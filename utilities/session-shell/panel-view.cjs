@@ -189,10 +189,10 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
-  // Spec rule 49: a folded panel is the eight-cell strip beside the native area or one row under it.
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false}){
+  // Spec rule 49 (c): a folded panel is the strip under the native area, in every placement.
   folded=folded===true&&!settings;
-  width=Math.max(folded&&side?5:12,width);height=Math.max(folded?side?3:1:4,height);
+  width=Math.max(folded?1:12,width);height=Math.max(folded?1:4,height);
   const cfg={...defaults,...configuration};
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -262,76 +262,138 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // read from the rows this paint finally shows, so a route the height dropped
   // keeps nothing turning.
   const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
+  // The session's own model: the native selection when it is shown, else Fleet's.
+  function selectedParts(){
+    const list=v=>Array.isArray(v)?v:[];
+    const nativeModel=native.model&&(native.model!==model.model_value||!list(model.selected).length);
+    // The native's own model name takes the color the backend gave it (its family's, else the
+    // harness's, as route rows); until that arrives for a new name, the harness's color.
+    const nativePart=model.native_model_part&&model.native_model_part.text===native.model?{...model.native_model_part,text:native.model}:
+      text(native.model,['claude','codex','opencode'].includes(harness)?'hb_'+harness:'loc_repo');
+    return nativeModel?[nativePart,...(native.effort?[text(' '+native.effort)]:[])]:
+      list(model.selected).length?model.selected:line(t('checking','Checking'));
+  }
   if(folded)return foldedView();
-  // Spec rule 49 (c): folded beside the native area the panel is a strip of eight cells (two
-  // borders, a blank cell inside each, four content cells), its border in this session's state
-  // color (the open panel's frame source). Inside, from the top: the state glyph (spinning
-  // while the session runs, `◑` waiting, `●` idle) with the session number (`⠸ e9`), an empty
-  // row, the route count (`2 RT`, from ten `9+RT`), the answer waits (`◑ 1`, from ten `◑ 9+`),
-  // and the unfold mark on the last row, where the open panel's fold button stands. An absent
-  // value draws no row; short of rows the empty row goes first, then the route count, the
-  // waits; the glyph row and the unfold mark stay. No steward mark, gear or moving rule: only the state glyph turns. A
-  // press anywhere on it opens the panel. Spec rule 49 (e): folded under the native area,
-  // one row: the session's status line and `▴` at its right end.
+  // Spec rule 49 (c): folded (by itself or by hand, beside or under the native area) the panel is
+  // one strip under the native area: a thin rule in the messages' line color with the unfold mark
+  // `▴` at its right end, then three rows, each the most pressing first and giving way whole item
+  // by whole item from its end:
+  //   1. the session: the state glyph and number, the project, model and effort, `CTX` and its
+  //      gauge, 5h, 7d (short of cells the reset times go first, then the effort, the project);
+  //   2. what to do now: the answer wait with its question's first row, compaction imminent, a
+  //      tidy notice;
+  //   3. the routes: `N ROUTE ⠏2 ✕1`, the failed routes' titles (else the running ones'),
+  //      `MESSAGES ←N` (received since the person's last input) and LAB's attention token.
+  // Short of rows the routes row goes first, then the session row: what to do stays to the last;
+  // a row with nothing on it gives its place to the next, and rows stand from the top. Labels are
+  // dark gray upper case. No frame, gear, beat or moving rule: only the state glyph turns. A press
+  // anywhere on it opens the panel.
   function foldedView(){
     const own=LIVE[state],color=own&&own[1]!=='g_work_off'?own[1]:'dim';
-    const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
     const plain=model.no_color===true||cfg.theme==='mono';
-    const out=[],hits=[];
-    if(side){
-      // The strip's width is native-display's STRIP (8): one blank cell inside each border and
-      // four content cells between them.
-      const content=Math.max(1,width-4);
-      const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
-      const cell=parts=>{const fit=clip(parts,content);return [text(' '),...fit.parts,text(' '.repeat(Math.max(0,content-fit.used)+1))];};
-      // The glyph keeps its cell while the state is unknown, so the number does not move.
-      const glyph=own?{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}:text(' ');
-      const number=tag?[text(' '),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'}]:[];
-      const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:Number.isInteger(model.route_count)&&model.route_count>0?model.route_count:0;
-      const waiting=typeof model.wait==='string'&&model.wait.trim()?/(\d+)\s*$/.exec(model.wait):null;
-      const waits=waiting?Number(waiting[1]):typeof model.wait==='string'&&model.wait.trim()?-1:0;
-      const items=[{rank:5,parts:[glyph,...number]}];
-      // The LAB token under the route count (draft A): `5 LB`, `!1LB` (failed or stuck), `?1LB`
-      // (unconfirmed or unnamed), `9+LB`, worded by the board. Short of rows a plain count goes
-      // before the route count, a `!`/`?` after it; the answer wait stays longest. A token wider
-      // than the strip (`!9+LB`) keeps its mark and count (`!9+`). It never colors the border.
-      const labStrip=Array.isArray(model.lab?.strip)?model.lab.strip.filter(p=>p&&typeof p==='object'):[];
-      const cellsOf=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
-      if(total||waits||labStrip.length){
-        items.push({rank:0,parts:[]});
-        if(total)items.push({rank:3,parts:total>=10?[text('9+','loc_repo'),text('RT','dim')]:[text(String(total),'loc_repo'),text(' RT','dim')]});
-        if(labStrip.length)items.push({rank:model.lab.strip_attention===true?3.5:2,parts:cellsOf(labStrip)<=content?labStrip:labStrip.slice(0,1)});
-        // An answer wait whose count is unknown shows its glyph alone (spec rule 12).
-        if(waits)items.push({rank:4,parts:[text('◑','g_blocked'),...(waits<0?[]:[text(' '+(waits>=10?'9+':String(waits)),'g_blocked')])]});
+    const P=v=>Array.isArray(v)?v.filter(p=>p&&typeof p==='object'):[];
+    const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+    const room=Math.max(0,width-1);
+    const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,text('…','dim')];
+    // A row's items, most pressing first: an item is `head` (whole or not at all) and `tail` (cut
+    // with `…` where cells run short, while it keeps four cells; a `titled` item without its tail
+    // goes whole); the first item that does not fit ends the row.
+    const pack=items=>{
+      const out=[];let used=0;
+      for(const item of items){
+        const gap=out.length?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
+        if(used+size(head)+size(tail)<=room){out.push(...head,...tail);used+=size(head)+size(tail);continue;}
+        const left=room-used-size(head);
+        if(tail.length&&left>=5)out.push(...head,...cut(tail,left));
+        else if(left>=0&&!item.titled)out.push(...head);
+        else if(!out.length)out.push(...cut([...item.head,...tail],room));
+        break;
       }
-      const room=Math.max(0,height-3);
-      while(items.length>room){let low=0;items.forEach((item,i)=>{if(item.rank<items[low].rank)low=i;});items.splice(low,1);}
-      const rule='─'.repeat(Math.max(0,width-2));
-      out.push([frameText('┌'+rule+'┐')]);
-      for(let i=0;i<height-2;i++){
-        const last=i===height-3,parts=last?[text(' '),text(cfg.position==='left'?'»':'«','dim')]:items[i]?.parts||[];
-        out.push([frameText('│'),...cell(parts),frameText('│')]);
-      }
-      out.push([frameText('└'+rule+'┘')]);
-      for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:'unfold'});
-    }else{
-      const line=(Array.isArray(segments)?segments:[]).filter(part=>part&&typeof part==='object');
-      const fit=clip(line,Math.max(0,width-2));
-      const body=fit.used<line.reduce((n,p)=>n+measure(clean(p.text)),0)?[...clip(line,Math.max(0,width-3)).parts,text('…','dim')]:fit.parts;
-      const used=body.reduce((n,p)=>n+measure(clean(p.text)),0);
-      out.push([...body,text(' '.repeat(Math.max(0,width-1-used))),text('▴','dim')]);
-      hits.push({row:0,left:0,right:width-1,action:'unfold'});
+      return out;
+    };
+    // 1. The session row.
+    const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
+    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+    const number=tag?[text('[','dim'),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
+    const lead=[...glyph,...(glyph.length&&number.length?[text(' ')]:[]),...number];
+    const project=Array.isArray(model.repo_side)?P(model.repo_side):P(model.repo).filter(p=>!/^\[[^\]]*\] ?$/.test(String(p.text)));
+    // `CTX` stands for the word `context` (a backend without `context_side` has its word taken off here, as the open panel's).
+    const unworded=parts=>{const head=parts[0],rest=String(head?.text??'').replace(/^context /,'');return !head||rest===String(head.text)?parts:rest?[{...head,text:rest},...parts.slice(1)]:parts.slice(1);};
+    const selected=selectedParts(),gauge=Array.isArray(model.context_side)?P(model.context_side):unworded(P(model.context));
+    const ctxLabel=text('CTX ','dim'),ctx=gauge.length?[ctxLabel,...gauge,...(P(model.mcp).length?[text(' │ ','dim'),...P(model.mcp)]:[])]:[];
+    const windows=[];let current=[];
+    for(const part of P(model.quota)){if(String(part.text)===' │ '){if(current.length)windows.push(current);current=[];}else current.push(part);}
+    if(current.length)windows.push(current);
+    const quotaParts=new Set(windows.flat());
+    const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
+    const bare=gs=>gs.map(g=>g.filter(part=>!/^\(↻/.test(String(part.text))));
+    const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(' │ ','dim'),...g]:g);
+    const sessionRow=()=>{
+      // Each step lets one more value go: the reset times, the effort, the project, 5h (the windows
+      // shorter than 7d), the model windows from the last, 7d, the model, the context.
+      const steps=[];let q=windows,m=selected,named=true,c=ctx;
+      const add=()=>steps.push([[...lead,...(named&&project.length?[...(lead.length?[text(' ')]:[]),...project]:[])],m,c,...q]);
+      add();q=bare(q);add();m=selected.slice(0,1);add();named=false;add();
+      q=q.filter(g=>kind(g)!=='window');add();
+      while(q.some(g=>kind(g)==='model')){const at=q.map(kind).lastIndexOf('model');q=q.filter((_,i)=>i!==at);add();}
+      q=[];add();m=[];add();c=[];add();
+      for(const groups of steps){const row=joinAll(groups);if(size(row)<=room)return row;}
+      return cut(lead,room);
+    };
+    // 2. What to do now.
+    const first=(()=>{
+      if(!model.wait||typeof questions!=='function')return [];
+      let rows=[];try{rows=questions({budget:3,columns:Math.max(20,width-4)})||[];}catch{rows=[];}
+      return rows.length>1&&Array.isArray(rows[1])?P(rows[1]).map(p=>({...p,text:clean(p.text)})).filter(p=>p.text.trim()):[];
+    })();
+    const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
+    const todo=[
+      ...(model.wait?[{head:[text(clean(model.wait),'g_blocked')],tail:first.length?[text(' · ','dim'),...first]:[]}]:[]),
+      ...(model.warning?[{head:[text('⚠ ','lvl_r')],tail:[text(clean(model.warning),'lvl_r')]}]:[]),
+      ...(tidy&&!model.answerable?[{head:[text('⚠ ','lvl_y')],tail:[text(tidy,'lvl_y')]}]:[])];
+    // 3. The routes, the new messages, LAB.
+    const counted=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:counted.length;
+    const label=clean(model.route_label||'').trim().replace(/^route (\d+)/,'$1 ROUTE')||(total?total+' ROUTE':'');
+    const failed=counted.filter(r=>r&&r.kind==='dead'),running=counted.filter(r=>r&&r.kind==='working');
+    const titled=(failed.length?failed:running).filter(r=>clean(r.title).trim()).map(r=>({titled:true,
+      head:[{...(r.paint?.glyph||text(r.kind==='dead'?'✕':'·',r.kind==='dead'?'g_dead':'dim')),role:'state:'+r.kind},text(' ')],
+      tail:line(clean(r.title).trim(),'loc_repo')}));
+    const unread=Number.isInteger(model.messages_new)&&model.messages_new>0?model.messages_new:0;
+    const labMark=model.lab&&model.lab.strip_attention===true?P(model.lab.strip).slice(0,1):[];
+    const routeItems=[...(label?[{head:[text(label,'g_idle')]}]:[]),...titled,
+      ...(unread?[{head:[{...text('MESSAGES','dim'),role:'title'},text(' ←'+unread,'loc_repo')]}]:[]),
+      ...(labMark.length?[{head:[...labMark,{...text(' LAB','dim'),role:'title'}]}]:[])];
+    const rowsOf={session:sessionRow(),todo:todo.length?pack(todo):[],routes:routeItems.length?pack(routeItems):[]};
+    // What stays, by rank: what to do, the session, the routes; a row with nothing on it gives its place.
+    const strip=height>=2,count=strip?height-1:1;
+    const chosen=new Set(['todo','session','routes'].filter(name=>rowsOf[name].length).slice(0,count));
+    const order=['session','todo','routes'].filter(name=>chosen.has(name));
+    const out=[],hits=[],groups=[];
+    const pad=parts=>[...parts,text(' '.repeat(Math.max(0,width-size(parts))))];
+    const withMark=parts=>{const body=cut(parts,Math.max(0,width-2));return [...body,text(' '.repeat(Math.max(0,width-1-size(body)))),text('▴','dim')];};
+    if(strip)out.push(width>=3?[{...text('─'.repeat(width-2),'dim'),role:'messages'},text(' '),text('▴','dim')]:withMark([]));
+    for(const name of order){
+      const parts=rowsOf[name];
+      out.push(strip?pad(parts):withMark(parts));
+      if(name==='session')groups.push('head',...(parts.includes(ctxLabel)?['context']:[]),...(parts.some(part=>quotaParts.has(part))?['quota']:[]));
+      if(name==='todo'&&model.wait)groups.push('wait');
+      if(name==='routes'&&label)groups.push('route');
     }
-    const painted=appearance(out,side?cfg:{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
+    if(!strip&&!out.length)out.push(withMark([]));
+    while(out.length<height)out.push(pad([]));
+    for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:'unfold'});
+    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
     const spins=out.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0);
-    return {rows:painted,hits,color,routePages:1,routeDetail,routeArea:null,groups:[],animated:spins.length>0,spins,motion:null,folded:true};
+    return {rows:painted,hits,color,routePages:1,routeDetail,routeArea:null,groups:[...new Set(groups)],animated:spins.length>0,spins,motion:null,folded:true};
   }
   // Spec rule 49 (a), (b), (e): the panel's last row inside carries the gear `⚙` (dim) at its
   // right end and, three cells left of it, the fold button: `»` beside the native area (`«`
-  // for a left panel), `▾` in the bottom layout. Their presses stay apart (the cell between
-  // them is neither's). The row stays however short rows run, so the panel can always fold;
-  // whatever shares it (5h/7d) takes the cells left of the buttons.
-  const foldMark=cfg.layout==='side'?cfg.position==='left'?'«':'»':'▾';
+  // for a left panel), `▾` under it (the bottom layout, or a panel opened by hand where it
+  // cannot stand beside). Their presses stay apart (the cell between them is neither's). The
+  // row stays however short rows run, so the panel can always fold; whatever shares it
+  // (5h/7d) takes the cells left of the buttons.
+  const foldMark=side?cfg.position==='left'?'«':'»':'▾';
   const BUTTONS=5;
   function footRow(left=[]){
     const at=content.length+1,room=Math.max(0,width-4-BUTTONS-1);
@@ -557,14 +619,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const rule=(label)=>{const head=label.length?fitted(label):[];return [...head,text('─'.repeat(Math.max(0,inner-size(head))))];};
     const open=new Set(expandedKeys||[]);
     const routeLine=['time','model'].includes(cfg.route_line)?cfg.route_line:'time';
-    // The session's own model: the native selection when it is shown, else Fleet's.
-    const nativeModel=native.model&&(native.model!==model.model_value||!painted(model.selected).length);
-    // The native's own model name takes the color the backend gave it (its family's, else the
-    // harness's, as route rows); until that arrives for a new name, the harness's color.
-    const nativePart=model.native_model_part&&model.native_model_part.text===native.model?{...model.native_model_part,text:native.model}:
-      text(native.model,['claude','codex','opencode'].includes(harness)?'hb_'+harness:'loc_repo');
-    const selected=nativeModel?[nativePart,...(native.effort?[text(' '+native.effort)]:[])]:
-      painted(model.selected).length?model.selected:line(t('checking','Checking'));
+    const selected=selectedParts();
     // Spec rule 15: the repo row carries the project only; Git takes the row below. Spec rule
     // 29: the session number moves to the top border, so the row keeps `hearting/`.
     let head=painted(model.head),git=painted(model.git);
@@ -1583,15 +1638,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       });
       routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
-    // Messages have no box: a label row and a lower rule, fixed at the bottom right above 5h/7d
-    // (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside the native area the
-    // label is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their own label, and the
-    // one closing rule ends both. Spec rule 58: the labels stand alone (no long rule beside
-    // them), and the count of messages not shown (`+N`) follows the messages' label.
+    // Messages have no box: a label row and a lower rule (spec rule 14, 11-11 night final layout).
+    // Spec rule 45 (b): beside the native area the label is `MESSAGES`. Spec rule 46 (a): MEM's
+    // records follow under their own label, and the one closing rule ends both. Spec rule 58
+    // (11-14 night, B-가 with the label first): beside the native area each label leads its row
+    // and a thin rule in the lower rule's color runs on from it to the row's end
+    // (`MESSAGES +2 ───…`, `MEM ───…`); the bottom layout keeps the label alone. The count of
+    // messages not shown (`+N`) follows the messages' label.
     const keepMessageRows=keepMessages&&messages.length>0;
     if(keepMessageRows||memShown()){
       const key=tone.messages,hidden=keepMessageRows?hiddenMessages():0;
-      const label=(word,tail=[])=>clip([{...text(word,key),...(styles[key]||{dim:true}),role:'title'},...tail],inner).parts;
+      const label=(word,tail=[])=>{
+        const head=clip([{...text(word,key),...(styles[key]||{dim:true}),role:'title'},...tail],inner),rest=inner-head.used;
+        return side&&rest>=2?[...head.parts,text(' '),{...text('─'.repeat(rest-1),key),role:'messages'}]:head.parts;
+      };
       if(keepMessageRows){
         messageBlock.push({parts:label(side?'MESSAGES':'messages',hidden?[text(' +'+hidden,'loc_repo')]:[])});
         messageBlock.push(...visibleMessages());
@@ -1614,8 +1674,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     if(gap&&routeBlock.length)add([]);
     for(const item of labBlock)add(item.parts,item.action);
     if(lgap&&labBlock.length)add([]);
-    // What comes and goes sits low: the question right above the messages, which keep the bottom.
-    if(fill)while(content.length<rows-tail)add([]);
+    // The sections stand from the top, one after another; the rows left over go under the last of
+    // them, right above the panel's last row (11-14 night: no long gap under the route box).
     if(content.length+tail<=budget){
       for(const item of ask)add(item.parts,item.action);
       for(const item of messageBlock)add(item.parts,item.action);

@@ -1176,7 +1176,8 @@ const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,g
 assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
 // (c) Six routes and eight messages at 40×58 (spec rule 38: each route with its context
 // row): three messages show (`MESSAGES +5`), their bodies on the rows they may take, and the
-// rows they leave stay empty under the route box.
+// rows they leave stay empty under the messages (11-14 night: the sections stand from the top,
+// the one parting row under the route box and no more).
 const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어감',6),
  message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const six=[...Array(6)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'s'+i,title:r.title+' '+(i+1)};});
@@ -1185,11 +1186,13 @@ const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:tr
  state:'idle',configuration:{},questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 const full=paint(six,58),m=rule(full),box=full.findIndex(s=>s.includes('╰'));
-assert(box>0&&box<m-1&&full.slice(box+1,m).every(blank)&&/^│ MESSAGES \+5 +│$/.test(full[m])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3,full.join('\n'));
+const closing=full.findIndex((s,i)=>i>m&&/^│ ─+ │$/.test(s));
+assert(box>0&&box===m-2&&blank(full[m-1])&&/^│ MESSAGES \+5 ─+ │$/.test(full[m])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3
+ &&closing>m&&closing<full.length-4&&full.slice(closing+1,-2).every(blank),full.join('\n'));
 // With a question the row stands between the route box and the question box.
 const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('─ ◑ Q_HEAD'));
 assert(q>2&&asked[q-2].includes('╰')&&blank(asked[q-1])&&asked[rule(asked)-1].includes('╰'),asked.join('\n'));
-// No route box: the head's empty row and spare rows stand above the messages, as before.
+// No route box: the head's empty row stands above the messages.
 const none=paint([],30,{model:{routes_known:true}});
 assert(!none.join('').includes('╭')&&blank(none[rule(none)-1]),none.join('\n'));
 // (d) Short of rows: values on several rows go before the route row, the route row before
@@ -1305,7 +1308,7 @@ const bare=paint([oneShot],40,50,{model:{git_side:[]}});
 assert(text(bare)[1].includes('wt 12')&&!text(bare).join('').includes('GIT')&&bare.groups.includes('git'),text(bare).join('\n'));
 // Spec E9 rule 46 (e): an older backend's one MEM row (painted pieces only) stands in the MEM
 // section under the messages, its age kept and its type left out; the head has no MEM row.
-const title=r50.findIndex(s=>s.startsWith('│ TITLE')),mem=r50.findIndex(s=>/^│ MEM +│$/.test(s)),msg=r50.findIndex(s=>s.startsWith('│ MESSAGES'));
+const title=r50.findIndex(s=>s.startsWith('│ TITLE')),mem=r50.findIndex(s=>/^│ MEM ─+ │$/.test(s)),msg=r50.findIndex(s=>s.startsWith('│ MESSAGES'));
 assert(title>0&&!r50.slice(0,msg).some(s=>s.includes('MEM'))&&mem>msg&&r50[mem+1].startsWith('│ ◆ 3m ')&&!r50[mem+1].includes('decision')
  &&r50[mem+2].startsWith('│   셸 패널')&&r50[mem+3].includes('…')&&!r50.join('').includes('지어낸 기억'),r50.join('\n'));
 // No row, no MEM.
@@ -1607,7 +1610,7 @@ const owned={...oneShot,role:'owner',kind_word:'code'};
 const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[owned,staged],route_count:2,...(o.model||{})},
  state:'working',configuration:{},questions:()=>[],...(o.extra||{})});
 const v=at(),rows=plain(v),all=rows.join('\n');
-assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES \+2 +│$/.test(s))&&!/\broute \d|messages|── MESSAGES/.test(all),all);
+assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES \+2 ─+ │$/.test(s))&&!/\broute \d|messages|── MESSAGES/.test(all),all);
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
 assert(all.includes('⠋ owner')&&all.includes('code · one-shot'),all);
 // The producer's label alone (no rows yet): its count first too.
@@ -1625,6 +1628,27 @@ assert(plain(at({width:120,side:false,model:{routes:[],route_count:0,route_label
 """
         self.node(script, "panel-view.cjs")
 
+    def test_spare_rows_go_under_the_last_section(self):
+        # 11-14 night: a tall side panel left a long run of empty rows between the ROUTE box and
+        # MESSAGES. The sections stand from the top, one after another (one parting row under the
+        # route box); the rows left over go under the last of them, right above the panel's last row.
+        # The bottom layout keeps its label alone (no rule beside `messages`).
+        script = self.FIXTURE + r'''
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const blank=s=>/^│ +│$/.test(s);
+const tall=(height,o={})=>plain(view.render({width:o.width||40,height,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[oneShot,staged],route_count:2},
+ state:'idle',configuration:{},questions:()=>[]}));
+for(const height of [50,70,90]){
+ const rows=tall(height),box=rows.findIndex(s=>s.includes('╰')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES')),closing=rows.findIndex((s,i)=>i>m&&/^│ ─+ │$/.test(s));
+ assert(box>0&&m===box+2&&blank(rows[box+1])&&closing>m,height+'\n'+rows.join('\n'));
+ const spare=rows.slice(closing+1,-2);
+ assert(spare.length>0&&spare.every(blank)&&/⚙ │$/.test(rows.at(-2)),height+'\n'+rows.join('\n'));
+}
+const bottom=tall(14,{side:false,width:120});
+assert(bottom.some(s=>/^│ messages( \+\d+)? +│$/.test(s))&&!bottom.some(s=>/messages[^│]*─/.test(s)),bottom.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_messages_show_three_at_most_however_many_rows_are_left(self):
         # 11-14 night ("메시지 뜨는 최대 개수를 좀 줄이자. 세로폭이 아무리 길어도 말이야"): beside the native area
         # no more than three messages show whatever the height; the label counts the rest
@@ -1637,12 +1661,12 @@ const heads=rows=>rows.filter(s=>/^│ [←→] \[/.test(s));
 for(const list of [messages,more])for(const height of [60,90,140]){
  const rows=at(list,height),label=rows.find(s=>s.startsWith('│ MESSAGES'));
  assert.equal(heads(rows).length,3,height+'\n'+rows.join('\n'));
- assert(new RegExp('^│ MESSAGES \\+'+(list.length-3)+' +│$').test(label),label);
+ assert(new RegExp('^│ MESSAGES \\+'+(list.length-3)+' ─+ │$').test(label),label);
  // The newest three, oldest first.
  assert.deepEqual(heads(rows).map(s=>s.slice(4,8)),list.slice(-3).map(m=>m.who),rows.join('\n'));
 }
 // Three or fewer: all of them, and no count.
-for(const n of [1,3]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│ MESSAGES +│$/.test(s)),rows.join('\n'));}
+for(const n of [1,3]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│ MESSAGES ─+ │$/.test(s)),rows.join('\n'));}
 // Spare rows still give a body up to three rows.
 const long=[...messages.slice(0,2),message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어가고 셋째 줄까지 이어지는 긴 본문입니다',6)];
 const rows=at(long,90),i=rows.findIndex(s=>s.startsWith('│ ← [52] claude · 08:10'));
@@ -1652,7 +1676,7 @@ assert(i>0&&rows.slice(i+1,i+4).every(s=>/^│   \S/.test(s)),rows.join('\n'));
 
     def test_mem_stands_under_the_messages_with_its_kind_and_gives_way_first(self):
         # Spec E9 rule 46: MEM leaves the head for its own section under the messages (spec rule 58:
-        # its label alone, as the messages' `MESSAGES`; one closing rule ends both), each record `◆ kind · age` (dim) over its headline (body
+        # its label first and a thin rule on from it, as the messages' `MESSAGES`; one closing rule ends both), each record `◆ kind · age` (dim) over its headline (body
         # color, two rows at most); two records at most; short of rows MEM goes before any of the
         # messages: two records, one, its headline on one row, none.
         script = self.FIXTURE + r"""
@@ -1662,10 +1686,10 @@ const items=[{kind:'decision',age:'3m',text:'panel labels in dark grey, and the 
 const routes=[oneShot,staged,{...oneShot,id:'c'}];
 const at=(o={})=>view.render({width:o.width||40,height:o.height||70,side:true,fill:true,model:{...head,routes,route_count:routes.length,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},questions:()=>[]});
-const section=(rows,word)=>{const i=rows.findIndex(s=>new RegExp('^│ '+word+'( \\+\\d+)? +│$').test(s));if(i<0)return null;let end=i+1;
- while(end<rows.length&&!/^│ (MESSAGES|MEM)( \+\d+)? +│$|^│ ─+ │$/.test(rows[end]))end++;return rows.slice(i+1,end);};
+const section=(rows,word)=>{const i=rows.findIndex(s=>new RegExp('^│ '+word+'( \\+\\d+)? ─+ │$').test(s));if(i<0)return null;let end=i+1;
+ while(end<rows.length&&!/^│ (MESSAGES|MEM)( \+\d+)? ─+ │$|^│ ─+ │$/.test(rows[end]))end++;return rows.slice(i+1,end);};
 let v=at(),rows=plain(v);
-const msg=rows.findIndex(s=>s.startsWith('│ MESSAGES')),mem=rows.findIndex(s=>/^│ MEM +│$/.test(s));
+const msg=rows.findIndex(s=>s.startsWith('│ MESSAGES')),mem=rows.findIndex(s=>/^│ MEM ─+ │$/.test(s));
 assert(msg>0&&mem>msg&&!rows.slice(0,msg).some(s=>s.includes('MEM')),rows.join('\n'));
 assert(rows[mem+1].startsWith('│ ◆ decision · 3m ')&&rows[mem+2].startsWith('│   panel labels in dark grey')&&rows[mem+3].startsWith('│   ')&&rows[mem+3].includes('…')
  &&rows[mem+4].startsWith('│ ◆ lesson · 2h ')&&rows[mem+5].startsWith('│   one fix per review finding')&&/^│ ─+ │$/.test(rows[mem+6]),rows.join('\n'));
@@ -1695,13 +1719,18 @@ for(let h=70;h>=12;h--){
  if(state)assert(messagesWhole(rows),h+' MEM goes before the messages fold or go\n'+rows.join('\n'));
  // Spec rule 58: the messages not shown are counted right after their label (`MESSAGES +N`), with or without MEM.
  const msgRows=section(rows,'MESSAGES'),hidden=msgRows?head.messages.length-msgRows.filter(s=>/^│ [←→] /.test(s)).length:0;
- if(hidden)assert(new RegExp('^│ MESSAGES \\+'+hidden+' +│$').test(rows.find(s=>s.startsWith('│ MESSAGES'))),h+'\n'+rows.join('\n'));
+ if(hidden)assert(new RegExp('^│ MESSAGES \\+'+hidden+' ─+ │$').test(rows.find(s=>s.startsWith('│ MESSAGES'))),h+'\n'+rows.join('\n'));
 }
 assert.deepEqual(seen,[23,12,11,0],JSON.stringify(seen));
-// Spec rule 58: no long rule beside the labels: `MESSAGES` and `MEM` stand alone (dim, the title
-// role), one closing rule under both; no titled rule anywhere.
-rows=plain(at());
-assert(rows.some(s=>/^│ MESSAGES \+2 +│$/.test(s))&&rows.some(s=>/^│ MEM +│$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)|(MESSAGES|MEM) ─/.test(s)),rows.join('\n'));
+// Spec rule 58 (11-14 night, B-가 with the label first): `MESSAGES` and `MEM` lead their rows (dim,
+// the title role) and a thin rule in the lower rule's color runs on from each to the row's end;
+// nothing stands before a label, and one closing rule ends both.
+let lined=at();rows=plain(lined);
+assert(rows.some(s=>/^│ MESSAGES \+2 ─+ │$/.test(s))&&rows.some(s=>/^│ MEM ─+ │$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)/.test(s)),rows.join('\n'));
+for(const word of ['MESSAGES','MEM']){
+ const y=rows.findIndex(s=>s.startsWith('│ '+word)),line=lined.rows[y].find(p=>/^─+$/.test(p.text)),closing=lined.rows[rows.findIndex((s,i)=>i>y&&/^│ ─+ │$/.test(s))].find(p=>/^─+$/.test(p.text));
+ assert(line&&line.role==='messages'&&line.role===closing.role&&line.dim===closing.dim&&line.foreground===closing.foreground,word+JSON.stringify([line,closing]));
+}
 assert.equal(rows.filter(s=>/^│ ─+ │$/.test(s)).length-rows.slice(0,rows.findIndex(s=>s.startsWith('│ MESSAGES'))).filter(s=>/^│ ─+ │$/.test(s)).length,1,rows.join('\n'));
 const cellsOf=s=>[...s].reduce((n,c)=>n+(/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
 for(const w of [32,40,48]){const r=plain(at({width:w}));assert(r.every(s=>cellsOf(s)===w),w+'\n'+r.join('\n'));}
@@ -1806,7 +1835,7 @@ const labDraw=(height,o={})=>plain(view.render({width:40,height,side:true,fill:t
  state:'idle',configuration:{},expandedKeys:['lab:grp_1'],questions:o.q?(x=>o.q.slice(0,x.budget)):()=>[]}));
 const state=rows=>{const a=labStart(rows),goal=a>=0&&rows[a+1]?.startsWith('│ 잔향에서');
  return {lab:a<0?0:!goal?1:rows.some(s=>/^│ 조건 /.test(s))?(rows.some(s=>s.startsWith('│   최고'))?4:3):2,
-  mem:rows.some(s=>/^│ MEM +│$/.test(s)),route:rows.some(s=>s.startsWith('│ ╭')),messages:rows.some(s=>s.startsWith('│ MESSAGES')),
+  mem:rows.some(s=>/^│ MEM ─+ │$/.test(s)),route:rows.some(s=>s.startsWith('│ ╭')),messages:rows.some(s=>s.startsWith('│ MESSAGES')),
   rule:rows.some((s,i)=>i<(a<0?rows.length:a)&&/^│ ─+ │$/.test(s))};};
 const seen=[];let memGone=0,tableGone=0,ruleGone=0,oneAt=0,labGone=0,routeGone=0,messagesGone=0;
 for(let h=90;h>=8;h--){
@@ -1855,17 +1884,18 @@ assert(rows[a+3].startsWith('│ 다른 묶음 잡음 실험도'),rows.join('\n'
         self.node(script, "panel-view.cjs")
 
     def test_an_experiment_failure_never_changes_the_frame_or_the_session_glyph(self):
-        # The frame, the head's glyph and number, and the folded strip's border are the session's
-        # own state (spec rule 25, 49 (c)); a failed or unconfirmed experiment stays inside LAB.
+        # The frame, the head's glyph and number, and the folded strip's rule and session row are the
+        # session's own state (spec rule 25, 49 (c)); a failed or unconfirmed experiment stays inside
+        # LAB (folded: its `!1 LAB` token at the end of the routes row).
         script = self.FIXTURE + self.LAB + r"""
-const frame=v=>JSON.stringify([v.color,v.rows[0],v.rows.map(r=>[r[0],r.at(-1)]),v.rows.at(-1)]);
+const frame=v=>JSON.stringify(v.folded?[v.color,v.rows[0],v.rows[1]]:[v.color,v.rows[0],v.rows.map(r=>[r[0],r.at(-1)]),v.rows.at(-1)]);
 for(const state of ['idle','working','blocked','unknown'])for(const folded of [false,true]){
- const labDraw=lab=>view.render({width:folded?8:40,height:30,side:true,fill:true,folded,frame:3,model:{...head,tag:'[e9]',routes:[oneShot],route_count:1,lab},
+ const labDraw=lab=>view.render({width:folded?120:40,height:folded?4:30,side:!folded,fill:!folded,folded,frame:3,model:{...head,tag:'[e9]',routes:[oneShot],route_count:1,lab},
   state,harness:'claude',configuration:{},questions:()=>[]});
  const none=labDraw(null),failed=labDraw(failedLab());
  assert.equal(frame(failed),frame(none),state+' '+folded);
  if(!folded)assert(plain(failed).some(s=>s.includes('실패 1')));
- else assert(plain(failed).some(s=>s==='│ !1LB │'),plain(failed).join('\n'));
+ else assert(plain(failed).some(s=>/ │ !1 LAB +$/.test(s))&&!plain(none).join('').includes('LAB')&&plain(failed)[1].includes('CTX ━━━━'),plain(failed).join('\n'));
 }
 """
         self.node(script, "panel-view.cjs")
@@ -1873,7 +1903,7 @@ for(const state of ['idle','working','blocked','unknown'])for(const folded of [f
     def test_lab_reads_the_same_in_every_harness(self):
         script = self.FIXTURE + self.LAB + r"""
 for(const open of [[],['lab:grp_1']])for(const folded of [false,true]){
- const labDraw=harness=>plain(view.render({width:folded?8:40,height:50,side:true,fill:true,folded,model:{...head,lab:failedLab()},state:'idle',harness,
+ const labDraw=harness=>plain(view.render({width:folded?120:40,height:folded?4:50,side:!folded,fill:!folded,folded,model:{...head,lab:failedLab()},state:'idle',harness,
   configuration:{},expandedKeys:open,questions:()=>[]})).filter(s=>!s.startsWith('┌'));
  const claude=labDraw('claude');
  for(const harness of ['codex','opencode'])assert.deepEqual(labDraw(harness),claude,harness);

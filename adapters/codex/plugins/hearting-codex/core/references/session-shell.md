@@ -161,15 +161,31 @@ input/relay ownership.
 
 The approved v3.3 shell opens as a right Hearting work panel (left by choice,
 or under the native area by choice). Spec E9 rule 49 folds and unfolds it: the
-fold button `»` (`«` for a left panel, `▾` in the bottom layout) on the panel's
-last row inside folds it into an eight-cell strip at its edge (two borders, a
-blank cell inside each and four content cells: the state glyph with the session
-number, the route count `2 RT`, the experiment board's `5 LB` (`!1LB` failed or
-stuck, `?1LB` unconfirmed or unnamed, `9+LB`), the answer waits `◑ 1` and `«`;
-its border in the session's state color, only the glyph turning), and
-the native area takes the freed columns through the same PTY resize a window
-resize uses; folded under the native area it is one row (the status line and
-`▴`). A press anywhere on the strip or that row opens it. Where the open panel
+fold button `»` (`«` for a left panel, `▾` under the native area, the bottom
+layout or a side panel opened where it cannot stand beside) on the panel's last
+row inside folds it. Folded there is one form, by itself or by hand, beside or
+under: a strip under the native area, which keeps the whole width (the native
+is told its new size through the same PTY resize a window resize uses). The
+strip is a thin rule in the messages' line color with `▴` at its right end,
+then three rows, each the most pressing first and giving way whole item by
+whole item from its end: the session (the state glyph and number, the project,
+model and effort, `CTX` and its gauge, 5h, 7d; short of cells the reset times
+go first, then the effort, the project, 5h, the model windows, 7d), what to do
+now (`◑답 대기 N · ` and the question's first row, cut with `…` before the wait
+goes; compaction imminent; a tidy notice), and the routes (`3 ROUTE ⠏2 ✕1`,
+the failed routes' titles, else the running ones', `MESSAGES ←N` for the kept
+messages received since the person's last input, and the experiment board's
+`!1 LAB` or `?1 LAB` when it needs a look). Its height follows the window's
+rows alone, never what it shows, so a question coming or going never moves the
+native area: three rows from 24 window rows (the native keeps 20 or more), two
+from 16, else one; short of rows the routes row goes first, then the session
+row, so what to do stays to the last, and a row with nothing on it gives its
+place to the next. Labels are dark gray upper case; there is no frame, gear,
+beat or moving rule, and only the state glyph turns. While the strip paints its
+session row, Claude's row under its input keeps the notice (what to do now) as
+with the panel open, so no value shows twice; the strip carries no Git or job
+row. A press anywhere on the strip, or **Ctrl+]**, opens the panel. Where the
+open panel
 would leave the native area under 60 columns it folds by itself, and opens again
 once there are three columns more (63), so a window dragged across the line does
 not jump back and forth; that one constant replaces the earlier minimum terminal width and
@@ -196,7 +212,8 @@ The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
 The panel follows the 2026-11-11 unified layout (the C3 draft the person
 chose), placed by the C6 rule: what is always there sits at the top, what
-comes and goes at the bottom. The top border carries Fleet's row head for this
+comes and goes below it; the sections stand from the top one after another and
+the rows left over go under the last of them (2026-11-14). The top border carries Fleet's row head for this
 session on the left: the state glyph (a spinner while it works or an answer is
 being typed in for the person, `●` idle, `◑` waiting on a dialog or question),
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
@@ -318,16 +335,17 @@ while the session works or waits), each on as many rows as it needs, then
 `◑답 대기 N` and a tidy notice; one empty row then parts the head from the
 route box. The bottom layout keeps the metadata row (or rows) first and one
 content row (`◑답 대기 N │ title │ NOW …`, title and NOW each keeping at least
-half of what is left); the row break parts them. Then the route box, high; free
-space (beside the native area at least one empty row under the route box, above
-any question box or the messages rule); any question box; the messages section, fixed at the bottom; and
+half of what is left); the row break parts them. Then the route box, high (beside
+the native area one empty row under it, above any question box or the messages
+label); any question box; the messages section; the rows left over; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
-no box, only its label alone (`messages`, beside the native area `MESSAGES`,
-dim, with no long rule beside it; the count of messages not shown follows it,
-`MESSAGES +2`) and a lower rule. Beside the native area `MEM` follows the
-messages under its own label (`MEM`, likewise alone; the one closing rule ends
-both): this repository's newest saved memory records, two at most, from the
+no box, only its label (`messages`, beside the native area `MESSAGES`, dim; the
+count of messages not shown follows it, `MESSAGES +2`) and a lower rule. Beside
+the native area the label leads its row and a thin rule in the lower rule's
+color runs on from it to the row's end (`MESSAGES +2 ───…`); the bottom layout
+keeps the label alone. Beside the native area `MEM` follows the messages under
+its own label (`MEM ───…`, likewise; the one closing rule ends both): this repository's newest saved memory records, two at most, from the
 journal Fleet reads (the newest `add`/`supersede` rows of its project, a
 supersede and its replacement's add counted once), each on two rows like a
 message: `◆ decision · 3m` (dim: the type as a short word, `correction` for
@@ -352,9 +370,9 @@ the condition table in place (40 cells: name, progress, latest, difference; 32:
 name, progress, state; under each row the values that row does not show and
 why it is not plain) and a press closes it. A value is whole or its column (its
 piece) leaves; only a name ends in `…`, read whole under it. No experiments and
-no problem: no section and no strip token; a broken catalog or a run with no
+no problem: no section and no `LAB` token in the folded strip; a broken catalog or a run with no
 name is an unconfirmed warning, never "no experiments". An experiment's failure
-never colors the frame, the glyph or the strip's border. Its catalog and its
+never colors the frame, the glyph or the folded strip. Its catalog and its
 run-record folders join the panel's file watch last (no poller): a folder is
 watched whole (a path ending in the separator), so any record written, replaced,
 added or removed in it redraws, at most once a second with the last change
@@ -790,7 +808,10 @@ statusline area, the rows directly under the input box, when their text equals
 the callback's latest recorded output. A group the panel paints counts even
 when its row is cut to the panel's width or wrapped; only a group the panel
 does not paint at all (dropped for rows, a read page, settings) keeps the
-native rows, so no value leaves the screen. A native screen too short for the whole
+native rows, so no value leaves the screen. Folded, the strip takes the row's
+place while it paints its session row (it carries no Git or job row), so the
+values show once and the row keeps the notice; a strip short of rows down to
+what to do alone leaves the native rows. A native screen too short for the whole
 record (the bottom layout's ten native rows) shows only its first rows, running
 to the screen's last line; those rows are the recorded ones and are blanked
 too. A screen without that input box, such
@@ -810,7 +831,7 @@ takes Fleet's failure mark `✕` and color when the result did not pass, and lea
 the box after the person's next input or ten minutes, the bound the notice row's
 news used.
 It reuses Fleet's glyphs and colors and adds no collection, setting or judgment.
-A hidden, collapsed, focused or not-yet-bound panel and a lost display host show
+A hidden (Fleet over the window), focused or not-yet-bound panel and a lost display host show
 that native row unchanged; unwrapped sessions keep their complete native rows.
 Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
