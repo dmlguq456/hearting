@@ -1466,9 +1466,11 @@ function tableInput(data){
     if(text[0]==='\x1d'){closePopup();return Buffer.from(text.slice(1),'latin1');}
     if(text[0]==='\x1b'){
       if(text.length===1){tableTail=text;tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){tableTail='';closePopup();block.escaped();}},25);return Buffer.alloc(0);}
-      const csi=/^\x1b(?:\[[0-9;]*[\x40-\x7e]|O[A-D])/.exec(text);
+      // A key is `ESC [ … final` or `ESC O x` (an application-cursor arrow or keypad key: any byte after
+      // the `O`, as the question popup reads it); a key split across reads waits for its rest.
+      const csi=/^\x1b(?:\[[0-9;]*[\x40-\x7e]|O[\s\S])/.exec(text);
       if(!csi){
-        if(/^\x1b\[[0-9;]*$/.test(text)){tableTail=text;return Buffer.alloc(0);}
+        if(/^\x1b(?:\[[0-9;]*|O)$/.test(text)){tableTail=text;return Buffer.alloc(0);}
         // ESC then anything but `[` or `O` (an arrow or function key) is no key of the popup's, as in the
         // question popup: Alt+letter, Shift/Alt+Enter, Esc then a control byte are dropped and it stands
         // (an Enter reaching the native would submit its text, a ^C interrupt its turn). Only a second Esc

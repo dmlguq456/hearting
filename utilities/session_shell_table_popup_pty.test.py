@@ -40,7 +40,7 @@ tty.setraw(0)
 event('start')
 pending='';said='READY_'+harness;later=[];seen=[]
 def screen():
-    print('\x1b[2J\x1b[H'+said+'\r\n'+''.join(s+'\r\n' for s in seen[-14:])+'❯ '+pending.replace('\x1b','^')+'\r\n',end='',flush=True)
+    print('\x1b[2J\x1b[H'+said+'\r\n'+''.join(s+'\r\n' for s in seen[-14:])+'❯ '+''.join('^'+chr(ord(c)+64) if ord(c)<32 else c for c in pending)+'\r\n',end='',flush=True)
 if harness!='claude':print('\x1b[?1000h\x1b[?1006h',end='',flush=True)
 screen()
 while True:
@@ -198,6 +198,32 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   await key('\x1b',300);s=await until(s=>!box(s),'closed at 60×16');
   checks.native_mouse_end=raw.includes('NATIVE_ESC_');
   s=await screen();checks.draft_end=s.some(l=>l.startsWith('❯ draft9'));checks.submitted_end=s.some(l=>l.includes('DONE_draft9'));
+  // The Esc rule (#1641's fixes, the question popup's editor) is every popup's: on a popup, ESC then a
+  // control byte (Tab, ^C) is dropped and the popup stands; ESC ESC closes it and the second is dropped;
+  // a lone Esc closes it and a lone Esc within a second after is the shell's. Nothing reaches the native
+  // (it shows every control byte it gets); after that second a lone Esc and a letter reach it.
+  await resize(160,40);
+  // The native's input row, its own cells only (the panel beside it starts at its frame `│`).
+  const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split('│')[0].trimEnd():null;};
+  const kinds=['QUESTIONS','ROUTE','LAB','SESSIONS'];
+  const open=async kind=>{await key('\x1d',400);await until(s=>!!box(s),'a popup by Ctrl+]');
+    for(let i=0;i<kinds.indexOf(kind);i++)await key('\x1b[C',400);
+    return until(s=>!!box(s)&&box(s).title.includes(kind),'the '+kind+' popup');};
+  checks.esc={};
+  for(const kind of kinds){
+    const r={};
+    await open(kind);
+    await key('\x1b\t',300);s=await screen();r.esc_tab_stands=!!box(s)&&box(s).title.includes(kind);
+    await key('\x1b\x03',300);s=await screen();r.esc_ctrl_c_stands=!!box(s)&&box(s).title.includes(kind);
+    await key('\x1b\x1b',300);s=await screen();r.esc_esc_closes=!box(s);
+    r.after_esc_esc=await draft();
+    await open(kind);
+    await key('\x1b',200);s=await screen();r.lone_esc_closes=!box(s);
+    await key('\x1b',300);s=await screen();r.second_esc_stays=!box(s);
+    r.after_second=await draft();
+    checks.esc[kind]=r;
+  }
+  await sleep(1200);await key('\x1b',300);await key('Q',300);checks.esc_after_a_second=await draft();
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
 finally{try{child.write('\x1b');child.write('\x15quit\r');}catch{}await sleep(300);try{child.kill();}catch{}}
@@ -365,6 +391,13 @@ class SessionShellTablePopupTest(unittest.TestCase):
         self.assertLessEqual(checks['narrow_width'], 60)
         self.assertTrue(checks['wheel_question'], text('narrow_question'))
         self.assertTrue(checks['wheel_table'], text('narrow_wheel'))
+        # The Esc rule is the same in the four popups (11-15, #1641's fixes): nothing reached the native.
+        for kind in ('QUESTIONS', 'ROUTE', 'LAB', 'SESSIONS'):
+            self.assertEqual(checks['esc'][kind], {'esc_tab_stands': True, 'esc_ctrl_c_stands': True, 'esc_esc_closes': True,
+                                                   'after_esc_esc': 'draft9', 'lone_esc_closes': True, 'second_esc_stays': True,
+                                                   'after_second': 'draft9'}, kind)
+        # A second after the close, a lone Esc and a letter are the native's again.
+        self.assertEqual(checks['esc_after_a_second'], 'draft9^[Q')
         return result
 
     def test_claude(self):
