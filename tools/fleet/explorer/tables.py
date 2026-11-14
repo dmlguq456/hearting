@@ -604,16 +604,52 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
 
 def route_counts(routes):
     """``(open, no_response, stopped)``: a route nothing of which runs (no response) is not open."""
+    open_routes, no_response, stopped, _done, _mark = route_tally(routes)
+    return open_routes, no_response, stopped
+
+
+def route_tally(routes):
+    """The one count of routes every place on the screen draws: ``(open, no_response, stopped,
+    done, mark)``. The OVERVIEW ROUTES rule, the OVERVIEW and ROUTES status rows, a project's
+    status row and the ROUTES tab all read it, so a number reads the same everywhere.
+
+    A route not known (``wait``) is in no count: neither open, nor no response, nor stopped,
+    nor done. ``mark`` stands for such routes (``details wait`` or ``?``), None when all are known."""
+    routes = tuple(routes or ())
     states = [str(route.get("state") or "") for route in routes]
-    # A route not known (``wait``) is in no count: neither open, nor no response, nor stopped.
     return (sum(1 for route, state in zip(routes, states)
                 if state not in ("done", "stale", "wait") and not route.get("closed")),
             states.count("stale"),
-            sum(1 for route in routes if route.get("state") == "dead" and not route.get("closed")))
+            sum(1 for route, state in zip(routes, states) if state == "dead" and not route.get("closed")),
+            states.count("done"),
+            unknown_mark(unknown_kind([unknown_route_kind(route) for route in routes])))
+
+
+def route_open_text(open_routes, mark, word="open"):
+    """``2 open``: the known count; with none known open and routes not known, their mark in its
+    place (``details wait``, ``? open``), never a 0."""
+    if open_routes or not mark:
+        return f"{open_routes} {word}".rstrip()
+    return mark if mark != "?" else f"? {word}".rstrip()
+
+
+def route_count_label(routes, word="open", mark_text=None):
+    """``2 open · ?``: ``route_open_text`` and, when some routes are known open, the mark after
+    the count. ``mark_text`` replaces the mark's words where the room is one cell (the tab)."""
+    open_routes, _no_response, _stopped, _done, mark = route_tally(routes)
+    if mark and mark_text:
+        mark = mark_text
+    text = route_open_text(open_routes, mark, word)
+    return text + (f" · {mark}" if open_routes and mark else "")
 
 
 def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
-    open_routes, no_response, stopped = route_counts(route_rows)
+    # Counted by the one rule the status rows and the ROUTES tab use (``route_tally``): the routes
+    # this section lists, and every route not known (one not bound yet may be one of theirs).
+    listed = {id(route) for route in route_rows}
+    open_routes, no_response, stopped, _done, mark = route_tally(
+        [*route_rows, *(route for route in (vm.routes or ())
+                        if id(route) not in listed and unknown_route_kind(route))])
     grid.put(x, y, "── ", "line")
     label_x = grid.put(x + 3, y, "ROUTES", "head")
     # Open routes pulse on the shared working beat (the same g_work/g_work_off pair as the
@@ -623,9 +659,7 @@ def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
     count_x = grid.put(label_x, y, "  ", "dim", limit=right)
     # Routes not known: their mark stands for the count only when none is known (never a
     # 0 open), and otherwise follows everything else in the room left (``· details wait``/``· ?``).
-    mark = unknown_mark(unknown_kind([unknown_route_kind(route) for route in (vm.routes or ())]))
-    count_text = (f"{open_routes} open" if open_routes or not mark
-                  else mark if mark != "?" else "? open")
+    count_text = route_open_text(open_routes, mark)
     count_end = grid.put(count_x, y, count_text, count_key, limit=right)
     meta = ((f" · no response {no_response}" if no_response else "") +
             (f" · {stopped} stopped" if stopped else ""))

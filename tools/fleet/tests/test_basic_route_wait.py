@@ -18,7 +18,9 @@ from unittest import mock
 
 from tools.fleet import details, projection, render, route_chain
 from tools.fleet.collectors import dispatch, prompt_inputs
-from tools.fleet.explorer import live, order, tables
+import re
+
+from tools.fleet.explorer import chrome, live, order, tables
 from tools.fleet.explorer.grid import CellGrid
 from tools.fleet.explorer.runtime import ExplorerRuntime
 from tools.fleet.explorer.state import NavState
@@ -360,6 +362,78 @@ class TriedRouteDetails(RouteDetailsFixture):
         for width, length in ((100, 25), (133, 56)):
             name, marked, control = self.overview_pair(model, width, length, wait=True)
             self.assertIn("◑ to answer 1", next(row for row in marked if name + "/" in row), (width, length))
+
+    def count_surfaces(self, model, routes):
+        """The route count every place on the screen draws for ``routes``: the OVERVIEW ROUTES
+        rule, the OVERVIEW and ROUTES status rows, the project's status row and the ROUTES tab."""
+        vm = model.with_updates(routes=routes)
+
+        def lines(grid):
+            return ["".join(cell[0] for cell in row) for row in grid.cells]
+
+        drawn = {}
+        grid = CellGrid(200, 60)
+        tables._draw_overview_routes_rule(grid, vm, NavState(), 34, 163, 199, 3, list(routes))
+        drawn["rule"] = lines(grid)[3].split("ROUTES  ", 1)[1].split(" ─", 1)[0]
+        for name, scope, view in (("overview", "-", "OVERVIEW"), ("routes", "-", "ROUTES"),
+                                  ("project", "repo:demo-app", "OVERVIEW")):
+            grid = CellGrid(200, 60)
+            chrome.draw_chrome(grid, vm, NavState(scope=scope, view=view))
+            drawn[name] = lines(grid)[-1].split("OVERVIEW  ", 1)[1].rstrip()
+        # The OVERVIEW status row's route segment (its answer-wait count is another count).
+        drawn["overview"] = next(part.strip() for part in drawn["overview"].split("│")
+                                 if part.strip().startswith(tables.ROUTE_WORD + " "))
+        grid = CellGrid(200, 60)
+        chrome.draw_explorer(grid, vm, NavState())
+        drawn["tab"] = next(line[:chrome.NAV_WIDTH] for line in lines(grid) if line.startswith(" ROUTES"))[7:].strip()
+        return drawn
+
+    @staticmethod
+    def known_and_mark(name, text):
+        """``(known open count or None, the routes-not-known mark or None)`` read off one place."""
+        if name == "tab":
+            found = re.fullmatch(r"(\d+)?(?: · )?(\?)?", text)
+            return (int(found.group(1)) if found.group(1) else None), ("mark" if found.group(2) else None)
+        pattern = r"route (\d+)" if name == "overview" else r"(?:^|· )(\d+) open"
+        found = re.search(pattern, text)
+        mark = "mark" if ("details wait" in text or re.search(r"(^|[ ·])\?( |$)", text)) else None
+        return (int(found.group(1)) if found else None), mark
+
+    def test_every_place_counts_routes_the_one_way(self):
+        """The reviewer's input (RV-PR1622-R3 §1): one bound route not known, alone and beside two
+        known ones (one open, one done), waiting and unread. The rule, the status rows and the
+        tab read the same known count and the same mark (a mark in place of a count when no
+        route is known open)."""
+        owner = next(job for job in self.basic.jobs if getattr(job, "route_id", None) == CARD)
+        owner.depth, owner.worker_type, owner.parent_sid = 1, "owner", "demo-claude-1"
+        model, _lines = self.draw(self.basic, details=False)
+        unknown = self.routes(model)[CARD]
+        known = [dict(unknown, id="known-open", state="working", activity="running", current=True,
+                      details_wait=False),
+                 dict(unknown, id="known-done", state="done", activity="ended", current=False,
+                      details_wait=False)]
+        expected = {("unknown-only", "wait"): (None, "details wait"),
+                    ("unknown-only", "unread"): (None, "?"),
+                    ("two-known-one-unknown", "wait"): (1, "details wait"),
+                    ("two-known-one-unknown", "unread"): (1, "?")}
+        for (case, kind), (count, mark) in expected.items():
+            card = dict(unknown, details_wait=kind == "wait")
+            routes = [card] if case == "unknown-only" else known + [card]
+            drawn = self.count_surfaces(model, routes)
+            read = {name: self.known_and_mark(name, text) for name, text in drawn.items()}
+            self.assertEqual(set(read.values()), {(count, "mark")}, (case, kind, drawn))
+            self.assertEqual(tables.route_tally(routes)[0], count or 0)
+            self.assertEqual(tables.route_tally(routes)[4], mark)
+            self.assertIn(mark, drawn["rule"])
+            self.assertIn(mark, drawn["overview"])
+            self.assertIn(mark, drawn["routes"])
+            self.assertIn(mark, drawn["project"])
+            self.assertNotRegex(" ".join(drawn.values()), r"(^|[^\d])0 open")
+        # All known: the same count everywhere, and no mark.
+        drawn = self.count_surfaces(model, known)
+        read = {name: self.known_and_mark(name, text) for name, text in drawn.items()}
+        self.assertEqual(set(read.values()), {(1, None)}, drawn)
+        self.assertIn("1 done", drawn["project"])
 
     def test_full_screen_sweep_has_no_overflow_or_error(self):
         frames = {"basic": None, "tried": self.detail_pass(OSError("synthetic"))}
