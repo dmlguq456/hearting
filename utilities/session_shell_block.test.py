@@ -158,11 +158,13 @@ console.log('PASS');"""
         import session_tidy
         from fleet.session_line import answer_wait_word
         from fleet.config import ui_text
+        from fleet import herdr_projection
         native_reason={'claude':'claude-native-response-surface-unavailable',
                        'codex':'codex-native-request-unsupported','opencode':'opencode-native-request-unsupported'}
         def describe(item,**kw):
             ident=item['id']
-            row=dict(id=ident,source=item.get('source'),owner=item.get('owner'),questions=[dict(id='q',question=ident,choices=[])])
+            row=dict(id=ident,source=item.get('source'),owner=item.get('owner'),state='current',
+                     questions=[dict(id='q',question=ident,choices=[])])
             if ident.startswith('S3:'):
                 return dict(row,answerable=False,reason='owner-correction-native-parent-context-required')
             if ident.startswith('S1:'):
@@ -178,10 +180,14 @@ console.log('PASS');"""
                  mock.patch.object(hws,'_request_producer'), \
                  mock.patch.object(hws,'_message_source_state',return_value='open'), \
                  mock.patch.object(questions,'describe',side_effect=describe), \
-                 mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}):
+                 mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}), \
+                 mock.patch.object(herdr_projection,'project_panel') as pane:
                 self.assertTrue(hws.publish_cache({'items':items,'observed_at':time.time(),'complete':True}))
                 total=hws.cached_view(request=False)['total']
-                return total,shell.panel_projection(harness,sid,columns=40)
+                result=shell.panel_projection(harness,sid,columns=40,pane_binding=dict(harness=harness,sid=sid))
+                # The pane's own `Q<n>/◑A<n>` reads the same count: every wait, the panel's answerable ones.
+                _binding,values,shown=pane.call_args.args
+                return total,result,herdr_projection._panel_counts(harness,sid,values,shown)
         text=lambda parts:''.join(part['text'] for part in parts or ())
         wait=lambda n:answer_wait_word()+' '+str(n)
         below=ui_text('fleet.session_block.compact_answer_below')
@@ -204,9 +210,10 @@ console.log('PASS');"""
             )
             for name,items,shared,count,block,line,notice in cases:
                 with self.subTest(harness=harness,case=name):
-                    total,result=projection(harness,sid,items)
+                    total,result,pane=projection(harness,sid,items)
                     panel=result['panel']
                     self.assertEqual(total,shared)
+                    self.assertEqual(pane,(count,len(block)))
                     self.assertEqual(panel['wait'],wait(count) if count else '')
                     self.assertEqual([row['id'] for row in result['questions']],block)
                     self.assertEqual(panel['wait_guide'],line)
