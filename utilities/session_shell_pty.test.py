@@ -325,25 +325,30 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
-   // Spec rule 49 (d): where the open panel would leave the native under 80 columns it folds by
-   // itself into the eight-cell strip (one blank cell apart) and opens again with room.
-   child.resize(80,24);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_71x24/);
-   child.resize(180,40);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry3\r').toString('base64')});await waitFor(/GEOMETRY_geometry3_138x40/);
    const press=async(x,y)=>{await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`).toString('base64')});await new Promise(r=>setTimeout(r,80));};
    const geometry=async(name,size)=>{await rpc(cfg.inlet,{batch:Buffer.from(name+'\r').toString('base64')});await waitFor(new RegExp('GEOMETRY_'+name+'_'+size));};
+   const resize=async(c,r)=>{child.resize(c,r);await new Promise(r=>setTimeout(r,80));};
+   // Spec rule 49 (d): where the open panel would leave the native under 60 columns it folds by
+   // itself into the eight-cell strip (one blank cell apart), and it opens again three columns past it.
+   await resize(102,24);await geometry('geometry2','60x24');
+   await resize(101,24);await geometry('geometry2a','92x24');
+   await resize(104,24);await geometry('geometry2b','95x24');
+   await resize(105,24);await geometry('geometry2c','63x24');
+   await resize(80,24);await geometry('geometry2d','71x24');
+   await resize(180,40);await geometry('geometry3','138x40');
    // The fold button `»` (the last row inside, three cells left of the gear) folds by hand; a hand fold stays folded when wider.
    await press(174,39);await geometry('geometry4','171x40');
-   child.resize(200,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry5','191x40');
+   await resize(200,40);await geometry('geometry5','191x40');
    // Any cell of the strip opens it.
    await press(198,10);await geometry('geometry6','158x40');
-   child.resize(110,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry7','101x40');
-   // Opened by hand where it would fold, it stays open at that width; the next width folds it again.
-   await press(108,10);await geometry('geometry8','68x40');
-   child.resize(112,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry9','103x40');
-   // A window of nine cells or fewer folds the panel to the one row under the native (the strip
-   // would leave the native no cell), and the open panel stands again once the window widens.
+   // Opened by hand it stays open however the window is resized: beside while the native keeps 48
+   // columns (here where it would fold by itself), under the native area narrower, and beside
+   // again once the width returns.
+   await resize(100,40);await geometry('geometry7','58x40');
+   await resize(89,40);await geometry('geometry8','89x(?:[1-9]|[1-3]\\d)(?!\\d)');
+   await resize(112,40);await geometry('geometry9','70x40');
+   // A window of nine cells or fewer leaves the native a cell, and the open panel stands beside
+   // again once the window widens.
    child.resize(9,40);await new Promise(r=>setTimeout(r,150));
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry10','138x40');
    // #1586 review follow-up 6: folding by hand while the settings editor is open closes the
@@ -356,13 +361,13 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(after.expanded!==false||after.focused!==false)throw Error('the editor outlived the fold '+JSON.stringify(after));
    await press(177,10);await geometry('geometry12','138x40');
    // #1586 review follow-up 3: a width set in the settings editor counts as opening the panel by
-   // hand at this window width (as a drag does): applying a wider panel that would fold keeps it
-   // open; the next window width judges again.
-   child.resize(125,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry13','83x40');
-   raw='';await press(123,39);await waitFor(/rule motion/);
+   // hand (as a drag does): applying a wider panel that would fold keeps it open, at the next
+   // window width too.
+   await resize(106,40);await geometry('geometry13','64x40');
+   raw='';await press(104,39);await waitFor(/rule motion/);
    await rpc(cfg.inlet,{batch:Buffer.from('\t\t++++++\r').toString('base64')});await new Promise(r=>setTimeout(r,300));
-   await geometry('geometry14','77x40');
-   child.resize(126,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry15','117x40');
+   await geometry('geometry14','58x40');
+   await resize(107,40);await geometry('geometry15','59x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);

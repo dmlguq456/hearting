@@ -1175,7 +1175,8 @@ assert(r50[1].includes('hearting/')&&r50[2].includes('(fix/fleet')&&blank(r50[3]
 const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,git:[],routes:[oneShot],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
 // (c) Six routes and eight messages at 40×58 (spec rule 38: each route with its context
-// row): the extra message rows stop one row short of the route box.
+// row): three messages show (`MESSAGES +5`), their bodies on the rows they may take, and the
+// rows they leave stay empty under the route box.
 const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어감',6),
  message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const six=[...Array(6)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'s'+i,title:r.title+' '+(i+1)};});
@@ -1183,8 +1184,8 @@ const QUESTION=[[P('◑ Q_HEAD')],[P('Q_BODY')],[P('› A')],[P('2 B')],[P('↑�
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
  state:'idle',configuration:{},questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
-const full=paint(six,58),m=rule(full);
-assert(full[m-2].includes('╰')&&blank(full[m-1])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3,full.join('\n'));
+const full=paint(six,58),m=rule(full),box=full.findIndex(s=>s.includes('╰'));
+assert(box>0&&box<m-1&&full.slice(box+1,m).every(blank)&&/^│ MESSAGES \+5 +│$/.test(full[m])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3,full.join('\n'));
 // With a question the row stands between the route box and the question box.
 const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('─ ◑ Q_HEAD'));
 assert(q>2&&asked[q-2].includes('╰')&&blank(asked[q-1])&&asked[rule(asked)-1].includes('╰'),asked.join('\n'));
@@ -1606,7 +1607,7 @@ const owned={...oneShot,role:'owner',kind_word:'code'};
 const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[owned,staged],route_count:2,...(o.model||{})},
  state:'working',configuration:{},questions:()=>[],...(o.extra||{})});
 const v=at(),rows=plain(v),all=rows.join('\n');
-assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES +│$/.test(s))&&!/\broute \d|messages|── MESSAGES/.test(all),all);
+assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES \+2 +│$/.test(s))&&!/\broute \d|messages|── MESSAGES/.test(all),all);
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
 assert(all.includes('⠋ owner')&&all.includes('code · one-shot'),all);
 // The producer's label alone (no rows yet): its count first too.
@@ -1621,6 +1622,31 @@ const bottom=plain(at({width:120,side:false})).join('\n');
 assert(bottom.includes('╭─ route 2 ')&&bottom.includes('│ messages ')&&!bottom.includes('── messages')&&!/ROUTE|MESSAGES/.test(bottom),bottom);
 assert(plain(at({width:120,side:false,extra:{routeDetail:true}}))[1].startsWith('│ route · Back'));
 assert(plain(at({width:120,side:false,model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}})).join('').includes('╭─ route 3 ⠏2 ─'));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_messages_show_three_at_most_however_many_rows_are_left(self):
+        # 11-14 night ("메시지 뜨는 최대 개수를 좀 줄이자. 세로폭이 아무리 길어도 말이야"): beside the native area
+        # no more than three messages show whatever the height; the label counts the rest
+        # (`MESSAGES +N`). Spare rows still lengthen the bodies.
+        script = self.FIXTURE + r"""
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const more=[...messages,message('←','[52]','08:10','두 번째 검토',6),message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
+const at=(list,height)=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,messages:list,routes:[oneShot],route_count:1},state:'idle',configuration:{},questions:()=>[]}));
+const heads=rows=>rows.filter(s=>/^│ [←→] \[/.test(s));
+for(const list of [messages,more])for(const height of [60,90,140]){
+ const rows=at(list,height),label=rows.find(s=>s.startsWith('│ MESSAGES'));
+ assert.equal(heads(rows).length,3,height+'\n'+rows.join('\n'));
+ assert(new RegExp('^│ MESSAGES \\+'+(list.length-3)+' +│$').test(label),label);
+ // The newest three, oldest first.
+ assert.deepEqual(heads(rows).map(s=>s.slice(4,8)),list.slice(-3).map(m=>m.who),rows.join('\n'));
+}
+// Three or fewer: all of them, and no count.
+for(const n of [1,3]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│ MESSAGES +│$/.test(s)),rows.join('\n'));}
+// Spare rows still give a body up to three rows.
+const long=[...messages.slice(0,2),message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어가고 셋째 줄까지 이어지는 긴 본문입니다',6)];
+const rows=at(long,90),i=rows.findIndex(s=>s.startsWith('│ ← [52] claude · 08:10'));
+assert(i>0&&rows.slice(i+1,i+4).every(s=>/^│   \S/.test(s)),rows.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
@@ -1675,7 +1701,7 @@ assert.deepEqual(seen,[23,12,11,0],JSON.stringify(seen));
 // Spec rule 58: no long rule beside the labels: `MESSAGES` and `MEM` stand alone (dim, the title
 // role), one closing rule under both; no titled rule anywhere.
 rows=plain(at());
-assert(rows.some(s=>/^│ MESSAGES +│$/.test(s))&&rows.some(s=>/^│ MEM +│$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)|(MESSAGES|MEM) ─/.test(s)),rows.join('\n'));
+assert(rows.some(s=>/^│ MESSAGES \+2 +│$/.test(s))&&rows.some(s=>/^│ MEM +│$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)|(MESSAGES|MEM) ─/.test(s)),rows.join('\n'));
 assert.equal(rows.filter(s=>/^│ ─+ │$/.test(s)).length-rows.slice(0,rows.findIndex(s=>s.startsWith('│ MESSAGES'))).filter(s=>/^│ ─+ │$/.test(s)).length,1,rows.join('\n'));
 const cellsOf=s=>[...s].reduce((n,c)=>n+(/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
 for(const w of [32,40,48]){const r=plain(at({width:w}));assert(r.every(s=>cellsOf(s)===w),w+'\n'+r.join('\n'));}

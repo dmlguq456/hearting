@@ -343,7 +343,7 @@ Diagnostics that V1 sent to `app.log` go to a capped per-service file,
 **Session shell panel.** In a shell window OpenCode gets the same right (left
 or bottom by choice) HEARTING panel as Claude and Codex, folding into the same
 eight-cell strip that widens the native area (by hand, or by itself where the
-open panel would leave under 80 native columns; spec E9 rule 49): same
+open panel would leave under 60 native columns; spec E9 rule 49): same
 renderer, settings (layout, position, width, theme, shade) and content order. OpenCode's own sidebar is
 hidden there through its documented CLI settings: `session.sidebar` is `auto`
 ("Shows the sidebar when space permits") or `hide` ("always hides it"), and

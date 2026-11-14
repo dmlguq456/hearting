@@ -1333,10 +1333,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     });
     // Spec rule 31: a message takes two rows: a head (the direction arrow in its color,
     // the other session's number, then dim harness, time, kind and a sent one's delivery
-    // state) and, two cells in, its first meaningful text in the body color. More body
-    // rows and more messages (from three) take rows that are left; short of rows a body
-    // keeps one row, then a message folds to the one-row form (arrow, number, bright
-    // text), then fewer messages show (the lower rule counts the rest).
+    // state) and, two cells in, its first meaningful text in the body color. Three show at
+    // most however many rows are left (the label counts the rest); more body rows take rows
+    // that are left; short of rows a body keeps one row, then a message folds to the one-row
+    // form (arrow, number, bright text), then fewer messages show.
     const messages=painted(model.messages);
     let messageCount=Math.min(3,messages.length),messageBody=1,messageOne=false,messageLimit=Infinity;
     const messageHead=m=>{
@@ -1422,8 +1422,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       ask.push(boxBottom(key,[],'question'));
     }
     // Short of rows (spec rule 34 (b), which orders rules 14, 19, 23, 24, 29 (c) and 31):
-    // empty rows; the messages' extra rows (past three, and a body's rows after its first:
-    // they only ever take rows the routes leave in their full form); opened details
+    // empty rows; the messages' extra rows (a body's rows after its first: they only ever
+    // take rows the routes leave in their full form); opened details
     // shorten, then close (an opened message shortens with them); a value on several rows
     // keeps one (ending in `…`; a route title, spec rule 36 (c), too); spec rule 35 (d): the
     // empty row under the route box, then the one inside
@@ -1545,19 +1545,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // Rows to spare beside the native area once everything above the messages' extra rows
     // stands whole (the routes in their three-row form, details, values on all their rows,
-    // both structural empty rows): bodies take up to three rows and more messages show,
-    // never past the rows the panel has.
+    // both structural empty rows): bodies take up to three rows, never past the rows the
+    // panel has. No more than three messages show however many rows are spare.
     const memWhole=keepMem===memItems.length>0&&memCount===Math.min(2,memItems.length)&&memBody===2;
     const labWhole=!lab||keepLab&&!labOne&&labNotes&&labTable===labOpened&&labSub===labOpened;
     const whole=detailCap===detailFull&&keepDetails&&keepMulti&&memWhole&&labWhole&&keepRouteGap&&keepMetaGap&&keepRules&&keepWorkers&&keepCtx&&keepPlace&&twoRows===twoFull&&routeLimit===routeRows.length&&keepRoutes===!!routeTitle&&keepGit&&keepOptional;
     if(side&&keepMessages&&whole&&!messageOne&&messageLimit===Infinity&&messageCount===baseCount){
-      const grow=()=>{
-        let changed=false;
-        if(messageBody<3){messageBody++;if(need()>budget)messageBody--;else changed=true;}
-        if(messageCount<messages.length){messageCount++;if(need()>budget)messageCount--;else changed=true;}
-        return changed;
-      };
-      while(grow());
+      while(messageBody<3){messageBody++;if(need()>budget){messageBody--;break;}}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
