@@ -30,6 +30,22 @@ globals().update({name: value for name, value in vars(FIXTURE).items()
                   and not (isinstance(value, type) and issubclass(value, unittest.TestCase))})
 
 
+def _resting_claude_shell():
+    """The runner holds a Claude completion only for a Hearting shell resting with an empty
+    input; these tests are about what it sends then, so the recipient has one."""
+    import contextlib
+    import session_shell
+    attachment = {"harness": "claude", "sid": "any", "incarnation": "i1", "host_pid": 4242,
+                  "host_start": "1", "native_pid": 4243, "native_start": "1",
+                  "socket": "/nonexistent.sock"}
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch.object(
+        peer_steward, "_current_shell_binding", return_value=(attachment, "")))
+    stack.enter_context(mock.patch.object(
+        session_shell, "control", return_value={"ok": True, "state": "idle", "empty": True}))
+    return stack
+
+
 class GridStartTest(_TmpRootMixin, unittest.TestCase):
     """Start through the shared pane opener; its placement cases live in terminal_surface.test.py."""
     FULL = [(10, 2, 200, 100)]
@@ -6185,7 +6201,8 @@ class NativeDispatchReceiptTest(unittest.TestCase):
                  mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
                      stdout=json.dumps(agents), returncode=0)), \
                  mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", sid)), \
-                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=capture_prompt) as send:
+                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=capture_prompt) as send, \
+                 _resting_claude_shell():
                 peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
             send.assert_called_once()
             # Receipt evidence is checked against the stored record before and after the claim.
@@ -6356,7 +6373,8 @@ class RegisteredParentReceiptAfterSuccessorTest(unittest.TestCase):
                  stdout=json.dumps(agents), returncode=0)), \
              mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", self.new)), \
              mock.patch.object(peer_steward, "_schedule_message_obligation"), \
-             mock.patch.object(peer_steward, "cmd_prompt", return_value=0) as send:
+             mock.patch.object(peer_steward, "cmd_prompt", return_value=0) as send, \
+             _resting_claude_shell():
             peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
         return send, self.pending.read(self.root, self.old, self.did)
 
@@ -7911,7 +7929,8 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(supervision, "continue_for_parent", return_value=None), \
                  mock.patch("dispatch_session_sweep.delivery_context",
                             side_effect=lambda groups: "late completion for C\n" + delivery_context(groups)), \
-                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier), \
+                 _resting_claude_shell():
                 peer_steward._resume_registered_obligation(duty, store)
             self.assertEqual(len(sent), 1)
             recipient, text, ref = sent[0]
