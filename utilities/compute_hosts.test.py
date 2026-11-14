@@ -3530,6 +3530,64 @@ class CompletionWatchTest(unittest.TestCase):
         self.assertIn("Routine, nothing to do (1 run): 1 ended normally (1 short or without metrics) -- here-1",
                       sweep.delivery_context([(state / "dispatch", parents)]))
 
+    def _end_of_a_worker_run(self, harness, carrier, *, attempt_status="open", code=0, seconds=30,
+                             metric=False, claimed=False, with_session=True, token="1"):
+        """One run end a registered worker started under a `harness` supervisor, as the supervisor's
+        carrier sees it: (subject, whether the notice waits for the supervisor's next delivery)."""
+        module = load_module()
+        attempt, supervisor = f"att-worker-{harness}-{token}", f"sid-supervisor-{harness}-{token}"
+        state = self.root / f"state-{harness}-{token}"
+        state.mkdir()
+        jobs = state / "jobs.log"
+        meta_row = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                             "worker_type=stage", "harness=claude", f"parent_sid={supervisor}",
+                             f"parent_completion_delivery={carrier}"))
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        jobs.write_text("\t".join((stamp, attempt_status, "/repo", "/wt", "worker", meta_row)) + "\n")
+        session = {"harness": harness, "id": supervisor} if with_session else None
+        provenance = {"attempt_id": attempt, "route": {"route_id": "rt-0123456789abcdef"},
+                      "session": session, "notify": session}
+        if claimed:
+            provenance["recipient_handovers"] = [{"from": session, "to": session, "by": "compute-hosts claim"}]
+        run_dir = self.root / f"run-{harness}-{token}"
+        run_dir.mkdir()
+        started = datetime.datetime.fromtimestamp(1000.0).isoformat(timespec="seconds")
+        (run_dir / "meta.json").write_text(json.dumps({
+            "run_id": f"here-{token}", "host": "here", "started_at": started, "provenance": provenance}))
+        observed = {"observation": {"summary": {"latest": {"value": 0.5}}}} if metric else None
+        with mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(state), "AGENT_DISPATCH_JOBS": str(jobs)}), \
+                mock.patch.object(module, "_observe_compute_experiment", return_value=observed):
+            sys.path.insert(0, str(Path(module.__file__).resolve().parent))
+            import dispatch_session_sweep as sweep
+            import session_notice
+            module._report_run_end(run_dir, code, None, lambda: 1000.0 + seconds)
+            records, _ = sweep.sweep_deliver(state, carrier, supervisor)
+        if not with_session:
+            self.assertEqual(records, [])
+            return None
+        self.assertEqual(len(records), 1)
+        return (records[0]["receipt"]["subject"],
+                session_notice.waits_for_next_delivery(records[0], harness, supervisor, jobs))
+
+    def test_a_quiet_normal_end_waits_for_the_supervisor_only_while_the_worker_is_open(self):
+        carriers = (("claude", "claude-parent-runtime"), ("codex", "codex-native-queue"),
+                    ("opencode", "opencode-turn"))
+        for harness, carrier in carriers:
+            with self.subTest(harness=harness):
+                end = lambda token, **kw: self._end_of_a_worker_run(harness, carrier, token=token, **kw)
+                # worker open: a short or metric-less normal end opens no turn of its own
+                self.assertEqual(end("quiet"), ("compute run, quiet", True))
+                self.assertEqual(end("nometric", seconds=9000), ("compute run, quiet", True))
+                # worker open: a failure and a long run that carries a metric are told at once
+                self.assertEqual(end("failed", code=6), ("compute run", False))
+                self.assertEqual(end("long", seconds=9000, metric=True), ("compute run", False))
+                # worker finished: nobody reads the end for the supervisor, so it is told at once
+                self.assertEqual(end("finished", attempt_status="done"), ("compute run, quiet", False))
+                # a session that took the notice with `claim` is waiting for exactly this end
+                self.assertEqual(end("claimed", claimed=True), ("compute run, quiet", False))
+                # no session at all: nothing is sent, as before
+                self.assertIsNone(end("sessionless", with_session=False))
+
     def _make_quiet(self, module):
         (self.run_dir / "log").write_text("epoch 1\n")
         old = time.time() - module.RUN_QUIET_SECONDS - 3600

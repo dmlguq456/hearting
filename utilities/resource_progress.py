@@ -2053,7 +2053,9 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             if event_key in seen or event_key in known:
                 continue
             new_event = True
-            notice_texts = _notice_texts({**run, "row_id": str(identity)}, event_kind,
+            notice_texts = _notice_texts({**run, "row_id": str(identity),
+                                          **({"status": status} if event_kind == "final" and status else {})},
+                                         event_kind,
                 observation, record_locator, sources or previous.get("sources", []),
                 _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
             outbox.append({"key": event_key, "kind": event_kind,

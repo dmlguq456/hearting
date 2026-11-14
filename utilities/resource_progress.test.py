@@ -1785,6 +1785,27 @@ class ExperimentObservationTest(unittest.TestCase):
                              ["checkpoint", "final"])
             self.assertTrue(terminal["available"])
 
+    def test_a_final_notice_does_not_call_an_ended_run_running(self):
+        # The registry row can still say `running` when the lifecycle authority has already finished the run
+        # (its exit evidence is in the sentinel, not in the row). The final notice says the status it was
+        # judged by, never the row's stale word.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "artifact").mkdir()
+            state = root / "state.json"
+            run = {"run_id": "ended-row", "started_at": 0, "artifact_root": str(root / "artifact"),
+                   "route_id": "route-a", "node": "eval", "status": "running",
+                   "notify": {"harness": "claude", "id": "owner-sid"}}
+            notices = []
+            with mock.patch.object(progress, "_observation_state_path", return_value=state), \
+                    mock.patch("session_notice.notify", side_effect=lambda *a, **kw:
+                               notices.append(kw) or {"state": "pending"}):
+                progress.observe_experiment(run, root / "registry.json", 7201, row_key="run",
+                                            started_at=0, final=True, status="exited")
+            text = " ".join(item["text"] for item in notices if item["subject"].startswith("experiment final"))
+            self.assertIn("status=exited;", text)
+            self.assertNotIn("status=running", text)
+
     def _terminal_source_fixture(self, root, *, run_id="counter-target"):
         artifact = root / "artifact"
         artifact.mkdir()
