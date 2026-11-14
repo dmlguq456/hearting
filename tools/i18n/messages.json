@@ -1326,6 +1326,10 @@
    "en": "more · PgUp/PgDn to read",
    "ko": "더 있음 · PgUp/PgDn 읽기"
   },
+  "fleet.session_block.more_page": {
+   "en": "more · focus and PgUp/PgDn to read",
+   "ko": "더 있음 · 포커스 후 PgUp/PgDn 읽기"
+  },
   "fleet.session_block.navigate": {
    "en": "Tab next · Esc/Ctrl+] back",
    "ko": "Tab 다음 · Esc/Ctrl+] 복귀"

@@ -79,10 +79,11 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=101)
         after = (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
         self.assertEqual(before, after)
-        self.assertEqual(result["total"], 1)
+        # A marker question is answered in its own session's input: listed, not counted (11-14).
+        self.assertEqual((len(result["items"]), result["total"]), (1, 0))
         self.assertEqual(result["items"][0]["question"], "A 또는 B")
         self.assertTrue(state.close_signal("seat-2", sequence=3))
-        self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["total"], 0)
+        self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["items"], [])
 
     def test_stale_signal_remains_source_state_and_is_not_deleted_by_reader(self):
         self.assertTrue(state.open_signal("opencode", "sid-3", "seat-3",
@@ -92,7 +93,7 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)
         self.assertEqual(len(result["items"]), 1)
         self.assertTrue(result["items"][0]["stale"])
-        self.assertEqual((result["total"], result["stale_total"]), (0, 1))
+        self.assertEqual((result["total"], result["stale_total"]), (0, 0))  # a marker: not counted
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue(state.close_signal("seat-3"))
         self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)["items"], [])
@@ -112,7 +113,9 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertFalse(by_id["s-current"]["stale"])
         self.assertTrue(by_id["s-older"]["stale"])
         self.assertTrue(by_id["s-expired"]["stale"])
-        self.assertEqual((result["total"], result["stale_total"]), (1, 2))
+        # Marker questions fold by the shared rule and are answered in their own input: listed,
+        # never counted by a person surface (11-14).
+        self.assertEqual((result["total"], result["stale_total"]), (0, 0))
 
     def test_s1_windows_kind_mapping_and_stale_activity_fixture(self):
         from tools.fleet import interaction
@@ -345,17 +348,22 @@ class HumanWaitStateTests(unittest.TestCase):
         from tools.fleet.refresh import fleet_answer_wait_view
         now = 1_000_000.0
         result = {"observed_at": now, "complete": True, "health": [], "items": [
-            {"id": "S3:live", "source": "S3", "kind": "decision", "since": now - 60,
-             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+            {"id": "S4:live", "source": "S4", "kind": "message", "since": now - 60,
+             "stale": False, "fold": None,
              "owner": {"harness": "claude", "session_id": "sid-new"},
              "owner_state": "successor", "attribution": "lineage", "cwd": "/work/repo",
              "registered_owner": {"harness": "claude", "session_id": "sid-old"},
              "question": "PRIVATE-BLOCKER"},
+            # A blocked owner: its parent agent's to answer, kept on the private board only.
+            {"id": "S3:owner", "source": "S3", "kind": "decision", "since": now - 60,
+             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+             "owner": {"harness": "claude", "session_id": "sid-new"},
+             "owner_state": "live", "attribution": "lineage", "question": "PRIVATE-BLOCKER"},
             {"id": "S2:gone", "source": "S2", "kind": "decision", "since": now - 60,
              "stale": True, "fold": "ownerless", "route_id": "rt-2", "gate_id": "frame-review",
              "owner": {"harness": "codex", "session_id": "sid-gone"},
              "owner_state": "none", "attribution": "lineage"},
-            {"id": "S4:aged", "source": "S4", "kind": "decision", "since": now - 80 * 3600,
+            {"id": "S4:aged", "source": "S4", "kind": "message", "since": now - 80 * 3600,
              "stale": True, "fold": "older", "owner_state": "unknown", "attribution": "exact",
              "owner": {"harness": "codex", "session_id": "sid-4"}},
         ]}
@@ -363,17 +371,20 @@ class HumanWaitStateTests(unittest.TestCase):
         private = state._read_cache(now=now)
         self.assertEqual((private["total"], private["older"], private["ownerless"]), (1, 2, 1))
         rows = {row["id"]: row for row in private["items"]}
-        self.assertEqual(rows["S3:live"]["registered_owner"],
+        self.assertIn("S3:owner", rows)
+        self.assertEqual(rows["S4:live"]["registered_owner"],
                          {"harness": "claude", "session_id": "sid-old"})
-        self.assertEqual((rows["S3:live"]["owner_state"], rows["S3:live"]["cwd"]),
+        self.assertEqual((rows["S4:live"]["owner_state"], rows["S4:live"]["cwd"]),
                          ("successor", "/work/repo"))
         self.assertEqual((rows["S2:gone"]["owner_state"], rows["S2:gone"]["fold"]),
                          ("none", "ownerless"))
-        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S3:live"]})
+        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S4:live"]})
         fleet = state.cached_fleet_view(now=now, request=False)
         self.assertEqual((fleet["total"], fleet["older"], fleet["ownerless"]), (1, 2, 1))
         by_id = {row["id"]: row for row in fleet["items"]}
-        self.assertEqual((by_id["S3:live"]["registered_session_id"], by_id["S3:live"]["stale"]),
+        # Listed for whoever answers it (Fleet in its parent's own session), never counted.
+        self.assertEqual(by_id["S3:owner"]["kind"], "blocked owner")
+        self.assertEqual((by_id["S4:live"]["registered_session_id"], by_id["S4:live"]["stale"]),
                          ("sid-old", "current"))
         self.assertEqual((by_id["S2:gone"]["fold"], by_id["S2:gone"]["stale"]),
                          ("ownerless", "older"))
@@ -382,7 +393,8 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(state.wait_counts(view["items"]),
                          {"total": view["total"], "older": view["older"], "ownerless": 1})
         self.assertEqual({row["id"]: row.get("owner_state") for row in view["items"]},
-                         {"S3:live": "successor", "S2:gone": "none", "S4:aged": "unknown"})
+                         {"S4:live": "successor", "S3:owner": "live", "S2:gone": "none",
+                          "S4:aged": "unknown"})
         self.assertNotIn("PRIVATE-BLOCKER", state._fleet_cache_path().read_text(encoding="utf-8"))
         self.assertNotIn("PRIVATE-BLOCKER", state._cache_path().read_text(encoding="utf-8"))
 
@@ -3295,7 +3307,7 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         def refresh():
             requests = state._route_demands(now=now)
             refreshes.append(dict(requests))
-            state.publish_cache({"items": [{"id": "S3:fixture", "source": "S3", "since": now,
+            state.publish_cache({"items": [{"id": "S2:fixture", "source": "S2", "since": now,
                 "owner": {"harness": "claude", "session_id": "other-wait"}}],
                 "observed_at": now, "complete": True, "route_sessions": requests,
                 "route_status": {key: "route 1 · frame" for key in requests}})
@@ -3602,13 +3614,21 @@ class MessageCompletionTests(unittest.TestCase):
                                 self.assertTrue(state.publish_cache(published))
                             shared = state._read_cache_file()
                             fleet = json.loads(state._fleet_cache_path().read_text())
+                            elsewhere = []
                             panel = session_shell.session_questions(
-                                harness, sid, view=state.cached_view(request=False))
+                                harness, sid, view=state.cached_view(request=False), elsewhere=elsewhere)
                             seen = {"shared": a["id"] in [row["id"] for row in shared["items"]],
                                     "by_session": a["id"] in shared["by_session"].get(harness + "\0" + sid, ()),
                                     "fleet": a["id"] in [row["id"] for row in fleet["items"]],
                                     "panel": a["id"] in [item["id"] for item in panel]}
-                            self.assertEqual(seen, dict.fromkeys(seen, want == LOAD))
+                            expect = dict.fromkeys(seen, want == LOAD)
+                            if change == "replaced" and want == LOAD:
+                                # 11-14: the panel's block holds what the person can answer here.
+                                # A late publication still lists the replaced question, which its
+                                # session's next question ended: it is the guidance line instead.
+                                expect["panel"] = False
+                                self.assertIn(a["id"], [item["id"] for item in elsewhere])
+                            self.assertEqual(seen, expect)
                             for view in (shared, fleet):
                                 self.assertIn(b["id"], [row["id"] for row in view["items"]])
                                 self.assertEqual(view["total"], len(view["items"]))
@@ -4146,13 +4166,22 @@ class MessageCompletionTests(unittest.TestCase):
         self.assertEqual(self.source(signal)["lifecycle"], "open")
         self.assertFalse(state.close_signal(signal["seat_key"]))
 
-    def test_incarnation_change_and_proven_clear_leave_old_question_unresolved(self):
-        import session_tidy as tidy
+    def test_the_same_session_in_a_new_process_still_answers_its_question(self):
+        # 11-14: a native resume, a restart or a compaction keeps the session id; the question
+        # stays answerable and its answer reaches that session as it is now.
         signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
         with mock.patch.object(state, "_proc_start_ticks", return_value="replacement-start"):
-            self.assertFalse(state.read_selected_request(envelope)["support"]["supported"])
-            self.f.submit(envelope)
-        self.assertIsNone(self.f.record(signal))
+            selected = state.read_selected_request(envelope)
+            self.assertEqual((selected["state"], selected["support"]["supported"]), ("open", True))
+            self.assertIn(self.f.submit(envelope)["state"], {"submitted", "received", "applied"})
+            self.assertIsNotNone(self.f.record(signal))
+            wire, _ref, _recipient = self.f.prepare(signal)
+            self.f.consume(signal, wire)
+        self.assertEqual(self.source(signal)["lifecycle"], "answered")
+
+    def test_another_session_on_the_seat_leaves_the_old_question_unresolved(self):
+        import session_tidy as tidy
+        signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
         seat = self.f.seat()
         tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear", "harness": "claude",
             "sid": "successor", "from": {"harness": "claude", "sid": signal["session_id"]}, "ts": time.time()})

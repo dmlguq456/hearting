@@ -60,7 +60,14 @@ module.exports=function({changed,answer,action,page}) {
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
     changed();
   }
-  function enter(){focused=true;scroll=0;follow=true;changed();}
+  // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
+  // (a receipt, a changed one), the first answerable one comes up instead.
+  function enter(){
+    focused=true;scroll=0;follow=true;
+    const row=current();
+    if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
+    changed();
+  }
   function leave(){focused=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
@@ -132,7 +139,9 @@ module.exports=function({changed,answer,action,page}) {
     if(follow&&lit>=body.length){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
     scroll=Math.max(0,Math.min(scroll,Math.max(0,content.length-page)));
     // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
-    const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):text('more','more · focus and ↑↓ to read');
+    // A question with choices reads with PgUp/PgDn once focused (↑↓ choose): the hint names
+    // those keys before focus too (11-14), as it does while choosing.
+    const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):!focused&&active(row)&&choices(row).length?text('more_page','more · focus and PgUp/PgDn to read'):text('more','more · focus and ↑↓ to read');
     const more=[span(`+${Math.max(0,content.length-page)} · ${reading} ${scroll+1}/${content.length}`)];
     if(space<=1)head=[...head,span(` +${content.length-page} ${choosing(row)?'PgUp/PgDn':'↑↓'}`)];
     return [head,...content.slice(scroll,scroll+page),...(space>1?[more]:[]),...footer].slice(0,limit);

@@ -721,22 +721,39 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
     return plan, path
 
 
-def session_questions(harness, sid, *, view=None, retained=()):
-    """The exact session's canonical board; retained IDs read receipts only."""
+_RECEIPT_STATES = frozenset({"submitted", "received", "applied"})
+
+
+def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
+    """The exact session's canonical board; retained IDs read receipts only.
+
+    Only what the person can answer here now is a question in this panel (11-14): the
+    answerable ones first, then the person's own answers still showing their receipt. A wait
+    not answerable here (its existing ``answerable``/``reason``) is no question in the block;
+    ``elsewhere`` (a list, when given) receives it, for the one guidance line.
+    """
     import time
     import human_wait_state
     import questions
     view = view if isinstance(view, dict) else human_wait_state.cached_view(request=False) or {}
     ids = set(view.get("by_session", {}).get((harness, sid), ()))
-    result = []
+    answerable, receipts, current = [], [], set()
     for item in view.get("items", ()):
         owner = item.get("owner") or {}
         if (item.get("id") in ids and not item.get("stale")
                 and owner.get("harness") == harness and owner.get("session_id") == sid):
-            result.append(questions.describe(item, now=time.time()))
-        if len(result) >= 8:
-            break
-    known = {item["id"] for item in result}
+            current.add(item.get("id"))
+            described = questions.describe(item, now=time.time())
+            if described.get("answerable") is True:
+                answerable.append(described)
+            elif described.get("request_state") in _RECEIPT_STATES:
+                receipts.append(described)
+            elif elsewhere is not None:
+                elsewhere.append(described)
+    result = (answerable + receipts)[:8]
+    # A current wait left out above stays out: a retained display reference keeps only a
+    # question that has left this session's waits (its receipt), never one judged here.
+    known = {item["id"] for item in result} | current
     for old in list(retained or ())[:8]:
         if not isinstance(old, dict) or old.get("id") in known or len(result) >= 8:
             continue
@@ -1018,10 +1035,25 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         values["steward"] = bool(steward_role.role_flag(harness, sid, cwd=values.get("cwd")))
     except Exception:
         values["steward"] = False
+    elsewhere = []
+    board = session_questions(harness, sid, view=view, retained=retained_questions, elsewhere=elsewhere)
+    # The answer wait this panel counts is what the person can answer here now: this
+    # session's answerable questions (11-14), the same rows the block and the notice line
+    # show. A wait answered elsewhere gets one guidance line instead (``wait_guide``).
+    answerable = sum(1 for item in board if item.get("answerable") is True
+                     and (item.get("request_state") or "open") == "open")
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
                   state=state, route_label=_plain(route),
-                  answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
-    board = session_questions(harness, sid, view=view, retained=retained_questions)
+                  answer_wait=(None if not counts else answerable if answerable
+                               else None if counts[0] < 0 and counts[1] > 0 else 0))
+    if elsewhere:
+        from fleet.session_block import unanswerable_state
+        first = elsewhere[0]
+        state = first.get("request_state")
+        word = (state if state in {"expired", "cancelled"} or state == "unknown" and not first.get("reason")
+                else unanswerable_state(first.get("reason"), own=True))
+        values["wait_guide"] = (ui_text("fleet.session_block.questions") + " " + str(len(elsewhere)) + " · "
+                                + ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + word))
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving
@@ -1062,7 +1094,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
               "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
     labels = {key: ui_text("fleet.session_block." + key) for key in (
-        *states, "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose")}
+        *states, "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose",
+        "more_page")}
     if columns < 64:
         for key in states:
             labels[key] = ui_text("fleet.session_block.compact_" + key)

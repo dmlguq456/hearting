@@ -89,6 +89,66 @@ console.log('PASS');"""
                               text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
+    def test_focus_opens_on_the_first_answerable_question_and_names_the_page_keys_before_it(self):
+        # 11-14: Ctrl+] opens on a question the person can answer now, even when the one shown
+        # is a receipt; before focus a long question with choices names PgUp/PgDn, the keys
+        # that read it once focused (↑↓ choose there).
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+const receipt={id:'sent',revision:'r0',answerable:false,request_state:'submitted',questions:[{id:'q',question:'SENT_BEFORE',choices:['A']}]};
+const open={id:'open',revision:'r1',answerable:true,questions:[{id:'q',question:'ANSWER_ME',choices:['A','B']}]};
+block.update([receipt,open]);
+let text=JSON.stringify(block.detail({budget:8,columns:40}));
+assert(text.includes('SENT_BEFORE'),text);
+block.enter();
+text=JSON.stringify(block.detail({budget:8,columns:40}));
+assert(text.includes('ANSWER_ME')&&text.includes('▸'),text);
+block.leave();
+const many=Array.from({length:9},(_,i)=>'CHOICE_'+i);
+block.update([{id:'c',revision:'r2',answerable:true,questions:[{id:'q',question:'Which?',choices:many}]}]);
+text=JSON.stringify(block.detail({budget:6,columns:40}));
+assert(text.includes('more · focus and PgUp/PgDn to read')&&!text.includes('focus and ↑↓'),text);
+console.log('PASS');"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+    def test_the_panel_board_holds_only_what_the_person_can_answer_here(self):
+        # 11-14 (the supervisor's panel): eight blocked owners, an unanswerable question and one
+        # the person can answer, published the normal way. Blocked owners stay out of the
+        # session's index and every count; the block carries the one answerable question,
+        # first; the other is one guidance line, never counted.
+        import tempfile
+        sid='panel-session'
+        owner=dict(harness='claude',session_id=sid)
+        owners=[dict(id='S3:att-%d'%n,source='S3',kind='decision',since=100+n,stale=False,owner=owner)
+                for n in range(8)]
+        old=dict(id='S4:old',source='S4',kind='message',since=200,stale=False,owner=owner)
+        new=dict(id='S4:new',source='S4',kind='message',since=300,stale=False,owner=owner)
+        def describe(item,**kw):
+            if item['id'].startswith('S3:'):
+                return dict(id=item['id'],answerable=False,reason='owner-correction-native-parent-context-required',
+                            questions=[dict(id='q',question='owner waits',choices=[])])
+            if item['id']=='S4:old':
+                return dict(id='S4:old',answerable=False,request_state='unknown',
+                            reason='message-question-no-longer-current',questions=[dict(id='message-response',question='OLD',choices=[])])
+            return dict(id='S4:new',answerable=True,revision='r',questions=[dict(id='message-response',question='NEW',choices=['A'])])
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ,{'XDG_STATE_HOME':tmp}), \
+             mock.patch.object(hws,'_request_producer'), \
+             mock.patch.object(hws,'_message_source_state',return_value='open'), \
+             mock.patch.object(questions,'describe',side_effect=describe):
+            import time
+            self.assertTrue(hws.publish_cache({'items':[*owners,old,new],'observed_at':time.time(),'complete':True}))
+            view=hws.cached_view(request=False)
+            self.assertEqual(view['by_session'],{('claude',sid):['S4:old','S4:new']})
+            self.assertEqual(view['total'],2)
+            elsewhere=[]
+            board=shell.session_questions('claude',sid,view=view,elsewhere=elsewhere)
+        self.assertEqual([row['id'] for row in board],['S4:new'])
+        self.assertEqual([row['id'] for row in elsewhere],['S4:old'])
+
     def test_page_keys_read_a_long_question_from_its_first_row_and_keep_the_choice(self):
         # PR #1532 R2: PgUp/PgDn read the body to its first and last rows; the page stays
         # where reading left it, the highlighted choice stays, and ↑↓/numbers follow the choice.

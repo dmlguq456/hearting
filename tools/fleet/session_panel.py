@@ -757,6 +757,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "context_side": gauge,
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
+            # A wait this panel cannot answer: one line saying where it is answered (11-14),
+            # never counted with the answer wait.
+            "wait_guide": sanitize_title(str(values.get("wait_guide") or ""))[:120],
             "session_title": sanitize_title(str(values.get("title") or ""))[:320],
             "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
                     if values.get("jobs") else [],

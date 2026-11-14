@@ -570,7 +570,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const jobs=painted(model.jobs),work=painted(model.work),quota=painted(model.quota),mcp=painted(model.mcp);
     // OpenCode's MCP count stays beside the model and context (its native sidebar is hidden).
     const contextParts=mcp.length?joined([painted(model.context),mcp]):painted(model.context);
-    const waitParts=model.wait?[text(model.wait,'g_blocked')]:[];
+    // A wait answered elsewhere (11-14): one dim line of where, never part of the count.
+    const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
+    const waitParts=model.wait?[text(model.wait,'g_blocked'),...(guide?[text(' · '+guide,'dim')]:[])]:guide?[text(guide,'dim')]:[];
     // Spec rule 29 (b): the session's own content, Fleet's TITLE and NOW (rule 28's value;
     // bright while the session works or waits, as Fleet's NOW cell).
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();

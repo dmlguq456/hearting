@@ -15,7 +15,9 @@ def capacity(rows):
 # answered in that session's own window: below in this session's own panel (`answer_below`), in
 # its window from Fleet or another session (`answer_there`).
 _SENDING_REASONS = frozenset({"action-pending", "owner-correction-already-pending"})
-_CLOSED_MARKS = ("no-longer-current", "not-current", "not-pending", "cancelled")
+# A registered question whose seat another session took (11-14: the same session in a new
+# process keeps it) is closed for this window too.
+_CLOSED_MARKS = ("no-longer-current", "not-current", "not-pending", "cancelled", "incarnation-changed")
 
 
 def unanswerable_state(reason, *, own=True):

@@ -722,8 +722,20 @@ parent` (`부모 창에서 답`) for a blocked worker's answer whose parent coul
 confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
 (`닫힘`) for a request already gone (an existing state word such as expired
 stays). The head carries the short form under 64 columns and the body row the
-whole words; the `◑ N` count still counts every wait. Long questions remain readable
-with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
+whole words. Only what the person can answer here now is a question in the
+panel: its block, the `◑ N` count, the notice line under the input and the
+folded strip carry this session's answerable questions only (answerable ones
+first; `Ctrl+]` opens on the first of them), and Fleet's count only the waits a
+person answers from Fleet. A blocked worker's wait belongs to its parent agent:
+it is in no count or question block (the route row shows the route blocked),
+and it closes once the route closes or its parent holds the worker's exact
+acknowledged completion receipt. Any other wait not answerable here is one dim
+guidance line beside the count (`questions 1 · answer below`), never counted.
+A registered question belongs to its session id: the same session in a new
+process (a native resume, a restart, a compaction) still answers it, and only
+another session that took the seat ends it. Long questions remain readable
+with focused scrolling (PgUp/PgDn while choosing, named before focus too) and an
+explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields. The former rows/3 estimate does
 not hide a question or require another user decision at 80 columns.

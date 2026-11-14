@@ -51,7 +51,9 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def result(self):
-        return {"items": [{"id": "S4:fixture", "source": "S4", "kind": "decision",
+        # A registered question: what a person answers from these surfaces (a marker question
+        # is answered in its own input and is not counted, 11-14).
+        return {"items": [{"id": "S4:fixture", "source": "S4", "kind": "message",
                            "question": "진행할까요?", "since": 100,
                            "owner": {"harness": "claude", "session_id": "sid-a"},
                            "attribution": "exact"}],
@@ -325,8 +327,10 @@ try {
                          ["current", "current", "current", "older", "older", "current"])
         self.assertEqual([item.get("pane_id") for item in view["items"]],
                          [None, None, None, None, None, None])
-        self.assertEqual(view["total"], 4)
-        self.assertEqual(view["older"], 2)
+        # Listed, not counted (11-14): the blocked owners (their parent agent answers) and the
+        # marker question (answered in its own input).
+        self.assertEqual(view["total"], 3)
+        self.assertEqual(view["older"], 0)
         self.assertEqual(view["unattributed"], ["s2", "s3-old"])
         ids_before = [item["id"] for item in view["items"]]
         self.assertTrue(human_wait_state.publish_cache(result))
@@ -336,7 +340,7 @@ try {
                                    compute_hosts=None)
         summary = job_summary(snapshot)
         self.assertIn(f"{answer_wait_word()} 1", summary)
-        self.assertIn("답변 필요 3", summary)
+        self.assertIn("답변 필요 2", summary)
 
     def test_fleet_reader_does_not_fall_back_to_private_projection_cache(self):
         private_path = human_wait_state._cache_path()

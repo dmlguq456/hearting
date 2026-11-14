@@ -100,11 +100,35 @@ def wait_fold(since, now, *, owner_state=None):
     return "older" if math.isfinite(age) and age >= OLDER_AFTER else None
 
 
+def person_wait(item):
+    """Whether a person answers this wait from a shared surface (the panel, Fleet).
+
+    The existing answer judgments, which never vary for these: a blocked owner (S3) takes its
+    correction only from its parent agent's own session
+    (``owner-correction-native-parent-context-required``); a Claude native request is answered
+    in its own window (``claude-native-response-surface-unavailable``); a marker question has
+    no reply surface but that session's input (``marker-has-no-bound-native-response-surface``).
+    """
+    if not isinstance(item, dict):
+        return False
+    source = str(item.get("source") or "")
+    harness = item.get("harness") or (item.get("owner") or {}).get("harness")
+    if source == "S3":
+        return False
+    if source.startswith("S1") and harness == "claude":
+        return False
+    return not (source == "S4" and item.get("kind") != "message")
+
+
 def wait_counts(items):
-    """The single count every surface shows: current, folded (older), and ownerless."""
+    """The single count every surface shows: current, folded (older), and ownerless.
+
+    Only waits a person answers from these surfaces count (``person_wait``, 11-14): the others
+    still exist for their own answerer and say where they are answered, but are no question here.
+    """
     current = folded = ownerless = 0
     for item in items:
-        if not isinstance(item, dict):
+        if not person_wait(item):
             continue
         if item.get("stale") in (True, "older"):
             folded += 1
@@ -569,17 +593,18 @@ def _message_source(envelope):
 
 
 def _message_incarnation_current(signal):
+    """Whether the asking session still holds its seat.
+
+    The question belongs to its session id: the same session in a new process (a native
+    resume, a restart, a compaction) still answers it, and the answer goes to that session as
+    it is now (the exact-SID courier keeps its own process proof). Only another session that
+    took the seat (a confirmed handover) or an unreadable lineage ends it here (11-14). The
+    recorded process stays part of the question's identity, not of its currency.
+    """
     from dispatch_seat_handover import resolve_recipient
     resolved = resolve_recipient("provenance", session=signal["session_id"], harness=signal["harness"])
-    if (resolved.state == "unreadable" or resolved.session_id != signal["session_id"]
-            or resolved.harness != signal["harness"]):
-        return False
-    incarnation = signal.get("incarnation")
-    if incarnation is None:
-        return True  # Native exact-SID courier still enforces its own process proof.
-    pid = incarnation.get("pid") if isinstance(incarnation, dict) else None
-    return (type(pid) is int and pid > 1 and _proc_uid(pid) == os.getuid()
-            and _proc_start_ticks(pid) == str(incarnation.get("proc_start")))
+    return not (resolved.state == "unreadable" or resolved.session_id != signal["session_id"]
+                or resolved.harness != signal["harness"])
 
 
 def _message_answer_error(text):
@@ -1135,7 +1160,9 @@ def publish_cache(result: dict) -> bool:
                 if ref is not None:
                     row[key] = ref
         items.append(row)
-        if harness and sid and not item.get("stale"):
+        # A blocked owner is its parent agent's to answer (``person_wait``): its route row says
+        # it waits, no session's question block or count does. The private board keeps it.
+        if harness and sid and not item.get("stale") and item.get("source") != "S3":
             key = str(harness) + "\0" + str(sid)
             by_session.setdefault(key, []).append(str(item.get("id") or ""))
     counts = wait_counts(items)
