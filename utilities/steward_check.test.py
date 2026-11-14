@@ -199,7 +199,7 @@ class StewardCheckLabTest(CheckBase):
                 step(T0 + 3 * INTERVAL + 100)
                 self.assertEqual(self.notify.call_count, before + 1)
                 notice = self.notice()
-                self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", notice["text"])
+                self.assertIn("LAB: 미확인 1·이름 없음 0·실패 0·정체 0", notice["text"])
                 self.assertIn("지금 볼 것: AMI 가변 화자 개선 — 작은 모델", notice["text"])
                 self.assertNotIn("20.4", notice["text"])
                 ack()
@@ -336,7 +336,7 @@ class StewardCheckLabTest(CheckBase):
                                   [lambda: None] * 5)
         self.assertEqual(outcomes, [True, True] + [False] * 5)
         text = self.notice()["text"]
-        self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", text)
+        self.assertIn("LAB: 미확인 1·이름 없음 0·실패 0·정체 0", text)
         self.assertNotIn("지금 볼 것", text)
         self.assertIn("`peer-steward steward off`", text)
         print("real_tidy_80names_long_targets", outcomes, text)
@@ -417,7 +417,7 @@ class StewardCheckLabTest(CheckBase):
                          {"failed": 1, "stagnant": 1, "unknown": 0, "unlinked": 1})
         self.register()
         self.step(T0 + INTERVAL)
-        self.assertIn("미연결 1", self.notice()["text"])
+        self.assertIn("이름 없음 1", self.notice()["text"])
         self.assertIn("지금 볼 것: AMI 가변 화자 개선 — 작은 모델", self.notice()["text"])
         self.write_run("unlinked-two", 11.0)
         after = REAL_OBSERVE(HARNESS, SID)
@@ -2035,14 +2035,14 @@ class LabRegressionTest(CheckBase):
         self.step(T0 + 2 * INTERVAL)
         self.assertEqual(self.obs()["phase"], "notified")
         receipt = self.record()["receipt"]
-        self.assertIn("LAB: 미확인 12·미연결 0·실패 0·정체 0", receipt["text"])
+        self.assertIn("LAB: 미확인 12·이름 없음 0·실패 0·정체 0", receipt["text"])
         self.assertIn("`peer-steward steward check`", receipt["text"])
 
     def test_oversized_names_use_counts_and_remember_all_runs(self):
         lab = self.labs(groups=[dict(name="가" * 180, headline_name="나" * 80,
                                    unknown=1, failed=0, stagnant=0)])
         self.assertEqual(self.tick(lab), 1)
-        self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", self.notice()["text"])
+        self.assertIn("LAB: 미확인 1·이름 없음 0·실패 0·정체 0", self.notice()["text"])
         self.assertNotIn("지금 볼 것", self.notice()["text"])
         self.assertEqual(len(self.obs()["lab_notified"]), 1)
         self.assertEqual(self.tick(lab), 0)
@@ -2076,7 +2076,7 @@ class LabRegressionTest(CheckBase):
                 self.assertIn("`peer-steward steward check`", text)
                 self.assertEqual(" | LAB: " in text, count > 0)
                 if count:
-                    self.assertIn(f"미확인 {count}·미연결 0·실패 0·정체 0 (묶음 {count}개)", text)
+                    self.assertIn(f"미확인 {count}·이름 없음 0·실패 0·정체 0 (묶음 {count}개)", text)
                 omitted = sum(work not in text for work in self.seen["open_work"])
                 if omitted:
                     self.assertIn(f"+{omitted} more", text)
@@ -2113,7 +2113,7 @@ class LabRegressionTest(CheckBase):
                        unknown=1, failed=0, stagnant=0) for i in range(6)]
         lab = self.labs(groups=groups)
         self.assertEqual(self.tick(lab), 1)
-        self.assertIn("LAB: 미확인 6·미연결 0·실패 0·정체 0 (묶음 6개)", self.notice()["text"])
+        self.assertIn("LAB: 미확인 6·이름 없음 0·실패 0·정체 0 (묶음 6개)", self.notice()["text"])
         self.assertEqual(len(self.obs()["lab_notified"]), 6)
         for _ in range(7):
             self.assertEqual(self.tick(lab), 0)
@@ -2123,7 +2123,7 @@ class LabRegressionTest(CheckBase):
             dict(name="가" * 180, headline_name="나" * 80, unknown=1, failed=0, stagnant=0),
             dict(name="small-group", headline_name="run B", unknown=1, failed=0, stagnant=0)])
         self.assertEqual(self.tick(lab), 1)
-        self.assertIn("LAB: 미확인 2·미연결 0·실패 0·정체 0 (묶음 2개)", self.notice()["text"])
+        self.assertIn("LAB: 미확인 2·이름 없음 0·실패 0·정체 0 (묶음 2개)", self.notice()["text"])
         self.assertEqual(len(self.obs()["lab_notified"]), 2)
         for _ in range(3):
             self.assertEqual(self.tick(lab), 0)
@@ -2134,7 +2134,7 @@ class LabRegressionTest(CheckBase):
                                         unknown=0, failed=0, stagnant=0)]))
         text = self.notice()["text"]
         self.assertNotIn("more", text)
-        self.assertIn("LAB: 미확인 0·미연결 0·실패 0·정체 0", text)
+        self.assertIn("LAB: 미확인 0·이름 없음 0·실패 0·정체 0", text)
         for work in self.seen["open_work"]:
             self.assertIn(work, text)
 
@@ -2171,8 +2171,8 @@ class LabRegressionTest(CheckBase):
 
     def test_lab_language_and_existing_signature_scope(self):
         seen = {**self.seen, "lab": self.labs(unknown=12, failed=1, stagnant=2, unlinked=3)}
-        for lang, words in (("en", ("failed 1", "stuck 2", "unknown 12", "look now:", "unlinked 3")),
-                            ("ko", ("실패 1", "정체 2", "미확인 12", "지금 볼 것:", "미연결 3"))):
+        for lang, words in (("en", ("failed 1", "stuck 2", "unknown 12", "look now:", "unnamed 3")),
+                            ("ko", ("실패 1", "정체 2", "미확인 12", "지금 볼 것:", "이름 없음 3"))):
             with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
                 counts, names, _ = SC._lab_summary(seen, [])
                 line = counts + names
@@ -2232,6 +2232,75 @@ class LabRegressionTest(CheckBase):
             self.assertEqual(self.tick(lab), 0)
         print("memory-2000", len(remembered), "record-bytes", size)
 
+    def many(self, count):
+        """One group of `count` unknown runs with a readable start: two nameplates each."""
+        rows = [dict(condition_id=f"c{i}", run_id=f"r{i}", started_at=1.0 + i, unknown_flag=True)
+                for i in range(count)]
+        return {"/synthetic": dict(groups=[dict(name="AMI", headline_name="작은 모델", unknown=count,
+                                                failed=0, stagnant=0, rows=rows)],
+                                   unlinked=0, unlinked_run_ids=[], unknown=count, failed=0, stagnant=0)}
+
+    def remember(self, entries):
+        observation = self.obs()
+        observation["lab_notified"] = entries
+        self.store.update(self.duty()["id"], observation=observation)
+
+    def test_a_full_memory_keeps_the_nameplates_that_are_still_visible(self):
+        # 300 runs = 600 visible nameplates, announced long ago; 424 other (old) nameplates
+        # fill the memory to its 1024 limit. New runs keep arriving: the cut must drop old ones.
+        lab = self.many(300)
+        self.assertEqual(self.tick(lab), 1)
+        visible = [[rid, 1] for rid in SC._lab_summary({"lab": lab}, [])[2]]
+        self.assertEqual(len(visible), 600)
+        self.remember(visible + [[SC._lab_id("/gone", "run", i), 1] for i in range(424)])
+        for added in range(1, 6):
+            lab = self.many(300 + added)
+            self.assertEqual(self.tick(lab), 1, added)
+            self.assertEqual(self.tick(lab), 0, added)      # the next check is quiet
+            memory = dict(self.obs()["lab_notified"])
+            self.assertEqual(len(memory), 1024)
+            self.assertTrue(set(SC._lab_summary({"lab": lab}, [])[2]) <= set(memory))
+            self.assertLess(len(json.dumps(self.duty()).encode()), 128 * 1024)
+
+    def test_more_visible_nameplates_than_the_memory_holds_announce_once_by_count(self):
+        lab = self.many(1100)                                # 2200 nameplates, 1024 fit
+        self.assertEqual(self.tick(lab), 1)
+        self.assertIn("미확인 1100", self.notice()["text"])
+        for _ in range(3):
+            self.assertEqual(self.tick(lab), 0)
+        self.assertLessEqual(len(self.obs()["lab_notified"]), 1024)
+        self.assertLess(len(json.dumps(self.duty()).encode()), 128 * 1024)
+        self.assertEqual(self.tick(self.many(1101)), 1)      # more than before: said again, once
+        self.assertEqual(self.tick(self.many(1101)), 0)
+        self.assertEqual(self.tick(self.many(1090)), 0)      # fewer: still quiet
+
+    def test_a_renamed_count_word_does_not_wake_a_steward_already_told(self):
+        lab = self.labs(unknown=1, unlinked=2)
+        self.assertEqual(self.tick(lab), 1)
+        before = self.obs()["lab_notified"]
+        for lang in ("en", "ko"):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                self.assertEqual(self.tick(lab), 0, lang)
+        self.assertEqual(self.obs()["lab_notified"], before)
+
+    def test_the_count_word_for_runs_without_a_catalog_name(self):
+        seen = {**self.seen, "lab": self.labs(unlinked=3)}
+        for lang, word, old in (("ko", "이름 없음 3", "미연결"), ("en", "unnamed 3", "unlinked")):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                line = SC._lab_summary(seen, [])[0]
+            self.assertIn(word, line)
+            self.assertNotIn(old, line)
+
+    def test_check_output_carries_the_lab_line_the_notice_carries(self):
+        self.seen["targets"] = [target()]
+        lab = self.labs(unknown=1, unlinked=2)
+        self.seen["lab"] = lab
+        line, names, _ = SC._lab_summary({"lab": lab}, [])
+        self.assertIn("이름 없음 2", line)
+        self.assertIn(line + names, self.check(self.clock + 10).splitlines())
+        self.seen["lab"] = {}
+        self.assertNotIn("LAB:", self.check(self.clock + 20))
+
     def test_installed_main_without_lab_memory(self):
         self.tick({})  # same ordinary signature and duty shape as installed main
         observation = self.obs()
@@ -2284,7 +2353,7 @@ class LabRegressionTest(CheckBase):
         self.tick(self.labs())
         self.assertEqual(self.tick(self.labs(unknown=1)), 1)
         text = self.notice()["text"]
-        self.assertIn("LAB: 미확인 1·미연결 0·실패 0·정체 0", text)
+        self.assertIn("LAB: 미확인 1·이름 없음 0·실패 0·정체 0", text)
         self.assertIn("`peer-steward steward off`", text)
         shown = sum(t["name"] in text for t in self.seen["targets"])
         self.assertIn(f"+{5 - shown} more", text)

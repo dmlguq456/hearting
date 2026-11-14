@@ -549,8 +549,15 @@ def _lab_summary(observation: dict, notified) -> tuple[str, str, dict]:
     # Only the id-less tail needs a count watermark; named runs use identities.
     overflow = {_lab_id(root, "unlinked-overflow"): lab["unlinked"] for root, lab in labs.items()
                 if lab["unlinked"] > len(lab.get("unlinked_run_ids", []))}
-    line = "LAB: " + "·".join(t("fleet.lab.n_" + key, n=sum(lab[key] for lab in labs.values()))
-                              for key in ("unknown", "unlinked", "failed", "stagnant"))
+    if len(ids) > _MAX_LAB_MEMORY:
+        # More nameplates are visible than the memory holds: remember their number, so the
+        # count is announced once and then stays quiet until it grows.
+        ids, overflow = [], {**overflow, _lab_id("visible-overflow"): len(ids)}
+    # The head, the Fleet line and this line name a run without a catalog name with one word.
+    line = "LAB: " + "·".join(
+        t("fleet.lab.n_" + word, n=sum(lab[key] for lab in labs.values()))
+        for key, word in (("unknown", "unknown"), ("unlinked", "unnamed"),
+                          ("failed", "failed"), ("stagnant", "stagnant")))
     if len(groups) > 1:
         line += " (" + t("fleet.lab.n_groups", n=len(groups)) + ")"
     selected = next((group for root, group in groups
@@ -1047,8 +1054,9 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
             **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
             "reason": "quiet-no-change"})
         return
-    # List order survives the store's sorted JSON keys. Evict oldest announcements only.
-    retained.update({rid: max(count, retained.get(rid, 0)) for rid, count in current.items()})
+    # List order survives the store's sorted JSON keys. Evict the oldest announcements first.
+    # The nameplates seen now go last, so the cut below never drops one that is still visible.
+    retained.update({rid: max(count, retained.pop(rid, 0)) for rid, count in current.items()})
     lab_notified = list(retained.items())[-_MAX_LAB_MEMORY:]
     delivery_id = _delivery_id(key)
     # Record the intent first so a carrier claiming right away already finds the
@@ -1198,6 +1206,12 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
           f"targets={count} changes={changes} checked_at={stamp}", file=out)
     for warning in policy_warnings():
         print(f"warning={warning}", file=out)
+    try:  # the same LAB line the periodic notice carries; a lab read that breaks hides only this line
+        line, names, _ = _lab_summary(seen, dict(observation.get("lab_notified") or []))
+    except Exception:  # noqa: BLE001
+        line = names = ""
+    if line:
+        print(line + names, file=out)
     actions = next_actions(seen, waiting_since, now)
     if not targets and not actions:
         print("hint=nothing to supervise; tidy finished sessions and release with "

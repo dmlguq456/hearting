@@ -277,7 +277,13 @@ class CrossPresentation(T.Base):
         self.assertEqual("".join(p["text"] for p in view["strip"]), "!2LB")
         seen = self.observe(root, board)
         line, names, notified = SC._lab_summary({"lab": seen}, [])
-        self.assertIn("미확인 1·미연결 1·실패 1·정체 1 (묶음 2개)", line)
+        self.assertIn("미확인 1·이름 없음 1·실패 1·정체 1 (묶음 2개)", line)
+        # One word for the runs without a catalog name: supervisor line, shell head and Fleet's lower line.
+        for lang, word in (("ko", "이름 없"), ("en", "unnamed")):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                self.assertIn(word, SC._lab_summary({"lab": seen}, [])[0])
+                self.assertIn(word, "".join(p["text"] for p in session_lab.view(board, NOW)["counts"][2]))
+                self.assertIn(word, lab_table.ui_text("experiment.unlinked", count=1, ids="loose-run"))
         self.assertIn("둘째 묶음 — 관측 끊긴 조건", names)
         _, fallback, _ = SC._lab_summary({"lab": seen}, notified)
         self.assertIn(GROUP + " — 실패 조건", fallback)
