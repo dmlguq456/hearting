@@ -4614,6 +4614,107 @@ class FinishedRouteWakeTests(unittest.TestCase):
         self.assertTrue(events.wait_changed(5.0))
         self.assertLess(time.monotonic() - began, 5.0)      # an event, well inside the 30 s cadence
 
+    # Rule B: only a route this pass confirms closed now leaves the watch. A terminal state in its
+    # history, "no answer wait", or a read that failed confirms nothing.
+
+    def assert_watched_and_wakes(self, route, touched, *, observed_waits=None):
+        observed, local = self.pass_once()
+        if observed_waits is not None:
+            self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], observed_waits)
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(touched), local | set(observation.last_pass_route_paths()))
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        with Path(touched).open("a", encoding="utf-8") as handle:
+            handle.write(" \n")
+        self.assertTrue(events.wait_changed(5.0), "a change on %s did not wake the producer" % touched)
+
+    def test_a_route_reopened_after_complete_is_watched_and_wakes(self):
+        route = self.route()                                   # COMPLETE, closed, done/PASS
+        self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        # Its closure is withdrawn and a new attempt runs it again; the COMPLETE stays in history.
+        route["file"].with_name("route.outcome.json").unlink()
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-reopen-") + "\n")
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": "2026-11-14T00:00:00Z", "route_id": route["record"]["route_id"],
+                                     "route_hash": route["record"]["route_hash"],
+                                     "workflow_state": "RUNNING"}) + "\n")
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_complete_with_its_closure_pending_is_watched_and_the_finish_wakes(self):
+        route = self.route(finished=False)
+        record = route["record"]
+        finish = Path(record["artifact_root"]) / ".runtime" / "inline-finish" / "v1" / record["route_id"] / "finish.json"
+        finish.parent.mkdir(parents=True)
+        finish.write_text(json.dumps({"schema": "inline_finish_v1", "state": "closure-pending",
+                                      "route_id": record["route_id"]}), encoding="utf-8")
+        route["journal"].write_text(json.dumps({"at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                                                "route_hash": record["route_hash"],
+                                                "workflow_state": "COMPLETE"}) + "\n", encoding="utf-8")
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+        self.assert_watched_and_wakes(route, finish)
+
+    def test_a_failed_route_waiting_for_a_decision_is_watched_and_wakes(self):
+        route = self.route(finished=False)
+        record = route["record"]
+        route["journal"].write_text(json.dumps({"at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                                                "route_hash": record["route_hash"],
+                                                "workflow_state": "FAILED_TERMINAL"}) + "\n", encoding="utf-8")
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] +
+                    ",verdict=FAIL,note=dead-worker-blocked\n")
+        self.assert_watched_and_wakes(route, route["journal"], observed_waits=[("S3", "decision")])
+
+    def test_a_route_that_cannot_be_read_stays_watched_and_its_repair_wakes(self):
+        unreadable = self.route()
+        with mock.patch.object(observation, "_route_outcome", side_effect=OSError("synthetic unreadable")):
+            observed = observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertIn(str(unreadable["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(unreadable["journal"]), observation.last_pass_route_paths())
+        self.assertTrue(any(item.get("reason") == "OSError" for item in observed["health"]))
+        observation._WAIT_MEMO.clear()
+        broken = self.route()
+        good = broken["file"].read_text(encoding="utf-8")
+        broken["file"].write_text("{broken", encoding="utf-8")
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(broken["file"]), watched)            # a broken record is not "closed"
+        self.assertIn(str(broken["journal"]), watched)
+        self.assertNotIn(str(unreadable["file"]), watched)     # readable again and closed: settled
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        broken["file"].write_text(good, encoding="utf-8")     # repaired
+        self.assertTrue(events.wait_changed(5.0))
+        _observed, _local = self.pass_once()                   # and settled once it reads closed
+        self.assertNotIn(str(broken["file"]), observation.last_pass_route_paths())
+
+    def test_a_pass_that_could_not_read_a_registry_keeps_the_paths_it_knew(self):
+        opened = self.route(finished=False)
+        self.pass_once()
+        self.assertIn(str(opened["file"]), observation.last_pass_route_paths())
+        import dispatch_registry_cache
+        with mock.patch.object(dispatch_registry_cache, "registry_snapshot",
+                               side_effect=OSError("synthetic registry")):
+            observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertIn(str(opened["file"]), observation.last_pass_route_paths())
+
+    def test_settled_routes_add_nothing_and_old_format_routes_stay_watched(self):
+        _observed, idle = self.pass_once()
+        settled = [self.route() for _ in range(60)]
+        old = []
+        for _ in range(60):                                    # closure evidence absent: no outcome, no end
+            route = self.route(finished=False)
+            self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+            old.append(route)
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertFalse({str(route["file"]) for route in settled} & (watched | local))
+        self.assertFalse({str(route["journal"]) for route in settled} & watched)
+        for route in old:
+            self.assertIn(str(route["file"]), watched)
+        self.assertLessEqual(len(watched), 4 * len(old))       # at most four files per such route
+
 
 if __name__ == "__main__":
     unittest.main()
