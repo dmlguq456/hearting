@@ -218,9 +218,11 @@ with a byte-for-byte backup; native model and permission settings are untouched.
 The default is a 40-column side panel. **»** beside the gear folds it into a
 eight-cell strip (state, session number, route count, answer waits) and gives
 the native area the freed columns; a press on the strip opens it again. Where
-the open panel would leave the native area under 80 columns (a 40-column panel
-in a terminal under 122 columns) it folds by itself and opens again with room;
-a choice made by hand wins at that width. The bottom layout folds to one row
+the open panel would leave the native area under 60 columns (a 40-column panel
+in a terminal under 102 columns) it folds by itself and opens again with room;
+a choice made by hand holds at every width (a panel opened by hand in a window
+too narrow to stand beside sits under the native area until the window widens).
+The bottom layout folds to one row
 (**▾** / **▴**). Existing explicit layout choices are retained. OpenCode uses
 the same panel and settings; its own sidebar is hidden in the shell window
 (OpenCode's toggle still opens it), with Context in its footer and its MCP

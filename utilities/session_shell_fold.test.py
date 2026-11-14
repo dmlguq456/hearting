@@ -131,25 +131,23 @@ assert(long.endsWith('… ▴')&&[...long].length===30,long);
 const assert=require('node:assert/strict'),path=require('node:path'),d=require(path.join(process.argv[1],'native-display.cjs'));
 const configuration={layout:'side',side_width:40,side_min_columns:100,position:'right'};
 const fold=(cols,choice=null,pinned=false)=>d.fold({cols,choice,configuration,pinned});
-// (d) The threshold is one constant: 80 native columns beside the open panel (cols - 40 - 2).
-assert.equal(d.NATIVE_MIN,80);
-assert.equal(fold(122).folded,false);assert.equal(fold(121).folded,true);
-for(const width of [32,60,80])assert.equal(d.fold({cols:width+82,configuration:{...configuration,side_width:width}}).folded,false),
- assert.equal(d.fold({cols:width+81,configuration:{...configuration,side_width:width}}).folded,true);
+// (d) The threshold is one constant: 60 native columns beside the open panel (cols - 40 - 2).
+assert.equal(d.NATIVE_MIN,60);
+assert.equal(fold(102).folded,false);assert.equal(fold(101).folded,true);
+for(const width of [32,60,80])assert.equal(d.fold({cols:width+62,configuration:{...configuration,side_width:width}}).folded,false),
+ assert.equal(d.fold({cols:width+61,configuration:{...configuration,side_width:width}}).folded,true);
 // #1586 review follow-up 2: a panel folded by itself opens again only three columns past the
-// threshold (83 native columns), so a window dragged across it does not jump back and forth; an
-// open panel still folds under 80.
+// threshold (63 native columns), so a window dragged across it does not jump back and forth; an
+// open panel still folds under 60.
 const now=(cols,expanded)=>d.fold({cols,configuration,expanded}).folded;
 assert.equal(d.REOPEN_MARGIN,3);
-assert.deepEqual([121,122,123,124,125].map(c=>now(c,false)),[true,true,true,true,false]);
-assert.deepEqual([125,122,121].map(c=>now(c,true)),[false,false,true]);
+assert.deepEqual([101,102,103,104,105].map(c=>now(c,false)),[true,true,true,true,false]);
+assert.deepEqual([105,102,101].map(c=>now(c,true)),[false,false,true]);
 // The old `side_min_columns` does not take part.
 assert.equal(d.fold({cols:130,configuration:{...configuration,side_min_columns:1000}}).folded,false);
-// A hand fold stays folded however wide; a hand unfold stays open at its width and lapses with the next.
+// A hand fold stays folded however wide; a hand unfold stays open however narrow.
 assert.deepEqual(fold(300,{folded:true}),{folded:true,choice:{folded:true}});
-assert.deepEqual(fold(100,{folded:false,cols:100}),{folded:false,choice:{folded:false,cols:100}});
-assert.deepEqual(fold(101,{folded:false,cols:100}),{folded:true,choice:null});
-assert.deepEqual(fold(140,{folded:false,cols:100}),{folded:false,choice:null});
+for(const cols of [100,40,140])assert.deepEqual(fold(cols,{folded:false}),{folded:false,choice:{folded:false}});
 // An open settings editor or question keeps an open panel open; the bottom layout never folds by itself.
 assert.equal(fold(100,null,true).folded,false);
 assert.equal(d.fold({cols:40,configuration:{...configuration,layout:'bottom'}}).folded,false);
@@ -157,11 +155,67 @@ assert.equal(d.fold({cols:40,choice:{folded:true},configuration:{...configuratio
 // The sizes the native is told: open beside (cols - width - 2), the strip (cols - 8 - 1), under (cols).
 const at=(cols,expanded,extra={})=>d.layout({cols,rows:40,expanded,configuration:{...configuration,...extra}});
 assert.equal(at(180,true).nativeCols,138);assert.equal(at(180,false).nativeCols,171);assert.equal(at(180,false).panelCols,d.STRIP);
-assert.equal(at(121,false).nativeCols,112);assert.equal(at(122,true).nativeCols,80);
+assert.equal(at(101,false).nativeCols,92);assert.equal(at(102,true).nativeCols,60);
 assert.deepEqual([at(180,false,{position:'left'}).nativeColumn,at(180,false).panelColumn],[9,172]);
 assert.deepEqual([at(180,false,{layout:'bottom'}).side,at(180,false,{layout:'bottom'}).nativeCols],[false,180]);
 // Opened by hand where the panel cannot stand beside (native under 48), it opens under the native area.
 assert.deepEqual([at(80,true).side,at(80,true).nativeCols],[false,80]);
+""")
+
+    def test_the_panel_folds_by_itself_only_under_sixty_native_columns(self):
+        # 11-14 night ("자동으로 접히는 기준이 타이트하고"): the open panel folds by itself only where it would
+        # leave the native area under 60 columns (it was 80), and opens again three columns past it.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),d=require(path.join(process.argv[1],'native-display.cjs'));
+for(const width of [40,54]){
+ const configuration={layout:'side',side_width:width,position:'right'};
+ const folded=(cols,expanded=true)=>d.fold({cols,configuration,expanded}).folded;
+ const line=width+2+60;  // 102 columns for a 40-column panel, 116 for a 54-column one
+ // Open, the native keeps 60 columns beside it; one column fewer folds it.
+ assert.deepEqual([line+20,line,line-1].map(c=>folded(c)),[false,false,true],String(width));
+ assert.equal(d.layout({cols:line,rows:40,expanded:true,configuration}).nativeCols,60);
+ // A window between the old line (80 native columns) and the new one stays open.
+ assert.deepEqual([width+2+79,width+2+70].map(c=>folded(c)),[false,false],String(width));
+ // Folded by itself, it opens again at 63 native columns and not before.
+ assert.deepEqual([line,line+2,line+3].map(c=>folded(c,false)),[true,true,false],String(width));
+}
+""")
+
+    def test_a_hand_choice_holds_at_every_width_and_only_no_choice_is_judged(self):
+        # 11-14 night ("창 크기 조절할때마다 자동으로 접히는게 좀 번거롭네"): a panel opened by hand stays open
+        # however the window is resized (under the native area where it cannot stand beside, beside
+        # again when the width returns); folded by hand it stays folded; only without a hand choice
+        # does the 60-column judgment fold and open it. The host's own fold path, resize by resize.
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const code=text.slice(text.indexOf('function geometry(){'),text.indexOf('function panelColumns(){'));
+const seedLine=text.split('\n').find(line=>line.includes('const choice=seed.foldChoice;'));
+const host=(cols,expanded=true)=>{
+ const c={nativeDisplay:require(path.join(process.argv[1],'native-display.cjs')),cols,rows:40,expanded,foldChoice:null,
+  displayConfiguration:{layout:'side',side_width:40,position:'right'},settings:undefined,dragging:false,block:{focused:false,leave(){}}};
+ vm.createContext(c);vm.runInContext(code,c);return c;};
+// One window resize (host.cjs: applyLayout, then refold), then what stands: open beside, open under, or folded.
+const resize=(c,cols)=>{c.cols=cols;c.refold();const g=c.geometry();return c.expanded?(g.side?'beside':'under'):'folded';};
+const press=(c,folded)=>{c.foldByHand(folded);c.refold();};
+// (1) Opened by hand where it had folded by itself: open at every width, narrower and wider, again and again.
+let c=host(95);assert.equal(resize(c,95),'folded');press(c,false);assert.equal(resize(c,95),'beside');
+const widths=[70,100,60,130,95,101,200,90,61,140];
+assert.deepEqual(widths.map(w=>resize(c,w)),widths.map(w=>w-42>=48?'beside':'under'));
+// (2) Folded by hand: folded however wide.
+c=host(180);assert.equal(resize(c,180),'beside');press(c,true);
+assert.deepEqual([300,400,120,180,90].map(w=>resize(c,w)),Array(5).fill('folded'));
+// (3) No hand choice: the 60-column judgment folds it (a 40-column panel under 102 columns) and opens
+// it again past the margin (105).
+c=host(180);
+assert.deepEqual([180,102,101,104,105,102,101,160].map(w=>resize(c,w)),['beside','beside','folded','folded','beside','beside','folded','beside']);
+// (4) Opened by hand too narrow to stand beside (under 48 native columns): under the native area, and
+// beside again, still open, once the width returns.
+c=host(85,false);assert.equal(resize(c,85),'folded');press(c,false);
+assert.deepEqual([85,95,80,180,89,90].map(w=>resize(c,w)),['under','beside','under','beside','under','beside']);
+// A host hand-over from the earlier release carries `{folded:false,cols}`: it holds at every width too.
+c=host(100);vm.runInContext('{const seed={foldChoice:{folded:false,cols:100}};'+seedLine.trim()+'}',c);
+assert.deepEqual([100,70,140,60].map(w=>resize(c,w)),['beside','under','beside','under']);
 """)
 
     def test_no_window_size_leaves_the_native_area_without_a_cell(self):

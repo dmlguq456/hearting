@@ -81,6 +81,20 @@ class SessionShellCopyTest(unittest.TestCase):
                 self.assertEqual(result['help'],config.ui_text('fleet.session_block.editor_help'))
                 self.assertNotIn('hearting ─','\n'.join(self.lines(result)))
 
+    def test_the_question_box_is_titled_questions_on_every_screen_language(self):
+        # 11-14 night ("질문 창은 한글로 '질문' 되어있는데 일관성을 좀 맞추려면 QUESIONS로"): the question box's
+        # title is `QUESTIONS`, Fleet's tab name, on a Korean screen as on an English one; the count
+        # follows it as before, dim as the panel's other name tags.
+        from fleet.session_block import question_presentations
+        for language in ('ko','en'):
+            with self.subTest(language=language),mock.patch.dict(os.environ,{'FLEET_NOW_LANG':language}):
+                lines=self.lines(self.panel({'human_state':'none'},language,question=True))
+                self.assertTrue(any('QUESTIONS 1 · 1/1' in line for line in lines),lines)
+                self.assertFalse(any('질문 1' in line or 'questions 1' in line for line in lines),lines)
+                item={'answerable':True,'questions':[{'question':'Choose?','choices':['Yes','No']}]}
+                question_presentations([item],60)
+                self.assertIn(('QUESTIONS 1','dim'),item['questions'][0]['display']['head'])
+
     def test_catalog_changes_reach_the_panel_without_another_wording_definition(self):
         catalog=config._ui_catalog()
         def translate(key,language,**fields):
