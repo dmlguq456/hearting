@@ -58,7 +58,7 @@ while True:
         if line=='later':later=[(time.monotonic()+0.5+i*0.02,'LATER_%02d'%i) for i in range(12)]
         if line=='busy':event('prompt')
         if line=='calm':event('stop')
-        said='DONE_'+line
+        said='DONE_'+line.replace('\x1b','^')
     screen()
 """
 
@@ -168,17 +168,30 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   await key('\r',400);checks.enter_swallowed=!(await screen()).some(l=>l.includes('DONE_draft1'));
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');
   // The other question: a text answer in Korean and a paste, kept when the popup closes.
+  await key('draft2',150);
   await key('\x1d',200);s=await until(s=>!!box(s),'the popup for the text question');
   await key('한글 답',100);
   // An Alt+letter (ESC then a letter) is no key the editor knows: dropped, the popup stands, the
   // draft stays and the native receives nothing.
   await key('\x1bb',250);await key('\x1bf',250);
   s=await screen();checks.alt_kept=!!box(s)&&has('› 한글 답')(s);
-  checks.alt_leaked=s.some(l=>/^❯ \S/.test(l))||s.some(l=>l.includes('NATIVE_ESC_'));
+  checks.alt_leaked=s.some(l=>/^❯ draft2\S/.test(l)||/^❯ (?!draft2)\S/.test(l))||s.some(l=>l.includes('NATIVE_ESC_'));
+  // ESC then Enter (Shift+Enter, Alt+Enter): dropped like it; the popup stands, the draft stays, and the
+  // Enter never submits the text standing in the native input.
+  await key('\x1b\r',300);
+  s=await screen();checks.escenter_kept=!!box(s)&&has('› 한글 답')(s);
+  checks.escenter_leaked=s.some(l=>l.includes('DONE_draft2'))||!s.some(l=>l.includes('❯ draft2'));
   await key('\x1b[200~붙여넣기\x1b[201~',250);
   s=await until(has('› 한글 답붙여넣기'),'the typed answer');frames.typing=s;
   await key('\x1b',200);await until(s=>!box(s),'closed');
   await key('\x1d',250);s=await until(has('› 한글 답붙여넣기'),'the draft kept');frames.draft_kept=s;
+  // The Esc that closes it, pressed again 0.2 s later, is the shell's; a letter after it, or an Esc
+  // after 1.5 s, is the native's.
+  await key('\x1b',200);await until(s=>!box(s),'closed again');
+  await key('\x1b',200);s=await screen();checks.esc2_leaked=s.some(l=>/^❯ .*\^/.test(l));
+  await key('\x1d',250);await until(s=>!!box(s),'the popup for the Esc and a letter');
+  await key('\x1b',200);await key('x',200);s=await screen();checks.esc_x_kept=s.some(l=>l.includes('❯ draft2x'));
+  await key('\r',250);
   // The moving frame turns beside it (the popup covers the panel's edge at 120 columns).
   await key('\x1b',200);await key('busy\r',300);await resize(120,30);await key('\x1d',300);
   await until(s=>!!box(s),'the popup at 120 columns');
@@ -208,7 +221,8 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   // A 60×16 window.
   await resize(60,16);await key('\x1d',300);s=await until(s=>!!box(s),'the popup at 60×16');frames.narrow=s;
   checks.narrow_width=Math.max(...s.map(l=>[...l].length));
-  await key('\x1b',200);
+  // An Esc 1.5 s after the Esc that closed it is the native's (last: it leaves an Esc in the native input).
+  await key('\x1b',1500);await key('\x1b',250);s=await screen();checks.esc_late_native=s.some(l=>/^❯ .*\^/.test(l));
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
 finally{try{child.write('\x1b');child.write('quit\r');}catch{}await sleep(300);try{child.kill();}catch{}}
@@ -323,6 +337,13 @@ class SessionShellPopupTest(unittest.TestCase):
         # An Alt+letter in a text answer: the popup stands, the draft stays, the native gets nothing.
         self.assertTrue(checks['alt_kept'])
         self.assertFalse(checks['alt_leaked'])
+        # ESC then Enter: dropped, the popup stands, the native input's text is not submitted.
+        self.assertTrue(checks['escenter_kept'])
+        self.assertFalse(checks['escenter_leaked'])
+        # The second Esc after the Esc that closed it is the shell's; a letter, or an Esc after 1.5 s, is the native's.
+        self.assertFalse(checks['esc2_leaked'])
+        self.assertTrue(checks['esc_x_kept'])
+        self.assertTrue(checks['esc_late_native'])
         self.assertLessEqual(checks['narrow_width'], 60)
         narrow = frames['narrow']
         top = next(i for i, line in enumerate(narrow) if '✕ ─╮' in line)

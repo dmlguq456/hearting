@@ -789,10 +789,12 @@ panel's QUESTIONS rows or on the strip's row of what to do opens it too, and a
 new question never does; with no question waiting `Ctrl+]` unfolds a folded panel
 (as it always did) and the read keys `r`, `w`, `f` stand beside it. While it
 stands every key and press is its own (none reaches the native, a native that
-reads the mouse included; an Alt+letter is dropped, neither closing it nor
-reaching the native); Escape, `Ctrl+]`, its `✕` or a press outside it closes it
+reads the mouse included; an Alt+letter, or an Enter right after Esc (Shift+Enter,
+Alt+Enter), is dropped, neither closing it nor reaching the native); Escape,
+`Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
-press are the popup's too), and a draft stays for the next opening. When the
+press are the popup's too; a lone Esc within a second of the Esc that closed it is
+the shell's, never the native's), and a draft stays for the next opening. When the
 question being read is replaced by another with nothing typed, `question changed`
 shows once and the first Enter after only clears it. Ordinary typing, including
 digits, Enter, Tab and action letters, remains native while it is closed. The
