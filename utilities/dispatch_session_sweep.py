@@ -1225,8 +1225,36 @@ def _compute_run_notice(record: dict) -> dict | None:
 
 
 _EXPERIMENT_FINAL_KEY_RE = re.compile(r"^experiment:(?P<run_id>[^:]+):final(?::|$)")
-_STATUS_EXIT_RE = re.compile(
-    r"status=(?P<status>[^;,\s]+)(?P<sep>;\s*)exit=(?P<exit>[^;,\s]+)")
+_STATUS_EXIT_FALLBACK = "status={status}; exit={exit}"
+
+
+def _status_exit_forms() -> list:
+    """Every language's `status=…; exit=…` key as ``(template, regex)``, read from the UI catalog.
+
+    The producer writes this key from ``resource.key.status`` in the notice's own language, so the
+    words come from that one catalog entry (a new language or a changed word is followed, not copied
+    here). An unreadable catalog leaves the English form alone; a delivery never fails over it."""
+    templates = [_STATUS_EXIT_FALLBACK]
+    try:
+        entry = json.loads((Path(__file__).resolve().parents[1] / "tools" / "i18n" / "messages.json")
+                           .read_text(encoding="utf-8"))["messages"]["resource.key.status"]
+        templates += [value for value in entry.values()
+                      if isinstance(value, str) and value not in templates
+                      and 0 <= value.find("{status}") < value.find("{exit}")]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    forms = []
+    for template in templates:
+        head, rest = template.split("{status}", 1)
+        middle, tail = rest.split("{exit}", 1)
+        word = "[^;,\\s]+"
+        # A space in the template is any run of spaces, as the key was always read (`;\s*exit=`).
+        pattern = "".join((re.escape(head), word, re.escape(middle), word, re.escape(tail))).replace("\\ ", "\\s*")
+        forms.append((template, re.compile(pattern)))
+    return forms
+
+
+_STATUS_EXIT_FORMS = _status_exit_forms()
 
 
 def _utc_epoch(value) -> float | None:
@@ -1288,12 +1316,14 @@ def _refreshed_notice_text(root: Path, record: dict, cache: dict) -> str | None:
     run = _experiment_run_state(root, record, cache)
     # Only the one `status=…; exit=…` the producer writes: a catalog name in front of it may
     # hold the same words, and then which one is the run's own cannot be told from the text.
-    if run is None or len(_STATUS_EXIT_RE.findall(text)) != 1:
+    # The same holds across languages: the key of every language together must appear exactly once.
+    found = [(template, pattern) for template, pattern in _STATUS_EXIT_FORMS if pattern.search(text)]
+    if run is None or len(found) != 1 or len(found[0][1].findall(text)) != 1:
         return None
+    template, pattern = found[0]
     exit_code = run.get("exit_code")
     exit_text = "None" if exit_code is None else str(exit_code)
-    return _STATUS_EXIT_RE.sub(
-        f"status={run['status']}; exit={exit_text}", text, count=1)
+    return pattern.sub(lambda _match: template.format(status=run["status"], exit=exit_text), text, count=1)
 
 
 def _notice_text(root: Path, record: dict, cache: dict | None = None) -> str:
