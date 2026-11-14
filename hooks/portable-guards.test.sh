@@ -2348,6 +2348,8 @@ fi
 # the byte figures themselves are not asserted -- pinning them made this case
 # red on every legitimate bootstrap edit (a 7467 -> 8321 byte drift reddened
 # it while the census was unchanged), which is noise, not a regression signal.
+# The shared LAB guidance is measured in the Codex bootstrap baseline;
+# the one-sentence addition is intentional, with no new worker/router surfaces.
 if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --skip-hooks >"$TMP/context_footprint.out" 2>"$TMP/context_footprint.err" \
   && grep -q '^context_footprint_report=1' "$TMP/context_footprint.out" \
   && grep -q '^surface=codex-plugin ' "$TMP/context_footprint.out" \
