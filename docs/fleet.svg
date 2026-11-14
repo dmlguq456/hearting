@@ -12,14 +12,14 @@
 <text x="153" y="54" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">◇</text>
 <text x="171" y="54" textLength="63" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">gpu-box</text>
 <text x="243" y="54" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2/2</text>
-<text x="756" y="54" textLength="27" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏ 3</text>
-<text x="792" y="54" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">working</text>
-<text x="873" y="54" textLength="27" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">● 4</text>
-<text x="909" y="54" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">idle</text>
-<text x="963" y="54" textLength="27" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">● 1</text>
-<text x="999" y="54" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">answer needed</text>
-<text x="1143" y="54" textLength="72" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">hearting</text>
-<text x="1224" y="54" textLength="54" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">v4.0.0</text>
+<text x="747" y="54" textLength="27" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏ 4</text>
+<text x="783" y="54" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">working</text>
+<text x="864" y="54" textLength="27" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">● 3</text>
+<text x="900" y="54" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">idle</text>
+<text x="954" y="54" textLength="27" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">● 1</text>
+<text x="990" y="54" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">answer needed</text>
+<text x="1134" y="54" textLength="72" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">hearting</text>
+<text x="1215" y="54" textLength="63" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">v4.32.1</text>
 <text x="1287" y="54" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· managed</text>
 <text x="1386" y="54" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">11:59</text>
 <text x="9" y="72" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
@@ -77,7 +77,7 @@
 <text x="9" y="180" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">QUESTIONS</text>
 <text x="270" y="180" textLength="9" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">1</text>
 <text x="288" y="180" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="333" y="180" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
+<text x="333" y="180" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
 <text x="351" y="180" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="180" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">b2</text>
 <text x="378" y="180" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
@@ -89,7 +89,7 @@
 <text x="756" y="180" textLength="27" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">71%</text>
 <text x="810" y="180" textLength="153" lengthAdjust="spacing" fill="#db81db" font-weight="700" xml:space="preserve">Pagination review</text>
 <text x="972" y="180" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
-<text x="1062" y="180" textLength="243" lengthAdjust="spacing" fill="#858689" xml:space="preserve">Review done; ready for more</text>
+<text x="1062" y="180" textLength="279" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">Re-running the API tests for […</text>
 <text x="1395" y="180" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38m</text>
 <text x="9" y="198" textLength="63" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">HISTORY</text>
 <text x="288" y="198" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
@@ -146,8 +146,8 @@
 <text x="1395" y="252" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">26m</text>
 <rect x="0" y="256" width="288" height="18" fill="#1c2030"/>
 <text x="9" y="270" textLength="72" lengthAdjust="spacing" fill="#8a8c93" xml:space="preserve">SESSIONS</text>
-<text x="207" y="270" textLength="18" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏3</text>
-<text x="234" y="270" textLength="18" lengthAdjust="spacing" fill="#708c5f" xml:space="preserve">●4</text>
+<text x="207" y="270" textLength="18" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏4</text>
+<text x="234" y="270" textLength="18" lengthAdjust="spacing" fill="#708c5f" xml:space="preserve">●3</text>
 <text x="261" y="270" textLength="18" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">●1</text>
 <text x="288" y="270" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="315" y="270" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
@@ -205,7 +205,7 @@
 <text x="72" y="342" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">b2</text>
 <text x="90" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
 <text x="108" y="342" textLength="45" lengthAdjust="spacing" fill="#db81db" xml:space="preserve">codex</text>
-<text x="162" y="342" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
+<text x="162" y="342" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
 <text x="288" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="333" y="342" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
 <text x="351" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
@@ -228,7 +228,7 @@
 <text x="108" y="360" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
 <text x="171" y="360" textLength="9" lengthAdjust="spacing" fill="#9a696d" xml:space="preserve">●</text>
 <text x="288" y="360" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="315" y="360" textLength="459" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">8 sessions · 3 working · ◑ to answer 1 · 4 projects</text>
+<text x="315" y="360" textLength="459" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">8 sessions · 4 working · ◑ to answer 1 · 4 projects</text>
 <text x="9" y="378" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─</text>
 <text x="36" y="378" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">ml-train/</text>
 <text x="288" y="378" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
