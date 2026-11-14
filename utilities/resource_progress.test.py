@@ -1710,7 +1710,7 @@ class ExperimentObservationTest(unittest.TestCase):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         bare = {"summary": {}, "elapsed_seconds": 3720, "planned_seconds": None}
         final = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": "not-declared"}, None, []))
-        self.assertIn("status=succeeded; exit=0; 실제=1h02m; 진행 파일 선언 없음", final)
+        self.assertIn("상태=succeeded; 종료 코드=0; 실제=1h02m; 진행 파일 선언 없음", final)
         checkpoint = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "not-declared"},
                                                       None, []))
         self.assertIn("경과 1h02m; 진행 파일 선언 없음", checkpoint)
@@ -1721,7 +1721,7 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertNotIn("지표 없음", text)
             self.assertNotIn("판정 불가", text)
             self.assertNotIn("ETA", text)
-            self.assertNotIn("source metrics unavailable", text)
+            self.assertNotIn("지표 출처 없음", text)
         # A declared folder that has not produced anything yet keeps the full form.
         declared = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": None}, None, []))
         self.assertIn("마지막=지표 없음", declared)
@@ -1739,7 +1739,7 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("최근=loss=0.42@12", text)
         self.assertIn("진행 12/60 epoch", text)
         self.assertIn("마지막 갱신 25m 전", text)
-        self.assertIn("source jsonl=/o/log.jsonl", text)
+        self.assertIn("출처 jsonl=/o/log.jsonl", text)
 
     def test_the_last_update_is_the_newest_source_change_this_observer_saw(self):
         samples = [{"source_updated_at": 100.0}, {"source_updated_at": 400.0}, {"epoch": 3}]
@@ -1995,12 +1995,12 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("estimated total time unknown; planned unknown; elapsed 1h02m", checkpoint)
         self.assertIn("source jsonl=no path", checkpoint)
         final, checkpoint = texts["Korean"]
-        self.assertIn("public run record=기록 경로 없음", final)
+        self.assertIn("실행 기록=기록 경로 없음", final)
         self.assertIn("마지막=loss=0.5@3; 최고=loss=0.4@2; 추세=악화", final)
         self.assertIn("실제=1h02m; 계획=미상", final)
         self.assertIn("최근=loss=0.5@3; 최고=loss=0.4@2; 기준 delta=기준 없음; 추세=악화", checkpoint)
         self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
-        self.assertIn("source jsonl=경로 없음", checkpoint)
+        self.assertIn("출처 jsonl=경로 없음", checkpoint)
 
     def test_a_short_or_metric_less_normal_end_and_a_bare_checkpoint_are_quiet(self):
         metric = {"summary": {"latest": {"value": 0.5, "epoch": 3}}}
@@ -2743,7 +2743,9 @@ class CatalogNoticeTest(unittest.TestCase):
         self.register()
         texts = self.observe(3600)
         (text,) = texts.values()
-        self.assertTrue(text.startswith("잔향 줄임 — SI-SNRi가 8 dB보다 높은가; 최근 11.00 dB@1; fix 8.00 dB 대비 +3.00 dB; run=name-run"), text)
+        self.assertTrue(text.startswith("잔향 줄임 — SI-SNRi가 8 dB보다 높은가; 최근 11.00 dB@1; fix 8.00 dB 대비 +3.00 dB; "
+                                        "지표: SISNRi (dB) ↑ · validation · s · 기준: fix 8.00 dB; 실행=name-run"), text)
+        self.assertTrue(text.endswith("; 표: hearting run experiment_catalog leaderboard --group '소리 분리 개선'"), text)
         self.assertNotIn("정본 이름 없음", text)
 
     def test_a_new_name_reaches_the_next_event_and_the_old_text_is_not_rewritten(self):
@@ -2763,7 +2765,8 @@ class CatalogNoticeTest(unittest.TestCase):
         other = self.run_spec("stray-run")
         first = self.observe(3600, other)
         (text,) = first.values()
-        self.assertIn("정본 이름 없음: run을 정본에 등록", text)
+        self.assertIn("정본 이름 없음: run을 정본에 등록; `hearting run experiment_catalog register --group-name <묶음> "
+                      "--condition-name <조건> --run stray-run`로 등록하면", text)   # the command, while the notice stays one part
         self.assertTrue(text.startswith("정본 이름 없음"))
         self.epochs(2)
         second = self.observe(7200, other)
@@ -2780,7 +2783,7 @@ class CatalogNoticeTest(unittest.TestCase):
         path.write_text("{not json", encoding="utf-8")
         texts = self.observe(3600)
         (text,) = texts.values()
-        self.assertTrue(text.startswith("run=name-run"), text)
+        self.assertTrue(text.startswith("실행=name-run"), text)
 
     def test_a_checkpoint_with_no_new_evaluation_point_is_quiet_but_still_published(self):
         self.register()

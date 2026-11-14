@@ -603,18 +603,19 @@ class RecipientsActionTest(IsolatedCase):
 
 
 class DeliveryContextRefreshTest(IsolatedCase):
-    def notice(self) -> dict:
+    def notice(self, text: str = "experiment perf-run finished; status=running; exit=None; result path artifacts/run.json",
+               delivery: str = "b") -> dict:
         receipt = {
             "schema_version": 1,
             "kind": "notice",
             "subject": "experiment final",
-            "text": f"experiment perf-run finished; status=running; exit=None; result path artifacts/run.json",
+            "text": text,
             "required_action": "report-to-user",
             "key": "experiment:perf-run:final:1",
         }
         return PD.create(
             self.root, recipient_kind=KIND, recipient_key=SESSION,
-            delivery_id="delivery-" + "b" * 32, session_generation="",
+            delivery_id="delivery-" + delivery * 32, session_generation="",
             session_generation_supported="0", attempt_ids=[], parent_attempt_id="",
             route_id="route-free", route_node="notice", receipt=receipt,
             receipt_digest=PD._canonical_receipt_digest(receipt), row_revisions={})
@@ -632,6 +633,50 @@ class DeliveryContextRefreshTest(IsolatedCase):
         self.assertIn("artifacts/run.json", text)
         self.assertIn("HEARTING_RECEIPT_V1", text)
         self.assertEqual(PD.read(self.root, SESSION, record["delivery_id"]), before)
+
+    def _refreshed(self, text: str, status: str = "success", exit_code=0) -> str:
+        self._count = getattr(self, "_count", 0) + 1
+        record = self.notice(text, delivery=f"{self._count:x}")
+        stored = PD.read(self.root, SESSION, record["delivery_id"])
+        INBOX.write_run_states(self.root, {
+            "generated_at": time.time() + 60,
+            "runs": {"perf-run": {"status": status, "exit_code": exit_code}},
+        })
+        return SWEEP._refreshed_notice_text(self.root, stored, {})
+
+    def test_every_catalog_language_of_the_status_key_is_refreshed_in_its_own_words(self):
+        # The key is whatever the catalog says for each language, so a new language or word is covered.
+        catalog = json.loads((ROOT / "tools/i18n/messages.json").read_text(encoding="utf-8"))["messages"]
+        entry = catalog["resource.key.status"]
+        self.assertGreaterEqual(len(entry), 2)
+        for lang, template in entry.items():
+            with self.subTest(lang=lang):
+                old = template.format(status="running", exit="None")
+                new = template.format(status="success", exit="0")
+                self.assertEqual(
+                    self._refreshed(f"run=perf-run; {old}; source jsonl=a.jsonl"),
+                    f"run=perf-run; {new}; source jsonl=a.jsonl")
+
+    def test_english_refresh_is_byte_for_byte_what_it_was(self):
+        self.assertEqual(
+            self._refreshed("experiment perf-run finished; status=running; exit=None; result path a.json",
+                            status="failed", exit_code=1),
+            "experiment perf-run finished; status=failed; exit=1; result path a.json")
+        # The producer's `;\s*` tolerance and a null exit stay as they were.
+        self.assertEqual(self._refreshed("x; status=running;   exit=3; y", exit_code=None),
+                         "x; status=success; exit=None; y")
+
+    def test_a_key_in_any_two_languages_at_once_is_not_guessed(self):
+        text = "상태=running; 종료 코드=None; status=running; exit=None"
+        self.assertIsNone(self._refreshed(text))
+        self.assertIsNone(self._refreshed("status=a; exit=1; status=b; exit=2"))
+
+    def test_unreadable_catalog_keeps_only_the_english_form(self):
+        with mock.patch.object(Path, "read_text", side_effect=OSError("no catalog")):
+            forms = SWEEP._status_exit_forms()
+        self.assertEqual([template for template, _ in forms], ["status={status}; exit={exit}"])
+        self.assertTrue(forms[0][1].search("status=running; exit=None"))
+        self.assertIsNone(forms[0][1].search("상태=running; 종료 코드=None"))
 
     def test_missing_older_or_unknown_state_leaves_the_notice_text_unchanged(self):
         record = self.notice()
