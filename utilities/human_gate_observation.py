@@ -561,6 +561,9 @@ _LAST_PASS_ROUTE_PATHS = ()
 # The same per registry, as the latest full pass that read it found them: a registry a pass cannot
 # read confirms none of its routes settled, so that pass keeps what this registry last named.
 _REGISTRY_ROUTE_PATHS = {}
+# An unsettled route nothing of which moved for this long is left to the periodic pass
+# (``_route_settled``): the wake watch only shortens the delay, and the periodic pass reads it.
+_WATCH_QUIET_SECONDS = 7 * 24 * 3600
 _TERMINAL_STATES = frozenset(("CANCELLED", "COMPLETE", "FAILED_TERMINAL"))
 _WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
 _WAIT_JUDGED = contextvars.ContextVar("human_gate_wait_judged", default=None)
@@ -658,21 +661,36 @@ def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_ro
     return waits
 
 
-def _route_settled(route_key, path, row, waits, deciding):
+def _route_settled(route_key, path, row, waits, deciding, *, now, activity, files=None):
     """The one condition that leaves a route out of the producer's wake watch.
 
-    All of it must be confirmed by this pass, else the route stays watched (a read that
-    failed confirms nothing): its registry and route record were read (the kept judgment
-    exists for this registry); the route is closed now and its closure is finished (no
-    ``closure-pending``), and the journal's last record is a terminal one
-    (CANCELLED/COMPLETE/FAILED_TERMINAL) with nothing written after it: a closed outcome does
-    not settle a route whose journal went on after the closure; no attempt is open on it after
-    that (its latest registry row is not live); and nothing on it waits for a person (no answer
-    wait, no owner decision). "No answer wait" alone is not "nothing left to watch"."""
-    entry = _WAIT_MEMO.get(route_key)
-    return (entry is not None and entry[0] == str(path) and entry[7] is True and entry[8] is True
-            and not waits and route_key not in deciding
-            and str(getattr(row, "status", "") or "").lower() not in ("open", "running"))
+    Never while a person is asked on it now (an answer wait, an owner decision) or an attempt
+    runs on it (its latest registry row is open/running): those stay watched however old.
+    Otherwise it leaves the watch when this pass confirms either
+
+    - settled: its registry and route record were read (the kept judgment exists for this
+      registry), its closure is finished (no ``closure-pending``), and the journal's last record
+      is a terminal one (CANCELLED/COMPLETE/FAILED_TERMINAL) with nothing written after it. A
+      closed outcome does not settle a route whose journal went on after the closure; or
+    - quiet: nothing of it moved for ``_WATCH_QUIET_SECONDS`` (its record, outcome, inline
+      finish and journal files, and its registry rows). The periodic pass still reads it, and
+      the pass after anything on it moves watches it again. ``files`` names the files of a route
+      whose record this pass did not read (their identities are then taken here).
+
+    A read that failed confirms nothing; "no answer wait" alone is not "nothing left to watch"."""
+    if waits or route_key in deciding or str(getattr(row, "status", "") or "").lower() in ("open", "running"):
+        return False
+    entry = _WAIT_MEMO.get(route_key) if files is None else None
+    if entry is not None and entry[0] == str(path):
+        if entry[7] is True and entry[8] is True:
+            return True
+        stamps = (*entry[2], entry[4])
+    else:
+        stamps = tuple(_stamp(item) for item in (files or ()) if item)
+    moved = [stamp[2] / 1e9 for stamp in stamps if stamp is not None]
+    if isinstance(activity, (int, float)) and math.isfinite(activity):
+        moved.append(float(activity))
+    return bool(moved) and now - max(moved) > _WATCH_QUIET_SECONDS
 
 
 def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
@@ -1071,6 +1089,13 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                             route_record, outcome = _route_outcome(route_module, route_file,
                                                                    route_id, route_digest)
                             if route_record is None:
+                                # Not read (missing or broken record): watched by the files it is
+                                # known by, unless nothing of it moved for a long time.
+                                if _route_settled(route_key, path, row, waits or (), deciding, now=instant,
+                                                  activity=route_activity,
+                                                  files=(*_route_file_paths(route_file, None, route_id),
+                                                         _journal_file(route_key, ledger_root))):
+                                    watched.discard(route_key)
                                 continue
                             # The loader's private schema tag is not covered by the
                             # sealed route hash; pending_human_waits must see sealed bytes.
@@ -1081,7 +1106,8 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                                 waits = _compute_waits(route_key, raw_record, route_record, outcome,
                                                        path, ledger_root)
                         seen_routes.add(route_key)
-                        if _route_settled(route_key, path, row, waits, deciding):
+                        if _route_settled(route_key, path, row, waits, deciding, now=instant,
+                                          activity=route_activity):
                             watched.discard(route_key)
                         for wait in waits:
                             if meta is None:

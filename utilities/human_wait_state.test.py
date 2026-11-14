@@ -4751,5 +4751,109 @@ class FinishedRouteWakeTests(unittest.TestCase):
         self.assertEqual(after, idle)
         self.assertFalse({str(route["journal"]) for route in routes} & after)
 
+    # Rule 3 (RV-PR1622-R3 §3): the wake watch only shortens the delay. An unsettled route nothing
+    # of which moved for a week is left to the periodic pass, unless a person is asked on it now
+    # or work runs on it.
+
+    def age(self, route, days):
+        """Move every file of ``route`` (record, outcome, journal, gate files) ``days`` into the past."""
+        when = time.time() - days * 86400
+        folder = route["file"].parent
+        for path in [*folder.rglob("*"), route["journal"]]:
+            if path.is_file():
+                os.utime(path, (when, when))
+
+    def old_format(self):
+        """A route with no closure evidence (no outcome, an empty journal) whose attempt ended."""
+        route = self.route(finished=False)
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+        return route
+
+    def test_quiet_unsettled_routes_add_no_watch_however_many(self):
+        _observed, idle = self.pass_once()
+        settled = [self.route() for _ in range(60)]
+        old = [self.old_format() for _ in range(60)]
+        for route in old:
+            self.age(route, 30)
+        _observed, at_60 = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(at_60, idle)
+        more = [self.old_format() for _ in range(140)]
+        missing = self.old_format()                             # its record deleted, then quiet
+        missing["file"].unlink()
+        for route in more + [missing]:
+            self.age(route, 30)
+        _observed, at_200 = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(at_200, idle)
+        self.assertFalse({str(route["file"]) for route in settled + old + more} & at_200)
+
+    def test_an_old_format_route_that_moved_yesterday_is_watched(self):
+        quiet = self.old_format()
+        self.age(quiet, 30)
+        moved = self.old_format()
+        self.age(moved, 1)
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(moved["file"]), watched)
+        self.assertIn(str(moved["journal"]), watched)
+        self.assertNotIn(str(quiet["file"]), watched)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        self.journal_row(moved, workflow_state="RUNNING")
+        self.assertTrue(events.wait_changed(5.0))
+
+    def test_a_new_attempt_on_a_quiet_route_wakes_and_is_watched_from_the_next_pass(self):
+        route = self.old_format()
+        self.age(route, 30)
+        _observed, local = self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(self.jobs), local)                   # the registry wakes the producer
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-again-") + "\n")
+        self.assertTrue(events.wait_changed(5.0), "a new attempt in the registry did not wake the producer")
+        _observed, local = self.pass_once()                    # the next pass watches it
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(route["journal"]), local | set(observation.last_pass_route_paths()))
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        self.journal_row(route, workflow_state="RUNNING")
+        self.assertTrue(events.wait_changed(5.0))
+        self.assertLess(time.monotonic() - began, 5.0)          # an event, well inside the 30 s cadence
+
+    def test_an_answer_wait_raised_forty_days_ago_stays_watched_and_its_answer_wakes(self):
+        route = self.route(finished=False)
+        artifact = self.raise_gate(route, at=datetime.fromtimestamp(time.time() - 40 * 86400, timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.age(route, 40)
+        observed, local = self.pass_once()
+        self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], [("S2", "decision")])
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(route["file"]), watched)
+        self.assertIn(str(artifact.parent / "answers.json"), watched)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        (artifact.parent / "answers.json").write_text("{}", encoding="utf-8")   # the answer arrives
+        self.assertTrue(events.wait_changed(5.0), "the answer to a forty-day wait did not wake the producer")
+        self.assertLess(time.monotonic() - began, 5.0)
+
+    def test_a_quiet_routes_change_is_read_by_the_periodic_pass(self):
+        route = self.old_format()
+        self.age(route, 30)
+        observed, _local = self.pass_once()
+        self.assertEqual(observed["items"], [])
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        events = state._wake_events()
+        self.raise_gate(route)                                  # not watched: no event ...
+        self.assertFalse(events.wait_changed(0.5))
+        observed, _local = self.pass_once()                     # ... the next periodic pass reads it
+        self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], [("S2", "decision")])
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertLessEqual(observation._WATCH_QUIET_SECONDS, 7 * 86400)
+
 if __name__ == "__main__":
     unittest.main()
