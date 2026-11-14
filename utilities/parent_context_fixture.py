@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Hermetic measurement of what Hearting puts into a supervising session's context.
+"""Hermetic measurement of what Hearting puts into a route parent session's context.
 
-One synthetic supervisor scenario per harness (Claude, Codex, OpenCode): ten
+One synthetic route-parent scenario per harness (Claude, Codex, OpenCode): ten
 registered depth-1 owner completions -- seven ordinary, one review that ends on
 a disposition verdict (``수정 후 병합``), one work that waited for CI before it
 finished, one failure -- and five typed prompts. Each source tree is imported in
@@ -14,7 +14,7 @@ the PostToolUse/Stop tool-boundary carrier, the Codex native queue body, the
 Codex prompt receipts and the OpenCode turn carrier (``delivery_context``). Only
 the native transport is synthetic: the Claude transcript events the runtime
 writes when a hook's output reaches the model, in the orders counted on a real
-supervisor session (idle wake, a long tool call during which the notification
+route parent session (idle wake, a long tool call during which the notification
 waits in Claude's queue, a typed prompt). Codex consumes its queue item; OpenCode
 records the body it was given.
 
@@ -26,7 +26,7 @@ or transcript.
 
 Usage::
 
-    python3 utilities/supervisor_context_fixture.py --source-root <tree> --output <json>
+    python3 utilities/parent_context_fixture.py --source-root <tree> --output <json>
 """
 from __future__ import annotations
 
@@ -47,12 +47,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-PARENT_SID = "ses-supervisor-fixture"
-PARENT_ATTEMPT = "att-supervisor-fixture-parent"
+PARENT_SID = "ses-parent-fixture"
+PARENT_ATTEMPT = "att-parent-fixture-parent"
 RECIPIENT_KIND = {"claude": "claude-parent-runtime", "codex": "codex-native-queue",
                   "opencode": "opencode-turn"}
 # The scenario: kind of each completion and how its notice reaches the model.
-# Claude orders are the ones counted on a real supervisor session: "idle" (the
+# Claude orders are the ones counted on a real route parent session: "idle" (the
 # rewake wakes a resting session, then a tool and the turn end follow), "mid" (it
 # lands during a tool call longer than the rewake's claim lease, waits in Claude's
 # queue and is absorbed at the next tool boundary), "prompt" (no rewake armed; the
@@ -143,7 +143,7 @@ class Scenario:
         for index, (kind, pattern) in enumerate(COMPLETIONS):
             attempt = f"att-scc-{self.harness}-{index:02d}" + "0" * 16
             route = {"capability": "autopilot-code", "capability_mode": "dev",
-                     "work_request": {"text": f"합성 과제 {index}: 감독 문맥 측정용 작업을 끝낸다."},
+                     "work_request": {"text": f"합성 과제 {index}: 부모 세션 문맥 측정용 작업을 끝낸다."},
                      "artifact_root": str(self.reports), "cwd": str(self.repo)}
             route["route_hash"] = route_identity.route_hash(route)
             route["route_id"] = route_identity.route_id_from_hash(route["route_hash"])
@@ -543,6 +543,85 @@ def _summarize(scenario: Scenario) -> dict:
                       for row in scenario.carried]}
 
 
+# --------------------------------------------------------------------------
+# Steward: main session A holds the steward role for main sessions B and C
+# --------------------------------------------------------------------------
+
+def _target(name, state="working", liveness="live", harness="claude"):
+    return {"name": name, "harness": harness, "session_id": f"ses-{name}", "state": state,
+            "liveness": liveness}
+
+
+# Each periodic check, what A's targets and A's own records look like. The last three
+# are the window the parent reported: every target ended (11-04~05), while A keeps
+# editing its own open records.
+STEWARD_STEPS = (
+    ("both working", [_target("B"), _target("C")], []),
+    ("B waits for its next step", [_target("B", state="idle"), _target("C")], ["#7 next slice"]),
+    ("B ended", [_target("B", state="idle", liveness="ended"), _target("C")], ["#7 next slice"]),
+    ("all ended", [_target("B", state="idle", liveness="ended"),
+                   _target("C", state="idle", liveness="ended")], ["#7 next slice"]),
+    ("all ended, own records change", [_target("B", state="idle", liveness="ended"),
+                                       _target("C", state="idle", liveness="ended")],
+     ["#7 next slice", "#8 new record"]),
+    ("all ended, own records change", [_target("B", state="idle", liveness="ended"),
+                                       _target("C", state="idle", liveness="ended")], ["#9 another"]),
+    ("all ended, own records change", [_target("B", state="idle", liveness="ended"),
+                                       _target("C", state="idle", liveness="ended")], ["#10 later"]),
+)
+
+
+def _steward(scenario: Scenario) -> dict:
+    """The periodic steward check, through the tree's own `steward_check` and notice carrier."""
+    import peer_obligations
+    import session_notice
+    import steward_check as SC
+    import dispatch_session_sweep as sweep
+    harness, sid = scenario.harness, "ses-steward-A"
+    ledger = scenario.base / "ledger"
+    ledger.mkdir()
+    os.environ["AGENT_PEER_LEDGER_ROOT"] = str(ledger)
+    store = peer_obligations.ObligationStore(ledger)
+    seen = {"targets": [], "pending_messages": 0, "open_work": []}
+    patches = [mock.patch.object(SC, "_role_held", return_value={"held": True, "reason": None, "successor": None}),
+               mock.patch.object(SC, "_role_flagged", return_value=True),
+               mock.patch.object(SC, "_observe_role", side_effect=lambda h, s: {
+                   **seen, "targets": list(seen["targets"]), "open_work": list(seen["open_work"])}),
+               mock.patch.object(SC, "_session_liveness", return_value="live"),
+               mock.patch.object(SC, "_human_wait_open", return_value=False),
+               mock.patch.object(SC, "_agents", return_value=[]),
+               mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=False),
+               mock.patch.object(peer_obligations, "request_dispatch_reconciliation", return_value=False)]
+    steps = []
+    with contextlib.ExitStack() as stack:
+        for patch in patches:
+            stack.enter_context(patch)
+        notify = stack.enter_context(mock.patch.object(session_notice, "notify", wraps=session_notice.notify))
+        start = 1_000_000.0
+        interval = SC.interval_seconds()
+        SC.register(harness, sid, now=start, store=store, ensure_runner=False)
+        for index, (label, targets, records) in enumerate(STEWARD_STEPS, start=1):
+            seen.update(targets=targets, open_work=records)
+            before = notify.call_count
+            duty = store.get(SC.duty_id(harness, sid))
+            # Each check runs one interval after the previous one settled (the ack restarts it).
+            due = start + index * (interval + 200)
+            SC.advance(duty, store, now=due)
+            text = ""
+            if notify.call_count > before:
+                records_out, _count = sweep.sweep_deliver(scenario.state, RECIPIENT_KIND[harness], sid)
+                text = sweep.delivery_context([(scenario.state, records_out)]) if records_out else ""
+                sweep.ack_delivered(scenario.state, sid, records_out, acked_by="fixture-steward")
+                duty = store.get(SC.duty_id(harness, sid))
+                SC.advance(duty, store, now=due + 100)
+            header = next((line for line in text.splitlines() if line.startswith("Hearting notice")), "")
+            steps.append({"step": index, "label": label, "woke": bool(text), "chars": len(text),
+                          "fixed_header_chars": len(header), "text": text})
+    return {"steps": steps, "wakes": sum(step["woke"] for step in steps),
+            "chars": sum(step["chars"] for step in steps),
+            "fixed_header_chars": sum(step["fixed_header_chars"] for step in steps)}
+
+
 @contextlib.contextmanager
 def _own_obligation_runners():
     """End only the obligation runners this measurement started before its root goes."""
@@ -574,6 +653,7 @@ def _child(source: Path, output: Path, harness: str) -> int:
         {"claude": _claude, "codex": _codex, "opencode": _opencode}[harness](scenario)
         result = _summarize(scenario)
         result["harness"] = harness
+        result["steward"] = _steward(scenario)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return 0
 
@@ -621,7 +701,10 @@ def main() -> int:
                           "chars": [row["chars"] for row in rows],
                           "carried": [row["carried"] for row in rows],
                           "extra_turns": [row["extra_turns"] for row in rows],
-                          "prompt_chars": [row["chars"] for row in result["prompts"]]}, ensure_ascii=False))
+                          "prompt_chars": [row["chars"] for row in result["prompts"]],
+                          "steward_woke": [step["woke"] for step in result["steward"]["steps"]],
+                          "steward_chars": [step["chars"] for step in result["steward"]["steps"]]},
+                         ensure_ascii=False))
     return 0
 
 

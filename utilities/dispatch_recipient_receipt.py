@@ -92,7 +92,7 @@ def _delivery_heads() -> tuple[str, ...]:
     headers = (sweep.GATE_DELIVERY_HEADER, sweep.NOTICE_DELIVERY_HEADER,
                sweep.COMPLETION_DELIVERY_HEADER, sweep._PREVIOUS_GATE_DELIVERY_HEADER,
                sweep._PREVIOUS_NOTICE_DELIVERY_HEADER, sweep._PREVIOUS_COMPLETION_DELIVERY_HEADER,
-               sweep._SHIPPED_COMPLETION_DELIVERY_HEADER,
+               sweep._SHIPPED_COMPLETION_DELIVERY_HEADER, sweep._SHIPPED_NOTICE_DELIVERY_HEADER,
                sweep._LEGACY_COMPLETION_DELIVERY_HEADER, sweep.OVERFLOW_HEADER,
                "AGENT_HARNESS_COMPLETION_V1", human_gate_receipt.NATIVE_HEAD)
     return tuple(header + "\n" for header in headers) + (dispatch_supervision.NEEDS_ATTENTION_HEAD,)

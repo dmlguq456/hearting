@@ -1,6 +1,7 @@
-"""What Hearting puts into a supervising session's context (BC-SUPERVISOR-CONTEXT-COST-1114).
+"""What Hearting puts into a route parent session's context (BC-SUPERVISOR-CONTEXT-COST-1114).
 
-The supervisor re-reads its whole context on every request, so a completion carried
+The route parent (the main session that starts registered work and receives its
+completions) re-reads its whole context on every request, so a completion carried
 twice, a fixed paragraph on every notice, a repeated line on every prompt, or an extra
 turn for work that finished normally is paid again on each later request.
 """
@@ -25,7 +26,7 @@ import dispatch_recipient_receipt as receipt  # noqa: E402
 import dispatch_session_sweep as sweep  # noqa: E402
 import route_authority  # noqa: E402
 import session_tidy  # noqa: E402
-import supervisor_context_fixture as fixture  # noqa: E402
+import parent_context_fixture as fixture  # noqa: E402
 import work_intent  # noqa: E402
 
 FIXED_PARAGRAPHS = ("First close: give the result", "Original request/format apply",
@@ -33,17 +34,23 @@ FIXED_PARAGRAPHS = ("First close: give the result", "Original request/format app
                     "Tracked-Workflow Continuation", "Receipt/ACK isn't execution")
 
 
-class SupervisorScenarioTest(unittest.TestCase):
+_MEASURED = {}
+
+
+def _measured():
+    """One measurement of this tree on every harness, shared by the scenario tests."""
+    if not _MEASURED:
+        with tempfile.TemporaryDirectory(prefix="scc-test-") as temporary:
+            _MEASURED.update(fixture.run(ROOT, Path(temporary)))
+    return _MEASURED
+
+
+class RouteParentScenarioTest(unittest.TestCase):
     """Ten completions and five typed prompts, measured on each harness's own carriers."""
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory(prefix="scc-test-")
-        cls.results = fixture.run(ROOT, Path(cls.tmp.name))
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
+        cls.results = _measured()
 
     def each(self):
         return [(harness, result, row) for harness, result in self.results.items()
@@ -118,6 +125,54 @@ class SupervisorScenarioTest(unittest.TestCase):
                     cards = [item["text"] for item in result["texts"]
                              if item["prompt"] == prompt["prompt"] and item["carrier"] == "prompt-card"]
                     self.assertEqual(cards, ["[답변 필요] 사용자 답 대기 ×3"])
+
+
+class StewardScenarioTest(unittest.TestCase):
+    """Main session A holds the steward role for B and C; the periodic check on each harness."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.results = _measured()
+
+    def test_with_no_live_target_only_its_own_records_changing_the_check_stays_quiet(self):
+        for harness, result in self.results.items():
+            with self.subTest(harness=harness):
+                steps = result["steward"]["steps"]
+                woke = [step["woke"] for step in steps]
+                # Live targets are checked every interval; once every target ended the one
+                # reminder goes out, and the holder's own changing records open no turn.
+                self.assertEqual(woke, [True, True, True, True, False, False, False])
+
+    def test_a_steward_notice_carries_no_fixed_paragraph(self):
+        for harness, result in self.results.items():
+            for step in result["steward"]["steps"]:
+                if not step["woke"]:
+                    continue
+                with self.subTest(harness=harness, step=step["label"]):
+                    for paragraph in ("about work you started", "polling loop", "re-invocation"):
+                        self.assertNotIn(paragraph, step["text"])
+                    self.assertLessEqual(step["fixed_header_chars"], 170)
+
+
+# The notice header v4.32.4 shipped (frozen bytes): what it already sent is still recognized.
+_FROZEN_SHIPPED_NOTICE_HEADER = (
+    "Hearting notice about work you started (a paused route resumed, a remote run ended). "
+    "Report observed metrics, trend, and elapsed or ETA against the criteria and plan; state when unavailable. "
+    "Act only where a line's required_action asks for it. "
+    "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
+)
+
+
+class ShippedNoticeHeaderTest(unittest.TestCase):
+    def test_a_notice_body_v4_32_4_sent_is_still_a_hearting_delivery(self):
+        marker = "HEARTING_RECEIPT_V1 delivery-" + "a" * 32 + " " + "b" * 64
+        body = sweep.NOTICE_DELIVERY_HEADER + "\n- steward-check: Steward check: x\n" + marker
+        shipped = sweep._shipped_headers(body)
+        self.assertEqual(shipped, _FROZEN_SHIPPED_NOTICE_HEADER + "\n- steward-check: Steward check: x\n" + marker)
+        self.assertIn(_FROZEN_SHIPPED_NOTICE_HEADER + "\n", receipt._delivery_heads())
+        # A quoted header inside a payload is not a block header.
+        quoted = "Hearting runtime delivery. x\n- line\nnot a marker\n\n" + sweep.NOTICE_DELIVERY_HEADER + "\nq"
+        self.assertEqual(sweep._shipped_headers(quoted).count(_FROZEN_SHIPPED_NOTICE_HEADER), 0)
 
 
 class ClaudeReceiptEvidenceTest(unittest.TestCase):

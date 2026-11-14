@@ -568,7 +568,7 @@ def owner_summary_line(route, owner, *, t=None) -> str | None:
 
 SUMMARY_NAME = "completion-summary.md"
 MAX_FIELD_CHARS = 320
-# The checks and the remaining work as the supervisor reads them on every later request:
+# The checks and the remaining work as the route parent re-reads them on every later request:
 # enough to decide the next step, the report holds the rest (its path is the last line).
 MAX_CHECKS_CHARS = 160
 MAX_REMAINING_CHARS = 140
@@ -1000,7 +1000,7 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     if not goal and request.get("text"):
         goal = draft(request["text"]).get("intent") or ""
     if goal:
-        # The supervisor wrote this intent; a short reminder is enough to match the result.
+        # The route parent wrote this intent; a short reminder is enough to match the result.
         original = (t("completion.intent_original", original=_line(intent["original"], 60))
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 100), original=original))

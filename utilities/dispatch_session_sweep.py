@@ -999,7 +999,14 @@ def sweep_deliver(
     return claimed, entry_count
 
 
+# One line: a notice may be a run's end, a resumed route or a steward check, so it keeps
+# only what the bootstrap does not already say (report a run's metrics against the plan).
 NOTICE_DELIVERY_HEADER = (
+    "Hearting notice. Act only where a line's required_action asks for it; for a run, report "
+    "metrics, trend and elapsed/ETA against the plan, or say they are unavailable."
+)
+# The notice header v4.32.4 shipped (frozen; receipt recovery only).
+_SHIPPED_NOTICE_DELIVERY_HEADER = (
     "Hearting notice about work you started (a paused route resumed, a remote run ended). "
     "Report observed metrics, trend, and elapsed or ETA against the criteria and plan; state when unavailable. "
     "Act only where a line's required_action asks for it. "
@@ -1166,16 +1173,18 @@ def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[di
     return text
 
 
-def _shipped_completion_header(text: str) -> str:
-    """The same body under the completion header v4.32.4 shipped (receipt recovery only)."""
+def _shipped_headers(text: str) -> str:
+    """The same body under the block headers v4.32.4 shipped (receipt recovery only)."""
     from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE
+    shipped = {COMPLETION_DELIVERY_HEADER: _SHIPPED_COMPLETION_DELIVERY_HEADER,
+               NOTICE_DELIVERY_HEADER: _SHIPPED_NOTICE_DELIVERY_HEADER}
     blocks, previous = [], None
     for block in text.split("\n\n"):
         header, separator, body = block.partition("\n")
-        if (header == COMPLETION_DELIVERY_HEADER
+        if (header in shipped
                 and (previous is None
                      or OPENCODE_MARKER_LINE_RE.fullmatch(previous.rsplit("\n", 1)[-1]))):
-            header = _SHIPPED_COMPLETION_DELIVERY_HEADER
+            header = shipped[header]
         blocks.append(header + separator + body)
         previous = block
     return "\n\n".join(blocks)
@@ -2104,8 +2113,8 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
                     shipped_rendered,
                     _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
-        # Every follow-up shipped up to v4.32.4 went out under that release's completion header.
-        variants.update(_shipped_completion_header(text) for text in tuple(variants) if text)
+        # Everything shipped up to v4.32.4 went out under that release's block headers.
+        variants.update(_shipped_headers(text) for text in tuple(variants) if text)
         if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
                for _root, record in selected):
             # Recover the previous wording from the same stored diagnosis.
