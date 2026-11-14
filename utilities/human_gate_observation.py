@@ -462,6 +462,8 @@ def pending_human_waits(route, *, jobs, outcome=None):
     name what it depends on: ``_WAIT_READS`` collects ``(path, identity)`` of every file besides
     the journal this call looked at (a frame-review artifact and its two answer files, as named
     and as resolved, and the artifact root), including one that was missing or refused.
+    ``_WAIT_JUDGED`` (a dict) likewise receives ``finished=True`` when the route is over (a
+    terminal journal state or its matched closed outcome): nothing on it can wait again.
     """
     if not isinstance(route, dict) or not route.get("route_id") or not route.get("route_hash"):
         return []
@@ -481,11 +483,12 @@ def pending_human_waits(route, *, jobs, outcome=None):
     if outcome and outcome.get("closed_at") and outcome.get("match") is True \
             and not outcome.get("finish_pending"):
         terminal = True
-    if terminal:
-        return []
     latest_lifecycle = next((row.get("workflow_state") for row in reversed(journal)
                             if row.get("workflow_state")), None)
-    if latest_lifecycle in {"CANCELLED", "COMPLETE", "FAILED_TERMINAL"}:
+    if terminal or latest_lifecycle in {"CANCELLED", "COMPLETE", "FAILED_TERMINAL"}:
+        judged = _WAIT_JUDGED.get()
+        if judged is not None:
+            judged["finished"] = True
         return []
     gates = []
     raised = []
@@ -541,13 +544,15 @@ def pending_human_waits(route, *, jobs, outcome=None):
 # Time, process liveness and lineage are not inputs; the caller still computes them every pass.
 # One entry per route triple; entries the latest full pass did not see are dropped.
 _WAIT_MEMO = {}
-# The route files the latest *full* pass read for the routes it saw, for waking only: the producer
+# The route files the latest *full* pass read for the open routes it saw (a finished route is left
+# to the periodic pass), for waking only: the producer
 # watches them (a NAS file by stat) so a route write starts the next pass early. It is never used
 # to skip a judgment. ``_WAIT_MEMO`` is not this: it can hold routes the pass did not see (an
 # ``only_id`` pass, or a pass that ended before its cleanup keeps older entries), so it is rebuilt
 # from ``seen_routes`` at the cleanup point and emptied by a full pass that did not reach it.
 _LAST_PASS_ROUTE_PATHS = ()
 _WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
+_WAIT_JUDGED = contextvars.ContextVar("human_gate_wait_judged", default=None)
 _METRICS["route_wait_recomputes"] = 0
 _METRICS["route_wait_reuses"] = 0
 
@@ -562,7 +567,7 @@ def _route_file_paths(route_file, record, route_id):
 
 
 def last_pass_route_paths():
-    """Sorted route record/outcome/finish/journal paths the latest full pass read (wake only)."""
+    """Sorted record/outcome/finish/journal paths of the open routes the latest full pass read (wake only)."""
     return _LAST_PASS_ROUTE_PATHS
 
 
@@ -590,7 +595,7 @@ def _kept_waits(route_key, path, ledger_root):
     entry = _WAIT_MEMO.get(route_key)
     if entry is None or ledger_root is None or entry[0] != str(path):
         return None
-    _jobs_key, files, stamps, journal, journal_stamp, reads, waits = entry
+    _jobs_key, files, stamps, journal, journal_stamp, reads, waits, _finished = entry
     # The same registry path can select another ledger (its directory now links elsewhere): the
     # journal the judgment was made from must still be the one this pass selects.
     if journal != _journal_file(route_key, ledger_root):
@@ -618,15 +623,23 @@ def _compute_waits(route_key, raw_record, route_record, outcome, path, ledger_ro
         stamps = (_stamp(files[0]), _stamp(files[1]), _stamp(files[2]) if files[2] is not None else None)
     journal_stamp = _stamp(journal) if journal is not None else None
     reads = []
-    token = _WAIT_READS.set(reads)
+    judged = {}
+    token, judged_token = _WAIT_READS.set(reads), _WAIT_JUDGED.set(judged)
     try:
         waits = pending_human_waits(route_record, jobs=path, outcome=outcome)
     finally:
+        _WAIT_JUDGED.reset(judged_token)
         _WAIT_READS.reset(token)
     if journal is not None:
         _WAIT_MEMO[route_key] = (str(path), files, stamps, journal, journal_stamp, tuple(reads),
-                                 tuple(dict(wait) for wait in waits))
+                                 tuple(dict(wait) for wait in waits), judged.get("finished") is True)
     return waits
+
+
+def _route_finished(route_key, path):
+    """The kept judgment of this pass says the route is over (unknown is not over)."""
+    entry = _WAIT_MEMO.get(route_key)
+    return entry is not None and entry[0] == str(path) and entry[7] is True
 
 
 def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
@@ -996,6 +1009,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 except (OSError, ValueError, TypeError, KeyError):
                     ledger_root = None
                 seen_routes = set()
+                # Only an open route wakes the producer: a finished one is history, which the
+                # periodic pass still reads (a route that opens again is watched from the next pass).
+                open_routes = set()
                 for (route_id, route_digest, route_file), (row, _candidate_meta, route_activity) in route_candidates.items():
                     if only_id is not None and not only_id.startswith("S2:" + str(route_id) + ":"):
                         continue
@@ -1028,6 +1044,8 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                                 waits = _compute_waits(route_key, raw_record, route_record, outcome,
                                                        path, ledger_root)
                         seen_routes.add(route_key)
+                        if not _route_finished(route_key, path):
+                            open_routes.add(route_key)
                         for wait in waits:
                             if meta is None:
                                 meta = row.completion_metadata()
@@ -1065,7 +1083,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 if only_id is None:
                     for stale in [key for key in _WAIT_MEMO if key not in seen_routes]:
                         del _WAIT_MEMO[stale]
-                    pass_paths.update(_seen_route_paths(seen_routes))
+                    pass_paths.update(_seen_route_paths(open_routes))
                     pass_reached += 1
         except (OSError, ValueError, UnicodeError) as exc:
             health.append({"source": "registry", "path": str(path),
