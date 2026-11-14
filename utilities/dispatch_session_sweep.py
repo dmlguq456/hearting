@@ -1195,7 +1195,7 @@ def _compute_run_notice(record: dict) -> dict | None:
     receipt_key = receipt.get("key")
     if (receipt.get("kind") != "notice" or not isinstance(receipt_key, str)
             or receipt_key.split(":", 1)[0] != "compute-run"
-            or receipt.get("subject") != "compute run"):
+            or receipt.get("subject") not in {"compute run", "compute run, quiet"}):
         return None
     match = _COMPUTE_RUN_NOTICE_RE.fullmatch(receipt.get("text", ""))
     if not match or match.group("tail") != match.group("run_id"):
@@ -1284,7 +1284,9 @@ def _refreshed_notice_text(root: Path, record: dict, cache: dict) -> str | None:
     if not isinstance(text, str):
         return None
     run = _experiment_run_state(root, record, cache)
-    if run is None or not _STATUS_EXIT_RE.search(text):
+    # Only the one `status=…; exit=…` the producer writes: a catalog name in front of it may
+    # hold the same words, and then which one is the run's own cannot be told from the text.
+    if run is None or len(_STATUS_EXIT_RE.findall(text)) != 1:
         return None
     exit_code = run.get("exit_code")
     exit_text = "None" if exit_code is None else str(exit_code)
@@ -1317,6 +1319,126 @@ def _render_context(batches: list[tuple[Path, list[dict]]]) -> str:
 
     with registry_read_scope():
         return delivery_context(batches)
+
+
+def _notice_run(record: dict) -> tuple[str, str]:
+    """`(run id, short name)` for a routine line: the run id from a compute run's notice or the
+    notice key, and the catalog name a compute run's notice leads with (else the run id)."""
+    run = _compute_run_notice(record)
+    if run:
+        return run["run_id"], run["name"] or run["run_id"]
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    parts = str(receipt.get("key") or "").split(":")
+    if len(parts) > 2 and parts[0] in {"experiment", "compute-run"} and parts[1]:
+        return parts[1], parts[1]
+    name = str(receipt.get("subject") or "notice")
+    return str(record.get("delivery_id") or name), name
+
+
+ROUTINE_NAMES_SHOWN = 3
+# The same experiment attention posted again at a periodic checkpoint (`resource_progress`).
+_ATTENTION_CHECKPOINT_KEY_RE = re.compile(r"^experiment:[^:]+:attention-checkpoint:")
+
+
+def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
+    """Where each notice goes in a delivery: `(0, …)` needs attention and is shown first,
+    `(1, …)` keeps its own line, `(2, position)` is folded into the one routine line.
+
+    Routine notices (an experiment's normal checkpoint or end, a compute run's exit 0) fold
+    when there are two or more, or when one is quiet (a short or metric-less normal end, a
+    metric-less checkpoint): a quiet notice never gets a line of its own. A single routine
+    notice that carries a value keeps its own line, as before.
+
+    A run's failure or attention in the same delivery outranks its routine notices, whatever
+    order they arrived in: a failed end outranks every routine notice of that run, and an
+    attention (new, changed or re-posted) outranks its normal checkpoints. Such a routine
+    notice is not counted or named on the routine line; its receipt marker rides under that
+    run's first attention entry (`attached`). Only a normal end after an attention still
+    counts: an end is the run's last word.
+    """
+    import session_notice
+    kinds = {id(record): session_notice.classify(record.get("receipt"))
+             for _root, record in notice_records}
+    run_of = {id(record): _notice_run(record)[0] for _root, record in notice_records}
+
+    def key_of(record):
+        receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+        return str(receipt.get("key") or "")
+
+    def ends(record):
+        key = key_of(record)
+        return session_notice.EXPERIMENT_FINAL_KEY.match(key) is not None or key.startswith("compute-run:")
+
+    def flags(record):
+        return (kinds[id(record)] == session_notice.ATTENTION
+                or _ATTENTION_CHECKPOINT_KEY_RE.match(key_of(record)) is not None)
+
+    failed = {run_of[id(record)] for _root, record in notice_records
+              if kinds[id(record)] == session_notice.ATTENTION and ends(record)}
+    flagged = {run_of[id(record)] for _root, record in notice_records if flags(record)}
+    routine, held = [], []
+    for root, record in notice_records:
+        if kinds[id(record)] != session_notice.ROUTINE:
+            continue
+        run = run_of[id(record)]
+        outranked = run in failed or (run in flagged and not ends(record))
+        (held if outranked else routine).append((root, record))
+    fold = len(routine) >= 2 or any(session_notice.is_quiet(record.get("receipt"))
+                                    for _root, record in routine)
+
+    def order(pair):
+        run_id, name = _notice_run(pair[1])
+        # A catalog name first (it says what the run is), then bare run ids.
+        return (name == run_id, name, run_id, str(pair[1].get("delivery_id", "")))
+
+    folded = sorted(routine, key=order) if fold else []
+    held_ids = {id(record) for _root, record in held}
+    places: dict[int, tuple] = {}
+    for position, (_root, record) in enumerate(folded):
+        places[id(record)] = (2, position)
+    for _root, record in notice_records:
+        if id(record) in places or id(record) in held_ids:
+            continue
+        receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+        places[id(record)] = (0 if kinds[id(record)] == session_notice.ATTENTION else 1,
+                              str(receipt.get("text", "")),
+                              str(record.get("delivery_id", "")))
+    attached: dict[int, list[tuple[Path, dict]]] = {}
+    for root, record in held:
+        host = min((other for _other_root, other in notice_records
+                    if flags(other) and run_of[id(other)] == run_of[id(record)]),
+                   key=lambda other: places[id(other)])
+        places[id(record)] = (*places[id(host)], 1, str(record.get("delivery_id", "")))
+        attached.setdefault(id(host), []).append((root, record))
+    for members in attached.values():
+        members.sort(key=lambda pair: places[id(pair[1])])
+    line = ""
+    if folded:
+        ended, checkpoints, quiet, runs = set(), set(), set(), set()
+        names: list[str] = []
+        for _root, record in folded:
+            receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+            run_id, name = _notice_run(record)
+            key = str(receipt.get("key") or "")
+            (checkpoints if session_notice.EXPERIMENT_CHECKPOINT_KEY.match(key) else ended).add(run_id)
+            runs.add(run_id)
+            if session_notice.is_quiet(receipt):
+                quiet.add(run_id)
+            if name not in names:
+                names.append(name)
+        checkpoints -= ended  # a run that also ended is counted once, as ended
+        counts = []
+        if ended:
+            counts.append(f"{len(ended)} ended normally")
+        if checkpoints:
+            counts.append(f"{len(checkpoints)} still running normally")
+        shown = ", ".join(names[:ROUTINE_NAMES_SHOWN])
+        more = len(names) - ROUTINE_NAMES_SHOWN
+        line = (f"Routine, nothing to do ({len(runs)} run{'s' if len(runs) != 1 else ''}): "
+                + ", ".join(counts)
+                + (f" ({len(quiet)} short or without metrics)" if quiet else "")
+                + f" -- {shown}" + (f" and {more} more" if more > 0 else ""))
+    return {"places": places, "routine": folded, "routine_line": line, "attached": attached}
 
 
 def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
@@ -1371,48 +1493,37 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
         blocks.append(GATE_DELIVERY_HEADER + "\n" + "\n".join(
             f"- {line}" for _delivery_id, line in sorted(gate_lines)))
     if notice_records:
+        layout = _notice_layout(notice_records)
+        attention: list[tuple[tuple, str]] = []
         individual: list[tuple[tuple, str]] = []
-        groups: dict[tuple, list[tuple[dict, dict]]] = {}
+        held = {id(record) for members in layout["attached"].values() for _root, record in members}
         for root, record in notice_records:
-            run = _compute_run_notice(record)
-            if run and run["exit"] == 0:
-                receipt = record.get("receipt") or {}
-                key = (receipt.get("subject"), run["host"], run["label"],
-                       receipt.get("required_action"), 0, run["name"])
-                groups.setdefault(key, []).append((run, {"root": root, "record": record}))
-            else:
-                receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
-                text = bound_notice_text(root, record)
-                individual.append(((0, str(receipt.get("text", "")),
-                                    str(record.get("delivery_id", ""))), text))
-        for key, members in groups.items():
-            members.sort(key=lambda item: (item[0]["stamp"], item[0]["run_id"],
-                                           str(item[1]["record"].get("delivery_id", ""))))
-            if len(members) < 3:
-                for run, pair in members:
-                    record = pair["record"]
-                    receipt = record.get("receipt") or {}
-                    individual.append(((0, str(receipt.get("text", "")),
-                                        str(record.get("delivery_id", ""))),
-                                       bound_notice_text(pair["root"], record)))
+            place = layout["places"][id(record)]
+            if place[0] == 2 or id(record) in held:
                 continue
-            runs = [run for run, _pair in members]
-            latest = runs[-1]
-            label = key[2] or "(unlabeled)"
-            named = f" name={key[5]}" if key[5] else ""
-            summary = (f"compute run summary: {len(runs)} runs on {key[1]} label={label}{named}; "
-                       f"exit 0:{len(runs)}; time {runs[0]['stamp']}..{latest['stamp']}; "
-                       f"latest {latest['run_id']}; compute-hosts tail {latest['run_id']}")
+            text = bound_notice_text(root, record)
+            # A routine notice this run's failure or attention outranks: its receipt only.
+            for other_root, other in layout["attached"].get(id(record), ()):
+                text += "".join("\n" + line for line in bound_notice_text(other_root, other).splitlines()
+                                if line.startswith("HEARTING_RECEIPT_V1 "))
+            (attention if place[0] == 0 else individual).append((place, text))
+        notice_lines: list[str] = []
+        if attention:
+            notice_lines.append(f"Needs attention ({len(attention)}), shown first:")
+            notice_lines.extend(f"- {line}" for _key, line in sorted(attention))
+            if individual or layout["routine"]:
+                notice_lines.append("Other notices:")
+        notice_lines.extend(f"- {line}" for _key, line in sorted(individual))
+        if layout["routine"]:
             markers = []
-            for _run, pair in members:
-                text = bound_notice_text(pair["root"], pair["record"])
+            for root, record in layout["routine"]:
+                text = bound_notice_text(root, record)
                 markers.extend(line for line in text.splitlines()
                                if line.startswith("HEARTING_RECEIPT_V1 "))
-            individual.append(((1, key, latest["run_id"]), summary + "\n" + "\n".join(markers)))
-        ordered_notices = sorted(individual, key=lambda item: item[0])
-        if ordered_notices:
-            blocks.append(NOTICE_DELIVERY_HEADER + "\n" + "\n".join(
-                f"- {line}" for _sort_key, line in ordered_notices))
+            notice_lines.append("- " + layout["routine_line"]
+                                + "".join("\n" + marker for marker in markers))
+        if notice_lines:
+            blocks.append(NOTICE_DELIVERY_HEADER + "\n" + "\n".join(notice_lines))
     if lines:
         blocks.append(COMPLETION_DELIVERY_HEADER + "\n" + "\n".join(
             f"- {line}" for _delivery_id, line in sorted(lines))
@@ -1442,37 +1553,25 @@ def utf8_len(text: str) -> int:
 def _render_keys(batches) -> dict[int, tuple]:
     """Each record's place in the text :func:`delivery_context` renders for ``batches``.
 
-    The same order the renderer uses: gates by delivery id, then notices (by
-    receipt text and delivery id; three or more successful compute runs of one
-    key as one summary after them), then completions by delivery id. Keyed by
-    ``id(record)``.
+    The same order the renderer uses: gates by delivery id, then notices (attention
+    first, then the others by receipt text and delivery id, then the one routine
+    line), then completions by delivery id. Keyed by ``id(record)``.
     """
-    groups: dict[tuple, list[tuple[dict, dict]]] = {}
     keys: dict[int, tuple] = {}
-    for _root, records in batches:
+    notice_records: list[tuple[Path, dict]] = []
+    for root, records in batches:
         for record in records:
             delivery_id = str(record.get("delivery_id", ""))
             receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
             if is_human_gate_record(record):
                 keys[id(record)] = (0, delivery_id)
             elif receipt.get("kind") == "notice":
-                run = _compute_run_notice(record)
-                if run and run["exit"] == 0:
-                    key = tuple(str(part) for part in (
-                        receipt.get("subject"), run["host"], run["label"],
-                        receipt.get("required_action"), run["name"]))
-                    groups.setdefault(key, []).append((run, record))
-                keys[id(record)] = (1, 0, str(receipt.get("text", "")), delivery_id)
+                notice_records.append((root, record))
             else:
                 keys[id(record)] = (2, delivery_id)
-    for key, members in groups.items():
-        if len(members) < 3:
-            continue
-        members.sort(key=lambda item: (str(item[0]["stamp"]), str(item[0]["run_id"]),
-                                       str(item[1].get("delivery_id", ""))))
-        latest = str(members[-1][0]["run_id"])
-        for position, (_run, record) in enumerate(members):
-            keys[id(record)] = (1, 1, key, latest, position)
+    layout = _notice_layout(notice_records)
+    for _root, record in notice_records:
+        keys[id(record)] = (1, *layout["places"][id(record)])
     return keys
 
 
@@ -2400,13 +2499,18 @@ def main(argv: list[str] | None = None) -> int:
                         deadline_ns=deadline_ns)
                 if records:
                     batches.append((root, records))
+            import session_notice
             print(json.dumps({
                 "text": _render_context(batches),
                 "records": [{"root": str(root), "storage_key": record.get(STORAGE_KEY) or args.session,
                              "delivery_id": record["delivery_id"], "claim_owner": record.get("claim_owner"),
                              "immutable_identity": record.get(IDENTITY_KEY)
                              or pending_delivery.received_ack_identity(
-                                 record, record.get(STORAGE_KEY) or args.session, record["delivery_id"])}
+                                 record, record.get(STORAGE_KEY) or args.session, record["delivery_id"]),
+                             # A quiet notice to a supervising session opens no idle turn of its
+                             # own; the carrier keeps it for the session's next natural turn.
+                             "waits": session_notice.waits_for_next_delivery(
+                                 record, "opencode", record.get(STORAGE_KEY) or args.session)}
                             for root, records in batches for record in records],
             }, ensure_ascii=False), flush=True)
         finally:
