@@ -575,10 +575,15 @@ function existing(file){return new Promise((resolve,reject)=>{
    // Correction 8: the light comes in on the paint that shows the turn (it never waits out a rest).
    const litAfter=Date.now()-opened;
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
-   // (1.95 s: not a whole number of the light's 3.5 s period, so the two readings differ.)
-   await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
+   // The second reading comes 0.95 s in. The light runs out and back over the rule, so a reading
+   // at the mirror of the first (2.6 s less twice the first's age into the turn) looks the same:
+   // 1.95 s after a first reading 0.3 s in was that mirror. 0.95 s after a first reading under
+   // 0.3 s (asserted below) is neither that mirror nor a whole 3.5 s period. The writes are still
+   // counted over 1.95 s.
+   await new Promise(r=>setTimeout(r,950));await flush();
    // (The same row, lit or resting: the light may be out on its rest by then.)
    const second=first&&rule(first.y);
+   await new Promise(r=>setTimeout(r,1000));sub.dispose();await flush();
    // Spec rule 51 (c): the rest (the dark rule for 1 s once the light has left on its first side;
    // the far end's dark beat lasts 0.1 s). Seen dark and still dark 0.25 s later, it is the rest:
    // for the next 0.5 s the host writes nothing for the rule's row, only the spinner's own glyph.
