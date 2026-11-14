@@ -170,8 +170,8 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 
     def test_an_alt_letter_in_the_popup_is_dropped_and_a_lone_esc_still_closes_it(self):
         # ESC then a letter (Alt+b, Alt+f) is no key this editor has: dropped, the popup stands, the
-        # draft stays, nothing goes on to the native. A lone Esc (the host's 25 ms) and Esc then
-        # Ctrl+] / Enter close it as before, handing the rest on.
+        # draft stays, nothing goes on to the native. A lone Esc (the host's 25 ms) closes it; so does
+        # Esc then Esc, and nothing else that follows an Esc does.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
 (async()=>{
@@ -187,9 +187,16 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
  }
  {const b=make();b.input(Buffer.from('\x1b'));b.input(Buffer.from('b'));assert.equal(b.focused,true,'split across reads');}
  {const b=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
- {const b=make();const rest=b.input(Buffer.from('\x1b\x1dZ'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\x1dZ','Esc then Ctrl+] closes and goes on');}
- {const b=make();const rest=b.input(Buffer.from('\x1b\t'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\t','Esc then Tab closes and goes on as before');}
- {const b=make();const rest=b.input(Buffer.from('\x1b\x1b'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\x1b','Esc then Esc closes and goes on as before');}
+ // One rule: after an Esc, in the same read or within the Esc window, only `[` and `O` (arrows, function
+ // keys) belong to a key; any other byte is dropped, never the native's, and only a second Esc closes it.
+ for(const combo of ['\x1b\x03','\x1b\x08','\x1b\t','\x1b\x1d','\x1b\x00']){
+  const b=make();const rest=b.input(Buffer.from(combo));
+  assert.equal(rest.length,0,'nothing goes on: '+JSON.stringify(combo));assert.equal(b.focused,true,'the popup stands: '+JSON.stringify(combo));
+  const split=make();split.input(Buffer.from('\x1b'));assert.equal(split.input(Buffer.from(combo.slice(1))).length,0,'split: '+JSON.stringify(combo));
+  assert.equal(split.focused,true,'split, the popup stands: '+JSON.stringify(combo));
+ }
+ {const b=make();const rest=b.input(Buffer.from('\x1b\x1b'));assert.equal(b.focused,false,'Esc then Esc closes it');assert.equal(rest.length,0,'and the second Esc is dropped');}
+ {const b=make();b.input(Buffer.from('\x1b'));const rest=b.input(Buffer.from('\x1b'));assert.equal(b.focused,false,'split Esc, Esc closes it');assert.equal(rest.length,0);}
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
@@ -240,6 +247,40 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
  {const b=make();b.input(Buffer.from('\x1d'));assert.equal(b.focused,false);assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'Ctrl+]: as before');}
  {const b=await escClosed();b.enter();b.leave();assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'a later close by another way ends it');}
  {const b=await escClosed();b.enter();assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'opening it again ends it');}
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_an_esc_key_after_an_esc_close_or_an_answer_reaches_the_native_whole(self):
+        # panel-mouse used to tear the ESC off a key it did not know (`ESC b`, `ESC \r`, `ESC O A`) and
+        # hand it on alone, where answeredEscape took it for the lone Esc. The key now goes whole (2, 2, 3,
+        # 2 bytes); only a lone Esc flushed after 8 ms is taken. Mouse reports, CSI and pastes are cut as before.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path');
+const create=require(path.join(process.argv[1],'block-input.cjs')),decoder=require(path.join(process.argv[1],'panel-mouse.cjs'));
+(async()=>{
+ const wait=ms=>new Promise(r=>setTimeout(r,ms));
+ const rig=()=>{ // inputBytes' native path: what answeredEscape does not take goes to the native
+  const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}}),native=[],mouse=[];
+  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',choices:['a','b']}]}],'',{});
+  const m=decoder({suppressed:()=>false,mouse:(...a)=>mouse.push(a.slice(0,4).join(',')),bytes:data=>{
+   while(data.length){if(!b.focused&&b.answeredEscape(data)){data=data.subarray(1);continue;}native.push(data.toString('latin1'));return;}}});
+  return {b,m,native,mouse};
+ };
+ const viaEsc=async r=>{r.b.enter();r.b.input(Buffer.from('\x1b'));await wait(60);assert.equal(r.b.focused,false);};
+ const viaAnswer=async r=>{r.b.enter();r.b.input(Buffer.from('1'));r.b.input(Buffer.from('\r'));await wait(20);assert.equal(r.b.focused,false);};
+ for(const [name,close] of [['Esc close',viaEsc],['an answer',viaAnswer]]){
+  for(const [key,size] of [['\x1bb',2],['\x1b\r',2],['\x1bOA',3],['\x1b\x7f',2],['\x1b[A',3],['\x1b[1;5C',6]]){
+   const r=rig();await close(r);await wait(200);r.m.feed(Buffer.from(key));await wait(30);
+   assert.equal(r.native.join('').length,size,name+': '+JSON.stringify(key)+' reaches the native whole');
+   assert.deepEqual(r.native,[key],name+': in one piece');
+  }
+  {const r=rig();await close(r);await wait(200);r.m.feed(Buffer.from('\x1b'));await wait(30);assert.deepEqual(r.native,[],name+': a lone Esc is the shell\'s');}
+  {const r=rig();await close(r);await wait(200);r.m.feed(Buffer.from('\x1b'));await wait(3);r.m.feed(Buffer.from('b'));await wait(30);
+   assert.deepEqual(r.native,['\x1bb'],name+': ESC and b split within a frame are one key');}
+ }
+ // Cut exactly as before: a mouse report, a CSI and a key behind another in one read.
+ {const r=rig();r.m.feed(Buffer.from('\x1bb\x1b[<0;5;6M\x1b[Ax\x1b\x1bc'));await wait(30);
+  assert.deepEqual(r.mouse,['0,5,6,false']);assert.deepEqual(r.native,['\x1bb','\x1b[A','x','\x1b','\x1bc']);}
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 

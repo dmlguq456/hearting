@@ -1394,8 +1394,8 @@ function inputBytes(data) {
     // Mouse-opened shell editors own their visible keys even while a peer's
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
-    // 11-15: while a popup stands it takes every key; nothing typed there reaches the native. Esc or
-    // Ctrl+] closes it and the rest goes on. A popup not drawn (the host being handed over) owns none.
+    // 11-15: while a popup stands it takes every key; nothing typed there reaches the native. A lone Esc
+    // closes it; Ctrl+] closes it and the rest goes on. A popup not drawn (the host being handed over) owns none.
     if(table&&popupShown()){
       const rest=tableInput(data);epoch+=data.length-rest.length;
       data=rest;queueDisplay();continue;
@@ -1469,11 +1469,12 @@ function tableInput(data){
       const csi=/^\x1b(?:\[[0-9;]*[\x40-\x7e]|O[A-D])/.exec(text);
       if(!csi){
         if(/^\x1b\[[0-9;]*$/.test(text)){tableTail=text;return Buffer.alloc(0);}
-        // ESC then anything else: Alt+letter and Shift/Alt+Enter (ESC then CR or LF) are dropped, as in the
-        // question popup (an Enter reaching the native would submit its text); a lone Esc before another
-        // key closes. (A UTF-8 letter's further bytes are no key either.)
-        if(text.charCodeAt(1)>=0x20||text[1]==='\r'||text[1]==='\n'){text=text.slice(2);continue;}
-        closePopup();return Buffer.from(text.slice(1),'latin1');
+        // ESC then anything but `[` or `O` (an arrow or function key) is no key of the popup's, as in the
+        // question popup: Alt+letter, Shift/Alt+Enter, Esc then a control byte are dropped and it stands
+        // (an Enter reaching the native would submit its text, a ^C interrupt its turn). Only a second Esc
+        // closes it, and is dropped too. (A UTF-8 letter's further bytes are no key either.)
+        if(text[1]==='\x1b'){closePopup();block.escaped();return Buffer.from(text.slice(2),'latin1');}
+        text=text.slice(2);continue;
       }
       const key=csi[0].replace('\x1bO','\x1b[');text=text.slice(csi[0].length);
       if(key==='\x1b[A')moveRow(-1);else if(key==='\x1b[B')moveRow(1);

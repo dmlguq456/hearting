@@ -174,8 +174,8 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   await key('\x1d',200);s=await until(s=>!!box(s),'the popup for the text question');
   await key('한글 답',100);
   // An Alt+letter (ESC then a letter) is no key the editor knows: dropped, the popup stands, the
-  // draft stays and the native receives nothing.
-  await key('\x1bb',250);await key('\x1bf',250);
+  // draft stays and the native receives nothing; so for ESC then a control byte (^C, Tab).
+  await key('\x1bb',250);await key('\x1bf',250);await key('\x1b\x03',250);await key('\x1b\t',250);
   s=await screen();checks.alt_kept=!!box(s)&&has('› 한글 답')(s);
   checks.alt_leaked=s.some(l=>/^❯ draft2\S/.test(l)||/^❯ (?!draft2)\S/.test(l))||s.some(l=>l.includes('NATIVE_ESC_'));
   // ESC then Enter (Shift+Enter, Alt+Enter): dropped like it; the popup stands, the draft stays, and the
@@ -193,6 +193,14 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   await key('\x1b',200);s=await screen();checks.esc2_leaked=s.some(l=>/^❯ .*\^/.test(l));
   await key('\x1d',250);await until(s=>!!box(s),'the popup for the Esc and a letter');
   await key('\x1b',200);await key('x',200);s=await screen();checks.esc_x_kept=s.some(l=>l.includes('❯ draft2x'));
+  // A key that starts with ESC, 0.2 s after the Esc that closed the popup, reaches the native whole: Alt+b is
+  // `^b` in its input, and Alt+Enter (ESC CR) is two bytes, not a bare Enter submitting `draft2x^bz`.
+  await key('\x1d',250);await until(s=>!!box(s),'the popup for Alt+b');await key('\x1b',200);await until(s=>!box(s),'closed for Alt+b');
+  await key('\x1bb',250);s=await screen();checks.alt_after_close=s.some(l=>l.includes('❯ draft2x^b'));
+  await key('z',150); // the host reads `ESC b` as an open key sequence until one more key ends it
+  await key('\x1d',250);await until(s=>!!box(s),'the popup for Alt+Enter');await key('\x1b',200);await until(s=>!box(s),'closed for Alt+Enter');
+  await key('\x1b\r',300);s=await screen();
+  checks.escenter_after_close=s.some(l=>l.includes('DONE_draft2x^bz^'))&&!s.some(l=>/DONE_draft2x\^bz(?!\^)/.test(l));
   await key('\r',250);
   // The moving frame turns beside it (the popup covers the panel's edge at 120 columns).
   await key('\x1b',200);await key('busy\r',300);await resize(120,30);await key('\x1d',300);
@@ -345,6 +353,9 @@ class SessionShellPopupTest(unittest.TestCase):
         # The second Esc after the Esc that closed it is the shell's; a letter, or an Esc after 1.5 s, is the native's.
         self.assertFalse(checks['esc2_leaked'])
         self.assertTrue(checks['esc_x_kept'])
+        # A key that starts with ESC right after an Esc close reaches the native whole (Alt+b, Alt+Enter).
+        self.assertTrue(checks['alt_after_close'])
+        self.assertTrue(checks['escenter_after_close'])
         self.assertTrue(checks['esc_late_native'])
         self.assertLessEqual(checks['narrow_width'], 60)
         narrow = frames['narrow']
