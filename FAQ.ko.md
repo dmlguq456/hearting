@@ -66,9 +66,23 @@ Code 작업자에만 적용됩니다. Codex 작업자는 Codex의 `workspace-wri
 
 모든 하네스와 프로젝트의 모든 git worktree가 공유하는 계획, 근거, 결과, 인계를
 담습니다. 옛 `.claude_reports/` 폴더는 이전 이름으로 계속 읽힙니다. 작업이 막혀도
-이 폴더를 지우지 마세요. 그 안의 `README.md`를 열거나 `hearting reports`를 실행하면
-최근 결과를 볼 수 있습니다.
+이 폴더를 지우지 마세요. 그 안의 `README.md`(브라우저에서는 `index.html`)를 열거나
+`hearting reports`를 실행하면 최근 결과를 볼 수 있고, `hearting open <번호 또는
+검색어>`가 하나를 엽니다.
 선택 사항: `hearting view`로 로컬 뷰어를 열고 Ctrl-C로 끕니다. 실행 중에는 `hearting open`이 URL도 보여 줍니다.
+기본 포트는 8765이고, 포트가 사용 중이면 `hearting view --port 0`으로 빈 포트를
+쓰거나 `--port 8766`으로 직접 고릅니다.
+
+계획이 필요한 일은 회차(cycle) 폴더 `campaigns/<campaign>/<cycle>/artifacts/`
+하나를 씁니다. 안에는 `plans/`(계획, 체크리스트, 개발·시험 로그, 근거, 최종
+보고서), `research/`, `analysis_project/`, `analysis/`, `spec/`(현재 판은
+`.agent_reports/shared/spec/`에서 함께 쓰고, 개정하면 이전 판을 남김),
+`documents/`, `experiments/`가 있습니다. 작은 직접 작업과 자동 턴 기록은 대신
+campaign의 하루 일지(`journals/YYYY-MM-DD.md`)에 모입니다.
+`hearting run artifact-journal dry-run --artifact-root <루트>`로 일지에 합칠 수 있는
+예전 작은 cycle을 미리 보고, 명시적인 `apply --cycle <ID>`와 `restore --cycle <ID>`로
+백업·통합·복원합니다. campaign은 `STATUS.md`를 둘 수 있으며, 하팅이 만들지는 않고
+Fleet가 프로젝트 화면에 보여 줍니다.
 
 ## hearting이나 fleet를 찾을 수 없다고 나옵니다
 
@@ -86,14 +100,41 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 
 ## herdr, NAS, GPU, 외부 산출물 도구 없이 쓸 수 있나요?
 
-네, 모두 선택 기능입니다. herdr가 없으면 peer 창, pane 제목, peer 전달, 자동
-`/clear`, 질문 알림은 tmux 안에서 일할 때 tmux로 합니다(데스크톱 세션은 질문
-알림을 `notify-send`로도 받습니다). 둘 다 없으면 이 기능들은 꺼지고 관련 hook은
-조용히 끝나며, `hearting runtime doctor`가 그렇다고 알려 줍니다. 완성된 산출물을
+네, 모두 선택 기능입니다. 세션 사이의 메시지, 요청, 감시는 하팅 자체 기록으로
+돌며 herdr도 tmux도 필요 없고, 패널도 마찬가지입니다. herdr나 tmux는 peer 창을
+열고 닫거나 pane 제목을 붙이고 질문 알림을 나르는 데 씁니다. 둘 다 없으면 이
+기능들은 꺼지고(데스크톱 세션은 질문 알림을 `notify-send`로 여전히 받습니다),
+`hearting runtime doctor`가 무엇이 꺼졌는지 알려 줍니다. 완성된 산출물을
 외부 도구로 보내는 단계는 연결한 도구가 없으면 사용할 수 없다고 알립니다. `compute-hosts`는 호스트를 지정하기
 전까지 주석 처리된 템플릿이고, 호스트 없이 연산을 요청하면 분명한 오류가 납니다.
 `~/.config/hearting/memory-sync.json`으로 교환을 설정하지 않으면 메모리는 로컬에만
 남습니다.
+
+## 패널을 끌 수 있나요?
+
+네. `hearting session shell disable`을 실행하면 새로 여는 Claude Code, Codex,
+OpenCode 터미널이 예전처럼 원래 CLI로 열리고, `hearting session shell enable`은
+패널을 다시 켭니다. `hearting session shell status`로 지금 선택을 봅니다. 실행 중인
+세션은 시작할 때 상태 그대로이고, 업데이트도 이 선택을 지킵니다. 패널은 두되 원래
+화면을 넓게 쓰고 싶으면 패널 톱니 옆 **»**로 좁은 띠로 접거나, **⚙**에서 폭과
+위치를 바꿉니다([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding), 영어).
+
+## 세션끼리 일과 메시지를 어떻게 주고받나요?
+
+평소 말로 하면 됩니다. “세션 [b2]에 시험을 다시 돌리고 보고해 달라고 해줘.” 번호는
+Fleet와 패널이 그 세션에 보여 주는 번호입니다. 에이전트가 **요청**을 보냅니다. 요청에는
+번호가 붙고, 상대 세션은 짧은 줄 하나를 받아 본문을 스스로 엽니다. 일하는 동안 일부
+보고를, 끝나면 최종 보고나 거절을 보내고, 보고가 올 때마다 맡긴 세션이 깨어납니다.
+맡긴 쪽은 새 판을 보내거나 취소할 수 있습니다. 두 패널 모두 요청이 닫힐 때까지
+보여 줍니다. 짧은 쪽지와 감시(“[e8]이 끝나면 알려줘”)도 같은 방식입니다. 어느 것도
+herdr나 tmux가 필요하지 않습니다.
+
+패널이 있는 터미널에서는 어느 하네스든 쉬고 있는 세션에 바로 닿습니다. Codex는
+자체 thread queue로 어디서든 바로 닿습니다. 패널이 없는 터미널에서는 쉬고 있는
+Claude Code 세션에는 그 세션의 다음 턴에, OpenCode에는 다음 idle이나 도구
+callback에 닿고, 그동안 요청은 열린 채 목록에 남습니다. Fleet는 아직 요청 목록을
+보여 주지 않고, Fleet에서 요청을 보낼 수도 아직 없습니다. 자세한 내용은
+[docs/session-panel.md](docs/session-panel.md#requests-and-messages)(영어)에 있습니다.
 
 ## 언어 설정이 모든 문구를 번역하나요?
 
@@ -111,8 +152,10 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 수집기가 자료를 못 얻거나 실패할 수 있습니다. Fleet는 읽지 못한 값을 `?`로
 보여 줍니다. 활동이 0이라는 뜻이 아니고, 그것만으로 작업이 실패했다는 뜻도
 아닙니다. 에이전트에게 실제 attempt id를 물어 보고
-`hearting run attempt-view <attempt-id> --follow`를 실행하세요. `.agent_reports/`의
-인계에도 무슨 일이 있었는지 남습니다.
+`hearting run attempt-view <attempt-id> --follow`를 실행하세요.
+`hearting run workflow-supervisor status --route <route-id> --json`은 요청이 지금
+어느 단계에 있는지 알려 줍니다. `.agent_reports/`의 인계에도 무슨 일이 있었는지
+남습니다.
 
 ## 작업 하나에 얼마가 드나요?
 

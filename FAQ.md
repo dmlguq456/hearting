@@ -74,8 +74,23 @@ Hearting records it automatically; there is nothing to start or finish.
 It stores plans, evidence, results, and handoffs shared by every runtime and
 every git worktree of the project. An older `.claude_reports/` folder is still
 read as a legacy alias. Do not delete these folders to unblock a task. Open its
-`README.md`, or run `hearting reports`, to see the latest results.
+`README.md` (or `index.html` in a browser), or run `hearting reports`, to see
+the latest results; `hearting open <number or words>` opens one.
 Optional: `hearting view` starts a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs.
+It uses port 8765; if that port is occupied, `hearting view --port 0` picks a
+free one, or `--port 8766` chooses one.
+
+Planned work uses one cycle folder,
+`campaigns/<campaign>/<cycle>/artifacts/`, holding `plans/` (plan, checklist,
+dev and test logs, evidence, final report), `research/`, `analysis_project/`,
+`analysis/`, `spec/` (the current revision is shared under
+`.agent_reports/shared/spec/`, and a revision keeps the previous one),
+`documents/`, and `experiments/`. Small direct changes and automatic turn
+records go to the campaign's daily journal (`journals/YYYY-MM-DD.md`) instead;
+`hearting run artifact-journal dry-run --artifact-root <root>` previews older
+small cycles that could be folded into it, and explicit `apply --cycle <id>` /
+`restore --cycle <id>` back them up and restore them. A campaign can keep a
+`STATUS.md`; Hearting never creates it, and Fleet shows it on the project page.
 
 ## hearting or fleet is not found
 
@@ -95,15 +110,46 @@ before planning, while a one-step direct change still runs.
 
 ## Can I use it without herdr, a NAS, GPUs, or an outside artifact tool?
 
-Yes; these are optional. Without herdr, peer windows, pane titles, peer
-delivery, automatic `/clear`, and question notifications use tmux when you
-work inside tmux (a desktop session also gets question notifications through
-`notify-send`); without either they are off, the related hooks exit quietly,
-and `hearting runtime doctor` says so. Sending finished artifacts to an
+Yes; these are optional. Messages, requests, and watching between sessions run
+on Hearting's own records and need neither herdr nor tmux, and neither does the
+panel. herdr or tmux is used to open and close peer windows, title panes, and
+carry question notifications; without either those are off (a desktop session
+still gets question notifications through `notify-send`), and
+`hearting runtime doctor` names what is off. Sending finished artifacts to an
 outside tool reports itself unavailable when none is connected. `compute-hosts` stays a
 commented template until you name a host, and a compute request without a host
 fails with a clear error. Memory stays local unless you configure an exchange
 in `~/.config/hearting/memory-sync.json`.
+
+## Can I turn the panel off?
+
+Yes. `hearting session shell disable` makes new Claude Code, Codex, and
+OpenCode terminals launch the native CLI as before, and
+`hearting session shell enable` turns the panel on again;
+`hearting session shell status` shows the current choice. Running sessions keep
+what they started with. Updates keep your choice. To keep the panel but give
+the native area more room, press **»** beside the panel's gear to fold it into
+a narrow strip, or change its width and position under **⚙**
+([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding)).
+
+## How do sessions pass work and messages to each other?
+
+Ask in your own words: “Ask session [b2] to re-run the tests and report back.”
+The number is the one Fleet and the panel show for that session. The agent
+sends a **request**: it gets a number, the other session receives one short
+line and opens the body itself, sends partial reports while it works and a
+final report (or a rejection) when done, and each report wakes the session that
+asked. The asker can send a new revision or cancel. Both panels list the
+request until it closes. Short notes and watching (“tell me when [e8]
+finishes”) work the same way. None of this needs herdr or tmux.
+
+In a terminal with the panel, an idle session on any runtime is reached at
+once. Codex is reached at once anywhere, through its own thread queue. Outside
+the panel's terminal, an idle Claude Code session is reached at its next turn
+and OpenCode at its next idle or tool callback; the request stays open and
+listed meanwhile. Fleet does not list requests yet, and you cannot send one
+from Fleet yet. Details:
+[docs/session-panel.md](docs/session-panel.md#requests-and-messages).
 
 ## Does the language setting translate every label?
 
@@ -122,8 +168,10 @@ agent, such as internal diagnostics, are not translated.
 A collector can lack data or fail. Fleet shows `?` for a value it could not
 read; that is not zero activity and does not by itself mean the task failed.
 Ask the agent for the real attempt id, then run
-`hearting run attempt-view <attempt-id> --follow`. The task's handoff under
-`.agent_reports/` also records what happened.
+`hearting run attempt-view <attempt-id> --follow`.
+`hearting run workflow-supervisor status --route <route-id> --json` says which
+stage a request is in. The task's handoff under `.agent_reports/` also records
+what happened.
 
 ## How much will a task cost?
 
