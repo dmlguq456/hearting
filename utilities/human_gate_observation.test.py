@@ -729,17 +729,17 @@ class PendingWaitTest(unittest.TestCase):
             result = H.read_answer_waits(jobs_paths=[self.jobs], now=now)
             self.assertEqual({item["source"] for item in result["items"]}, {"S1", "S2", "S4"},
                              repr(result))
-            # The marker question (S4 without a reply surface) is answered in its own session's
-            # input: listed, folded, never counted by a person surface (11-14).
+            # The marker question (S4 without a reply surface), answered in its own session's
+            # input, still waits for a person: it is counted with the rest (11-14).
             self.assertEqual((result["total"], result["stale_total"], result["by_session"]),
-                             (0, 2, {}))
+                             (0, 3, {}))
             self.assertTrue(all(item["stale"] for item in result["items"]))
             self.assertTrue(human_wait_state.publish_cache(result))
             projection = human_wait_state._read_cache_file()
             fleet_cache = json.loads(human_wait_state._fleet_cache_path().read_text(encoding="utf-8"))
             self.assertEqual((projection["total"], projection["older"], projection["by_session"]),
-                             (0, 2, {}))
-            self.assertEqual((fleet_cache["total"], fleet_cache["older"]), (0, 2))
+                             (0, 3, {}))
+            self.assertEqual((fleet_cache["total"], fleet_cache["older"]), (0, 3))
             self.assertTrue(all("question" not in item for item in fleet_cache["items"]))
 
             self.assertTrue(interaction.clear_wait("native-older", "codex"))

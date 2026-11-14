@@ -1037,23 +1037,29 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         values["steward"] = False
     elsewhere = []
     board = session_questions(harness, sid, view=view, retained=retained_questions, elsewhere=elsewhere)
-    # The answer wait this panel counts is what the person can answer here now: this
-    # session's answerable questions (11-14), the same rows the block and the notice line
-    # show. A wait answered elsewhere gets one guidance line instead (``wait_guide``).
+    # The answer wait this panel counts is every wait of this session a person must answer
+    # (11-14), wherever it is answered: the questions its block answers, and the ones answered
+    # in another place (a Claude native request, a marker question), which stand as one line
+    # saying where (``wait_guide``). A finished one (closed, expired, an answer on its way)
+    # waits for no one; a blocked owner is its parent agent's.
     answerable = sum(1 for item in board if item.get("answerable") is True
                      and (item.get("request_state") or "open") == "open")
+    from fleet.session_block import unanswerable_state
+    def place(item):
+        state = item.get("request_state")
+        return (state if state in {"expired", "cancelled"} or state == "unknown" and not item.get("reason")
+                else unanswerable_state(item.get("reason"), own=True))
+    elsewhere = [item for item in elsewhere if human_wait_state.person_wait(item)
+                 and place(item) not in {"expired", "cancelled", "answer_closed", "answer_sending"}]
+    waiting = answerable + len(elsewhere)
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
                   state=state, route_label=_plain(route),
-                  answer_wait=(None if not counts else answerable if answerable
+                  answer_wait=(None if not counts else waiting if waiting
                                else None if counts[0] < 0 and counts[1] > 0 else 0))
     if elsewhere:
-        from fleet.session_block import unanswerable_state
-        first = elsewhere[0]
-        state = first.get("request_state")
-        word = (state if state in {"expired", "cancelled"} or state == "unknown" and not first.get("reason")
-                else unanswerable_state(first.get("reason"), own=True))
-        values["wait_guide"] = (ui_text("fleet.session_block.questions") + " " + str(len(elsewhere)) + " · "
-                                + ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + word))
+        word = ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + place(elsewhere[0]))
+        values["wait_place"] = word
+        values["wait_guide"] = ui_text("fleet.session_block.questions") + " " + str(len(elsewhere)) + " · " + word
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving
@@ -1108,6 +1114,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                 # this restrictive display hint never grants input authority.
                 available = [dict(item, answerable=False, reason="action-pending")
                              if answer_busy and item.get("answerable") else item for item in board]
+                available += elsewhere  # counted with the rest, answered in their own place
                 projector(pane_binding, values, available)
         except Exception:
             pass  # Optional metadata cannot interrupt this terminal's display.

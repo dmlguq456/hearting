@@ -327,9 +327,10 @@ try {
                          ["current", "current", "current", "older", "older", "current"])
         self.assertEqual([item.get("pane_id") for item in view["items"]],
                          [None, None, None, None, None, None])
-        # Listed, not counted (11-14): the blocked owners (their parent agent answers) and the
-        # marker question (answered in its own input).
-        self.assertEqual(view["total"], 3)
+        # Every wait a person must answer counts, the marker question (answered in its own
+        # input) too; the blocked owners, their parent agent's to answer, are listed, not
+        # counted (11-14).
+        self.assertEqual(view["total"], 4)
         self.assertEqual(view["older"], 0)
         self.assertEqual(view["unattributed"], ["s2", "s3-old"])
         ids_before = [item["id"] for item in view["items"]]
@@ -340,7 +341,15 @@ try {
                                    compute_hosts=None)
         summary = job_summary(snapshot)
         self.assertIn(f"{answer_wait_word()} 1", summary)
-        self.assertIn("답변 필요 2", summary)
+        self.assertIn("답변 필요 3", summary)
+        # Fleet's head is the sum of what its session rows wait on (their current waits, the
+        # way the collector attaches them), blocked owners aside: three rows, one wait each.
+        rows = {}
+        for item in view["items"]:
+            if item.get("stale") == "current" and item.get("session_id") and item["source"] not in ("S2", "S3"):
+                rows.setdefault((item["harness"], item["session_id"]), []).append(item["kind"])
+        self.assertEqual(sum(map(len, rows.values())), 3)
+        self.assertEqual(sorted(rows), [("claude", "c"), ("codex", "a"), ("opencode", "q")])
 
     def test_fleet_reader_does_not_fall_back_to_private_projection_cache(self):
         private_path = human_wait_state._cache_path()

@@ -178,12 +178,11 @@ def render(board, rows, folded):
         counts["total"] if board.get("complete") else "?", counts["older"])
     if counts["ownerless"]:
         head += " (%d ownerless)" % counts["ownerless"]
-    # Listed but not counted: a blocked owner (its parent agent answers), a native-only request
-    # or a marker question (that session's own input) is no person's question on these surfaces.
-    own = sum(1 for item in board.get("items") or ()
-              if isinstance(item, dict) and not item.get("stale") and not HWS.person_wait(item))
-    if own:
-        head += " · %d answered in their own session" % own
+    # Listed but not counted: a blocked owner is its parent agent's to answer, not a person's.
+    agents = sum(1 for item in board.get("items") or ()
+                 if isinstance(item, dict) and not item.get("stale") and not HWS.person_wait(item))
+    if agents:
+        head += " · %d blocked owner%s for the parent agent" % (agents, "" if agents == 1 else "s")
     head += " · observed %s ago" % _age(observed) if observed >= 60 else " · observed now"
     if not board.get("complete"):
         head += " · observation incomplete"

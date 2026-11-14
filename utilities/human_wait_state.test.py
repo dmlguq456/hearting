@@ -71,6 +71,28 @@ class HumanWaitStateTests(unittest.TestCase):
                                           "[답변 필요] 진행할까요?", sequence=3, now=200))
         self.assertEqual(state.read_signals(now=200)[0]["since"], 100)
 
+    def test_every_wait_but_a_blocked_owner_is_a_persons_to_answer(self):
+        # 11-14: the count holds every wait a person must answer, wherever it is answered (the
+        # panel, a Claude native request in its own window, a marker in that session's input,
+        # a human gate); only a blocked owner, its parent agent's to answer, stays out.
+        owner = {"harness": "claude", "session_id": "sid"}
+        waits = [
+            {"id": "S1:claude:sid:1", "source": "S1", "kind": "approval", "owner": owner},
+            {"id": "S1:codex:sid:2", "source": "S1-question", "kind": "decision",
+             "owner": {"harness": "codex", "session_id": "sid"}},
+            {"id": "S2:gate", "source": "S2", "kind": "decision", "owner": {}},
+            {"id": "S4:marker", "source": "S4", "kind": "marker", "owner": owner},
+            {"id": "S4:message", "source": "S4", "kind": "message", "owner": owner},
+            {"id": "S4:older", "source": "S4", "kind": "marker", "owner": owner, "stale": True},
+        ]
+        owners = [{"id": "S3:att-%d" % n, "source": "S3", "kind": "decision", "owner": owner}
+                  for n in range(8)]
+        self.assertEqual([state.person_wait(item) for item in waits], [True] * len(waits))
+        self.assertEqual({state.person_wait(item) for item in owners}, {False})
+        self.assertFalse(state.person_wait(None))
+        self.assertEqual(state.wait_counts([*owners, *waits]),
+                         {"total": 5, "older": 1, "ownerless": 0})
+
     def test_reader_is_read_only_and_user_prompt_closes_exact_seat(self):
         self.assertTrue(state.open_signal("codex", "sid-2", "seat-2",
                                           "[결정 필요] A 또는 B", sequence=2, now=100))
@@ -79,8 +101,9 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=101)
         after = (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
         self.assertEqual(before, after)
-        # A marker question is answered in its own session's input: listed, not counted (11-14).
-        self.assertEqual((len(result["items"]), result["total"]), (1, 0))
+        # A marker question, answered in its own session's input, still waits for a person:
+        # listed and counted (11-14).
+        self.assertEqual((len(result["items"]), result["total"]), (1, 1))
         self.assertEqual(result["items"][0]["question"], "A 또는 B")
         self.assertTrue(state.close_signal("seat-2", sequence=3))
         self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["items"], [])
@@ -93,7 +116,7 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)
         self.assertEqual(len(result["items"]), 1)
         self.assertTrue(result["items"][0]["stale"])
-        self.assertEqual((result["total"], result["stale_total"]), (0, 0))  # a marker: not counted
+        self.assertEqual((result["total"], result["stale_total"]), (0, 1))  # a marker counts, folded
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue(state.close_signal("seat-3"))
         self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)["items"], [])
@@ -113,9 +136,9 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertFalse(by_id["s-current"]["stale"])
         self.assertTrue(by_id["s-older"]["stale"])
         self.assertTrue(by_id["s-expired"]["stale"])
-        # Marker questions fold by the shared rule and are answered in their own input: listed,
-        # never counted by a person surface (11-14).
-        self.assertEqual((result["total"], result["stale_total"]), (0, 0))
+        # Marker questions fold by the shared rule and, answered in their own input, still
+        # wait for a person: counted (11-14).
+        self.assertEqual((result["total"], result["stale_total"]), (1, 2))
 
     def test_s1_windows_kind_mapping_and_stale_activity_fixture(self):
         from tools.fleet import interaction

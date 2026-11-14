@@ -149,6 +149,72 @@ console.log('PASS');"""
         self.assertEqual([row['id'] for row in board],['S4:new'])
         self.assertEqual([row['id'] for row in elsewhere],['S4:old'])
 
+    def test_the_count_holds_every_wait_a_person_answers_and_ctrl_names_only_the_panel(self):
+        # 11-14 (the supervisor's correction): the panel counts every wait of this session a
+        # person must answer, wherever it is answered; the block holds what the panel answers and
+        # the rest is one line saying where. `Ctrl+]` stands on the notice line only when the
+        # panel answers one. Blocked owners and finished waits count nowhere.
+        import tempfile, time
+        import session_tidy
+        from fleet.session_line import answer_wait_word
+        from fleet.config import ui_text
+        native_reason={'claude':'claude-native-response-surface-unavailable',
+                       'codex':'codex-native-request-unsupported','opencode':'opencode-native-request-unsupported'}
+        def describe(item,**kw):
+            ident=item['id']
+            row=dict(id=ident,source=item.get('source'),owner=item.get('owner'),questions=[dict(id='q',question=ident,choices=[])])
+            if ident.startswith('S3:'):
+                return dict(row,answerable=False,reason='owner-correction-native-parent-context-required')
+            if ident.startswith('S1:'):
+                return dict(row,answerable=False,reason=native_reason[item['owner']['harness']])
+            if ident=='S4:marker':
+                return dict(row,answerable=False,reason='marker-has-no-bound-native-response-surface')
+            if ident=='S4:closed':
+                return dict(row,answerable=False,request_state='unknown',reason='message-question-no-longer-current')
+            return dict(row,answerable=True,revision='r',questions=[dict(id='message-response',question='NEW',choices=['A'])])
+        def projection(harness,sid,items):
+            with tempfile.TemporaryDirectory() as tmp, \
+                 mock.patch.dict(os.environ,{'XDG_STATE_HOME':tmp}), \
+                 mock.patch.object(hws,'_request_producer'), \
+                 mock.patch.object(hws,'_message_source_state',return_value='open'), \
+                 mock.patch.object(questions,'describe',side_effect=describe), \
+                 mock.patch.object(session_tidy,'prompt_display',return_value={'human_state':'none'}):
+                self.assertTrue(hws.publish_cache({'items':items,'observed_at':time.time(),'complete':True}))
+                total=hws.cached_view(request=False)['total']
+                return total,shell.panel_projection(harness,sid,columns=40)
+        text=lambda parts:''.join(part['text'] for part in parts or ())
+        wait=lambda n:answer_wait_word()+' '+str(n)
+        below=ui_text('fleet.session_block.compact_answer_below')
+        guide=lambda n:ui_text('fleet.session_block.questions')+' '+str(n)+' · '+below
+        for harness in ('claude','codex','opencode'):
+            sid='sid-'+harness
+            owner=dict(harness=harness,session_id=sid)
+            item=lambda ident,source,kind:dict(id=ident,source=source,kind=kind,since=100,stale=False,owner=owner)
+            owners=[item('S3:att-%d'%n,'S3','decision') for n in range(8)]
+            question=item('S4:new','S4','message')
+            native=item('S1:%s:%s:1'%(harness,sid),'S1','approval')
+            cases=(
+                # (waits, shared total, count, block ids, guidance line, notice line)
+                ('eight blocked owners and one question',[*owners,question],1,1,['S4:new'],'',wait(1)+' │ Ctrl+]'),
+                ('a native request and one question',[native,question],2,2,['S4:new'],guide(1),wait(2)+' │ Ctrl+]'),
+                ('a marker question alone',[item('S4:marker','S4','marker')],1,1,[],guide(1),wait(1)+' │ '+below),
+                # A late publication may still list a question its session's next one closed:
+                # finished, it waits for no one here (the next publication drops it).
+                ('a blocked owner and a closed question',[owners[0],item('S4:closed','S4','message')],1,0,[],'',''),
+            )
+            for name,items,shared,count,block,line,notice in cases:
+                with self.subTest(harness=harness,case=name):
+                    total,result=projection(harness,sid,items)
+                    panel=result['panel']
+                    self.assertEqual(total,shared)
+                    self.assertEqual(panel['wait'],wait(count) if count else '')
+                    self.assertEqual([row['id'] for row in result['questions']],block)
+                    self.assertEqual(panel['wait_guide'],line)
+                    if harness=='claude':
+                        self.assertEqual(text(panel['notice']),notice)
+                    else:
+                        self.assertNotIn('notice',panel)
+
     def test_page_keys_read_a_long_question_from_its_first_row_and_keep_the_choice(self):
         # PR #1532 R2: PgUp/PgDn read the body to its first and last rows; the page stays
         # where reading left it, the highlighted choice stays, and ↑↓/numbers follow the choice.

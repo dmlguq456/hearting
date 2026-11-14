@@ -101,30 +101,22 @@ def wait_fold(since, now, *, owner_state=None):
 
 
 def person_wait(item):
-    """Whether a person answers this wait from a shared surface (the panel, Fleet).
+    """Whether this wait is a person's to answer: every wait but a blocked owner (S3).
 
-    The existing answer judgments, which never vary for these: a blocked owner (S3) takes its
-    correction only from its parent agent's own session
-    (``owner-correction-native-parent-context-required``); a Claude native request is answered
-    in its own window (``claude-native-response-surface-unavailable``); a marker question has
-    no reply surface but that session's input (``marker-has-no-bound-native-response-surface``).
+    A blocked owner takes its correction from its parent agent
+    (``owner-correction-native-parent-context-required``), not from a person. Every other wait
+    holds its session until a person answers it, wherever the answer is given (the panel, a
+    Claude native request in its own window, a marker question in that session's input), so
+    every surface counts it (11-14).
     """
-    if not isinstance(item, dict):
-        return False
-    source = str(item.get("source") or "")
-    harness = item.get("harness") or (item.get("owner") or {}).get("harness")
-    if source == "S3":
-        return False
-    if source.startswith("S1") and harness == "claude":
-        return False
-    return not (source == "S4" and item.get("kind") != "message")
+    return isinstance(item, dict) and str(item.get("source") or "") != "S3"
 
 
 def wait_counts(items):
     """The single count every surface shows: current, folded (older), and ownerless.
 
-    Only waits a person answers from these surfaces count (``person_wait``, 11-14): the others
-    still exist for their own answerer and say where they are answered, but are no question here.
+    Every wait a person must answer counts, wherever it is answered (``person_wait``); a
+    blocked owner, its parent agent's to answer, stays listed and uncounted.
     """
     current = folded = ownerless = 0
     for item in items:

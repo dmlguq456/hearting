@@ -235,11 +235,18 @@ def notice_line(values, routes, questions, display, now, upgrade_note=""):
     nothing here collects, judges or authorizes anything new.
     """
     from .render_cells import _LIVE_GLYPH
-    waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
-                  and (item.get("request_state") or "open") == "open")
+    here = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
+               and (item.get("request_state") or "open") == "open")
+    # The panel's own count (11-14): every wait of this session a person must answer, the ones
+    # answered in another place too. `Ctrl+]` is named only when the panel answers one; else the
+    # place the answer goes, from the guidance line.
+    counted = values.get("answer_wait")
+    waiting = counted if type(counted) is int and counted > here else here
     if waiting:
         from .session_line import answer_wait_word
-        return [(answer_wait_word() + " " + str(waiting), "g_blocked"), (" │ Ctrl+]", "dim")]
+        place = sanitize_title(str(values.get("wait_place") or ""))[:40]
+        return [(answer_wait_word() + " " + str(waiting), "g_blocked"),
+                *([(" │ Ctrl+]", "dim")] if here else [(" │ " + place, "dim")] if place else [])]
     if compaction_imminent(values.get("compaction_pressure")):
         return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
     readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
