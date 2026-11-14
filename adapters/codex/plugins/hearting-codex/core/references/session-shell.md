@@ -170,21 +170,23 @@ its border in the session's state color, only the glyph turning), and
 the native area takes the freed columns through the same PTY resize a window
 resize uses; folded under the native area it is one row (the status line and
 `▴`). A press anywhere on the strip or that row opens it. Where the open panel
-would leave the native area under 80 columns it folds by itself, and opens again
-once there are three columns more (83), so a window dragged across the line does
+would leave the native area under 60 columns it folds by itself, and opens again
+once there are three columns more (63), so a window dragged across the line does
 not jump back and forth; that one constant replaces the earlier minimum terminal width and
-bottom fallback. The person's last choice wins at its width: folded by hand it
-stays folded however wide the window grows, opened by hand it stays open until
-the width changes. An open settings editor, a question being answered or a drag
+bottom fallback. It judges only until the person chooses, and the person's last
+choice holds at every width: folded by hand it stays folded however wide the
+window grows, opened by hand it stays open however the window is resized. An
+open settings editor, a question being answered or a drag
 of the panel's edge keeps it open; when that ends, a width the person set (the
 drag, or a new width applied in the settings editor) counts as opening it by
-hand at this window width, and otherwise (a question answered, the editor
+hand, and otherwise (a question answered, the editor
 closed) the width is judged once again. Folding by hand closes an open settings
 editor first; a press made while the panel is being drawn for another placement
 is dropped. The fold choice lasts while the window is up
 (it rides a host hand-over) and is not saved. A panel opened by hand where it
 cannot stand beside the native area (under 48 native columns or 8 rows) opens
-under it. All four edges belong
+under it, and stands beside again, still open, once the window is wide enough.
+All four edges belong
 to Hearting and share its representative state color; never frame the native
 terminal itself. By default the panel uses the terminal's neutral background,
 without tinted fills; a chosen theme or shade recolors only the panel itself.
@@ -461,7 +463,8 @@ Short of cells the kind word goes first, then the tool, then the word `staged`
 (`3/7 execute ●`), the title keeping ten cells through both; narrower still the
 kind column goes whole, and the tool shows whole or not at all. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
-`messages`, stage names, `5h`/`7d`; beside the native area the section heads
+`messages`, stage names, `5h`/`7d`, the question box's title `QUESTIONS 1` in
+either layout, Fleet's tab name; beside the native area the section heads
 are upper case with the count first, `2 ROUTE`, `MESSAGES`, `MEM`, and so are
 the read pages' heads, `ROUTE · Back`, `MESSAGES · Back`, while role words,
 kind rows and setting names stay as they are); only real content and
@@ -473,7 +476,7 @@ The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run
 short, the question (its body and choices) and the top groups stay, and the
 others give way first, in this order: empty rows; the messages' extra rows
-(past three, and a body's rows after its first); an opened route detail (and an
+(a body's rows after its first); an opened route detail (and an
 opened message) shortens and closes; the MEM section (two records, one, its
 headline on one row, none: before any of the messages); the opened LAB table
 loses its per-row values, then closes to its summary; a value on several rows
@@ -589,9 +592,9 @@ arrow in its direction's color, the other session's number, then dim harness,
 `delivered`/`sent` dim, `not delivered` (the recipient was never resolved; no age) in the caution color,
 `failed` red) and, two cells in, the text in the body color from its first
 meaningful words (leading bracket frames and heading marks left out, nothing
-else changed). Three show; rows to spare once every route stands in its three-row
-form (and an opened detail whole) give bodies up to three rows and more messages
-(up to eight); short of rows a message folds to one row (arrow,
+else changed). Three show at most, however many rows are left (`MESSAGES +2`
+counts the rest); rows to spare once every route stands in its three-row
+form (and an opened detail whole) give bodies up to three rows; short of rows a message folds to one row (arrow,
 number, bright text), then fewer show from the oldest and the lower rule counts
 them. Pressing a message shows its whole retained text in place. Two limits differ: the
 source keeps a received input's first 384 characters and a sent message's

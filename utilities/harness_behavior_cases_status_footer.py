@@ -145,7 +145,7 @@ class StatusFooterScenario(Scenario):
         ev["fleet_answer_waits"] = fixture_python(run, FLEET_CODE, {"sid": sid,
                                                                   "harness": run.harness}, 120)
         if "session_shell" in ev:   # set by Run.execute under --session-shell
-            # The panel paints the wait with Fleet's glyph and catalog (`◑ questions 1`).
+            # The panel paints the wait with Fleet's glyph and catalog (`◑ QUESTIONS 1`).
             ev["panel_wait_rows"] = [line.strip()[:200] for line in screen.splitlines()
                                      if "◑" in line and not BADGE.search(line)]
             run.note(f"shell: badge rows {len(ev['badge_rows'])}, wait rows "
