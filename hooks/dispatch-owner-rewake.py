@@ -1283,7 +1283,6 @@ def classified_receipt(
     if not (home / "core" / "CORE.md").is_file():
         home = root
     status = delivery.status if delivery is not None else ""
-    row_revision = delivery.row_revision if delivery is not None else "unavailable"
     marker_current = bool(delivery and _completion_evidence_current(delivery))
     if delivery is not None:
         owned_children = delivery.owned_children
@@ -1300,8 +1299,6 @@ def classified_receipt(
     else:
         owned_children = 0
     quiescent = bool(delivery and delivery.quiescent)
-    advanced = bool(delivery and delivery.advanced)
-    row_digest = delivery.row_digest if delivery is not None else "unavailable"
     if (
         state in {"ready", "attention"}
         and delivery is not None
@@ -1326,16 +1323,11 @@ def classified_receipt(
             except (ImportError, OSError, ValueError):  # the optional explanation never blocks a wake
                 parked = None
         if state == "success":
-            instruction = "No harvest command is required; the registered owner completed."
+            # The shared runtime-v1 follow-up line (Codex and OpenCode carry the same one);
+            # the close contract itself is the adapter bootstrap's (§0.5).
+            from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
             summary = _sealed_summary(row, launch.attempt_id)
-            if summary:
-                instruction += ("\nFirst close: give the result in one or two sentences, preserve any "
-                                "important remaining failure, unfinished work, or user-impacting limit, "
-                                "ask only what only the person can decide, state a recommended in-scope, "
-                                "reversible next step (such as fixing and re-testing) as proceeding, and "
-                                "point to the "
-                                "detailed record. Keep the runtime summary below as agent context and "
-                                "record; do not reproduce it for the person.\n" + summary)
+            instruction = RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)] + ("\n" + summary if summary else "")
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate
@@ -1395,16 +1387,17 @@ def classified_receipt(
         if state == "success"
         else "Hearting dispatch requires attention"
     )
+    # Only what the model acts on: the row revision and digest are the runtime's own
+    # record (the delivery record keeps them), and waiting, polling and recaps are the
+    # adapter bootstrap's rules already.
     message = (
         f"{title}. Runtime owner completion receipt "
         f"schema=2 state={state} attempt_id={launch.attempt_id} armed={launch.armed} "
-        f"status={status or '-'} row_revision={row_revision} "
-        f"row_digest={row_digest} marker_current={int(marker_current)} "
+        f"status={status or '-'} marker_current={int(marker_current)} "
         f"quiescent={int(quiescent)} owned_children={owned_children} "
-        f"advanced={int(advanced)} "
+        f"advanced={int(bool(delivery and delivery.advanced))} "
         f"reason={reason} required_action={required_action}. "
-        "Do not start or re-arm Background Bash, Monitor, liveness, or dispatch-wait. "
-        f"{instruction}\nDo not emit a periodic progress recap."
+        f"{instruction}"
     )
     return state, message
 

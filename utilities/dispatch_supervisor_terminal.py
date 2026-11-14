@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import opencode_server_log
 from dispatch_contract import reconcile_attempt_terminal
-from route_authority import HANDOFF_RE, pass_blocker_violation
+from route_authority import HANDOFF_RE, handoff_search, pass_blocker_violation
 
 
 CLASSIFIER_SOURCE = "supervisor-terminal-v1"
@@ -134,7 +134,7 @@ def _handoff_terminal(text: object, *, event: str, process_exit: int) -> Supervi
     # search, not fullmatch — the pattern anchors the block to the end of the
     # message, so a prepended sentence is ignored rather than fatal. A
     # trailing fence or up to two sentences are tolerated the same way (G1).
-    match = _HANDOFF_RE.search(text.strip()) if isinstance(text, str) else None
+    match = handoff_search(text)
     if match is None:
         return SupervisorTerminal(
             "dead-contract",
@@ -143,8 +143,8 @@ def _handoff_terminal(text: object, *, event: str, process_exit: int) -> Supervi
             "final-handoff-invalid",
             str(process_exit),
         )
-    verdict = match.group("verdict")
-    blocker = match.group("blocker")
+    verdict = match["verdict"]
+    blocker = match["blocker"]
     violation = pass_blocker_violation(verdict, blocker)
     if violation:
         return SupervisorTerminal(
@@ -319,11 +319,12 @@ def completed_owner_assessment(terminal, text, *, jobs=None, attempt_id=None):
         if text is None:
             parsed = inspect_terminal_attempt(meta.get("log_file"), **context)
         else:
-            match = HANDOFF_RE.search(text.strip()) if isinstance(text, str) else None
+            match = handoff_search(text)
             if not match or match["verdict"] != "FAIL":
                 return terminal
             parsed = inspect_terminal_value({"state": "valid", "verdict": "FAIL", "blocker": match["blocker"],
-                "artifact": match["artifact"], "artifact_state": "unchecked", "source": "exact-owner-handoff"}, **context)
+                "artifact": match["artifact"], "artifact_state": "unchecked", "source": "exact-owner-handoff",
+                **({"disposition": match["disposition"]} if match.get("disposition") else {})}, **context)
         if "completed-audit-with-findings" not in str(parsed.get("envelope_normalized") or "").split(","):
             return terminal
         return replace(terminal, note="completed-supervisor", failure_class="pass",

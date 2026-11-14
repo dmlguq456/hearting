@@ -568,6 +568,10 @@ def owner_summary_line(route, owner, *, t=None) -> str | None:
 
 SUMMARY_NAME = "completion-summary.md"
 MAX_FIELD_CHARS = 320
+# The checks and the remaining work as the route parent re-reads them on every later request:
+# enough to decide the next step, the report holds the rest (its path is the last line).
+MAX_CHECKS_CHARS = 160
+MAX_REMAINING_CHARS = 140
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$")
 _BOLD_FIELD = re.compile(r"^\s*\*\*(?P<title>[^*]+?)\*\*[:：]?\s*(?P<value>.*)$")
@@ -576,17 +580,37 @@ _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
 # other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
-    ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "unverified", "failed", "skipped",
-                           "remaining")),
+    ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "해결하지", "필수", "unverified", "failed",
+                           "skipped", "remaining", "unresolved")),
     # Limits, residual risks and follow-ups are shown with the rest, but only a failed/skipped,
     # unverified or remaining-work heading (and the checks) can say that something failed.
     ("limits", (), ("한계", "limitation", "limits", "open risk")),
-    ("follow_up", ("6",), ("후속", "follow-up", "follow up", "follow-ups")),
-    ("verified", ("4",), ("검증", "시험", "검사", "qa", "verification", "validation", "checks", "tests", "testing")),
+    # "하지 않은 것" lists what the work left to others on purpose (install, merge): follow-ups.
+    ("follow_up", ("6",), ("후속", "하지", "follow-up", "follow up", "follow-ups", "not done")),
+    # "근거" and "실행한 것" are where review reports list what they ran and observed.
+    ("verified", ("4",), ("검증", "시험", "검사", "명령", "근거", "qa", "verification", "validation", "checks", "tests",
+                          "testing", "evidence")),
     ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
-_FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "unverified", "failed", "skipped")
+_FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "해결하지", "unverified", "failed", "skipped",
+                     "unresolved")
+# The report's own first line when it states the verdict (`최종 판정: …`, `Final verdict: …`).
+_VERDICT_LINE = re.compile(r"^\s*(?:[-*]\s+)?\**\s*(?:최종\s*판정|판정|결론|(?:final\s+)?verdict)\s*\**\s*[:：]\s*\**\s*"
+                           r"(?P<verdict>.+?)\s*$", re.I)
+# A line naming the publication: a PR link or number with its head, CI or mergeability.
+_PUBLICATION_LINE = re.compile(r"pull/(?P<url>\d+)|\bPR\s*#\s*(?P<number>\d+)", re.I)
+# The PR a verdict line names: `PR #1637`, `PR 1637` or a `pull/1637` link; a bare `#1637`
+# only when it is the line's one `#number` and the report names that PR elsewhere (a
+# finding's `#1` is not a PR).
+_VERDICT_PR = re.compile(r"pull/(\d+)|\bPR\s*#?\s*(\d+)", re.I)
+_BARE_NUMBER = re.compile(r"(?<![\w&])#(\d+)\b")
+_PUBLICATION_WORDS = re.compile(r"\bhead\b|\bCI\b|mergeable|\bsha\b", re.I)
+_PUBLICATION_FIELDS = (
+    re.compile(r"\bhead\W{0,3}(?P<value>[0-9a-f]{7,40})\b", re.I),
+    re.compile(r"\bCI\W{0,3}(?P<value>\d+\s*/\s*\d+(?:\s*[가-힣A-Za-z]+)?|[A-Za-z가-힣]+)", re.I),
+    re.compile(r"(?P<value>\b(?:MERGEABLE|CONFLICTING|UNKNOWN)\b|병합\s*가능)"),
+)
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
 _UNRUN_WORDS = (r"not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안"
@@ -628,6 +652,8 @@ def _section_field(title: str, *, numbered: bool) -> str | None:
     lowered = (title[number.end():] if number else title).lower()
     # A finding or historical narrative can mention checks without being the
     # report's checks section. Only a heading that names the field qualifies.
+    if re.match(r"(?:실행한|돌린|수행한)\s*것(?:$|[\s(·:—-])", lowered):
+        return "verified"
     leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
     if not any(leading.startswith(word) and _has_word(leading, word)
                for _field, _numbers, words in _SECTION_FIELDS for word in words):
@@ -694,6 +720,115 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
     return sections
 
 
+def _unfenced_lines(text: str):
+    """The report's lines outside fenced blocks (an example, a quoted notice or log)."""
+    fence = False
+    for raw in (text or "").splitlines():
+        if raw.strip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if not fence:
+            yield raw
+
+
+def _verdict_match(text: str):
+    for raw in _unfenced_lines(text):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        return _VERDICT_LINE.match(line.replace("**", ""))
+    return None
+
+
+def report_verdict(text: str) -> str:
+    """The report's first non-heading line when it states the verdict, else ""."""
+    match = _verdict_match(text)
+    return _line(match["verdict"].strip("* "), 100) if match else ""
+
+
+def _verdict_pr(text: str) -> str | None:
+    """The PR this report is about: the one its verdict line names (``_VERDICT_PR``), else
+    the one its first heading names (a review's closed verdict line cannot carry a PR number
+    but its title does), else None."""
+    match = _verdict_match(text)
+    if match is not None:
+        found = _VERDICT_PR.search(match["verdict"])
+        if found:
+            return next(value for value in found.groups() if value)
+        bare = set(_BARE_NUMBER.findall(match["verdict"]))
+        named = {next(value for value in found.groups() if value)
+                 for raw in _unfenced_lines(text) for found in _PUBLICATION_LINE.finditer(raw)}
+        if len(bare) == 1 and bare <= named:
+            return bare.pop()
+    for raw in _unfenced_lines(text):
+        line = raw.strip()
+        if line.startswith("#"):
+            found = _VERDICT_PR.search(line)
+            return next(value for value in found.groups() if value) if found else None
+    return None
+
+
+def _verdict_head(text: str) -> str | None:
+    """The head the verdict line names, else None."""
+    match = _verdict_match(text)
+    found = _PUBLICATION_FIELDS[0].search(match["verdict"]) if match else None
+    return found["value"].lower() if found else None
+
+
+def _pr_number(line: str) -> str | None:
+    found = _PUBLICATION_LINE.search(line)
+    return (found["url"] or found["number"]) if found else None
+
+
+def _other_head(line: str, verdict_head: str | None) -> bool:
+    """A line whose head is not the verdict line's head (a line with no head is kept)."""
+    found = _PUBLICATION_FIELDS[0].search(line.replace("`", "")) if verdict_head else None
+    head = found["value"].lower() if found else None
+    return bool(head and not (head.startswith(verdict_head) or verdict_head.startswith(head)))
+
+
+def _publication_lines(text: str):
+    """Lines naming a PR with its head, CI or mergeability, outside fenced blocks. When
+    the verdict line names this work's PR, only lines about that PR."""
+    own = _verdict_pr(text)
+    verdict_head = None if own else _verdict_head(text)
+    for raw in _unfenced_lines(text):
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
+        if (line and not line.startswith(("#", "|")) and not _VERDICT_LINE.match(line.replace("**", ""))
+                and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)
+                and own in (None, _pr_number(line.replace("`", "")))
+                and not _other_head(line, verdict_head)):
+            yield line
+
+
+def report_pr_urls(text: str, limit: int = 3) -> list[str]:
+    """PR links outside fenced blocks; only this work's PR when the verdict line or title names it."""
+    own = _verdict_pr(text)
+    urls = [url for raw in _unfenced_lines(text) for url in _PR_URL.findall(raw)
+            if own is None or url.rsplit("/", 1)[-1] == own]
+    return list(dict.fromkeys(urls))[:limit]
+
+
+def is_publication_line(line: str) -> bool:
+    return bool(_PUBLICATION_LINE.search(line or "") and _PUBLICATION_WORDS.search(line or ""))
+
+
+def report_publication(text: str) -> str:
+    """``#<n> · head <sha12> · CI <state> · <mergeability>`` from the report's PR line, else ""."""
+    for line in _publication_lines(text):
+        plain = line.replace("`", "")
+        found = _PUBLICATION_LINE.search(plain)
+        parts = ["#" + (found["url"] or found["number"])]
+        for pattern in _PUBLICATION_FIELDS:
+            value = pattern.search(plain)
+            if value:
+                word = value["value"].strip()
+                parts.append(("head " + word[:12]) if pattern is _PUBLICATION_FIELDS[0]
+                             else ("CI " + word) if pattern is _PUBLICATION_FIELDS[1] else word)
+        return _line(" · ".join(parts), 120)
+    return ""
+
+
 def _joined(lines, cap=MAX_FIELD_CHARS) -> str:
     return _line(" · ".join(dict.fromkeys(item for item in lines if item)), cap)
 
@@ -738,7 +873,7 @@ def _verified_summary(lines, t):
     commands = [line for line in lines if _COMMAND_LINE.search(line.strip())]
     prose = [line for line in lines if line not in commands]
     if not commands:
-        return _joined(lines) or t("completion.no_checks")
+        return _joined(lines, MAX_CHECKS_CHARS) or t("completion.no_checks")
     passed = failures = 0
     for line in commands:
         words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(_unnegated(line))]
@@ -748,7 +883,8 @@ def _verified_summary(lines, t):
         summary = t("completion.command_checks_unmarked", count=len(commands))
     else:
         summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
-    return _joined([*prose, summary])
+    # The counts first: a long prose line is cut at the cap, never the failure count.
+    return _joined([summary, *prose], MAX_CHECKS_CHARS)
 
 
 def _review_degraded(route_file) -> list[str]:
@@ -936,9 +1072,10 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     if not goal and request.get("text"):
         goal = draft(request["text"]).get("intent") or ""
     if goal:
-        original = (t("completion.intent_original", original=_line(intent["original"], 100))
+        # The route parent wrote this intent; a short reminder is enough to match the result.
+        original = (t("completion.intent_original", original=_line(intent["original"], 60))
                     if intent.get("original") else "")
-        lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
+        lines.append(t("completion.intent", intent=_line(goal, 100), original=original))
     owner_line = owner_summary_line(route, owner, t=t)
     if owner_line:
         lines.append(owner_line)
@@ -950,10 +1087,13 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     sections = report_sections(text, numbered=code_report)
     result = _result_line(route, t, sections.get("remaining") or [], limits=sections.get("limits") or [],
                           follow_up=sections.get("follow_up") or [], verified=sections.get("verified") or [])
-    if route.get("capability") == "audit" and assessment == "FAIL":
+    if assessment == "FAIL":
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
     lines.append(t("completion.result", result=result))
+    verdict = report_verdict(text)
+    if verdict:
+        lines.append(t("completion.verdict", verdict=verdict))
     if isinstance(publication, dict) and publication.get("status") == "pending":
         reason = publication.get("detail") or publication.get("reason") or "-"
         lines.append(t("completion.publication_pending", reason=_line(reason, 160)))
@@ -968,13 +1108,17 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
             lines.append(t("completion.changed", items=_joined(sections["changed"])))
         checks = _verified_summary(sections.get("verified") or [], t)
         lines.append(t("completion.checks", items=checks))
-        rest = [line for field in ("remaining", "limits", "follow_up") for line in sections.get(field) or []]
-        lines.append(t("completion.remaining", items=_joined(rest) or t("completion.no_remaining")))
+        rest = [line for field in ("remaining", "limits", "follow_up") for line in sections.get(field) or []
+                if not is_publication_line(line)]
+        lines.append(t("completion.remaining", items=_joined(rest, MAX_REMAINING_CHARS) or t("completion.no_remaining")))
     else:
         lines.append(t("completion.unreadable"))
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
-    prs = list(dict.fromkeys(_PR_URL.findall(text)))[:3]
+    published = report_publication(text)
+    if published:
+        lines.append(t("completion.publication", line=published))
+    prs = [] if published else report_pr_urls(text)
     entrance = _entrance_line(route, primary, t)
     if entrance:
         lines.append(entrance)

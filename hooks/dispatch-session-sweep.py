@@ -36,7 +36,7 @@ from dispatch_session_sweep import (  # noqa: E402
     CLAUDE_CONTEXT_CHARS,
     activate,
     ack_delivered,
-    claude_hook_evidence,
+    claude_receipt_observer,
     fit_inline,
     release_claims,
     settle_stop_sends,
@@ -103,30 +103,8 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         return 0
     seen: set[Path] = set()
     batches: list[tuple[Path, list[dict]]] = []
-    receipt_observer = None
-    if _event_name(payload) == "UserPromptSubmit" and isinstance(payload, dict):
-        transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
-        cwd = payload.get("cwd")
-        if isinstance(transcript_path, str) and isinstance(cwd, str):
-            cached_signature = object()
-            cached_evidence = None
-
-            def observe_receipt(_root, _storage, _record):
-                nonlocal cached_signature, cached_evidence
-                try:
-                    info = Path(transcript_path).stat()
-                    signature = (info.st_size, info.st_mtime_ns)
-                except OSError:
-                    signature = None
-                if signature != cached_signature:
-                    try:
-                        cached_evidence = claude_hook_evidence(payload, session_id)
-                    except (OSError, RuntimeError, TypeError, ValueError):
-                        cached_evidence = None
-                    cached_signature = signature
-                return cached_evidence
-
-            receipt_observer = observe_receipt
+    receipt_observer = (claude_receipt_observer(payload, session_id)
+                        if _event_name(payload) == "UserPromptSubmit" else None)
     from dispatch_notice_state import NoticeReadContext
     notice_context = NoticeReadContext()
     if _event_name(payload) == "UserPromptSubmit":

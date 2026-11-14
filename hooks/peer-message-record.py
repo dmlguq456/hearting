@@ -232,7 +232,8 @@ _CROSS_SESSION_RE = re.compile(r"<cross-session-message\s+from=\"([^\"]*)\"")
 _CROSS_SESSION_NAME_RE = re.compile(r"<cross-session-message\s[^>]*?from-name=\"([^\"]*)\"")
 
 
-def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
+def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS, payload=None,
+                          defer_queued=False):
     """Claim this session's owed records for the running turn: ``(text, batches)``.
 
     The same records and claim as the prompt sweep (``dispatch-session-sweep.py``):
@@ -240,7 +241,11 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
     waiting for the next prompt. ``deadline`` is ``time.monotonic()``. Only
     records whose text fits ``max_chars`` whole are returned for ACK (one over
     it alone as its head plus a whole copy's path, or, without that copy,
-    left pending); the rest are handed back pending.
+    left pending); the rest are handed back pending. With the hook ``payload``
+    the transcript settles what the async rewake already showed. ``defer_queued``
+    (a tool boundary) leaves a notice Claude's own queue provably still holds to
+    that queue, so one completion is shown once; the turn's Stop does not, because
+    nothing runs after it to catch a queue that lost the notice.
     """
     if not session_id or time.monotonic() >= deadline:
         return "", []
@@ -248,10 +253,11 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
         sys.path.insert(0, str(_UTILITIES_DIR))
     from dispatch_contract import dispatch_state_roots, resolve_agent_home
     from dispatch_notice_state import NoticeReadContext
-    from dispatch_session_sweep import fit_inline, release_claims, sweep_deliver
+    from dispatch_session_sweep import claude_receipt_observer, fit_inline, release_claims, sweep_deliver
     deadline_ns = time.monotonic_ns() + int(max(0.0, deadline - time.monotonic()) * 1e9)
     context = NoticeReadContext()
     batches = []
+    observer = claude_receipt_observer(payload, session_id)
 
     for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home())):
         if time.monotonic_ns() >= deadline_ns:
@@ -260,7 +266,9 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
             continue  # a missing fallback root holds nothing; touching it would create it
         try:
             records, _count = sweep_deliver(root, _CLAUDE_RECIPIENT_KIND, session_id,
-                                           notice_context=context, deadline_ns=deadline_ns)
+                                           notice_context=context, deadline_ns=deadline_ns,
+                                           defer_native_queued=defer_queued,
+                                           **({"receipt_observer": observer} if observer else {}))
         except Exception:  # noqa: BLE001 - left for the prompt sweep
             continue
         if records:
@@ -334,7 +342,9 @@ def handle_stop(payload, out):
     """Continue the turn once more with the records owed to this session, if any.
 
     Same claim, fit and settlement as a tool boundary; nothing is owed, nothing
-    is printed and the turn ends. A record not shown whole stays pending.
+    is printed and the turn ends. A record not shown whole stays pending. A notice
+    a tool boundary left to Claude's queue and the transcript does not show received
+    is carried here: the turn's end is how long that hand-off lasts.
     """
     session_id = payload.get("session_id")
     if not session_id or str(payload.get("agent_id") or "").strip():
@@ -345,7 +355,8 @@ def handle_stop(payload, out):
     # An earlier block's records are ACKed only from the native transcript.
     settle_stop_records(payload)
     text, batches = tool_boundary_records(
-        session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2)
+        session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2,
+        payload=payload)
     try:
         if text:
             out.write(json.dumps({"decision": "block", "reason": _STOP_HEADER + "\n\n" + text},
@@ -645,7 +656,8 @@ def main(exit_guard=False):
                     # After the exact peer-body claims, within what they left.
                     try:
                         text, batches = tool_boundary_records(
-                            session_id, min(_deadline(), time.monotonic() + _RECORD_SHARE_S))
+                            session_id, min(_deadline(), time.monotonic() + _RECORD_SHARE_S),
+                            payload=payload, defer_queued=True)
                     except Exception:  # noqa: BLE001 - the prompt sweep still carries them
                         return ""
                     owed.extend(batches)

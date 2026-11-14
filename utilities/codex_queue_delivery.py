@@ -45,7 +45,7 @@ _PRIOR_SUCCESS_FOLLOWUP = (
     "follow-through is handled does not call for the same action or a new user ACK; preserve a new failure, "
     "conflict, unfinished work, or direct user question."
 )
-_CURRENT_SUCCESS_FOLLOWUP_START = "Original request/format apply."
+_SHIPPED_SUCCESS_FOLLOWUP_START = "Original request/format apply."
 
 
 class QueueDeliveryError(RuntimeError):
@@ -515,8 +515,12 @@ def native_batch_unit_body(root: Path, storage_key: str, records: list[dict]) ->
 def prior_followup_text(current: str) -> str | None:
     """The one exact historical completion wording retained for recovery: the
     previous success first line, or the previous open-row harvest line."""
+    from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES, SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES
     head, newline, rest = current.partition("\n")
-    if head.startswith(_CURRENT_SUCCESS_FOLLOWUP_START):
+    for has_summary, prefix in RUNTIME_V1_FOLLOWUP_PREFIXES.items():
+        if head == prefix:
+            return SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES[has_summary] + newline + rest
+    if head.startswith(_SHIPPED_SUCCESS_FOLLOWUP_START):
         return _PRIOR_SUCCESS_FOLLOWUP + newline + rest
     from dispatch_completion_join import previous_harvest_wording
     previous = previous_harvest_wording(current)

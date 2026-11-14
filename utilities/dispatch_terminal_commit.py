@@ -565,11 +565,17 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
                 owner = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
             except Exception:  # noqa: BLE001
                 owner = None
-        if route.get("capability") == "audit":
-            from dispatch_completion_join import exact_attempt_row
-            row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id)
-            if row.metadata.get("reconcile_reason") == "completed-audit-with-findings":
+        # A finished review whose subject did not pass: an audit, or any owner that
+        # closed on a review disposition (`수정 후 병합`, route_authority.handoff_search).
+        try:
+            row = owner
+            if row is None:
+                from dispatch_completion_join import exact_attempt_row
+                row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
+            if row.get("reconcile_reason") == "completed-audit-with-findings":
                 assessment = "FAIL"
+        except Exception:  # noqa: BLE001 -- an unreadable row only leaves the assessment unnamed
+            assessment = None
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,
                                               cost=_completion_cost(request, route),
                                               corrections=completion_corrections(request.jobs, request.owner_attempt_id),

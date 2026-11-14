@@ -249,6 +249,43 @@ class CompletionMidTurnNoSocketScenario(CompletionMidTurnScenario):
     codex_argv = ("--no-daemon",)
 
 
+class CompletionLongToolScenario(CompletionMidTurnScenario):
+    """BC-SUPERVISOR-CONTEXT-COST-1114: the child ends inside a tool call longer than the
+    async rewake's claim lease (30 s), so the rewake's notice waits in the native queue
+    while the tool-boundary sweep could take the same record again."""
+    name = "completion-long-tool"
+    summary = ("A registered child completes during a tool call longer than the async rewake's "
+               "claim lease; its receipt reaches the model once and the next action runs.")
+    STEP_SECONDS = 45
+
+    def script(self, run):
+        inner = super().script(run)
+
+        def answer(record, earlier):
+            reply = inner(record, earlier)
+            if reply.shell and self.step in reply.shell:
+                # Claude Code refuses a plain long `sleep`; a process that waits is the same step.
+                return Reply(shell=long_shell(
+                    f"python3 -c 'import time; time.sleep({self.STEP_SECONDS})'; echo {self.step}",
+                    wait_ms=(self.STEP_SECONDS + 15) * 1000))
+            return reply
+        return answer
+
+    def drive(self, run):
+        verdict = super().drive(run)
+        marker = re.compile(r"HEARTING_RECEIPT_V1 delivery-[A-Za-z0-9._-]+ [0-9a-f]{64}")
+        previous, carriages = 0, 0
+        for record in run.main_requests():
+            count = len(marker.findall(record["text"]))
+            carriages += max(0, count - previous)
+            previous = max(previous, count)
+        run.evidence["receipt_carriages"] = carriages
+        run.note(f"receipt carried {carriages} time(s)")
+        if verdict == "pass" and carriages != 1:
+            return "fail"
+        return verdict
+
+
 # --------------------------------------------------------------------------
 # follow-through-unrelated
 # --------------------------------------------------------------------------
@@ -483,4 +520,5 @@ class NativeWatchEndScenario(WatchWakeScenario):
 
 
 SCENARIOS = [NoticeMidTurnScenario, CompletionMidTurnScenario, CompletionMidTurnNoSocketScenario,
+             CompletionLongToolScenario,
              FollowThroughUnrelatedScenario, WatchWakeScenario, NativeWatchEndScenario]
