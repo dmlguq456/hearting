@@ -29,7 +29,8 @@ def event(kind,identity=sid):
     registry=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/str(os.getpid())
     registry=registry.with_suffix('.json');registry.parent.mkdir(parents=True,exist_ok=True)
     registry.write_text(json.dumps({'pid':os.getpid(),'procStart':start,'sessionId':identity,
-        'status':'busy' if kind=='prompt' else 'idle'}))
+        'status':'busy' if kind=='prompt' else 'waiting' if kind=='blocked' else 'idle',
+        **({'waitingFor':'permission prompt'} if kind=='blocked' else {})}))
     with socket.socket(socket.AF_UNIX) as channel:
         channel.settimeout(5);channel.connect(os.environ['HEARTING_SHELL_SOCKET'])
         channel.sendall((json.dumps(request)+'\n').encode());channel.recv(8192)
@@ -110,11 +111,12 @@ while True:
         line=line.replace('\x1b[200~','').replace('\x1b[201~','')
         if line.startswith('live-'):live(line);continue
         callback_missing='PEER_NO_CALLBACK' in line
-        if not callback_missing and line!='turn-close':event('prompt')
+        if not callback_missing and line not in ('turn-close','turn-wait'):event('prompt')
+        if line=='turn-wait':event('blocked')
         if line=='spawn-child':
             subprocess.run([sys.executable,__file__,sid,'--headless-event'],
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
-        if not callback_missing and line!='turn-open':event('stop')
+        if not callback_missing and line not in ('turn-open','turn-wait'):event('stop')
         print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
         if line.startswith('geometry'):print('GEOMETRY_'+line+'_'+str(os.get_terminal_size(0).columns)+'x'+str(os.get_terminal_size(0).lines)+'\r\n',end='',flush=True)
         if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
@@ -155,7 +157,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','border-motion','border-motion-bottom','native-bg','request-panel'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -556,48 +558,58 @@ function existing(file){return new Promise((resolve,reject)=>{
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }
- const ruleMotion={};
- if(cfg.scenario==='rule-motion'){
-   // Spec E9 rule 47 (d): while the session runs, the head's rule moves on the spinner's beat
-   // and only its changed cells go out; the native half of that row is never written again.
+ const borderMotion={};
+ if(cfg.scenario==='border-motion'||cfg.scenario==='border-motion-bottom'){
+   // Spec E9 rule 47 (d) (11-14): while the session runs, an arc goes round the panel's outer
+   // frame on the spinner's beat, and a beat sends only the frame's changed cells; a wait breathes
+   // the frame red; idle, nothing is sent. Beside the native area and under it alike.
+   const bottom=cfg.scenario==='border-motion-bottom';
+   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve)),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+   const lineAt=y=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
+   // The panel's box: beside the native area its 40 columns at the right edge; under it, from its top border down.
+   const box=()=>{if(!bottom)return {top:0,left:sideTerm.cols-40,W:40,H:sideTerm.rows};
+     for(let y=0;y<sideTerm.rows;y++){const t=lineAt(y)?.translateToString()||'';if(t.startsWith('┌')&&t.endsWith('┐'))return {top:y,left:0,W:sideTerm.cols,H:sideTerm.rows-y};}return null;};
+   // A frame cell's look: an arc shade (`0` the head .. `3`), `b` the neutral frame (the terminal's dim),
+   // `p<N>` another color, `t` the head's words.
+   const RAMP=[230,187,144,101];
+   const look=c=>{const ch=c.getChars();if(!ch||!'┌┐└┘─│'.includes(ch))return 't';
+     if(c.isFgPalette()){const i=RAMP.indexOf(c.getFgColor());return i>=0?String(i):'p'+c.getFgColor();}return c.isFgDefault()&&c.isDim()?'b':'x';};
+   const word=()=>{const m=(lineAt(box()?.top??0)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);return m?m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running':'';};
+   const read=()=>{const b=box();if(!b)return null;const at=(y,x)=>lineAt(b.top+y).getCell(b.left+x),cells=[];
+     for(let x=0;x<b.W;x++)cells.push(at(0,x));for(let y=1;y<b.H-1;y++)cells.push(at(y,b.W-1));
+     for(let x=b.W-1;x>=0;x--)cells.push(at(b.H-1,x));for(let y=b.H-2;y>0;y--)cells.push(at(y,0));
+     return {at:Date.now(),looks:cells.map(look),top:b.top,left:b.left,W:b.W,H:b.H,word:word(),
+       native:Array.from({length:bottom?b.top:sideTerm.rows},(_,y)=>(lineAt(y)?.translateToString()||'').slice(0,bottom?undefined:b.left-2)),
+       inside:Array.from({length:b.H-2},(_,y)=>(lineAt(b.top+1+y)?.translateToString()||'').slice(b.left+1,b.left+b.W-1)),
+       cursor:[sideTerm.buffer.active.cursorX,sideTerm.buffer.active.cursorY],
+       screen:Array.from({length:sideTerm.rows},(_,y)=>lineAt(y)?.translateToString()||'')};};
+   const until=async want=>{const began=Date.now();while(Date.now()-began<6000){await flush();if(word()===want)return true;await sleep(10);}return false;};
+   const watch=async ms=>{const chunks=[];const sub=child.onData(t=>chunks.push(t));await sleep(ms);sub.dispose();await flush();return chunks;};
+   const send=text=>rpc(cfg.inlet,{batch:Buffer.from(text).toString('base64')});
+   // The title first, so the panel has its rows before the turn (a row added later changes the frame's size).
    const now=Date.now()/1000;
-   fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
-   await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
-   const opened=Date.now();
-   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
-   // The rule's row: the thin rule (spec rule 52) whose cells are not all the plain dim line.
-   // (`at`: that row however it stands, lit or dark.)
-   const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
-     const m=line.slice(140).match(/^│ ([─━]{36}) │$/);
-     const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
-     if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),cells:m[1],colors};}return null;};
-   let first=null;const began=Date.now();
-   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
-   // Correction 8: the light comes in on the paint that shows the turn (it never waits out a rest).
-   const litAfter=Date.now()-opened;
-   let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
-   // The second reading comes 0.95 s in. The light runs out and back over the rule, so a reading
-   // at the mirror of the first (2.6 s less twice the first's age into the turn) looks the same:
-   // 1.95 s after a first reading 0.3 s in was that mirror. 0.95 s after a first reading under
-   // 0.3 s (asserted below) is neither that mirror nor a whole 3.5 s period. The writes are still
-   // counted over 1.95 s.
-   await new Promise(r=>setTimeout(r,950));await flush();
-   // (The same row, lit or resting: the light may be out on its rest by then.)
-   const second=first&&rule(first.y);
-   await new Promise(r=>setTimeout(r,1000));sub.dispose();await flush();
-   // Spec rule 51 (c): the rest (the dark rule for 1 s once the light has left on its first side;
-   // the far end's dark beat lasts 0.1 s). Seen dark and still dark 0.25 s later, it is the rest:
-   // for the next 0.5 s the host writes nothing for the rule's row, only the spinner's own glyph.
-   const dark=()=>{const r=first&&rule(first.y);return !!r&&r.colors.split(',').every(c=>c.endsWith('d'));};
-   let restAt=0;const looking=Date.now();
-   while(!restAt&&Date.now()-looking<6000){await flush();if(dark()){await new Promise(r=>setTimeout(r,250));await flush();if(dark())restAt=Date.now();}else await new Promise(r=>setTimeout(r,20));}
-   const rest=[];const restSub=child.onData(t=>rest.push(t));
-   await new Promise(r=>setTimeout(r,500));restSub.dispose();await flush();
-   const resting=first&&rule(first.y);
-   let back=null;const waiting=Date.now();
-   while(Date.now()-waiting<1500&&!(back=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
-   Object.assign(ruleMotion,{first,second,bytes,writes,rest,rest_seen:!!restAt,lit_after_ms:litAfter,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
-   await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
+   fs.writeFileSync(cfg.title,JSON.stringify({title:'BORDER_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
+   {const began=Date.now();while(Date.now()-began<5000&&!read()?.screen.some(row=>row.includes('BORDER_MOTION_TITLE'))){await flush();await sleep(20);}}
+   // Running, with a draft standing in the native's input row.
+   await send('turn-open\rDRAFT_TEXT');await waitFor(/DONE_turn-open/);
+   const opened=Date.now();let first=null;
+   while(Date.now()-opened<6000){await flush();const r=read();if(r&&r.looks.some(x=>/^[0-3]$/.test(x))){first=r;break;}await sleep(10);}
+   borderMotion.lit_after_ms=Date.now()-opened;
+   // (The terminal here takes a large paint in pieces: the readings start once that paint is in.)
+   await sleep(60);await flush();first=first&&read();
+   const chunks=[];const sub=child.onData(t=>chunks.push(t));
+   await sleep(950);await flush();const second=read();
+   await sleep(950);await flush();const third=read();sub.dispose();
+   Object.assign(borderMotion,{first,second,third,chunks,window_ms:third&&first?third.at-first.at:0});
+   // Waiting: the whole frame breathes red (256 colors here: a shade every 1.2 s).
+   // (The draft goes in as its own line first.)
+   await send('\rturn-wait\r');await waitFor(/DONE_turn-wait/);borderMotion.waiting=await until('waiting');
+   await sleep(100);await flush();const w1=read();const waitChunks=await watch(1300);const w2=read();
+   Object.assign(borderMotion,{w1,w2,wait_chunks:waitChunks});
+   // Idle: the still neutral frame, nothing sent for it.
+   await send('turn-close\r');await waitFor(/DONE_turn-close/);borderMotion.idle=await until('idle');
+   await sleep(300);await flush();const i1=read();const idleChunks=await watch(600);const i2=read();
+   Object.assign(borderMotion,{i1,i2,idle_chunks:idleChunks});
  }
  const nativeBg={};
  if(cfg.scenario==='native-bg'){
@@ -617,7 +629,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({native_bg:nativeBg,rule_motion:ruleMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
+ console.log(JSON.stringify({native_bg:nativeBg,border_motion:borderMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -758,8 +770,9 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','native-bg','request-panel'}:
             config.update(columns=180,rows=40)
+        if scenario=='border-motion-bottom':config.update(columns=120,rows=30)  # the bottom layout (policy below)
         if scenario=='route-pages':config.update(columns=80,rows=24)  # the bottom layout's pages (policy below)
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
@@ -774,8 +787,8 @@ class SessionShellPTYTest(unittest.TestCase):
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'}
-                          else '{"enabled":true,"layout":"bottom"}' if scenario=='route-pages' else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','native-bg','request-panel'}
+                          else '{"enabled":true,"layout":"bottom"}' if scenario in {'route-pages','border-motion-bottom'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -891,36 +904,111 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertNotEqual(colors['idle'],colors['running'])
         self.assertEqual(result['state_colors'][2][1],colors['idle'])
 
-    def test_the_head_rule_moves_on_the_spinner_beat_sending_only_its_changed_cells(self):
-        # Spec E9 rule 47 (d): a running session's head rule (every cell heavy) carries a moving light on the beat the
-        # spinner already keeps; each beat sends only the rule's changed cells beside the spinner's
-        # row, so a beat stays small (the whole row each beat would be about 500 bytes), and the
-        # native half stays put.
-        result=self.run_loop('rule-motion')['rule_motion']
-        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes'],
-                          'rest_writes':len(result['rest']),'rest_bytes':[len(c.encode()) for c in result['rest']]}))
-        first,second=result['first'],result['second']
-        self.assertIsNotNone(first);self.assertIsNotNone(second)
-        # Spec E9 rule 52: the moving rule is the thin rule; no heavy cell anywhere on it.
-        for value in (first,second):self.assertEqual(value['cells'],'─'*36,value)
-        self.assertNotEqual(first['colors'],second['colors'])
-        self.assertEqual(first['native'],second['native'])
-        self.assertGreaterEqual(result['writes'],15)
-        self.assertLess(result['bytes']/result['writes'],400,result)
-        # Spec E9 rule 51 (c): through the rest the rule's row stands dark and nothing is written
-        # to it; the host's writes there are the spinner's glyph alone (one cell each). Then the
-        # light comes back in.
-        # Correction 8: the light shows on the first paint of the turn (within 0.3 s of it).
+    @staticmethod
+    def written_cells(chunk):
+        # The cells a chunk of terminal output writes (1-based row, column), following its cursor.
+        import re,unicodedata
+        row=col=0;out=[]
+        for token in re.findall(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]|\x1b\][^\x07]*\x07|[\s\S]',chunk):
+            if token.startswith('\x1b'):
+                m=re.fullmatch(r'\x1b\[(\d+);(\d+)H',token)
+                if m:row,col=int(m.group(1)),int(m.group(2))
+                continue
+            out.append((row,col));col+=2 if unicodedata.east_asian_width(token) in 'WF' else 1
+        return out
+
+    def beats(self,chunks):
+        # The beat's own writes (the spinner and the moving frame): each in one synchronized update with the cursor kept.
+        return [c for c in chunks if c.startswith('\x1b[?2026h\x1b7') and c.endswith('\x1b8\x1b[?2026l')]
+
+    @staticmethod
+    def frame_cells(reading):
+        top,left,W,H=reading['top']+1,reading['left']+1,reading['W'],reading['H']
+        return ({(top,left+x) for x in range(W)}|{(top+H-1,left+x) for x in range(W)}
+                |{(top+y,left) for y in range(H)}|{(top+y,left+W-1) for y in range(H)})
+
+    @staticmethod
+    def turned(a,b):
+        # How many cells the arc moved on clockwise from reading a to reading b (the best match of their looks).
+        n=len(a);score=lambda s:sum(1 for i in range(n) if a[i]!='t' and b[(i+s)%n]!='t' and a[i]==b[(i+s)%n])
+        return max(range(n),key=score)
+
+    def check_border_motion(self,result,cells):
+        first,second,third=result['first'],result['second'],result['third']
+        for value in (first,second,third):self.assertIsNotNone(value,result)
+        P=len(first['looks'])
+        self.assertEqual(P,cells(first),first)
+        # Shown within 0.3 s of the turn (the arc starts with the state).
         self.assertLess(result['lit_after_ms'],300,result)
-        self.assertTrue(result['rest_seen'],result)
-        y=result['rest_row'];self.assertIsNotNone(y,result)
-        self.assertTrue(all(c.endswith('d') for c in result['resting'].split(',')),result['resting'])
-        self.assertTrue(result['rest'],result)
-        for chunk in result['rest']:
-            self.assertNotIn('\x1b[%d;'%(y+1),chunk,result['rest'])
-            self.assertLess(len(chunk.encode()),96,chunk)
-        self.assertIsNotNone(result['back'],result)
-        self.assertTrue(any(not c.endswith('d') for c in result['back'].split(',')),result['back'])
+        for value in (first,second,third):
+            # A quarter of the frame (of its size at that reading), less the cells behind the head's words.
+            arc=round(cells(value)/4);lit=sum(1 for x in value['looks'] if x in '0123')
+            self.assertTrue(arc-20<=lit<=arc,(lit,arc,''.join(x[0] for x in value['looks'])))
+            self.assertTrue(set(value['looks'])<={'0','1','2','3','b','t'},value['looks'])
+            self.assertEqual(value['word'],'running')
+        # One way round, at one lap every 6 s whatever the size: clockwise by the elapsed time's share
+        # of the frame (two readings of one size; a panel that grew a row between them is not compared).
+        pairs=[(a,b) for a,b in ((first,second),(second,third)) if len(a['looks'])==len(b['looks'])]
+        self.assertTrue(pairs)
+        for a,b in pairs:
+            n=len(a['looks']);moved=self.turned(a['looks'],b['looks']);expected=n*(b['at']-a['at'])/6000
+            self.assertTrue(0<moved<n/2 and abs(moved-expected)<=10,(moved,expected))
+        # The native area (with its draft) and the cursor never move for it.
+        self.assertEqual(first['native'],second['native']);self.assertEqual(second['native'],third['native'])
+        self.assertTrue(any('DRAFT_TEXT' in row for row in first['native']),first['native'])
+        self.assertEqual(first['cursor'],second['cursor']);self.assertEqual(second['cursor'],third['cursor'])
+        # The beat: at most ten a second, each only the frame's changed cells and the spinner glyph,
+        # never the native area, never the panel's inside, never the whole frame.
+        frame=self.frame_cells(first)|self.frame_cells(second)|self.frame_cells(third)
+        beats=self.beats(result['chunks']);seconds=result['window_ms']/1000
+        self.assertTrue(len(beats)>=7*seconds and len(beats)<=10.5*seconds+1,(len(beats),seconds))
+        for chunk in beats:
+            written=self.written_cells(chunk)
+            self.assertTrue(written and set(written)<=frame,[c for c in written if c not in frame][:5])
+            self.assertLess(len(written),P//2,chunk)
+        sizes=[len(c.encode()) for c in beats]
+        return {'beats':len(beats),'seconds':round(seconds,2),'beats_per_second':round(len(beats)/seconds,1),
+                'bytes_per_beat':round(sum(sizes)/len(sizes)),'max_beat_bytes':max(sizes),
+                'cells_per_beat':round(sum(len(self.written_cells(c)) for c in beats)/len(beats),1),
+                'other_writes':len(result['chunks'])-len(beats)}
+
+    def check_border_wait_and_idle(self,result):
+        w1,w2,i1,i2=result['w1'],result['w2'],result['i1'],result['i2']
+        self.assertTrue(result['waiting'],result);self.assertTrue(result['idle'],result)
+        # Waiting: every line cell of the frame one red at a time, the brightest first, a shade 1.2 s on.
+        tones=[{x for x in w['looks'] if x!='t'} for w in (w1,w2)]
+        self.assertEqual(tones,[{'p217'},{'p210'}],tones)
+        self.assertEqual(w1['native'],w2['native']);self.assertEqual(w1['cursor'],w2['cursor'])
+        waits=self.beats(result['wait_chunks'])
+        self.assertTrue(1<=len(waits)<=2,len(waits))
+        for chunk in waits:self.assertTrue(set(self.written_cells(chunk))<=self.frame_cells(w1))
+        # Idle: the still neutral frame; nothing is sent for it.
+        self.assertTrue(set(i1['looks'])<={'b','t'},i1['looks']);self.assertEqual(i1['looks'],i2['looks'])
+        self.assertEqual(self.beats(result['idle_chunks']),[])
+        return {'wait_beats':len(waits),'wait_bytes':[len(c.encode()) for c in waits]}
+
+    def test_the_outer_frame_turns_on_the_spinner_beat_sending_only_its_changed_cells(self):
+        # Spec E9 rule 47 (d) (11-14: the outer frame instead of the head rule): a running session's
+        # frame carries an arc round it on the beat the spinner already keeps; each beat sends only
+        # the frame's changed cells (and the spinner glyph), so a beat stays small and the native
+        # area, its draft and the cursor stay put. A wait breathes the frame red; idle sends nothing.
+        result=self.run_loop('border-motion')['border_motion']
+        load=self.check_border_motion(result,lambda reading:2*40+2*38)
+        load.update(self.check_border_wait_and_idle(result))
+        print(json.dumps({'event':'session-shell-border-motion',**load}))
+        # A beat is a small part of the frame's 156 cells: about 2 KB would repaint the whole frame.
+        self.assertLess(load['bytes_per_beat'],700,load)
+
+    def test_the_outer_frame_turns_alike_under_the_native_area(self):
+        # The bottom layout's frame moves the same way, and its beats never write the native rows above it.
+        result=self.run_loop('border-motion-bottom')['border_motion']
+        first=result['first'];self.assertIsNotNone(first,result)
+        load=self.check_border_motion(result,lambda reading:2*120+2*(reading['H']-2))
+        load.update(self.check_border_wait_and_idle(result))
+        print(json.dumps({'event':'session-shell-border-motion-bottom','rows':first['H'],**load}))
+        top=min(result[k]['top'] for k in ('first','second','third'))
+        for chunk in self.beats(result['chunks']):
+            self.assertTrue(all(row>top for row,_ in self.written_cells(chunk)),chunk)
 
     def test_the_gap_beside_the_panel_takes_the_natives_own_background(self):
         # A native that paints its whole area (OpenCode) reaches the panel's frame: the two cells
