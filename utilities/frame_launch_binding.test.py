@@ -266,20 +266,50 @@ raise SystemExit(rc)
         self.assertFalse((self.target/'payload.txt').exists())
         self.assertTrue((self.saved/'new-project/payload.txt').exists())
 
-    def test_rpc_directory_uses_the_native_process_kernel_cwd(self):
+    def test_native_requests_carry_the_real_path_that_outlives_the_server(self):
+        # Codex checks a patch path against these roots by its text and runs shells in a
+        # sandbox with its own /proc, so a /proc/<pid>/cwd alias rejected worktree writes.
         self.prepare();server=load('frame_rpc_server','codex-app-server-supervisor.py')
         with B.RepositoryBinding(self.record()) as binding:
             instance=server.AppServer([sys.executable,'-c','import time;time.sleep(20)'],str(self.destination),dict(os.environ))
             try:
-                self.swap()
                 path=B.rpc_worktree(str(self.destination),instance)
+                self.assertEqual(path,str(self.destination))
                 self.assertEqual(Path(path).stat().st_ino,os.fstat(binding.fds['leaf']).st_ino)
-                self.assertEqual(path,f'/proc/{instance.process.pid}/cwd')
+                self.assertEqual(B.native_path(str(self.destination/'sub')),str(self.destination/'sub'))
                 literal=str(self.destination)+'/request text'
-                params=B.runtime_request({'cwd':str(self.destination),'sandboxPolicy':{'writableRoots':[str(self.destination)]},'input':[{'text':literal}]},instance)
-                self.assertEqual(params['sandboxPolicy']['writableRoots'],[path])
+                params=B.runtime_request({'cwd':str(self.destination),'input':[{'text':literal}],
+                    'sandboxPolicy':{'writableRoots':[str(self.destination),str(self.outside)]}},instance)
+                self.assertEqual(params['cwd'],str(self.destination))
+                self.assertEqual(params['sandboxPolicy']['writableRoots'],[str(self.destination),str(self.outside)])
                 self.assertEqual(params['input'][0]['text'],literal)
+                self.assertTrue((self.destination/'src/module.py').is_relative_to(params['cwd']))
+                self.assertFalse(any((self.root.parent/'elsewhere/x.py').is_relative_to(root)
+                                     for root in params['sandboxPolicy']['writableRoots']))
             finally:instance.close()
+        (Path(path)/'after-exit.txt').write_text('fixture')
+        self.assertTrue((self.destination/'after-exit.txt').exists())
+
+    def test_replaced_directory_is_never_handed_to_a_native_request(self):
+        self.prepare();server=load('frame_rpc_server','codex-app-server-supervisor.py')
+        with B.RepositoryBinding(self.record()):
+            instance=server.AppServer([sys.executable,'-c','import time;time.sleep(20)'],str(self.destination),dict(os.environ))
+            try:
+                self.swap()
+                with self.assertRaises(B.RepositoryBindingError):B.rpc_worktree(str(self.destination),instance)
+                with self.assertRaises(B.RepositoryBindingError):B.native_path(str(self.destination))
+            finally:instance.close()
+
+    def test_read_only_request_stays_read_only(self):
+        self.prepare();server=load('frame_rpc_server','codex-app-server-supervisor.py')
+        args=__import__('argparse').Namespace(sandbox='read-only',network_access=False,
+                                              worktree=str(self.destination),writable_root=[str(self.outside)])
+        with B.RepositoryBinding(self.record()):
+            instance=server.AppServer([sys.executable,'-c','import time;time.sleep(20)'],str(self.destination),dict(os.environ))
+            try:
+                params=B.runtime_request({'cwd':str(self.destination),'sandboxPolicy':server.sandbox_policy(args)},instance)
+            finally:instance.close()
+        self.assertEqual(params['sandboxPolicy'],{'type':'readOnly','networkAccess':False})
 
     def test_explicit_recovery_binds_its_independently_chosen_repository(self):
         self.prepare()

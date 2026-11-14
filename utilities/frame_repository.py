@@ -319,28 +319,30 @@ def native_process_options(path=None):
 
 
 def rpc_worktree(path, server):
+    """The real path for a native request, while it still names the bound directory.
+
+    A native runtime checks writes against this path and runs commands in its own
+    sandbox, where another process's /proc entry is not visible, so no alias.
+    """
     binding = current()
     if binding is None or execution_path(path) == str(path):
         return str(path)
-    relative = Path(os.path.abspath(path)).relative_to(binding.path)
     process = getattr(server, "process", None)
     pid = getattr(process, "pid", None)
-    if binding and type(pid) is int:
+    if type(pid) is int:
         if process.poll() is not None:
             raise binding.changed()
-        candidate = Path(f"/proc/{pid}/cwd")
-        if not binding.same(candidate.stat(), binding.record["first_leg"]["repository_created"]):
+        if not binding.same(Path(f"/proc/{pid}/cwd").stat(), binding.record["first_leg"]["repository_created"]):
             raise binding.changed()
-        return str(candidate / relative)
-    return execution_path(path)
+    return native_path(path)
 
 
 def native_path(path):
-    """A shell/payload alias that survives the short-lived adapter's exit."""
+    """The real path for shells and native payloads; it outlives every launcher."""
     binding = current()
     if binding and execution_path(path) != str(path):
-        relative = Path(os.path.abspath(path)).relative_to(binding.path)
-        return str(Path("/proc/self/cwd") / relative)
+        binding.verify()
+        return os.path.abspath(path)
     return str(path)
 
 

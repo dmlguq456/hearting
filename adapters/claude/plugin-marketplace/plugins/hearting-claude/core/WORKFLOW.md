@@ -489,8 +489,9 @@ cwd. A fresh process reopens only the recorded physical identity
 when its inherited descriptors are unavailable.
 Trusted launcher hops inherit only the source descriptor. Native model processes
 start in the bound kernel cwd with directory descriptors closed; parent and Git
-directory handles remain in the trusted launcher. Supervised directory
-requests use the verified native process cwd for that process's lifetime.
+directory handles remain in the trusted launcher. Native cwd, writable-root and
+payload paths are the real paths, handed over only while they still name the
+bound directory; no process-scoped alias reaches the model.
 Later legs that keep this same dedicated new-repository destination reuse its
 physical binding and repository instead of allocating another worktree. An
 explicitly different destination keeps its existing selection and preparation.
