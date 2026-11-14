@@ -7267,6 +7267,16 @@ def _runner_maintenance_pass(store):
                                 + int(PEER_HISTORY_TIME_BUDGET_S * 1_000_000_000)),
                 start_after=cursor if isinstance(cursor, str) else None)
             result["peer_history"] = counts
+            # Peer requests on the same due pass: a confirmation a writer left after its
+            # seal is finished from that seal, then requests closed (or never sealed) for
+            # 14 days go; an open request is never removed for its age.
+            try:
+                import peer_request
+                request_counts = peer_request.maintain()
+                result["peer_requests_settled"] = request_counts["settled"]
+                result["peer_requests_pruned"] = request_counts["pruned"]
+            except (OSError, ValueError, ImportError):
+                pass
             peer_obligations.write_runner_duty_state(
                 root, "peer-history", {
                     "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
@@ -7274,13 +7284,6 @@ def _runner_maintenance_pass(store):
                     "removed": counts["removed"],
                     "locks_removed": counts.get("locks_removed", 0)},
                 expected_root_identity=identity)
-            # Peer requests closed (or never sealed) for 14 days go on the same
-            # due pass; an open request is never removed for its age.
-            try:
-                import peer_request
-                result["peer_requests_pruned"] = len(peer_request.prune())
-            except (OSError, ValueError, ImportError):
-                pass
     except (OSError, ValueError, RuntimeError):
         pass
     try:

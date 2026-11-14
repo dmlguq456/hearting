@@ -95,7 +95,10 @@ class KilledWriterTest(Boundary):
                     self.assertEqual(rc, 0, shown)
                     self.assertIn("BODY-show", shown)
                 else:
-                    self.assertEqual(pr.maintain()["settled"], 1)
+                    # The runner's own maintenance pass (its first pass is due).
+                    store = fixture.peer_obligations.ObligationStore()
+                    result = steward._runner_maintenance_pass(store)
+                    self.assertEqual((result or {}).get("peer_requests_settled"), 1, result)
                 self.assertEqual(pr.load(record["id"])["state"], "open")
 
     def test_killed_before_the_index_the_request_is_still_listed(self):
