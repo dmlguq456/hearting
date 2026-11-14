@@ -392,19 +392,21 @@ def _latest_revision(record):
     to be. A reservation without a seal is not a revision (nothing went to the recipient)."""
     entries = [(r["n"], r.get("label", "")) for r in record["revisions"]]
     entries += [(r["n"], r.get("label", "")) for r in _sending(record, "revision")
-                if _sealed(record["id"], r)]
+                if _sealed(record["id"], r) is True]
     return max(entries) if entries else (0, "")
 
 
 def _sealed(request_id, entry):
-    """True when the transfer sealed under ``entry`` exists: the seal is the evidence."""
+    """Is the transfer sealed under ``entry`` there? ``True``: it is. ``False``: the
+    record is confirmed absent (or is not this seal). ``None``: could not be read
+    (permission, timeout, a damaged file): unknown is never treated as absent."""
     ref = entry.get("ref")
     if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
         return False
     try:
         transfer = _read_json(requests_dir().parent / "transfers" / (ref + ".json"))
     except (OSError, ValueError):
-        return False
+        return None
     return (isinstance(transfer, dict) and transfer.get("message_id") == ref
             and transfer.get("request") == request_seal(request_id, entry["revision"], entry["role"]))
 
@@ -476,12 +478,23 @@ def _settle_locked(record, *, known=None, transfer_ref=None):
     changed, result = False, None
     for entry in sorted(_sending(record), key=lambda e: e.get("seq", 0)):
         mine = entry.get("ref") == known
-        if mine or _sealed(record["id"], entry):
+        if mine or _sealed(record["id"], entry) is True:
             applied = _apply(record, entry, transfer_ref if mine else None)
             if applied is not None:
                 changed = True
                 if mine:
                     result = applied
+    # A revision reservation below an applied one that has no seal (its writer died, or
+    # has not sealed yet) is closed as superseded. Unknown (unreadable) is left as it is.
+    newest = max([r["n"] for r in record["revisions"]] + [0])
+    for lower in _sending(record, "revision"):
+        if lower["n"] < newest and _sealed(record["id"], lower) is False:
+            record["revisions"].append(dict(_revision(lower["n"], lower.get("label", ""),
+                                                      lower["ref"], state="superseded"),
+                                            unsealed=True))
+            record["revisions"].sort(key=lambda r: r["n"])
+            record["sending"] = [o for o in _sending(record) if o.get("ref") != lower["ref"]]
+            changed = True
     return changed, result
 
 
@@ -539,8 +552,8 @@ def abort(request_id, reserved_ref):
         if not _valid_record(record, request_id):
             return False
         mine = [e for e in _sending(record) if e.get("ref") == reserved_ref]
-        if not mine or any(_sealed(request_id, e) for e in mine):
-            return False
+        if not mine or any(_sealed(request_id, e) is not False for e in mine):
+            return False  # sealed, or not known to be absent: kept for the next access
         record["sending"] = [e for e in _sending(record) if e.get("ref") != reserved_ref]
         if record["state"] == "preparing" and not record["revisions"] and not record["sending"]:
             with contextlib.suppress(OSError):
@@ -655,17 +668,13 @@ def reserve_message(request_id, *, label=None):
             raise ValueError("request-closed")
         newest, newest_label = _latest_revision(record)
         if label is not None and label != newest_label:
-            # The same revision sent again after a death before its seal: nothing reached
-            # the recipient, so it takes that reservation over (same number, same ref).
-            entry = next((e for e in sorted(_sending(record, "revision"),
-                                            key=lambda e: e.get("seq", 0), reverse=True)
-                          if e["n"] > newest and e.get("label", "") == clean(label, 80)
-                          and not _sealed(record["id"], e)), None)
-            if entry is None:
-                top = max([r["n"] for r in record["revisions"]]
-                          + [e["n"] for e in _sending(record, "revision")] + [0])
-                entry = _reservation(record, "revision", "request", top + 1, top + 1,
-                                     label=clean(label, 80))
+            # Every send has its own reservation and ref, the next number above every
+            # applied and reserved revision. An earlier reservation without a seal is
+            # never taken over: it is closed as superseded when a newer revision applies.
+            top = max([r["n"] for r in record["revisions"]]
+                      + [e["n"] for e in _sending(record, "revision")] + [0])
+            entry = _reservation(record, "revision", "request", top + 1, top + 1,
+                                 label=clean(label, 80))
         else:
             target = revision_of(record, newest)
             serial = (len(target["followups"]) if target else 0) + len(
@@ -1009,9 +1018,13 @@ def describe(record, *, rows=None, now=None):
     lines = ["request=%s state=%s title=%s" % (record["id"], record["state"], record.get("title", ""))]
     lines.append("from=%s to=%s" % (_name(record["requester"]), _name(record["recipient"])))
     for revision in record["revisions"]:
-        lines.append("revision=%d state=%s label=%s delivery=%s" % (
+        line = "revision=%d state=%s label=%s delivery=%s" % (
             revision["n"], revision["state"], revision.get("label", ""),
-            delivery_word(rows.get(revision["transfer_ref"])) or "-"))
+            delivery_word(rows.get(revision["transfer_ref"])) or "-")
+        if revision.get("unsealed") and _sealed(record["id"], {
+                "ref": revision["transfer_ref"], "revision": revision["n"], "role": "request"}) is not True:
+            line += " unconfirmed reason=no-seal"  # closed as superseded; nothing was ever sent
+        lines.append(line)
     for report in record["reports"]:
         lines.append("report=%d kind=%s revision=%d late=%s elapsed=%s result=%s remaining=%s" % (
             report["n"], report["kind"], report["revision"], str(report["late"]).lower(),

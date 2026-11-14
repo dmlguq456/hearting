@@ -501,7 +501,28 @@ class ReservationLifeTest(Boundary):
         self.assertNotEqual(rc, 0, out)
         self.assertEqual(pr.load(request_id)["sending"], [])
 
-    def test_the_same_new_revision_sent_again_after_a_death_before_its_seal_takes_its_place(self):
+    def transfers_sealing(self, request_id, revision, role="request"):
+        """Every sealed transfer of ``request_id`` for one revision and role."""
+        found = []
+        for path in (pr.requests_dir().parent / "transfers").glob("*.json"):
+            seal = (json.loads(path.read_text()).get("request") or {})
+            if (seal.get("id"), seal.get("revision"), seal.get("role")) == (request_id, revision, role):
+                found.append(path.stem)
+        return found
+
+    @contextlib.contextmanager
+    def seal_unreadable(self, error):
+        """Every read of a sealed transfer record fails with ``error`` (not a missing file)."""
+        original = pr._read_json
+
+        def read(path, **kwargs):
+            if Path(path).parent.name == "transfers":
+                raise error
+            return original(path, **kwargs)
+        with mock.patch.object(pr, "_read_json", read):
+            yield
+
+    def test_the_same_new_revision_sent_again_after_a_death_before_its_seal_gets_a_new_number(self):
         request_id, _ = self.new_request()
         self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
         self.die_before_seal(lambda: self.request(A, request_id, "FIRST-TRY", rev="head2"))
@@ -509,24 +530,203 @@ class ReservationLifeTest(Boundary):
         self.assertEqual((reserved["what"], reserved["n"]), ("revision", 2))
         rc, out = self.request(A, request_id, "SECOND-TRY", rev="head2")
         self.assertEqual(rc, 0, out)
-        self.assertIn("revision=2", out)
+        self.assertIn("revision=3", out)  # its own reservation and ref, never the dead one's
         self.assertNotIn("followup", out)
-        record = pr.load(request_id)
-        self.assertEqual([r["n"] for r in record["revisions"]], [1, 2])
-        self.assertEqual(record["revisions"][1]["followups"], [])
+        record = pr.load_settled(request_id)
+        self.assertEqual([(r["n"], r["state"]) for r in record["revisions"]],
+                         [(1, "superseded"), (2, "superseded"), (3, "current")])
+        self.assertNotEqual(record["revisions"][1]["transfer_ref"], record["revisions"][2]["transfer_ref"])
+        self.assertEqual(record["revisions"][2]["followups"], [])
+        self.assertEqual(record["sending"], [])  # the dead reservation did not stay `sending`
+        rc, shown = self.show(B, request_id)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("SECOND-TRY", shown)
+        rc, shown = self.show(B, request_id, rev=2)  # not revision-unknown: unconfirmed, superseded
+        self.assertIn("revision=2 state=superseded", shown)
+        self.assertIn("unconfirmed reason=no-seal", shown)
+        self.assertNotIn("revision-unknown", shown)
+        self.assertEqual(self.transfers_sealing(request_id, 2), [])
+        self.assertEqual(len(self.transfers_sealing(request_id, 3)), 1)
+
+    def test_a_death_right_after_the_new_revision_reservation_then_the_same_command_again(self):
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.die_before_seal(lambda: self.request(A, request_id, "LOST", rev="head2"))
+        rc, out = self.request(A, request_id, "LOST", rev="head2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("revision=3", out)
+        record = pr.load_settled(request_id)
+        self.assertEqual(record["sending"], [])
+        self.assertEqual(record["state"], "open")
+        self.assertEqual([r["n"] for r in record["revisions"] if r["state"] == "current"], [3])
+        self.assertEqual(sum(len(r["followups"]) for r in record["revisions"]), 0)
+        rc, shown = self.show(B, request_id)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("LOST", shown)
+
+    def test_a_death_after_only_the_body_file_is_written_the_next_send_uses_a_new_ref(self):
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        original = pm._write_body_payload
+
+        def child():
+            def write(*args, **kwargs):
+                result = original(*args, **kwargs)
+                _die()  # the body file is there; nothing is sealed
+                return result
+            pm._write_body_payload = write
+            self.request(A, request_id, "BODY-ONLY", rev="head2")
+        self.assertEqual(os.WTERMSIG(self.in_child(child)), signal.SIGKILL)
+        (reserved,) = pr.load(request_id)["sending"]
+        self.assertTrue((pr.requests_dir().parent.parent / "peer-messages" / "payloads"
+                         / (reserved["ref"] + ".txt")).exists())
+        rc, out = self.request(A, request_id, "BODY-ONLY", rev="head2")
+        self.assertEqual(rc, 0, out)  # not peer-pending-unavailable
+        self.assertIn("revision=3", out)
+        record = pr.load_settled(request_id)
+        self.assertEqual(record["sending"], [])
+        self.assertEqual([(r["n"], r["state"]) for r in record["revisions"]][1:],
+                         [(2, "superseded"), (3, "current")])
+        rc, shown = self.show(B, request_id)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("BODY-ONLY", shown)
+        rc, shown = self.show(B, request_id, rev=2)
+        self.assertNotIn("revision-unknown", shown)
+
+    def resend_while_the_first_is_held_before_its_seal(self, second_fails):
+        """One writer reserves revision 2 and stops just before its seal; the same command
+        is sent again meanwhile (it fails, or it seals). Then the first one goes on."""
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        gate = self.root / "go"
+        reserved = self.root / "reserved"
+        real_send = pc._send
+
+        def child():
+            def held(*args, **kwargs):
+                reserved.write_text("1")
+                deadline = time.monotonic() + 30
+                while not gate.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                return real_send(*args, **kwargs)
+            pc._send = held
+            self.request(A, request_id, "FIRST", rev="head2")
+        pid = os.fork()
+        if pid == 0:
+            try:
+                child()
+            finally:
+                os._exit(0)
+        deadline = time.monotonic() + 30
+        while not reserved.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(reserved.exists())
+        try:
+            if second_fails:
+                with mock.patch.object(pc, "_send", return_value=(5, "unverified", None, None, "seal-failed")):
+                    rc, out = self.request(A, request_id, "SECOND", rev="head2")
+                self.assertNotEqual(rc, 0, out)
+                # The failing one dropped only its own reservation; the held one is still there.
+                self.assertEqual([e["n"] for e in pr.load(request_id)["sending"]], [2])
+            else:
+                rc, out = self.request(A, request_id, "SECOND", rev="head2")
+                self.assertEqual(rc, 0, out)
+        finally:
+            gate.write_text("1")
+            os.waitpid(pid, 0)
+        return request_id
+
+    def test_two_writers_sending_the_same_revision_the_failing_one_leaves_the_others_reservation(self):
+        request_id = self.resend_while_the_first_is_held_before_its_seal(second_fails=True)
+        record = pr.load_settled(request_id)
+        self.assertEqual([(r["n"], r["state"]) for r in record["revisions"]][1:], [(2, "current")])
         self.assertEqual(record["sending"], [])
         rc, shown = self.show(B, request_id, rev=2)
         self.assertEqual(rc, 0, shown)
-        self.assertIn("SECOND-TRY", shown)
-        self.assertEqual(pr.load_settled(request_id)["sending"], [])
+        self.assertIn("FIRST", shown)
+        rc, again = self.request(A, request_id, "THIRD", rev="head3")
+        self.assertEqual(rc, 0, again)
+        for number in (2, 3):  # one seal per revision, never two for the same one
+            self.assertEqual(len(self.transfers_sealing(request_id, number)), 1, number)
 
-    def test_another_revision_after_an_unsealed_one_still_gets_a_new_number(self):
+    def test_two_writers_sending_the_same_revision_both_sealed_one_seal_per_revision(self):
+        request_id = self.resend_while_the_first_is_held_before_its_seal(second_fails=False)
+        record = pr.load_settled(request_id)
+        self.assertEqual(record["sending"], [])
+        self.assertEqual([(r["n"], r["state"]) for r in record["revisions"]][1:],
+                         [(2, "superseded"), (3, "current")])
+        self.assertEqual(len(set(r["transfer_ref"] for r in record["revisions"])), 3)
+        for number in (2, 3):
+            self.assertEqual(len(self.transfers_sealing(request_id, number)), 1, number)
+        rc, shown = self.show(B, request_id)
+        self.assertIn("SECOND", shown)
+
+    def test_a_seal_that_cannot_be_read_is_not_absent_nothing_is_dropped(self):
+        for error in (PermissionError("denied"), TimeoutError("slow")):
+            with self.subTest(error=type(error).__name__):
+                for path in pr.requests_dir().glob("rq-*.json"):
+                    path.unlink()
+                # A new request: sealed, its confirmation failed, and the seal cannot be read.
+                with self.seal_unreadable(error):
+                    self.failing_confirm(lambda: self.request(A, "bee", "SEALED-NEW", title="kept"))
+                (record,) = self.request_files()
+                self.assertEqual(len(record["sending"]), 1)
+                self.assertEqual(record["state"], "preparing")
+                with self.seal_unreadable(error):  # still unknown: shown as not confirmed
+                    self.assertEqual([r["id"] for r in pr.session_requests(*A)["out"]], [record["id"]])
+                    self.assertEqual(pr.load(record["id"])["state"], "preparing")
+                    self.assertTrue(pr.unconfirmed(pr.load(record["id"])))
+                self.assertEqual(pr.load(record["id"])["state"], "preparing")
+                # The error is gone: the next access finishes it.
+                self.assertEqual(pr.load_settled(record["id"])["state"], "open")
+                rc, shown = self.show(B, record["id"])
+                self.assertEqual(rc, 0, shown)
+                self.assertIn("SEALED-NEW", shown)
+
+    def test_a_revision_seal_that_cannot_be_read_is_kept_and_not_taken_over(self):
         request_id, _ = self.new_request()
-        self.die_before_seal(lambda: self.request(A, request_id, "lost", rev="head2"))
-        rc, out = self.request(A, request_id, "other", rev="head3")
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        with self.seal_unreadable(PermissionError("denied")):
+            self.failing_confirm(lambda: self.request(A, request_id, "SEALED-REV2", rev="head2"))
+        (reserved,) = pr.load(request_id)["sending"]
+        self.assertEqual(reserved["n"], 2)
+        self.assertEqual(len(self.transfers_sealing(request_id, 2)), 1)
+        # The seal is readable now: the sealed 2 is finished (never taken over), and the
+        # same label again is its follow-up; another label is the next revision, 3.
+        rc, out = self.request(A, request_id, "SECOND-TRY", rev="head2")
         self.assertEqual(rc, 0, out)
+        self.assertIn("followup=1", out)
+        rc, out = self.request(A, request_id, "THIRD", rev="head3")
         self.assertIn("revision=3", out)
-        self.assertEqual([e["n"] for e in pr.load(request_id)["sending"]], [2])
+        record = pr.load_settled(request_id)
+        self.assertEqual([(r["n"], r["state"]) for r in record["revisions"]][1:],
+                         [(2, "superseded"), (3, "current")])
+        self.assertEqual(len(self.transfers_sealing(request_id, 2)), 1)
+        rc, shown = self.show(B, request_id, rev=2)
+        self.assertEqual(rc, 0, shown)
+        self.assertIn("SEALED-REV2", shown)  # the sealed revision is the one that was sent
+
+    def test_an_unreadable_older_reservation_is_closed_once_it_can_be_read(self):
+        request_id, _ = self.new_request()
+        self.ack(pr.load(request_id)["revisions"][0]["transfer_ref"])
+        self.die_before_seal(lambda: self.request(A, request_id, "LOST", rev="head2"))
+        with self.seal_unreadable(TimeoutError("slow")):
+            rc, out = self.request(A, request_id, "NEXT", rev="head2")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([e["n"] for e in pr.load(request_id)["sending"]], [2])  # unknown: left
+        record = pr.load_settled(request_id)  # known now: absent, and a newer one is applied
+        self.assertEqual(record["sending"], [])
+        self.assertEqual([(r["n"], r["state"]) for r in record["revisions"]][1:],
+                         [(2, "superseded"), (3, "current")])
+
+    def test_an_unsealed_reservation_without_a_newer_revision_stays_not_confirmed(self):
+        request_id, _ = self.new_request()
+        self.die_before_seal(lambda: self.request(A, request_id, "LOST", rev="head2"))
+        record = pr.load_settled(request_id)
+        self.assertEqual([e["n"] for e in record["sending"]], [2])
+        rc, shown = self.show(A, request_id)
+        self.assertIn("revision=2 state=unconfirmed reason=no-seal", shown)
+        self.assertEqual(pr.current_revision(record)["n"], 1)
 
     def test_a_request_never_confirmed_is_not_removed_by_age_until_it_is_cancelled(self):
         self.die_before_seal(lambda: self.request(A, "bee", "lost", title="unsealed"))
