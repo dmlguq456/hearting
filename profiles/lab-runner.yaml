@@ -8,5 +8,5 @@ fragments:
   - profiles/fragments/lab-runner.md
 expose:
   skills: [autopilot-lab, analyze-project]
-  agents: []
+  agents: [light, balanced, deep]
   triggers: []
