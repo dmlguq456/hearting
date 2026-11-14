@@ -127,18 +127,28 @@ def _runtime_identity(proc: Path):
 
 
 def _argument_sessions(argv: list[str]) -> set[str]:
+    """Session ids a Claude argv names for its own conversation.
+
+    ``--fork-session`` resumes a copy under a new id and leaves the original
+    unchanged on disk; ``--session-id`` names the conversation's id. With both,
+    the one ``--session-id`` value is this process's session and the resumed
+    source is not held. Without ``--fork-session``, every named id stays a claim.
+    """
     values = set()
+    named = set()
     value_flags = {"--resume", "--session", "--session-id", "--resume-session", "-r"}
     for index, token in enumerate(argv):
         if token in value_flags and index + 1 < len(argv):
             value = argv[index + 1]
             if value and not value.startswith("-"):
-                values.add(value)
+                (named if token == "--session-id" else values).add(value)
         elif any(token.startswith(flag + "=") for flag in value_flags if flag.startswith("--")):
-            value = token.split("=", 1)[1]
+            flag, value = token.split("=", 1)
             if value:
-                values.add(value)
-    return values
+                (named if flag == "--session-id" else values).add(value)
+    if "--fork-session" in argv and len(named) == 1:
+        return named
+    return values | named
 
 
 _CLAUDE_COMMANDS = {"agents", "auth", "doctor", "install", "mcp", "plugin",
@@ -579,6 +589,189 @@ class ClaimedSessions(set):
     process_claims: tuple = ()
 
 
+_SESSION_SHELL_SCRIPTS = {"entry.py": "entry", "host.cjs": "host"}
+
+
+def _session_shell_role(argv: list[str]) -> str | None:
+    """``entry``/``host`` for Hearting's own Claude session-shell wrapper argv.
+
+    ``entry.py`` runs as ``python utilities/session-shell/entry.py claude
+    <native> ...`` and forks the native Claude with that exact ``<native> ...``
+    argv; its display ``host.cjs`` runs as ``node .../host.cjs claude <native>
+    ...``. The shape alone excludes nothing: see ``claude_session_census``.
+    """
+    if len(argv) < 4 or argv[2] != "claude":
+        return None
+    script = Path(argv[1])
+    role = _SESSION_SHELL_SCRIPTS.get(script.name)
+    if role is None or script.parent.name != "session-shell" or script.parent.parent.name != "utilities":
+        return None
+    interpreter = os.path.basename(argv[0]).lower()
+    if role == "entry" and interpreter.startswith("python"):
+        return role
+    if role == "host" and interpreter in {"node", "nodejs"}:
+        return role
+    return None
+
+
+def _background_role(argv: list[str]) -> str | None:
+    """``supervisor``/``pty-host``/``spare`` for Claude Code's own background argv.
+
+    ``claude daemon run`` is the background-session supervisor; it starts each
+    session under ``claude --bg-pty-host <pty.sock> <cols> <rows> -- <exe>
+    <args>``, and keeps a waiting ``--bg-spare <claim.sock>`` process that takes
+    the next session over without changing its argv. The shape alone excludes
+    nothing: see ``claude_session_census``.
+    """
+    if argv[1:3] == ["daemon", "run"]:
+        return "supervisor"
+    if argv[1:2] == ["--bg-pty-host"] and "--" in argv[2:]:
+        return "pty-host"
+    if len(argv) == 3 and argv[1] == "--bg-spare":
+        return "spare"
+    return None
+
+
+def _bounded_json(path: Path, limit: int):
+    """One same-user regular file's JSON value, or None when absent or unusable."""
+    fd = None
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > limit:
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        chunks, size = [], 0
+        while size <= limit:
+            chunk = os.read(fd, limit + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
+            return None
+        return json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+_SUPERVISOR_JOB_LIMIT = 4096
+# Claude Code 2.1.323's jobs/ layout: one directory per job, named by eight
+# lowercase hex digits, beside its pins file. Anything else is a layout this
+# census does not know, so it proves no empty state.
+_SUPERVISOR_JOB_NAME = frozenset("0123456789abcdef")
+_SUPERVISOR_JOB_FILES = frozenset({"pins.json"})
+
+
+def _supervisor_lock_names(home: Path, pid: str, start: str) -> bool:
+    lock = _bounded_json(home / "daemon.lock", 65536)
+    return (isinstance(lock, dict) and str(lock.get("pid")) == pid
+            and str(lock.get("procStart") or "") == start)
+
+
+def _supervisor_sessions(home: Path, pid: str, start: str) -> set[str] | None:
+    """Every session id this exact supervisor may carry, or None when not exact.
+
+    The supervisor runs no conversation itself; each background session is its
+    own process. Between processes it does carry one: a respawn stops the old
+    worker and hands the session to a spare about 0.1 s later, while the job's
+    state reads ``stopped`` and no process or roster entry names it. Every
+    session it starts or carries has ``jobs/<id>/state.json`` naming it before
+    dispatch and through respawn, so all of those ids count as held while
+    ``daemon.lock`` names this pid and start.
+
+    An empty result is believed only in 2.1.323's own layout: ``jobs/`` exists
+    and holds nothing but job directories and its pins file, and
+    ``daemon/roster.json`` names this supervisor and only workers whose sessions
+    have a job. A missing ``jobs/``, an unknown entry, a symlink, an unreadable
+    job record or a roster worker without a job makes the result None.
+    """
+    if not _supervisor_lock_names(home, pid, start):
+        return None
+    jobs = home / "jobs"
+    try:
+        entries = list(os.scandir(jobs))
+    except OSError:
+        return None
+    if len(entries) > _SUPERVISOR_JOB_LIMIT or not _owner_directory(jobs):
+        return None
+    sessions = set()
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                return None
+            if not entry.is_dir(follow_symlinks=False):
+                if entry.name in _SUPERVISOR_JOB_FILES and entry.is_file(follow_symlinks=False):
+                    continue
+                return None
+        except OSError:
+            return None
+        if len(entry.name) != 8 or not set(entry.name) <= _SUPERVISOR_JOB_NAME:
+            return None
+        row = _bounded_json(Path(entry.path) / "state.json", 1 << 20)
+        sid = row.get("sessionId") if isinstance(row, dict) else None
+        if not isinstance(sid, str) or not sid:
+            return None
+        sessions.add(sid)
+    # Read after the jobs: a worker dispatched meanwhile names a session they lack.
+    roster = _bounded_json(home / "daemon" / "roster.json", 1 << 20)
+    workers = roster.get("workers") if isinstance(roster, dict) else None
+    if not isinstance(workers, dict) or str(roster.get("supervisorPid")) != pid:
+        return None
+    for worker in workers.values():
+        sid = worker.get("sessionId") if isinstance(worker, dict) else None
+        if not isinstance(sid, str) or sid not in sessions:
+            return None
+    return sessions
+
+
+def _spare_waiting(proc: Path, home: Path, pid: str, start: str, claim: str) -> bool:
+    """A spare that has not taken a session: it still listens in its spare directory.
+
+    Taking a session, a spare first removes its claim socket, then moves to the
+    session's directory and only then writes ``sessions/<pid>.json``. The
+    evidence is read in the opposite order, the record's absence first and the
+    socket last, so all three held together when the socket was seen. A session
+    the supervisor connected before that moment already has its job record, which
+    the census reads again after this check when it closes.
+    """
+    own = _process_parent(proc)
+    if own is None or own[1] != start:
+        return False
+    try:
+        (home / "sessions" / (pid + ".json")).lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    else:
+        return False
+    try:
+        cwd = os.readlink(proc / "cwd")
+        socket_info = os.lstat(claim)
+    except OSError:
+        return False
+    return (stat.S_ISSOCK(socket_info.st_mode) and socket_info.st_uid == os.getuid()
+            and cwd == os.path.dirname(claim))
+
+
+def _process_parent(proc: Path) -> tuple[str, str] | None:
+    """``(ppid, start ticks)`` from one stat read, or None when unreadable."""
+    try:
+        with open(os.fspath(proc) + "/stat", encoding="ascii") as source:
+            text = source.read()
+    except (OSError, UnicodeError):
+        return None
+    close = text.rfind(")")
+    fields = text[close + 2:].split()
+    if close < 0 or len(fields) <= 19:
+        return None
+    return fields[1], fields[19]
+
+
 def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                           budget_seconds: float = 1.0):
     """Return ``(complete, live_sids, reasons)`` from a bounded host census.
@@ -587,6 +780,24 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
     malformed native claims, and process churn make the result incomplete.
     A process in a nested PID namespace binds by its own innermost pid; otherwise
     namespace mismatch keeps the census incomplete.
+
+    Hearting's session-shell wrapper (``entry.py`` and its ``host.cjs``) repeats
+    its native Claude child's argv. It adds no unresolved reason only while that
+    direct child, in the same PID namespace with the identical argv, is confirmed
+    by its own native session record and the wrapper holds no claim of its own.
+    Otherwise it is judged like any other Claude-shaped process.
+
+    Claude Code's own background processes follow the same rule. The supervisor
+    (``claude daemon run``) whose ``daemon.lock`` names its pid and start holds
+    every session its ``jobs/`` records name, and nothing else, while those jobs
+    and its roster keep the layout this census knows. A ``--bg-spare`` under a
+    ``--bg-pty-host`` of that supervisor holds nothing while its claim socket and
+    spare directory show it waiting. Both are checked again when the census
+    closes, the spares first and then the supervisor's jobs, which must be
+    unchanged.
+    A ``--bg-pty-host`` adds no unresolved reason only while its direct child
+    runs its exact command and is confirmed or such a waiting spare. Anything
+    less exact stays incomplete; these rules only add holders, never remove one.
     """
     root = Path(proc_root)
     started = time.monotonic()
@@ -606,6 +817,112 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
     mounts_path = root / "mounts"
     if not mounts_path.exists():
         mounts_path = Path("/proc/mounts")
+
+    def observe(pid, proc, start, argv):
+        """One candidate's evidence, applied by ``commit``; never mutates the census."""
+        seen = {"reasons": set(), "holders": set(), "claim": None, "candidate": None,
+                "namespace": None, "native_sid": None, "own_claims": set()}
+        found = seen["reasons"]
+        try:
+            namespace = os.readlink(proc / "ns" / "pid")
+            environ = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            found.add("process-context-unreadable")
+            return seen
+        seen["namespace"] = namespace
+        claim_pid = pid
+        if namespace != host_namespace:
+            claim_pid = _namespace_pid(proc, pid)
+            if claim_pid is None:
+                found.add("pid-namespace-mismatch")
+                return seen
+        env = {}
+        for item in environ:
+            if b"=" in item:
+                key, value = item.split(b"=", 1)
+                if key in {b"CLAUDE_CONFIG_DIR", b"HOME"}:
+                    env[key.decode()] = value.decode("utf-8", "replace")
+        home_value = env.get("CLAUDE_CONFIG_DIR") or str(Path(env.get("HOME", "")).expanduser() / ".claude")
+        if not home_value or not Path(home_value).is_absolute():
+            found.add("config-home-unresolved")
+            return seen
+        home = Path(home_value)
+        if home_value not in remote_homes:
+            # One mount table per census: every process naming this home has
+            # the same answer, so read and match the table once per home.
+            remote_homes[home_value] = _remote_mount(home, mounts_path)
+        if (not _owner_directory(home) or not _owner_directory(home / "sessions")
+                or remote_homes[home_value]):
+            found.add("remote-config-home")
+            return seen
+        seen["candidate"] = (start, argv, home)
+        argv_sids = _argument_sessions(argv)
+        seen["holders"].update(argv_sids)
+        if len(argv_sids) > 1:
+            found.add("conflicting-session-arguments")
+        native_sid, valid = _native_session_claim(home, claim_pid, start)
+        if not valid:
+            found.add("native-session-claim-unusable")
+            if argv_sids:
+                seen["claim"] = (None, frozenset(argv_sids))
+            return seen
+        home_key = str(home)
+        if home_key not in tap_indexes:
+            try:
+                statusline_dir = home / ".statusline"
+                try:
+                    statusline_info = statusline_dir.lstat()
+                except FileNotFoundError:
+                    tap_indexes[home_key] = {}
+                else:
+                    if not stat.S_ISDIR(statusline_info.st_mode):
+                        raise OSError("statusline tap path is not a directory")
+                    tap_indexes[home_key] = tap_claim_index(home, strict=True)
+            except OSError:
+                tap_indexes[home_key] = None
+        if tap_indexes[home_key] is None:
+            found.add("statusline-tap-index-incomplete")
+            if argv_sids:
+                seen["claim"] = (None, frozenset(argv_sids))
+            return seen
+        taps = tap_sids_by_pid(home, claim_pid, start, index=tap_indexes[home_key])
+        claims = {native_sid} if native_sid else set()
+        claims.update(taps)
+        seen["holders"].update(claims)
+        seen["own_claims"] = claims
+        seen["native_sid"] = native_sid or None
+        if argv_sids or claims:
+            seen["claim"] = (native_sid or None, frozenset(argv_sids | claims))
+        if not claims:
+            if not argv_sids and invocation_kind(argv) == "command":
+                return seen
+            found.add("session-identity-unresolved")
+        # Native, exact tap, and argv aliases may all describe one process's
+        # session history. Every exact claim is a holder; multiplicity is safe.
+        return seen
+
+    def commit(pid, seen, *, repeats_child=False):
+        if seen["candidate"] is not None:
+            candidates[pid] = seen["candidate"]
+        holders.update(seen["holders"])
+        if repeats_child:
+            # The confirmed child already names these argv ids itself.
+            reasons.update(seen["reasons"] - {"session-identity-unresolved"})
+            return
+        reasons.update(seen["reasons"])
+        if seen["claim"] is not None:
+            process_claims.append(seen["claim"])
+
+    def claims_nothing_itself(seen):
+        return (seen["candidate"] is not None and not seen["own_claims"]
+                and seen["reasons"] <= {"session-identity-unresolved",
+                                        "conflicting-session-arguments"})
+
+    confirmed = {}
+    wrappers = []
+    deferred = {}
+    spare_rechecks = []
+    supervisor_rechecks = []
     for pid in pids:
         if time.monotonic() - started > budget_seconds:
             reasons.add("census-budget-exhausted")
@@ -635,80 +952,115 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
             # A same-uid process with an unreadable executable is resolved by
             # its argv. Ordinary non-Claude helpers are outside this census.
             continue
-        try:
-            namespace = os.readlink(proc / "ns" / "pid")
-            environ = (proc / "environ").read_bytes().split(b"\0")
-        except OSError:
-            reasons.add("process-context-unreadable")
+        seen = observe(pid, proc, start, argv)
+        role = None if native_exe else _session_shell_role(argv)
+        if role is not None:
+            # Judged after every child is seen: a child may sort before or after.
+            wrappers.append((role, pid, proc, start, argv, seen))
             continue
-        claim_pid = pid
-        if namespace != host_namespace:
-            claim_pid = _namespace_pid(proc, pid)
-            if claim_pid is None:
-                reasons.add("pid-namespace-mismatch")
-                continue
-        env = {}
-        for item in environ:
-            if b"=" in item:
-                key, value = item.split(b"=", 1)
-                if key in {b"CLAUDE_CONFIG_DIR", b"HOME"}:
-                    env[key.decode()] = value.decode("utf-8", "replace")
-        home_value = env.get("CLAUDE_CONFIG_DIR") or str(Path(env.get("HOME", "")).expanduser() / ".claude")
-        if not home_value or not Path(home_value).is_absolute():
-            reasons.add("config-home-unresolved")
+        background = _background_role(argv) if native_exe else None
+        if background is not None and not seen["native_sid"]:
+            # Judged after every process is seen, like the session-shell wrapper.
+            deferred[pid] = (background, proc, start, argv, seen)
             continue
-        home = Path(home_value)
-        if home_value not in remote_homes:
-            # One mount table per census: every process naming this home has
-            # the same answer, so read and match the table once per home.
-            remote_homes[home_value] = _remote_mount(home, mounts_path)
-        if (not _owner_directory(home) or not _owner_directory(home / "sessions")
-                or remote_homes[home_value]):
-            reasons.add("remote-config-home")
+        commit(pid, seen)
+        if native_exe and seen["native_sid"]:
+            confirmed[pid] = (seen["namespace"], start, argv)
+
+    def quiet(seen):
+        """No claim, argv id, or reason other than the missing session identity."""
+        return (claims_nothing_itself(seen) and not seen["holders"]
+                and seen["reasons"] <= {"session-identity-unresolved"}
+                and seen["namespace"] == host_namespace)
+
+    supervisors = {}
+    for pid, (background, proc, start, argv, seen) in deferred.items():
+        if background != "supervisor":
             continue
-        candidates[pid] = (start, argv, home)
-        argv_sids = _argument_sessions(argv)
-        holders.update(argv_sids)
-        if len(argv_sids) > 1:
-            reasons.add("conflicting-session-arguments")
-        native_sid, valid = _native_session_claim(Path(home_value), claim_pid, start)
-        if not valid:
-            reasons.add("native-session-claim-unusable")
-            if argv_sids:
-                process_claims.append((None, frozenset(argv_sids)))
+        home = seen["candidate"][2] if seen["candidate"] is not None else None
+        carried = _supervisor_sessions(home, pid, start) if quiet(seen) else None
+        if carried is not None:
+            supervisors[pid] = (start, home)
+            seen["holders"].update(carried)
+            seen["claim"] = (None, frozenset(carried)) if carried else None
+            seen["reasons"].discard("session-identity-unresolved")
+            supervisor_rechecks.append(lambda home=home, pid=pid, start=start, carried=carried:
+                                       _supervisor_sessions(home, pid, start) == carried)
+        commit(pid, seen)
+
+    def pty_tail(argv):
+        tail = argv[argv.index("--", 2) + 1:]
+        return tail if tail and _native_claude_executable(tail[0]) else None
+
+    waiting = {}
+    for pid, (background, proc, start, argv, seen) in deferred.items():
+        if background != "spare":
             continue
-        home_key = str(home)
-        if home_key not in tap_indexes:
-            try:
-                statusline_dir = home / ".statusline"
-                try:
-                    statusline_info = statusline_dir.lstat()
-                except FileNotFoundError:
-                    tap_indexes[home_key] = {}
-                else:
-                    if not stat.S_ISDIR(statusline_info.st_mode):
-                        raise OSError("statusline tap path is not a directory")
-                    tap_indexes[home_key] = tap_claim_index(home, strict=True)
-            except OSError:
-                tap_indexes[home_key] = None
-        if tap_indexes[home_key] is None:
-            reasons.add("statusline-tap-index-incomplete")
-            if argv_sids:
-                process_claims.append((None, frozenset(argv_sids)))
-            continue
-        taps = tap_sids_by_pid(home, claim_pid, start, index=tap_indexes[home_key])
-        claims = {native_sid} if native_sid else set()
-        claims.update(taps)
-        holders.update(claims)
-        if argv_sids or claims:
-            process_claims.append((native_sid or None, frozenset(argv_sids | claims)))
-        if not claims:
-            if not argv_sids and invocation_kind(argv) == "command":
-                continue
-            reasons.add("session-identity-unresolved")
-            continue
-        # Native, exact tap, and argv aliases may all describe one process's
-        # session history. Every exact claim is a holder; multiplicity is safe.
+        claim = argv[2]
+        parent = _process_parent(proc)
+        host = deferred.get(parent[0]) if parent is not None and parent[1] == start else None
+        verified = False
+        if (quiet(seen) and os.path.isabs(claim) and claim.endswith(".claim.sock")
+                and os.path.basename(os.path.dirname(claim)) == "spare"
+                and host is not None and host[0] == "pty-host"
+                and host[4]["namespace"] == seen["namespace"]
+                and (pty_tail(host[3]) or [None])[1:] == ["--bg-spare", claim]):
+            grandparent = _process_parent(host[1])
+            supervisor = supervisors.get(grandparent[0]) if grandparent is not None else None
+            home = seen["candidate"][2]
+            verified = (supervisor is not None and grandparent[1] == host[2]
+                        and supervisor[1] == home
+                        and _spare_waiting(proc, home, pid, start, claim))
+            if verified:
+                waiting[pid] = (seen["namespace"], start, argv)
+                spare_rechecks.append(lambda proc=proc, home=home, pid=pid, start=start, claim=claim:
+                                      _spare_waiting(proc, home, pid, start, claim))
+        commit(pid, seen, repeats_child=verified)
+
+    def explained_pty_host(pid, proc, start, argv, seen):
+        """A direct child running this host's exact command, confirmed or waiting."""
+        own = _process_parent(proc)
+        tail = pty_tail(argv)
+        if (not claims_nothing_itself(seen) or seen["namespace"] != host_namespace
+                or own is None or own[1] != start or tail is None):
+            return False
+        for child, (namespace, child_start, child_argv) in (*confirmed.items(), *waiting.items()):
+            if (namespace == seen["namespace"] and child_argv[1:] == tail[1:]
+                    and (child_argv[0] == tail[0]
+                         or (child_argv[0] == "claude bg-spare" and tail[1:2] == ["--bg-spare"]))
+                    and _process_parent(root / child) == (pid, child_start)):
+                return True
+        return False
+
+    for pid, (background, proc, start, argv, seen) in deferred.items():
+        if background == "pty-host":
+            commit(pid, seen, repeats_child=explained_pty_host(pid, proc, start, argv, seen))
+
+    def confirmed_shell_child(pid, start, argv, seen):
+        """A direct native child with this wrapper's exact argv tail and namespace."""
+        own = _process_parent(root / pid)
+        if not claims_nothing_itself(seen) or own is None or own[1] != start:
+            return False
+        for child, (namespace, child_start, child_argv) in confirmed.items():
+            if (child_argv == argv[3:] and namespace == seen["namespace"]
+                    and _process_parent(root / child) == (pid, child_start)):
+                return True
+        return False
+
+    entries = {}
+    for role, pid, proc, start, argv, seen in wrappers:
+        if role == "entry":
+            verified = confirmed_shell_child(pid, start, argv, seen)
+            if verified:
+                entries[pid] = (argv, seen["namespace"])
+            commit(pid, seen, repeats_child=verified)
+    for role, pid, proc, start, argv, seen in wrappers:
+        if role == "host":
+            parent = _process_parent(proc)
+            entry = entries.get(parent[0]) if parent is not None and parent[1] == start else None
+            verified = (entry is not None and claims_nothing_itself(seen)
+                        and entry[0][2:] == argv[2:] and entry[1] == seen["namespace"])
+            commit(pid, seen, repeats_child=verified)
 
     if not reasons:
         try:
@@ -724,6 +1076,11 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                             and (native_exe or _claude_shaped_argv(argv))):
                         final_candidates[pid] = start
             if final_candidates != {pid: item[0] for pid, item in candidates.items()}:
+                reasons.add("process-inventory-changed")
+            elif not all(check() for check in (*spare_rechecks, *supervisor_rechecks)):
+                # A spare took a session, or a supervisor lost its lock or changed its
+                # jobs meanwhile. The jobs are read after the spares: a session handed
+                # to a spare that still looked waiting has its job by then.
                 reasons.add("process-inventory-changed")
         except OSError:
             reasons.add("closing-inventory-unavailable")

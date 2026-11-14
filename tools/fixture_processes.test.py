@@ -375,5 +375,18 @@ class ReapTest(unittest.TestCase):
             self.assertEqual(fixture_processes.reap(name), [])
 
 
+class UniqueAttemptIdTest(unittest.TestCase):
+    def test_same_name_is_stable_within_a_run_and_differs_between_runs(self):
+        first = fixture_processes.unique_attempt_id("att-watcher-owner")
+        self.assertEqual(first, fixture_processes.unique_attempt_id("att-watcher-owner"))
+        self.assertTrue(first.startswith("att-watcher-owner-"))
+        self.assertNotEqual(first, fixture_processes.unique_attempt_id("att-other"))
+        probe = ("import sys;sys.path.insert(0,sys.argv[1]);import fixture_processes;"
+                 "print(fixture_processes.unique_attempt_id('att-watcher-owner'))")
+        other = subprocess.run([sys.executable, "-c", probe, str(Path(__file__).resolve().parent)],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        self.assertNotEqual(first, other)
+
+
 if __name__ == "__main__":
     unittest.main()

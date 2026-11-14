@@ -2276,9 +2276,9 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
     def seed_turn(self, **overrides):
         return self._seed(self.SID, recipient_kind="opencode-turn", **overrides)
 
-    def _compute_notice(self, run_id, host, code=0, session_id=None):
+    def _compute_notice(self, run_id, host, code=0, session_id=None, name=None):
         import session_notice
-        text = (f"run {run_id} on {host} ended with exit {code}"
+        text = ((f"{name}: " if name else "") + f"run {run_id} on {host} ended with exit {code}"
                 f"; read it with: compute-hosts tail {run_id}")
         row = session_notice.notify(
             "opencode", session_id or self.SID, key=f"compute-run:{run_id}", subject="compute run",
@@ -2294,13 +2294,42 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         forward = SWEEP.delivery_context([(self.root, records)])
         reverse = SWEEP.delivery_context([(self.root, list(reversed(records)))])
         self.assertEqual(forward, reverse)
-        self.assertIn("compute run summary: 3 runs on gpu-a label=resnet-e4-w4", forward)
-        self.assertIn("exit 0:3", forward)
-        self.assertIn("compute-hosts tail gpu-a-20261024-120003-resnet-e4-w4", forward)
+        # The failure is shown first and on its own; the five normal ends are one routine line.
+        lines = forward.splitlines()
+        self.assertEqual(lines[1], "Needs attention (1), shown first:")
+        self.assertIn("ended with exit 2", lines[2])
+        self.assertIn("- Routine, nothing to do (5 runs): 5 ended normally -- "
+                      "gpu-a-20261024-120001-resnet-e4-w4, gpu-a-20261024-120002-resnet-e4-w4, "
+                      "gpu-a-20261024-120003-resnet-e4-w4 and 2 more", forward)
         self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
-        self.assertIn("exit 2", forward)
-        self.assertIn("resnet-e4-w5", forward)
-        self.assertEqual(forward.count("run gpu-a-20261024-120004-resnet-e4-w5"), 1)
+        self.assertEqual(forward.count("run gpu-a-20261024-120004-resnet-e4-w5"), 0)
+        self.assertTrue(all(record["delivery_id"] in forward for record in records))
+
+    def test_named_compute_run_notices_bundle_by_name_and_the_summary_keeps_the_name(self):
+        # `compute-hosts` leads an ended notice with the experiment catalog name; the sweep recognizes that
+        # optional prefix, folds three exit-0 notices of one name and label, and says the name in the summary.
+        named = [self._compute_notice(f"gpu-a-20261024-12000{i}-sweep", "gpu-a", name="잔향 줄임") for i in (1, 2, 3)]
+        other = [self._compute_notice(f"gpu-a-20261024-12001{i}-sweep", "gpu-a", name="잡음 줄임") for i in (1, 2)]
+        plain = [self._compute_notice(f"gpu-a-20261024-12002{i}-sweep", "gpu-a") for i in (1, 2, 3)]
+        records = named + other + plain
+        forward = SWEEP.delivery_context([(self.root, records)])
+        reverse = SWEEP.delivery_context([(self.root, list(reversed(records)))])
+        self.assertEqual(forward, reverse)
+        # One routine line counts every run and names the catalog names first.
+        self.assertIn("- Routine, nothing to do (8 runs): 8 ended normally -- "
+                      "잔향 줄임, 잡음 줄임, gpu-a-20261024-120021-sweep and 2 more", forward)
+        self.assertNotIn("Needs attention", forward)
+        self.assertEqual(forward.count("run gpu-a-20261024-120011-sweep"), 0)
+        self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
+
+    def test_the_notice_pattern_takes_an_optional_name_and_nothing_else_in_front(self):
+        tail = "run gpu-a-20261024-120001-x on gpu-a ended with exit 0; read it with: compute-hosts tail gpu-a-20261024-120001-x"
+        for text, name in ((tail, None), ("잔향 줄임: " + tail, "잔향 줄임"), ("A — B: " + tail, "A — B")):
+            match = SWEEP._COMPUTE_RUN_NOTICE_RE.fullmatch(text)
+            self.assertIsNotNone(match, text)
+            self.assertEqual(match.group("name"), name)
+        self.assertIsNone(SWEEP._COMPUTE_RUN_NOTICE_RE.fullmatch("line one\n잔향: " + tail))   # one line only
+        self.assertIsNone(SWEEP._COMPUTE_RUN_NOTICE_RE.fullmatch("잔향 줄임 " + tail))          # the name needs its colon
 
     def test_idle_opencode_finds_and_acks_notice_under_lineage_predecessor(self):
         predecessor = "ses-oc-before-clear"

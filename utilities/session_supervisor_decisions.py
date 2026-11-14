@@ -15,12 +15,15 @@ Each supervisor passes its own `emit` so a caller that replaces the module's
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 import time
 from typing import Any, Callable
 
 import dispatch_budget_record as budget_record
+import dispatch_completion_join as completion_join
+import dispatch_resource_wait as resource_wait
 import dispatch_stage_advance as stage_advance
 import owner_route_binding
 from dispatch_continuation_budget import AdmitVerdict, ContinuationLedger
@@ -28,6 +31,8 @@ from dispatch_continuation_budget import AdmitVerdict, ContinuationLedger
 # one decision; it lives beside the observer both of them sample.
 from foreground_activity import OWNER_TURN_IDLE_SECONDS  # noqa: F401
 from foreground_activity import ActivityWindow as OwnerTurnActivity  # noqa: F401
+
+from dispatch_supervision import StopWaiting
 
 # Registered supervisors share the bounded, no-progress transient retry chain
 # used by the interactive Codex capacity continuation.
@@ -71,6 +76,44 @@ def transient_retry_delay(error_info: object, failures: int, *, registered: bool
     else:
         return None
     return TRANSIENT_RETRY_DELAYS[failures] if failures < len(TRANSIENT_RETRY_DELAYS) else None
+
+
+EDGE_BLOCK_CONTINUE_PROMPT = (
+    "The previous turn stopped on a transient service block (an HTTP 403 edge page, not an "
+    "account or key rejection). Continue the same work from where it stopped; preserve active "
+    "children.")
+
+
+def edge_block_retry_delay(terminal: object, failures: int) -> int | None:
+    """The next bounded retry delay for a turn the edge network blocked, or None.
+
+    The classifier names the block page (`EDGE_BLOCK_REASON`); every other
+    terminal keeps its existing handling. Same schedule as the structured
+    overload retry above."""
+    from dispatch_supervisor_terminal import EDGE_BLOCK_REASON
+    if (getattr(terminal, "reconcile_reason", None) != EDGE_BLOCK_REASON
+            or not isinstance(failures, int) or isinstance(failures, bool) or failures < 0):
+        return None
+    return TRANSIENT_RETRY_DELAYS[failures] if failures < len(TRANSIENT_RETRY_DELAYS) else None
+
+
+def wait_transient_retry(delay: float, *, control, emit: Callable[[dict], None], common: dict,
+                         clock: Callable[[], float] = time.monotonic,
+                         sleep: Callable[[float], None] = time.sleep) -> str:
+    """Wait out one retry delay; a pending owner correction ends it early.
+
+    Returns "owner-input" or "deadline"."""
+    deadline = clock() + delay
+    emit({"type": "dispatch.supervisor.transient-wait.started", **common,
+          "deadline_monotonic": deadline})
+    outcome = "deadline"
+    while clock() < deadline:
+        if control is not None and control.pending():
+            outcome = "owner-input"
+            break
+        sleep(min(0.25, max(0.0, deadline - clock())))
+    emit({"type": "dispatch.supervisor.transient-wait.ended", **common, "outcome": outcome})
+    return outcome
 
 
 class SupervisorError(RuntimeError):
@@ -376,3 +419,142 @@ def attempt_stage_advance(
             except (OSError, ValueError):
                 advanced_record = None
     return advanced_record
+
+
+# A supervisor parked on model children looks at the resources its owner holds this
+# often. It is the existing join split into shorter timeouts, not a timer or a poller.
+RESOURCE_ATTENTION_CHECK_SECONDS = 30.0
+
+
+class ResourceAttentionReady(StopWaiting):
+    """A held resource has a receipt for this owner while its model children are still parked."""
+
+    def __init__(self, prompt: str):
+        super().__init__("resource-attention-ready")
+        self.prompt = prompt
+
+
+PARKED_CORRECTION_PROMPT = (
+    "Continue the same work using the pending user correction; preserve active children. "
+    "Your registered children are still running and were not delivered: after applying the "
+    "correction, end the turn with `runtime_wait: registered-children` to keep waiting for them.")
+
+
+class CorrectionReady(ResourceAttentionReady):
+    """A user correction waits for this owner while its model children are still parked.
+
+    Caught where a resource receipt is: the children stay undelivered and are parked
+    again after the owner's turn, and the loop's own `control.prepare` attaches the
+    correction text. No resource outbox exists, so no continuation is spent on it."""
+
+    def __init__(self):
+        super().__init__(PARKED_CORRECTION_PROMPT)
+
+
+def join_with_resource_attention(
+    args, state_path, control, delivered: set[str],
+    join: Callable[[Any, set[str]], dict], *,
+    check_seconds: float = RESOURCE_ATTENTION_CHECK_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[set[str]], dict]:
+    """Wrap `join(args, attempts)` so a correction or a resource's attention is not held
+    behind model children.
+
+    The same total wait (`args.join_timeout`) runs in `check_seconds` pieces. Between
+    pieces a pending user correction (`control.pending()`) raises `CorrectionReady`, and an
+    owner holding resources gets one look at them (`dispatch_resource_wait.observe_once`);
+    a receipt raises `ResourceAttentionReady`. Either way the model children are not
+    delivered and keep running, so the next loop parks them again.
+
+    Holding nothing and not having read it yet differ: a holder that could not be read
+    (`HolderUnobserved`) is read again at each checkpoint; once it reads as holding
+    nothing, the checkpoints only look for a correction.
+    """
+    def holds_resources() -> bool | None:
+        try:
+            return resource_wait.context(args, control) is not None
+        except resource_wait.HolderUnobserved:
+            return None  # could not look yet: never read as "holds nothing"
+        except Exception:  # the old behavior: no look at all, never a new failure here
+            return False
+
+    def correction_pending() -> bool:
+        try:
+            return bool(control is not None and control.pending())
+        except Exception:  # an unreadable channel is looked at again at the next checkpoint
+            return False
+
+    def run(attempts: set[str]) -> dict:
+        total = float(args.join_timeout)
+        if total <= 0:
+            return join(args, attempts)
+        holds = holds_resources()
+        deadline = clock() + total
+        while True:
+            step = max(min(check_seconds, deadline - clock()), 1.0)
+            piece = copy.copy(args)
+            piece.join_timeout = step
+            receipt = join(piece, attempts)
+            if receipt.get("state") != "timeout":
+                return receipt
+            if correction_pending():
+                raise CorrectionReady()
+            if holds is None:
+                holds = holds_resources()
+            if not holds:
+                if clock() >= deadline:
+                    return receipt
+                continue
+            state = completion_join.read_supervisor_phase_state(state_path, args.parent_attempt_id)
+            resource = dict(state.resource) if state and state.resource else {
+                "session_id": control.thread_id, "delivered": [], "outbox": None}
+            if resource["session_id"] == control.thread_id and not resource["outbox"]:
+                try:
+                    prompt = resource_wait.observe_once(args, state_path, control, delivered, resource)
+                except (completion_join.JoinContractError, OSError, ValueError):
+                    prompt = None  # looked at again at the next checkpoint
+                after = completion_join.read_supervisor_phase_state(state_path, args.parent_attempt_id)
+                if isinstance(prompt, str) and after is not None and (after.resource or {}).get("outbox"):
+                    raise ResourceAttentionReady(prompt)
+            if clock() >= deadline:
+                return receipt
+    return run
+
+
+def recovered_resource_wait(args, state_path, control, delivered: set[str], emit,
+                            join: Callable[[Any, set[str]], dict]) -> str | None:
+    """A restarted supervisor's first wait over the resource state it recovered.
+
+    It waits where the loop would: on the held resources alone when no model child is
+    left to join, else on those children with the resources looked at between join
+    pieces (`join_with_resource_attention`, the loop's own park), so a child that already
+    finished is not held behind a long resource run. Returns the resource receipt's
+    prompt, or None (nothing outstanding, or the children are ready first); the loop
+    then continues as for any restart and delivers the children itself.
+    """
+    jobs = Path(args.jobs)
+    rows = completion_join.current_children(jobs, args.parent_attempt_id,
+                                            route_id=args.route_id, route_hash=args.route_hash)
+    undelivered = [row for row in rows if row.attempt_id not in delivered]
+    children = set(completion_join.partition_runtime_wait_children(
+        jobs, args.parent_attempt_id, undelivered, {row.attempt_id for row in undelivered}).joinable)
+    if not children:
+        return resource_wait.wait(args, state_path, control, delivered, emit)
+
+    def park():
+        from dispatch_supervision import wait_for_batch
+        from dispatch_replacement import advance_batch, adopt_receipt
+        try:
+            receipt = wait_for_batch(
+                join=join_with_resource_attention(args, state_path, control, delivered, join),
+                attempts=set(children), jobs=jobs, parent_attempt_id=args.parent_attempt_id,
+                emit=emit,
+                replacement_checkpoint=lambda selected: advance_batch(jobs, selected)
+                    if not control.pending() else (selected, [], []))
+        except ResourceAttentionReady as ready:
+            return ready.prompt
+        _joined, replaced = adopt_receipt(jobs, set(children), receipt)
+        delivered.update(replaced)
+        return None
+
+    return resource_wait.wait(args, state_path, control, delivered, emit, park=park)

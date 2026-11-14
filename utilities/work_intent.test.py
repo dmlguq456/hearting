@@ -38,6 +38,22 @@ class DraftTest(unittest.TestCase):
         self.assertEqual((english["intent"], english["scope"], english["not_doing"]),
                          ("Keep one row.", "utilities/", ["new flags"]))
 
+    def test_answer_first_leg_keeps_the_original_intent_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            intent = root / "shards/frame/intent.md"
+            intent.parent.mkdir(parents=True)
+            intent.write_text("The user's answers take precedence.\nOnly train E on mpwav 0.\n")
+            for request in (HEADER, "Fix the question guidance. Keep the existing lifecycle."):
+                route = {"route_id": "rt-intent-fixture", "artifact_root": str(root),
+                         "work_request": {"text": request}}
+                task = work_start._leg_task_text(route, root, root, [], {},
+                                                {"given": [], "execution_scope": "complete"}, actor_kind="user")
+                self.assertTrue(task.startswith("## Agreed intent"))
+                self.assertLess(task.index("Only train E"), task.index("## Original work request"))
+                self.assertEqual(WI.draft(task), WI.draft(request))
+                self.assertEqual(WI.parse_header(task), WI.parse_header(request))
+
     def test_without_header_the_first_sentence_is_a_marked_draft(self):
         found = WI.draft("Fix: the Fleet row repeats. Keep one row per session.\n")
         self.assertEqual(found, {"intent": "Fix: the Fleet row repeats.", "basis": "first-sentence"})
@@ -779,6 +795,19 @@ class CompletionCostLineTest(unittest.TestCase):
         self.assertTrue(lines[2].startswith("Result: "))
         self.assertEqual(lines[3], "Cost: unknown elapsed · session tokens unknown")
         self.assertNotIn("Cost:", WI.completion_summary(self.route, self.report))   # no observation, no line
+
+    def test_an_unpublished_shared_spec_is_one_line_after_the_result(self):
+        pending = {"status": "pending", "reason": "shared-base-invalid",
+                   "detail": "shared-base-invalid: incomplete seed"}
+        lines = WI.completion_summary(self.route, self.report, publication=pending).splitlines()
+        result = next(i for i, line in enumerate(lines) if line.startswith("Result: "))
+        self.assertEqual(lines[result + 1], "Shared spec not published: shared-base-invalid: incomplete seed"
+                         " · the cycle keeps its spec; the next start of this route retries")
+        for quiet in (None, {"status": "admitted"}, {"status": "not-applicable"}):
+            self.assertNotIn("Shared spec", WI.completion_summary(self.route, self.report, publication=quiet))
+        declared_language(self, "ko")
+        self.assertIn("공유 명세 게시 안 됨: shared-base-invalid: incomplete seed",
+                      WI.completion_summary(self.route, self.report, publication=pending))
 
 
 def WI_epoch(stamp):

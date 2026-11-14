@@ -3627,6 +3627,9 @@ def cmd_watch(args):
                 existing_arm = _read_json(existing_paths.arm) or existing_arm
             _write_watch_claim(logical_fd, existing_id)
             _write_watch_claim(claim_fd, existing_id)
+            _mark_observed(agent["harness"], agent["session_id"], agent.get("name") or target,
+                           from_identity=(steward_sid, steward_harness), pane=agent.get("pane"),
+                           target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat)
             print(_already_armed_line(existing_id, existing_arm, existing_paths))
             return 0
 
@@ -4673,6 +4676,7 @@ def cmd_rearm(args):
         print(f"watch_id={watch_id} state=already-done receipt={paths.receipt}")
         return 0
     if _watcher_present(arm):
+        _restore_watch_role(watch_id, arm)
         print(_already_armed_line(watch_id, arm, paths).replace("state=already-armed", "state=alive"))
         return 0
     if arm is None:
@@ -4690,11 +4694,10 @@ def cmd_rearm(args):
                 and observation.get("reason") == "steward-exited"):
             print(f"watch_id={watch_id} state=pending reason=steward-exited receipt={paths.receipt}")
             return 0
-        print(f"watch_id={watch_id} state=rearmed receipt={paths.receipt}")
-        print(steward_fields(
-            arm.get("wake"), watch_id, agent_home=Path(__file__).resolve().parents[1],
-            arms_hook=False, timeout_ms=arm.get("timeout"),
-        ))
+        # Restore execution first; relation bookkeeping must not delay recovery.
+        arm = _read_json(paths.arm) or arm
+        _restore_watch_role(watch_id, arm)
+        print(_already_armed_line(watch_id, arm, paths).replace("state=already-armed", "state=rearmed"))
         return 0
     print(f"watch_id={watch_id} state=pending reason=observer-restart-unavailable receipt={paths.receipt}")
     return 0
@@ -6677,17 +6680,26 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # runner-local selection cursor so an open first group cannot starve later
     # recipients. It carries no delivery or authorization evidence; candidates
     # and every record/target are re-read through the normal path each pass.
-    # d6: terminal (failure/completion) notices go first, both in group order
-    # and inside the batch; progress notices share the batch or wait one pass.
-    # A question answer is the person's own reply: it ranks with terminal.
+    # d6: attention (a failure, a new attention), then terminal (completion)
+    # notices go first, both in group order and inside the batch; progress and
+    # routine notices share the batch or wait one pass. A question answer is the
+    # person's own reply: it ranks with attention.
+    ranks = {}
+
     def _terminal_rank(item):
-        try:
-            receipt = item[4].get("receipt")
-            if isinstance(receipt, dict) and "answer_binding" in receipt:
-                return 0
-            return 0 if session_notice.classify(item[4].get("receipt")) == session_notice.TERMINAL else 1
-        except (TypeError, ValueError, AttributeError):
-            return 1
+        key = id(item[4])
+        if key not in ranks:
+            try:
+                receipt = item[4].get("receipt")
+                if isinstance(receipt, dict) and "answer_binding" in receipt:
+                    ranks[key] = 0
+                else:
+                    kind = session_notice.classify(receipt)
+                    ranks[key] = (0 if kind == session_notice.ATTENTION
+                                  else 1 if kind == session_notice.TERMINAL else 2)
+            except (TypeError, ValueError, AttributeError):
+                ranks[key] = 2
+        return ranks[key]
 
     import session_resume
     candidates.sort(key=lambda item: (item[1], item[3], _terminal_rank(item),
@@ -6695,9 +6707,22 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     groups = {}
     for item in candidates:
         groups.setdefault((item[1], item[3]), []).append(item)
+    # A quiet routine notice to the supervisor of the run's owner (a short or metric-less
+    # normal end, a metric-less checkpoint) starts no turn of its own: a recipient whose
+    # every open notice is such waits, and they ride its next delivery or next input.
+    def _waits(item):
+        source = peer_obligations._notice_duty_source(item[0], root)
+        return bool(source) and session_notice.waits_for_next_delivery(
+            item[4], source[0], source[1], source[3])
+
+    for key in list(groups):
+        if all(_waits(item) for item in groups[key]):
+            del groups[key]
+    if not groups:
+        return
     group_keys = sorted(groups)
     terminal_groups = {key for key in group_keys
-                       if any(_terminal_rank(item) == 0 for item in groups[key])}
+                       if any(_terminal_rank(item) < 2 for item in groups[key])}
     state_root = str(root.resolve())
     if selection is not None:
         if (selection.get("state_root") != state_root
@@ -8753,6 +8778,29 @@ def _herdr_error_reason(payload, rc):
     return f"herdr-exit-{rc}"
 
 
+def _restore_watch_role(watch_id, arm, *, identity=None):
+    """Repair relation evidence only for the current exact watch recipient."""
+    if not isinstance(arm, dict):
+        return
+    sid, harness = identity or _current_session_identity()
+    recipient = arm.get("steward") or {}
+    if (recipient.get("harness"), recipient.get("session_id")) != (harness, sid):
+        return
+    agent = arm.get("agent") or {}
+    if not agent.get("harness") or not (agent.get("session_id") or agent.get("name")):
+        return
+    _mark_observed(agent["harness"], agent.get("session_id"), agent.get("name"),
+                   from_identity=(sid, harness), pane=agent.get("pane"),
+                   target_cwd=agent.get("cwd"), steward_seat=arm.get("steward_seat"))
+
+
+def _restore_own_watch_roles(harness, sid):
+    root = _watch_root()
+    for watch_id, arm in _watch_entries(root):
+        if not _watch_paths(watch_id, root).receipt.exists():
+            _restore_watch_role(watch_id, arm, identity=(sid, harness))
+
+
 def cmd_steward(args):
     """F-100c-2 — explicit steward mode switch. The flag is a role, not a side effect of
     sending: only `steward on` (source=explicit), a `wait`/`watch` that observed a real
@@ -8770,8 +8818,20 @@ def cmd_steward(args):
             print(peer_message.format_steward_limited(result))
             return 1
         ok = result["written"]
+        if ok:
+            _restore_own_watch_roles(harness, sid)
         _ensure_steward_runner(result)
         print(f"steward={'on' if ok else 'unchanged'} harness={harness} session_id={sid}")
+        if ok:
+            try:
+                fleet = peer_message._fleet_steward()
+                rows = fleet._registry_sessions()
+                repository = fleet.repository_for_session(harness, sid, sessions=rows)
+                if repository:
+                    print(peer_message.format_steward_census(fleet.repo_supervision(
+                        repository_key=repository, sessions=rows, agents=())))
+            except Exception:
+                print("steward-count=unknown reason=census-unavailable policy=new-grants-limited")
         return 0 if ok else 1
     if args.state == "check":
         try:

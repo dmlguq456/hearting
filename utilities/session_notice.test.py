@@ -131,6 +131,94 @@ class SessionNoticeTest(unittest.TestCase):
         self.assertEqual(len(duties), 1)
 
 
+    def test_only_an_attention_or_a_failed_or_unknown_final_wakes_a_resting_recipient(self):
+        def record(key, subject="experiment attention (1/1)"):
+            return {"receipt": {"schema_version": 1, "kind": "notice", "subject": subject,
+                                "text": "run=r; loss NaN", "required_action": "read-notice", "key": key}}
+        attention = record("experiment:run-1:attention:ab:0123:1:claude:sid-1")
+        checkpoint = record("experiment:run-1:checkpoint:ab:1:claude:sid-1", "experiment checkpoint (1/1)")
+        final = record("experiment:run-1:final:ab:1:claude:sid-1", "experiment final (1/1)")
+        self.assertTrue(N.wakes_resting_recipient(attention))
+        # The same attention re-posted at a periodic checkpoint waits for the next input (RV-PR1602 1).
+        self.assertFalse(N.wakes_resting_recipient(record("experiment:run-1:attention-checkpoint:ab:7:0123:1:claude:sid-1")))
+        self.assertFalse(N.wakes_resting_recipient(checkpoint))
+        for status, wakes in (("succeeded", False), ("failed", True), ("cancelled", True), (None, True)):
+            with self.subTest(final=status), mock.patch.object(
+                    N, "_run_state", return_value=None if status is None else {"status": status}):
+                self.assertIs(N.wakes_resting_recipient(final), wakes)
+        # A compute run's end follows the same rule: a nonzero exit wakes, exit 0 does not.
+        ended = "run h-20261114-101010-x on h ended with exit {}; read it with: compute-hosts tail h-20261114-101010-x"
+        for code, wakes in ((6, True), (0, False)):
+            with self.subTest(compute_exit=code):
+                compute = record("compute-run:h-20261114-101010-x:claude:sid-1", "compute run")
+                compute["receipt"]["text"] = ended.format(code)
+                self.assertIs(N.wakes_resting_recipient(compute), wakes)
+        quiet = record("experiment:run-1:final:ab:1:claude:sid-1", "experiment final, quiet (1/1)")
+        self.assertFalse(N.wakes_resting_recipient(quiet))   # its producer saw it succeed
+        self.assertTrue(N.is_quiet(quiet["receipt"]))
+        self.assertFalse(N.is_quiet(final["receipt"]))
+        self.assertFalse(N.wakes_resting_recipient(record("steward-check:x")))
+        self.assertFalse(N.wakes_resting_recipient({"receipt": {"kind": "notice"}}))
+        self.assertFalse(N.wakes_resting_recipient({}))
+        # Waking is the attention class itself: one classification for the whole notice path.
+        self.assertEqual(N.classify(attention["receipt"]), N.ATTENTION)
+        self.assertEqual(N.classify(checkpoint["receipt"]), N.ROUTINE)
+        self.assertEqual(N.classify(final["receipt"]), N.ATTENTION)   # outcome not known yet
+        for status, kind in (("succeeded", N.ROUTINE), ("failed", N.ATTENTION)):
+            with self.subTest(classify=status), mock.patch.object(
+                    N, "_run_state", return_value={"status": status}):
+                self.assertEqual(N.classify(final["receipt"]), kind)
+
+    def test_a_compute_runs_end_is_read_only_from_its_own_end_phrase(self):
+        # RV-PR1618 P1: the catalog name leads the notice and is free text; words in it that look
+        # like a normal end must not hide the run's real end, and an end that cannot be read, or a
+        # signal end, is never a normal one.
+        run = "h-20261114-101010-x"
+        tail = f"; read it with: compute-hosts tail {run}"
+
+        def receipt(text, key=f"compute-run:{run}:claude:sid-1", subject="compute run"):
+            return {"schema_version": 1, "kind": "notice", "subject": subject, "text": text,
+                    "required_action": "report-to-user", "key": key}
+        ended = f"run {run} on h ended with exit {{}}"
+        cases = [
+            ("baseline ended with exit 0: " + ended.format(6) + tail, 6),
+            ("status=succeeded; exit=0: " + ended.format(6) + tail, 6),
+            ("exit=0: " + ended.format(6) + " (stopped)" + tail, 6),
+            # A name that repeats the whole phrase of this run: two codes, so none is read.
+            (f"x: run {run} on h ended with exit 0: " + ended.format(6) + tail, None),
+            (ended.format(-9) + tail, -9),           # killed by a signal
+            (ended.format(137) + tail, 137),
+            (f"run {run} on h ended with exit None" + tail, None),
+            (f"run {run} on h finished" + tail, None),
+            # Another run's phrase is not this run's end.
+            ("run h-20261114-999999-y on h ended with exit 0" + tail, None),
+            # RV-PR1618-R2: one rule — every token after the phrase is collected, and only whole
+            # integers of one value are a code. A name's `exit 0` cannot cover a real `None`.
+            (f"baseline: run {run} on h ended with exit 0: " + ended.format(None) + tail, None),
+            (ended.format("0unknown") + tail, None),
+            (f"baseline: run {run} on h ended with exit 0: " + ended.format(1) + tail, None),
+            (ended.format("") , None),
+            (ended.format("0.5") + tail, None),
+        ]
+        for text, code in cases:
+            with self.subTest(text=text):
+                self.assertEqual(N.classify(receipt(text)), N.ATTENTION)
+                self.assertTrue(N.wakes_resting_recipient({"receipt": receipt(text)}))
+                # A quiet subject cannot make a failed end quiet either.
+                self.assertFalse(N.is_quiet(receipt(text, subject="compute run, quiet")))
+                self.assertEqual(N.compute_run_exit(receipt(text)), code)
+        for text in (ended.format(0) + tail, "baseline ended with exit 6: " + ended.format(0) + tail,
+                     f"x: run {run} on h ended with exit 0: " + ended.format(0) + tail,
+                     ended.format(0), ended.format("0;") + tail, ended.format("0, quiet") + tail,
+                     ended.format("0:") + tail):
+            with self.subTest(normal=text):
+                for key in (f"compute-run:{run}:claude:sid-1", f"compute-run:{run}"):
+                    self.assertEqual(N.classify(receipt(text, key)), N.ROUTINE)
+                    self.assertFalse(N.wakes_resting_recipient({"receipt": receipt(text, key)}))
+                    self.assertEqual(N.compute_run_exit(receipt(text, key)), 0)
+        self.assertIsNone(N.compute_run_exit(receipt(ended.format(0) + tail, key="compute-run:")))
+
+
 class MessageNoticeBoundaryTests(unittest.TestCase):
     def test_context_sweep_cannot_claim_or_ack_the_peer_couriers_message_answer(self):
         from fixtures.message_questions import MessageQuestionFixture

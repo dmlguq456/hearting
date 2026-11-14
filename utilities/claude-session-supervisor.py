@@ -668,6 +668,23 @@ def _admit_continuation(ledger, state_root, **kwargs):
     """Shared continuation admission (`session_supervisor_decisions`), with this module's `emit`."""
     return DECISIONS.admit_continuation(ledger, state_root, emit=lambda value: emit(value), **kwargs)
 
+
+def _resource_turn(args, state_path, ledger, state_root, prompt, continuations):
+    """A resource receipt's turn: admitted against the continuation budget once, like any other."""
+    state = read_supervisor_phase_state(state_path, args.parent_attempt_id)
+    if state is not None and (state.resource or {}).get("outbox"):
+        verdict, notice = _admit_continuation(
+            ledger, state_root, parent_attempt_id=args.parent_attempt_id,
+            route_id=args.route_id, route_hash=args.route_hash,
+            ordinal=continuations, purpose="ordinary", stalled=False,
+            warning_threshold=args.continuation_warning_threshold)
+        if not verdict.admitted:
+            raise SupervisorError("continuation-limit-exceeded")
+        continuations += 1
+        prompt = _apply_notice(prompt, notice)
+    return prompt, continuations
+
+
 def _seal_terminal_handoff_or_raise(ledger, state_root, **kwargs):
     """Shared reserved terminal hand-off (`session_supervisor_decisions`)."""
     return DECISIONS.seal_terminal_handoff_or_raise(
@@ -1386,6 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
     active_outbox: SupervisorOutbox | None = None
     delivery_timing = delivery_timing_fields()
     same_thread_resume_count = 0
+    edge_block_failures = 0
     launch_remediated: set[tuple[str, ...]] = set()
     # SD-116 (c): a one-element list, not a bool, so `_seal_terminal_handoff_or_raise`
     # can flip it for the whole loop -- the reserve is spendable exactly once
@@ -1450,7 +1468,10 @@ def main(argv: list[str] | None = None) -> int:
                     (active_outbox.receipt or {})["delivery_timing"]
                 )
         if recovered is not None and recovered.resource is not None and active_outbox is None:
-            resource_prompt = RESOURCE_WAIT.wait(args, state_path, control, delivered, emit)
+            # The same combined wait the loop parks on: a finished model child is not held
+            # behind a resource that is still running.
+            resource_prompt = DECISIONS.recovered_resource_wait(
+                args, state_path, control, delivered, emit, run_join)
             if resource_prompt is not None:
                 next_prompt = resource_prompt
                 resume = True
@@ -1576,10 +1597,25 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
                 terminal = classify_runtime_result(args, result, process_rc)
+                delay = DECISIONS.edge_block_retry_delay(terminal, edge_block_failures)
+                if delay is not None:
+                    # The edge network, not the provider, refused this turn: wait on the
+                    # shared schedule and continue the same session; its result is unchanged.
+                    edge_block_failures += 1
+                    DECISIONS.wait_transient_retry(delay, control=control, emit=emit, common={
+                        "parent_attempt_id": args.parent_attempt_id, "turn_ordinal": turn_ordinal,
+                        "reason_code": "transient-edge-block", "ordinal": edge_block_failures})
+                    if turn_transport == "stream-json":
+                        stream_session = ClaudeStreamSession(args, session_id, resume=True)
+                    if active_outbox is None and not resource_receipt_id:
+                        next_prompt = DECISIONS.EDGE_BLOCK_CONTINUE_PROMPT
+                    resume = True
+                    continue
                 if not reconcile(args, terminal):
                     return 70
                 emit(result)
                 return process_rc or 3
+            edge_block_failures = 0
             DECISIONS.refresh_owner_route(args)
             rows = current_children(Path(args.jobs), args.parent_attempt_id,
                                     route_id=args.route_id, route_hash=args.route_hash)
@@ -1689,17 +1725,8 @@ def main(argv: list[str] | None = None) -> int:
             if not park_attempts and not unstarted and not partition.chain_pending:
                 resource_prompt = RESOURCE_WAIT.wait(args, state_path, control, delivered, emit)
                 if resource_prompt is not None:
-                    resource_state = read_supervisor_phase_state(state_path, args.parent_attempt_id)
-                    if resource_state is not None and (resource_state.resource or {}).get("outbox"):
-                        verdict, notice = _admit_continuation(
-                            ledger, budget_state_root, parent_attempt_id=args.parent_attempt_id,
-                            route_id=args.route_id, route_hash=args.route_hash,
-                            ordinal=continuations, purpose="ordinary", stalled=False,
-                            warning_threshold=args.continuation_warning_threshold)
-                        if not verdict.admitted:
-                            raise SupervisorError("continuation-limit-exceeded")
-                        continuations += 1
-                        resource_prompt = _apply_notice(resource_prompt, notice)
+                    resource_prompt, continuations = _resource_turn(
+                        args, state_path, ledger, budget_state_root, resource_prompt, continuations)
                     next_prompt = resource_prompt
                     resume = True
                     continue
@@ -1786,13 +1813,23 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 from dispatch_supervision import wait_for_batch
                 from dispatch_replacement import advance_batch, adopt_receipt
-                receipt = wait_for_batch(
-                    join=lambda attempts: run_join(args, attempts),
-                    attempts=set(park_attempts), jobs=Path(args.jobs),
-                    parent_attempt_id=args.parent_attempt_id, emit=emit,
-                    replacement_checkpoint=lambda selected: advance_batch(Path(args.jobs), selected)
-                        if not control.pending() else (selected, [], []),
-                )
+                try:
+                    receipt = wait_for_batch(
+                        join=DECISIONS.join_with_resource_attention(
+                            args, state_path, control, delivered, run_join),
+                        attempts=set(park_attempts), jobs=Path(args.jobs),
+                        parent_attempt_id=args.parent_attempt_id, emit=emit,
+                        replacement_checkpoint=lambda selected: advance_batch(Path(args.jobs), selected)
+                            if not control.pending() else (selected, [], []),
+                    )
+                except DECISIONS.ResourceAttentionReady as ready:
+                    # A held resource needs this owner now. The model children stay undelivered
+                    # and are parked again on the next loop; their terminal handoff claim is
+                    # the same claim then (same children), not a second one.
+                    next_prompt, continuations = _resource_turn(
+                        args, state_path, ledger, budget_state_root, ready.prompt, continuations)
+                    resume = True
+                    continue
                 park_attempts, replaced_attempts = adopt_receipt(Path(args.jobs), set(park_attempts), receipt)
                 delivered.update(replaced_attempts)
                 joined_rows = current_children(

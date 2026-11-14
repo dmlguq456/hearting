@@ -1717,7 +1717,16 @@ _QUESTION_ABOUT = {"S1-approval": "permission approval", "S1-question": "questio
 # One or two words for a selected request that is not waiting for a choice on this screen.
 _QUESTION_STATE_WORD = {"loading": "loading…", "submitted": "sent", "received": "received",
                         "applied": "answered", "cancelled": "cancelled", "expired": "expired"}
-_NATIVE_ONLY = "answer in its pane"
+
+
+def _native_only(envelope=None):
+    """Where a wait Fleet cannot answer is answered, by its reason (spec E9 rule 54): the
+    shell panel's words for another session's wait (that window, the parent, sending, closed)."""
+    from ..session_block import unanswerable_state
+    support = envelope.get("support") if hasattr(envelope, "get") else None
+    reason = ((support.get("reason") if hasattr(support, "get") else None)
+              or (envelope.get("reason") if hasattr(envelope, "get") else None))
+    return ui_text("fleet.session_block." + unanswerable_state(reason, own=False))
 
 
 def question_about(question):
@@ -1839,7 +1848,7 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             for value in (question.get("title"), question.get("now")):
                 for wrapped in _wrap(str(value or ""), width) if value else ():
                     line(wrapped, "soft")
-        items = [(_NATIVE_ONLY, "dim", None)]
+        items = [(_native_only(), "dim", None)]
         if open_item:
             items.append(open_item)
         if y < bottom:
@@ -1949,7 +1958,7 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             items.append((decision, "hearting" if decision != "defer" else "soft",
                           ("question.decision", decision)))
         if not decisions:
-            items.append((_NATIVE_ONLY, "dim", None))
+            items.append((_native_only(envelope), "dim", None))
     elif request_state == "open" and (specs or can_answer) and can_answer and not native_only:
         ready = complete and not private.get("pending")
         items.append(("submit", "hearting" if ready else "dim",
@@ -1957,7 +1966,7 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     elif request_state in _QUESTION_STATE_WORD:
         items.append((_QUESTION_STATE_WORD[request_state], "dim", None))
     else:
-        items.append((_NATIVE_ONLY, "dim", None))
+        items.append((_native_only(envelope), "dim", None))
     if private.get("pending") and items and items[0][0] != "sending…":
         items[0] = ("sending…", "dim", None)
     if open_item:

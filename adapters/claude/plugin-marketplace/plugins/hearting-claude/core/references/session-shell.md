@@ -164,17 +164,24 @@ or under the native area by choice). Spec E9 rule 49 folds and unfolds it: the
 fold button `»` (`«` for a left panel, `▾` in the bottom layout) on the panel's
 last row inside folds it into an eight-cell strip at its edge (two borders, a
 blank cell inside each and four content cells: the state glyph with the session
-number, the route count `2 RT`, the answer waits `◑ 1` and `«`; its border in
-the session's state color, only the glyph turning), and
+number, the route count `2 RT`, the experiment board's `5 LB` (`!1LB` failed or
+stuck, `?1LB` unconfirmed or unnamed, `9+LB`), the answer waits `◑ 1` and `«`;
+its border in the session's state color, only the glyph turning), and
 the native area takes the freed columns through the same PTY resize a window
 resize uses; folded under the native area it is one row (the status line and
 `▴`). A press anywhere on the strip or that row opens it. Where the open panel
 would leave the native area under 80 columns it folds by itself, and opens again
-with room; that one constant replaces the earlier minimum terminal width and
+once there are three columns more (83), so a window dragged across the line does
+not jump back and forth; that one constant replaces the earlier minimum terminal width and
 bottom fallback. The person's last choice wins at its width: folded by hand it
 stays folded however wide the window grows, opened by hand it stays open until
 the width changes. An open settings editor, a question being answered or a drag
-of the panel's edge keeps it open. The fold choice lasts while the window is up
+of the panel's edge keeps it open; when that ends, a width the person set (the
+drag, or a new width applied in the settings editor) counts as opening it by
+hand at this window width, and otherwise (a question answered, the editor
+closed) the width is judged once again. Folding by hand closes an open settings
+editor first; a press made while the panel is being drawn for another placement
+is dropped. The fold choice lasts while the window is up
 (it rides a host hand-over) and is not saved. A panel opened by hand where it
 cannot stand beside the native area (under 48 native columns or 8 rows) opens
 under it. All four edges belong
@@ -197,8 +204,16 @@ state's color, and the three glyph shapes still differ in `mono` and under
 `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
 the number; the glyph stays. Right of that head the border is the line alone:
 the gear `⚙` stands at the right end of the panel's last row inside, three cells
-right of the fold button, beside 5h/7d (which give up their reset times first),
-and that row stays however short rows run. The state shown is the host's
+right of the fold button, beside 5h/7d and the model windows (`5h … │ 7d … │
+fable 70%`, the model word in its model color), and that row stays however
+short rows run; short of cells it gives way whole value by whole value: the
+reset times, then 5h, then the model values, then 7d. Claude's statusline
+callback carries only its 5h and 7d windows: the same credential-bound account
+cache's model windows stay beside them while that cache is fresh, never an older
+reading shown as now (a callback that carries its own wins). That cache's existing
+refresh is asked for two thirds into its fresh window, and the panel's own
+projection wakes it once when due, so the value stays without Fleet; a refresh
+that keeps failing still leaves the value out once the window ends. The state shown is the host's
 own observation; hook events confirm and correct it, and input readiness and
 every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
 into its session record as it paints (`busy` while it shows progress, `waiting`
@@ -263,28 +278,34 @@ than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
 then parts it from this session's content. The rule follows this session's own
-state, from the frame's source (not a route's): while the session runs every
-cell of the rule is heavy (`━`, the dark rule) and a light passes over it, its
-middle five cells brightest (the session spinner's color) and four cells on
-each side one shade down each (thirteen cells, five shades); the light runs at
-one speed from fully outside one end to fully outside the other and back every
-3.2 seconds, so at each end the rule is briefly dark before the light comes
-back in on the same side. While an answer or a confirmation waits the whole
-rule is heavy and red and breathes, never blinking, once every 3.6 seconds on
+state, from the frame's source (not a route's), and stays the thin `─` in
+every state (no heavy cell anywhere on it; state is told by the frame's color
+and the head's state glyph). While the session runs the rule is dark and a
+light passes over it, its middle five cells brightest (the session spinner's
+color) and four cells on each side one shade down each (thirteen cells, five
+shades); the light runs at one speed from fully outside one end to fully
+outside the other and back every 2.6 seconds, turning at the far end after one
+dark beat; once it has left on the side it came in from the dark rule rests
+for one second (its turn beat included) and the light comes in again on that
+side. The light starts with the state: on the very paint that shows the
+session running it is already coming in (it never waits out a rest), and a
+wait's breath starts at its brightest. While an answer or a confirmation waits the whole
+rule is red and breathes, never blinking, once every 3.6 seconds on
 a cosine through eight shades in 24-bit color (when `COLORTERM` says the
 terminal takes it) or six in 256 colors, one shade at a time, each for an equal
 stretch, the brightest the frame's waiting red and the darkest still showing;
-the steward `⚑` keeps its own blink. Otherwise it is the plain thin rule, so a
-heavy rule means working or waiting and a thin one idle. Every value (the five
-bright cells, the four fading ones, the shades, the round trip, the breath and
-its shade count) is a constant in one place (`RULE_*` in `panel-view.cjs`). It moves on the beat the spinner already
+the steward `⚑` keeps its own blink. Otherwise it is the plain dark rule.
+Every value (the five
+bright cells, the four fading ones, the shades, the round trip, the rest, the
+breath and its shade count) is a constant in one place (`RULE_*` in `panel-view.cjs`). It moves on the beat the spinner already
 keeps: the host wakes at the next frame anything painted changes (a spinner's
-frame, the rule's next step: every frame for the light, at each shade change of
-a breath),
+frame, the rule's next step: every frame while the light is inside, then the
+end of its rest, nothing in between; at each shade change of a breath),
 repaints the whole panel only for a one-second blink, and otherwise sends only
 the changed cells (the spinner glyphs, the rule's changed cells); idle, nothing
 wakes and nothing is sent. `rule motion` off, `mono`, `NO_COLOR` and eight
-colors move nothing (running keeps the thin rule, a wait a still heavy one), and
+colors move nothing (running keeps the plain rule, a wait a still red one where
+color shows), and
 a panel short of rows that drops the rule adds nothing. The
 content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
@@ -300,11 +321,11 @@ space (beside the native area at least one empty row under the route box, above
 any question box or the messages rule); any question box; the messages section, fixed at the bottom; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
-no box, only a titled upper rule (`── messages ──`, beside the native area
-`── MESSAGES ──`) and a lower rule. Beside the native area `MEM` follows the
-messages under its own titled rule (`── MEM ──`, in place of their lower rule;
-the one closing rule ends both, and the messages' `+N` then ends their title
-rule): this repository's newest saved memory records, two at most, from the
+no box, only its label alone (`messages`, beside the native area `MESSAGES`,
+dim, with no long rule beside it; the count of messages not shown follows it,
+`MESSAGES +2`) and a lower rule. Beside the native area `MEM` follows the
+messages under its own label (`MEM`, likewise alone; the one closing rule ends
+both): this repository's newest saved memory records, two at most, from the
 journal Fleet reads (the newest `add`/`supersede` rows of its project, a
 supersede and its replacement's add counted once), each on two rows like a
 message: `◆ decision · 3m` (dim: the type as a short word, `correction` for
@@ -314,7 +335,33 @@ start of its snippet) in the body color on at most two rows ending in `…`; no
 body, and no section without a journal row. The journal is read again only
 when it changed, the two records come from that one read, and their headlines
 come with the open work's query. A backend that sends only the earlier one-row
-pieces gives that one record, without its type; the head carries no `MEM` row. They
+pieces gives that one record, without its type; the head carries no `MEM` row.
+Beside the native area the LAB section stands right under the route box (one
+parting row after the box, as before a question box): this project's experiment
+board (`utilities/experiment_board.py`), worded by `tools/fleet/session_lab.py`
+with the Fleet LAB table's own cells, so the panel and Fleet read a condition
+alike. Collapsed it is `5 LAB 20:40` (the selected group's condition count
+first, the word a dim label, the board's read time) with its most pressing
+counts at the right (`failed 1`, `stuck 1`, `unknown 1`, `unnamed 1`,
+`waiting 1`, else `running 5`), the goal, and the one condition to look at (the
+board's choice: failed, stuck, unconfirmed, then unnamed runs, not comparable
+or waiting, else the best latest value with its baseline). A press on it opens
+the condition table in place (40 cells: name, progress, latest, difference; 32:
+name, progress, state; under each row the values that row does not show and
+why it is not plain) and a press closes it. A value is whole or its column (its
+piece) leaves; only a name ends in `…`, read whole under it. No experiments and
+no problem: no section and no strip token; a broken catalog or a run with no
+name is an unconfirmed warning, never "no experiments". An experiment's failure
+never colors the frame, the glyph or the strip's border. Its catalog and its
+run-record folders join the panel's file watch last (no poller): a folder is
+watched whole (a path ending in the separator), so any record written, replaced,
+added or removed in it redraws, at most once a second with the last change
+always drawn (a watched file keeps its 25 ms batch); a folder deleted or moved
+and made again at the same path is watched again, and a run-record folder's watch that keeps failing
+is made again at most once a second. Past four folders the rest are
+an unconfirmed note. A board that cannot be read or worded is LAB's own unconfirmed state and
+keeps its watch; the rest of the panel draws on. Ages count from the
+projection's clock. They
 differ by place and color only, all from the panel's theme and shade: the
 question's border, `◑` and `›` rose (its words are body text), route plain,
 messages dim. An opened route carries what Fleet's ROUTES row unfolds, from the
@@ -356,19 +403,24 @@ row is always the owner's (or a frame leg's with no owner; a worker leading a
 route whose owner is not one known attempt sends no `workers_live`, so the row
 keeps its one doer), the context row
 starts with a dim `CTX` in the role column with the gauge under the harness
-(`CTX    ━━━━──── 52%`; no row for an unknown context), the route's time ends
-the title's last row (the title folds and ends in `…` within the cells left
-beside it), and no `owner <model>` word follows the stage. The owner's live
+and the route's time right after the percent (`CTX    ━━━━──── 52% · 2h 10m`,
+the ` · ` and the time dim; never at the right edge; an unknown context keeps
+the time alone in the value column, and with neither no row), the title takes
+its rows whole, and no `owner <model>` word follows the stage. Short of cells
+the `CTX` row's bar shortens (four cells at least), then goes, then the time;
+the percent stays. The owner's live
 workers stand in one rounded box under its rows (dim lines, no branch and no
-guide beside the owner): each worker's first row, its own mark, `worker` (or
-`frame`), harness, model and effort, stands in the box's top line (`╭─ ⠸ worker
-claude Sonnet 5.5 ─╮`; a later worker's in the line between, `├─ … ─┤`; the
-bottom line once, so N workers take 3N+1 rows), then inside the box, four
-cells narrower, its `CTX` row (`CTX` under the role word, the gauge under the
-harness) and its stage, open tool and target (the path, the file name, the
-tool, then none) with its own time at the right. Short of cells the top line
-lets the effort go, then the harness (`─` fills; a model longer than the line
-is cut with `…`); a finished stage's worker is not drawn. Short of rows the
+guide beside the owner), two cells further in: its left line under the owner's
+`CTX` and title, its right line where the route's rows end. Each worker's first
+row, its own mark, `worker` (or `frame`), harness, model and effort, stands in
+the box's top line (`╭─ ⠸ worker claude Sonnet 5.5 ─╮`, or up to the corner
+rather than giving up a value; a later worker's in the line between,
+`├─ … ─┤`; the bottom line once, so N workers take 3N+1 rows), then inside the
+box its `CTX` row (`CTX` under the role word, the gauge under the harness, its
+own time after its percent) and its stage, open tool and target (the path, the
+file name, the tool, then none). Short of cells the top line lets the effort
+go, then the harness (`─` fills; a model longer than the line is cut with
+`…`); a finished stage's worker is not drawn. Short of rows the
 owners and their workers fold together, every route at the same step: every
 owner's context folds into its first row and, in the same step, each worker
 takes one row two cells in (no box; its percent and time in the owners'
@@ -423,18 +475,20 @@ short, the question (its body and choices) and the top groups stay, and the
 others give way first, in this order: empty rows; the messages' extra rows
 (past three, and a body's rows after its first); an opened route detail (and an
 opened message) shortens and closes; the MEM section (two records, one, its
-headline on one row, none: before any of the messages); a value on several rows
+headline on one row, none: before any of the messages); the opened LAB table
+loses its per-row values, then closes to its summary; a value on several rows
 (title, NOW, a route title) keeps one row ending in `…`; the empty row under the
 route box,
 then the one inside the metadata (structural rows, not spare ones: the messages'
 extra rows leave them); then the head's rule (it is not an empty row: it goes
-only once TITLE and NOW are one row each); the messages fold
+only once TITLE and NOW are one row each); LAB's notes, then LAB keeps its head
+row alone; the messages fold
 to one row each (three of them); the routes' context row folds into their first
 row; their kind row goes, then their title row (one-row form);
 fewer messages show (three down to one, `+N` at the end of the lower rule); only
 then does the route box scroll in place, showing fewer
 routes (down to one) without dropping any; then the Git row, the route box and
-running jobs go; the messages section goes only last, then 5h/7d. Rows a later
+running jobs go; then the LAB head; the messages section goes only last, then 5h/7d. Rows a later
 step frees beyond its need go back to the steps before it, the most important
 first, so no row stays empty that an earlier value could fill. A section is
 placed whole or not at all.
@@ -547,8 +601,13 @@ new is stored.
 A press on a route or message row is display only: it opens or folds the row
 and leaves focus, `empty` and the native input frontier as they were.
 Put each answer choice on
-its own line, wrapping within that choice. In a focused question box ↑↓ move
-the highlighted choice (`›` in place of its number, bright text) and Enter
+its own line, wrapping within that choice; every choice row leads with a
+two-cell column for the mark. In a focused question box ↑↓ move the chosen
+choice: its first row carries `▸` in this session's harness color, bold, and
+every row of it (each row of a wrapped one) has its words bold in the bright
+body color, while every
+other choice keeps the mark's column blank and reads dim grey (without color
+the mark and the weight alone tell them apart). Enter
 sends it, as Claude's own question does; it starts on the recommended choice,
 else the first. Number keys pick a choice and `t` types an answer as before;
 the guidance reads `↑↓ choose · Enter send · t text`. A decision
@@ -629,12 +688,35 @@ choices or free-text affordance and exact request state are readable before
 focus; an empty question section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
 Enter submits only explicit, complete answers. Keep a single active action.
+A settled question (answered, expired, cancelled) stays to show its receipt
+while the editor is focused; once focus returns to the native it is let go and
+no longer asked for, and an answered registered question leaves the shared
+answer-wait view the moment it completes, so the panel's count and question
+follow the answer at once. Publishing re-reads each registered question's
+source, and a source that is read decides: an open question stays, even one
+answered before and registered again under the same id; one that is not open
+(answered, expired, cancelled, removed, or replaced by its session's next
+question) leaves. Only when a source cannot be read just then do the answers
+already completed decide: a question that completion took out stays out, even
+from a collection read before the answer, until its source is read; any other
+stays as the collection read it, with the publication marked incomplete, until
+the next collection.
 Collect every current form draft at that one submit; moving with Tab does not
 require Enter in each field and an edited draft supersedes its earlier value.
 Secret answers remain masked while selected, submitted, unfocused or consumed;
 only the unchanged canonical response carries their actual value.
-Pending transport and proved consumption are distinct, and unavailable, expired
-or cancelled questions offer no active choices. Long questions remain readable
+Pending transport and proved consumption are distinct, and questions not
+answerable here, expired or cancelled offer no active choices. A wait not
+answerable here never reads "answer unavailable" or its machine reason: its
+reason picks what to do, `answer below` (`아래 입력창에 답`) in this session's own
+panel or `answer in its window` (`그 창에서 답`) from Fleet or another session for
+a marker question with no bound reply surface, a missing exact session binding,
+an unsupported native request and any reason not named here; `answer in the
+parent` (`부모 창에서 답`) for a blocked worker's answer whose parent could not be
+confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
+(`닫힘`) for a request already gone (an existing state word such as expired
+stays). The head carries the short form under 64 columns and the body row the
+whole words; the `◑ N` count still counts every wait. Long questions remain readable
 with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields. The former rows/3 estimate does

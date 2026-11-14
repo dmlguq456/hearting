@@ -208,14 +208,34 @@ class ClassifyTest(IsolatedCase):
         self.assertEqual(session_notice.classify(base), session_notice.PROGRESS)
         self.assertEqual(session_notice.classify(
             {**base, "required_action": "report-to-user"}), session_notice.TERMINAL)
+        # A final whose outcome the runner has not published yet needs attention; a
+        # published success, or one its producer called quiet, is routine.
+        final = {**base, "key": "experiment:run-1:final:1:claude:A",
+                 "subject": "experiment final (1/1)"}
+        self.assertEqual(session_notice.classify(final), session_notice.ATTENTION)
+        self.publish_run_state("run-1", status="succeeded")
+        self.assertEqual(session_notice.classify(final), session_notice.ROUTINE)
+        self.publish_run_state("run-1", status="failed", exit_code=6)
+        self.assertEqual(session_notice.classify(final), session_notice.ATTENTION)
         self.assertEqual(session_notice.classify(
-            {**base, "key": "experiment:run-1:final:1:claude:A",
-             "subject": "experiment final (1/1)"}), session_notice.TERMINAL)
+            {**final, "subject": "experiment final, quiet (1/1)", "key": "experiment:run-2:final:1:claude:A"}),
+            session_notice.ROUTINE)
+        # An experiment attention is attention whatever its subject (it was `progress` before).
         self.assertEqual(session_notice.classify(
             {**base, "key": "experiment:run-1:attention:abc",
-             "subject": "experiment final (1/1)"}), session_notice.TERMINAL)
+             "subject": "experiment final (1/1)"}), session_notice.ATTENTION)
         self.assertEqual(session_notice.classify(
-            {**base, "key": "experiment:run-1:attention:abc"}), session_notice.PROGRESS)
+            {**base, "key": "experiment:run-1:attention:abc"}), session_notice.ATTENTION)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:attention-checkpoint:abc:7:d"}), session_notice.PROGRESS)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:checkpoint:run:7:1:claude:A"}), session_notice.ROUTINE)
+        compute = {**base, "key": "compute-run:h-20261114-101010-x", "subject": "compute run",
+                   "required_action": "report-to-user",
+                   "text": "run h-20261114-101010-x on h ended with exit 0; read it with: compute-hosts tail h-20261114-101010-x"}
+        self.assertEqual(session_notice.classify(compute), session_notice.ROUTINE)
+        self.assertEqual(session_notice.classify(
+            {**compute, "text": compute["text"].replace("exit 0", "exit 6")}), session_notice.ATTENTION)
         # A broken receipt is progress, never a terminal wake.
         self.assertEqual(session_notice.classify({"kind": "notice"}), session_notice.PROGRESS)
 

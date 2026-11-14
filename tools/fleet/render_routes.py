@@ -599,6 +599,17 @@ def _collect_project_status(sessions):
         return None
 
 
+def _collect_experiment_status(sessions):
+    """Experiment boards for the sessions' projects (collectors.experiment_status); None in demo or on failure."""
+    if os.environ.get("FLEET_DEMO"):
+        return None
+    try:
+        from .collectors import experiment_status
+        return experiment_status.collect(getattr(session, "cwd", None) for session in sessions or ())
+    except Exception:
+        return None
+
+
 def _collect_governor():
     try:
         from .collectors import governor

@@ -37,9 +37,14 @@ class CodexTuiExitTest(unittest.TestCase):
         tui = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"])
         self.addCleanup(tui.wait)
         start = procscan.read_proc_start(tui.pid)
+        from peer_steward_base import peer_message
+        marker = peer_message.steward_marker_path("codex", SID)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"harness":"codex", "session_id":SID, "targets":{}}))
         with mock.patch.object(codex, "process_for_thread", return_value=(tui.pid, start)):
             self.assertEqual(codex_tui_exit.watch(SID), 0)
         self.assertIsNone(interaction.read_wait(SID, "codex"))
+        self.assertEqual(json.loads(marker.read_text())["session_end"]["reason"], "tui-exited")
 
     def test_unproven_tui_leaves_the_wait_alone(self):
         with mock.patch.object(codex, "process_for_thread", return_value=None), \

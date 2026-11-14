@@ -439,8 +439,8 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                 state, reason = "blocked", "producer-finalize-refused"
             elif facts.get("checkpoint") != "owner-envelope-sealed":
                 state, reason = "pending", str(facts.get("checkpoint") or "")
-            elif facts.get("publication_pending"):
-                state, reason = "pending", "shared-spec-publication-pending"
+            # Shared-spec publication is not a terminal gate (WORKFLOW §0.5 producer
+            # transaction): an unpublished spec rides on the completion as information.
             elif facts.get("goal_pending"):
                 state, reason = "pending", "campaign-goal-close-pending"
             else:
@@ -651,8 +651,11 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         return ContinuationDecision(True, "launch", next_action="start")
     if action == "replacement-result":
         terminal, kind = facts["terminal"], facts["kind"]
+        # A runtime end's own envelope is the death itself; a provider refusal (`auth`) is one.
+        ends = {"frame-capacity": {"capacity"}, "stopped": {"runtime"},
+                "runtime": {"runtime", "auth"}}.get(kind, {kind})
         absent = terminal.get("state") == "absent" or (terminal.get("state") == "invalid" and
-            terminal.get("failure_class") == {"frame-capacity": "capacity", "stopped": "runtime"}.get(kind, kind)
+            terminal.get("failure_class") in ends
             and kind in {"capacity", "frame-capacity", "runtime", "stopped"})
         return ContinuationDecision(absent, "continue" if absent else "protected",
             "" if absent else "replacement-result-settlement-required", "start" if absent else "settle")

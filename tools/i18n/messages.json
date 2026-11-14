@@ -98,6 +98,10 @@
    "en": "Unverified or remaining work could not be extracted reliably; see the report",
    "ko": "미검증·남은 일을 확실히 추출하지 못함 · 보고서 확인"
   },
+  "completion.publication_pending": {
+   "en": "Shared spec not published: {reason} · the cycle keeps its spec; the next start of this route retries",
+   "ko": "공유 명세 게시 안 됨: {reason} · 주기의 spec은 그대로 있고, 이 route를 다시 start하면 재시도"
+  },
   "completion.remaining": {
    "en": "Unverified / remaining: {items}",
    "ko": "미검증·남은 것: {items}"
@@ -414,6 +418,22 @@
    "en": "baseline",
    "ko": "비교 기준"
   },
+  "experiment.card.catalog": {
+   "en": "experiment catalog: {path}",
+   "ko": "실험 정본: {path}"
+  },
+  "experiment.card.conditions": {
+   "en": "conditions: {names}",
+   "ko": "조건: {names}"
+  },
+  "experiment.card.more": {
+   "en": ", … and {n} more",
+   "ko": ", … 외 {n}개"
+  },
+  "experiment.card.rule": {
+   "en": "call each condition by this catalog name",
+   "ko": "조건은 이 이름으로 부른다"
+  },
   "experiment.direction.max": {
    "en": "higher is better",
    "ko": "높을수록 좋음"
@@ -458,6 +478,58 @@
    "en": "latest value @{epoch} is not a finite number",
    "ko": "최근 값@{epoch}이 유한한 숫자가 아님"
   },
+  "experiment.leaderboard.col.baseline": {
+   "en": "Baseline",
+   "ko": "기준"
+  },
+  "experiment.leaderboard.col.best": {
+   "en": "Best",
+   "ko": "최고"
+  },
+  "experiment.leaderboard.col.delta": {
+   "en": "Diff",
+   "ko": "차이"
+  },
+  "experiment.leaderboard.col.group": {
+   "en": "Group",
+   "ko": "묶음"
+  },
+  "experiment.leaderboard.col.latest": {
+   "en": "Latest",
+   "ko": "최근"
+  },
+  "experiment.leaderboard.col.name": {
+   "en": "Condition",
+   "ko": "조건"
+  },
+  "experiment.leaderboard.col.relative": {
+   "en": "Relative %",
+   "ko": "상대 %"
+  },
+  "experiment.leaderboard.col.run": {
+   "en": "Run",
+   "ko": "실행"
+  },
+  "experiment.leaderboard.col.state": {
+   "en": "State / reason",
+   "ko": "상태·사유"
+  },
+  "experiment.leaderboard.comparable": {
+   "en": "comparable",
+   "ko": "비교 가능"
+  },
+  "experiment.leaderboard.empty": {
+   "en": "no conditions to rank",
+   "ko": "순위표에 올릴 조건이 없음"
+  },
+  "experiment.leaderboard.note": {
+   "en": "Order within one group by the latest value against the target; not a final winner or a pass/fail call.",
+   "ko": "묶음 안에서 최근 값을 목표와 견준 순서이며 최종 승자나 합격 판정이 아님."
+  },
+  "experiment.leaderboard.unreadable": {
+   "en": "no leaderboard: the catalog is missing or cannot be read ({code})",
+   "ko": "순위표 없음: 정본이 없거나 읽을 수 없음 ({code})"
+  },
   "experiment.metric": {
    "en": "({key}, {unit}, {direction})",
    "ko": "({key}, {unit}, {direction})"
@@ -469,6 +541,18 @@
   "experiment.not_comparable": {
    "en": "not comparable: {reason}",
    "ko": "비교 불가: {reason}"
+  },
+  "experiment.notice.goal_missing": {
+   "en": "goal not registered",
+   "ko": "목표 미등록"
+  },
+  "experiment.notice.line": {
+   "en": "{name} — {goal}; {values}",
+   "ko": "{name} — {goal}; {values}"
+  },
+  "experiment.notice.unregistered": {
+   "en": "no catalog name for this run: register it in the experiment catalog",
+   "ko": "정본 이름 없음: run을 정본에 등록"
   },
   "experiment.observed": {
    "en": "observed {age}",
@@ -537,6 +621,14 @@
   "experiment.relative": {
    "en": ", relative {value}%",
    "ko": "(상대 {value}%)"
+  },
+  "experiment.run_state.row-ended": {
+   "en": "row ended, no outcome recorded",
+   "ko": "행 종료, 결과 기록 없음"
+  },
+  "experiment.run_state.running": {
+   "en": "running",
+   "ko": "실행 중"
   },
   "experiment.show_aliases": {
    "en": "aliases: {items}",
@@ -721,6 +813,186 @@
   "fleet.keys.kill_select": {
    "en": "pick what to kill · ↑↓ move · x kill · Esc cancel · q quit",
    "ko": "종료 선택 · ↑↓ 이동 · x 종료 요청 · Esc 취소 · q 끝"
+  },
+  "fleet.lab.base": {
+   "en": "BASE",
+   "ko": "기준"
+  },
+  "fleet.lab.base_condition": {
+   "en": "compared with {name}",
+   "ko": "{name}와 비교"
+  },
+  "fleet.lab.base_missing": {
+   "en": "baseline not registered",
+   "ko": "기준 미등록"
+  },
+  "fleet.lab.catalog_missing": {
+   "en": "no experiment catalog yet; runs show by id only",
+   "ko": "실험 정본 아직 없음; run은 id로만 보임"
+  },
+  "fleet.lab.col.base": {
+   "en": "BASE",
+   "ko": "기준"
+  },
+  "fleet.lab.col.best": {
+   "en": "BEST",
+   "ko": "최고"
+  },
+  "fleet.lab.col.delta": {
+   "en": "DIFF",
+   "ko": "차이"
+  },
+  "fleet.lab.col.expected": {
+   "en": "EXPECT",
+   "ko": "예상"
+  },
+  "fleet.lab.col.latest": {
+   "en": "LATEST",
+   "ko": "최근"
+  },
+  "fleet.lab.col.name": {
+   "en": "CONDITION",
+   "ko": "조건"
+  },
+  "fleet.lab.col.observed": {
+   "en": "SEEN",
+   "ko": "관측뒤"
+  },
+  "fleet.lab.col.progress": {
+   "en": "PROGRESS",
+   "ko": "진행"
+  },
+  "fleet.lab.col.since": {
+   "en": "IDLE",
+   "ko": "진행뒤"
+  },
+  "fleet.lab.col.state": {
+   "en": "STATE",
+   "ko": "상태"
+  },
+  "fleet.lab.count": {
+   "en": "{n} conditions",
+   "ko": "조건 {n}"
+  },
+  "fleet.lab.detail": {
+   "en": "DETAIL",
+   "ko": "상세"
+  },
+  "fleet.lab.goal": {
+   "en": "GOAL",
+   "ko": "목표"
+  },
+  "fleet.lab.goal_missing": {
+   "en": "goal not registered",
+   "ko": "목표 미등록"
+  },
+  "fleet.lab.invalid": {
+   "en": "invalid",
+   "ko": "유효하지 않음"
+  },
+  "fleet.lab.metric": {
+   "en": "METRIC",
+   "ko": "지표"
+  },
+  "fleet.lab.metric_missing": {
+   "en": "metric not registered",
+   "ko": "지표 미등록"
+  },
+  "fleet.lab.n_failed": {
+   "en": "failed {n}",
+   "ko": "실패 {n}"
+  },
+  "fleet.lab.n_running": {
+   "en": "running {n}",
+   "ko": "진행 {n}"
+  },
+  "fleet.lab.n_stagnant": {
+   "en": "stuck {n}",
+   "ko": "정체 {n}"
+  },
+  "fleet.lab.n_unknown": {
+   "en": "unknown {n}",
+   "ko": "미확인 {n}"
+  },
+  "fleet.lab.n_unnamed": {
+   "en": "unnamed {n}",
+   "ko": "이름 없음 {n}"
+  },
+  "fleet.lab.n_waiting": {
+   "en": "waiting {n}",
+   "ko": "대기 {n}"
+  },
+  "fleet.lab.no_conditions": {
+   "en": "no conditions registered in this group",
+   "ko": "이 묶음에 등록된 조건 없음"
+  },
+  "fleet.lab.none": {
+   "en": "none yet",
+   "ko": "아직 없음"
+  },
+  "fleet.lab.other_group": {
+   "en": "also needs a look in {name}: {counts}",
+   "ko": "다른 묶음 {name}도 확인 필요: {counts}"
+  },
+  "fleet.lab.reason.name-missing": {
+   "en": "no registered name",
+   "ko": "등록된 이름 없음"
+  },
+  "fleet.lab.reason.observation-unknown": {
+   "en": "observation time unknown",
+   "ko": "관측 시각 미확인"
+  },
+  "fleet.lab.reason.row-ended": {
+   "en": "row ended, no outcome recorded",
+   "ko": "행 종료, 결과 기록 없음"
+  },
+  "fleet.lab.runs_n": {
+   "en": "{n}",
+   "ko": "{n}건"
+  },
+  "fleet.lab.state.ended": {
+   "en": "ended",
+   "ko": "종료"
+  },
+  "fleet.lab.state.failed": {
+   "en": "failed",
+   "ko": "실패"
+  },
+  "fleet.lab.state.running": {
+   "en": "running",
+   "ko": "진행"
+  },
+  "fleet.lab.state.stagnant": {
+   "en": "stuck",
+   "ko": "정체"
+  },
+  "fleet.lab.state.unknown": {
+   "en": "unknown",
+   "ko": "미확인"
+  },
+  "fleet.lab.state.waiting": {
+   "en": "waiting",
+   "ko": "대기"
+  },
+  "fleet.lab.title": {
+   "en": "LAB",
+   "ko": "LAB"
+  },
+  "fleet.lab.unavailable": {
+   "en": "n/a",
+   "ko": "비교 불가"
+  },
+  "fleet.lab.unnamed_runs": {
+   "en": "unnamed runs",
+   "ko": "이름 없는 run"
+  },
+  "fleet.lab.unreadable": {
+   "en": "experiment catalog could not be read ({code}); not the same as no experiments",
+   "ko": "실험 정본을 읽지 못함 ({code}); 실험이 없다는 뜻이 아님"
+  },
+  "fleet.lab.unwatched": {
+   "en": "{n} run-record folders not watched; their values are unconfirmed",
+   "ko": "실행 기록 폴더 {n}개는 감시하지 못함; 그 값은 미확인"
   },
   "fleet.loading": {
    "en": "loading",
@@ -926,6 +1198,26 @@
    "en": "no seat · {error}",
    "ko": "seat 없음 · {error}"
   },
+  "fleet.session_block.answer_below": {
+   "en": "answer below",
+   "ko": "아래 입력창에 답"
+  },
+  "fleet.session_block.answer_closed": {
+   "en": "closed",
+   "ko": "닫힘"
+  },
+  "fleet.session_block.answer_parent": {
+   "en": "answer in the parent",
+   "ko": "부모 창에서 답"
+  },
+  "fleet.session_block.answer_sending": {
+   "en": "sending",
+   "ko": "보내는 중"
+  },
+  "fleet.session_block.answer_there": {
+   "en": "answer in its window",
+   "ko": "그 창에서 답"
+  },
   "fleet.session_block.applied": {
    "en": "✓ consumed",
    "ko": "✓ 소비 확인"
@@ -945,6 +1237,26 @@
   "fleet.session_block.choose": {
    "en": "↑↓ choose · Enter send · t text",
    "ko": "↑↓ choose · Enter send · t text"
+  },
+  "fleet.session_block.compact_answer_below": {
+   "en": "answer below",
+   "ko": "입력창에 답"
+  },
+  "fleet.session_block.compact_answer_closed": {
+   "en": "closed",
+   "ko": "닫힘"
+  },
+  "fleet.session_block.compact_answer_parent": {
+   "en": "in the parent",
+   "ko": "부모 창에서"
+  },
+  "fleet.session_block.compact_answer_sending": {
+   "en": "sending",
+   "ko": "보내는 중"
+  },
+  "fleet.session_block.compact_answer_there": {
+   "en": "in its window",
+   "ko": "그 창에서 답"
   },
   "fleet.session_block.compact_applied": {
    "en": "✓ consumed",
@@ -969,10 +1281,6 @@
   "fleet.session_block.compact_submitted": {
    "en": "sending",
    "ko": "전송 중"
-  },
-  "fleet.session_block.compact_unavailable": {
-   "en": "unavailable",
-   "ko": "답변 불가"
   },
   "fleet.session_block.compact_unknown": {
    "en": "unknown",
@@ -1045,10 +1353,6 @@
   "fleet.session_block.this_session": {
    "en": "this session",
    "ko": "이 세션"
-  },
-  "fleet.session_block.unavailable": {
-   "en": "answer unavailable",
-   "ko": "답변 불가"
   },
   "fleet.session_block.unknown": {
    "en": "unknown · check receipt",
@@ -1501,10 +1805,6 @@
   "fleet.session_panel.theme_terminal": {
    "en": "Terminal",
    "ko": "터미널"
-  },
-  "fleet.session_panel.threshold": {
-   "en": "Side minimum columns",
-   "ko": "옆 배치 최소 폭"
   },
   "fleet.session_panel.title": {
    "en": "SESSION {tag} · {harness} · Ctrl+] {collapse}",

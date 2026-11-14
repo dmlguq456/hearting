@@ -38,6 +38,13 @@ MAX_SOURCE_BINDING_ASSERTIONS = 8
 MAX_ARMS = 32
 OBSERVATION_VERSION = 2
 CHECKPOINT_INTERVAL = 12 * 60 * 60
+# The time rule: a predicted (or, unmeasured, elapsed) total of 1.5x the plan, or past
+# six hours without a plan, is an attention.
+ETA_ATTENTION_RATIO = 1.5
+ETA_ATTENTION_UNPLANNED_SECONDS = 6 * 3600
+ETA_ATTENTION_KINDS = frozenset({"eta-over-plan", "eta-over-six-hours"})
+ATTENTION_IDENTITY_KEYS = ("kind", "metric", "epoch", "op", "threshold", "episode_id",
+                           "generation", "since", "source_value_hash")
 _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
 
 
@@ -279,13 +286,15 @@ def evaluate_observation(*, now, started_at, planned_seconds=None, progress=None
             attention.append({"kind": "metric-divergence", "metric": summary["metric"],
                               "epoch": summary["latest"]["epoch"]})
     if rate is not None and predicted_total is not None:
-        if planned_seconds and predicted_total is not None and predicted_total >= 1.5 * float(planned_seconds):
+        if planned_seconds and predicted_total is not None \
+                and predicted_total >= ETA_ATTENTION_RATIO * float(planned_seconds):
             attention.append({"kind": "eta-over-plan", "predicted_total_seconds": predicted_total})
-        elif not planned_seconds and predicted_total is not None and predicted_total > 6 * 3600:
+        elif not planned_seconds and predicted_total is not None \
+                and predicted_total > ETA_ATTENTION_UNPLANNED_SECONDS:
             attention.append({"kind": "eta-over-six-hours", "predicted_total_seconds": predicted_total})
-    elif planned_seconds and elapsed >= 1.5 * float(planned_seconds):
+    elif planned_seconds and elapsed >= ETA_ATTENTION_RATIO * float(planned_seconds):
         attention.append({"kind": "elapsed-over-plan", "elapsed_seconds": elapsed})
-    elif not planned_seconds and elapsed > 6 * 3600:
+    elif not planned_seconds and elapsed > ETA_ATTENTION_UNPLANNED_SECONDS:
         attention.append({"kind": "elapsed-over-six-hours", "elapsed_seconds": elapsed})
     if isinstance(optional_rules, list):
         for rule in optional_rules[:16]:
@@ -323,6 +332,54 @@ def evaluate_observation(*, now, started_at, planned_seconds=None, progress=None
             "due_checkpoint_at": schedule["due_checkpoint_at"],
             "next_checkpoint_at": now if final else schedule["next_checkpoint_at"],
             "final": bool(final)}
+
+
+def eta_attention_episode(observation, previous, now):
+    """The episode and size step of an ETA attention, for telling it apart.
+
+    The same ETA attention stands while its prediction stays over the rule's boundary,
+    wobbles around it, or goes unmeasured. It ends only when a measured prediction is
+    back within the plan (the boundary divided by the rule's own 1.5x; four hours without
+    a plan), so a later breach is a new episode (`since`). Within an episode, a
+    prediction grown by that same 1.5x over the size it was last marked at is a new
+    `step`; smaller changes are the same attention. Returns the tracker to keep (None
+    when no episode stands).
+    """
+    tracker = previous if isinstance(previous, dict) else None
+    attention = observation.get("attention") if isinstance(observation.get("attention"), list) else []
+    item = next((row for row in attention if isinstance(row, dict)
+                 and row.get("kind") in ETA_ATTENTION_KINDS), None)
+    if item is None:
+        planned = observation.get("planned_seconds")
+        predicted = observation.get("predicted_total_seconds")
+        boundary = (ETA_ATTENTION_RATIO * float(planned) if planned
+                    else ETA_ATTENTION_UNPLANNED_SECONDS)
+        if (observation.get("rate_per_second") is not None
+                and isinstance(predicted, (int, float)) and not isinstance(predicted, bool)
+                and predicted <= boundary / ETA_ATTENTION_RATIO):
+            return None
+        return tracker
+    predicted = float(item["predicted_total_seconds"])
+    size = tracker.get("size_seconds") if tracker else None
+    if (tracker and tracker.get("kind") == item["kind"]
+            and isinstance(tracker.get("since"), (int, float))
+            and type(tracker.get("step")) is int
+            and isinstance(size, (int, float)) and not isinstance(size, bool) and size > 0):
+        since, step, size = float(tracker["since"]), tracker["step"], float(size)
+        if predicted >= ETA_ATTENTION_RATIO * size:
+            step, size = step + 1, predicted
+    else:
+        since, step, size = float(now), 0, predicted
+    return {"kind": item["kind"], "since": since, "step": step, "size_seconds": size}
+
+
+def attention_identity(item, eta_episode=None):
+    """What makes one attention the same as another (the notice digest's input)."""
+    identity = {key: item.get(key) for key in ATTENTION_IDENTITY_KEYS}
+    if item.get("kind") in ETA_ATTENTION_KINDS and isinstance(eta_episode, dict):
+        identity["since"] = eta_episode.get("since")
+        identity["step"] = eta_episode.get("step")
+    return identity
 
 
 def public_run_record(run, *, status=None, observation=None, metrics=None,
@@ -1397,7 +1454,110 @@ _TREND_TEXT = {"개선": "resource.trend.improving", "정체": "resource.trend.f
                "판정 불가": "resource.trend.undetermined"}
 
 
-def _notice_texts(run, event_kind, observation, record_path, sources):
+def _catalog_module():
+    """`experiment_catalog`, imported when a notice needs it (it imports this module at its top)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import experiment_catalog
+    return experiment_catalog
+
+
+def _experiment_context(run, identity, observation, has_decision_metric):
+    """What the project's experiment catalog says about this live row, or None when it cannot say.
+
+    `{"info", "catalog", "has_decision_metric"}`: `info` is `describe_observation`'s answer (None when the
+    run is not linked or two conditions claim it).  Any failure reading the catalog gives None: a notice is
+    never held back, and never changed, because the catalog could not be read."""
+    root = run.get("artifact_root")
+    if not root:
+        return None
+    try:
+        catalog = _catalog_module()
+        read = catalog.load(Path(root))
+        if read.status == "invalid":
+            return None
+        doc = read.doc if read.status == "ok" else None
+        info = catalog.describe_observation(Path(root), run.get("run_id"), str(identity),
+                                            observation.get("summary") or {}, doc=doc)
+        if info is not None and not info.get("name"):
+            info = None  # a condition without a name cannot give one
+        return {"info": info, "catalog": read.status, "has_decision_metric": bool(has_decision_metric)}
+    except Exception:  # noqa: BLE001 -- the catalog is read-only context for a notice
+        return None
+
+
+def _experiment_lines(context, *, first, final):
+    """The catalog name line for a notice, plus the "register this run" line on a run's first notice and its
+    final one (not on every checkpoint)."""
+    if not context:
+        return []
+    try:
+        catalog = _catalog_module()
+        if context["info"] is not None:
+            return [catalog.notice_line(context["info"])]
+        if (first or final) and (context["catalog"] == "ok" or context["has_decision_metric"]):
+            return [catalog.unregistered_line()]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def _decision_mark(context, samples):
+    """What a notice has told about the catalog's deciding metric: its latest point plus a digest of
+    every validation evaluation of that metric, so a first evaluation of an earlier epoch that arrives
+    late, or an earlier epoch rewritten, is new even when the latest point stays the same.  None when
+    the catalog declares no metric this run has reported."""
+    point = ((context or {}).get("info") or {}).get("decision_point")
+    if not point:
+        return None
+    key = point.get("metric")
+    evaluations = sorted(
+        [str(row.get("split")), row["epoch"], repr(float(row["metrics"][key]))]
+        for row in samples if isinstance(row, dict) and isinstance(row.get("metrics"), dict)
+        and str(row.get("split", "")).lower() in {"valid", "val", "validation"}
+        and type(row.get("epoch")) is int and isinstance(row["metrics"].get(key), (int, float))
+        and not isinstance(row["metrics"].get(key), bool))
+    digest = hashlib.sha256(json.dumps(evaluations, separators=(",", ":")).encode()).hexdigest()[:16]
+    return {**point, "points": digest}
+
+
+def _quiet_checkpoint(context, previous, samples):
+    """A periodic checkpoint with nothing new is not worth the conversation: when the project's catalog
+    declares the deciding metric and this run has reported it, a checkpoint is made only when that
+    metric has a new evaluation (any epoch, a late one or a corrected one included) since the last
+    notice.  Anything else (no catalog, no declared metric, a metric never reported, a catalog that
+    cannot be read) keeps the existing checkpoint, so an unconfirmed run does not go quiet.  A told point
+    saved before the digest existed (`{metric, epoch, value}` only) is compared on those fields alone, so
+    an install does not make every running experiment speak once; the caller then stores the digest."""
+    mark = _decision_mark(context, samples)
+    if not mark:
+        return False
+    told = previous.get("notified_decision_point")
+    if isinstance(told, dict) and "points" not in told:
+        return told == {key: value for key, value in mark.items() if key != "points"}
+    return told == mark
+
+
+def _quiet_event(event_kind, observation, status):
+    """A routine event that carries nothing to read on its own line (`session_notice.is_quiet`):
+    a normal end of a run shorter than `QUIET_RUN_SECONDS` or with no metric, and a checkpoint
+    with neither a metric nor a progress count. An attention, a failed or unknown end, and
+    anything with a value are never quiet."""
+    from session_notice import QUIET_RUN_SECONDS
+    summary = observation.get("summary") if isinstance(observation.get("summary"), dict) else {}
+    metrics = bool(summary.get("latest") or summary.get("latest_metrics"))
+    if event_kind == "checkpoint":
+        return not metrics and observation.get("reached") is None
+    if event_kind != "final" or status != "succeeded":
+        return False
+    elapsed = observation.get("elapsed_seconds")
+    short = (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+             and math.isfinite(float(elapsed)) and float(elapsed) < QUIET_RUN_SECONDS)
+    return short or not metrics
+
+
+def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
     t = _ui_translator()
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
@@ -1490,13 +1650,13 @@ def _notice_texts(run, event_kind, observation, record_path, sources):
     if not source_lines:
         source_lines.append("source metrics unavailable")
     entries.extend(source_lines)
-    text = "; ".join(entries)
+    text = "; ".join([*name_lines, *entries])
     if len(text) <= 600:
         return [text]
     # Keep every field in immutable bounded parts; numbered chunks can be
     # concatenated in order when a path is longer than one notice.
     output = []
-    for label, value in [("run", run_line), ("record", record),
+    for label, value in [("run", "; ".join([*name_lines, run_line])), ("record", record),
                          ("metrics", "; ".join(entries[2:]))]:
         value = f"{label}: {value}"
         if len(value) <= 600:
@@ -1807,6 +1967,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             baseline=run.get("baseline_value", declared.get("baseline_value")), final=final,
             optional_rules=run.get("rules", declared.get("rules")),
             last_checkpoint_at=previous.get("last_checkpoint_at"))
+        eta_episode = eta_attention_episode(observation, previous.get("eta_attention"), now)
         stagnation = tracker_result.get("stagnation")
         if stagnation is None and isinstance(progress_tracker, dict):
             stagnation = {"state": "observing", "signal": "counter",
@@ -1845,38 +2006,60 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             observation["eta_vs_plan"] = None
         artifact_root = run.get("artifact_root")
         record_locator = public_record_path(artifact_root, run_id) if artifact_root else None
+        catalog_context = []
+
+        def experiment():
+            if not catalog_context:
+                catalog_context.append(_experiment_context(run, identity, observation, bool(
+                    decision_metric.get("key") if isinstance(decision_metric, dict) else decision_metric)))
+            return catalog_context[0]
         event_specs = []
+        quiet_checkpoint = False
+        seen = set(previous.get("event_keys", []))
+        outbox = list(previous.get("outbox", []))
+        known = {item.get("key") for item in outbox if isinstance(item, dict)}
         if notify_events and final:
             event_specs.append(("final", f"final:{identity}"))
         if (notify_events and observation["attention"]
                 and (not final or source_signal_changed and source_observations)):
-            attention_identity = [{key: item.get(key) for key in
-                ("kind", "metric", "epoch", "op", "threshold", "episode_id",
-                 "generation", "since", "source_value_hash")}
-                for item in observation["attention"]]
-            attention_digest = hashlib.sha256(json.dumps(attention_identity, sort_keys=True,
+            # The same attention is the same digest; one that cleared and came back, or
+            # whose size grew by the rule's own step, is a different one (an ETA attention
+            # carries its episode and size step; the others carry their epoch or episode).
+            identities = [attention_identity(item, eta_episode)
+                          for item in observation["attention"]]
+            attention_digest = hashlib.sha256(json.dumps(identities, sort_keys=True,
                 separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
-            if observation["checkpoint_due"]:
+            # A new or changed attention is `attention:` whenever it appears; the same
+            # attention again at a periodic checkpoint is `attention-checkpoint:`, which
+            # waits for the recipient's next input instead of waking it (session_notice).
+            attention_told = any(
+                key == f"attention:{identity}:{attention_digest}"
+                or (key.startswith(f"attention-checkpoint:{identity}:")
+                    and key.endswith(f":{attention_digest}"))
+                for key in (seen | known) if isinstance(key, str))
+            if observation["checkpoint_due"] and attention_told:
                 slot = int(observation["due_checkpoint_at"])
                 event_specs.append(("attention", f"attention-checkpoint:{identity}:{slot}:{attention_digest}"))
             else:
                 event_specs.append(("attention", f"attention:{identity}:{attention_digest}"))
         elif notify_events and observation["checkpoint_due"] and not final:
             slot = int(observation["due_checkpoint_at"])
-            event_specs.append(("checkpoint", f"checkpoint:{identity}:{slot}"))
-        seen = set(previous.get("event_keys", []))
-        outbox = list(previous.get("outbox", []))
-        known = {item.get("key") for item in outbox if isinstance(item, dict)}
+            quiet_checkpoint = _quiet_checkpoint(experiment(), previous, samples)
+            if not quiet_checkpoint:
+                event_specs.append(("checkpoint", f"checkpoint:{identity}:{slot}"))
+        first_notice = not seen and not outbox
         new_event = False
         for event_kind, event_key in event_specs:
             if event_key in seen or event_key in known:
                 continue
             new_event = True
             notice_texts = _notice_texts({**run, "row_id": str(identity)}, event_kind,
-                observation, record_locator, sources or previous.get("sources", []))
+                observation, record_locator, sources or previous.get("sources", []),
+                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
             outbox.append({"key": event_key, "kind": event_kind,
                            "recipients": _notice_targets(run),
-                           "texts": notice_texts, "text": notice_texts[0]})
+                           "texts": notice_texts, "text": notice_texts[0],
+                           "quiet": _quiet_event(event_kind, observation, status)})
             known.add(event_key)
         previous_observation = previous.get("observation") if isinstance(previous.get("observation"), dict) else {}
         previous_stagnation = previous_observation.get("stagnation") \
@@ -1894,6 +2077,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                       "last_admission_observed_at": (float(now) if should_read_admission
                           else last_admission_observed_at),
                       "progress_tracker": progress_tracker,
+                      "eta_attention": eta_episode,
                       "progress_sample": next_progress,
                       "progress_at": (progress_tracker.get("last_sample_at")
                                       if isinstance(progress_tracker, dict) else None),
@@ -1904,6 +2088,10 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                       "source_observations": source_observations,
                       "last_checkpoint_at": (float(now) if observation["checkpoint_due"]
                                              else previous.get("last_checkpoint_at")),
+                      "notified_decision_point": (
+                          _decision_mark(experiment(), samples) or
+                          previous.get("notified_decision_point")) if new_event or quiet_checkpoint
+                          else previous.get("notified_decision_point"),
                       "last_public_write_at": previous.get("last_public_write_at"),
                       "public_status": previous.get("public_status"),
                       "last_delivery_at": previous.get("last_delivery_at"),
@@ -1953,6 +2141,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                          and (cursor != previous.get("cursor") or bool(new_samples)
                               or sources != previous.get("sources", []))
                          or next_progress != previous.get("progress_sample")
+                         or eta_episode != previous.get("eta_attention")
                          or admission_changed or stagnation_changed
                          or source_observations_changed
                          or should_read_admission
@@ -1971,7 +2160,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                           or new_event)
         if notify_events and outbox and should_deliver:
             try:
-                from session_notice import notify
+                from session_notice import notify, quiet_subject
                 attempted_delivery = False
                 for event in outbox:
                     delivered_to = []
@@ -1990,10 +2179,13 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                             else:
                                 harness, session_id = target
                                 lineage = None
+                            subject = f"experiment {event['kind']} ({part_index}/{len(texts)})"
+                            if event.get("quiet") is True:
+                                subject = quiet_subject(subject)
                             try:
                                 receipt = notify(harness, session_id,
                                     key=f"experiment:{run_id}:{event['key']}:{part_index}:{harness}:{session_id}",
-                                    subject=f"experiment {event['kind']} ({part_index}/{len(texts)})",
+                                    subject=subject,
                                     text=part_text, route_id=run.get("route_id") or "route-free",
                                     required_action="read-notice", lineage=lineage,
                                     jobs=(run.get("jobs")

@@ -50,6 +50,27 @@ assert(bottom.at(-2).endsWith('▾   ⚙ │'),bottom.join('\n'));
 assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('«   ⚙ │'));
 """)
 
+    def test_the_last_row_keeps_the_model_quota_and_gives_way_in_order(self):
+        # Correction 7 (2026-11-13): the last row reads `5h … │ 7d … │ fable 70%` (the model word in
+        # its model color). Short of cells it gives way in this order: the reset times `(↻ …)`,
+        # then 5h, then the model values, then 7d. The folded strip carries none of it.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
+const P=(t,o={})=>({text:t,...o}),sep=P(' │ ',{dim:true});
+const quota=[P('5h ',{dim:true}),P('12%',{foreground:150}),P('(↻ 2h)',{dim:true}),sep,P('7d ',{dim:true}),P('66%',{foreground:186}),P('(↻ 5d)',{dim:true}),
+ sep,P('fable ',{foreground:176}),P('70%',{foreground:186})];
+const model={tag:'[e9]',repo:[P('hearting/')],quota};
+const last=w=>{const r=v.render({width:w,height:20,side:true,model,state:'idle',harness:'claude',questions:()=>[]});return r.rows.at(-2);};
+const text=row=>row.map(x=>x.text).join('');
+const want=[[60,'5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 70%'],[40,'5h 12% │ 7d 66% │ fable 70%'],[32,'7d 66% │ fable 70%'],[26,'7d 66%'],[15,'']];
+for(const [w,s] of want){const t=text(last(w));assert(t.startsWith('│ '+s+(s?' ':''))&&t.endsWith('»   ⚙ │')&&!t.includes('…'),w+' '+t);}
+// The model word keeps its model color; nothing of the row is cut mid-value.
+assert.equal(last(40).find(x=>x.text==='fable ').foreground,176);
+// The folded strip has no quota.
+const strip=v.render({width:8,height:20,side:true,folded:true,model:{...model,route_total:2},state:'idle',questions:()=>[]}).rows.map(text).join('\n');
+assert(!/fable|7d|5h/.test(strip),strip);
+""")
+
     def test_the_folded_strip_carries_the_core_values_only(self):
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
@@ -115,6 +136,13 @@ assert.equal(d.NATIVE_MIN,80);
 assert.equal(fold(122).folded,false);assert.equal(fold(121).folded,true);
 for(const width of [32,60,80])assert.equal(d.fold({cols:width+82,configuration:{...configuration,side_width:width}}).folded,false),
  assert.equal(d.fold({cols:width+81,configuration:{...configuration,side_width:width}}).folded,true);
+// #1586 review follow-up 2: a panel folded by itself opens again only three columns past the
+// threshold (83 native columns), so a window dragged across it does not jump back and forth; an
+// open panel still folds under 80.
+const now=(cols,expanded)=>d.fold({cols,configuration,expanded}).folded;
+assert.equal(d.REOPEN_MARGIN,3);
+assert.deepEqual([121,122,123,124,125].map(c=>now(c,false)),[true,true,true,true,false]);
+assert.deepEqual([125,122,121].map(c=>now(c,true)),[false,false,true]);
 // The old `side_min_columns` does not take part.
 assert.equal(d.fold({cols:130,configuration:{...configuration,side_min_columns:1000}}).folded,false);
 // A hand fold stays folded however wide; a hand unfold stays open at its width and lapses with the next.
@@ -158,6 +186,86 @@ for(const extra of [{},{position:'left'},{layout:'bottom'}])for(const expanded o
   assert.equal(g.side?g.nativeCols+g.gap+g.panelCols:g.nativeCols,cols,seen);
   assert.equal(g.nativeRows,g.side?rows:Math.max(1,rows-(panelRows??1)),seen);
  }
+""")
+
+    def test_a_press_on_the_targets_drawn_for_this_placement_counts_while_a_layout_is_queued(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+// Review 1597 follow-up (11-13): a press made while a layout was queued was dropped even when the
+// targets on screen were drawn for the very placement it was made in. The placement decides alone:
+// the same placement counts; a press on targets drawn for another placement is still dropped.
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const code=text.slice(text.indexOf('function panelMouse('),text.indexOf('function displayReporter('));
+const g={side:true,folded:false,left:false,panelColumn:90,panelCols:40},place='true:true:false:false:40:130:30:false';
+let calls=[];
+const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,routeDetail:false,routeArea:null,
+  geometry:()=>g,panelColumns:()=>40,panelRow:()=>0,height:()=>30,terminal:{modes:{mouseTrackingMode:'none'}},
+  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,
+  panelHits:[{row:1,left:9,right:14,action:'question'}],panelAction:action=>calls.push(action)};
+vm.createContext(c);vm.runInContext(code,c);
+for(const [queued,stamp,expected] of [[false,place,['question']],[true,place,['question']],[false,'old',[]],[true,'old',[]]]){
+  c.layoutQueued=queued;c.panelHitsPlacement=stamp;calls=[];
+  assert.equal(c.panelMouse(0,101,2,false),true);
+  assert.deepEqual(calls,expected,JSON.stringify({queued,stamp}));
+}
+""")
+
+
+    def test_the_strip_carries_the_lab_token_under_the_route_count(self):
+        # Draft A: `5 LB` (conditions), `!1LB` (failed or stuck), `?1LB` (unconfirmed or unnamed),
+        # `9+LB`, as the board words them, under `N RT`. Short of rows a plain count goes before
+        # the route count, a `!`/`?` after it, the answer wait last; `!9+LB` keeps `!9+`. The
+        # border stays the session's own color.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
+const styles={dim:{dim:true},loc_repo:{foreground:252},lvl_r:{foreground:217},lvl_y:{foreground:186},g_spin:{foreground:230}};
+const T=(t,k)=>({text:t,...(styles[k]||{})});
+const token=s=>{const m=/^([!?]?)(\d+\+?)( ?LB)$/.exec(s);return {strip:[T(m[1]+m[2],m[1]==='!'?'lvl_r':m[1]==='?'?'lvl_y':'loc_repo'),T(m[3],'dim')],strip_attention:!!m[1]};};
+const strip=(model={},o={})=>v.render({width:8,height:12,side:true,folded:true,model:{tag:'[e9]',styles,...model},state:'idle',harness:'claude',questions:()=>[],...o});
+const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
+assert.deepEqual(text(strip({route_total:1,lab:token('5 LB')})).slice(1,6),['│ ● e9 │','│      │','│ 1 RT │','│ 5 LB │','│      │']);
+for(const [s,row] of [['!1LB','│ !1LB │'],['?1LB','│ ?1LB │'],['9+LB','│ 9+LB │'],['!9+LB','│ !9+  │'],['?9+LB','│ ?9+  │']])
+ assert.deepEqual(text(strip({lab:token(s)})).slice(1,4),['│ ● e9 │','│      │',row],s);
+// With a wait: route count, LAB, wait, in that order.
+assert.deepEqual(text(strip({route_total:2,wait:'◑답 대기 1',lab:token('!1LB')})).slice(1,6),['│ ● e9 │','│      │','│ 2 RT │','│ !1LB │','│ ◑ 1  │']);
+// The mark takes the board's color, `LB` the label's dim.
+const row=strip({lab:token('!1LB')}).rows[3];assert(row.find(x=>x.text==='!1').foreground===217&&row.find(x=>x.text==='LB').dim);
+// Short of rows: blank, then `5 LB`, then `2 RT`, then the wait; a `!` outlasts the route count.
+const rows=(lab,h)=>text(strip({route_total:2,wait:'◑답 대기 1',lab:token(lab)},{height:h})).slice(1,-1);
+assert.deepEqual(rows('5 LB',7),['│ ● e9 │','│ 2 RT │','│ 5 LB │','│ ◑ 1  │','│  «   │']);
+assert.deepEqual(rows('5 LB',6),['│ ● e9 │','│ 2 RT │','│ ◑ 1  │','│  «   │']);
+assert.deepEqual(rows('!1LB',6),['│ ● e9 │','│ !1LB │','│ ◑ 1  │','│  «   │']);
+assert.deepEqual(rows('?1LB',5),['│ ● e9 │','│ ◑ 1  │','│  «   │']);
+// No board, no row; the border is the session's own whatever the board says.
+assert.deepEqual(text(strip({lab:null})).slice(1,3),['│ ● e9 │','│      │']);
+for(const state of ['idle','working','blocked'])
+ assert.deepEqual(strip({lab:token('!3LB')},{state,frame:2}).rows.map(r=>[r[0],r.at(-1)]),strip({},{state,frame:2}).rows.map(r=>[r[0],r.at(-1)]),state);
+// Every harness gets the same strip.
+for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({lab:token('?2LB')},{harness})),text(strip({lab:token('?2LB')})));
+""")
+
+    def test_a_press_on_the_lab_rows_opens_and_closes_them_where_they_were_drawn(self):
+        # Draft A: a press on the LAB rows opens the condition table in place and closes it again,
+        # by the host's own open set (as a route or a message); a press on targets drawn for another
+        # placement is dropped (review 1597 follow-up).
+        self.node(r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const code=text.slice(text.indexOf('function panelMouse('),text.indexOf('function displayReporter('))
+ +text.slice(text.indexOf('function panelAction('),text.indexOf('// Scroll the route box'));
+const g={side:true,folded:false,left:false,panelColumn:90,panelCols:40},place='true:true:false:false:40:130:30:false';
+const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,routeDetail:false,routeArea:null,epoch:0,empty:true,
+  geometry:()=>g,panelColumns:()=>40,panelRow:()=>0,height:()=>30,terminal:{modes:{mouseTrackingMode:'none'}},
+  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,panelOpen:new Set(),layouts:0,queueLayout(){c.layouts++;},queueDisplay(){},
+  panelHits:[{row:16,left:2,right:37,action:'lab:grp_1'},{row:17,left:2,right:37,action:'lab:grp_1'}]};
+vm.createContext(c);vm.runInContext(code,c);
+assert.equal(c.panelMouse(0,101,17,false),true);assert.deepEqual([...c.panelOpen],['lab:grp_1']);
+assert.equal(c.panelMouse(0,101,18,false),true);assert.deepEqual([...c.panelOpen],[]);
+// A row with no LAB target: nothing opens.
+c.panelMouse(0,101,20,false);assert.deepEqual([...c.panelOpen],[]);
+// Targets drawn for another placement: dropped.
+c.panelHitsPlacement='old';c.panelMouse(0,101,17,false);assert.deepEqual([...c.panelOpen],[]);
+assert.equal(c.layouts,2);
 """)
 
 

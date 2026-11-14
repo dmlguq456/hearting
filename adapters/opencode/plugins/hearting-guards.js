@@ -2264,6 +2264,15 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, "resend-limit-deferred", { deliveries: [...held] })
         return
       }
+      if (claimed.records.every(record => record.waits === true)) {
+        // Only quiet notices to a supervising session (a short or metric-less normal end):
+        // no turn of their own; they ride the next natural turn (session_notice).
+        if (!deferred.has(sid)) deferred.set(sid, new Set())
+        for (const record of claimed.records) deferred.get(sid).add(record.delivery_id)
+        await command("release", sid, { records: claimed.records })
+        log("skip", sid, "quiet-waits-for-next-turn", { deliveries: claimed.records.map(record => record.delivery_id) })
+        return
+      }
       const canSend = await nativeIdle()
       // A second native read is the final output/send recheck. If another
       // carrier's exact receipt appeared after our first read, settle it here
@@ -3540,7 +3549,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       observeCompactRuntimeStatus(ctx, sid, "working")
       if (sid) noteInteractionRequest(sid, event.properties?.requestID, "closed")
       if (sid && !isWorkerSession()) {
-        publishInteraction("clear", sid, { request_id: event.properties?.requestID })
+        publishInteraction("clear", sid, { request_id: event.properties?.requestID,
+          closure_reason: event.type === "question.rejected" ? "cancelled" : "answered" })
       }
     }
     if (event && event.type === "session.idle") {
@@ -3580,14 +3590,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       touchHeartbeat(dispatchSlug())
     }
     if (event && event.type === "session.deleted") {
-      const sid = (event.properties && event.properties.sessionID) || ""
+      const sid = event.properties?.sessionID || event.properties?.info?.id || ""
       if (sid) {
         if (!isWorkerSession()) {
-          const child = spawn("python3", [fleetInteractionState, "clear", "--harness", "opencode"], {
-            stdio: ["pipe", "ignore", "ignore"], detached: true })
-          child.on("error", () => {})
-          child.unref()
-          child.stdin?.end(JSON.stringify({ session_id: sid }))
+          await publishInteraction("clear", sid, { scope: "session", hook_event_name: "SessionEnd",
+            reason: "session.deleted" })
         }
         spawnSummary(sid, "final")
         completionCarrier.forget(sid)

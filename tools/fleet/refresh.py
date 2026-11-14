@@ -57,6 +57,7 @@ class LiveSnapshot:
     hearting: dict = None
     answer_waits: object = None
     project_status: object = None   # {cwd: status document record} (collectors.project_status)
+    experiment_status: object = None   # {cwd: experiment board} (collectors.experiment_status)
 
     def __iter__(self):
         # Keep the existing sessions, jobs unpacking surface for CLI readers.

@@ -11,7 +11,7 @@ This holds the static half in one user-owned file and measures the rest:
     list    inventory plus reachability, GPU load/VRAM, and exact process owners
     probe   the live GPU/process measurement alone, for one host or all of them
     self    measure this machine without requiring an inventory
-    claim   bind a detached root PID to its exact launcher session identity
+    claim   bind a detached root PID and its live run notices to a session
     run     start a detached command on a host under a stable run id
     runs    what has been started, and which of those are still alive
     tail    read a run's log from any host that shares the run root
@@ -2772,12 +2772,136 @@ for line in status.splitlines():
         break
 if effective != os.geteuid():
     raise SystemExit("process belongs to another effective uid")
+run_id, run_id_error = None, None
+try:
+    # Only this PID's environment; a parent's run is not this process's claim.
+    raw = (root / "environ").read_bytes()
+    for item in raw.split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if separator and key == b"HEARTING_COMPUTE_RUN_ID":
+            run_id = value.decode("utf-8", errors="strict")
+            break
+except (OSError, UnicodeError) as exc:
+    run_id_error = "process environment unreadable: %s" % type(exc).__name__
 print(json.dumps({
     "pid": pid, "start": start,
     "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+    "run_id": run_id, "run_id_error": run_id_error,
 }, sort_keys=True))
 PY
 """
+
+
+def _claim_run_recipient(run_root, identity, claim):
+    """Move a live standalone run's notices, independently of its GPU claim."""
+    run_id = identity.get("run_id")
+
+    def unchanged(reason):
+        return {"status": "unchanged", "run_id": run_id,
+                "message": "run 알림 수신처를 옮기지 못함: " + reason}
+
+    if identity.get("run_id_error"):
+        return unchanged(identity["run_id_error"])
+    if not run_id:
+        return {"status": "unchanged", "run_id": run_id,
+                "message": "등록 실행이 아니어서 옮길 알림 없음"}
+    if (not isinstance(run_id, str) or len(run_id) > 255
+            or Path(run_id).name != run_id or run_id in {".", ".."}
+            or any(ord(char) < 32 or ord(char) == 127 for char in run_id)):
+        return unchanged("유효하지 않은 run id")
+    owner = claim["owner"]
+    registered_worker = (bool(os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"))
+                         and os.environ.get("AGENT_DISPATCH_DEPTH") in {"1", "2"})
+    if registered_worker:
+        # A short-lived worker keeps its GPU label, but notices belong to its parent seat.
+        owner = _launcher_session_owner()
+        if owner is None:
+            return unchanged("dispatch 작업자 세션으로는 알림을 옮기지 않음: 담당 부모 세션을 확인할 수 없음")
+    # Explicit --harness/--session or the existing unambiguous launcher identity.
+    # Never copy attempt-parent authority from the run's previous recipient.
+    verified = _unique_session_owner({CANONICAL_SESSION_KEY[owner["harness"]]: owner["id"]})
+    if verified is None:
+        return unchanged("넘겨받는 세션 신원을 확인할 수 없음")
+    recipient = {"harness": verified["harness"], "id": verified["id"]}
+    recipient_label = (f"담당 부모 세션 {recipient['harness']}:{recipient['id']}"
+                       if registered_worker else "이 세션")
+    root = Path(run_root)
+    run_dir = root / run_id
+    meta_path = run_dir / "meta.json"
+    try:
+        # Reuse the claim lock so two claimers preserve both handover records.
+        with (root / OWNER_CLAIMS_LOCK).open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if run_dir.is_symlink() or meta_path.is_symlink():
+                return unchanged("실행 폴더 또는 meta.json이 심볼릭 링크임")
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict) or not isinstance(meta.get("provenance"), dict):
+                return unchanged("meta.json의 provenance를 읽을 수 없음")
+            if meta.get("host") != claim["host"] or meta.get("run_id") != run_id:
+                return unchanged("실행의 호스트 또는 run id가 다름")
+            if (run_dir / "exit_code").exists():
+                return unchanged("이미 끝난 실행")
+            provenance = meta["provenance"]
+            if provenance.get("resource") is not None or meta.get("owner_wait") is not None:
+                return unchanged("route 자원 알림은 담당 계보를 따름")
+            previous = {key: provenance.get(key) for key in ("session", "notify")}
+            import resource_progress
+            targets = resource_progress._notice_targets(previous)
+            if (previous["session"] == recipient
+                    and ("notify" not in provenance or previous["notify"] == recipient)):
+                return {"status": "unchanged", "run_id": run_id,
+                        "message": f"run {run_id}의 알림은 이미 {recipient_label}으로 옴"}
+            history = provenance.setdefault("recipient_handovers", [])
+            if not isinstance(history, list):
+                return unchanged("meta.json의 인계 이력을 읽을 수 없음")
+            handover = {"from": previous["session"], "to": recipient,
+                        "by": "compute-hosts claim", "at": claim["recorded_at"]}
+            if "notify" in provenance:
+                handover["notify_from"] = previous["notify"]
+                provenance["notify"] = recipient
+            provenance["session"] = recipient
+            history.append(handover)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=run_dir,
+                                                 prefix=".claim-", delete=False) as handle:
+                    temporary = Path(handle.name)
+                    os.fchmod(handle.fileno(), stat.S_IMODE(meta_path.stat().st_mode))
+                    json.dump(meta, handle, ensure_ascii=False, indent=1, sort_keys=True)
+                    handle.write("\n")
+                os.replace(temporary, meta_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError) as exc:
+        return unchanged(f"meta.json 읽기·교체 실패 ({type(exc).__name__})")
+
+    old_labels = ", ".join(f"{row['harness']}:{row['session_id']}" for row in targets) or "미확인"
+    result = {"status": "moved", "run_id": run_id, "from": previous, "to": recipient,
+              "message": f"run {run_id}의 알림은 이제 {recipient_label}으로 옴 (전에는 {old_labels})"}
+    warnings = []
+    # Reuse an existing watcher, or attach one to a previously sessionless run.
+    # Like reattachment, depth zero avoids rewriting meta from this in-memory snapshot.
+    if not _spawn_completion_watch(run_dir, meta, environ={**os.environ, "AGENT_DISPATCH_DEPTH": "0"}):
+        warnings.append("수신처는 옮겼지만 실행 감시자를 시작하지 못함")
+    for target in targets:
+        harness, session_id = target["harness"], target["session_id"]
+        if (harness, session_id) == (recipient["harness"], recipient["id"]):
+            continue
+        try:
+            from session_notice import notify
+            notice = notify(harness, session_id,
+                key=f"compute-run-claim:{run_id}:{len(history)}:{harness}:{session_id}",
+                subject="compute run recipient",
+                text=f"run {run_id}의 알림이 {recipient['harness']}:{recipient['id']}로 옮겨짐 (compute-hosts claim)",
+                lineage=target["lineage"])
+            if notice is None:
+                warnings.append(f"{harness}:{session_id}에 인계 알림을 남기지 못함")
+        except Exception:  # noqa: BLE001 -- the recipient and GPU claim are already recorded
+            warnings.append(f"{harness}:{session_id}에 인계 알림을 남기지 못함")
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def cmd_claim(args):
@@ -2785,8 +2909,9 @@ def cmd_claim(args):
     _refuse_namespace_self(config, "claim")
     (name, host), = _select(config, [args.host])
     if not args.session:
-        # The launcher's own session, read the way `run` exports it.
-        owner = _unique_session_owner(os.environ)
+        # Session keys come from session_identity; installed blank aliases are unset.
+        # Keep claim's strict ambiguity checks and its own GPU identity (not the parent).
+        owner = _unique_session_owner({key: value for key, value in os.environ.items() if value != ""})
         if owner is None or (args.harness and args.harness != owner["harness"]):
             raise ConfigError("claim needs --session (and --harness) outside one harness session")
         args.harness, args.session = owner["harness"], owner["id"]
@@ -2821,10 +2946,14 @@ def cmd_claim(args):
         "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     _record_claim(config["run_root"], claim)
+    claim["run_recipient"] = _claim_run_recipient(config["run_root"], identity, claim)
     if args.json:
         print(json.dumps(claim, ensure_ascii=False, sort_keys=True))
     else:
         print("claimed %s pid %d -> %s" % (name, args.pid, claim["owner"]["label"]))
+        print(claim["run_recipient"]["message"])
+        for warning in claim["run_recipient"].get("warnings", []):
+            print("warning: " + warning)
     return 0
 
 
@@ -3274,6 +3403,56 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
         return None
 
 
+def _meta_artifact_root(meta):
+    """The artifact root a run's metadata names (the run's own record, then its route's), without a subprocess."""
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
+    if not artifact_root and isinstance(route.get("route_file"), str):
+        try:
+            route_path = Path(route["route_file"])
+            if route_path.is_absolute() and not route_path.is_symlink():
+                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
+                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
+                    artifact_root = route_doc.get("artifact_root")
+        except (OSError, ValueError, TypeError):
+            pass
+    return artifact_root
+
+
+def _meta_row_id(meta):
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    return resource.get("row_id") or meta.get("row_id")
+
+
+def _catalog_identity(artifact_root, run_id, row_id=None, cache=None):
+    """`{name, condition_id, goal}` the project's experiment catalog gives this run, or None.
+
+    One read of the catalog per root when `cache` is shared; None when there is no catalog, the run is
+    not linked, two conditions claim it, or the condition has no name.  Never raises: a listing or a
+    run-ended notice is not held back for a name."""
+    if not artifact_root:
+        return None
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import experiment_catalog
+        key = str(artifact_root)
+        cache = {} if cache is None else cache
+        if key not in cache:
+            read = experiment_catalog.load(Path(key))
+            cache[key] = read.doc if read.status == "ok" else None
+        info = experiment_catalog.describe_run(cache[key], run_id, row_id)
+        if info and info.get("name"):
+            return {"name": info["name"], "condition_id": info["condition_id"], "goal": info.get("goal")}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _compute_observation_summary(result):
     # Part of the run-ended notice text; dispatch_session_sweep (this and older releases) matches the
     # no-observation form of that notice literally, so the words stay as they are.
@@ -3454,7 +3633,12 @@ def _report_run_end(run_dir, code, last_observation, now):
     if not notice_targets:
         return 0
     stop = _read_stop_reason(run_dir)
-    text = (f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
+    # The catalog name leads the notice (`{name}: run …`).  `dispatch_session_sweep` accepts that optional
+    # prefix (`_COMPUTE_RUN_NOTICE_RE`), so a named notice is recognized and folded like an unnamed one and
+    # the folded summary carries the name.  An unnamed run's text is unchanged.
+    experiment = _catalog_identity(_meta_artifact_root(meta), run_id, _meta_row_id(meta))
+    text = ((f"{experiment['name']}: " if experiment else "")
+            + f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
             + (f" ({stop})" if stop else "")
             + (f"; started by attempt {provenance.get('attempt_id')} in route {route.get('route_id')}"
                if provenance.get("notify") else "")
@@ -3464,7 +3648,15 @@ def _report_run_end(run_dir, code, last_observation, now):
     if here not in sys.path:
         sys.path.insert(0, here)
     try:
-        from session_notice import notify
+        import session_notice
+        notify = session_notice.notify
+        # A normal end that took under about a minute or reported no metric is quiet: the
+        # delivered text counts it on the one routine line instead of giving it its own.
+        subject = "compute run"
+        quiet_seconds = getattr(session_notice, "QUIET_RUN_SECONDS", None)
+        if code == 0 and quiet_seconds and (not _observation_has_metric(final_observation)
+                                            or _run_seconds(meta, now()) < quiet_seconds):
+            subject = "compute run, quiet"
         for target in notice_targets:
             if isinstance(target, dict):
                 harness, session_id = target.get("harness"), target.get("session_id")
@@ -3474,11 +3666,26 @@ def _report_run_end(run_dir, code, last_observation, now):
                 lineage = None
             notify(harness, session_id,
                    key=f"compute-run:{run_id}:{harness}:{session_id}",
-                   subject="compute run", text=text, route_id=route.get("route_id") or "route-free",
+                   subject=subject, text=text, route_id=route.get("route_id") or "route-free",
                    required_action="report-to-user", lineage=lineage)
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
+
+
+def _observation_has_metric(result):
+    observation = result.get("observation") if isinstance(result, dict) else None
+    summary = observation.get("summary") if isinstance(observation, dict) else None
+    return isinstance(summary, dict) and bool(summary.get("latest") or summary.get("latest_metrics"))
+
+
+def _run_seconds(meta, now):
+    """How long the run took by its recorded start, or infinity when that is unknown."""
+    try:
+        started = datetime.datetime.fromisoformat(str(meta.get("started_at"))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    return max(0.0, float(now) - started)
 
 
 def _run_state(config, run_id):
@@ -3526,16 +3733,7 @@ def _run_state(config, run_id):
     provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
     route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
     resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
-    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
-    if not artifact_root and isinstance(route.get("route_file"), str):
-        try:
-            route_path = Path(route["route_file"])
-            if route_path.is_absolute() and not route_path.is_symlink():
-                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
-                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
-                    artifact_root = route_doc.get("artifact_root")
-        except (OSError, ValueError, TypeError):
-            pass
+    artifact_root = _meta_artifact_root(meta)
     if artifact_root:
         try:
             import resource_progress
@@ -3548,6 +3746,7 @@ def _run_state(config, run_id):
             "launch_receipt": receipt,
             "experiment_observation": experiment_record,
             "experiment_record_path": str(experiment_record_path) if experiment_record_path else None,
+            "artifact_root": str(artifact_root) if artifact_root else None,
             "quiet_since": _iso_time(quiet_since) if quiet_since is not None else None,
             "state": state}
 
@@ -4114,6 +4313,19 @@ def _tmux_session_alive(
     return None
 
 
+def _pad_cells(text, width):
+    """`text` cut or padded to `width` terminal cells (Korean names are two cells a character)."""
+    import unicodedata
+    out, used = [], 0
+    for char in text:
+        cells = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if used + cells > width:
+            break
+        out.append(char)
+        used += cells
+    return "".join(out) + " " * (width - used)
+
+
 def cmd_runs(args):
     config = load_config()
     _refuse_namespace_self(config, "runs")
@@ -4131,7 +4343,10 @@ def cmd_runs(args):
         rows.append(state)
         if len(rows) >= args.limit:
             break
+    catalogs = {}
     for row in rows:
+        row["experiment"] = _catalog_identity(row.get("artifact_root"), row["run_id"],
+                                              _meta_row_id(row["meta"]), catalogs)
         if row["state"] == "running":
             host_name = row["meta"].get("host")
             alive = None
@@ -4155,7 +4370,7 @@ def cmd_runs(args):
             row["stale"] = False
     if args.json:
         print(json.dumps([{k: (str(v) if k == "dir" else v)
-                           for k, v in row.items() if k != "session_alive"}
+                           for k, v in row.items() if k not in ("session_alive", "artifact_root")}
                           for row in rows],
                          ensure_ascii=False, sort_keys=True))
         return 0
@@ -4173,7 +4388,8 @@ def cmd_runs(args):
         else:
             tail = row["state"]
         command = " ".join(row["meta"].get("command") or [])
-        print(f"  {row['run_id']:<34} {tail:<20} {command[:60]}")
+        name = (row.get("experiment") or {}).get("name") or "-"
+        print(f"  {row['run_id']:<34} {tail:<20} {_pad_cells(name, 24)} {command[:60]}")
     if not rows:
         print("  (none)")
     return 0
@@ -4264,7 +4480,7 @@ def build_parser():
     p_self.set_defaults(func=cmd_self)
 
     p_claim = sub.add_parser(
-        "claim", help="Bind a detached root PID to its exact launcher session")
+        "claim", help="Bind a detached root PID and its live run notices to a session")
     p_claim.add_argument("host")
     p_claim.add_argument("pid", type=int)
     p_claim.add_argument("--harness", choices=("claude", "codex", "opencode"),

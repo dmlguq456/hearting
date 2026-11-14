@@ -225,9 +225,11 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
                             "refuses it, it waits for the next owner turn."),
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
-    notice = (lead + " A parked owner gets its next turn once the children running now finish or "
-              "require attention; a serial sub-session chain starts no further sub-session while a "
-              "correction waits. A bound correction is never replayed after a sending or "
+    notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "
+              "within about 30 seconds, and the children keep running; an owner waiting only on "
+              "resources gets it within seconds. A serial sub-session chain starts no further "
+              "sub-session while a correction waits, so there it waits for the running sub-session. "
+              "A bound correction is never replayed after a sending or "
               "delivery-unknown receipt; consumer recovery requires the effective parent and "
               "positive quiescence evidence.")
     if timing == "phase-unavailable":

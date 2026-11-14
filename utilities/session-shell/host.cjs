@@ -318,14 +318,26 @@ function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuratio
 // Spec rule 49: the panel opened or folded through the same layout path a window resize takes
 // (the native is told its new width by the PTY resize in applyLayout). An open settings editor,
 // a question being answered or the panel's edge being dragged keeps an open panel open.
+function pinned(){return expanded&&(!!settings||block.focused||dragging);}
 function refold(){
-  const next=nativeDisplay.fold({cols,choice:foldChoice,configuration:displayConfiguration,pinned:expanded&&(!!settings||block.focused||dragging)});
+  const next=nativeDisplay.fold({cols,choice:foldChoice,configuration:displayConfiguration,pinned:pinned(),expanded});
   foldChoice=next.choice;
   if(expanded===!next.folded)return;
   expanded=!next.folded;
   if(!expanded)block.leave();
 }
-function foldByHand(folded){foldChoice=folded?{folded:true}:{folded:false,cols};}
+// #1586 review follow-up 3: when what kept the panel open ends, the judgment is the same for all
+// three: a width the person set (a drag, or the settings editor applying a new width) counts as
+// opening it by hand at this window width; otherwise (a question answered, the editor closed) the
+// width is judged once again, now.
+let wasPinned=false;
+function pinLapsed(){const now=pinned(),lapsed=wasPinned&&!now;wasPinned=now;return lapsed;}
+// #1586 review follow-up 6: folding by hand closes an open settings editor first (it never
+// stands squeezed into the strip with the keys going to it).
+function foldByHand(folded){
+  if(folded&&settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;}
+  foldChoice=folded?{folded:true}:{folded:false,cols};
+}
 function panelColumns(){return geometry().panelCols;}
 // The open panel's width: the projection is laid out for it while the panel is folded, so
 // opening paints current values at once.
@@ -348,9 +360,18 @@ function foldedSegments(){
   const note=deliveryNote();
   return [...(footerSegments.length?footerSegments:[{text:footer||`${harness} · CTX ?`}]),...(note?[{text:note}]:[])];
 }
+// Correction 8 (11-13): the frame the shown state's rule motion began (running moves a light,
+// a wait breathes), so the rule follows the frame's color on the same paint.
+let ruleMotionKind='',ruleSince=0;
+function ruleMotionSince(shown){
+  const kind=shown==='blocked'?'wait':shown==='working'||shown==='submitting'?'scan':'';
+  if(kind!==ruleMotionKind){ruleMotionKind=kind;ruleSince=spinFrame();}
+  return ruleSince;
+}
 function panelViewNow(){
+  const shown=shownState();
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shownState(),sid,harness,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:ruleMotionSince(shown),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
     cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
@@ -412,9 +433,14 @@ function motionSpan(y){
 // The gap beside the panel: the terminal's own background, or the native's own at its edge cell.
 // Two cells beside the open panel, one beside the folded strip (spec rule 49 (c)).
 function gapText(){return '\x1b[0m'+' '.repeat(geometry().gap);}
+// An inverse edge cell shows its foreground as its background (#1583 review follow-up (다)): the
+// gap takes that color, the terminal's own where that foreground is the default.
 function gapOf(line,x){
-  const cell=line?.getCell(x);if(!cell||cell.isBgDefault())return gapText();
-  return `\x1b[0;${succession.color(cell,true)}m${' '.repeat(geometry().gap)}\x1b[0m`;
+  const cell=line?.getCell(x);if(!cell)return gapText();
+  const inverse=!!cell.isInverse();
+  if(inverse?cell.isFgDefault():cell.isBgDefault())return gapText();
+  const sgr=inverse?succession.color(cell,false).replace(/^38;/,'48;'):succession.color(cell,true);
+  return `\x1b[0;${sgr}m${' '.repeat(geometry().gap)}\x1b[0m`;
 }
 function spun(y,row){
   if(paintedMotion&&y===paintedMotion.row&&typeof row==='string')return motionNow();
@@ -482,7 +508,11 @@ function spinPaint(){
 // unknown background keeps the terminal's own and paints no shade.
 const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=Number(value.split(';').pop());
   return value.includes(';')&&Number.isInteger(bg)?([7,15].includes(bg)?'light':bg>=0&&bg<16?'dark':''):'';})();
-function panelContent(){const view=panelViewNow();panelHits=view.hits;routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
+// #1586 review follow-up 5: the press targets carry the placement they were drawn for; a press
+// while the panel is being drawn for another placement (folding or opening) is dropped.
+let panelHitsPlacement='';
+function placement(){const g=geometry();return [expanded,g.side,g.folded,g.left,g.panelCols,cols,rows,!!settings].join(':');}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;panelHitsPlacement=placement();routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
 // only while it is on screen. Collapsed, under Fleet or the settings editor,
 // relayed, or no longer kept, it leaves them to the native like any other key;
@@ -611,7 +641,7 @@ function displayLines(lines,height,done) {
 let rebuilding=false,rebuildPending=false,displayQueued=false,layoutQueued=false;
 function queueDisplay(){
   if(displayQueued)return;displayQueued=true;
-  setImmediate(()=>{displayQueued=false;try{if(!fleetView&&(terminal.rows!==nativeRows()||terminal.cols!==nativeColumns()))applyLayout();else rebuildDisplay();}catch{rawRelay();}});
+  setImmediate(()=>{displayQueued=false;try{if(pinLapsed())refold();if(!fleetView&&(terminal.rows!==nativeRows()||terminal.cols!==nativeColumns()))applyLayout();else rebuildDisplay();}catch{rawRelay();}});
 }
 function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
@@ -693,40 +723,77 @@ function applyLayout() {
   if(relay)return;
   if(succeeding){layoutDeferred=true;return;}
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
-  refold();
+  refold();wasPinned=pinned();
   child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
-function queueProjection() {
-  if(ended||relay||projectionTimer||succeeding)return;
+// A redraw waits 25 ms to gather the events that come with it. A change seen only in a folder
+// watched whole (LAB's run records may change many times a second) redraws at most once a second:
+// it waits for the second since the last redraw began, and the last change always lands. Any other
+// request keeps the 25 ms wait, and that redraw carries the folder's changes as well.
+function queueProjection(folder=false) {
+  if(ended||relay||succeeding)return;
+  const now=Date.now(),delay=folder?Math.min(FOLDER_PAUSE,Math.max(25,projectionStarted+FOLDER_PAUSE-now)):25;
+  if(projectionTimer){if(projectionDue<=now+delay)return;clearTimeout(projectionTimer);}
   nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
-  projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
+  projectionDue=now+delay;
+  projectionTimer=setTimeout(()=>{projectionTimer=undefined;projectionStarted=Date.now();projection();},delay);
 }
+const FOLDER_PAUSE=1000;let projectionDue=0,projectionStarted=0;
+// A folder is its device, inode and birth time: one made again at the same path is another
+// folder even when it is given the old inode number again.
+function folderIdentity(directory){try{const s=fs.statSync(directory);return [s.dev,s.ino,s.birthtimeMs].join(':');}catch{return '';}}
+// A target that ends in the path separator is a folder watched whole: any entry written,
+// replaced, added or removed in it redraws, however many files it holds (LAB's run records).
+// A watched folder removed, renamed away or made again leaves its watch on the old folder: the
+// watch is dropped at that event, or at the next projection's observation, and made again.
+// A folder's watch that fails stays as failed until the next projection's observation makes it
+// again. Made again for its failure alone (the same folder, the same targets), it asks no 25 ms
+// redraw: its re-read takes a folder's once-a-second pace, so a watch failing again and again is
+// made again, and redrawn for, at most once a second, the last change still drawn. A watch on a
+// file target keeps its own way: dropped at the failure, made again as a new watch at the next
+// projection.
 function observeFiles(paths) {
   const wanted=new Map();let changed=false;
   for(const target of (Array.isArray(paths)?paths:[]).slice(0,64)){
     if(typeof target!=='string'||!path.isAbsolute(target)||target.length>4096)continue;
-    let directory=path.dirname(target);
+    let directory=target.endsWith(path.sep)?target.slice(0,-1)||path.sep:path.dirname(target);
     while(!fs.existsSync(directory)&&path.dirname(directory)!==directory)directory=path.dirname(directory);
     if(!wanted.has(directory))wanted.set(directory,[]);wanted.get(directory).push(target);
   }
   for(const [directory,row] of watchers)if(!wanted.has(directory)){row.watch.close();watchers.delete(directory);changed=true;}
   for(const [directory,targets] of wanted){
-    const existing=watchers.get(directory);
-    if(existing){if(JSON.stringify(existing.targets)!==JSON.stringify(targets))changed=true;existing.targets=targets;continue;}
+    const existing=watchers.get(directory),identity=folderIdentity(directory);
+    const retried=!!existing?.failed&&existing.identity===identity&&JSON.stringify(existing.targets)===JSON.stringify(targets);
+    if(existing&&(existing.failed||existing.identity!==identity)){existing.watch.close();watchers.delete(directory);}
+    else if(existing){if(JSON.stringify(existing.targets)!==JSON.stringify(targets))changed=true;existing.targets=targets;continue;}
     try{
-      const row={targets};
-      row.watch=fs.watch(directory,(_event,name)=>{
+      const row={targets,identity};
+      // Only folders watched whole among the targets: their changes take the once-a-second pace.
+      const folder=hits=>hits.length>0&&hits.every(target=>target.endsWith(path.sep));
+      row.watch=fs.watch(directory,(event,name)=>{
+        if(watchers.get(directory)!==row)return;
         const changed=name?path.join(directory,String(name)):directory;
-        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep))){
+        // The watched folder's own removal or move comes under its own name.
+        if(event==='rename'&&(name===path.basename(directory)||folderIdentity(directory)!==row.identity)){
+          row.watch.close();watchers.delete(directory);queueProjection(folder(row.targets));return;
+        }
+        const hits=name?row.targets.filter(target=>target===changed||target.startsWith(changed+path.sep)
+          ||target.endsWith(path.sep)&&changed.startsWith(target)):row.targets;
+        if(hits.length){
           // The native's own turn record is read at once; the rest waits for the projection.
           if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
-          queueProjection();
+          queueProjection(!!name&&folder(hits));
         }
       });
-      row.watch.on('error',()=>{row.watch.close();watchers.delete(directory);sourceError={reason:'file-observation-unavailable'};});
+      // Only a folder watched whole stays as failed (its slow, once-a-second remake). A file target's
+      // watch is dropped and made again at the projection as before this PR.
+      row.watch.on('error',()=>{row.watch.close();
+        if(row.targets.some(target=>target.endsWith(path.sep)))row.failed=true;
+        else if(watchers.get(directory)===row)watchers.delete(directory);
+        sourceError={reason:'file-observation-unavailable'};queueProjection(true);});
       watchers.set(directory,row);
-      changed=true;
+      if(retried)queueProjection(true);else changed=true;
     }catch{sourceError={reason:'file-observation-unavailable'};}
   }
   return changed;
@@ -881,13 +948,14 @@ async function applySettings(){
   const current=settings;if(!current||current.saving)return;current.saving=true;
   const result=await source('display-settings',{settings:current.value});
   if(settings!==current)return;
-  if(result.ok){displayConfiguration=result.settings;settings=undefined;}
+  if(result.ok){if(result.settings?.side_width!==current.before.side_width)foldByHand(false);displayConfiguration=result.settings;settings=undefined;}
   else{current.saving=false;current.error=true;}
   queueLayout();
 }
 function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
 function panelAction(action){
-  if(/^(?:route|message):/.test(action)&&!settings){
+  // A route, a message, or the LAB section (`lab:<group>`, draft A) opens in place and closes again.
+  if(/^(?:route|message|lab):/.test(action)&&!settings){
     if(panelOpen.has(action))panelOpen.delete(action);else{if(panelOpen.size>=16)panelOpen.clear();panelOpen.add(action);}
     queueLayout();return;
   }
@@ -956,6 +1024,8 @@ function panelMouse(code,x,y,release){
   // The wheel over the route box scrolls it in place (spec rule 23); elsewhere in the panel it does nothing.
   if((code&0xc3)===64||(code&0xc3)===65){if(!release&&!routeDetail&&!settings&&routeArea&&row>=routeArea.top&&row<=routeArea.bottom)scrollRoutes((code&1)?1:-1);return true;}
   if(release||code>=32||(code&3)!==0)return true;
+  // The targets drawn for this very placement are what the person pressed, a queued layout or not.
+  if(panelHitsPlacement!==placement())return true;
   const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
   if(hit){
     if(hit.action==='settings-buttons')panelAction(local<panelColumns()/3?'apply':local<panelColumns()*2/3?'cancel':'defaults');

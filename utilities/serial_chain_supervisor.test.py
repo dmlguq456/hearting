@@ -576,7 +576,9 @@ class SupervisorEdgeAcceptanceTest(unittest.TestCase):
                     process.stdin.write("initial assignment")
                     process.stdin.close()
                     process.stdin = None
-                    time.sleep(1.5)
+                    # The 2-second join wait runs in correction checkpoints first; the
+                    # repark comes once that whole wait has timed out.
+                    time.sleep(4.0)
                     self.assertIsNone(process.poll(), runtime)
                 finally:
                     process.terminate()

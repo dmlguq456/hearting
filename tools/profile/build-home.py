@@ -548,8 +548,9 @@ def _dispatch_defaults_module():
     if spec is None or spec.loader is None:
         raise ImportError('dispatch defaults loader is unavailable')
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
     spec.loader.exec_module(module)
+    # Cache it only once loaded: a concurrent caller never sees a half-run module.
+    sys.modules[name] = module
     return module
 
 

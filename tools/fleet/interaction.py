@@ -157,6 +157,24 @@ def _atomic_write(path, payload):
         raise
 
 
+def _remember_closed(current, status):
+    """Best-effort diagnostic metadata; it cannot change publication or closing."""
+    if current is None:
+        return
+    try:
+        import sys
+        from pathlib import Path
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        from human_wait_state import record_closed_question
+        item_id = "S1:%s:%s:%d" % (current["harness"], current["session_id"],
+                                    int(current["waiting_since"] * 1000))
+        record_closed_question(item_id, status)
+    except Exception:
+        pass  # diagnostic loss must never change the existing wait lifecycle
+
+
 def set_wait(session_id, harness, kind, source, now=None, *,
              request_id=None, turn_id=None, item_id=None):
     """Atomically publish one exact wait marker; every failure is observational."""
@@ -166,22 +184,26 @@ def set_wait(session_id, harness, kind, source, now=None, *,
                           request_id=request_id, turn_id=turn_id, item_id=item_id)
         if payload is None:
             return False
+        previous = read_wait(session_id, harness)
         _atomic_write(sidecar_path(session_id, harness), payload)
+        if previous and previous["waiting_since"] != payload["waiting_since"]:
+            _remember_closed(previous, "replaced")
         return True
     except Exception:
         return False
 
 
-def clear_wait(session_id, harness, *, request_id=None):
+def clear_wait(session_id, harness, *, request_id=None, reason="closed"):
     """Remove only the exact harness/session marker."""
     try:
+        current = read_wait(session_id, harness)
         if request_id is not None:
-            current = read_wait(session_id, harness)
             expected = _safe_identity_ref("request_id", request_id)
             if expected is None or current is None or current.get("request_id") != expected:
                 return False
         path = sidecar_path(session_id, harness)
         os.unlink(path)
+        _remember_closed(current, reason)
         return True
     except FileNotFoundError:
         return True

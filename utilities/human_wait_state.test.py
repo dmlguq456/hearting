@@ -3393,6 +3393,275 @@ class MessageCompletionTests(unittest.TestCase):
                     "harness": harness, "session_id": b["session_id"]})
                 self.assertEqual(selected["state"], "open", selected)
 
+    def test_an_answered_message_question_leaves_the_published_waits_at_once(self):
+        # Correction 3 (11-13): answering a registered question from the panel completed it, but the
+        # published answer-wait cache kept listing it until the next collection (up to a minute), so
+        # the panel kept `◑ 1` and the question. Completion now drops that one wait from the cache
+        # and Fleet's view right away, the rule the collection applies anyway; other waits stay.
+        a, ea = self.f.ask("claude", "session-a", "question A")
+        b, eb = self.f.ask("claude", "session-b", "question B")
+        def item(signal):
+            return {"id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+                    "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+        self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+        before = state._read_cache_file()
+        self.assertEqual(before["total"], 2)
+        self.f.submit(ea, "answer A")
+        wire, _, _ = self.f.prepare(a)
+        self.f.consume(a, wire)
+        self.assertEqual(self.source(a)["lifecycle"], "answered")
+        after = state._read_cache_file()
+        self.assertEqual([row["id"] for row in after["items"]], [b["id"]])
+        self.assertEqual(after["total"], 1)
+        self.assertNotIn("claude\0session-a", after["by_session"])
+        self.assertEqual(after["by_session"]["claude\0session-b"], [b["id"]])
+        fleet = json.loads(state._fleet_cache_path().read_text())
+        self.assertEqual([row["id"] for row in fleet["items"]], [b["id"]])
+        self.assertEqual(fleet["total"], 1)
+        self.assertEqual(state.cached_statusline("claude", "session-a")[0][1], 0)
+        # A direct answer in the session settles the same way.
+        self.f.direct(b, "answer B")
+        self.assertEqual(state._read_cache_file()["items"], [])
+
+    def test_a_collection_read_before_the_answer_does_not_publish_the_answered_question(self):
+        # Review 1597-1 (11-13): one pass read A, A was answered from the panel and the same
+        # session registered B, then the pass published what it had read — the answered A came
+        # back to the cache and Fleet until the next collection. The publish re-reads each
+        # registered question's exact source under the lock its completion settles with.
+        from tools.fleet.collectors import dispatch
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, ea = self.f.ask(harness, "session-a", "first")
+                b, _ = self.f.ask(harness, "session-b", "other")
+                original = observation.read_answer_waits
+                def collect():
+                    with mock.patch.object(observation, "_session_liveness_probe",
+                                           return_value=lambda *args: "live"), \
+                         mock.patch.object(observation, "_codex_rollout_waits",
+                                           return_value={"complete": True, "pending": {}}):
+                        return original(jobs_paths=[self.f.jobs])
+                self.assertTrue(state.publish_cache(collect()))
+                later = []
+                def read_then_answer(**kwargs):
+                    seen = collect()
+                    self.f.submit(ea, "answer first")
+                    wire, _, _ = self.f.prepare(a)
+                    self.f.consume(a, wire)
+                    later.append(self.f.ask(harness, "session-a", "second")[0])
+                    return seen
+                with mock.patch.object(observation, "read_answer_waits", side_effect=read_then_answer), \
+                     mock.patch.object(state, "_route_demands", return_value={}), \
+                     mock.patch.object(state, "_notify_result"), \
+                     mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[self.f.jobs]):
+                    self.assertTrue(state._refresh_cache())
+                self.assertEqual(self.source(later[0])["lifecycle"], "open")
+                shared = state._read_cache_file()
+                fleet = json.loads(state._fleet_cache_path().read_text())
+                for view in (shared, fleet):
+                    self.assertEqual([row["id"] for row in view["items"]], [b["id"]])
+                    self.assertEqual(view["total"], 1)
+                self.assertNotIn(harness + "\0session-a", shared["by_session"])
+                # The next collection (registration requests one) shows B beside the other question.
+                with mock.patch.object(observation, "read_answer_waits", side_effect=lambda **kw: collect()), \
+                     mock.patch.object(state, "_route_demands", return_value={}), \
+                     mock.patch.object(state, "_notify_result"), \
+                     mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[self.f.jobs]):
+                    self.assertTrue(state._refresh_cache())
+                self.assertEqual(sorted(row["id"] for row in state._read_cache_file()["items"]),
+                                 sorted([b["id"], later[0]["id"]]))
+
+    def test_a_source_not_read_at_publication_keeps_its_unanswered_question(self):
+        # Review 1597-r2 (11-13): the publication's re-read turned a failed read (`_read` folds an
+        # OSError into None) into "that question ended", so one EIO on the open A's source left A
+        # out of the cache and Fleet with `complete: true` and no health, until the next collection.
+        # Not read is not ended: A stays as the collection read it, and the publication says it is
+        # incomplete through the existing health path. An ended (answered) A still leaves (above).
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, _ = self.f.ask(harness, "session-a", "unanswered A")
+                b, _ = self.f.ask(harness, "session-b", "unanswered B")
+                with mock.patch.object(observation, "_session_liveness_probe",
+                                       return_value=lambda *args: "live"), \
+                     mock.patch.object(observation, "_codex_rollout_waits",
+                                       return_value={"complete": True, "pending": {}}):
+                    seen = observation.read_answer_waits(jobs_paths=[self.f.jobs])
+                self.assertTrue(seen["complete"])
+                source = state._signal_path(a)
+                raw = source.read_bytes()
+                original, failed = Path.read_text, []
+                def transient(path, *args, **kwargs):
+                    if path == source and not failed:
+                        failed.append(path)
+                        raise OSError(5, "synthetic transient I/O failure")
+                    return original(path, *args, **kwargs)
+                with mock.patch.object(Path, "read_text", transient):
+                    self.assertTrue(state.publish_cache(seen))
+                self.assertEqual(len(failed), 1)
+                self.assertEqual(source.read_bytes(), raw)
+                self.assertEqual(self.source(a)["lifecycle"], "open")
+                shared = state._read_cache_file()
+                fleet = json.loads(state._fleet_cache_path().read_text())
+                for view in (shared, fleet):
+                    self.assertEqual(sorted(row["id"] for row in view["items"]), sorted([a["id"], b["id"]]))
+                    self.assertEqual(view["total"], 2)
+                    self.assertIs(view["complete"], False)
+                    self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+                self.assertEqual(shared["by_session"][harness + "\0session-a"], [a["id"]])
+                # The next publication that reads the source is complete again.
+                self.assertTrue(state.publish_cache(seen))
+                shared = state._read_cache_file()
+                self.assertEqual(sorted(row["id"] for row in shared["items"]), sorted([a["id"], b["id"]]))
+                self.assertIs(shared["complete"], True)
+                self.assertEqual(shared["health"], [])
+                # A source that is gone has ended: it still leaves at once.
+                source.unlink()
+                self.assertTrue(state.publish_cache(seen))
+                self.assertEqual([row["id"] for row in state._read_cache_file()["items"]], [b["id"]])
+
+    def test_the_publication_table_for_each_question_state_read_and_collection(self):
+        # Review 1597-r3 (11-13), the third finding at this spot (r1: a late publication brought an
+        # answered question back; r2: a failed read hid an unanswered one; r3: a failed read brought
+        # an answered one back). The whole table is fixed here instead of one cell at a time: the
+        # question's real state x the publication's re-read of its source x what is published (a
+        # collection read before the change, published late, or a new collection). B, an
+        # unanswered question of another session, is read normally and always stays.
+        # Review 1597-r4: a source that is read decides; the completions are used only when it
+        # cannot be read. "reopened" is A answered and settled, then the same id registered again
+        # (another question C, then A, in the same input sequence): read, it shows; not read, its
+        # completion keeps it out until a publication that reads it (checked below).
+        import session_shell
+        LOAD, DROP = "load", "drop"
+        # state -> {read: (late publication of the earlier collection, new collection)}
+        table = {
+            "open":            {"ok": (LOAD, LOAD), "fail": (LOAD, LOAD)},
+            "answered":        {"ok": (DROP, DROP), "fail": (DROP, DROP)},
+            "source-answered": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-expired":  {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-cancelled": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-gone":     {"ok": (DROP, DROP), "fail": (DROP, DROP)},
+            "replaced":        {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "reopened":        {"ok": (LOAD, LOAD), "fail": (DROP, DROP)},
+        }
+        def collect():
+            with mock.patch.object(observation, "_session_liveness_probe",
+                                   return_value=lambda *args: "live"), \
+                 mock.patch.object(observation, "_codex_rollout_waits",
+                                   return_value={"complete": True, "pending": {}}):
+                return observation.read_answer_waits(jobs_paths=[self.f.jobs])
+        cell = 0
+        for harness in ("claude", "codex", "opencode"):
+            for change, reads in table.items():
+                for read, expected in reads.items():
+                    for collection, want in zip(("late", "new"), expected):
+                        cell += 1
+                        with self.subTest(harness=harness, state=change, read=read, collection=collection):
+                            for path in state.state_root().glob("*.json"):
+                                path.unlink()
+                            sid = "session-a-%d" % cell
+                            a, ea = self.f.ask(harness, sid, "question A %d" % cell)
+                            b, _ = self.f.ask(harness, "session-b-%d" % cell, "question B %d" % cell)
+                            earlier = collect()
+                            self.assertTrue(state.publish_cache(earlier))
+                            source = state._signal_path(a)
+                            if change in ("answered", "reopened"):
+                                self.f.submit(ea, "answer A")
+                                wire, _, _ = self.f.prepare(a)
+                                self.f.consume(a, wire)
+                                self.assertEqual(self.source(a)["lifecycle"], "answered")
+                                self.assertNotIn(a["id"], [row["id"] for row in state._read_cache_file()["items"]])
+                            if change == "reopened":
+                                self.f.ask(harness, sid, "question C %d" % cell)
+                                again, _ = self.f.ask(harness, sid, "question A %d" % cell)
+                                self.assertEqual(again["id"], a["id"])
+                                self.assertEqual(self.source(a)["lifecycle"], "open")
+                                self.assertIn(a["id"], [row["id"] for row in
+                                                        state._read_cache_file()["settled_waits"]])
+                            elif change.startswith("source-") and change != "source-gone":
+                                # Reflected in the source only; its completion has not settled yet.
+                                signal = self.source(a)
+                                signal["lifecycle"] = change.split("-", 1)[1]
+                                state._write_signal_source(signal)
+                            elif change == "source-gone":
+                                source.unlink()
+                            elif change == "replaced":
+                                replacement, _ = self.f.ask(harness, sid, "next question %d" % cell)
+                                self.assertNotEqual(replacement["id"], a["id"])
+                                self.assertEqual(state._signal_path(replacement), source)
+                            published = earlier if collection == "late" else collect()
+                            original = Path.read_text
+                            def unreadable(path, *args, **kwargs):
+                                if path == source:
+                                    raise OSError(5, "synthetic I/O failure")
+                                return original(path, *args, **kwargs)
+                            with mock.patch.object(Path, "read_text",
+                                                   unreadable if read == "fail" else original):
+                                self.assertTrue(state.publish_cache(published))
+                            shared = state._read_cache_file()
+                            fleet = json.loads(state._fleet_cache_path().read_text())
+                            panel = session_shell.session_questions(
+                                harness, sid, view=state.cached_view(request=False))
+                            seen = {"shared": a["id"] in [row["id"] for row in shared["items"]],
+                                    "by_session": a["id"] in shared["by_session"].get(harness + "\0" + sid, ()),
+                                    "fleet": a["id"] in [row["id"] for row in fleet["items"]],
+                                    "panel": a["id"] in [item["id"] for item in panel]}
+                            self.assertEqual(seen, dict.fromkeys(seen, want == LOAD))
+                            for view in (shared, fleet):
+                                self.assertIn(b["id"], [row["id"] for row in view["items"]])
+                                self.assertEqual(view["total"], len(view["items"]))
+                            if change == "open" and read == "fail":
+                                for view in (shared, fleet):
+                                    self.assertIs(view["complete"], False)
+                                    self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+                            if change == "reopened":
+                                if read == "fail":
+                                    # The next publication that reads the source shows it.
+                                    self.assertTrue(state.publish_cache(published))
+                                    shared = state._read_cache_file()
+                                    self.assertIn(a["id"], [row["id"] for row in shared["items"]])
+                                    self.assertIn(a["id"], [row["id"] for row in json.loads(
+                                        state._fleet_cache_path().read_text())["items"]])
+                                # Read open, its id leaves the completions.
+                                self.assertNotIn(a["id"], [row["id"] for row in
+                                                           shared.get("settled_waits", ())])
+
+    def test_settled_waits_leave_once_a_later_collection_is_published(self):
+        # Review 1597-r3: the remembered completions do not grow. Many answers between two
+        # collections are all remembered; the next collection that started after them clears them.
+        def collect():
+            with mock.patch.object(observation, "_session_liveness_probe",
+                                   return_value=lambda *args: "live"), \
+                 mock.patch.object(observation, "_codex_rollout_waits",
+                                   return_value={"complete": True, "pending": {}}):
+                return observation.read_answer_waits(jobs_paths=[self.f.jobs])
+        asked = [self.f.ask("claude", "session-%d" % n, "question %d" % n) for n in range(5)]
+        earlier = collect()
+        self.assertTrue(state.publish_cache(earlier))
+        for signal, envelope in asked:
+            self.f.direct(signal, "answer")
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+        ids = [signal["id"] for signal, _ in asked]
+        self.assertEqual([row["id"] for row in state._read_cache_file()["settled_waits"]], ids)
+        # The same answer settled twice is remembered once.
+        state._settle_published_wait(ids[-1])
+        self.assertEqual([row["id"] for row in state._read_cache_file()["settled_waits"]], ids)
+        # Late publications of the earlier collection publish none of them and keep the list.
+        for _ in range(3):
+            self.assertTrue(state.publish_cache(earlier))
+            value = state._read_cache_file()
+            self.assertEqual(value["items"], [])
+            self.assertEqual(len(value["settled_waits"]), len(ids))
+        # A collection that started after the answers clears the list.
+        self.assertTrue(state.publish_cache(collect()))
+        self.assertNotIn("settled_waits", state._read_cache_file())
+        # The bound holds even if no later collection ever comes.
+        for n in range(state._SETTLED_WAITS_MAX + 10):
+            state._settle_published_wait("S4:%064x" % n)
+        self.assertEqual(len(state._read_cache_file()["settled_waits"]), state._SETTLED_WAITS_MAX)
+
     def test_legacy_question_keeps_its_address_when_another_session_registers(self):
         import session_tidy as tidy
         a, envelope = self.f.ask("codex", "session-a", "legacy question")

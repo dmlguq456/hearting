@@ -74,8 +74,20 @@ def _label(raw: str) -> str | None:
     return next((name for name, labels in _LABELS.items() if key in labels), None)
 
 
+def original_work_request(text: str) -> str:
+    """Unwrap an agreed-intent-first leg before displaying or clipping its request."""
+    # Leg prompts put the agreed answers first. The original request still owns
+    # these display/intent fields; headings in the generated wrapper are not goals.
+    if (text or "").startswith("## Agreed intent\n"):
+        _, separator, original = text.partition("\n## Original work request\n\n")
+        if separator and "\n## Frame briefs (read-only input)\n" in original:
+            return original.rsplit("\n## Frame briefs (read-only input)\n", 1)[0].strip()
+    return text or ""
+
+
 def _split_header(text: str) -> tuple[dict, str]:
     """The leading label lines of a prompt file and the text after them."""
+    text = original_work_request(text)
     found: dict = {}
     lines = (text or "").splitlines()
     index = 0
@@ -790,7 +802,8 @@ def _entrance_line(route, primary, t):
     return t("completion.entrance", path=str(Path(root) / "README.md"))
 
 
-def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None, assessment=None) -> str:
+def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None, assessment=None,
+                       publication=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -798,6 +811,8 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     itself; a report whose headings cannot be matched is named, not summarised,
     so nothing is invented and nothing unverified reads as verified. The labels
     come from the shared UI-text catalog (`t`; English unless Korean is declared).
+    A shared-spec `publication` the settlement observed as pending is named on
+    one line right after the result: it does not hold the completion back.
     """
     t = t or ui_translator()
     request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
@@ -823,6 +838,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
     lines.append(t("completion.result", result=result))
+    if isinstance(publication, dict) and publication.get("status") == "pending":
+        reason = publication.get("detail") or publication.get("reason") or "-"
+        lines.append(t("completion.publication_pending", reason=_line(reason, 160)))
     for state in ("undelivered", "unknown"):
         if (corrections or {}).get(state):
             lines.append(t("completion.corrections_" + state, count=corrections[state]))

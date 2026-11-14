@@ -16,6 +16,8 @@ Codex/OpenCode parity a carrier problem rather than a schema fork.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -69,7 +71,7 @@ def _is_watch_command(command: str) -> bool:
         if Path(token).name not in {"peer-steward", "peer-steward.py"}:
             continue
         rest = [p for p in parts[index + 1:] if not p.startswith("-")]
-        return bool(rest) and rest[0] == "watch"
+        return bool(rest) and rest[0] in {"watch", "rearm"}
     return False
 
 
@@ -90,8 +92,8 @@ def _run(*argv: str, timeout: float | None = None) -> subprocess.CompletedProces
         return None
 
 
-def parse_arm(payload: dict[str, Any]) -> tuple[str, str] | None:
-    """Return `(watch_id, target)` for the watch this hook owns, else None.
+def parse_arm(payload: dict[str, Any]) -> tuple[str, str, Path] | None:
+    """Return `(watch_id, target, watch_root)` for this hook's watch, else None.
 
     Fail-closed on every condition: a mismatch is not an error to report, it is
     simply not this hook's watch.
@@ -107,7 +109,7 @@ def parse_arm(payload: dict[str, Any]) -> tuple[str, str] | None:
         return None
 
     fields = _fields(stdout)
-    if _single(fields, "state") != "armed":
+    if _single(fields, "state") not in {"armed", "already-armed", "alive", "rearmed"}:
         return None
     if _single(fields, "wake") != "hook":
         return None
@@ -143,7 +145,7 @@ def parse_arm(payload: dict[str, Any]) -> tuple[str, str] | None:
     receipt_path = Path(receipt)
     if not receipt_path.is_absolute() or receipt_path.parent != Path(watch_root):
         return None
-    return watch_id, str(entry.get("target") or "-")
+    return watch_id, str(entry.get("target") or "-"), Path(watch_root)
 
 
 def notice(watch_id: str, target: str, line: str, *, rearmed: int) -> str:
@@ -184,7 +186,13 @@ def main() -> int:
     armed = parse_arm(payload)
     if armed is None:
         return 0
-    watch_id, target = armed
+    watch_id, target, watch_root = armed
+    with ExitStack() as locks:
+        return _wait(watch_id, target, watch_root, locks)
+
+
+def _wait(watch_id: str, target: str, watch_root: Path, locks: ExitStack) -> int:
+    locked_ids = set()
 
     # One deadline, computed once. A rearm must never restart it: a restarted
     # clock pushes the hook past the runtime's own kill and the session gets no
@@ -202,6 +210,18 @@ def main() -> int:
     # contract, and it keeps the "no poll loop in product code" assertion honest.
     rearmed = 0
     for attempt in range(2):
+        if watch_id not in locked_ids:
+            # Repeated watch/rearm calls may arm another hook. Only one carrier
+            # waits and emits; process death releases the lock for a replacement.
+            # Keep the inode (never unlink) and any predecessor lock until exit.
+            if not re.fullmatch(r"[0-9a-f]{16}", watch_id):
+                return 0
+            try:
+                lock = locks.enter_context((watch_root / f"{watch_id}.hook.lock").open("a"))
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return 0
+            locked_ids.add(watch_id)
         # The join blocks for the whole remaining budget; its own `--timeout`
         # is the bound, and the subprocess cap only backstops a wedged utility.
         join_cap = max(1.0, deadline - time.monotonic()) + BUDGET_MARGIN_SECONDS

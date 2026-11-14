@@ -32,11 +32,12 @@ DEATH_NOTES = frozenset({
     'dead-missing-result', 'dead-parent-orphaned', 'dead-governor-reservation-transfer',
     'dead-no-progress', 'dead-timeout',
 })
-# An owner whose runtime died under it: the process exited (`dead-runtime-exit`) or the runtime
-# returned an error envelope such as a provider 5xx (`dead-runtime-error`). An explicit `start`
-# replaces each settled failed attempt through the same checked path without a count cutoff; the
-# parent's bound completion carrier replaces one observed column set once.
-RUNTIME_DEATH_NOTES = frozenset({'dead-runtime-exit', 'dead-runtime-error'})
+# An owner whose runtime died under it: the process exited (`dead-runtime-exit`), the runtime
+# returned an error envelope such as a provider 5xx (`dead-runtime-error`), or the provider refused
+# the session (`dead-auth`). An explicit `start` replaces each settled failed attempt through the
+# same checked path without a count cutoff; the parent's bound completion carrier replaces one
+# observed column set once. Same set as `dispatch_supervisor_terminal.RUNTIME_END_NOTES`.
+RUNTIME_DEATH_NOTES = frozenset({'dead-runtime-exit', 'dead-runtime-error', 'dead-auth'})
 SCHEMA = 'automatic-dead-replacement-v1'
 # D2: a frame leg whose `top` the frame rule assigned is replaced once, one profile lower, when it
 # stops at a usage limit. The claim carries exactly this value; nothing else may.

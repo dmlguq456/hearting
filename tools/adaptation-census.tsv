@@ -64,6 +64,7 @@ shared-utility-deferred	harness_behavior_cases_design_mcp.py
 shared-utility-deferred	harness_behavior_cases_e.py
 shared-utility-deferred	harness_behavior_cases_followthrough.py
 shared-utility-deferred	harness_behavior_cases_idle_wake.py
+shared-utility-deferred	harness_behavior_cases_lab_warning.py
 shared-utility-deferred	harness_behavior_cases_opencode_plugin.py
 shared-utility-deferred	harness_behavior_cases_session_upgrade.py
 shared-utility-deferred	harness_behavior_cases_status_footer.py
@@ -286,6 +287,7 @@ utility-deferred	dispatch_supervisor_terminal.py
 utility-deferred	dispatch_terminal_commit.py
 utility-deferred	dispatch_v20.test.py
 utility-deferred	dispatch_wrapper_common.py
+utility-deferred	experiment_board.py
 utility-deferred	experiment_catalog.py
 utility-deferred	extract_web_figures.py
 utility-deferred	fleet_cutover_gate.py
@@ -370,6 +372,7 @@ utility-deferred	stage_session_contract.py
 utility-deferred	stage_session_runtime.py
 utility-deferred	stage_session_runtime.test.py
 utility-deferred	steward_check.py
+utility-deferred	steward_session_end.test.py
 utility-deferred	subdivision_batch_admission.py
 utility-deferred	tidy_decisions.py
 utility-deferred	tidy_transcripts.py
