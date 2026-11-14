@@ -720,9 +720,9 @@ class NoticeOwnerObservation:
     attempt id); anything else -- an unreadable, missing, broken-link or
     directory path, a torn last line or invalid UTF-8, a row that did not
     parse -- leaves it ``None``: nothing was observed, so no owner is absent.
-    ``owner_rows`` keeps each observed attempt's status and recorded launch
-    incarnation beside its id, so the eligibility rule can tell a row the
-    notice can still be delivered through from one it cannot. The archive is
+    ``owner_rows`` keeps each observed attempt's latest status beside its id,
+    so the eligibility rule can tell a row the notice can still be delivered
+    through from one it cannot. The archive is
     read lazily, after the live file, with the same rule: the archive writes
     and syncs a row before the live file drops it, so a row is always in one
     of the two reads.
@@ -748,9 +748,7 @@ class NoticeOwnerObservation:
             if not attempt_id:
                 return None, None
             attempts.add(attempt_id)
-            rows.setdefault(attempt_id, (fields[1],
-                                         metadata.get("parent_runtime_pid", ""),
-                                         metadata.get("parent_runtime_pid_start", "")))
+            rows[attempt_id] = fields[1]  # the last row wins, as the resolver reads it
         return frozenset(attempts), rows
 
     @staticmethod
@@ -893,7 +891,7 @@ def _notice_owner_row_unreceivable(attempt_id: str, observation: NoticeOwnerObse
     row = (observation.owner_rows or {}).get(attempt_id)
     if row is None:
         return False
-    status, _pid, _start = row
+    status = row
     if status in {"open", "running"}:
         return False
     if status != "done":

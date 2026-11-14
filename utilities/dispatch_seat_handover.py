@@ -1826,28 +1826,6 @@ def _lineage_index(read_context=None):
         return {}, "handover-unreadable:" + str(exc)
 
 
-def _notice_owner_session_ended(row, harness, session, *, read_context=None) -> bool:
-    """Whether a notice's owner session is confirmed ended for good.
-
-    A recorded end status (killed, cancelled, failed) is the registry's own
-    end record. A ``done`` row ends only when the session itself is proven
-    ended natively -- the same proof the retained notice's answer-preserved
-    path uses; an alive, unrecognized or unprovable row is not ended, so its
-    notice keeps waiting.
-    """
-    if row.status not in {"killed", "cancelled", "failed"}:
-        if row.status != "done":
-            return False
-        try:
-            from peer_steward_native import end_observation as fresh_end_observation, native_lifetime
-        except ImportError:
-            return False
-        observation = (read_context.end_observation(fresh_end_observation)
-                       if read_context is not None else None)
-        return native_lifetime(harness, session, observation=observation) == "ended"
-    return True
-
-
 def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness="", read_context=None):
     """Answer each recipient question from the common qualified observation."""
     metadata = metadata or {}
@@ -1862,38 +1840,16 @@ def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness
             row = current_attempt_row(jobs, metadata["attempt_id"], read_context=read_context) if jobs is not None else None
             # The parent is a fact recorded at launch, so how the child ended never hides it; only
             # the attempt's own session (nobody is left to read it once it ended) needs a live row.
-            if row is None:
+            if row is None or (question == "owner-session" and row.status not in {"open", "running", "done"}):
                 raise ValueError("notice-attempt-unavailable")
             if question == "owner-session":
                 if row.metadata.get("harness") != original_harness:
                     raise ValueError("notice-consumer-harness-mismatch")
                 state = read_supervisor_phase_state(dispatch_state_root(jobs) / "supervisor-state" /
                     (metadata["attempt_id"] + ".json"), metadata["attempt_id"])
-                if (row.status in {"open", "running", "done"}
-                        and state is not None and isinstance(state.resource, dict)
-                        and state.resource.get("session_id") == registered):
-                    return RecipientResolution(registered, original_harness, "no-handover", registered, original_harness)
-                # The owner cannot receive its own notice: its row is a recorded
-                # end, or its waiting supervisor is gone. An owner confirmed
-                # ended with nothing succeeding it follows the #1624 answer for
-                # an ended owner -- its parent; a live or unprovable end, or a
-                # confirmed successor, keeps the refusal so the notice waits
-                # instead of reaching the wrong session.
-                if not _notice_owner_session_ended(row, original_harness, registered,
-                                                  read_context=read_context):
+                if state is None or not isinstance(state.resource, dict) or state.resource.get("session_id") != registered:
                     raise ValueError("notice-consumer-unavailable")
-                _end, successor = _chain_end(_pass_lineage_graph(read_context),
-                                             original_harness, registered)
-                if successor != "self":
-                    raise ValueError("notice-consumer-unavailable")
-                parent_sid = str(row.metadata.get("parent_sid") or "")
-                parent_harness = _registered_parent_harness(row.metadata)
-                if not parent_sid or not parent_harness:
-                    raise ValueError("notice-owner-ended-unroutable")
-                return resolve_recipient("attempt-parent", metadata={
-                    "kind": "attempt-parent", "attempt_id": metadata["attempt_id"],
-                    "harness": parent_harness, "session_id": parent_sid},
-                    jobs=jobs, read_context=read_context)
+                return RecipientResolution(registered, original_harness, "no-handover", registered, original_harness)
             if (row.metadata.get("parent_sid") != registered
                     or (_registered_parent_harness(row.metadata) or original_harness) != original_harness
                     or row.metadata.get("parent_completion_delivery") != parent_completion(original_harness).get("carrier")):

@@ -3844,20 +3844,13 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
                     "kind": "attempt-parent", "harness": "claude", "session_id": sid, "attempt_id": meta["attempt_id"]})
                 owner, = self.notices(sid=sid, label="owner-" + status, lineage={
                     "kind": "owner-session", "harness": "claude", "session_id": sid, "attempt_id": meta["attempt_id"]})
-                # the parent is a fact of the launch; how the child ended never hides it
+                # the parent is a fact of the launch; a confirmed hand-over of that seat is still followed
                 self.assertEqual(record_recipient_binding(parent, sid, harness="claude", jobs=self.jobs),
                                  ("claude", sid))
-                # the attempt's own session keeps its notice while the attempt is live
-                # or done; a recorded end (killed, cancelled, failed) follows the #1624
-                # answer for an ended owner and names the parent instead
-                self.assertEqual(record_recipient_binding(owner, sid, harness="claude", jobs=self.jobs),
-                                 ("claude", sid) if status in {"open", "running", "done",
-                                                               "killed", "cancelled", "failed"} else None)
                 self.edge("claude", sid, "next-" + status)
                 self.assertEqual(record_recipient_binding(parent, sid, harness="claude", jobs=self.jobs),
                                  ("claude", "next-" + status))
-                # a confirmed successor of the owner's own seat keeps the refusal:
-                # the notice waits instead of reaching the wrong session
+                # the attempt's own session has nobody to read it once the attempt ended
                 self.assertEqual(record_recipient_binding(owner, sid, harness="claude", jobs=self.jobs),
                                  ("claude", sid) if status in {"open", "running", "done"} else None)
         # no row at all: nothing to resolve, as before
@@ -3865,6 +3858,26 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             answer = resolve_recipient(question, metadata={"session_id": "gone", "harness": "claude",
                 "attempt_id": "att-never-registered"}, jobs=self.jobs, session="gone", harness="claude")
             self.assertEqual((answer.state, answer.reason), ("unreadable", "handover-unreadable:notice-attempt-unavailable"))
+
+    def test_an_ended_owners_notice_is_refused_not_re_resolved_to_its_parent(self):
+        # The owner and its parent are different sessions. The producer gives the
+        # parent its own copy, so an owner that cannot receive its copy gets
+        # nothing re-resolved to the parent: the answer is a refusal.
+        from dispatch_seat_handover import record_recipient_binding
+        for index, status in enumerate(("killed", "cancelled", "failed", "done")):
+            with self.subTest(status=status):
+                parent_sid, owner_sid = "sup-" + status, "own-" + status
+                meta = self.parent_row(parent_sid, index=60 + index)
+                self._end_attempt(meta, status)
+                parent, = self.notices(sid=parent_sid, label="parent-" + status, lineage={
+                    "kind": "attempt-parent", "harness": "claude", "session_id": parent_sid,
+                    "attempt_id": meta["attempt_id"]})
+                owner, = self.notices(sid=owner_sid, label="owner-" + status, lineage={
+                    "kind": "owner-session", "harness": "claude", "session_id": owner_sid,
+                    "attempt_id": meta["attempt_id"]})
+                self.assertEqual(record_recipient_binding(parent, parent_sid, harness="claude", jobs=self.jobs),
+                                 ("claude", parent_sid))
+                self.assertIsNone(record_recipient_binding(owner, owner_sid, harness="claude", jobs=self.jobs))
 
     def test_owner_session_keeps_exact_native_consumer_after_tidy(self):
         import dispatch_completion_join as join
