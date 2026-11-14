@@ -239,7 +239,7 @@ try {
         raw["items"][0]["stale"] = "current"
         view = fleet_answer_wait_view(raw)
         snapshot = SimpleNamespace(jobs=[], sessions=[], answer_waits=view, compute_hosts=None)
-        self.assertIn("답변 필요 2", job_summary(snapshot))
+        self.assertIn("답 필요 2", job_summary(snapshot))
         self.assertNotIn(answer_wait_word(), job_summary(snapshot))
         lines = system_lines(snapshot)
         self.assertIn(f"{answer_wait_word()} 2", lines)
@@ -341,7 +341,7 @@ try {
                                    compute_hosts=None)
         summary = job_summary(snapshot)
         self.assertIn(f"{answer_wait_word()} 1", summary)
-        self.assertIn("답변 필요 3", summary)
+        self.assertIn("답 필요 3", summary)
         # Fleet's head is the sum of what its session rows wait on (their current waits, the
         # way the collector attaches them), blocked owners aside: three rows, one wait each.
         rows = {}
@@ -366,7 +366,7 @@ try {
         self.assertNotIn("claude\0c", human_wait_state._read_cache_file()["by_session"])
         summary = job_summary(SimpleNamespace(jobs=[], sessions=[], answer_waits=fleet_answer_wait_view(view),
                                               compute_hosts=None))
-        self.assertIn("답변 필요 2", summary)
+        self.assertIn("답 필요 2", summary)
         self.assertEqual(fleet_answer_wait_view(view)["items"][-1].get("answer"), "sent")
 
     def test_fleet_reader_does_not_fall_back_to_private_projection_cache(self):

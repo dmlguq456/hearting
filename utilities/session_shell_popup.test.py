@@ -128,6 +128,15 @@ const resize=async(c,r)=>{cols=c;rows=r;term.resize(c,r);child.resize(c,r);await
 const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;const open=raw.lastIndexOf('\x1b[?2026h',at),shut=raw.lastIndexOf('\x1b[?2026l',at);
   return open>shut&&raw.indexOf('\x1b[?2026l',at)>at;};
 (async()=>{try{
+  if(cfg.scenario==='empty'){
+    // No question waits: a folded panel opens again by Ctrl+] alone, and the read keys stand.
+    await until(has('READY_'+cfg.harness),'the native');
+    await resize(90,24);await sleep(500);frames.folded=await screen();
+    await key('\x1d',500);frames.opened=await screen();
+    await key('r',400);frames.read=await screen();
+    await key('\x1b',300);frames.closed=await screen();
+    fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
+  }
   await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
   frames.closed=await screen();
   // Native output while the popup stands: the twelve lines arrive under it.
@@ -160,7 +169,13 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');
   // The other question: a text answer in Korean and a paste, kept when the popup closes.
   await key('\x1d',200);s=await until(s=>!!box(s),'the popup for the text question');
-  await key('한글 답',100);await key('\x1b[200~붙여넣기\x1b[201~',250);
+  await key('한글 답',100);
+  // An Alt+letter (ESC then a letter) is no key the editor knows: dropped, the popup stands, the
+  // draft stays and the native receives nothing.
+  await key('\x1bb',250);await key('\x1bf',250);
+  s=await screen();checks.alt_kept=!!box(s)&&has('› 한글 답')(s);
+  checks.alt_leaked=s.some(l=>/^❯ \S/.test(l))||s.some(l=>l.includes('NATIVE_ESC_'));
+  await key('\x1b[200~붙여넣기\x1b[201~',250);
   s=await until(has('› 한글 답붙여넣기'),'the typed answer');frames.typing=s;
   await key('\x1b',200);await until(s=>!box(s),'closed');
   await key('\x1d',250);s=await until(has('› 한글 답붙여넣기'),'the draft kept');frames.draft_kept=s;
@@ -183,6 +198,13 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   const native=raw.split('NATIVE_ESC_').length;
   await press(1,1);s=await until(s=>!box(s),'a press outside closing it');
   checks.outside_reached_native=(await screen()).some(l=>l.includes('NATIVE_ESC_'));
+  // The drag that follows the press which closed it is the popup's too, up to the release.
+  await key('\x1d',300);await until(s=>!!box(s),'the popup again for a drag');
+  child.write('\x1b[<0;2;2M');await sleep(80);
+  for(const x of [3,4,5])child.write(`\x1b[<32;${x};2M`);await sleep(80);
+  child.write('\x1b[<0;5;2m');await sleep(250);
+  s=await until(s=>!box(s),'the press closing it');
+  checks.drag_reached_native=(await screen()).some(l=>l.includes('NATIVE_ESC_'));
   // A 60×16 window.
   await resize(60,16);await key('\x1d',300);s=await until(s=>!!box(s),'the popup at 60×16');frames.narrow=s;
   checks.narrow_width=Math.max(...s.map(l=>[...l].length));
@@ -224,8 +246,8 @@ class SessionShellPopupTest(unittest.TestCase):
         cls.launcher = cls.root / 'launcher.cjs'; cls.launcher.write_text(LAUNCHER)
         cls.driver = cls.root / 'driver.cjs'; cls.driver.write_text(DRIVER)
 
-    def popup(self, harness):
-        case = self.root / harness; case.mkdir(mode=0o700)
+    def popup(self, harness, scenario=None):
+        case = self.root / (harness + (scenario or '')); case.mkdir(mode=0o700)
         project = case / 'project'; project.mkdir()
         sid = {'claude': '00000000-0000-4000-8000-0000000000c1', 'codex': '00000000-0000-4000-8000-0000000000c2',
                'opencode': 'ses_popupfixture'}[harness]
@@ -240,7 +262,7 @@ class SessionShellPopupTest(unittest.TestCase):
         value['route_panels'][key] = []; value['route_status'][key] = ''; value['route_sessions'][key] = time.time() + 3600
         target.write_text(json.dumps(value)); target.chmod(0o600)
         questions = case / 'questions.json'; answers = case / 'answers.jsonl'
-        questions.write_text(json.dumps([
+        questions.write_text(json.dumps([] if scenario == 'empty' else [
             {'id': 'popup-choice', 'revision': 'a' * 64, 'answerable': True, 'questions': [
                 {'id': 'shape', 'question': '패널을 접었을 때의 모양을 어느 안으로 구현할까요?\n아래 두 줄(다)은 원래 화면이 폭을 다 '
                  '돌려받고, 답할 질문의 첫 줄과 실패한 route가 글로 남습니다.',
@@ -254,7 +276,7 @@ class SessionShellPopupTest(unittest.TestCase):
         backend.chmod(0o700)
         config = {'harness': harness, 'sid': sid, 'python': sys.executable, 'fake': str(self.fake),
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
-                  'backend': str(backend), 'diagnostic': str(case / 'display-errors'),
+                  'scenario': scenario, 'backend': str(backend), 'diagnostic': str(case / 'display-errors'),
                   'project': str(project), 'result': str(case / 'result.json')}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
@@ -296,13 +318,32 @@ class SessionShellPopupTest(unittest.TestCase):
         self.assertTrue(checks['motion_kept'])
         self.assertTrue(checks['strip_kept'], '\n'.join(frames['strip_popup']))
         self.assertFalse(checks['outside_reached_native'], '\n'.join(frames['strip_popup']))
+        # The drag and release after the press that closed it never reach a native that reads the mouse.
+        self.assertFalse(checks['drag_reached_native'])
+        # An Alt+letter in a text answer: the popup stands, the draft stays, the native gets nothing.
+        self.assertTrue(checks['alt_kept'])
+        self.assertFalse(checks['alt_leaked'])
         self.assertLessEqual(checks['narrow_width'], 60)
         narrow = frames['narrow']
         top = next(i for i, line in enumerate(narrow) if '✕ ─╮' in line)
         self.assertEqual(narrow[top].index('╭'), 2, '\n'.join(narrow))
 
+    def no_question(self, harness):
+        frames = self.popup(harness, 'empty')['frames']
+        # Folded at 90 columns, with no question waiting Ctrl+] opens the panel again (the keyboard's
+        # only way to unfold it); the read keys stand in the popup; the panel stays open after it.
+        folded, opened = '\n'.join(frames['folded']), '\n'.join(frames['opened'])
+        self.assertNotIn('REPO', folded)
+        self.assertIn('REPO', opened)
+        self.assertIn('r 메시지 · w 열린 일', opened)
+        self.assertIn('✉', '\n'.join(frames['read']))
+        self.assertIn('REPO', '\n'.join(frames['closed']))
+
     def test_claude(self):
         self.check('claude')
+
+    def test_no_question_opens_a_folded_panel(self):
+        self.no_question('claude')
 
     def test_codex(self):
         self.check('codex')

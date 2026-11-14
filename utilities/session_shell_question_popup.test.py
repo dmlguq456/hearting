@@ -167,6 +167,57 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
+    def test_an_alt_letter_in_the_popup_is_dropped_and_a_lone_esc_still_closes_it(self):
+        # ESC then a letter (Alt+b, Alt+f) is no key this editor has: dropped, the popup stands, the
+        # draft stays, nothing goes on to the native. A lone Esc (the host's 25 ms) and Esc then
+        # Ctrl+] / Enter close it as before, handing the rest on.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+(async()=>{
+ const make=()=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?'}]}],'',{});b.enter();return b;};
+ for(const alt of ['\x1bb','\x1bf','\x1bx','\x1b\x7f','\x1b한']){
+  const b=make();b.input(Buffer.from('abc'));
+  const rest=b.input(Buffer.from(alt));
+  assert.equal(rest.length,0,'nothing goes on: '+JSON.stringify(alt));
+  assert.equal(b.focused,true,'the popup stands: '+JSON.stringify(alt));
+  b.input(Buffer.from('d'));
+  assert(b.detail({budget:6,columns:60}).some(row=>row.some(p=>p.text.includes('abcd'))),'the draft stays and goes on: '+JSON.stringify(alt));
+ }
+ {const b=make();b.input(Buffer.from('\x1b'));b.input(Buffer.from('b'));assert.equal(b.focused,true,'split across reads');}
+ {const b=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
+ {const b=make();const rest=b.input(Buffer.from('\x1b\x1dZ'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\x1dZ','Esc then Ctrl+] closes and goes on');}
+ {const b=make();const rest=b.input(Buffer.from('\x1b\r'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\r');}
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_a_question_replaced_with_nothing_typed_says_so_once_and_the_first_enter_only_clears_it(self):
+        # A choice question being read goes (answered or cancelled elsewhere) and the next choice
+        # question takes its place: the first Enter after never answers the new one unseen.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+(async()=>{
+ const sent=[];
+ const b=create({changed(){},answer:async r=>{sent.push(r.question_id);return {state:'submitted'};},action(){}});
+ const ask=id=>({id,revision:id,answerable:true,questions:[{id:'q'+id,question:'Question '+id+'?',choices:['one','two']}]});
+ const words=()=>b.detail({budget:8,columns:80}).map(row=>row.map(p=>p.text).join('')).join('\n');
+ b.update([ask('A'),ask('B')],'',{});b.enter();assert(words().includes('Question A?'));
+ b.update([ask('B')],'',{});                       // A is answered elsewhere; B stands in its place
+ assert(words().includes('Question B?')&&words().includes('question changed'),words());
+ b.update([ask('B')],'',{});assert.equal((words().match(/question changed/g)||[]).length,1,'once');
+ b.input(Buffer.from('\r'));await new Promise(r=>setTimeout(r,20));
+ assert.deepEqual(sent,[],'the first Enter sends nothing');
+ assert(!words().includes('question changed'),'it clears the word');
+ assert.equal(b.focused,true);
+ b.input(Buffer.from('\r'));await new Promise(r=>setTimeout(r,20));
+ assert.deepEqual(sent,['B'],'the next Enter answers B once');
+ // A question that is simply read on (a later one arrives, this one stays) says nothing.
+ const c=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ c.update([ask('A')],'',{});c.enter();c.update([ask('Z'),ask('A')],'',{});
+ assert(!c.detail({budget:8,columns:80}).map(row=>row.map(p=>p.text).join('')).join('\n').includes('question changed'));
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
     def test_the_question_words_and_colors_are_one_set(self):
         # 11-15 design F 1-4, 12 (words) and 7-9 (colors): one word per meaning on the panel, the
         # popup, Fleet and the notices; `◑` Fleet's waiting red everywhere; `✓` Fleet's green on the

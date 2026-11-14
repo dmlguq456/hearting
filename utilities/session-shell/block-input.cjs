@@ -3,7 +3,7 @@
 const {StringDecoder}=require('node:string_decoder');
 module.exports=function({changed,answer,action,page}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0;
-  let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer;
+  let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
   let labels={},styles={},help='';
   const entries=new Map();
   const key=item=>item.id+'@'+item.revision;
@@ -41,7 +41,7 @@ module.exports=function({changed,answer,action,page}) {
   }
   // ↑↓ choose only while this question takes a choice; otherwise they scroll as before.
   function choosing(row){return !!row&&focused&&active(row)&&!state(row.item).typing[row.question.id]&&choices(row).length>0;}
-  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;}
+  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;skipTail=false;}
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
   // longer asked for as a retained reference and leaves the panel.
@@ -67,7 +67,14 @@ module.exports=function({changed,answer,action,page}) {
     else if(found>=0){index=found;frozen=undefined;stale=false;}
     else if(previous&&focused&&!state(previous.item).state&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length||Object.keys(state(previous.item).cursor).length)){
       frozen=previous;stale=true;state(previous.item).notice=text('changed','question changed · Tab next');
-    }else{frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;}
+    }else{
+      frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;
+      // The question being read left with nothing typed to it and another stands in its place:
+      // say so once, and the first Enter after only clears the word, never answers the new one.
+      if(previous&&focused&&listed.length&&!state(previous.item).sending){
+        state(listed[index].item).notice=text('changed','question changed · Tab next');changeArmed=true;
+      }
+    }
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
@@ -76,16 +83,16 @@ module.exports=function({changed,answer,action,page}) {
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
   function enter(){
-    focused=true;scroll=0;follow=true;answeredAt=0;
+    focused=true;scroll=0;follow=true;answeredAt=0;changeArmed=false;
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
-  function leave(){focused=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){focused=false;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
-    moves++;seat=seatOf(flat()[index]);
+    moves++;changeArmed=false;seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
@@ -245,6 +252,7 @@ module.exports=function({changed,answer,action,page}) {
     if(c==='\t'){move(1);return;}
     if(c==='\r'||c==='\n'){
       if(!row){action('\r');return;}
+      if(changeArmed){changeArmed=false;local.notice='';changed();return;}
       // Enter sends the highlighted choice, the same value its number key picks.
       if(choosing(row)&&cursorOf(row)>=0){
         local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
@@ -267,10 +275,18 @@ module.exports=function({changed,answer,action,page}) {
     for(let i=0;i<data.length;i++){
       if(!focused){changed();return data.subarray(i);}
       const byte=data[i],c=String.fromCharCode(byte);
+      if(skipTail){if((byte&0xc0)===0x80)continue;skipTail=false;}
       if(escape){
         clearTimeout(escapeTimer);escapeTimer=undefined;
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
-        if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){if(pasting){escape='';character('\x1b');character(c);continue;}leave();return data.subarray(i);}
+        if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
+          if(pasting){escape='';character('\x1b');character(c);continue;}
+          // Alt+letter (`ESC` then a printable or Backspace): a combination this editor has no meaning for is
+          // dropped, never the native's; the popup stands. Whatever else follows a lone Esc
+          // (Ctrl+], Enter, another Esc) closes it as before and goes on.
+          if(byte>=0x20){escape='';if(byte>=0xc0)skipTail=true;continue;}
+          leave();return data.subarray(i);
+        }
         escape+=c;
         if(escape==='\x1b[200~'){pasting=true;escape='';}
         else if(escape==='\x1b[201~'){pasting=false;escape='';}

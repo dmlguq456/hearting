@@ -1070,7 +1070,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if elsewhere:
         word = ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + place(elsewhere[0]))
         values["wait_place"] = word
-        values["wait_guide"] = ui_text("fleet.session_block.questions") + " " + str(len(elsewhere)) + " · " + word
+        values["wait_guide"] = str(len(elsewhere)) + " " + ui_text("fleet.session_block.questions") + " · " + word
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving

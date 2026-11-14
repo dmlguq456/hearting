@@ -188,7 +188,8 @@ with the panel open, so no value shows twice; the strip carries no Git or job
 row. A press on the rule, the session row or the routes row opens the panel; a
 press on the row of what to do while it carries the question, or **Ctrl+]**,
 opens the question popup above the strip (the strip stays and the native keeps
-its width). Where the open panel
+its width); with no question waiting **Ctrl+]** opens the panel again instead, so
+the keyboard alone can unfold a folded panel. Where the open panel
 would leave the native area under 60 columns it folds by itself, and opens again
 once there are three columns more (63), so a window dragged across the line does
 not jump back and forth; that one constant replaces the earlier minimum terminal width and
@@ -759,7 +760,7 @@ a finished one (closed, replaced, expired, an answer on its way) are not counted
 The questions section holds what the person can answer here now (answerable
 ones first; `Ctrl+]` opens the popup on the first of them); a counted wait answered in another
 place is one dim guidance line beside the count saying where
-(`QUESTIONS 1 · answer below`), and the notice line names `Ctrl+]` only when the
+(`1 QUESTIONS · answer below`), and the notice line names `Ctrl+]` only when the
 panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
 parent holds the worker's exact acknowledged completion receipt. Once the person
@@ -785,10 +786,15 @@ last real human input. Only session-owned GPU work warrants a resource row.
 `Ctrl+]` opens the question popup in the middle of the window (the native area
 and the panel together; above the folded strip, never over it); a press on the
 panel's QUESTIONS rows or on the strip's row of what to do opens it too, and a
-new question never does. While it stands every key and press is its own (none
-reaches the native, a native that reads the mouse included); Escape, `Ctrl+]`,
-its `✕` or a press outside it closes it and returns to the native input and
-cursor, and a draft stays for the next opening. Ordinary typing, including
+new question never does; with no question waiting `Ctrl+]` unfolds a folded panel
+(as it always did) and the read keys `r`, `w`, `f` stand beside it. While it
+stands every key and press is its own (none reaches the native, a native that
+reads the mouse included; an Alt+letter is dropped, neither closing it nor
+reaching the native); Escape, `Ctrl+]`, its `✕` or a press outside it closes it
+and returns to the native input and cursor (the drag and release that follow that
+press are the popup's too), and a draft stays for the next opening. When the
+question being read is replaced by another with nothing typed, `question changed`
+shows once and the first Enter after only clears it. Ordinary typing, including
 digits, Enter, Tab and action letters, remains native while it is closed. The
 popup is one layer over the host's own screen: the native's output under it
 keeps arriving in the host's copy, every paint lays the popup again in the same

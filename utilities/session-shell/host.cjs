@@ -1170,6 +1170,9 @@ mouseInput=require('./panel-mouse.cjs')({
 let popupPressed=false;
 function popupMouse(code,x,y,release){
   if(release&&popupPressed){popupPressed=false;return true;}
+  // The drag that follows the press which closed it is its own too, up to the release.
+  if(popupPressed&&code>=32&&(code&0xc0)!==64)return true;
+  if(!release&&code<32)popupPressed=false;
   const l=popupLayer;if(!l||!block.focused||relay||fleetView)return false;
   const col=x-1,row=y-1,f=l.frame,inside=row>=f.top&&row<f.top+f.height&&col>=f.left&&col<f.left+f.width;
   if((code&0xc3)===64||(code&0xc3)===65){if(!release&&inside)block.wheel((code&1)?1:-1);return true;}
@@ -1242,8 +1245,13 @@ function inputBytes(data) {
     // prefix; keeping that lone byte pending would disable focus after a modal.
     if(keyTail==='\x1b'&&!paste)keyTail='';
     // 11-15: Ctrl+] opens the question popup over the window as it stands (open or folded panel,
-    // the native at its width); it closes it again.
-    if(!paste&&!keyTail){epoch++;actionLines=[];block.enter();queueDisplay();}
+    // the native at its width); it closes it again. With no question waiting it opens the panel
+    // as before (the keyboard's way to unfold a folded one), the read keys r, w, f beside it.
+    if(!paste&&!keyTail){
+      epoch++;actionLines=[];
+      if(block.question){block.enter();queueDisplay();}
+      else{foldByHand(false);expanded=true;routeDetail=false;routePage=0;block.enter();queueLayout();}
+    }
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
   }
