@@ -1179,12 +1179,14 @@ def _followup(root: Path, record: dict) -> str:
 
 # `compute-hosts` leads a run's ended notice with the experiment catalog name when the run has one
 # (`{name}: run … ended with exit …`); the name is optional here so a named notice is folded and
-# recognized like an unnamed one.  `compute-hosts` keeps its no-observation words literally.
+# recognized like an unnamed one.  The observation summary `compute-hosts` appends (`; 마지막 …` with a metric,
+# `; 지표 없음 …` without) is skipped up to the closing `read it with` phrase, so a run that carries metrics
+# is named by its catalog name too, not by its run id.
 _COMPUTE_RUN_NOTICE_RE = re.compile(
     r"^(?:(?P<name>[^\n]+?): )?run (?P<run_id>[A-Za-z0-9_-]+) on (?P<host>[A-Za-z0-9_.-]+) "
     r"ended with exit (?P<exit>[0-9]+)(?: \([^()\n]*\))?"
     r"(?:; started by attempt [^;\n]+ in route [^;\n]+)?"
-    r"(?:; 지표 없음; 계획 시간 미상; run 기록 경로 없음)?"
+    r"(?:; (?:마지막|지표 없음)[^\n]*?)?"
     r"; read it with: compute-hosts tail (?P<tail>[A-Za-z0-9_-]+)$"
 )
 
