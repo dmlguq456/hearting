@@ -1321,8 +1321,17 @@ def _owner_handed_over_lines(route: dict, route_file: Path, node_id) -> list[str
 
 # The fixed first line of a completed runtime-v1 owner follow-up, keyed by
 # whether runtime summaries follow it. Delivery recovery maps exactly these
-# bytes back to earlier shipped wording (dispatch_session_sweep).
+# bytes back to earlier shipped wording (dispatch_session_sweep). One short line:
+# the close contract itself is the adapter bootstrap's (§0.5), so the receipt only
+# points at it and keeps what the bootstrap cannot know (no harvest is owed, and
+# the summary below is context, not text for the person).
 RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Owner finished; no harvest. Close per §0.5; the summary below is agent context: "
+           "do not reproduce it for the person."),
+    False: "Owner finished; no harvest. Close per §0.5.",
+}
+# The first line v4.32.4 shipped (frozen; receipt recovery only).
+SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES = {
     True: ("Original request/format apply. Review the result and continue approved work or its existing "
            "continuation. First close: "
            "give the result in one or two sentences; preserve any important remaining failure, "

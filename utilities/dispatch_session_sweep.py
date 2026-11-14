@@ -703,7 +703,7 @@ def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
     notice_context=None, deadline_ns: int | None = None, read_context=None,
-    select=None,
+    select=None, defer_native_queued: bool = False,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -720,6 +720,11 @@ def sweep_deliver(
 
     ``select``, when given, is a predicate on an addressed record: a record it
     rejects is not claimed here and stays with its existing carriers.
+
+    ``defer_native_queued`` (a Claude tool boundary or Stop): a record whose exact
+    receipt waits in Claude's own prompt queue (``natively_queued``) is left to that
+    queue, which attaches it to this turn or starts the next one; the next prompt's
+    sweep still carries it if the queue lost it.
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """
@@ -843,6 +848,10 @@ def sweep_deliver(
         delivery_id = current["delivery_id"]
         observed_evidence.clear()
         if settle_observed(current)["received"]:
+            continue
+        if defer_native_queued and harness == "claude" and any(
+                natively_queued(current, storage_key, evidence)
+                for evidence in observed_evidence.values()):
             continue
         if not currently_addressed(current, storage_key):
             continue
@@ -1008,7 +1017,14 @@ GATE_DELIVERY_HEADER = (
     "`await-release` or has paused at the gate; the release continues the work either way. "
     "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
 )
+# One line: following required_action, keeping open work and not building a wait are
+# the adapter bootstrap's rules already; the header names the delivery and points at them.
 COMPLETION_DELIVERY_HEADER = (
+    "Hearting runtime delivery. Act on each required_action; keep failures, unfinished work "
+    "and questions; no polling."
+)
+# The header v4.32.4 shipped (frozen; receipt recovery only).
+_SHIPPED_COMPLETION_DELIVERY_HEADER = (
     "Hearting runtime delivery. Follow required_action/next-action receipt; "
     "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
     "Keep new failures/conflicts, unfinished work, questions; no extra "
@@ -1148,6 +1164,21 @@ def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[di
                 text = text.replace(follow, frozen[has_summary] + follow[len(prefix):], 1)
                 break
     return text
+
+
+def _shipped_completion_header(text: str) -> str:
+    """The same body under the completion header v4.32.4 shipped (receipt recovery only)."""
+    from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE
+    blocks, previous = [], None
+    for block in text.split("\n\n"):
+        header, separator, body = block.partition("\n")
+        if (header == COMPLETION_DELIVERY_HEADER
+                and (previous is None
+                     or OPENCODE_MARKER_LINE_RE.fullmatch(previous.rsplit("\n", 1)[-1]))):
+            header = _SHIPPED_COMPLETION_DELIVERY_HEADER
+        blocks.append(header + separator + body)
+        previous = block
+    return "\n\n".join(blocks)
 
 
 def _previous_runtime_v1_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
@@ -1755,6 +1786,54 @@ def claude_hook_evidence(payload, session_id: str):
         runtime_home=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
 
 
+def claude_receipt_observer(payload, session_id: str):
+    """A ``sweep_deliver`` receipt observer for one Claude hook call, or ``None``.
+
+    Re-reads the transcript only when it changed (size and mtime). On a prompt that
+    is itself a Stop-hook notification (the turn it woke), that prompt's receipts
+    count too: the model reads it in the same request as this hook's context.
+    """
+    if not isinstance(payload, dict):
+        return None
+    transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
+    if not isinstance(transcript_path, str) or not isinstance(payload.get("cwd"), str):
+        return None
+    from dispatch_recipient_receipt import claude_prompt_bindings
+    prompt = claude_prompt_bindings(payload.get("prompt"))
+    cache = {"signature": object(), "evidence": None}
+
+    def observe(_root=None, _storage=None, _record=None):
+        try:
+            info = Path(transcript_path).stat()
+            signature = (info.st_size, info.st_mtime_ns)
+        except OSError:
+            signature = None
+        if signature != cache["signature"]:
+            try:
+                evidence = claude_hook_evidence(payload, session_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                evidence = None
+            if prompt and isinstance(evidence, dict):
+                evidence = {**evidence, "bindings": sorted(
+                    {*map(tuple, evidence.get("bindings") or ()), *prompt})}
+            cache.update(signature=signature, evidence=evidence)
+        return cache["evidence"]
+
+    return observe
+
+
+def natively_queued(record: dict, storage_key: str, evidence) -> bool:
+    """Whether Claude's own prompt queue holds this exact delivery right now."""
+    if not isinstance(evidence, dict) or not evidence.get("queued"):
+        return False
+    try:
+        from dispatch_recipient_receipt import binding_digest
+        binding = (record.get("delivery_id"), binding_digest(record, storage_key))
+    except Exception:  # noqa: BLE001 - unproven is not queued
+        return False
+    return binding in {tuple(item) for item in evidence["queued"]}
+
+
 def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
     """Keep what a flushed Stop `block` reason showed open until it is taken.
 
@@ -2016,12 +2095,17 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
             [record for _root, record in selected]) if rendered else ""
         # Shipped forms: current; the three previous follow-ups under current headers
         # (the earliest one also under the older headers); and the legacy full body.
-        short_rendered, decision_rendered = (_replace_runtime_v1_followups(
+        from dispatch_completion_join import SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES
+        short_rendered, decision_rendered, shipped_rendered = (_replace_runtime_v1_followups(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected], frozen) if rendered else ""
-            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES))
+            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES,
+                           SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES))
         variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
+                    shipped_rendered,
                     _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
+        # Every follow-up shipped up to v4.32.4 went out under that release's completion header.
+        variants.update(_shipped_completion_header(text) for text in tuple(variants) if text)
         if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
                for _root, record in selected):
             # Recover the previous wording from the same stored diagnosis.

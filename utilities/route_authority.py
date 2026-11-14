@@ -3178,6 +3178,47 @@ HANDOFF_RE = re.compile(
 )
 
 
+# A finished judgment a worker wrote as its verdict word instead of PASS/FAIL/BLOCKED
+# (a review asking for fixes, holding, or able to merge). The three-line envelope
+# around it is otherwise exact, so it is read as the verdict it names and the word
+# is kept as the disposition: a review that asked for fixes is a finished review,
+# not a broken contract. Only these closed forms count; anything else stays invalid.
+_DISPOSITION_VERDICTS = (
+    ("FAIL", ("수정 후 병합", "changes requested", "보류", "hold")),
+    ("PASS", ("병합 가능", "mergeable")),
+)
+_DISPOSITION_HANDOFF_RE = re.compile(HANDOFF_RE.pattern.replace(
+    r"verdict: (?P<verdict>PASS|FAIL|BLOCKED)\n", r"verdict: (?P<verdict>[^\n]{1,160})\n", 1))
+assert _DISPOSITION_HANDOFF_RE.pattern != HANDOFF_RE.pattern
+
+
+def _disposition_verdict(word: str) -> str | None:
+    for verdict, forms in _DISPOSITION_VERDICTS:
+        for form in forms:
+            pattern = r"\s*".join(re.escape(part) for part in form.split())
+            if re.fullmatch(r"\*{0,2}" + pattern + r"\*{0,2}(?:\s*[—–:(（-].*)?", word.strip(), re.I):
+                return verdict
+    return None
+
+
+def handoff_search(text) -> dict | None:
+    """The final handoff's fields (``HANDOFF_RE``), or ``None``.
+
+    A closed disposition word in the verdict line (``_DISPOSITION_VERDICTS``) reads
+    as the verdict it names; the word itself is returned as ``disposition``.
+    """
+    if not isinstance(text, str):
+        return None
+    match = HANDOFF_RE.search(text.strip())
+    if match:
+        return match.groupdict()
+    loose = _DISPOSITION_HANDOFF_RE.search(text.strip())
+    verdict = _disposition_verdict(loose["verdict"]) if loose else None
+    if verdict is None:
+        return None
+    return {**loose.groupdict(), "verdict": verdict, "disposition": loose["verdict"].strip()}
+
+
 _PASS_NOTE_RE = re.compile(r"none\s*\((?P<note>.+)\)\s*")
 
 

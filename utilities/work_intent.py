@@ -463,17 +463,31 @@ _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
 # other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
-    ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "unverified", "failed", "skipped",
-                           "remaining")),
+    ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "해결하지", "필수", "unverified", "failed",
+                           "skipped", "remaining", "unresolved")),
     # Limits, residual risks and follow-ups are shown with the rest, but only a failed/skipped,
     # unverified or remaining-work heading (and the checks) can say that something failed.
     ("limits", (), ("한계", "limitation", "limits", "open risk")),
-    ("follow_up", ("6",), ("후속", "follow-up", "follow up", "follow-ups")),
-    ("verified", ("4",), ("검증", "시험", "검사", "qa", "verification", "validation", "checks", "tests", "testing")),
+    # "하지 않은 것" lists what the work left to others on purpose (install, merge): follow-ups.
+    ("follow_up", ("6",), ("후속", "하지", "follow-up", "follow up", "follow-ups", "not done")),
+    ("verified", ("4",), ("검증", "시험", "검사", "명령", "qa", "verification", "validation", "checks", "tests",
+                          "testing")),
     ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
-_FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "unverified", "failed", "skipped")
+_FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "해결하지", "unverified", "failed", "skipped",
+                     "unresolved")
+# The report's own first line when it states the verdict (`최종 판정: …`, `Final verdict: …`).
+_VERDICT_LINE = re.compile(r"^\s*(?:[-*]\s+)?\**\s*(?:최종\s*판정|판정|결론|(?:final\s+)?verdict)\s*\**\s*[:：]\s*\**\s*"
+                           r"(?P<verdict>.+?)\s*$", re.I)
+# A line naming the publication: a PR link or number with its head, CI or mergeability.
+_PUBLICATION_LINE = re.compile(r"pull/(?P<url>\d+)|\bPR\s*#\s*(?P<number>\d+)", re.I)
+_PUBLICATION_WORDS = re.compile(r"\bhead\b|\bCI\b|mergeable|\bsha\b", re.I)
+_PUBLICATION_FIELDS = (
+    re.compile(r"\bhead\W{0,3}(?P<value>[0-9a-f]{7,40})\b", re.I),
+    re.compile(r"\bCI\W{0,3}(?P<value>\d+\s*/\s*\d+(?:\s*[가-힣A-Za-z]+)?|[A-Za-z가-힣]+)", re.I),
+    re.compile(r"(?P<value>\b(?:MERGEABLE|CONFLICTING|UNKNOWN)\b|병합\s*가능)"),
+)
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
 _UNRUN_WORDS = (r"not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안"
@@ -579,6 +593,49 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             field = "remaining" if current == "verified" and _UNRUN_CHECK.search(line) else current
             sections.setdefault(field, []).append(line.strip("|").strip())
     return sections
+
+
+def report_verdict(text: str) -> str:
+    """The report's first non-heading line when it states the verdict, else ""."""
+    fence = False
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line.startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence or not line or line.startswith("#"):
+            continue
+        match = _VERDICT_LINE.match(line.replace("**", ""))
+        return _line(match["verdict"].strip("* "), 120) if match else ""
+    return ""
+
+
+def _publication_lines(text: str):
+    for raw in (text or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
+        if (line and not line.startswith(("#", "|", "```")) and not _VERDICT_LINE.match(line.replace("**", ""))
+                and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)):
+            yield line
+
+
+def is_publication_line(line: str) -> bool:
+    return bool(_PUBLICATION_LINE.search(line or "") and _PUBLICATION_WORDS.search(line or ""))
+
+
+def report_publication(text: str) -> str:
+    """``#<n> · head <sha12> · CI <state> · <mergeability>`` from the report's PR line, else ""."""
+    for line in _publication_lines(text):
+        plain = line.replace("`", "")
+        found = _PUBLICATION_LINE.search(plain)
+        parts = ["#" + (found["url"] or found["number"])]
+        for pattern in _PUBLICATION_FIELDS:
+            value = pattern.search(plain)
+            if value:
+                word = value["value"].strip()
+                parts.append(("head " + word[:12]) if pattern is _PUBLICATION_FIELDS[0]
+                             else ("CI " + word) if pattern is _PUBLICATION_FIELDS[1] else word)
+        return _line(" · ".join(parts), 120)
+    return ""
 
 
 def _joined(lines, cap=MAX_FIELD_CHARS) -> str:
@@ -823,9 +880,10 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     if not goal and request.get("text"):
         goal = draft(request["text"]).get("intent") or ""
     if goal:
-        original = (t("completion.intent_original", original=_line(intent["original"], 100))
+        # The supervisor wrote this intent; a short reminder is enough to match the result.
+        original = (t("completion.intent_original", original=_line(intent["original"], 60))
                     if intent.get("original") else "")
-        lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
+        lines.append(t("completion.intent", intent=_line(goal, 120), original=original))
     try:
         text = Path(primary).read_text(encoding="utf-8") if primary else ""
     except (OSError, UnicodeError):
@@ -834,10 +892,13 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     sections = report_sections(text, numbered=code_report)
     result = _result_line(route, t, sections.get("remaining") or [], limits=sections.get("limits") or [],
                           follow_up=sections.get("follow_up") or [], verified=sections.get("verified") or [])
-    if route.get("capability") == "audit" and assessment == "FAIL":
+    if assessment == "FAIL":
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
     lines.append(t("completion.result", result=result))
+    verdict = report_verdict(text)
+    if verdict:
+        lines.append(t("completion.verdict", verdict=verdict))
     if isinstance(publication, dict) and publication.get("status") == "pending":
         reason = publication.get("detail") or publication.get("reason") or "-"
         lines.append(t("completion.publication_pending", reason=_line(reason, 160)))
@@ -852,13 +913,17 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
             lines.append(t("completion.changed", items=_joined(sections["changed"])))
         checks = _verified_summary(sections.get("verified") or [], t)
         lines.append(t("completion.checks", items=checks))
-        rest = [line for field in ("remaining", "limits", "follow_up") for line in sections.get(field) or []]
+        rest = [line for field in ("remaining", "limits", "follow_up") for line in sections.get(field) or []
+                if not is_publication_line(line)]
         lines.append(t("completion.remaining", items=_joined(rest) or t("completion.no_remaining")))
     else:
         lines.append(t("completion.unreadable"))
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
-    prs = list(dict.fromkeys(_PR_URL.findall(text)))[:3]
+    published = report_publication(text)
+    if published:
+        lines.append(t("completion.publication", line=published))
+    prs = [] if published else list(dict.fromkeys(_PR_URL.findall(text)))[:3]
     entrance = _entrance_line(route, primary, t)
     if entrance:
         lines.append(entrance)

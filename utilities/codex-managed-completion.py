@@ -1128,7 +1128,7 @@ def _queue_target_from_rows(jobs: Path, rows, registered: str, *, read_context=N
 
 
 _PRIOR_SUCCESS_FOLLOWUP = codex_queue_delivery._PRIOR_SUCCESS_FOLLOWUP
-_CURRENT_SUCCESS_FOLLOWUP_START = codex_queue_delivery._CURRENT_SUCCESS_FOLLOWUP_START
+_SHIPPED_SUCCESS_FOLLOWUP_START = codex_queue_delivery._SHIPPED_SUCCESS_FOLLOWUP_START
 _LEGACY_HISTORY_MISMATCH = {"queue-peer-history-mismatch", "queue-peer-history-conflict",
                             "queue-peer-pending-mismatch"}
 _IMMEDIATE_RECEIPT_KINDS = {"human-gate", "supervision", "notice"}

@@ -92,6 +92,7 @@ def _delivery_heads() -> tuple[str, ...]:
     headers = (sweep.GATE_DELIVERY_HEADER, sweep.NOTICE_DELIVERY_HEADER,
                sweep.COMPLETION_DELIVERY_HEADER, sweep._PREVIOUS_GATE_DELIVERY_HEADER,
                sweep._PREVIOUS_NOTICE_DELIVERY_HEADER, sweep._PREVIOUS_COMPLETION_DELIVERY_HEADER,
+               sweep._SHIPPED_COMPLETION_DELIVERY_HEADER,
                sweep._LEGACY_COMPLETION_DELIVERY_HEADER, sweep.OVERFLOW_HEADER,
                "AGENT_HARNESS_COMPLETION_V1", human_gate_receipt.NATIVE_HEAD)
     return tuple(header + "\n" for header in headers) + (dispatch_supervision.NEEDS_ATTENTION_HEAD,)
@@ -176,12 +177,65 @@ def _evidence(harness: str, session_id: str, source: str,
             "bindings": bindings, "legacy_texts": list(texts)}
 
 
+def _native_notification(value: Any) -> bool:
+    return (isinstance(value, dict) and value.get("kind") == "task-notification")
+
+
+def _stop_feedback_bindings(text: str) -> list[tuple[str, str]]:
+    """Markers in a text that carries a Claude Stop-hook-feedback task notification.
+
+    Claude Code puts the hook's output after the notification block (in the
+    system reminder that follows it), the same text a user event holds."""
+    if not isinstance(text, str) or CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(text) is None:
+        return []
+    return [(match.group(1), match.group(2)) for match in MARKER_RE.finditer(text)]
+
+
+def _claude_queued(events: list, session_id: str) -> list[tuple[str, str]]:
+    """Bindings of Stop-hook notifications still waiting in this session's native queue.
+
+    Claude Code records its prompt queue in the transcript: ``enqueue`` carries the
+    text, ``dequeue`` takes the oldest item into a new turn, and ``remove`` takes the
+    named item into the running turn. What is left was handed to Claude and has not
+    reached the model yet; it is not a receipt, only a reason not to show it again
+    at this boundary.
+    """
+    queue: list[str] = []
+    for event in events:
+        if (not isinstance(event, dict) or event.get("type") != "queue-operation"
+                or event.get("sessionId", event.get("session_id")) != session_id):
+            continue
+        operation, content = event.get("operation"), event.get("content")
+        if operation == "enqueue":
+            queue.append(content if isinstance(content, str) else "")
+        elif operation == "dequeue" and queue:
+            queue.pop(0)
+        elif operation == "remove" and isinstance(content, str) and content in queue:
+            queue.remove(content)
+    return sorted({binding for text in queue for binding in _stop_feedback_bindings(text)})
+
+
 def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | None:
-    """Accept only this session's native user feedback transcript events."""
+    """Accept only this session's native user feedback transcript events.
+
+    A Stop-hook notification that arrived while the model was working is attached
+    to the running turn as a ``queued_command`` record instead of a user event;
+    that record is the same native receipt.
+    """
     if not isinstance(session_id, str) or not session_id or not isinstance(events, list):
         return None
     texts = []
     for event in events:
+        if (isinstance(event, dict) and event.get("type") == "attachment"
+                and event.get("sessionId", event.get("session_id")) == session_id):
+            attachment = event.get("attachment")
+            if (isinstance(attachment, dict) and attachment.get("type") == "queued_command"
+                    and attachment.get("commandMode") == "task-notification"
+                    and _native_notification(attachment.get("origin"))
+                    and isinstance(attachment.get("prompt"), str)
+                    and CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(attachment["prompt"])):
+                texts.append(attachment["prompt"])
+            continue
         if not isinstance(event, dict) or event.get("type") != "user":
             continue
         if event.get("sessionId", event.get("session_id")) != session_id:
@@ -204,7 +258,21 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             continue
         if text:
             texts.append(text)
-    return _evidence("claude", session_id, "claude-transcript", texts)
+    evidence = _evidence("claude", session_id, "claude-transcript", texts)
+    evidence["queued"] = _claude_queued(events, session_id)
+    return evidence
+
+
+def claude_prompt_bindings(prompt: Any) -> list[tuple[str, str]]:
+    """Receipts in the prompt Claude Code is submitting for a Stop-hook notification turn.
+
+    When a notification wakes a resting session, its text is the turn's prompt: the
+    prompt hooks run with it before the transcript holds the user event, and the model
+    reads it in the same request as their context.
+    """
+    if not isinstance(prompt, str) or not prompt.lstrip().startswith("<task-notification>"):
+        return []
+    return _stop_feedback_bindings(prompt)
 
 
 def claude_transcript_evidence(*, transcript_path: str | Path, session_id: str,

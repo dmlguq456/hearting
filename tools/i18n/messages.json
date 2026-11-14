@@ -98,6 +98,10 @@
    "en": "Unverified or remaining work could not be extracted reliably; see the report",
    "ko": "미검증·남은 일을 확실히 추출하지 못함 · 보고서 확인"
   },
+  "completion.publication": {
+   "en": "PR: {line}",
+   "ko": "PR: {line}"
+  },
   "completion.publication_pending": {
    "en": "Shared spec not published: {reason} · the cycle keeps its spec; the next start of this route retries",
    "ko": "공유 명세 게시 안 됨: {reason} · 주기의 spec은 그대로 있고, 이 route를 다시 start하면 재시도"
@@ -141,6 +145,10 @@
   "completion.unreadable": {
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
+  },
+  "completion.verdict": {
+   "en": "Verdict: {verdict}",
+   "ko": "판정: {verdict}"
   },
   "compute.device_access": {
    "en": "device access observed",

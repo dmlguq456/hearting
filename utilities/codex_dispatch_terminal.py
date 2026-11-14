@@ -29,7 +29,7 @@ from dispatch_supervisor_terminal import (
 # (`failure_class=fail`) is unchanged. Only a `worker_type=review` row with a
 # readable artifact earns it; every other FAIL keeps the dead-worker note.
 from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
-from route_authority import HANDOFF_RE, pass_blocker_note, pass_blocker_violation
+from route_authority import HANDOFF_RE, handoff_search, pass_blocker_note, pass_blocker_violation
 REVIEW_WORKER_TYPE = "review"
 
 
@@ -372,8 +372,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     # search, not fullmatch: the pattern itself anchors the block to the end of
     # the message, so anything before it is ignored rather than fatal. A
     # trailing fence or up to two sentences are tolerated the same way (G1).
-    match = _HANDOFF_RE.search(final_message.strip())
-    if match is None:
+    handoff = handoff_search(final_message)
+    if handoff is None:
         return _result(
             3,
             "invalid",
@@ -384,7 +384,6 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             reason="malformed-handoff",
         )
 
-    handoff = match.groupdict()
     if pass_blocker_violation(handoff["verdict"], handoff["blocker"]):
         return _result(
             3,
@@ -420,6 +419,11 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     note = pass_blocker_note(handoff["blocker"]) if verdict == "PASS" else None
     normalized = {"envelope_normalized": "pass-blocker-note",
                   "pass_note_excerpt": _escape_and_bound(note)[0]} if note else {}
+    if handoff.get("disposition"):
+        # A closed disposition word read as the verdict it names (route_authority.handoff_search).
+        normalized["disposition"] = _escape_and_bound(handoff["disposition"])[0]
+        normalized["envelope_normalized"] = ",".join(
+            filter(None, (normalized.get("envelope_normalized"), "verdict-disposition")))
     failure_note = (
         "dead-sandbox-init"
         if verdict == "BLOCKED" and sandbox_init
@@ -1073,6 +1077,10 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
             or parsed.get("artifact_state") != "readable"
             or parsed.get("artifact_shape") != "file"):
         return False
+    if parsed.get("disposition"):
+        # The owner itself wrote a closed review disposition (e.g. `수정 후 병합`) as its
+        # verdict and named a readable report: a finished review of any capability.
+        return True
     try:
         import route_identity
         path = binding.get("owner_route_file") or binding.get("route_file")
