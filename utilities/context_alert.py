@@ -3,8 +3,9 @@
 500K/700K are absolute token thresholds, not historical usage or window ratios.
 Each threshold speaks once while the session stays above it; a session jumping
 across both gets the urgent line and both are consumed. A latest request at or
-below 500K -- the session's own compaction, by session-tidy or the runtime, or
-a new native session ID -- clears them, so the next crossing speaks once more.
+below 400K -- the session's own compaction, by session-tidy or the runtime, or
+a new native session ID -- clears them, so the next crossing speaks once more;
+a small dip under 500K (old tool results trimmed) is not a compaction.
 A zero or unknown count observes nothing. Adapters own user/model presentation.
 These work-preservation notices do not promise headroom before native compaction.
 """
@@ -21,11 +22,11 @@ import sys
 import tempfile
 
 THRESHOLDS = (500_000, 700_000)
+# A request this small means the context was compacted, not merely trimmed.
+REARM_BELOW = THRESHOLDS[0] * 4 // 5
 # The 700K line says what the 2026-10-07 decision asks for: a default tidy at the
 # next work boundary, and that 정리만 does not shrink the context.
-URGENT = ("지금 하는 일 하나를 넘긴 경계(없으면 즉시)에서 /session-tidy 기본 정리"
-          "(같은 세션 압축 — 세션 번호·감독 역할·기다리는 완료 알림 유지) · "
-          "'정리만'은 문맥을 줄이지 않음")
+URGENT = "하던 일 하나를 넘긴 뒤 /session-tidy 기본 정리('정리만'은 문맥을 줄이지 않음)"
 
 
 def main_session(env=None) -> bool:
@@ -167,7 +168,7 @@ def codex_notice(payload: dict) -> str:
 
 
 def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None, env=None) -> str:
-    """Atomically consume newly exceeded thresholds; at or below 500K, clear them.
+    """Atomically consume newly exceeded thresholds; at or below 400K, clear them.
 
     Any unavailable state is silent and leaves the record as it is."""
     if (not session_id or not isinstance(tokens, int) or isinstance(tokens, bool)
@@ -179,7 +180,7 @@ def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None,
     ) / "hearting/context-alert"
     digest = hashlib.sha256(f"{harness}\0{session_id}".encode()).hexdigest()
     target = base / (digest + ".json")
-    if not crossed and not os.path.lexists(target):
+    if not crossed and (tokens > REARM_BELOW or not os.path.lexists(target)):
         return ""  # Nothing crossed and nothing to clear: no state is touched.
     if not main_session(env):
         return ""
@@ -195,7 +196,7 @@ def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None,
             if not isinstance(seen, list) or any(item not in THRESHOLDS for item in seen):
                 return ""
             if not crossed:
-                # Back at or below 500K: the context was compacted. Both may speak again.
+                # Back at or below 400K: the context was compacted. Both may speak again.
                 target.unlink()
                 return ""
             fresh = [threshold for threshold in crossed if threshold not in seen]

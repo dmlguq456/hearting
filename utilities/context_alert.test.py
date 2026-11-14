@@ -39,9 +39,8 @@ class ContextAlertTest(unittest.TestCase):
                       "cache_read_input_tokens": count - 30, "output_tokens": 900000}}}) + "\n")
         return path
 
-    URGENT = ("입력 문맥 약 703K — 지금 하는 일 하나를 넘긴 경계(없으면 즉시)에서 /session-tidy "
-              "기본 정리(같은 세션 압축 — 세션 번호·감독 역할·기다리는 완료 알림 유지) · "
-              "'정리만'은 문맥을 줄이지 않음 · 자동 압축 여유 보장 아님")
+    URGENT = ("입력 문맥 약 703K — 하던 일 하나를 넘긴 뒤 /session-tidy 기본 정리"
+              "('정리만'은 문맥을 줄이지 않음) · 자동 압축 여유 보장 아님")
 
     def test_strict_boundaries_and_once_while_the_session_stays_above(self):
         for count in (499999, 500000):
@@ -55,10 +54,20 @@ class ContextAlertTest(unittest.TestCase):
         for count in (0, 500001, 800000):
             self.assertEqual(self.notice(count), "")
 
-    def test_compaction_back_at_or_below_500k_lets_each_threshold_speak_once_more(self):
+    def test_a_small_dip_under_500k_is_not_a_compaction(self):
+        self.assertIn("작업 상태 저장 권장", self.notice(505000))
+        record = next(self.state.glob("*.json"))
+        for count in (496000, 503000, 400001, 503000):
+            self.assertEqual(self.notice(count), "")
+            self.assertEqual(json.loads(record.read_text()), [500000])
+        self.assertEqual(self.notice(400000), "")       # this small: compacted
+        self.assertFalse(record.exists())
+        self.assertIn("작업 상태 저장 권장", self.notice(503000))
+
+    def test_compaction_well_below_500k_lets_each_threshold_speak_once_more(self):
         self.assertEqual(self.notice(703000), self.URGENT)
         self.assertEqual(self.notice(720000), "")
-        self.assertEqual(self.notice(500000), "")       # the session's own compaction
+        self.assertEqual(self.notice(400000), "")       # the session's own compaction
         self.assertEqual(self.notice(30000), "")
         self.assertIn("작업 상태 저장 권장", self.notice(512000))
         self.assertEqual(self.notice(530000), "")
@@ -218,7 +227,7 @@ class ContextAlertTest(unittest.TestCase):
         payload = {"hook_event_name": "UserPromptSubmit", "session_id": "codex-session-id",
                    "transcript_path": str(path)}
         with patch.dict(os.environ, {**self.env, "HOME": str(self.temp)}, clear=True):
-            self.assertIn("지금", alert.codex_notice(payload))
+            self.assertIn("기본 정리", alert.codex_notice(payload))
             self.assertEqual(alert.codex_notice(payload), "")
             payload["session_id"] = "new-codex-session"
             self.assertEqual(alert.codex_notice(payload), "")
@@ -264,7 +273,7 @@ class ContextAlertTest(unittest.TestCase):
                 with redirect_stdout(stdout):
                     self.assertEqual(hook.main(), 0)
                 emitted = json.loads(stdout.getvalue())
-                self.assertIn("지금", emitted["systemMessage"])
+                self.assertIn("기본 정리", emitted["systemMessage"])
                 self.assertIn(emitted["systemMessage"], emitted["hookSpecificOutput"]["additionalContext"])
                 self.assertIn("existing card", emitted["hookSpecificOutput"]["additionalContext"])
                 self.assertNotIn("existing briefing", emitted["systemMessage"])
