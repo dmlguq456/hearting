@@ -15,9 +15,22 @@ route ending.
 
 Records live beside the peer-message transfers:
 ``<peer-state-root>/peer-messages/requests/<id>.json`` (0600, atomic replace).
-``requests/by-session/<harness>/<sid>.json`` lists the request ids a session
-sent (`out`) and received (`in`). The index is a discovery hint; every id it
-names is re-read from its record before use.
+The record is the one source of truth. ``requests/index.json`` maps each
+request id to its two sessions; it is a cache rebuilt from the record files
+whenever it lacks one of them or names one that is gone, so a request is found
+even when the index was never written, was cut short or is unreadable. Nothing
+in it is ever cut for its count.
+
+One message, one reservation. A revision, a follow-up or a report is first
+written into the record as a reservation (``sending``) in one locked update
+that also fixes its number and its transfer ref; the message is then sealed
+under exactly that number and ref, and the reservation is applied (the
+revision becomes current, the report closes the request, ...). If the writer
+dies after the seal, the next ordinary read of the request - a list, `show`,
+`report`, the runner's maintenance pass - finds the sealed transfer and
+applies the reservation (`settle`): the seal is the evidence. A reservation
+whose seal does not exist stays in the record, shown as not confirmed, in both
+sessions' lists; it is never removed for that.
 
 Lock order: the per-request lock is the outermost lock. Nothing seals or
 delivers a message while holding it, and code holding a pending or seat lock
@@ -53,6 +66,8 @@ _REVISION_STATES = ("current", "superseded", "cancelled")
 _ROLES = ("request", "followup", "report", "late-report", "cancel")
 _EVENT_LIMIT = 32
 _MAX_RECORD_BYTES = 256 * 1024
+_MAX_INDEX_BYTES = 16 * 1024 * 1024
+INDEX_SCHEMA = "peer-request-index-v2"
 _TITLE_LIMIT = 80
 _RESULT_LIMIT = 120
 _LOCK_WAIT_S = 10.0
@@ -121,13 +136,9 @@ def _record_path(request_id, *, create=False):
     return requests_dir(create=create) / (request_id + ".json")
 
 
-def _index_path(harness, sid, *, create=False):
-    if harness not in _HARNESSES or not isinstance(sid, str) or not _SAFE.fullmatch(sid):
-        raise ValueError("request-index-key-invalid")
-    directory = requests_dir(create=create) / "by-session" / harness
-    if create:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return directory / (sid + ".json")
+def index_path(*, create=False):
+    """The index file (a cache of each request's two sessions; see the module text)."""
+    return requests_dir(create=create) / "index.json"
 
 
 # --- file primitives -------------------------------------------------------
@@ -160,7 +171,7 @@ def request_lock(key):
         os.close(fd)
 
 
-def _read_json(path):
+def _read_json(path, *, limit=_MAX_RECORD_BYTES):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -168,9 +179,9 @@ def _read_json(path):
     with os.fdopen(fd, encoding="utf-8") as handle:
         info = os.fstat(handle.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_mode & 0o077 or info.st_size > _MAX_RECORD_BYTES):
+                or info.st_mode & 0o077 or info.st_size > limit):
             raise ValueError("peer-request-file-unsafe")
-        return json.loads(handle.read(_MAX_RECORD_BYTES + 1))
+        return json.loads(handle.read(limit + 1))
 
 
 def _atomic_write(path, payload):
@@ -193,6 +204,7 @@ def _valid_record(record, request_id):
             and record.get("id") == request_id and record.get("state") in _STATES
             and isinstance(record.get("revisions"), list)
             and isinstance(record.get("reports"), list)
+            and isinstance(record.get("sending", []), list)
             and _endpoint(record.get("requester")) and _endpoint(record.get("recipient")))
 
 
@@ -202,7 +214,9 @@ def _endpoint(value):
 
 
 def load(request_id):
-    """The validated record, or None when absent, invalid or still preparing a seal."""
+    """The validated record (also one whose first revision is not confirmed), or None.
+
+    Read only: it never settles, so it is safe under a pending or seat lock."""
     try:
         record = _read_json(_record_path(request_id))
     except (OSError, ValueError):
@@ -230,37 +244,76 @@ def _event(record, what, **fields):
 
 # --- index -----------------------------------------------------------------
 
-def _index_read(harness, sid):
+def _key(endpoint):
+    return "%s:%s" % (endpoint["harness"], endpoint["session_id"])
+
+
+def _record_ids():
+    """Every request id that has a record file (the source of truth for the index)."""
     try:
-        data = _read_json(_index_path(harness, sid))
+        names = os.listdir(requests_dir())
     except (OSError, ValueError):
-        return {"out": [], "in": []}
-    if not isinstance(data, dict):
-        return {"out": [], "in": []}
-    return {side: [i for i in (data.get(side) or []) if isinstance(i, str) and _ID.fullmatch(i)]
-            for side in ("out", "in")}
+        return set()
+    return {name[:-5] for name in names if name.endswith(".json") and _ID.fullmatch(name[:-5])}
 
 
-def _index_update(harness, sid, side, request_id, *, add):
+def _index_load():
+    try:
+        data = _read_json(index_path(), limit=_MAX_INDEX_BYTES)
+    except (OSError, ValueError):
+        return {}
+    parties = data.get("parties") if isinstance(data, dict) else None
+    if not isinstance(parties, dict):
+        return {}
+    return {request_id: pair for request_id, pair in parties.items()
+            if isinstance(request_id, str) and _ID.fullmatch(request_id)
+            and isinstance(pair, list) and len(pair) == 2 and all(isinstance(k, str) for k in pair)}
+
+
+def _index_store(parties):
+    _atomic_write(index_path(create=True), {"schema": INDEX_SCHEMA, "parties": parties})
+
+
+def _index_record(record):
+    """Add one request to the index right after its record is published (a hint only)."""
     with request_lock("index"):
-        data = _index_read(harness, sid)
-        ids = [i for i in data[side] if i != request_id]
-        if add:
-            ids.append(request_id)
-        data[side] = ids[-512:]
-        if not any(data.values()):
-            with contextlib.suppress(OSError, ValueError):
-                _index_path(harness, sid).unlink()
-            return
-        _atomic_write(_index_path(harness, sid, create=True),
-                      {"schema": "peer-request-index-v1", **data})
+        parties = _index_load()
+        parties[record["id"]] = [_key(record["requester"]), _key(record["recipient"])]
+        _index_store(parties)
 
 
-def _index_record(record, *, add):
-    _index_update(record["requester"]["harness"], record["requester"]["session_id"],
-                  "out", record["id"], add=add)
-    _index_update(record["recipient"]["harness"], record["recipient"]["session_id"],
-                  "in", record["id"], add=add)
+def _index():
+    """``{id: [requester key, recipient key]}`` for every record on disk.
+
+    The record files are read for any id the index lacks, and ids whose record is
+    gone are dropped; the corrected index is written back. A request's two sessions
+    never change after it is created, so a cached pair stays right."""
+    parties, ids = _index_load(), _record_ids()
+    if ids == set(parties):
+        return parties
+    with contextlib.suppress(OSError, ValueError):
+        with request_lock("index"):
+            parties, ids = _index_load(), _record_ids()
+            changed = False
+            for request_id in set(parties) - ids:
+                del parties[request_id]
+                changed = True
+            for request_id in sorted(ids - set(parties)):
+                record = load(request_id)
+                if record is not None:
+                    parties[request_id] = [_key(record["requester"]), _key(record["recipient"])]
+                    changed = True
+            if changed:
+                _index_store(parties)
+            return parties
+    # The index could not be locked or written: answer from the records alone.
+    for request_id in set(parties) - ids:
+        del parties[request_id]
+    for request_id in ids - set(parties):
+        record = load(request_id)
+        if record is not None:
+            parties[request_id] = [_key(record["requester"]), _key(record["recipient"])]
+    return parties
 
 
 # --- identity following (N3) ------------------------------------------------
@@ -319,31 +372,226 @@ def _predecessors(harness, sid):
         return []
 
 
+# --- reservations: number and ref first, seal second, apply third -----------
+
+def _reservation(record, what, role, revision, number, **fields):
+    record["seq"] = int(record.get("seq") or 0) + 1
+    entry = dict(fields, seq=record["seq"], what=what, role=role, revision=int(revision),
+                 n=int(number), ref=secrets.token_hex(16), at=time.time())
+    record.setdefault("sending", []).append(entry)
+    return entry
+
+
+def _sending(record, what=None):
+    return [entry for entry in record.get("sending") or ()
+            if isinstance(entry, dict) and (what is None or entry.get("what") == what)]
+
+
+def _latest_revision(record):
+    """``(n, label)`` of the newest revision, confirmed or still reserved."""
+    entries = [(r["n"], r.get("label", "")) for r in record["revisions"]]
+    entries += [(r["n"], r.get("label", "")) for r in _sending(record, "revision")]
+    return max(entries) if entries else (0, "")
+
+
+def _sealed(request_id, entry):
+    """True when the transfer sealed under ``entry`` exists: the seal is the evidence."""
+    ref = entry.get("ref")
+    if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
+        return False
+    try:
+        transfer = _read_json(requests_dir().parent / "transfers" / (ref + ".json"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(transfer, dict) and transfer.get("message_id") == ref
+            and transfer.get("request") == request_seal(request_id, entry["revision"], entry["role"]))
+
+
+def _apply(record, entry, transfer_ref=None):
+    """Apply one reservation to ``record``; return what it became (None: not yet)."""
+    ref = transfer_ref or entry["ref"]
+    what = entry["what"]
+    if what == "revision":
+        number = entry["n"]
+        newer = any(r["n"] > number for r in record["revisions"])
+        state = "cancelled" if record["state"] == "cancelled" else "superseded" if newer else "current"
+        if state == "current":
+            for revision in record["revisions"]:
+                if revision.get("state") == "current":
+                    revision["state"] = "superseded"
+        applied = _revision(number, entry.get("label", ""), ref, state=state)
+        record["revisions"].append(applied)
+        record["revisions"].sort(key=lambda r: r["n"])
+        if record["state"] == "preparing":
+            record["state"] = "open"
+        _event(record, "opened" if number == 1 else "revised", revision=number)
+    elif what == "followup":
+        applied = revision_of(record, entry["revision"])
+        if applied is None:
+            return None  # its revision is not applied yet; the next settle does both in order
+        if ref not in applied["followups"]:
+            applied["followups"].append(ref)
+        _event(record, "followup", revision=entry["revision"])
+    elif what == "report":
+        target = revision_of(record, entry["revision"])
+        if target is None:
+            return None
+        late = bool(entry.get("late") or target.get("state") != "current"
+                    or record["state"] in _CLOSED_STATES)
+        started = target.get("created") or record["created"]
+        applied = {"n": entry["n"], "revision": entry["revision"], "kind": entry["kind"],
+                   "result": entry.get("result", ""), "remaining": entry.get("remaining", ""),
+                   "artifact": entry.get("artifact", ""), "transfer_ref": ref,
+                   "reporter": entry.get("reporter"), "at": entry["at"],
+                   "elapsed": max(0.0, entry["at"] - started), "late": late}
+        record["reports"].append(applied)
+        record["reports"].sort(key=lambda r: r["n"])
+        if not late:
+            record["state"] = {"partial": "partial", "final": "final", "reject": "rejected"}[entry["kind"]]
+        _event(record, "report", report=entry["n"], report_kind=entry["kind"], late=late)
+    else:
+        return None
+    record["sending"] = [other for other in _sending(record) if other.get("ref") != entry["ref"]]
+    return applied
+
+
+def _applied(record, entry_ref, transfer_ref):
+    """What an already-applied reservation became (a retry of the same confirm)."""
+    for revision in record["revisions"]:
+        if revision.get("transfer_ref") in (entry_ref, transfer_ref):
+            return revision
+        if transfer_ref in revision.get("followups", ()) or entry_ref in revision.get("followups", ()):
+            return revision
+    for report in record["reports"]:
+        if report.get("transfer_ref") in (entry_ref, transfer_ref):
+            return report
+    return None
+
+
+def _settle_locked(record, *, known=None, transfer_ref=None):
+    """Apply every reservation whose seal exists, oldest first. ``known`` is a
+    reservation its own writer just sealed (as ``transfer_ref``)."""
+    changed, result = False, None
+    for entry in sorted(_sending(record), key=lambda e: e.get("seq", 0)):
+        mine = entry.get("ref") == known
+        if mine or _sealed(record["id"], entry):
+            applied = _apply(record, entry, transfer_ref if mine else None)
+            if applied is not None:
+                changed = True
+                if mine:
+                    result = applied
+    return changed, result
+
+
+def settle(request_id):
+    """Finish an interrupted confirmation from its seal; the settled record (or None)."""
+    record = load(request_id)
+    if record is None or not _sending(record):
+        return record
+    try:
+        with request_lock(request_id):
+            record = _load_for_update(request_id)
+            changed, _result = _settle_locked(record)
+            if changed:
+                _store(record)
+            return record
+    except (OSError, ValueError):
+        return load(request_id)
+
+
+def load_settled(request_id):
+    """:func:`load` after :func:`settle` (never while a pending or seat lock is held)."""
+    try:
+        return settle(request_id)
+    except ValueError:
+        return None
+
+
+def confirm(request_id, reserved_ref, transfer_ref=None):
+    """After a reservation's message is sealed: apply it. ``(record, applied)``.
+
+    Earlier reservations whose seals exist are applied first, in order. A retry
+    (already applied) returns what it became; nothing else is written."""
+    with request_lock(request_id):
+        record = _load_for_update(request_id)
+        if not any(entry.get("ref") == reserved_ref for entry in _sending(record)):
+            applied = _applied(record, reserved_ref, transfer_ref)
+            if applied is None:
+                raise ValueError("reservation-unknown")
+            return record, applied
+        _changed, applied = _settle_locked(record, known=reserved_ref, transfer_ref=transfer_ref)
+        _store(record)
+        return record, applied
+
+
+def abort(request_id, reserved_ref):
+    """Drop a reservation whose seal failed. A new request with nothing else is removed."""
+    with request_lock(request_id):
+        try:
+            record = _read_json(_record_path(request_id))
+        except (OSError, ValueError):
+            return False
+        if not _valid_record(record, request_id):
+            return False
+        before = len(_sending(record))
+        record["sending"] = [e for e in _sending(record) if e.get("ref") != reserved_ref]
+        if len(record["sending"]) == before:
+            return False
+        if record["state"] == "preparing" and not record["revisions"] and not record["sending"]:
+            with contextlib.suppress(OSError):
+                _record_path(request_id).unlink()
+            return True
+        _store(record)
+        return True
+
+
 # --- creation and revisions -------------------------------------------------
 
-def reserve(requester, recipient, *, title, address=""):
-    """Take an id and write a `preparing` record. It is in no index and no panel."""
+def open_request(requester, recipient, *, title, address="", label=""):
+    """Write a new request with revision 1 reserved: ``(record, reservation)``.
+
+    It is listed for both sessions at once (as not confirmed until its seal exists)."""
     if not (_endpoint(requester) and _endpoint(recipient)):
         raise ValueError("request-endpoint-invalid")
     directory = requests_dir(create=True)
     for _attempt in range(8):
         request_id = "rq-" + secrets.token_hex(3)
-        path = directory / (request_id + ".json")
+        now = time.time()
         record = {"schema": SCHEMA, "id": request_id, "title": clean(title, _TITLE_LIMIT),
-                  "created": time.time(), "updated": time.time(),
+                  "created": now, "updated": now,
                   "requester": _identity(requester), "recipient": _identity(recipient),
                   "address": clean(address, 200), "state": "preparing",
-                  "revisions": [], "reports": [], "cancel": None, "events": []}
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except FileExistsError:
-            continue
+                  "revisions": [], "reports": [], "cancel": None, "events": [], "sending": []}
+        entry = _reservation(record, "revision", "request", 1, 1, label=clean(label, 80))
+        if _publish_new(directory / (request_id + ".json"), record):
+            with contextlib.suppress(OSError, ValueError):
+                _index_record(record)
+            return record, entry
+    raise ValueError("request-id-exhausted")
+
+
+def _publish_new(path, record):
+    """Create ``path`` with ``record`` at once (never a half-written file); False if taken."""
+    tmp = path.with_name(".tmp-%s-%s" % (path.name, secrets.token_hex(4)))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle, ensure_ascii=False, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
-        return request_id
-    raise ValueError("request-id-exhausted")
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def reserve(requester, recipient, *, title, address="", label=""):
+    """The id of a new request whose revision 1 is reserved (see :func:`open_request`)."""
+    return open_request(requester, recipient, title=title, address=address, label=label)[0]["id"]
 
 
 def _identity(endpoint):
@@ -351,39 +599,29 @@ def _identity(endpoint):
             "name": clean(endpoint.get("name") or "", 80)}
 
 
-def commit_open(request_id, transfer_ref, *, label=""):
-    """After the first revision is sealed: open the request and index it."""
-    with request_lock(request_id):
-        record = _load_for_update(request_id)
-        if record["state"] != "preparing":
-            if record["revisions"] and record["revisions"][0].get("transfer_ref") == transfer_ref:
-                return record  # a retry of the same sealed message
-            raise ValueError("request-not-preparing")
-        record["state"] = "open"
-        record["revisions"] = [_revision(1, label, transfer_ref)]
-        _event(record, "opened", revision=1)
-        _store(record)
-        _index_record(record, add=True)
-        return record
+def commit_open(request_id, transfer_ref, *, label=None):
+    """Confirm revision 1 of a new request as sealed under ``transfer_ref``."""
+    record = load(request_id)
+    if record is None:
+        raise ValueError("request-unknown")
+    first = next((e for e in _sending(record, "revision") if e.get("n") == 1), None)
+    if first is None:
+        if record["revisions"] and record["revisions"][0].get("transfer_ref") == transfer_ref:
+            return record
+        raise ValueError("request-not-preparing")
+    if label is not None:
+        with request_lock(request_id):
+            current = _load_for_update(request_id)
+            for entry in _sending(current, "revision"):
+                if entry.get("n") == 1:
+                    entry["label"] = clean(label, 80)
+            _store(current)
+    return confirm(request_id, first["ref"], transfer_ref)[0]
 
 
-def abort_preparing(request_id):
-    """Drop a `preparing` record whose seal failed. Anything else stays."""
-    with request_lock(request_id):
-        try:
-            record = _read_json(_record_path(request_id))
-        except (OSError, ValueError):
-            return False
-        if not _valid_record(record, request_id) or record["state"] != "preparing":
-            return False
-        with contextlib.suppress(OSError):
-            _record_path(request_id).unlink()
-        return True
-
-
-def _revision(number, label, transfer_ref):
+def _revision(number, label, transfer_ref, state="current"):
     return {"n": number, "label": clean(label, 80), "transfer_ref": transfer_ref,
-            "created": time.time(), "state": "current", "followups": []}
+            "created": time.time(), "state": state, "followups": []}
 
 
 def current_revision(record):
@@ -400,81 +638,71 @@ def revision_of(record, number):
     return None
 
 
-def add_revision(request_id, transfer_ref, *, label=""):
-    """Seal-then-commit: a new revision supersedes the current one."""
+def reserve_message(request_id, *, label=None):
+    """Reserve the requester's next message: ``(record, reservation)``.
+
+    A label that differs from the newest revision's makes a new revision (number
+    fixed here, under the lock); otherwise it is a follow-up of the newest one."""
     with request_lock(request_id):
         record = _load_for_update(request_id)
-        for revision in record["revisions"]:
-            if revision.get("transfer_ref") == transfer_ref:
-                return record, revision["n"]  # a retry of the same sealed message
+        _settle_locked(record)
+        if record["state"] == "preparing":
+            raise ValueError("request-incomplete")
         if record["state"] not in _OPEN_STATES:
             raise ValueError("request-closed")
-        for revision in record["revisions"]:
-            if revision.get("state") == "current":
-                revision["state"] = "superseded"
-        number = len(record["revisions"]) + 1
-        record["revisions"].append(_revision(number, label, transfer_ref))
-        _event(record, "revised", revision=number)
+        newest, newest_label = _latest_revision(record)
+        if label is not None and label != newest_label:
+            entry = _reservation(record, "revision", "request", newest + 1, newest + 1,
+                                 label=clean(label, 80))
+        else:
+            target = revision_of(record, newest)
+            serial = (len(target["followups"]) if target else 0) + len(
+                [e for e in _sending(record, "followup") if e.get("revision") == newest]) + 1
+            entry = _reservation(record, "followup", "followup", newest, serial,
+                                 label=newest_label)
         _store(record)
-        return record, number
+        return record, entry
 
 
-def add_followup(request_id, transfer_ref):
-    """A further message about the current revision (no new revision)."""
-    with request_lock(request_id):
-        record = _load_for_update(request_id)
-        if record["state"] not in _OPEN_STATES:
-            raise ValueError("request-closed")
-        revision = current_revision(record)
-        if transfer_ref in revision["followups"]:
-            return record, revision["n"]
-        revision["followups"].append(transfer_ref)
-        _event(record, "followup", revision=revision["n"])
-        _store(record)
-        return record, revision["n"]
-
-
-def record_report(request_id, *, kind, revision, result="", remaining="", artifact="",
-                  transfer_ref="", reporter=None):
-    """Attach one report; return ``(record, report)``.
+def reserve_report(request_id, *, kind, revision, result="", remaining="", artifact="",
+                   reporter=None):
+    """Reserve one report: ``(record, reservation)``; its number is fixed here.
 
     The report belongs to the revision it answers. A report for a revision that is
-    no longer current, or for a request already closed, is `late`: it is kept on
-    that revision and changes neither the request state nor the newest result.
-    A partial report keeps the request open.
+    no longer current, or for a request already closed, is `late`: once applied it
+    is kept on that revision and changes neither the request state nor the newest
+    result. A partial report keeps the request open. Running the same report
+    command again reserves another report: it is a new report, not a retry.
     """
     if kind not in ("partial", "final", "reject"):
         raise ValueError("report-kind-invalid")
     with request_lock(request_id):
         record = _load_for_update(request_id)
+        _settle_locked(record)
         if record["state"] == "preparing":
             raise ValueError("request-incomplete")
-        for earlier in record["reports"]:
-            if transfer_ref and earlier.get("transfer_ref") == transfer_ref:
-                return record, earlier  # a retry of the same sealed message
         target = revision_of(record, revision)
         if target is None:
             raise ValueError("revision-unknown")
         late = target.get("state") != "current" or record["state"] in _CLOSED_STATES
-        started = target.get("created") or record["created"]
-        report = {"n": len(record["reports"]) + 1, "revision": revision, "kind": kind,
-                  "result": clean(result, _RESULT_LIMIT), "remaining": clean(remaining, 400),
-                  "artifact": clean(artifact, 300), "transfer_ref": transfer_ref,
-                  "reporter": _identity(reporter) if _endpoint(reporter) else None,
-                  "at": time.time(), "elapsed": max(0.0, time.time() - started), "late": late}
-        record["reports"].append(report)
-        if not late:
-            record["state"] = {"partial": "partial", "final": "final", "reject": "rejected"}[kind]
-        _event(record, "report", report=report["n"], report_kind=kind, late=late)
+        number = max([r["n"] for r in record["reports"]] + [e["n"] for e in _sending(record, "report")]
+                     + [0]) + 1
+        entry = _reservation(record, "report", "late-report" if late else "report", revision, number,
+                             kind=kind, result=clean(result, _RESULT_LIMIT),
+                             remaining=clean(remaining, 400), artifact=clean(artifact, 300),
+                             reporter=_identity(reporter) if _endpoint(reporter) else None,
+                             late=late)
         _store(record)
-        return record, report
+        return record, entry
 
 
 def cancel(request_id, *, reason=""):
-    """Cancel the open work. Every non-superseded revision becomes `cancelled`."""
+    """Cancel the open work. Every non-superseded revision becomes `cancelled`;
+    a revision still reserved is cancelled when it is applied."""
     with request_lock(request_id):
         record = _load_for_update(request_id)
-        if record["state"] not in _OPEN_STATES:
+        _settle_locked(record)
+        if record["state"] not in _OPEN_STATES + ("preparing",):
             raise ValueError("request-closed")
         for revision in record["revisions"]:
             if revision.get("state") == "current":
@@ -510,35 +738,66 @@ def note_body_unreadable(request_id, reason):
         pass
 
 
+def message_refs(record):
+    """Every transfer ref of the requester's messages (revisions, follow-ups, reserved ones)."""
+    refs = []
+    for revision in record["revisions"]:
+        refs.append(revision.get("transfer_ref"))
+        refs.extend(revision.get("followups") or ())
+    refs.extend(e.get("ref") for e in _sending(record) if e.get("what") in ("revision", "followup"))
+    return [ref for ref in refs if isinstance(ref, str) and ref]
+
+
+def unconfirmed(record):
+    """The reservations of ``record`` whose seal is not there (yet): what is not confirmed."""
+    return _sending(record)
+
+
 # --- reads -----------------------------------------------------------------
 
 def session_requests(harness, sid):
     """``{"out": [...], "in": [...]}`` for a session, including its confirmed
-    predecessors' requests. Index hints are verified against the record."""
-    sources = [(harness, sid)] + [(harness, old) for old in _predecessors(harness, sid)]
+    predecessors' requests, read from the records (the index only narrows which).
+
+    Every request of the session is in it, however many there are; an interrupted
+    confirmation is finished here first (:func:`settle`). A request whose first
+    revision has no seal stays listed (state `preparing`, not confirmed)."""
+    keys = {"%s:%s" % (harness, sid)} | {"%s:%s" % (harness, old) for old in _predecessors(harness, sid)}
     me = {"harness": harness, "session_id": sid}
-    seen, out, received = set(), [], []
-    for source_harness, source_sid in sources:
-        index = _index_read(source_harness, source_sid)
-        for side in ("out", "in"):
-            for request_id in index[side]:
-                if (side, request_id) in seen:
-                    continue
-                seen.add((side, request_id))
-                record = load(request_id)
-                if record is None or record["state"] == "preparing":
-                    continue
-                if side == "out" and _same(current_requester(record), me):
-                    out.append(record)
-                elif side == "in" and _same(current_recipient(record), me):
-                    received.append(record)
-    key = lambda record: (record["state"] not in _OPEN_STATES, -record.get("updated", 0))  # noqa: E731
+    out, received = [], []
+    for request_id, (requester_key, recipient_key) in sorted(_index().items()):
+        if requester_key not in keys and recipient_key not in keys:
+            continue
+        record = load(request_id)
+        if record is not None and _sending(record):
+            record = load_settled(request_id)
+        if record is None:
+            continue
+        actual = [_key(record["requester"]), _key(record["recipient"])]
+        if actual != [requester_key, recipient_key]:
+            # The record wins over a wrong index entry, which is put right here.
+            requester_key, recipient_key = actual
+            with contextlib.suppress(OSError, ValueError):
+                with request_lock("index"):
+                    parties = _index_load()
+                    parties[request_id] = actual
+                    _index_store(parties)
+        if requester_key in keys and _same(current_requester(record), me):
+            out.append(record)
+        if recipient_key in keys and _same(current_recipient(record), me):
+            received.append(record)
+    key = lambda record: (record["state"] not in _OPEN_STATES + ("preparing",),  # noqa: E731
+                          -record.get("updated", 0))
     return {"out": sorted(out, key=key), "in": sorted(received, key=key)}
 
 
 def withdrawn(row):
     """True when a still-undelivered request row belongs to a revision that was
-    superseded or cancelled: it must not be sent. Delivered rows are never undone."""
+    superseded or cancelled: it must not be sent. Delivered rows are never undone.
+
+    Read only (a carrier calls it under its pending lock): a cancelled request,
+    a revision marked superseded or cancelled, or a newer applied revision
+    withdraws it."""
     if not isinstance(row, dict) or row.get("state") != "pending":
         return False
     for ref in row.get("refs") or ():
@@ -546,8 +805,14 @@ def withdrawn(row):
         if parsed is None or parsed["role"] not in ("request", "followup"):
             continue
         record = load(parsed["id"])
-        revision = revision_of(record, parsed["revision"]) if record else None
+        if record is None:
+            continue
+        if record["state"] == "cancelled":
+            return True
+        revision = revision_of(record, parsed["revision"])
         if revision is not None and revision.get("state") in ("superseded", "cancelled"):
+            return True
+        if any(r["n"] > parsed["revision"] for r in record["revisions"]):
             return True
     return False
 
@@ -604,17 +869,19 @@ def message_kind(text="", transfer=None):
 
 def prune(now=None, *, examine=64):
     """Remove records closed (or never sealed) for more than the retention period.
-    An open request is never removed for its age. Returns the removed ids."""
+    An open request is never removed for its age. Returns the removed ids.
+    A removed record leaves the index by itself (the index follows the files)."""
     now = time.time() if now is None else now
     try:
         directory = requests_dir()
-        names = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+        names = sorted(name for name in os.listdir(directory)
+                       if name.endswith(".json") and _ID.fullmatch(name[:-5]))
     except (OSError, ValueError):
         return []
     removed = []
     for name in names[:examine]:
         request_id = name[:-5]
-        record = load_any(request_id)
+        record = load(request_id)
         if record is None:
             continue
         stamp = record.get("updated") or record.get("created") or now
@@ -622,24 +889,32 @@ def prune(now=None, *, examine=64):
             continue
         with contextlib.suppress(OSError, ValueError):
             with request_lock(request_id):
-                current = load_any(request_id)
+                current = load(request_id)
                 if (current is None or current["state"] in _OPEN_STATES
                         or now - (current.get("updated") or stamp) < RETENTION_SECONDS):
                     continue
-                if current["state"] != "preparing":
-                    _index_record(current, add=False)
                 _record_path(request_id).unlink()
                 removed.append(request_id)
     return removed
 
 
+def maintain(now=None):
+    """The runner's due pass: settle every interrupted confirmation, then prune.
+    Returns ``{"settled": n, "pruned": n}``."""
+    settled = 0
+    for request_id in sorted(_record_ids()):
+        record = load(request_id)
+        if record is not None and _sending(record):
+            before = len(_sending(record))
+            after = load_settled(request_id)
+            if after is not None and len(_sending(after)) < before:
+                settled += 1
+    return {"settled": settled, "pruned": len(prune(now))}
+
+
 def load_any(request_id):
-    """Like :func:`load` but includes `preparing` records (retention reads this)."""
-    try:
-        record = _read_json(_record_path(request_id))
-    except (OSError, ValueError):
-        return None
-    return record if _valid_record(record, request_id) else None
+    """Same as :func:`load` (kept for retention readers)."""
+    return load(request_id)
 
 
 # --- rendering ---------------------------------------------------------------
@@ -730,5 +1005,13 @@ def describe(record, *, rows=None, now=None):
             elapsed_text(report.get("elapsed") or 0), report.get("result", ""), report.get("remaining", "")))
     if record.get("cancel"):
         lines.append("cancelled reason=%s" % record["cancel"].get("reason", ""))
+    for entry in _sending(record):
+        # Reserved, and its sealed message is not there: not confirmed, never dropped.
+        what = {"revision": "revision=%d" % entry["n"],
+                "followup": "followup revision=%d" % entry["revision"],
+                "report": "report=%d kind=%s revision=%d" % (entry["n"], entry.get("kind"),
+                                                            entry["revision"])}.get(entry.get("what"))
+        if what:
+            lines.append("%s state=unconfirmed reason=no-seal" % what)
     lines.append("updated=%s ago" % elapsed_text(now - record.get("updated", now)))
     return lines

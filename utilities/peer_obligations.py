@@ -3391,7 +3391,17 @@ class ObligationStore:
                 watch_ids = _message_watch_ids(message.get("refs", []))
                 if watch_ids is None:
                     return False
-                if not watch_ids:
+                # A sealed peer request follows the successor Hearting's lineage confirms;
+                # the receipt's own binding (made by the exact receiver check) names it.
+                followed = (isinstance(message.get("request"), dict)
+                            and isinstance(original.get("session_id"), str)
+                            and any(isinstance(item, str) and item.startswith("peer-request:")
+                                    for item in message.get("refs", []))
+                            and all((binding.get("recipient") or {}).get(key) == recipient.get(key)
+                                    for key in ("harness", "session_id")))
+                if not watch_ids and followed:
+                    pass
+                elif not watch_ids:
                     if original.get("harness") != recipient.get("harness"):
                         return False
                     pane_bound = original.get("session_id") is None

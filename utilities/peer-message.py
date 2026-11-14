@@ -455,6 +455,12 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     if producer_binding is not None and not include_trailer:
         raise ValueError("peer-runtime-producer-requires-receipt-envelope")
     ref = secrets.token_hex(16)
+    if request is not None and request.get("ref") is not None:
+        # A peer request fixed this message's ref (with its number) in the request
+        # record before sealing, so the seal can be found from the record.
+        ref = request["ref"]
+        if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
+            raise ValueError("peer-request-seal-invalid")
     normalized = body.rstrip("\n")
     source_sha256 = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     command = handoff_accept_command(ref) if handoff is not None else ""
@@ -2584,7 +2590,10 @@ def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
                 or not exact_recipient
                 or (not claim.get("first_input")
                     and not _pending_target_matches(current, recipient))
-                or _registered_delivery_settled(current)):
+                or _registered_delivery_settled(current)
+                or _request_withdrawn(current)):
+            # A request revision cancelled or superseded after its reservation is
+            # not written; this is the same pending lock a cancel reads it under.
             return None
         if not _registered_submission_current(current):
             return None
@@ -2873,6 +2882,10 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
                 raise QueueDeliveryError("peer-claim-changed-before-add")
+            if _request_withdrawn(current):
+                # Cancelled or superseded since the check above: not handed over.
+                # A cancel reads this row under this same lock after it is recorded.
+                raise QueueDeliveryError("request-withdrawn-before-add")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-add")
             current = {key: value for key, value in current.items() if key != "steer_turn_id"}
@@ -2888,6 +2901,8 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
                 raise QueueDeliveryError("peer-claim-changed-before-steer")
+            if _request_withdrawn(current):
+                raise QueueDeliveryError("request-withdrawn-before-steer")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-steer")
             _save_pending(dict(current, state="unverified", receipt="native-steer-inflight",

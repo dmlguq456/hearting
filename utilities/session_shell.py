@@ -802,7 +802,7 @@ def _request_body(peer, ref):
 
 def _request_views(harness, sid, now, errors=None):
     """``(views, watched)``: what this session sent and received as requests, read from the
-    request records through its own small index (never the recent-message tail), with the
+    request records (the index only narrows which; never the recent-message tail), with the
     delivery rows of their messages. The files read are watched so a change repaints the panel.
 
     A read that fails shows no request lines, and says why: its reason is appended to
@@ -814,17 +814,24 @@ def _request_views(harness, sid, now, errors=None):
         if errors is not None:
             errors.append("%s: %s" % (type(exc).__name__, str(exc)[:96]))
         return [], []
-    if not listing["out"] and not listing["in"]:
-        return [], []
-    peer = _peer_message()
     views, watched = [], []
     with contextlib.suppress(Exception):
-        watched.append(str(peer_request._index_path(harness, sid)))
+        watched.append(str(peer_request.index_path()))  # a new request repaints the panel
+    if not listing["out"] and not listing["in"]:
+        return [], watched
+    peer = _peer_message()
     for side in ("in", "out"):
-        for record in listing[side][:_REQUEST_VIEWS]:
+        # Open work is never cut for its count; only closed requests are, and only
+        # the first views read a body (the panel opens one at a time).
+        closed_views = 0
+        for index, record in enumerate(listing[side]):
             closed = record["state"] in ("final", "rejected", "cancelled")
             if closed and now - float(record.get("updated") or 0) > 7 * 86400:
                 continue
+            if closed:
+                closed_views += 1
+                if closed_views > _REQUEST_VIEWS:
+                    continue
             refs = []
             for revision in record["revisions"]:
                 refs.append(revision["transfer_ref"])
@@ -853,7 +860,7 @@ def _request_views(harness, sid, now, errors=None):
                 except Exception:
                     gone = False
             body = ""
-            if not closed and current.get("transfer_ref"):
+            if not closed and current.get("transfer_ref") and index < _REQUEST_VIEWS:
                 body = _request_body(peer, current["transfer_ref"])
             views.append({"record": record, "side": side, "rows": rows, "gone": gone, "body": body})
     return views, watched

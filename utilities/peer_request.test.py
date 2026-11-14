@@ -639,10 +639,11 @@ class KindAndRetentionTest(Fixture):
 
     def test_l_index_and_record_disagree_the_record_wins(self):
         request_id, _ = self.new_request(title="t")
-        pr._index_update(*C, "in", request_id, add=True)
-        pr._index_update(*C, "in", "rq-ffffff", add=True)
+        # The index names the request for C and names an id with no record: the records win.
+        pr._index_store({request_id: ["%s:%s" % A, "%s:%s" % C], "rq-ffffff": ["%s:%s" % C] * 2})
         self.assertEqual(pr.session_requests(*C)["in"], [])
         self.assertEqual([r["id"] for r in pr.session_requests(*B)["in"]], [request_id])
+        self.assertEqual(pr._index_load(), {request_id: ["%s:%s" % A, "%s:%s" % B]})
 
 
 class FailureBoundaryTest(Fixture):
@@ -690,10 +691,17 @@ class FailureBoundaryTest(Fixture):
     def test_n_first_line_is_the_delivery_word_and_preparing_ids_are_incomplete(self):
         request_id, out = self.new_request(title="t")
         self.assertRegex(out.split()[1], r"^delivery=(delivered|queued-not-delivered)$")
+        # A request whose first revision was never sealed (its writer died before the seal):
+        # not readable, not reportable, and still listed on both sides as not confirmed.
         dangling = pr.reserve(pr.load(request_id)["requester"], pr.load(request_id)["recipient"], title="x")
-        self.assertIn("request-incomplete", self.show(B, dangling)[1])
+        shown = self.show(B, dangling)[1]
+        self.assertIn("request-incomplete", shown)
+        self.assertIn("revision=1 state=unconfirmed", shown)
         self.assertIn("request-incomplete", self.report(B, dangling, result="x")[1])
-        self.assertEqual([r["id"] for r in pr.session_requests(*B)["in"]], [request_id])
+        self.assertEqual({r["id"] for r in pr.session_requests(*B)["in"]}, {request_id, dangling})
+        self.assertEqual({r["id"] for r in pr.session_requests(*A)["out"]}, {request_id, dangling})
+        self.assertIn("%s unconfirmed" % dangling, self.show(A)[1])
+        self.assertEqual(pr.load(dangling)["state"], "preparing")
 
 
 class LockOrderTest(Fixture):

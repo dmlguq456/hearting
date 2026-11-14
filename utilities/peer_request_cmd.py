@@ -3,14 +3,17 @@
 
 They send through the same sealed message and carrier as `prompt`
 (`cmd_prompt` with a `request` seal), so delivery, obligations and wake-ups are
-the existing ones. This module only decides what a request's work state records
-and what its one-line message says. ``steward`` is the peer-steward module.
+the existing ones, and the caller is the session `prompt` names
+(`_current_session_identity`, the shared resolver). This module only decides
+what a request's work state records and what its one-line message says.
+``steward`` is the peer-steward module.
 
 Order of record and seal (the request lock is outermost and is never held while
-a message is sealed or delivered): a new request first takes an id as
-`preparing` (in no index); the message is sealed outside any request lock; the
-`on_prepared` callback commits the record once the seal exists and before any
-delivery attempt. A failed seal removes the `preparing` record.
+a message is sealed or delivered): one locked update reserves the message in
+the request record with its number and transfer ref; the message is sealed
+under exactly those; the `on_prepared` callback applies the reservation before
+any delivery attempt. A failed seal drops the reservation. A writer that dies
+after the seal leaves a reservation the next read applies from the seal.
 """
 
 from __future__ import annotations
@@ -62,14 +65,19 @@ def _refuse(head, reason, code=1, **extra):
     return code
 
 
-def _send(steward, label, body, recipient, seal, line, refs, on_prepared):
-    """One sealed send through `cmd_prompt`. Returns ``(rc, outcome, ref, via, reason)``."""
+def _send(steward, label, body, recipient, seal, line, refs, on_prepared, ref=None):
+    """One sealed send through `cmd_prompt`. Returns ``(rc, outcome, ref, via, reason)``.
+
+    ``ref`` is the transfer ref the request record reserved for this message."""
     ns = argparse.Namespace(target=label, text=body, body_file=None, body_stdin=False,
                             no_trailer=False, ref=list(refs))
     captured = io.StringIO()
+    request = {"seal": seal, "line": line}
+    if ref is not None:
+        request["ref"] = ref
     with contextlib.redirect_stdout(captured):
         rc = steward.cmd_prompt(ns, resolved_recipient=recipient, on_prepared=on_prepared,
-                                request={"seal": seal, "line": line})
+                                request=request)
     output = captured.getvalue()
     match = None
     for match in _PROMPT_RESULT.finditer(output):
@@ -128,9 +136,19 @@ def _delivered_to(row, sessions):
     return (to.get("harness"), to.get("session_id")) in sessions
 
 
-def _delivered_anywhere(steward, record):
-    """True when some revision or follow-up of the request may have reached the receiver."""
-    for row in _rows(steward, record).values():
+def _handed_over(steward, record):
+    """True when a revision or follow-up of the request was handed to the receiver.
+
+    Read after the cancel is recorded, each row under its own pending lock: a
+    carrier re-checks the cancel under that lock before it hands a row over, so
+    a row still `pending` here is never handed over, and one that was is seen."""
+    pm = steward.peer_message
+    for ref in pr.message_refs(record):
+        try:
+            with pm.pending_lock(ref):
+                row = pm._read_pending(ref)
+        except (OSError, ValueError):
+            return True  # unreadable: a notice is the safe side
         if row and row.get("state") in ("queued", "received", "unverified"):
             return True
     return False
@@ -164,24 +182,24 @@ def request(args, steward):
         return _refuse("request=-", "request-to-self")
     title = args.title or body.strip().splitlines()[0]
     label = args.rev or ""
-    request_id = pr.reserve(_endpoint(steward, me), _endpoint(steward, recipient),
-                            title=title, address=args.target)
+    record, reserved = pr.open_request(_endpoint(steward, me), _endpoint(steward, recipient),
+                                       title=title, address=args.target, label=label)
+    request_id = record["id"]
     head = "request=%s" % request_id
-    record = pr.load(request_id)
     line = pr.render_line(record, "request", revision=1, label=label,
                           body_lines=len(body.splitlines()))
     seal = pr.request_seal(request_id, 1, "request")
     committed = []
 
     def commit(ref):
-        pr.commit_open(request_id, ref, label=label)
+        pr.confirm(request_id, reserved["ref"], ref)
         committed.append(ref)
 
     refs = [pr.ref_for(request_id, 1, "request")]
     rc, outcome, ref, via, why = _send(steward, _label(steward, recipient), body, recipient, seal,
-                                       line, refs, commit)
+                                       line, refs, commit, ref=reserved["ref"])
     if not committed:
-        pr.abort_preparing(request_id)
+        pr.abort(request_id, reserved["ref"])
         return _refuse("request=-", why or "seal-failed", rc or 5)
     print("%s delivery=%s to=%s harness=%s via=%s reason=%s next=%s" % (
         head, _delivery(outcome), steward.peer_message.peer_alias(recipient["harness"], sid),
@@ -192,9 +210,9 @@ def request(args, steward):
 def _revise(args, steward, me):
     request_id = args.target
     head = "request=%s" % request_id
-    record = pr.load(request_id)
+    record = pr.load_settled(request_id)
     if record is None or record["state"] == "preparing":
-        return _refuse(head, "request-unknown")
+        return _refuse(head, "request-unknown" if record is None else "request-incomplete")
     if not pr._same(pr.current_requester(record), me):
         return _refuse(head, "not-the-requester")
     if record["state"] not in pr._OPEN_STATES:
@@ -202,32 +220,34 @@ def _revise(args, steward, me):
     body = _read_body(args).rstrip("\n")
     if not body.strip():
         return _refuse(head, "empty-body")
+    try:
+        # The number (a new revision, or a follow-up's serial) is fixed in this one
+        # locked update, and the message is sealed under exactly that number.
+        record, reserved = pr.reserve_message(request_id, label=args.rev)
+    except ValueError as exc:
+        return _refuse(head, str(exc))
     recipient = pr.current_recipient(record)
-    current = pr.current_revision(record)
-    new_revision = args.rev is not None and args.rev != current.get("label", "")
-    number = len(record["revisions"]) + 1 if new_revision else current["n"]
-    role = "request" if new_revision else "followup"
-    label = args.rev if new_revision else current.get("label", "")
+    role, number, label = reserved["role"], reserved["revision"], reserved.get("label", "")
+    new_revision = reserved["what"] == "revision"
     seal = pr.request_seal(request_id, number, role)
     line = pr.render_line(record, role, revision=number, label=label,
                           body_lines=len(body.splitlines()))
-    serial = len(current["followups"]) + 1
     refs = [pr.ref_for(request_id, number, role)]
-    if role == "followup":
-        refs.append("peer-request-seq:%d" % serial)
+    if not new_revision:
+        refs.append("peer-request-seq:%d" % reserved["n"])
     state = {}
 
     def commit(ref):
-        if new_revision:
-            _record, state["n"] = pr.add_revision(request_id, ref, label=label)
-        else:
-            _record, state["n"] = pr.add_followup(request_id, ref)
+        pr.confirm(request_id, reserved["ref"], ref)
+        state["n"] = number
 
     rc, outcome, ref, via, why = _send(steward, _label(steward, recipient), body,
-                                       recipient, seal, line, refs, commit)
+                                       recipient, seal, line, refs, commit, ref=reserved["ref"])
     if "n" not in state:
+        pr.abort(request_id, reserved["ref"])
         return _refuse(head, why or "seal-failed", rc or 5)
-    extra = " revision=%d supersedes=%d" % (number, number - 1) if new_revision else " followup=%d" % serial
+    extra = (" revision=%d supersedes=%d" % (number, number - 1) if new_revision
+             else " followup=%d" % reserved["n"])
     print("%s delivery=%s%s to=%s harness=%s via=%s reason=%s next=%s" % (
         head, _delivery(outcome), extra,
         steward.peer_message.peer_alias(recipient["harness"], recipient["session_id"]),
@@ -238,24 +258,25 @@ def _revise(args, steward, me):
 def _cancel(args, steward, me):
     request_id = args.target
     head = "request=%s" % request_id
-    record = pr.load(request_id)
-    if record is None or record["state"] == "preparing":
+    record = pr.load_settled(request_id)
+    if record is None:
         return _refuse(head, "request-unknown")
     if not pr._same(pr.current_requester(record), me):
         return _refuse(head, "not-the-requester")
-    if record["state"] not in pr._OPEN_STATES:
+    if record["state"] not in pr._OPEN_STATES + ("preparing",):
         return _refuse(head, "request-closed")
-    notify = _delivered_anywhere(steward, record)
     reason = args.reason or ""
     try:
         record = pr.cancel(request_id, reason=reason)
     except ValueError as exc:
         return _refuse(head, str(exc))
-    if not notify:
+    # Whether a notice is owed is read only now that the cancel is recorded: a
+    # carrier that had not handed a row over by now will not hand it over.
+    if not _handed_over(steward, record):
         print("%s state=cancelled notice=not-needed" % head)
         return 0
     recipient = pr.current_recipient(record)
-    revision = record["revisions"][-1]["n"]
+    revision = record["revisions"][-1]["n"] if record["revisions"] else 1
     body = "요청 %s 취소: %s" % (request_id, reason or record.get("title", ""))
     line = pr.render_line(record, "cancel")
     sent = {}
@@ -290,7 +311,7 @@ def report(args, steward):
     if args.partial and args.reject is not None:
         return _refuse("report=-", "partial-and-reject")
     if args.rq:
-        record = pr.load(args.rq)
+        record = pr.load_settled(args.rq)
         if record is None:
             return _refuse("report=%s" % args.rq, "request-unknown")
         if record["state"] == "preparing":
@@ -342,34 +363,41 @@ def report(args, steward):
                            revisions=",".join(str(r["n"]) for r in record["revisions"]),
                            next="report %s --rev N" % request_id)
         revision = max(received or delivered)
+    try:
+        # The report's number (and whether it is late) is fixed in this one locked
+        # update; its message is sealed under exactly that number.
+        record, reserved = pr.reserve_report(
+            request_id, kind=kind, revision=revision, result=result,
+            remaining=args.remaining or "", artifact=args.artifact or "",
+            reporter=_endpoint(steward, me))
+    except ValueError as exc:
+        return _refuse(head, str(exc))
     target = pr.revision_of(record, revision)
-    if target is None:
-        return _refuse(head, "revision-unknown")
-    late = target.get("state") != "current" or record["state"] in pr._CLOSED_STATES
-    number = len(record["reports"]) + 1
-    import time as _time
-    synthetic = {"n": number, "revision": revision, "kind": kind, "result": pr.clean(result, 120),
-                 "late": late, "elapsed": max(0.0, _time.time() - (target.get("created") or _time.time()))}
+    number, late, role = reserved["n"], reserved["late"], reserved["role"]
+    synthetic = {"n": number, "revision": revision, "kind": kind, "result": reserved["result"],
+                 "late": late, "elapsed": max(0.0, reserved["at"] - (target.get("created") or reserved["at"]))}
     requester = pr.current_requester(record)
-    role = "late-report" if late else "report"
     line = pr.render_line(record, role, report=synthetic)
     seal = pr.request_seal(request_id, revision, role)
     refs = [pr.ref_for(request_id, revision, role), "peer-request-seq:%d" % number]
     state = {}
 
     def commit(ref):
-        _record, state["report"] = pr.record_report(
-            request_id, kind=kind, revision=revision, result=result, remaining=args.remaining or "",
-            artifact=args.artifact or "", transfer_ref=ref, reporter=_endpoint(steward, me))
+        _record, state["report"] = pr.confirm(request_id, reserved["ref"], ref)
 
     rc, outcome, ref, via, why = _send(steward, _label(steward, requester), body,
-                                       requester, seal, line, refs, commit)
+                                       requester, seal, line, refs, commit, ref=reserved["ref"])
     if "report" not in state:
+        pr.abort(request_id, reserved["ref"])
         return _refuse(head, why or "seal-failed", rc or 5)
     after = pr.load(request_id)
-    print("%s kind=%s revision=%d late=%s state=%s delivery=%s via=%s reason=%s next=%s" % (
-        head, kind, revision, str(state["report"]["late"]).lower(), after["state"],
-        _delivery(outcome), via or "-", why or "-", _next_hint(via, why)))
+    applied = state["report"] or {}
+    print("%s kind=%s revision=%d late=%s state=%s delivery=%s via=%s reason=%s next=%s number=%d" % (
+        head, kind, revision, str(bool(applied.get("late", late))).lower(), after["state"],
+        _delivery(outcome), via or "-", why or "-", _next_hint(via, why), number))
+    # A transfer retry never repeats a report; running this command again does.
+    print("report-again: running this command again sends report %d (a new report, not a retry)"
+          % (number + 1))
     return 0 if outcome in ("true", "queued") else rc
 
 
@@ -391,9 +419,12 @@ def show(args, steward):
         count = 0
         for side, mark in (("in", "◂"), ("out", "→")):
             for record in listing[side]:
-                if record["state"] in pr._OPEN_STATES or args.all:
+                if record["state"] in pr._OPEN_STATES + ("preparing",) or args.all:
                     other = record["requester" if side == "in" else "recipient"]
-                    print("%s %s %s %s │ %s" % (mark, record["id"], record["state"],
+                    shown = "unconfirmed" if record["state"] == "preparing" else record["state"]
+                    if record["state"] != "preparing" and pr.unconfirmed(record):
+                        shown += ",unconfirmed"
+                    print("%s %s %s %s │ %s" % (mark, record["id"], shown,
                                                 pr._name(other), record.get("title", "")))
                     if side == "in" and record["state"] in pr._OPEN_STATES:
                         print("  %s" % pr.report_commands(
@@ -402,12 +433,9 @@ def show(args, steward):
         if not count:
             print("requests=none")
         return 0
-    record = pr.load(args.rq)
+    record = pr.load_settled(args.rq)
     if record is None:
         print("request=%s reason=request-unknown" % args.rq)
-        return 1
-    if record["state"] == "preparing":
-        print("request=%s reason=request-incomplete" % args.rq)
         return 1
     if not _party(record, me):
         print("request=%s reason=not-a-party" % args.rq)
@@ -415,6 +443,10 @@ def show(args, steward):
     rows = _rows(steward, record)
     for line in pr.describe(record, rows=rows):
         print(line)
+    if record["state"] == "preparing":
+        # Its first revision has no seal: shown, kept, and not readable yet.
+        print("body=unreadable reason=request-incomplete")
+        return 1
     if args.report is not None:
         report = next((item for item in record["reports"] if item["n"] == args.report), None)
         if report is None:
