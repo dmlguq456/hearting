@@ -554,8 +554,12 @@ _WAIT_MEMO = {}
 # watches them (a NAS file by stat) so a route write starts the next pass early. It is never used
 # to skip a judgment. ``_WAIT_MEMO`` is not this: it can hold routes the pass did not see (an
 # ``only_id`` pass, or a pass that ended before its cleanup keeps older entries), so it is rebuilt
-# from ``seen_routes`` at the cleanup point and emptied by a full pass that did not reach it.
+# from ``seen_routes`` at the cleanup point; a registry the pass could not read keeps the paths it
+# named last (``_REGISTRY_ROUTE_PATHS``), and one no longer listed names none.
 _LAST_PASS_ROUTE_PATHS = ()
+# The same per registry, as the latest full pass that read it found them: a registry a pass cannot
+# read confirms none of its routes settled, so that pass keeps what this registry last named.
+_REGISTRY_ROUTE_PATHS = {}
 _WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
 _WAIT_JUDGED = contextvars.ContextVar("human_gate_wait_judged", default=None)
 _METRICS["route_wait_recomputes"] = 0
@@ -915,10 +919,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
     except Exception as exc:
         health.append({"source": "S4", "state": "unknown", "reason": type(exc).__name__})
 
-    pass_paths, pass_total, pass_reached = set(), 0, 0
+    pass_paths, pass_read = set(), {}
     for jobs in jobs_paths:
         path = Path(jobs)
-        pass_total += 1
         try:
             with registry_read_scope(), contextlib.ExitStack() as lineage_pin:
                 snapshot = registry_snapshot(path)
@@ -1110,19 +1113,26 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 if only_id is None:
                     for stale in [key for key in _WAIT_MEMO if key not in seen_routes]:
                         del _WAIT_MEMO[stale]
-                    pass_paths.update(_seen_route_paths(watched, ledger_root))
-                    pass_reached += 1
+                    pass_read[str(path)] = tuple(sorted(_seen_route_paths(watched, ledger_root)))
+                    pass_paths.update(pass_read[str(path)])
         except (OSError, ValueError, UnicodeError) as exc:
             health.append({"source": "registry", "path": str(path),
                            "state": "unknown", "reason": type(exc).__name__})
 
     if only_id is None:
-        global _LAST_PASS_ROUTE_PATHS
-        # A pass that did not read every registry cannot confirm any of their routes settled:
-        # it keeps the paths it knew and adds what it read.
-        _LAST_PASS_ROUTE_PATHS = (() if not pass_total else tuple(sorted(pass_paths))
-                                  if pass_reached == pass_total
-                                  else tuple(sorted(set(_LAST_PASS_ROUTE_PATHS) | pass_paths)))
+        global _LAST_PASS_ROUTE_PATHS, _REGISTRY_ROUTE_PATHS
+        # A registry this pass could not read confirms none of its routes settled: it keeps the
+        # paths it named last time. One no longer listed is dropped with its paths.
+        kept = {}
+        for jobs in jobs_paths:
+            key = str(Path(jobs))
+            if key in pass_read:
+                kept[key] = pass_read[key]
+            elif key in _REGISTRY_ROUTE_PATHS:
+                kept[key] = _REGISTRY_ROUTE_PATHS[key]
+                pass_paths.update(kept[key])
+        _REGISTRY_ROUTE_PATHS = kept
+        _LAST_PASS_ROUTE_PATHS = tuple(sorted(pass_paths))
 
     retained = []
     for item in items:

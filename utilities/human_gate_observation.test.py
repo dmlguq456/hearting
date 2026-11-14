@@ -308,13 +308,22 @@ class PendingWaitTest(unittest.TestCase):
         self.jobs.write_text("".join(rows), encoding="utf-8")
         H.read_answer_waits(jobs_paths=[self.jobs], now=402, only_id="S3:att-a")
         self.assertEqual(H.last_pass_route_paths(), only_b)
-        # A full pass that cannot read the registry empties it, while the memo keeps its old entries.
+        # A full pass over another registry that cannot be read names nothing (the first one is
+        # no longer listed), while the memo keeps its old entries.
         H.read_answer_waits(jobs_paths=[self.jobs], now=403)
         self.assertTrue(set(files) <= set(H.last_pass_route_paths()))
         self.assertTrue(H._WAIT_MEMO)
         H.read_answer_waits(jobs_paths=[self.root / "missing" / "jobs.log"], now=404)
         self.assertEqual(H.last_pass_route_paths(), ())
         self.assertTrue(H._WAIT_MEMO, "the accessor must not mirror the memo")
+        # A listed registry this pass cannot read confirms none of its routes settled: the paths
+        # it named last stay.
+        H.read_answer_waits(jobs_paths=[self.jobs], now=405)
+        named = H.last_pass_route_paths()
+        self.assertTrue(set(files) <= set(named))
+        with mock.patch("dispatch_registry_cache.registry_snapshot", side_effect=OSError("synthetic")):
+            H.read_answer_waits(jobs_paths=[self.jobs], now=406)
+        self.assertEqual(H.last_pass_route_paths(), named)
 
     def test_later_owner_on_different_route_file_does_not_close_wait(self):
         route, _attempt, _lease, metadata = self._blocked_owner_fixture()
