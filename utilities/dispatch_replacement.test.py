@@ -4647,6 +4647,106 @@ class ReplacementTest(unittest.TestCase):
             self.assertIn('candidate=', caught.exception.detail)
             self.assertIn('child_spawned=0', caught.exception.detail)
 
+    def test_carried_allowed_tools_follow_the_sealed_lineage_across_a_release_move(self):
+        # #1510: a Claude owner sealed on an older release is replaced on a newer one. The
+        # launcher would compute its allow list again, with rules the newer release adds, so
+        # the unchanged strict comparison refuses it. The replacement keeps the sealed list.
+        import route_authority
+        share=self.root/'share'
+        va,vb=share/'releases'/'vA',share/'releases'/'vB'
+        for tree in (va,vb,self.root/'dev'):(tree/'core').mkdir(parents=True)
+        (share/'current').symlink_to(vb)
+        public=['Bash(git push -u origin HEAD:refs/heads/task)','Bash(gh pr view)']
+        def rules(home,*extra):
+            return [f'Bash(python3 {home}/utilities/peer-steward.py *)',f'Bash({home}/utilities/peer-steward.py)',
+                    'Bash(git status *)',f'Bash(python3 {self.root}/dev/utilities/tool.py *)',
+                    f'Edit(//{self.root}/**)',*extra]
+        def seal(attempt,home,tools,*,harness='claude',worker_type='owner',retry=None,digest=None):
+            args=SimpleNamespace(attempt_id=attempt,jobs_path=self.jobs,worktree=str(self.root),route_id='rt-test',
+                route_node='frame',launch_lifecycle='detached',
+                replacement_input_argv=['--start','--attempt-id',attempt,'--prompt-text','the raw task'],
+                resolved_permission_posture={'mode':'bypass','mode_flag':'bypassPermissions',
+                    'allowed_tools':tools,'inherited_default_mode':'default'})
+            with mock.patch.object(R,'ROOT',Path(home)):
+                fragment=R.seal_launch_input(args,harness,'the raw task')
+            meta={**self.meta,'attempt_id':attempt,'worker_type':worker_type,'harness':harness,
+                  **D.parse_registry_metadata(fragment)}
+            if retry:meta['automatic_retry_of']=retry
+            if digest:meta['replacement_input_digest']=digest
+            self.write(meta,append=True)
+        def carried(attempt,*,home=vb,agent_home=None,**options):
+            return R.carried_allowed_tools(self.jobs,attempt,**{'harness':'claude','worker_type':'owner',
+                'agent_home':agent_home or home,'current_home':home,**options})
+        sealed=rules(va)
+        seal('att-p',va,sealed)
+        # (a) The release moved: the sealed list comes back with only its release root moved.
+        moved=carried('att-p')
+        self.assertEqual(moved,rules(vb))
+        self.assertEqual(len(moved),len(sealed))
+        # (g) Another harness tree (a development checkout) and the Edit rule keep their place.
+        self.assertIn(f'Bash(python3 {self.root}/dev/utilities/tool.py *)',moved)
+        self.assertIn(f'Edit(//{self.root}/**)',moved)
+        # (h) The moved list is the same permission as the sealed one for the strict comparison.
+        sealed_input=R.launch_input(self.jobs,'att-p',R._rows(self.jobs.read_text().splitlines())['att-p'][1])
+        candidate=json.loads(json.dumps(sealed_input))
+        candidate['launch_home']=str(vb);candidate['applied_permissions']['claude']['allowed_tools']=moved
+        self.assertEqual(route_authority.granted_permissions(sealed_input['applied_permissions'],va)['claude'],
+                         route_authority.granted_permissions(candidate['applied_permissions'],vb)['claude'])
+        # The pointer spelling is kept when the launch was started through it.
+        self.assertEqual(carried('att-p',agent_home=share/'current'),rules(share/'current'))
+        # Without a rule or a predecessor to carry, and on the other axes, nothing is carried.
+        for name,value in (('retry_of',None),('harness','codex'),('worker_type','stage')):
+            with self.subTest(refused=name):
+                options={name:value} if name!='retry_of' else {}
+                self.assertIsNone(R.carried_allowed_tools(self.jobs,value if name=='retry_of' else 'att-p',
+                    **{'harness':'claude','worker_type':'owner','agent_home':vb,'current_home':vb,**options}))
+        self.assertIsNone(carried('att-unknown'))
+        # (b) A lineage that stayed on one release keeps computing afresh, so a change there is
+        # still refused by the comparator.
+        seal('att-same',vb,rules(vb))
+        self.assertIsNone(carried('att-same'))
+        # (c) A replacement already carried to vB, replaced again on vB: the move is still in
+        # its lineage, so the predecessor's carried list is used rather than a fresh one.
+        seal('att-r1',vb,moved,retry='att-p')
+        self.assertEqual(carried('att-r1'),rules(vb))
+        seal('att-r2',vb,moved,retry='att-r1')
+        self.assertEqual(carried('att-r2'),rules(vb))
+        # Once the install moves again, the chain's own sealed list is re-addressed again.
+        vc=share/'releases'/'vC';(vc/'core').mkdir(parents=True)
+        self.assertEqual(carried('att-r2',home=vc),rules(vc))
+        # An unrelated chain on the release does not borrow another chain's move.
+        seal('att-r1-other',vb,rules(vb),retry='att-same')
+        self.assertIsNone(carried('att-r1-other'))
+        # (d) A predecessor of another harness, (e) a predecessor stage, (f) an input that does
+        # not prove itself: the ordinary computation stays.
+        seal('att-codex',va,sealed,harness='codex')
+        self.assertIsNone(carried('att-codex'))
+        seal('att-stage',va,sealed,worker_type='stage')
+        self.assertIsNone(carried('att-stage'))
+        seal('att-digest',va,sealed,digest='0'*64)
+        self.assertIsNone(carried('att-digest'))
+        # A lineage whose earlier link was sealed by another harness does not count that link.
+        seal('att-x1',va,sealed,harness='codex')
+        seal('att-x2',vb,rules(vb),retry='att-x1')
+        self.assertIsNone(carried('att-x2'))
+        # (i) A list sealed while a Git operation was in progress names no release path: there
+        # is nothing to move, so the ordinary computation stays as it is today.
+        observation=['Bash(git status *)','Bash(git diff *)',f'Edit(//{self.root}/**)']
+        seal('att-observation',va,observation)
+        self.assertIsNone(carried('att-observation'))
+        # (j) A carried list never gains a rule: rules the newer release would add stay out.
+        grown=rules(va,*public)
+        seal('att-grown',va,grown)
+        self.assertEqual(carried('att-grown'),rules(vb,*public))
+        self.assertNotIn('Bash(git push -u origin HEAD:refs/heads/other)',carried('att-p'))
+        # The default current home is read when called, so a patched ROOT is honoured.
+        with mock.patch.object(R,'ROOT',vb):
+            self.assertEqual(R.carried_allowed_tools(self.jobs,'att-p',harness='claude',worker_type='owner',
+                                                     agent_home=vb),rules(vb))
+        with mock.patch.object(R,'ROOT',va):
+            self.assertIsNone(R.carried_allowed_tools(self.jobs,'att-p',harness='claude',worker_type='owner',
+                                                      agent_home=va))
+
     def test_historical_read_axis_mismatch_is_detailed_on_normal_and_never_started_reentry(self):
         import route_authority
 

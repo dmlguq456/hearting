@@ -2552,6 +2552,48 @@ _RELEASE_TREE_PATH = re.compile(r"(/[^\s\"'()*]*?)/(?:core|capabilities|roles|ut
 RELEASE_ROOT_TOKEN = "<launch_home>"
 
 
+def release_root_aliases(text, launch_home, worktree=None) -> set:
+    """The spellings of ``launch_home`` that a permission value (as JSON ``text``) uses.
+
+    A path into the harness's own tree names ``launch_home`` itself, its realpath, or, for a
+    managed release, another release of the same install or its ``<share>/hearting/current``
+    pointer. Any other harness tree, such as a development checkout, is not an alias. With a
+    ``worktree``, the same roots written relative to it (OpenCode edit rules) are included."""
+    home = os.path.realpath(str(launch_home))
+    releases = os.path.dirname(home)
+    managed = os.path.basename(releases) == "releases"
+    pointer = os.path.join(os.path.dirname(releases), "current")
+    roots = {root for root in _RELEASE_TREE_PATH.findall(text)
+             if root == str(launch_home) or os.path.realpath(root) == home
+             or (managed and (root == pointer or os.path.dirname(os.path.realpath(root)) == releases))}
+    # OpenCode edit rules check the same directory relative to the worktree.
+    # Normalize only aliases of the identified launch roots, never arbitrary
+    # relative task paths or another development checkout.
+    if worktree:
+        roots.update(os.path.relpath(root, worktree) for root in tuple(roots))
+    return roots
+
+
+def _release_root_patterns(roots) -> list:
+    return [re.compile(r"(?<![^\s\"'(])" + re.escape(root) + "/")
+            for root in sorted(roots, key=len, reverse=True)]
+
+
+def readdress_release_roots(values, launch_home, new_home) -> list:
+    """``values`` (strings) with every spelling of ``launch_home`` rewritten to ``new_home``.
+
+    Only the aliases ``release_root_aliases`` identifies move; a path into any other tree and
+    every rule's remaining text stay as they are. Nothing is added or removed."""
+    patterns = _release_root_patterns(release_root_aliases(json.dumps(list(values)), launch_home))
+    target = str(new_home).rstrip("/") + "/"
+    result = []
+    for value in values:
+        for pattern in patterns:
+            value = pattern.sub(lambda _match: target, value)
+        result.append(value)
+    return result
+
+
 def granted_permissions(applied, launch_home=None, worktree=None) -> dict:
     """``applied_permissions`` without the values the launcher's location decides.
 
@@ -2564,20 +2606,8 @@ def granted_permissions(applied, launch_home=None, worktree=None) -> dict:
     granted = {key: value for key, value in (applied or {}).items() if key not in LAUNCH_LOCATION_VALUES}
     if launch_home:
         text = json.dumps(granted, sort_keys=False)
-        home = os.path.realpath(str(launch_home))
-        releases = os.path.dirname(home)
-        managed = os.path.basename(releases) == "releases"
-        pointer = os.path.join(os.path.dirname(releases), "current")
-        roots = {root for root in _RELEASE_TREE_PATH.findall(text)
-                 if root == str(launch_home) or os.path.realpath(root) == home
-                 or (managed and (root == pointer or os.path.dirname(os.path.realpath(root)) == releases))}
-        # OpenCode edit rules check the same directory relative to the worktree.
-        # Normalize only aliases of the identified launch roots, never arbitrary
-        # relative task paths or another development checkout.
-        if worktree:
-            roots.update(os.path.relpath(root, worktree) for root in tuple(roots))
-        patterns = [re.compile(r"(?<![^\s\"'(])" + re.escape(root) + "/")
-                    for root in sorted(roots, key=len, reverse=True)]
+        roots = release_root_aliases(text, launch_home, worktree)
+        patterns = _release_root_patterns(roots)
 
         def normalize_paths(value):
             if isinstance(value, str):
