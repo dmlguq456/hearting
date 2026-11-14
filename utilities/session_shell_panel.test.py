@@ -389,8 +389,11 @@ assert.equal(r.find(p=>p.text==='kimi-k3').foreground,110);assert.notEqual(r.fin
         sid = "00000000-0000-4000-8000-000000001112"
         me = os.getpid()
         start = open("/proc/self/stat").read().rsplit(") ", 1)[1].split()[19]
+        # This process's own folder is the checkout: its experiment board is not this test's to read.
+        from fleet import session_lab
+        no_lab = mock.patch.object(session_lab, "read", return_value=(None, []))
         quiet = mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, ""))
-        with tempfile.TemporaryDirectory() as home, quiet, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+        with tempfile.TemporaryDirectory() as home, quiet, no_lab, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
             record = Path(home) / "sessions" / f"{me}.json"
             record.parent.mkdir()
             project = lambda: shell.panel_projection("claude", sid, native_pid=me, native_start=start, columns=40, rows=30)
@@ -409,7 +412,7 @@ assert.equal(r.find(p=>p.text==='kimi-k3').foreground,110);assert.notEqual(r.fin
             for other in ({"sessionId": "another"}, {"procStart": "1"}):
                 record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": "busy", **other}))
                 self.assertNotIn("native_turn", project(), other)
-        with quiet, mock.patch.object(codex, "exact_rollout_for_session_id", return_value=__file__), \
+        with quiet, no_lab, mock.patch.object(codex, "exact_rollout_for_session_id", return_value=__file__), \
                 mock.patch.object(codex, "_tail_token_count", return_value=None):
             for event, turn in (("task_started", "working"), ("task_complete", "idle"), ("turn_aborted", "idle")):
                 with mock.patch.object(codex, "_latest_task_lifecycle", return_value=(event, "turn")):
@@ -1594,6 +1597,179 @@ assert(rows.some(s=>/^│ MESSAGES +│$/.test(s))&&rows.some(s=>/^│ MEM +│$
 assert.equal(rows.filter(s=>/^│ ─+ │$/.test(s)).length-rows.slice(0,rows.findIndex(s=>s.startsWith('│ MESSAGES'))).filter(s=>/^│ ─+ │$/.test(s)).length,1,rows.join('\n'));
 const cellsOf=s=>[...s].reduce((n,c)=>n+(/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
 for(const w of [32,40,48]){const r=plain(at({width:w}));assert(r.every(s=>cellsOf(s)===w),w+'\n'+r.join('\n'));}
+"""
+        self.node(script, "panel-view.cjs")
+
+    # Draft A (chosen 11-13, "권장안으로 해. A으로"): the LAB section of the experiment board. The
+    # backend words it (tools/fleet/session_lab.py, Fleet's LAB-table cells); these build its shape.
+    LAB = r'''
+const T=(t,k)=>({text:t,...({dim:{dim:true},loc_repo:{foreground:252},lvl_r:{foreground:217},lvl_y:{foreground:186},g_spin:{foreground:230},lvl_g:{foreground:150},soft:{foreground:250}})[k]||{}});
+const piece=(col,label,value,key='soft')=>({col,parts:label?[T(label+' ','dim'),T(value,key)]:[T(value,key)]});
+const NAMES=['기본 분리','잔향 줄임','잡음 섞기','긴 구간 학습','작은 음성 보존'];
+const labRow=(n,i,o={})=>{const latest=o.latest||(8.4+i/10).toFixed(1)+'@5',delta=o.delta||'+'+(0.4+i/10).toFixed(1)+' dB',state=o.state||'진행';
+ return {name:T(n,'soft'),full:n,cells:{progress:T((36-i)+'/60 ep','soft'),latest:T(latest,'soft'),delta:T(delta,'lvl_g'),state:T(state,o.stateKey||'g_spin')},
+  more:[piece('latest','최근',latest),piece('best','최고','8.7@4'),piece('delta','차이',delta,'lvl_g'),piece('state','',state,o.stateKey||'g_spin'),
+   piece('expected','예상','21:10'),piece('since','진행뒤',o.since||'1m'),piece('observed','관측뒤','20s')],reason:o.reason?[T(o.reason,'dim')]:[]};};
+const lab=(o={})=>({key:'lab:grp_1',count:'5',clock:'20:40',counts:[[T('진행 5','g_spin')]],goal:[T('잔향에서 기준보다 선명하게','soft')],
+ headline:{left:[T('잔향 줄임','soft'),T(' 9.1 dB@5','soft')],right:[T('fix 8 dB','soft')]},notes:[],
+ metric:[[T('si_sdr (dB) ↑','soft')],[T('기준 ','dim'),T('fix 8 dB','soft')]],header:{name:'조건',progress:'진행',latest:'최근',delta:'차이',state:'상태'},
+ rows:NAMES.map((n,i)=>labRow(n,i)),more_rows:[],unlinked:[],strip:[T('5','loc_repo'),T(' LB','dim')],strip_attention:false,...o});
+const failedLab=()=>lab({counts:[[T('실패 1','lvl_r')]],headline:{left:[T('잡음 섞기','soft'),T(' 실패','lvl_r')],right:[T('34/60 ep','soft')]},
+ rows:NAMES.map((n,i)=>labRow(n,i,i===2?{state:'실패',stateKey:'lvl_r',reason:'실행 실패'}:{})),strip:[T('!1','lvl_r'),T('LB','dim')],strip_attention:true});
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const labStart=rows=>rows.findIndex(s=>/^│ (\d+ )?LAB( |$)/.test(s));
+'''
+
+    def test_lab_stands_under_the_routes_above_the_question_and_the_messages(self):
+        # Draft A: `5 LAB 20:40` (the count leads its upper-case word, spec rule 45; the word a dim
+        # title as MESSAGES and MEM), the most pressing count at the right, the goal and the one
+        # condition to look at; under the route box (one parting row, spec rule 35 (c)) and above
+        # the question and the messages; a press on any of its rows (and only those) opens it.
+        script = self.FIXTURE + self.LAB + r"""
+const items=[{kind:'decision',age:'3m',text:'평가 조건을 같게 유지'}];
+const at=(o={})=>view.render({width:o.width||40,height:o.height||60,side:true,fill:true,
+ model:{...head,routes:[oneShot],route_count:1,memory_items:items,lab:lab(o.lab||{}),...(o.model||{})},state:'idle',configuration:{},
+ expandedKeys:o.open||[],questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]});
+for(const width of [40,32]){
+ const v=at({width}),rows=plain(v),at0=labStart(rows),box=rows.findIndex(s=>s.startsWith('│ ╰')),msg=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+ assert(box>0&&at0===box+2&&/^│ +│$/.test(rows[box+1])&&msg>at0,rows.join('\n'));
+ assert(new RegExp('^│ 5 LAB 20:40 +진행 5 │$').test(rows[at0])&&rows[at0+1].startsWith('│ 잔향에서 기준보다 선명하게')
+  &&/^│ 잔향 줄임 9\.1 dB@5 +fix 8 dB │$/.test(rows[at0+2])&&/^│ +│$/.test(rows[at0+3]),rows.join('\n'));
+ const word=v.rows[at0].find(p=>p.text==='LAB');assert(word.dim===true&&word.role==='title',JSON.stringify(word));
+ // A press on the LAB rows (exactly those) toggles `lab:grp_1`.
+ assert.deepEqual(v.hits.filter(h=>h.action==='lab:grp_1').map(h=>h.row),[at0,at0+1,at0+2],JSON.stringify(v.hits));
+ assert(v.hits.filter(h=>h.action==='lab:grp_1').every(h=>h.left===2&&h.right===width-3));
+}
+// No route box: LAB right under the head's parting row.
+let rows=plain(at({model:{routes:[],route_count:0}}));
+assert(/^│ +│$/.test(rows[labStart(rows)-1])&&!rows.join('').includes('ROUTE'),rows.join('\n'));
+// A question: LAB keeps its place above it, the question stays above the messages.
+const q=[[P('◑ 조건을 계속 비교할까요?')],[P('▸ 계속')],[P('  멈춤')],[P('↑↓ choose · Enter send')]];
+rows=plain(at({q,height:44}));
+const qa=rows.findIndex(s=>s.includes('조건을 계속')),la=labStart(rows),ma=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+assert(la>0&&qa>la+3&&ma>qa&&rows.some(s=>s.includes('▸ 계속'))&&rows.some(s=>s.includes('Enter send')),rows.join('\n'));
+assert.equal(la,labStart(plain(at({height:44}))),'LAB does not move when a question comes');
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_lab_opens_in_place_as_a_condition_table_without_cutting_a_number(self):
+        # Draft A opened: the metric and baseline, then one row per condition. 40 cells (36 inside):
+        # name, progress, latest, difference, and under each the pieces its row does not show; 32
+        # cells: name, progress, state, the rest under it. Each value whole; a column that does not
+        # fit leaves; only a name ends in `…` (read whole on the row under it).
+        script = self.FIXTURE + self.LAB + r"""
+const labDraw=(width,model,open=['lab:grp_1'],height=80)=>view.render({width,height,side:true,fill:true,model:{...head,routes:[],route_count:0,messages:[],...model},
+ state:'idle',configuration:{},expandedKeys:open,questions:()=>[]});
+let rows=plain(labDraw(40,{lab:lab()})),a=labStart(rows);
+assert(rows[a+2].startsWith('│ si_sdr (dB) ↑ · 기준 fix 8 dB')&&/^│ 조건 +진행 +최근 +차이 │$/.test(rows[a+3]),rows.join('\n'));
+assert(/^│ 기본 분리 +36\/60 ep +8\.4@5 +\+0\.4 dB │$/.test(rows[a+4])&&rows[a+5]==='│   최고 8.7@4 · 진행 · 예상 21:10     │'&&rows[a+6].startsWith('│   진행뒤 1m · 관측뒤 20s'),rows.join('\n'));
+// A cut name: `…` right after its last letter, the whole name on the next row.
+const long=rows.findIndex(s=>s.startsWith('│ 작은 음성…'));assert(long>0&&rows[long+1].startsWith('│   작은 음성 보존'),rows.join('\n'));
+rows=plain(labDraw(32,{lab:lab()}));a=labStart(rows);
+assert(/^│ 조건 +진행 +상태 │$/.test(rows[a+4])&&rows[a+2].startsWith('│ si_sdr (dB) ↑')&&rows[a+3].startsWith('│ 기준 fix 8 dB'),rows.join('\n'));
+assert(/^│ 기본 분리 +36\/60 ep +진행 │$/.test(rows[a+5])&&rows[a+6].startsWith('│   최근 8.4@5 · 최고 8.7@4')&&rows[a+7].startsWith('│   차이 +0.4 dB · 예상 21:10'),rows.join('\n'));
+// A failed row says why under it; the head counts it.
+rows=plain(labDraw(40,{lab:failedLab()}));a=labStart(rows);
+assert(/^│ 5 LAB 20:40 +실패 1 │$/.test(rows[a])&&rows.some(s=>s.startsWith('│   실행 실패')),rows.join('\n'));
+// Collapsed and opened: a press closes it again (the same key).
+const v=labDraw(40,{lab:lab()}),vr=plain(v),va=labStart(vr),vend=vr.findIndex((s,i)=>i>va&&/^│ +│$/.test(s));
+assert.deepEqual(v.hits.filter(h=>h.action==='lab:grp_1').map(h=>h.row),vr.map((_,i)=>i).slice(va,vend),vr.join('\n'));
+// Long numbers: never cut, at any width; their column leaves whole (32's narrower form), the piece leaves when wider than a row.
+const huge='12345678.90@1234567',diff='+12345658.91 dB';
+const big=lab({rows:NAMES.map((n,i)=>labRow(n,i,i===1?{latest:huge,delta:diff}:{}))});
+for(const width of [32,36,40,44,48,56,64,80]){
+ const all=plain(labDraw(width,{lab:big}));
+ for(const s of all)for(const value of [huge,diff,'36/60 ep','8.7@4','21:10'])
+  for(let n=3;n<value.length;n++)assert(!s.includes(value.slice(0,n)+'…'),width+' cut '+value+'\n'+all.join('\n'));
+ assert(all.join('\n').includes(huge)===(width-4-2>=huge.length+3),width+'\n'+all.join('\n'));
+}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_lab_gives_way_in_its_order_and_the_question_keeps_its_rows(self):
+        # Draft A's order merged with the panel's (spec rule 34 (b), 46 (d)): MEM first, then the
+        # opened table loses its pieces and closes to the two-row summary, then (after the details,
+        # values on several rows and structural rows) the head alone; the head outlasts the route
+        # box and goes before any message. The question's rows, the fold and settings row stay.
+        script = self.FIXTURE + self.LAB + r"""
+const items=[{kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{kind:'lesson',age:'2h',text:'one fix per review finding'}];
+const q=[[P('◑ 조건을 계속 비교할까요?')],[P('▸ 계속')],[P('  멈춤')],[P('↑↓ choose · Enter send')]];
+const labDraw=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot],route_count:1,memory_items:items,lab:lab(),...(o.model||{})},
+ state:'idle',configuration:{},expandedKeys:['lab:grp_1'],questions:o.q?(x=>o.q.slice(0,x.budget)):()=>[]}));
+const state=rows=>{const a=labStart(rows),goal=a>=0&&rows[a+1]?.startsWith('│ 잔향에서');
+ return {lab:a<0?0:!goal?1:rows.some(s=>/^│ 조건 /.test(s))?(rows.some(s=>s.startsWith('│   최고'))?4:3):2,
+  mem:rows.some(s=>/^│ MEM +│$/.test(s)),route:rows.some(s=>s.startsWith('│ ╭')),messages:rows.some(s=>s.startsWith('│ MESSAGES')),
+  rule:rows.some((s,i)=>i<(a<0?rows.length:a)&&/^│ ─+ │$/.test(s))};};
+const seen=[];let memGone=0,tableGone=0,ruleGone=0,oneAt=0,labGone=0,routeGone=0,messagesGone=0;
+for(let h=90;h>=8;h--){
+ const rows=labDraw(h),s=state(rows);
+ seen.push(h+':'+JSON.stringify(s));
+ if(!s.mem&&!memGone)memGone=h;if(s.lab<3&&!tableGone)tableGone=h;if(s.lab&&!s.rule&&!ruleGone)ruleGone=h;
+ if(s.lab===1&&!oneAt)oneAt=h;if(!s.lab&&!labGone)labGone=h;if(!s.route&&!routeGone)routeGone=h;if(!s.messages&&!messagesGone)messagesGone=h;
+ assert(rows.at(-2).endsWith('»   ⚙ │'),h+'\n'+rows.join('\n'));
+}
+// (A later step that frees more rows than it needed gives them back to the earlier ones, so a
+// state may come back one height lower; the order is that of the first height each step is taken.)
+assert(memGone>tableGone&&tableGone>oneAt&&ruleGone>=oneAt&&routeGone>=labGone&&labGone>messagesGone&&messagesGone>0,
+ JSON.stringify({memGone,tableGone,ruleGone,oneAt,routeGone,labGone,messagesGone})+'\n'+seen.join('\n'));
+// The one-row form: the count and the most pressing count stay, the clock goes first.
+const one=labDraw(oneAt).find(s=>/^│ 5 LAB/.test(s));assert(/^│ 5 LAB( 20:40)? +진행 5 │$/.test(one),one);
+// With a question: LAB takes none of its rows at any height (the same rows as without LAB, and
+// all of them while there is room), and the fold row stays.
+const asked=rows=>rows.filter(s=>/조건을 계속|▸ 계속|멈춤|Enter send/.test(s));
+for(let h=40;h>=8;h--){const rows=labDraw(h,{q}),none=labDraw(h,{q,model:{lab:null}});
+ assert.deepEqual(asked(rows),asked(none),h+'\n'+rows.join('\n'));
+ if(h>=16)assert.equal(asked(rows).length,4,h+'\n'+rows.join('\n'));
+ assert(rows.at(-2).endsWith('»   ⚙ │'),h);}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_lab_is_absent_without_a_board_and_an_unconfirmed_board_says_so(self):
+        # No experiments and no problem: the backend sends no LAB and no row stands. A broken or
+        # missing catalog with runs found, or runs without a name, never reads as "no experiments".
+        script = self.FIXTURE + self.LAB + r"""
+const labDraw=(model,o={})=>view.render({width:40,height:40,side:true,fill:true,model:{...head,routes:[oneShot],route_count:1,...model},state:'idle',configuration:{},
+ expandedKeys:o.open||[],questions:()=>[]});
+for(const none of [null,undefined,'x',[]]){const rows=plain(labDraw({lab:none}));assert(!/\bLAB\b/.test(rows.join('\n'))&&labStart(rows)<0,rows.join('\n'));}
+const unread=lab({count:'',counts:[[T('이름 없음 2','lvl_y')]],goal:[T('실험 정본 아직 없음; run은 id로만 보임','lvl_y')],
+ headline:{left:[T('이름 없는 run','lvl_y')],right:[T('2건','lvl_y')]},metric:[],rows:[],key:'lab:',
+ unlinked:[T('이름 없는 실행 2건: run-x, run-y (정본에 등록 필요)','lvl_y')],strip:[T('?2','lvl_y'),T('LB','dim')],strip_attention:true});
+let rows=plain(labDraw({lab:unread})),a=labStart(rows);
+// Without a group the second row says why, whole on up to three rows (here two), then the unnamed runs.
+assert(/^│ LAB 20:40 +이름 없음 2 │$/.test(rows[a])&&rows[a+1].startsWith('│ 실험 정본 아직 없음;')&&rows[a+2].startsWith('│ 보임 ')
+ &&/^│ 이름 없는 run +2건 │$/.test(rows[a+3]),rows.join('\n'));
+rows=plain(labDraw({lab:unread},{open:['lab:']}));a=labStart(rows);
+assert(rows.slice(a).some(s=>s.startsWith('│ 이름 없는 실행 2건: run-x'))&&!rows.some(s=>/^│ 조건 /.test(s)),rows.join('\n'));
+// Another group's trouble is told, not hidden behind the selected one.
+rows=plain(labDraw({lab:lab({notes:[[T('다른 묶음 잡음 실험도 확인 필요: 실패 1','lvl_y')]]})}));a=labStart(rows);
+assert(rows[a+3].startsWith('│ 다른 묶음 잡음 실험도'),rows.join('\n'));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_an_experiment_failure_never_changes_the_frame_or_the_session_glyph(self):
+        # The frame, the head's glyph and number, and the folded strip's border are the session's
+        # own state (spec rule 25, 49 (c)); a failed or unconfirmed experiment stays inside LAB.
+        script = self.FIXTURE + self.LAB + r"""
+const frame=v=>JSON.stringify([v.color,v.rows[0],v.rows.map(r=>[r[0],r.at(-1)]),v.rows.at(-1)]);
+for(const state of ['idle','working','blocked','unknown'])for(const folded of [false,true]){
+ const labDraw=lab=>view.render({width:folded?8:40,height:30,side:true,fill:true,folded,frame:3,model:{...head,tag:'[e9]',routes:[oneShot],route_count:1,lab},
+  state,harness:'claude',configuration:{},questions:()=>[]});
+ const none=labDraw(null),failed=labDraw(failedLab());
+ assert.equal(frame(failed),frame(none),state+' '+folded);
+ if(!folded)assert(plain(failed).some(s=>s.includes('실패 1')));
+ else assert(plain(failed).some(s=>s==='│ !1LB │'),plain(failed).join('\n'));
+}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_lab_reads_the_same_in_every_harness(self):
+        script = self.FIXTURE + self.LAB + r"""
+for(const open of [[],['lab:grp_1']])for(const folded of [false,true]){
+ const labDraw=harness=>plain(view.render({width:folded?8:40,height:50,side:true,fill:true,folded,model:{...head,lab:failedLab()},state:'idle',harness,
+  configuration:{},expandedKeys:open,questions:()=>[]})).filter(s=>!s.startsWith('┌'));
+ const claude=labDraw('claude');
+ for(const harness of ['codex','opencode'])assert.deepEqual(labDraw(harness),claude,harness);
+}
 """
         self.node(script, "panel-view.cjs")
 

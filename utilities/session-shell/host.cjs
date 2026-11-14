@@ -727,36 +727,73 @@ function applyLayout() {
   child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
-function queueProjection() {
-  if(ended||relay||projectionTimer||succeeding)return;
+// A redraw waits 25 ms to gather the events that come with it. A change seen only in a folder
+// watched whole (LAB's run records may change many times a second) redraws at most once a second:
+// it waits for the second since the last redraw began, and the last change always lands. Any other
+// request keeps the 25 ms wait, and that redraw carries the folder's changes as well.
+function queueProjection(folder=false) {
+  if(ended||relay||succeeding)return;
+  const now=Date.now(),delay=folder?Math.min(FOLDER_PAUSE,Math.max(25,projectionStarted+FOLDER_PAUSE-now)):25;
+  if(projectionTimer){if(projectionDue<=now+delay)return;clearTimeout(projectionTimer);}
   nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
-  projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
+  projectionDue=now+delay;
+  projectionTimer=setTimeout(()=>{projectionTimer=undefined;projectionStarted=Date.now();projection();},delay);
 }
+const FOLDER_PAUSE=1000;let projectionDue=0,projectionStarted=0;
+// A folder is its device, inode and birth time: one made again at the same path is another
+// folder even when it is given the old inode number again.
+function folderIdentity(directory){try{const s=fs.statSync(directory);return [s.dev,s.ino,s.birthtimeMs].join(':');}catch{return '';}}
+// A target that ends in the path separator is a folder watched whole: any entry written,
+// replaced, added or removed in it redraws, however many files it holds (LAB's run records).
+// A watched folder removed, renamed away or made again leaves its watch on the old folder: the
+// watch is dropped at that event, or at the next projection's observation, and made again.
+// A folder's watch that fails stays as failed until the next projection's observation makes it
+// again. Made again for its failure alone (the same folder, the same targets), it asks no 25 ms
+// redraw: its re-read takes a folder's once-a-second pace, so a watch failing again and again is
+// made again, and redrawn for, at most once a second, the last change still drawn. A watch on a
+// file target keeps its own way: dropped at the failure, made again as a new watch at the next
+// projection.
 function observeFiles(paths) {
   const wanted=new Map();let changed=false;
   for(const target of (Array.isArray(paths)?paths:[]).slice(0,64)){
     if(typeof target!=='string'||!path.isAbsolute(target)||target.length>4096)continue;
-    let directory=path.dirname(target);
+    let directory=target.endsWith(path.sep)?target.slice(0,-1)||path.sep:path.dirname(target);
     while(!fs.existsSync(directory)&&path.dirname(directory)!==directory)directory=path.dirname(directory);
     if(!wanted.has(directory))wanted.set(directory,[]);wanted.get(directory).push(target);
   }
   for(const [directory,row] of watchers)if(!wanted.has(directory)){row.watch.close();watchers.delete(directory);changed=true;}
   for(const [directory,targets] of wanted){
-    const existing=watchers.get(directory);
-    if(existing){if(JSON.stringify(existing.targets)!==JSON.stringify(targets))changed=true;existing.targets=targets;continue;}
+    const existing=watchers.get(directory),identity=folderIdentity(directory);
+    const retried=!!existing?.failed&&existing.identity===identity&&JSON.stringify(existing.targets)===JSON.stringify(targets);
+    if(existing&&(existing.failed||existing.identity!==identity)){existing.watch.close();watchers.delete(directory);}
+    else if(existing){if(JSON.stringify(existing.targets)!==JSON.stringify(targets))changed=true;existing.targets=targets;continue;}
     try{
-      const row={targets};
-      row.watch=fs.watch(directory,(_event,name)=>{
+      const row={targets,identity};
+      // Only folders watched whole among the targets: their changes take the once-a-second pace.
+      const folder=hits=>hits.length>0&&hits.every(target=>target.endsWith(path.sep));
+      row.watch=fs.watch(directory,(event,name)=>{
+        if(watchers.get(directory)!==row)return;
         const changed=name?path.join(directory,String(name)):directory;
-        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep))){
+        // The watched folder's own removal or move comes under its own name.
+        if(event==='rename'&&(name===path.basename(directory)||folderIdentity(directory)!==row.identity)){
+          row.watch.close();watchers.delete(directory);queueProjection(folder(row.targets));return;
+        }
+        const hits=name?row.targets.filter(target=>target===changed||target.startsWith(changed+path.sep)
+          ||target.endsWith(path.sep)&&changed.startsWith(target)):row.targets;
+        if(hits.length){
           // The native's own turn record is read at once; the rest waits for the projection.
           if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
-          queueProjection();
+          queueProjection(!!name&&folder(hits));
         }
       });
-      row.watch.on('error',()=>{row.watch.close();watchers.delete(directory);sourceError={reason:'file-observation-unavailable'};});
+      // Only a folder watched whole stays as failed (its slow, once-a-second remake). A file target's
+      // watch is dropped and made again at the projection as before this PR.
+      row.watch.on('error',()=>{row.watch.close();
+        if(row.targets.some(target=>target.endsWith(path.sep)))row.failed=true;
+        else if(watchers.get(directory)===row)watchers.delete(directory);
+        sourceError={reason:'file-observation-unavailable'};queueProjection(true);});
       watchers.set(directory,row);
-      changed=true;
+      if(retried)queueProjection(true);else changed=true;
     }catch{sourceError={reason:'file-observation-unavailable'};}
   }
   return changed;
@@ -917,7 +954,8 @@ async function applySettings(){
 }
 function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
 function panelAction(action){
-  if(/^(?:route|message):/.test(action)&&!settings){
+  // A route, a message, or the LAB section (`lab:<group>`, draft A) opens in place and closes again.
+  if(/^(?:route|message|lab):/.test(action)&&!settings){
     if(panelOpen.has(action))panelOpen.delete(action);else{if(panelOpen.size>=16)panelOpen.clear();panelOpen.add(action);}
     queueLayout();return;
   }
