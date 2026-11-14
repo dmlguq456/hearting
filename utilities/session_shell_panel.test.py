@@ -69,7 +69,9 @@ for(const width of [37,40,80]){
  const model={selected:[{text:'Native selected'},{text:' high'}],session_title:'Preserve the approved task',answerable:true,wait:'◑답 대기 1',route_count:1,
   routes:[{id:'r',title:'Exact route',state:'working',kind:'working',flow:'implement › verify ●',paint:{glyph:{text:'⠏'},harness:{text:'claude'}}}]};
  const v=view.render({width,height:width===80?12:30,side:width<80,model,sid:'exact',configuration:{},expandedKeys:['route:r'],
-  questions:()=>[[{text:'Where should this result go?'}],[{text:'1 · Current project'}],[{text:'Ctrl+] answer'}]]});
+  // 11-15: the question's summary (its first row, its choices on one row); the whole of it reads in the popup.
+  brief:()=>({count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Where should this result go?'}],[{text:'  '},{text:'1 Current project'}]],
+   one:[[{text:'◑ '},{text:'Where should this result go?'}]],line:[{text:'Where should this result go?'}],choices:1})});
  const text=v.rows.map(r=>r.map(s=>s.text).join(''));
  assert(text.some(s=>s.includes('Native selected high')));assert(text.some(s=>s.includes('Exact route')));
  assert(text.some(s=>s.includes('Where should')));assert(text.some(s=>s.includes('◑답 대기 1')));
@@ -158,11 +160,12 @@ const model={head:[{text:'[e9] '},{text:'project'},{text:' (topic 🚧 3)'}],sel
  context:[{text:'context '},{text:'━━━━──────'},{text:' 42%'}],wait:'◑답 대기 1',session_title:'SESSION_TITLE',
  jobs:[{text:'>_'},{text:' running: '},{text:'pytest'}],quota:[{text:'5h 23%'},{text:' │ '},{text:'7d 60%'}],route_count:6,
  routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),messages:[{way:'←',who:'[e7]',text:'MESSAGE_ONE',at:1},{way:'→',who:'[73]',text:'MESSAGE_TWO',at:2}]};
-const question=[[{text:'Q head'}],[{text:'1 · yes'}],[{text:'2 · no'}],[{text:'Ctrl+] answer'}]];
+// 11-15: the question's summary under its label row; the whole of it reads in the popup.
+const question={count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Q head'}],[{text:'  '},{text:'1 yes · 2 no'}]],one:[[{text:'◑ '},{text:'Q head'}]],line:[{text:'Q head'}],choices:2};
 const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,sid:'exact',configuration:{},expandedKeys:open,
- questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
+ brief:()=>q}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
- const idle=paint(width,height,side,[]);
+ const idle=paint(width,height,side,null);
  for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE',side?'╭─ 6 ROUTE':'╭─ route 6','ROUTE_0',side?'│ MESSAGES':'│ messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
@@ -173,7 +176,7 @@ for(const [width,height,side] of [[40,30,true],[80,20,false]]){
 for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;height<=24;height+=2){
  const rows=paint(width,height,side,question,['route:r0']),text=rows.join('\n');
  assert(rows.length<=height,width+'x'+height);
- for(const row of question)assert(text.includes(row[0].text),'question row lost at '+width+'x'+height+'\n'+text);
+ for(const want of ['1 QUESTIONS','◑ Q head'])assert(text.includes(want),'question row lost at '+width+'x'+height+'\n'+text);
  for(const want of ['project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // 11-11 night final layout: the route side gives way first (its opened detail
  // before its rows), and the messages fixed at the bottom go only last.
@@ -452,9 +455,10 @@ const route=i=>({id:'r'+i,title:'ROUTE_'+i,state:'working',kind:'working',elapse
 const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],selected:[p('fixture high')],context:[p('context 42%')],
  quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:217},g_dead:{foreground:217,bold:true}},
  session_title:'SESSION_TITLE',now:'NOW_LINE',messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
-const question=[[p('◑ Q_HEAD')],[p('Q_BODY')],[p('› A')],[p('2 B')],[p('↑↓ choose · Enter send · t text')]];
+// 11-15: the question's summary under its label row; the whole of it reads in the popup.
+const question={count:1,label:'QUESTIONS',rows:[[p('◑ '),p('Q_HEAD')],[p('  '),p('1 A · 2 B')]],one:[[p('◑ '),p('Q_HEAD')]],line:[p('Q_HEAD')],choices:2};
 const paint=(o={})=>view.render({width:40,height:o.height||30,side:true,sid:'s',harness:'claude',configuration:o.cfg||{},model:{...model,...o.model},state:o.state,frame:o.frame,since:o.since,
- settings:o.settings,questions:q=>(o.q||[]).slice(0,q.budget)});
+ settings:o.settings,brief:()=>o.q||null});
 const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
 // Spec rule 29 (a): Fleet's session-row head on the left of the top border (glyph,
 // number, harness); no state word; HEARTING only in settings. Spec rule 49 (a): no gear on the
@@ -524,19 +528,25 @@ assert(/│ │ \S codex +│ │/.test(rows[t0-2])&&/│ │   72% +42m │ │
 assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-10&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
 assert(rows[m+1].includes('← [e7]')&&rows[m+2].includes('│   MESSAGE_1'),rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
-// A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
+// The questions section sits right above the messages (11-15: no box): its label row, the count in the
+// question's rose and the name tag dim with a thin rule to `›`, then the question's summary; messages
+// are dim, route plain.
 const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
-const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
-// Spec rule 34 (b): short of rows the messages fold to one row each before a route gives up its second row.
-assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%')&&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
+const qTop=rows.findIndex(s=>/^│ 1 QUESTIONS ─+ › │$/.test(s)),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+assert(qTop>r&&rows[qTop+1].startsWith('│ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│   1 A · 2 B')&&mq===qTop+3&&rows.at(-2).includes('7d 60%')
+ &&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
 const ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE '));
-assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
+assert.equal(asked.rows[qTop].find(x=>x.text==='1').foreground,174);assert.equal(asked.rows[qTop].find(x=>x.text==='QUESTIONS').dim,true);
+assert.equal(asked.rows[qTop+1].find(x=>x.text==='◑').foreground,174);
+assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
+// A press on any of its rows opens the question popup.
+assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop,qTop+1,qTop+2]);
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
 // before the route box scrolls in place; messages go last.
-const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:o=>q.slice(0,o.budget)}));
-for(const q of [[],question])for(let h=12;h<=30;h++){
+const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',brief:()=>q}));
+for(const q of [null,question])for(let h=12;h<=30;h++){
  const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   ROUTE_'));
  // Spec rules 23, 31: fewer messages show from the oldest (their label counts them, spec rule
  // 58), before the route box scrolls; the newest message goes only with the section, last.
@@ -547,7 +557,7 @@ for(const q of [[],question])for(let h=12;h<=30;h++){
  if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ 3 ROUTE'),h+' messages go last\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box.
-for(let h=10;h<=30;h++)for(const q of [[],question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',questions:o=>q.slice(0,o.budget)}));
+for(let h=10;h<=30;h++)for(const q of [null,question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',brief:()=>q}));
  assert.equal(rows.filter(s=>s.includes('╭')).length,rows.filter(s=>s.includes('╰')).length,h+'\n'+rows.join('\n'));}
 rows=text(paint({model:{routes:[],route_count:0,routes_known:true,messages:[]}}));assert(!rows.join('').includes('╭'),rows.join('\n'));
 // The groups a paint shows decide Claude's statusline rows: a long Git reading cut to the
@@ -558,7 +568,7 @@ for(const [w,side] of [[32,true],[40,true],[80,false]]){
  assert(text(v).some(s=>s.includes('(shell-box')&&(!side||s.includes('…'))),text(v).join('\n'));
  for(const g of ['head','git','context','quota','wait','route'])assert(v.groups.includes(g),w+' '+g+' '+v.groups);
 }
-const tight=view.render({width:40,height:12,side:true,sid:'s',configuration:{},model:{...longGit,answerable:true},state:'idle',questions:o=>question.slice(0,o.budget)});
+const tight=view.render({width:40,height:10,side:true,sid:'s',configuration:{},model:{...longGit,answerable:true},state:'idle',brief:()=>question});
 assert(!tight.groups.includes('git')&&!text(tight).some(s=>s.includes('(shell-box')),tight.groups+'\n'+text(tight).join('\n'));
 assert(!view.render({width:40,height:30,side:true,sid:'s',configuration:{},model,settings:{index:0,value:view.defaults},questions:()=>[]}).groups.length,'settings paint no group');
 // An opened message folded with the rest keeps its first row and its read row, so its page stays reachable.
@@ -809,14 +819,16 @@ assert.equal(idle.rows.flat().find(x=>x.text==='1 ROUTE').foreground,186);
                             "wait": panel["wait"], "session_title": panel["session_title"]}
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
-const question=['◑ 질문 1 · 1/1 · 답변 필요','REVIEW1463: 결과를 어디에 둘까요?','1 현재 프로젝트 (추천)','2 다른 폴더','Ctrl+] · 답변 필요','more','more 2'].map(text=>[{text}]);
+// 11-15: the question's summary under its label row (the editor, focused or not, reads in the popup).
+const question={count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'REVIEW1463: 결과를 어디에 둘까요?'}],[{text:'  '},{text:'1 현재 프로젝트 (추천) · 2 다른 폴더'}]],
+ one:[[{text:'◑ '},{text:'REVIEW1463: 결과를 어디에 둘까요?'}]],line:[{text:'REVIEW1463: 결과를 어디에 둘까요?'}],choices:2};
 const routes=[{id:'r',title:'REVIEW1463_ROUTE',state:'blocked',kind:'blocked',paint:{glyph:{text:'◑'}}}];
-const paint=(width,height,side,focused,model,n=question.length)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
- model:{...model,answerable:true,routes,route_count:1},questions:o=>question.slice(0,Math.min(n,o.budget))})
+const paint=(width,height,side,focused,model)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
+ model:{...model,answerable:true,routes,route_count:1},brief:()=>question})
  .rows.map(r=>r.map(p=>p.text).join(''));
-for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,true],[80,14,false,true,5],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
- const rows=paint(width,height,side,focused,models.short,n);
- for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB',models.short.wait,'◑ 질문 1'])
+for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
+ const rows=paint(width,height,side,focused,models.short);
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB',models.short.wait,'1 QUESTIONS','◑ REVIEW1463'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
  const branch=rows.findIndex(s=>s.includes('(values-fix'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
@@ -1016,14 +1028,14 @@ assert.equal(stageRows.length,2,all.join('\n'));
 for(const s of stageRows)assert(!s.includes('apply_patch')&&!s.includes('agent'),s);
 assert.equal(all.filter(s=>s.includes('>_ apply_patch · +1 agent')).length,1,all.join('\n'));
 // A working route the height (a question) dropped from the panel: nothing turns.
-const q=[[p('Q_HEAD')],[p('BODY')],[p('1 YES')],[p('2 NO')],[p('choose')],[p('back')]];
-for(const [width,height,side] of [[40,12,true],[80,12,false]]){
- const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},questions:o=>q.slice(0,o.budget)});
+const q={count:1,label:'QUESTIONS',rows:[[p('◑ '),p('Q_HEAD')],[p('  '),p('1 YES · 2 NO')]],one:[[p('◑ '),p('Q_HEAD')]],line:[p('Q_HEAD')],choices:2};
+for(const [width,height,side] of [[40,8,true],[80,6,false]]){
+ const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});
  assert(!rows(r).join('\n').includes(side?'1 ROUTE':'route 1'),rows(r).join('\n'));
  assert.deepEqual(r.spins,[]);assert.equal(r.animated,false,width+'x'+height);
 }
 // The same route with room to show it: its mark spins and the beat runs.
-const shown=view.render({width:40,height:30,side:true,state:'idle',model:{routes:[route],route_count:1},questions:o=>q.slice(0,o.budget)});
+const shown=view.render({width:40,height:30,side:true,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});
 assert(rows(shown).join('\n').includes('1 ROUTE'));assert.equal(shown.animated,true);assert(shown.spins.length>0);
 """
         self.node(script, "panel-view.cjs")
@@ -1187,17 +1199,18 @@ assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&noGit[3].includes('claud
 const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어감',6),
  message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const six=[...Array(6)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'s'+i,title:r.title+' '+(i+1)};});
-const QUESTION=[[P('◑ Q_HEAD')],[P('Q_BODY')],[P('› A')],[P('2 B')],[P('↑↓ choose · Enter send · t text')]];
+const QUESTION={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('Q_HEAD')],[P('  '),P('1 A · 2 B')]],one:[[P('◑ '),P('Q_HEAD')]],line:[P('Q_HEAD')],choices:2};
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
- state:'idle',configuration:{},questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+ state:'idle',configuration:{},brief:()=>o.q||null}).rows.map(r=>r.map(p=>p.text).join(''));
 const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 const full=paint(six,58),m=rule(full),box=full.findIndex(s=>s.includes('╰'));
 const closing=full.findIndex((s,i)=>i>m&&/^│ ─+ │$/.test(s));
 assert(box>0&&box===m-2&&blank(full[m-1])&&/^│ MESSAGES \+5 ─+ │$/.test(full[m])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3
  &&closing>m&&closing<full.length-4&&full.slice(closing+1,-2).every(blank),full.join('\n'));
-// With a question the row stands between the route box and the question box.
-const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('─ ◑ Q_HEAD'));
-assert(q>2&&asked[q-2].includes('╰')&&blank(asked[q-1])&&asked[rule(asked)-1].includes('╰'),asked.join('\n'));
+// With a question the row stands between the route box and the questions section (11-15: its label row
+// and the summary, right above the messages).
+const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('1 QUESTIONS ─'));
+assert(q>2&&asked[q-2].includes('╰')&&blank(asked[q-1])&&rule(asked)===q+3,asked.join('\n'));
 // No route box: the head's empty row stands above the messages.
 const none=paint([],30,{model:{routes_known:true}});
 assert(!none.join('').includes('╭')&&blank(none[rule(none)-1]),none.join('\n'));
@@ -1772,7 +1785,7 @@ const labStart=rows=>rows.findIndex(s=>/^│ (\d+ )?LAB( |$)/.test(s));
 const items=[{kind:'decision',age:'3m',text:'평가 조건을 같게 유지'}];
 const at=(o={})=>view.render({width:o.width||40,height:o.height||60,side:true,fill:true,
  model:{...head,routes:[oneShot],route_count:1,memory_items:items,lab:lab(o.lab||{}),...(o.model||{})},state:'idle',configuration:{},
- expandedKeys:o.open||[],questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]});
+ expandedKeys:o.open||[],brief:()=>o.q||null});
 for(const width of [40,32]){
  const v=at({width}),rows=plain(v),at0=labStart(rows),box=rows.findIndex(s=>s.startsWith('│ ╰')),msg=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
  assert(box>0&&at0===box+2&&/^│ +│$/.test(rows[box+1])&&msg>at0,rows.join('\n'));
@@ -1787,10 +1800,10 @@ for(const width of [40,32]){
 let rows=plain(at({model:{routes:[],route_count:0}}));
 assert(/^│ +│$/.test(rows[labStart(rows)-1])&&!rows.join('').includes('ROUTE'),rows.join('\n'));
 // A question: LAB keeps its place above it, the question stays above the messages.
-const q=[[P('◑ 조건을 계속 비교할까요?')],[P('▸ 계속')],[P('  멈춤')],[P('↑↓ choose · Enter send')]];
+const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
 rows=plain(at({q,height:44}));
 const qa=rows.findIndex(s=>s.includes('조건을 계속')),la=labStart(rows),ma=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
-assert(la>0&&qa>la+3&&ma>qa&&rows.some(s=>s.includes('▸ 계속'))&&rows.some(s=>s.includes('Enter send')),rows.join('\n'));
+assert(la>0&&qa>la+3&&ma>qa&&rows.some(s=>s.includes('1 QUESTIONS'))&&rows.some(s=>s.includes('1 계속 · 2 멈춤')),rows.join('\n'));
 assert.equal(la,labStart(plain(at({height:44}))),'LAB does not move when a question comes');
 """
         self.node(script, "panel-view.cjs")
@@ -1836,9 +1849,9 @@ for(const width of [32,36,40,44,48,56,64,80]){
         # box and goes before any message. The question's rows, the fold and settings row stay.
         script = self.FIXTURE + self.LAB + r"""
 const items=[{kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{kind:'lesson',age:'2h',text:'one fix per review finding'}];
-const q=[[P('◑ 조건을 계속 비교할까요?')],[P('▸ 계속')],[P('  멈춤')],[P('↑↓ choose · Enter send')]];
+const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
 const labDraw=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot],route_count:1,memory_items:items,lab:lab(),...(o.model||{})},
- state:'idle',configuration:{},expandedKeys:['lab:grp_1'],questions:o.q?(x=>o.q.slice(0,x.budget)):()=>[]}));
+ state:'idle',configuration:{},expandedKeys:['lab:grp_1'],brief:()=>o.q||null}));
 const state=rows=>{const a=labStart(rows),goal=a>=0&&rows[a+1]?.startsWith('│ 잔향에서');
  return {lab:a<0?0:!goal?1:rows.some(s=>/^│ 조건 /.test(s))?(rows.some(s=>s.startsWith('│   최고'))?4:3):2,
   mem:rows.some(s=>/^│ MEM ─+ │$/.test(s)),route:rows.some(s=>s.startsWith('│ ╭')),messages:rows.some(s=>s.startsWith('│ MESSAGES')),
@@ -1859,10 +1872,10 @@ assert(memGone>tableGone&&tableGone>oneAt&&ruleGone>=oneAt&&routeGone>=labGone&&
 const one=labDraw(oneAt).find(s=>/^│ 5 LAB/.test(s));assert(/^│ 5 LAB( 20:40)? +진행 5 │$/.test(one),one);
 // With a question: LAB takes none of its rows at any height (the same rows as without LAB, and
 // all of them while there is room), and the fold row stays.
-const asked=rows=>rows.filter(s=>/조건을 계속|▸ 계속|멈춤|Enter send/.test(s));
+const asked=rows=>rows.filter(s=>/1 QUESTIONS|조건을 계속|1 계속 · 2 멈춤/.test(s));
 for(let h=40;h>=8;h--){const rows=labDraw(h,{q}),none=labDraw(h,{q,model:{lab:null}});
  assert.deepEqual(asked(rows),asked(none),h+'\n'+rows.join('\n'));
- if(h>=16)assert.equal(asked(rows).length,4,h+'\n'+rows.join('\n'));
+ if(h>=16)assert.equal(asked(rows).length,3,h+'\n'+rows.join('\n'));
  assert(rows.at(-2).endsWith('»   ⚙ │'),h);}
 """
         self.node(script, "panel-view.cjs")
@@ -2163,11 +2176,14 @@ const assert=require('node:assert/strict'),path=require('node:path'),v=require(p
 const c=require(path.join(path.dirname(process.argv[1]),'block-input.cjs'))({changed(){},answer(){throw Error('no submit');},action(){}});
 c.update([{id:'exact',revision:'one',answerable:true,questions:[{id:'q',question:'Where should this result go?',choices:['Here','Another folder'],display:{head:[{text:'Question · answer needed'}],body:[[{text:'Where should this result go?'}]],options:[[{text:'1 Here · 2 Another folder'}]],source:[[{text:'this session'}]]}}]}]);
 c.enter();c.input(Buffer.from('tDraft answer'));
-const model={answerable:true,title:'Confirmed task',routes:[{title:'Confirmed task',state:'working',stage:'review',stages:[{name:'prepare'},{name:'review'}],reason:'Review this result together'}]};
-for(const [width,height,side] of [[37,21,true],[80,12,false]]){
- const r=v.render({width,height,side,focused:true,model,configuration:{},questions:o=>c.detail(o)});
+// 11-15: the editor reads in the popup over the window, at its width: a narrow window and 80 columns
+// keep the draft and the keys in sight.
+for(const [cols,rows] of [[40,16],[80,12],[60,10]]){
+ const all=c.detail({budget:v.popupRoom(rows)+1,columns:v.popupWidth(cols)-4});
+ const r=v.popup({cols,rows,title:all[0],body:all.slice(1),sections:['QUESTIONS']});
  const text=r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
  assert(text.includes('Draft answer'),text);assert(text.includes('Tab next'),text);
+ assert(r.rows.every(row=>row.reduce((n,p)=>n+[...p.text].length,0)<=cols),text);
 }
 '''
         self.node(script, "panel-view.cjs")
@@ -2239,8 +2255,8 @@ const assert=require('node:assert/strict'),v=require(process.argv[1]);
 const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},lvl_y:{foreground:186},g_work:{foreground:150,bold:true},lvl_g:{foreground:150},g_dead:{foreground:217,bold:true}};
 const model={styles,colors:256,title:'Task',answerable:true,routes:[{id:'t',title:'Task',state:'working',kind:'working',paint:{glyph:{text:'⠏'}},stages:[{name:'execute',current:true,mark:'●'}]}],
  route_count:1,routes_known:true,messages:[{way:'←',who:'[e7]',text:'note',at:1}]};
-const q=()=>[[{text:'◑ questions 1'}],[{text:'Which?'}],[{text:'›'},{text:' A',bold:true}]];
-const paint=(cfg,background,extra={})=>v.render({width:40,height:24,side:true,model:{...model,...extra},configuration:cfg,background,questions:q});
+const q=()=>({count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Which?'}],[{text:'  '},{text:'1 '},{text:'A',bold:true}]],one:[[{text:'◑ '},{text:'Which?'}]],line:[{text:'Which?'}],choices:1});
+const paint=(cfg,background,extra={})=>v.render({width:40,height:24,side:true,model:{...model,...extra},configuration:cfg,background,brief:q});
 const text=r=>r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
 const base=paint({});
 assert.deepEqual(paint({theme:'terminal',shade:'none'}).rows,base.rows);
@@ -2261,8 +2277,8 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
  assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.body,label);
  assert(parts.some(p=>p.text.includes('MESSAGES')&&p.foreground===f.title),label);
  if(theme!=='mono'){
-  // The question's border, `◑` and `›` are rose; its words are body text.
-  assert(parts.some(p=>p.text==='◑'&&p.foreground===f.accent)&&parts.some(p=>p.text==='›'&&p.foreground===f.accent),label);
+  // The question's `◑` and its count (11-15: the section's label row) are rose; its words are body text.
+  assert(parts.some(p=>p.text==='◑'&&p.foreground===f.accent)&&parts.some(p=>p.text==='1'&&p.role==='accent'&&p.foreground===f.accent),label);
   assert.equal(parts.find(p=>p.text==='Which?').foreground,f.body,label);
  }
  if(face==='light')assert(!parts.some(p=>[253,186,150,217].includes(p.foreground)),label);
@@ -2400,7 +2416,8 @@ assert.equal(gone.routeDetail,false);
 const asking={...base,answerable:true};
 for(const [width,height] of [[37,26],[80,24]]){
  const v=render(width,height,{expandedKeys:['request:rq-aaaaaa','request:rq-bbbbbb'],
-  questions:()=>[[{text:'◑ Where should this go?'}],[{text:'1 · Current project'}],[{text:'Ctrl+] answer'}]]},asking);
+  brief:()=>({count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Where should this go?'}],[{text:'  '},{text:'1 Current project'}]],
+   one:[[{text:'◑ '},{text:'Where should this go?'}]],line:[{text:'Where should this go?'}],choices:1})},asking);
  const lines=text(v);
  assert(lines.some(s=>s.includes('Where should this go?')),'question at '+width);
  assert(lines.some(s=>s.includes('Current project')));

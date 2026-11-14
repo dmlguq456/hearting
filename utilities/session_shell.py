@@ -1001,7 +1001,7 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="", native_model=None) -> dict:
+                     upgrade_note="", native_model=None, popup_columns=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -1070,7 +1070,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if elsewhere:
         word = ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + place(elsewhere[0]))
         values["wait_place"] = word
-        values["wait_guide"] = ui_text("fleet.session_block.questions") + " " + str(len(elsewhere)) + " · " + word
+        values["wait_guide"] = str(len(elsewhere)) + " " + ui_text("fleet.session_block.questions") + " · " + word
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     # A terminal that says it takes 24-bit color (the COLORTERM it already reads): the moving
@@ -1102,18 +1102,21 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     prefix, tail = block_sections(values, columns=columns, route=_plain(route), received=peers,
                                  human=human_line,
                                  work=(str(open_count(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
-    question_presentations(board, max(20, columns - 4), native_wait=values.get("native_wait"))
+    # 11-15: a question reads whole in the popup at its own width; the panel draws each
+    # question's summary at the panel's width inside its frame.
+    editor = popup_columns or max(20, columns - 4)
+    question_presentations(board, editor, native_wait=values.get("native_wait"), brief_columns=columns - 4)
     for item in board:
         for question in item.get("questions") or ():
-            question["display"] = {key: ([styled(line) for line in value] if key != "head" else styled(value))
+            question["display"] = {key: ([styled(line) for line in value] if key not in ("head", "brief_line") else styled(value))
                                    for key, value in question["display"].items()}
     # Spec E9 rule 54: the five `answer_*` words say where a wait not answerable here is answered.
     states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
               "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose",
-        "more_page", "sent")}
-    if columns < 64:
+        "more_page", "sent", "questions")}
+    if editor < 64:
         for key in states:
             labels[key] = ui_text("fleet.session_block.compact_" + key)
     if pane_binding:
@@ -1466,9 +1469,13 @@ def _backend_operation(request: dict) -> dict:
         rows = request.get("rows", 30)
         if type(rows) is not int or not 8 <= rows <= 10000:
             return {"ok": False, "reason": "invalid-display-size"}
+        # The question popup's width (11-15); an older host sends none and keeps the panel's.
+        popup = request.get("popup_columns")
+        popup = popup if type(popup) is int and 20 <= popup <= 10000 else None
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
+            popup_columns=popup,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,

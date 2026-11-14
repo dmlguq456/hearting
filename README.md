@@ -188,11 +188,13 @@ statusline: folder, title, branch and Git state, usage and running jobs, then
 messages, as rows allow. Each section stands right under the one before it, and
 spare rows stay at the bottom; beside the native area `MESSAGES` and `MEM` each
 lead a thin rule across the panel. Click a route for its stages and
-result. Press **Ctrl+]** to focus it: answer
-an existing question, inspect routes/peers/work, or open Fleet with **f**.
-Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
-you focus the block. The question-first bottom shows the current question and
-choices before focus. Use **Tab** to move between questions, **1–9** to choose,
+result. The panel shows a question as two rows under `3 QUESTIONS ─ ›` (its
+first line and its choices on one line); press those rows or **Ctrl+]** and the
+whole question opens in a popup in the middle of the window: answer it there,
+inspect peers/work, or open Fleet with **f** (with no question waiting,
+**Ctrl+]** opens the panel when it is folded). Escape, **Ctrl+]**, its `✕` or a
+press outside closes it; while it stands every key is its own, and ordinary keys
+stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
 **t** for text (including pasted text), and **Enter** after every form field is
 answered. Choices and drafts survive question navigation. A transport receipt
 is shown separately from proved consumption; expired or cancelled questions
@@ -226,7 +228,9 @@ with the question's first line, compaction about to happen), and the routes
 that needs a look). Each row drops whole items from its end when narrow. The
 strip keeps its height whatever it shows (a short window gets fewer rows: three
 from 24 rows, two from 16, else one, with what to do kept longest); a press on
-it, or **Ctrl+]**, opens the panel again. Where the open panel would leave the
+it opens the panel again, and a press on the row of what to do (or **Ctrl+]**)
+opens the question in a popup above the strip (with no question waiting,
+**Ctrl+]** opens the panel). Where the open panel would leave the
 native area under 60 columns (a 40-column panel in a terminal under 102
 columns) it folds by itself into the same strip and opens again with room; a
 choice made by hand holds at every width (a panel opened by hand in a window
