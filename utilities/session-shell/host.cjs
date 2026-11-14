@@ -360,18 +360,18 @@ function foldedSegments(){
   const note=deliveryNote();
   return [...(footerSegments.length?footerSegments:[{text:footer||`${harness} · CTX ?`}]),...(note?[{text:note}]:[])];
 }
-// Correction 8 (11-13): the frame the shown state's rule motion began (running moves a light,
-// a wait breathes), so the rule follows the frame's color on the same paint.
-let ruleMotionKind='',ruleSince=0;
-function ruleMotionSince(shown){
-  const kind=shown==='blocked'?'wait':shown==='working'||shown==='submitting'?'scan':'';
-  if(kind!==ruleMotionKind){ruleMotionKind=kind;ruleSince=spinFrame();}
-  return ruleSince;
+// Correction 8 (11-13): the frame the shown state's frame motion began (running sends the arc
+// round, a wait breathes), so the motion starts with the state on the same paint.
+let motionKind='',motionBegan=0;
+function motionSince(shown){
+  const kind=shown==='blocked'?'breathe':shown==='working'||shown==='submitting'?'orbit':'';
+  if(kind!==motionKind){motionKind=kind;motionBegan=spinFrame();}
+  return motionBegan;
 }
 function panelViewNow(){
   const shown=shownState();
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:ruleMotionSince(shown),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
     cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options),sent:()=>block.sent()});
@@ -387,49 +387,96 @@ function panelViewNow(){
 // the cached rows; the blink, a color change, repaints the panel once a second.
 function spinFrame(){return Math.floor(Date.now()/100);}
 let viewGroups=[],paintedGroups=new Set(),viewSpins=[],paintedSpins=new Set(),viewAnimated=false,panelAnimated=false;
-// Spec rule 47 (d): the moving rule beside the native area turns on the same beat as the
-// spinner. Its row, painted at the current spinner frame, is written as the scratch VT would
-// write it (`serialize`'s per-cell attributes; every cell of that row is one cell wide), so a
-// native frame and the beat write the same line, and the beat sends only the cells that changed.
-let viewMotion=null,paintedMotion=null,viewBlinks=false,panelBlinks=false;
+// Spec rule 47 (d): the moving frame turns on the same beat as the spinner, beside the native area
+// and under it alike. Its line cells (the view's: row, column and glyph) are written as the
+// scratch VT would write them (`serialize`'s per-cell attributes; each is one cell wide): a whole
+// row written for any other reason carries them at the current spinner frame, and the beat sends
+// only the cells that changed, a run at a time. The panel rows are kept with those cells at one
+// fixed look (`panelKey`), so a rebuild whose rows only differ there rewrites nothing.
+let viewMotion=null,paintedMotion=null,viewBlinks=false,panelBlinks=false,panelKey=[],written=[];
+// What the terminal shows at each moving cell (`row,column` on the screen).
+const motionShown=new Map();
 // A part's foreground as SGR: a 256-color index, or `#rrggbb` (24-bit, where the terminal takes it:
-// the moving rule's breath), as the scratch VT writes them back.
+// the moving frame's breath), as the scratch VT writes them back.
 function foregroundSgr(value){
   if(Number.isInteger(value)&&value>=0&&value<=255)return '38;5;'+value;
   const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(value??''));
   return m?'38;2;'+m.slice(1).map(x=>parseInt(x,16)).join(';'):null;
 }
-function motionCells(parts){
-  const cells=[];
-  for(const part of parts){
-    const a=[0,foregroundSgr(part.foreground)||'39',
-      Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
-    if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
-    const attr=a.join(';');
-    for(const ch of String(part.text).replace(/[\x00-\x1f\x7f]/g,' '))cells.push([attr,ch]);
-  }
-  return cells;
+function cellAttr(part){
+  const a=[0,foregroundSgr(part.foreground)||'39',
+    Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
+  if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
+  return a.join(';');
 }
-function sgrRun(cells,from=0,to=cells.length){
-  let s='',previous='';
-  for(let i=from;i<to;i++){const [attr,ch]=cells[i];if(attr!==previous){s+=`\x1b[${attr}m`;previous=attr;}s+=ch;}
-  return s+'\x1b[0m';
+const TOKENS=/\x1b\[[0-9;]*m|[\s\S]/gu;
+// The glyph at each cell of a serialized row.
+function rowGlyphs(row){
+  const out=[];let col=0;
+  for(const token of String(row).match(TOKENS)||[]){if(token.startsWith('\x1b['))continue;const w=cellWidth(token);if(w>0){out[col]=token;col+=w;}}
+  return out;
 }
+// The view's moving cells that stand painted where it says (a row the host replaced, such as the
+// delivery note's, keeps none), by row in column order, with that motion's paint and next change.
+function motionPlan(motion,painted,drop){
+  if(!motion||!Array.isArray(motion.cells))return null;
+  const rows=new Map(),glyphs=new Map();
+  motion.cells.forEach((c,i)=>{
+    if(c.row===drop||typeof painted[c.row]!=='string')return;
+    if(!glyphs.has(c.row))glyphs.set(c.row,rowGlyphs(painted[c.row]));
+    if(glyphs.get(c.row)[c.col]!==c.ch)return;
+    if(!rows.has(c.row))rows.set(c.row,[]);rows.get(c.row).push({row:c.row,col:c.col,ch:c.ch,i});
+  });
+  for(const list of rows.values())list.sort((a,b)=>a.col-b.col);
+  return rows.size?{rows,at:motion.at,next:motion.next,frame:null,now:[],spliced:new Map()}:null;
+}
+// The moving cells' looks at the current spinner frame (once a frame).
 function motionNow(){
   const m=paintedMotion,frame=spinFrame();
-  if(m.frame!==frame){m.frame=frame;m.cells=motionCells(m.at(frame));m.line=sgrRun(m.cells);}
-  m.offered=m.cells;return m.line;
+  if(m.frame!==frame){m.frame=frame;m.now=m.at(frame).map(cellAttr);m.spliced=new Map();}
+  return m.now;
 }
-// The cells of the moving rule's row that differ from what the terminal shows, at their place.
-function motionSpan(y){
-  const m=paintedMotion,now=m.offered,was=m.shown,column=geometry().left?1:terminal.cols+1+geometry().gap;
-  if(!was||was.length!==now.length)return `\x1b[${y+1};${column}H\x1b[0m`+sgrRun(now);
-  const same=i=>was[i][0]===now[i][0]&&was[i][1]===now[i][1];
-  let from=0,to=now.length;
-  while(from<to&&same(from))from++;
-  while(to>from&&same(to-1))to--;
-  return from<to?`\x1b[${y+1};${column+from}H`+sgrRun(now,from,to):'';
+// A serialized row with its moving cells in the given looks; every other cell keeps its own.
+function motionSplice(row,list,look){
+  const at=new Map(list.map(c=>[c.col,c]));
+  let out='',own='',pending=false,current=null,col=0;
+  for(const token of row.match(TOKENS)||[]){
+    if(token.startsWith('\x1b[')){own=token;pending=true;continue;}
+    const c=at.get(col);
+    if(c&&token===c.ch){const attr=look(c);if(current!==attr){out+=`\x1b[${attr}m`;current=attr;}pending=false;}
+    else if(pending||current!==null){out+=own||'\x1b[0m';pending=false;current=null;}
+    out+=token;col+=cellWidth(token);
+  }
+  return pending||current!==null?out+(pending?own:'\x1b[0m'):out;
 }
+function motionRow(y,row){
+  const m=paintedMotion,list=m.rows.get(y),now=motionNow(),kept=m.spliced.get(y);
+  if(kept&&kept[0]===row)return kept[1];
+  const out=motionSplice(row,list,c=>now[c.i]);m.spliced.set(y,[row,out]);return out;
+}
+// A whole row just written: its moving cells show their current looks.
+function motionWrote(y,screen,column){
+  const list=paintedMotion?.rows.get(y);if(!list)return;
+  const now=motionNow();for(const c of list)motionShown.set(screen+','+(column+c.col),now[c.i]);
+}
+// The moving cells of a panel row that differ from what the terminal shows, a run at a time.
+function motionSpan(y,screen,column){
+  const list=paintedMotion?.rows.get(y);if(!list)return '';
+  const now=motionNow(),stale=c=>motionShown.get(screen+','+(column+c.col))!==now[c.i];
+  let out='';
+  for(let k=0;k<list.length;){
+    if(!stale(list[k])){k++;continue;}
+    let run=`\x1b[${screen+1};${column+list[k].col}H`,current=null;
+    for(let x=list[k].col;k<list.length&&list[k].col===x&&stale(list[k]);k++,x++){
+      const c=list[k];if(current!==now[c.i]){run+=`\x1b[${now[c.i]}m`;current=now[c.i];}run+=c.ch;
+      motionShown.set(screen+','+(column+c.col),now[c.i]);
+    }
+    out+=run+'\x1b[0m';
+  }
+  return out;
+}
+// A row whose other cells stand as last written: its spinner glyphs and its changed moving cells.
+function cellSpan(y,screen,column){return (paintedSpins.has(y)?spinSpan(screen,panelRows[y],column):'')+motionSpan(y,screen,column);}
 // The gap beside the panel: the terminal's own background, or the native's own at its edge cell.
 // Two cells beside the open panel, one beside the folded strip (spec rule 49 (c)).
 function gapText(){return '\x1b[0m'+' '.repeat(geometry().gap);}
@@ -443,14 +490,15 @@ function gapOf(line,x){
   return `\x1b[0;${sgr}m${' '.repeat(geometry().gap)}\x1b[0m`;
 }
 function spun(y,row){
-  if(paintedMotion&&y===paintedMotion.row&&typeof row==='string')return motionNow();
-  if(typeof row!=='string'||!paintedSpins.has(y))return row;
-  const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);
+  if(typeof row!=='string')return row;
+  let out=row;
+  if(paintedSpins.has(y)){const spin=panelView.SPIN;out=out.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);}
+  return paintedMotion?.rows.has(y)?motionRow(y,out):out;
 }
 let beatTimer,beatPhase=-1;
 function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&panelRows.length>0;}
 // The beat wakes at the next moment something painted changes: a spinner's next frame, the
-// moving rule's next change (a waiting rule's breath: four times a breath), a blink's phase
+// moving frame's next change (the arc's next step; a breath's next shade), a blink's phase
 // change once a second (spec rule 47 (d)). A blink repaints the panel; the rest swap their own
 // cells. Nothing changing, nothing wakes.
 function armBeat(){
@@ -480,25 +528,31 @@ function spinSpan(y,row,column){
   }
   return out&&out+'\x1b[0m';
 }
-// Only the changed cells of the panel rows (the spinner glyphs, the moving rule), with the cursor
-// kept where the native left it. A native frame already on its way paints them itself.
+// Only the changed cells of the panel rows (the spinner glyphs, the moving frame's cells), with
+// the cursor kept where the native left it. A native frame already on its way paints them itself.
+// A row whose other cells were not written as they stand now goes whole (the panel part).
 function spinPaint(){
   if(frameTimer||!paintedSpins.size&&!paintedMotion||succeeding)return;
   let text='';const side=geometry().side;
-  for(const y of paintedMotion?new Set([...paintedSpins,paintedMotion.row]):paintedSpins){
+  for(const y of paintedMotion?new Set([...paintedSpins,...paintedMotion.rows.keys()]):paintedSpins){
     if(y>=panelRows.length)continue;
-    const panel=spun(y,panelRows[y]),motion=!!paintedMotion&&y===paintedMotion.row;
+    const panel=spun(y,panelRows[y]);
     if(side){
       if(nativeLast[y]===undefined)continue;
       const gap=nativeGap[y]||gapText();
       const line=geometry().left?panel+`\x1b[${panelColumns()+1}G`+gap+nativeLast[y]:nativeLast[y]+`\x1b[${terminal.cols+1}G`+gap+panel;
       if(last[y]===line)continue;
-      const column=geometry().left?1:terminal.cols+1+geometry().gap;
-      text+=last[y]===undefined?`\x1b[${y+1};${column}H\x1b[0m`+panel:motion?motionSpan(y):spinSpan(y,panelRows[y],column);
-      last[y]=line;if(motion)paintedMotion.shown=paintedMotion.offered;
+      const column=geometry().left?1:terminal.cols+1+geometry().gap,quiet=last[y]!==undefined&&written[y]===panelKey[y];
+      text+=quiet?cellSpan(y,y,column):`\x1b[${y+1};${column}H\x1b[0m`+panel;
+      if(!quiet)motionWrote(y,y,column);
+      last[y]=line;written[y]=panelKey[y];
     }else{
       const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
-      if(last[row]===panel)continue;text+=last[row]===undefined?`\x1b[${row+1};1H`+panel:spinSpan(row,panelRows[y],1);last[row]=panel;
+      if(last[row]===panel)continue;
+      const quiet=last[row]!==undefined&&written[row]===panelKey[y];
+      text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H`+panel;
+      if(!quiet)motionWrote(y,row,1);
+      last[row]=panel;written[row]=panelKey[y];
     }
   }
   if(text)emit('\x1b[?2026h\x1b7'+text+'\x1b8\x1b[?2026l');
@@ -586,20 +640,29 @@ function render() {
         const plain=y!==notice&&!concealed.has(y)&&!masked;
         const gap=plain?gapOf(view.buffer.active.getLine(view.buffer.active.viewportY+y),geometry().left?0:view.cols-1):gapText();
         const same=nativeLast[y]===line&&nativeGap[y]===gap;nativeLast[y]=line;nativeGap[y]=gap;
-        const panel=y<panelRows.length?spun(y,panelRows[y]):' '.repeat(panelColumns());
+        const shown=y<panelRows.length,panel=shown?spun(y,panelRows[y]):' '.repeat(panelColumns());
         line=geometry().left?panel+`\x1b[${panelColumns()+1}G`+gap+line:line+`\x1b[${view.cols+1}G`+gap+panel;
-        // The moving rule's row whose native part is unchanged: only its changed cells.
-        motion=!!paintedMotion&&y===paintedMotion.row&&y<panelRows.length;
-        if(motion&&same&&last[y]!==undefined&&last[y]!==line){text+=motionSpan(y);last[y]=line;}
+        // A row of the moving frame whose native part and other panel cells are unchanged: only
+        // its changed cells (and its spinner glyphs).
+        const column=geometry().left?1:view.cols+1+geometry().gap;
+        motion=shown&&!!paintedMotion?.rows.has(y);
+        if(motion&&same&&last[y]!==undefined&&last[y]!==line&&written[y]===panelKey[y]){text+=cellSpan(y,y,column);last[y]=line;}
+        else if(motion&&last[y]!==line)motionWrote(y,y,column);
+        written[y]=shown?panelKey[y]:undefined;
       }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
-      if(motion)paintedMotion.shown=paintedMotion.offered;
     }
     if(!fleetView&&!geometry().side&&(expanded||height()>0))for(let y=0;y<panelRows.length;y++){
-      const row=rows-height()+y;
-      const cached=expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
-        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
-      if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
+      const row=rows-height()+y,first=expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude';
+      const cached=first?'\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
+      if(last[row]!==cached){
+        // A row of the moving frame whose other cells are unchanged: only its changed cells.
+        const quiet=!first&&!!paintedMotion?.rows.has(y)&&last[row]!==undefined&&written[row]===panelKey[y];
+        text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H${cached}`;
+        if(!quiet&&!first)motionWrote(y,row,1);
+        last[row]=cached;
+      }
+      written[row]=first?undefined:panelKey[y];
     }
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
@@ -656,7 +719,7 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();paintedMotion=null;panelBlinks=false;panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];panelKey=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();paintedMotion=null;motionShown.clear();panelBlinks=false;panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=deliveryNote();
   let lines,edit=-1,groups=[],spins=[],animated=false,motion=null,blinks=false;
@@ -680,8 +743,11 @@ function rebuildDisplay() {
   displayLines(lines,height(),(painted,lengths,plain)=>{
     blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
     panelRows=painted;paintedGroups=new Set(groups);paintedSpins=new Set(spins);panelAnimated=animated;
-    // What the terminal shows of the moving rule stays known while its row stays the same.
-    paintedMotion=motion?{row:motion.row,at:motion.at,next:motion.next,shown:paintedMotion&&paintedMotion.row===motion.row?paintedMotion.shown:null}:null;
+    // The moving frame's cells as painted (the delivery note's row, which replaces the last one,
+    // keeps none); what the terminal shows at them stays known (`motionShown`).
+    paintedMotion=motionPlan(motion,painted,extra?lines.length-1:-1);
+    if(!paintedMotion)motionShown.clear();
+    panelKey=painted.map((row,y)=>paintedMotion?.rows.has(y)?motionSplice(row,paintedMotion.rows.get(y),()=>'0'):row);
     panelBlinks=blinks;
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
     displayFooter=painted[0];footerLast='\0';rebuilding=false;
