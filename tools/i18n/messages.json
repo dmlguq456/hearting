@@ -822,6 +822,10 @@
    "en": "baseline not registered",
    "ko": "기준 미등록"
   },
+  "fleet.lab.catalog_missing": {
+   "en": "no experiment catalog yet; runs show by id only",
+   "ko": "실험 정본 아직 없음; run은 id로만 보임"
+  },
   "fleet.lab.col.base": {
    "en": "BASE",
    "ko": "기준"
@@ -906,6 +910,14 @@
    "en": "unknown {n}",
    "ko": "미확인 {n}"
   },
+  "fleet.lab.n_unnamed": {
+   "en": "unnamed {n}",
+   "ko": "이름 없음 {n}"
+  },
+  "fleet.lab.n_waiting": {
+   "en": "waiting {n}",
+   "ko": "대기 {n}"
+  },
   "fleet.lab.no_conditions": {
    "en": "no conditions registered in this group",
    "ko": "이 묶음에 등록된 조건 없음"
@@ -929,6 +941,10 @@
   "fleet.lab.reason.row-ended": {
    "en": "row ended, no outcome recorded",
    "ko": "행 종료, 결과 기록 없음"
+  },
+  "fleet.lab.runs_n": {
+   "en": "{n}",
+   "ko": "{n}건"
   },
   "fleet.lab.state.ended": {
    "en": "ended",
@@ -962,9 +978,17 @@
    "en": "n/a",
    "ko": "비교 불가"
   },
+  "fleet.lab.unnamed_runs": {
+   "en": "unnamed runs",
+   "ko": "이름 없는 run"
+  },
   "fleet.lab.unreadable": {
    "en": "experiment catalog could not be read ({code}); not the same as no experiments",
    "ko": "실험 정본을 읽지 못함 ({code}); 실험이 없다는 뜻이 아님"
+  },
+  "fleet.lab.unwatched": {
+   "en": "{n} run-record folders not watched; their values are unconfirmed",
+   "ko": "실행 기록 폴더 {n}개는 감시하지 못함; 그 값은 미확인"
   },
   "fleet.loading": {
    "en": "loading",
