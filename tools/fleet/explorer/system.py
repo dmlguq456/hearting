@@ -97,7 +97,7 @@ def job_summary(snapshot):
         if gates:
             parts.insert(2, f"{wait} {gates}")
         if other_waits:
-            parts.insert(3 if gates else 2, f"답변 필요 {other_waits}")
+            parts.insert(3 if gates else 2, f"답 필요 {other_waits}")
     return " · ".join(parts)
 
 
