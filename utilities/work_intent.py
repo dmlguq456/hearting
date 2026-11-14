@@ -856,6 +856,16 @@ def _unnegated(text: str) -> str:
     return _NEGATED_FAILURE.sub(" ", text)
 
 
+# A row that says what a check did before the fix ("고치기 전 코드로 돌리면 FAIL"): the evidence that the
+# check can fail, not a failure now. Its pass/fail words cannot be told from the checks that ran
+# on the finished work, so such a row is never counted and a group holding one gives no numbers.
+_BEFORE_FIX = re.compile(
+    r"(?:고치|수정하|패치하|변경하|적용하|구현하)기\s*(?:전|이전)|(?:수정|패치|변경|적용|구현)\s*(?:전|이전)"
+    r"|(?:고치|수정하|패치하)지\s*않은|되돌린\s*(?:코드|트리)"
+    r"|\b(?:before|prior to|without)\s+(?:the\s+|this\s+|my\s+|our\s+)?(?:fix|patch|changes?)\b"
+    r"|\bpre-?fix\b|\bunfixed\b|\bbefore fixing\b", re.I)
+
+
 def _command_failures(line) -> int:
     """Fail words on one command row; an error word alone counts once, never as zero."""
     rest = _unnegated(line)
@@ -874,6 +884,8 @@ def _verified_summary(lines, t):
     prose = [line for line in lines if line not in commands]
     if not commands:
         return _joined(lines, MAX_CHECKS_CHARS) or t("completion.no_checks")
+    if any(_BEFORE_FIX.search(line) for line in commands):
+        return _joined([t("completion.no_checks"), *prose], MAX_CHECKS_CHARS)
     passed = failures = 0
     for line in commands:
         words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(_unnegated(line))]
@@ -940,6 +952,8 @@ def _failure_kind(line, *, verified=False) -> str | None:
         return None
     rest = _unnegated(text)
     if verified:
+        if _BEFORE_FIX.search(text):
+            return None  # what the check did before the fix is not a failure now
         if _COMMAND_LINE.search(text):
             return "check" if _command_failures(text) else None
         return "check" if _failure_kind(_UNRUN_WORD.sub(" ", text)) == "failure" else None

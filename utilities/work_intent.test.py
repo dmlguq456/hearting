@@ -436,6 +436,35 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertIn("검증: 명령 1개 · 결과 표시 없음", text)
         self.assertNotIn("통과 0 · 실패 0", text)
 
+    def _checks_and_result(self, rows):
+        self.report.write_text("## 변경 개요\n- x\n\n## 검증\n" + "\n".join("- " + row for row in rows) + "\n")
+        lines = WI.completion_summary(self.route, self.report).splitlines()
+        return (next(line for line in lines if line.startswith("검증:")),
+                next(line for line in lines if line.startswith("결과:")))
+
+    def test_a_row_that_says_what_failed_before_the_fix_is_not_a_failure(self):
+        passed = "`python3 tools/run-tests.py --select utilities/a.test.py`: 22 passed"
+        for before in ("`bash hooks/x.test.sh`를 고치기 전 hook으로 돌리면 FAIL (PASS 21·FAIL 1), 고친 뒤 PASS 22·FAIL 0",
+                       "python3 tools/run-tests.py --select utilities/b.test.py — 수정 전 코드에서 3 failed, 수정 후 12 passed",
+                       "python3 tools/run-tests.py --select utilities/b.test.py: before the fix 1 failed; now 12 passed"):
+            with self.subTest(before=before):
+                checks, result = self._checks_and_result([passed, before])
+                self.assertEqual(checks, "검증: " + WI.ui_translator()("completion.no_checks"))
+                self.assertNotIn("실패", checks.replace("확실히 추출하지 못함", ""))
+                self.assertEqual(result, "결과: 완료")
+        # A prose line about the failing-before check is not a failure either.
+        self.assertEqual(self._checks_and_result([passed, "고치기 전에는 FAIL 이었다"])[1], "결과: 완료")
+
+    def test_a_check_that_fails_now_is_still_seen_next_to_a_before_the_fix_row(self):
+        failing = "`python3 tools/run-tests.py --select utilities/a.test.py`: 20 passed, 2 failed"
+        before = "`bash hooks/x.test.sh`를 고치기 전 hook으로 돌리면 FAIL (PASS 21·FAIL 1), 고친 뒤 PASS 22·FAIL 0"
+        checks, result = self._checks_and_result([before, failing])
+        self.assertIn("확인", result)      # "완료 — 보고서의 남은 것 확인", never a clean "결과: 완료"
+        self.assertNotEqual(result, "결과: 완료")
+        # Without a before-the-fix row the failure is counted as before.
+        checks, _result = self._checks_and_result([failing])
+        self.assertEqual(checks, "검증: 명령 1개 · 통과 1 · 실패 1")
+
     def test_command_line_with_only_an_error_word_is_not_zero_failures(self):
         self.report.write_text("## 검증\npython3 tools/check.py -> 오류 발생\n")
         text = WI.completion_summary(self.route, self.report)
