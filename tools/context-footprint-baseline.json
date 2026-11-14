@@ -9,7 +9,7 @@
  "schema": 1,
  "surfaces": {
   "bootstrap:claude": 5377,
-  "bootstrap:codex": 8605,
+  "bootstrap:codex": 9244,
   "bootstrap:opencode": 6678,
   "entry-router:canonical:max": 3069,
   "entry-router:canonical:total": 33922,
@@ -38,5 +38,9 @@
   "worker-bootstrap:review": 2428,
   "worker-bootstrap:stage": 2456,
   "worker-bootstrap:support": 2412
+ },
+ "codex_bootstrap_correction": {
+  "recorded_at": "2026-11-14",
+  "reason": "Measured LAB guidance bootstrap; preserve the 21-warning ceiling."
  }
 }
