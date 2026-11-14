@@ -98,6 +98,11 @@ separate; `compaction` only says what this file left out.
   value older than 600 s gives no rate or ETA but keeps that clock. A tracked progress
   source that can no longer be read leaves stagnation `unknown` and is not vouched
   for, so its record turns stale.
+  A live run whose progress stops stays running with its progress age (`마지막 갱신 N 전`)
+  up to two hours and turns `stagnant` at two hours; the age of a progress file alone never
+  makes it `unknown` (`unknown` is for when liveness cannot be seen). A progress file the
+  run names counts as declared even before it exists or while it cannot be read, as at
+  launch; only the runner's own default place, never written, reads as not declared.
   A run without a declaration is filled only from its exact evidence: the
   observation metadata's `path`, the hash-bound `--request` or the `--config`
   output keys. Without such evidence it stays `unknown`/`not-declared`; no folder

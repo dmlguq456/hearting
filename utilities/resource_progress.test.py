@@ -1798,6 +1798,76 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertIn("진행 파일 선언 없음", "; ".join(progress._notice_texts(
                 bare, "checkpoint", nothing["observation"], None, nothing["metrics"])))
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_a_progress_file_the_run_names_is_declared_before_it_is_there_or_readable(self):
+        # RV-PR1619-R2-1114 required fix 2: the launch note counted a named progress file as a
+        # declaration, the run's notices only after a first successful read. One judgment now.
+        # The place the runner gives every run (log + ".progress.json") stays no declaration.
+        not_visible = "선언한 진행 폴더가 여기서 안 보임"
+        with tempfile.TemporaryDirectory() as tmp:
+            base, now = Path(tmp), 1_800_000_000.0
+
+            def told(run, name, read=None, at=now):
+                with mock.patch.object(progress, "_observation_state_path", return_value=base / f"{name}.json"):
+                    result = progress.observe_experiment(run, base / "registry.json", at, progress=read,
+                                                         alive=True, status="running", notify_events=False)
+                observation = result["observation"]
+                return observation, "; ".join(progress._notice_texts(
+                    run, "checkpoint", observation, None, result["metrics"]))
+
+            def declared(name, **extra):
+                return {"run_id": f"{name}-run", "node": "train", "status": "running",
+                        "started_at": now - 3600, "progress_file": str(base / f"{name}.progress.json"), **extra}
+
+            # Named, not there yet.
+            run = declared("missing")
+            self.assertIsNone(progress.declaration_note(run))
+            observation, text = told(run, "missing")
+            self.assertEqual(observation["undeclared"], "declared-unresolved")
+            self.assertIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Named, broken from the first read.
+            run = declared("broken")
+            Path(run["progress_file"]).write_text("{not json")
+            observation, text = told(run, "broken", progress.read_progress(run, now))
+            self.assertEqual(observation["undeclared"], "declared-unresolved")
+            self.assertIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Named, not there at first, written later: the value and its age.
+            run = declared("later")
+            self.assertEqual(told(run, "later")[0]["undeclared"], "declared-unresolved")
+            Path(run["progress_file"]).write_text(json.dumps({
+                "schema_version": 1, "run_id": run["run_id"], "node": "train",
+                "updated_at": now + 540, "completed": 12, "total": 60, "unit": "epoch"}))
+            observation, text = told(run, "later", progress.read_progress(run, now + 600), now + 600)
+            self.assertIsNone(observation["undeclared"])
+            self.assertIn("진행 12/60 epoch", text)
+            self.assertIn("마지막 갱신", text)
+            self.assertNotIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Read, then broken: it stays a declaration (the tracked source is simply not vouched for).
+            run = declared("lost")
+            Path(run["progress_file"]).write_text(json.dumps({
+                "schema_version": 1, "run_id": run["run_id"], "node": "train",
+                "updated_at": now, "completed": 12, "total": 60, "unit": "epoch"}))
+            told(run, "lost", progress.read_progress(run, now))
+            Path(run["progress_file"]).write_text("{not json")
+            observation, text = told(run, "lost", progress.read_progress(run, now + 1500), now + 1500)
+            self.assertIsNone(observation["undeclared"])
+            self.assertEqual(observation["stagnation"], {"state": "unknown"})
+            self.assertNotIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Only the runner's own place, never written, and nothing at all: still no declaration.
+            log = str(base / "run.log")
+            for name, run in (("default", {"run_id": "default-run", "status": "running", "log": log,
+                                           "progress_file": log + ".progress.json", "started_at": now - 3600}),
+                              ("nothing", {"run_id": "nothing-run", "status": "running",
+                                           "started_at": now - 3600})):
+                observation, text = told(run, name)
+                self.assertEqual(observation["undeclared"], "not-declared")
+                self.assertIn("진행 파일 선언 없음", text)
+                self.assertNotIn(not_visible, text)
+
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},

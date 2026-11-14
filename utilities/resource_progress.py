@@ -1465,6 +1465,21 @@ _UNDECLARED_TEXT = {"not-declared": "resource.no_progress_declared",
                     "declared-unresolved": "resource.progress_not_visible"}
 
 
+def _declared_progress_file(run):
+    """The progress file a run's own declaration names, or None.
+
+    One judgment for the launch note and for a run's notices. The place the runner provides
+    for every run (its log + ".progress.json", handed to the workload to write) is not a
+    declaration; any other `progress_file` is one, whether or not it exists or reads yet."""
+    path = run.get("progress_file") if isinstance(run, dict) else None
+    if not isinstance(path, str) or not path:
+        return None
+    log = run.get("log")
+    if isinstance(log, str) and log and os.path.normpath(path) == os.path.normpath(log + ".progress.json"):
+        return None
+    return path
+
+
 def declaration_note(run):
     """The one line a launch prints when its run declares no progress file or output folder.
 
@@ -1473,7 +1488,7 @@ def declaration_note(run):
     when its route node declares no training output, or when this cannot be told."""
     try:
         observation = run.get("observation") if isinstance(run.get("observation"), dict) else {}
-        if run.get("output_dir") or run.get("progress_file") or observation.get("source_bindings"):
+        if run.get("output_dir") or _declared_progress_file(run) or observation.get("source_bindings"):
             return None
         folder, reason = discover_output_binding(run)
         if folder or reason not in ("not-declared", "remote-unmapped"):
@@ -2123,9 +2138,11 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             observation["eta_vs_plan"] = None
         observation["source_updated_at"] = _latest_source_update(samples, progress, now)
         # Why there is nothing to read, when there is no folder and no progress value was ever read
-        # (the public record's reason). A progress file read at any age is a declaration.
+        # (the public record's reason). A progress file read at any age is a declaration, and so
+        # is one named but not there or not readable yet (the launch note's own judgment).
+        named = bool(root_value) or bool(_declared_progress_file(run))
         observation["undeclared"] = (None if metric_root is not None or isinstance(progress_tracker, dict)
-                                     else _public_output_state(run, None, binding_given=bool(root_value),
+                                     else _public_output_state(run, None, binding_given=named,
                                                                discovered_reason=discovered_reason)[1])
         artifact_root = run.get("artifact_root")
         record_locator = public_record_path(artifact_root, run_id) if artifact_root else None
