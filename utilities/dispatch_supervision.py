@@ -263,6 +263,46 @@ def runtime_tool_progress(metadata, previous=None):
     return latest
 
 
+# Rows a runtime appends as its own turn or step moves, in each harness's shape. Bare
+# speech rows (``text``) and the supervisor's ``dispatch.supervisor.*`` bookkeeping are not
+# turns, so long talk or a supervisor's own writes never read as progress.
+_TURN_EVENT_TYPES = frozenset({
+    "turn.started", "turn.completed", "turn.failed", "item.started", "item.completed",  # codex
+    "assistant", "user",  # claude transcript
+    "step_start", "step_finish", "tool_use"})  # opencode
+
+
+def runtime_turn_mark(metadata):
+    """Where the worker's own newest turn/step row sits in its event source, or ``None``.
+
+    A live worker's new turn is progress even when it ran no tool. Only the byte offset
+    of the newest such row is read; never its prose.
+    """
+    raw_path = metadata.get("log_file", "")
+    if not raw_path or not Path(raw_path).is_absolute():
+        return None
+    try:
+        with _tool_event_source(metadata, Path(raw_path)).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 262144)
+            handle.seek(start)
+            if start:
+                start += len(handle.readline())
+            data = handle.read(262144)
+    except OSError:
+        return None
+    mark, offset = None, start
+    for line in data.splitlines(keepends=True):
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            event = None
+        if isinstance(event, dict) and event.get("type") in _TURN_EVENT_TYPES:
+            mark = offset
+        offset += len(line)
+    return mark
+
+
 # Retry waits each supervisor writes (`session_supervisor_decisions.wait_transient_retry`,
 # Codex `run_turn`): Codex names its turn by thread/turn id, Claude and OpenCode by turn ordinal.
 _TRANSIENT_WAIT_REASONS = {"codex": {"transient-capacity", "transient-edge-block"},
@@ -820,6 +860,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
         fingerprint = deterministic_progress_fingerprint({
             "attempt_id": attempt_id, "route_id": route_id, "route_node": route_node,
             "heartbeat": hb or None, "tool": tool_event,
+            "turn": runtime_turn_mark(metadata),
             "registry_transition": {"status": status, "note": metadata.get("note", "")},
             "file_signature": scoped_file_signature(
                 metadata, worktree if worktree is not None else metadata.get("_stall_worktree", "")),
@@ -937,6 +978,12 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             # An unfinished call record is not progress by itself: it counts inside the
             # quiet windows, or while the exact tool command started for it still runs.
             observation_state, reason = "active", "native-tool-active"
+        elif quiet >= max_quiet_windows and _call_command_running(
+                metadata, last_progress - max(1.0, progress_window_seconds)):
+            # One blocking command (a CI watch) that started after the last event and still
+            # runs is the worker's wait, whether or not its call row is still in flight. An
+            # older resident shell is not: it started before the last event.
+            observation_state, reason = "active", "tool-command-running"
         elif quiet >= max_quiet_windows:
             observation_state, reason = "stalled", "no-comparable-progress"
         else:
@@ -1045,6 +1092,37 @@ def _open_attempt_rows(jobs):
         seen.add(attempt_id)
         result.append((record.status, metadata))
     return result
+
+
+def running_route_ids(jobs, candidates):
+    """Which of the ``candidates`` route ids have a worker that works or waits on its own work now.
+
+    Read-only, from the same observer the stall notice uses: an open attempt of the route
+    whose observation reads ``active``, or ``waiting`` on something other than a person
+    (a parked owner on its child or resource run). A stalled, unverifiable or finished
+    route is not running, so its unreceived result stays open work.
+    """
+    wanted = {str(item) for item in candidates or ()}
+    if not wanted:
+        return set()
+    from dispatch_contract import process_table_scan_scope
+    running = set()
+    try:
+        jobs = Path(jobs).resolve(strict=True)
+        with process_table_scan_scope():
+            for status, metadata in _open_attempt_rows(jobs):
+                route = metadata.get("owner_route_id") or metadata.get("route_id")
+                if route not in wanted or route in running:
+                    continue
+                observation = update_attempt_stall_observation(
+                    jobs, metadata.get("attempt_id", ""), persist=False, row=(status, metadata))
+                if observation and (observation.get("state") == "active" or (
+                        observation.get("state") == "waiting"
+                        and observation.get("reason") != "raised-human-gate")):
+                    running.add(route)
+    except (OSError, ValueError, SupervisionError):
+        return running
+    return running
 
 
 def has_unowned_stall_observation(jobs):

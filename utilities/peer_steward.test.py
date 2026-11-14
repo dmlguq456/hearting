@@ -2200,6 +2200,47 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
         self.assertEqual((result["queued"], result["kind"]), (True, "message"), result)
         self.assertEqual(result["to"]["harness"], "codex")
 
+    def _opencode_env(self, with_carrier):
+        env = self._env("idle")
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env["OPENCODE_SESSION_ID"] = "ses-oc-steward"
+        env.pop("AGENT_PARENT_COMPLETION_CARRIER", None)
+        if with_carrier:
+            env["AGENT_PARENT_COMPLETION_CARRIER"] = "opencode-turn:ses-oc-steward"
+        return env
+
+    _OPENCODE_SEAT = {"kind": "pane", "key": "opencode-seat-k", "pane": "%7@/tmp/hbt-x/s",
+                      "harness": "opencode", "project_key": ""}
+
+    def test_an_opencode_watch_with_its_plugin_carrier_ends_the_turn(self):
+        """2026-11-14: OpenCode got `wake=none`, so a watch it left to rest never woke it."""
+        proc = self._codex_watch_with_seat(self._opencode_env(True), self._OPENCODE_SEAT)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("wake=opencode", proc.stdout)
+        directive = self._directive(proc.stdout)
+        self.assertEqual(directive.get("parent_next"), "end-turn", proc.stdout)
+        self.assertEqual(directive.get("parent_next_reason"), "carrier-steward-watch-opencode-turn")
+
+    def test_an_opencode_watch_without_the_carrier_or_a_proven_seat_still_waits(self):
+        for label, run in (
+                ("no plugin carrier on the command",
+                 lambda: self._codex_watch_with_seat(self._opencode_env(False), self._OPENCODE_SEAT)),
+                ("seat unproven", lambda: self._codex_watch_with_seat(self._opencode_env(True), None))):
+            with self.subTest(label):
+                proc = run()
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("wake=none", proc.stdout)
+                self.assertEqual(self._directive(proc.stdout).get("parent_next"), "bounded-wait")
+
+    def test_an_opencode_watch_receipt_leaves_no_queued_notice_to_hide_it_from_the_sweep(self):
+        import peer_steward_watch
+        arm = {"wake": "opencode", "steward": {"harness": "opencode", "session_id": "ses-oc-steward"},
+               "steward_seat": self._OPENCODE_SEAT, "agent": {"name": "w"}}
+        with mock.patch.object(peer_steward_watch.peer_message, "prepare_peer_message") as prepare:
+            self.assertIsNone(peer_steward_watch._prepare_watch_notice(
+                "0123456789abcdef", arm, {"state": "idle"}))
+        prepare.assert_not_called()
+
     def test_a_codex_watch_without_a_queue_socket_still_waits(self):
         proc = self._run("watch", self.target, env=self._codex_env(False))
         self.assertEqual(proc.returncode, 0, proc.stderr)

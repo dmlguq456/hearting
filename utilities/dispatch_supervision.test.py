@@ -1714,6 +1714,127 @@ class OwnerProgressAlarmTest(unittest.TestCase):
                 self.assertEqual((observation["state"], observation["reason"]),
                                  ("stalled", "execution-absent"))
 
+    def turn_rows(self, harness, count=1, *, supervisor=False, speech=False):
+        """New worker turns that ran no tool (or only its supervisor's rows, or bare speech)."""
+        lines = []
+        for _ in range(count):
+            if speech:
+                lines.append({"type": "text", "text": "words " * 1000})
+            elif supervisor:
+                lines.append({"type": "dispatch.supervisor.token_usage", "tokens": 1})
+            elif harness == "claude":
+                lines.append({"type": "assistant", "message": {"id": "m-turn", "content": [
+                    {"type": "text", "text": "x"}]}})
+            elif harness == "codex":
+                lines.append({"type": "item.completed", "item": {"type": "agent_message", "id": "i-turn"}})
+            else:
+                lines.append({"type": "step_finish", "part": {"type": "step-finish", "id": "p-turn"}})
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.writelines(json.dumps(line) + "\n" for line in lines)
+
+    def test_e_a_live_workers_new_turn_without_a_tool_is_progress(self):
+        # 24 h of PASS owners got "no comparable progress" while they kept taking turns.
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                with self.lease():
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live")
+                    self.tool_rows(harness, [("call-a", "start", "m1"), ("call-a", "end", "m1")])
+                    count = self.alarms(self.t0)
+                    for step in range(1, 30):  # one turn every 400 s, longer than a quiet window
+                        self.turn_rows(harness)
+                        count += self.alarms(self.t0 + step * 400)
+                    observation = self.state(self.t0 + 29 * 400 + 100)
+                self.assertEqual(count, 0)
+                self.assertEqual(observation["state"], "active")
+
+    def test_f_a_live_workers_new_tool_event_is_progress(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                with self.lease():
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live")
+                    count = 0
+                    for step in range(30):
+                        self.tool_rows(harness, [(f"call-{step}", "start", f"m{step}"),
+                                                 (f"call-{step}", "end", f"m{step}")])
+                        count += self.alarms(self.t0 + step * 400)
+                self.assertEqual(count, 0)
+
+    def test_g_one_blocking_command_that_is_still_running_is_not_a_stall(self):
+        # A worker waiting on one CI watch for 20+ minutes: the command started after its last
+        # event and lives. Its call row may already read finished (or never be seen).
+        for harness in self.DELIVERY:
+            for rows in (True, False):
+                with self.subTest(harness=harness, call_rows=rows):
+                    self.owner(harness, "-rows" if rows else "-bare")
+                    with self.lease():
+                        self.phase("running-turn")
+                        self.runtime("active", "runtime-command-live")
+                        if rows:
+                            self.tool_rows(harness, [("call-w", "start", "m1"), ("call-w", "end", "m1")])
+                        self.assertEqual(self.alarms(self.t0), 0)
+                        with mock.patch.object(supervision, "_running_tool_command",
+                                               return_value=(self.t0 + 5, "gh")):
+                            count = sum(self.alarms(self.t0 + window * 300) for window in range(1, 25))
+                            observation = self.state(self.t0 + 24 * 300)
+                    self.assertEqual(count, 0)
+                    self.assertEqual((observation["state"], observation["reason"]),
+                                     ("active", "tool-command-running"))
+
+    def test_h_a_worker_that_is_alive_but_silent_with_no_command_still_alarms(self):
+        for harness in self.DELIVERY:
+            for case in ("no-command", "older-resident-shell", "supervisor-rows-only", "speech-only"):
+                with self.subTest(harness=harness, case=case):
+                    self.owner(harness, "-" + case)
+                    with self.lease():
+                        self.phase("running-turn")
+                        self.runtime("active", "runtime-command-live")
+                        self.tool_rows(harness, [("call-a", "start", "m1"), ("call-a", "end", "m1")])
+                        self.assertEqual(self.alarms(self.t0), 0)
+                        running = (self.t0 - 3600, "sleep") if case == "older-resident-shell" else None
+                        with mock.patch.object(supervision, "_running_tool_command", return_value=running):
+                            if case in {"supervisor-rows-only", "speech-only"}:
+                                self.turn_rows(harness, 3, supervisor=case == "supervisor-rows-only",
+                                               speech=case == "speech-only")
+                            count = self.alarms(self.t0 + 601)
+                            observation = self.state(self.t0 + 601)
+                    self.assertEqual(count, 1)
+                    self.assertEqual((observation["state"], observation["reason"]),
+                                     ("stalled", "no-comparable-progress"))
+
+    def test_i_a_dead_worker_still_alarms_even_with_fresh_turns(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                self.phase("parked")
+                self.runtime("absent", "attempt-tag-census-empty")
+                self.turn_rows(harness)
+                self.assertEqual(self.alarms(self.t0), 1)
+                self.assertEqual(self.state(self.t0)["reason"], "execution-absent")
+
+    def test_j_running_route_ids_names_only_routes_whose_worker_runs_now(self):
+        for harness in self.DELIVERY:
+            with self.subTest(harness=harness):
+                self.owner(harness)
+                route = "rt-alarm-" + harness
+                with self.lease():
+                    self.phase("running-turn")
+                    self.runtime("active", "runtime-command-live")
+                    self.tool_rows(harness, [("call-a", "start", "m1"), ("call-a", "end", "m1")])
+                    with mock.patch.object(supervision.time, "time", return_value=self.t0):
+                        self.assertEqual(supervision.running_route_ids(self.jobs, {route, "rt-other"}), {route})
+                        self.assertEqual(supervision.running_route_ids(self.jobs, {"rt-other"}), set())
+                    # Alive but silent past the windows is the stalled case: not running.
+                    self.alarms(self.t0)
+                    with mock.patch.object(supervision.time, "time", return_value=self.t0 + 601):
+                        self.assertEqual(supervision.running_route_ids(self.jobs, {route}), set())
+                # A dead worker is not running either.
+                self.runtime("absent", "attempt-tag-census-empty")
+                self.assertEqual(supervision.running_route_ids(self.jobs, {route}), set())
+
     def test_a_claude_owner_whose_receipt_log_caught_a_cli_warning_still_shows_its_tools(self):
         # 12:44/13:05/13:53: each turn's "Ignoring 7 permissions.allow ..." stderr line landed in
         # the receipt log, and the owner's own transcript stopped being the tool-progress source.

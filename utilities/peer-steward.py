@@ -3385,6 +3385,14 @@ def _codex_queue_present():
         return False
 
 
+def _opencode_carrier_present():
+    """This OpenCode session's plugin carrier is armed: the plugin puts
+    ``AGENT_PARENT_COMPLETION_CARRIER=opencode-turn:<session>`` on its tool commands, and the
+    same plugin wakes an idle session with its steward watch receipts (the carrier `wake=opencode`
+    names). An older plugin leaves it unset: unknown is not a carrier."""
+    return os.environ.get("AGENT_PARENT_COMPLETION_CARRIER", "").startswith("opencode-turn:")
+
+
 def _codex_turn_in_progress(thread_id):
     """The thread's latest native turn is running (App Server ``thread/turns/list``).
 
@@ -3423,7 +3431,9 @@ def cmd_watch(args):
         # promise it: `wake=none` prints the bounded wait instead of `end-turn`.
         wake = "hook" if _caller_is_claude() else (
             "queue" if (steward_harness == "codex" and steward_seat is not None
-                        and _codex_queue_present()) else "none")
+                        and _codex_queue_present()) else
+            "opencode" if (steward_harness == "opencode" and steward_seat is not None
+                           and _opencode_carrier_present()) else "none")
 
     server = _HERDR_SESSION or "default"
     # Resolve names and pane aliases from Hearting's native session records.
