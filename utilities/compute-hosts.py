@@ -3671,11 +3671,28 @@ def _report_run_end(run_dir, code, last_observation, now):
     provenance = meta.get("provenance") or {}
     route = provenance.get("route") or {}
     run_id = meta.get("run_id") or run_dir.name
+    # A normal end that took under about a minute or reported no metric is quiet: the delivered text
+    # counts it on the one routine line instead of giving it its own.
+    quiet = False
+    try:
+        import session_notice
+        quiet_seconds = getattr(session_notice, "QUIET_RUN_SECONDS", None)
+        quiet = bool(code == 0 and quiet_seconds and (not _observation_has_metric(final_observation)
+                                                      or _run_seconds(meta, now()) < quiet_seconds))
+    except Exception:  # noqa: BLE001 -- without the notice module the end is simply not quiet
+        pass
     notice_targets = []
     try:
         import resource_progress
+        # While the worker that started the run is still open it reads and reports this end itself, so
+        # its supervisor takes a quiet end by the same attempt-parent lineage as any other child's: it
+        # waits for the supervisor's next delivery (session_notice). A finished worker, or any end that
+        # is not quiet, leaves the lineage off and the supervisor hears it at once.
+        attempt = provenance.get("attempt_id") if quiet and _worker_attempt_open(provenance) else None
         notice_targets = resource_progress._notice_targets({
-            "session": provenance.get("session"), "notify": provenance.get("notify")})
+            key: ({**provenance[key], "attempt_id": attempt}
+                  if attempt and isinstance(provenance.get(key), dict) else provenance.get(key))
+            for key in ("session", "notify")})
     except Exception:
         pass
     if not notice_targets:
@@ -3698,13 +3715,7 @@ def _report_run_end(run_dir, code, last_observation, now):
     try:
         import session_notice
         notify = session_notice.notify
-        # A normal end that took under about a minute or reported no metric is quiet: the
-        # delivered text counts it on the one routine line instead of giving it its own.
-        subject = "compute run"
-        quiet_seconds = getattr(session_notice, "QUIET_RUN_SECONDS", None)
-        if code == 0 and quiet_seconds and (not _observation_has_metric(final_observation)
-                                            or _run_seconds(meta, now()) < quiet_seconds):
-            subject = "compute run, quiet"
+        subject = "compute run, quiet" if quiet else "compute run"
         for target in notice_targets:
             if isinstance(target, dict):
                 harness, session_id = target.get("harness"), target.get("session_id")
@@ -3719,6 +3730,22 @@ def _report_run_end(run_dir, code, last_observation, now):
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
+
+
+def _worker_attempt_open(provenance):
+    """Whether the registered worker that started this run still has its attempt open.
+
+    The registry's own row decides. A run whose notice was handed over by `claim` belongs to the
+    session that took it (a waiting owner), not to the worker's supervisor, and a registry that
+    cannot be read counts as not open: both leave the notice immediate."""
+    attempt, jobs = provenance.get("attempt_id"), os.environ.get("AGENT_DISPATCH_JOBS")
+    if not (provenance.get("notify") and attempt and jobs) or provenance.get("recipient_handovers"):
+        return False
+    try:
+        from dispatch_completion_join import OPEN_STATES, exact_attempt_row
+        return exact_attempt_row(Path(jobs), str(attempt)).status in OPEN_STATES
+    except Exception:  # noqa: BLE001 -- unknown means the supervisor is told at once, as before
+        return False
 
 
 def _observation_has_metric(result):

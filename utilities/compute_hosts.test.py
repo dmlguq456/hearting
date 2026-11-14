@@ -3530,6 +3530,128 @@ class CompletionWatchTest(unittest.TestCase):
         self.assertIn("Routine, nothing to do (1 run): 1 ended normally (1 short or without metrics) -- here-1",
                       sweep.delivery_context([(state / "dispatch", parents)]))
 
+    def _end_of_a_worker_run(self, harness, carrier, *, attempt_status="open", code=0, seconds=30,
+                             metric=False, claimed=False, with_session=True, token="1", then=None):
+        """One run end a registered worker started under a `harness` supervisor, as the supervisor's
+        carrier sees it: (subject, whether the notice waits for the supervisor's next delivery)."""
+        module = load_module()
+        attempt, supervisor = f"att-worker-{harness}-{token}", f"sid-supervisor-{harness}-{token}"
+        state = self.root / f"state-{harness}-{token}"
+        state.mkdir()
+        jobs = state / "jobs.log"
+        meta_row = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                             "worker_type=stage", "harness=claude", f"parent_sid={supervisor}",
+                             f"parent_completion_delivery={carrier}"))
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        jobs.write_text("\t".join((stamp, attempt_status, "/repo", "/wt", "worker", meta_row)) + "\n")
+        session = {"harness": harness, "id": supervisor} if with_session else None
+        provenance = {"attempt_id": attempt, "route": {"route_id": "rt-0123456789abcdef"},
+                      "session": session, "notify": session}
+        if claimed:
+            provenance["recipient_handovers"] = [{"from": session, "to": session, "by": "compute-hosts claim"}]
+        run_dir = self.root / f"run-{harness}-{token}"
+        run_dir.mkdir()
+        started = datetime.datetime.fromtimestamp(1000.0).isoformat(timespec="seconds")
+        (run_dir / "meta.json").write_text(json.dumps({
+            "run_id": f"here-{token}", "host": "here", "started_at": started, "provenance": provenance}))
+        observed = {"observation": {"summary": {"latest": {"value": 0.5}}}} if metric else None
+        with mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(state), "AGENT_DISPATCH_JOBS": str(jobs)}), \
+                mock.patch.object(module, "_observe_compute_experiment", return_value=observed):
+            sys.path.insert(0, str(Path(module.__file__).resolve().parent))
+            import dispatch_session_sweep as sweep
+            import session_notice
+            module._report_run_end(run_dir, code, None, lambda: 1000.0 + seconds)
+            if then:  # the worker is closed after the end was held back, before the supervisor's next delivery
+                jobs.write_text(jobs.read_text().replace("\topen\t", "\t" + then + "\t", 1))
+            records, _ = sweep.sweep_deliver(state, carrier, supervisor)
+        if not with_session:
+            self.assertEqual(records, [])
+            return None
+        self.assertEqual(len(records), 1)
+        return (records[0]["receipt"]["subject"],
+                session_notice.waits_for_next_delivery(records[0], harness, supervisor, jobs))
+
+    def test_a_quiet_normal_end_waits_for_the_supervisor_only_while_the_worker_is_open(self):
+        carriers = (("claude", "claude-parent-runtime"), ("codex", "codex-native-queue"),
+                    ("opencode", "opencode-turn"))
+        for harness, carrier in carriers:
+            with self.subTest(harness=harness):
+                end = lambda token, **kw: self._end_of_a_worker_run(harness, carrier, token=token, **kw)
+                # worker open: a short or metric-less normal end opens no turn of its own
+                self.assertEqual(end("quiet"), ("compute run, quiet", True))
+                self.assertEqual(end("nometric", seconds=9000), ("compute run, quiet", True))
+                # worker open: a failure and a long run that carries a metric are told at once
+                self.assertEqual(end("failed", code=6), ("compute run", False))
+                self.assertEqual(end("long", seconds=9000, metric=True), ("compute run", False))
+                # worker finished: nobody reads the end for the supervisor, so it is told at once
+                self.assertEqual(end("finished", attempt_status="done"), ("compute run, quiet", False))
+                # a session that took the notice with `claim` is waiting for exactly this end
+                self.assertEqual(end("claimed", claimed=True), ("compute run, quiet", False))
+                # no session at all: nothing is sent, as before
+                self.assertIsNone(end("sessionless", with_session=False))
+
+    def test_a_held_back_end_reaches_the_supervisor_however_the_worker_that_started_it_ended(self):
+        carriers = (("claude", "claude-parent-runtime"), ("codex", "codex-native-queue"),
+                    ("opencode", "opencode-turn"))
+        for harness, carrier in carriers:
+            for status in ("done", "killed", "cancelled"):
+                with self.subTest(harness=harness, worker=status):
+                    # held back while the worker was open, then the worker ended: still delivered, still not waking
+                    self.assertEqual(self._end_of_a_worker_run(harness, carrier, token="then-" + status, then=status),
+                                     ("compute run, quiet", True))
+
+    def test_a_notice_for_the_supervisor_of_a_worker_that_already_ended_is_delivered(self):
+        """Before the end was held back too: a run or an experiment a registered worker started reports
+        to that worker's supervisor by its attempt-parent lineage, which a killed or cancelled worker's
+        row used to cut."""
+        import dispatch_session_sweep as sweep
+        import resource_progress
+        import session_notice
+        from harness_capabilities import parent_completion
+        for harness in ("claude", "codex", "opencode"):
+            carrier = parent_completion(harness)["carrier"]
+            for status in ("done", "killed", "cancelled"):
+                with self.subTest(harness=harness, worker=status):
+                    token = f"{harness}-{status}"
+                    state = self.root / f"seen-{token}"
+                    state.mkdir()
+                    jobs, attempt, supervisor = state / "jobs.log", f"att-seen-{token}", f"sid-seen-{token}"
+                    meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                                     "worker_type=stage", "harness=claude", f"parent_sid={supervisor}",
+                                     f"parent_completion_delivery={carrier}"))
+                    jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt", "worker", meta)) + "\n")
+                    targets = resource_progress._notice_targets({
+                        "jobs": str(jobs), "owner_wait": {"harness": "claude", "session_id": f"sid-worker-{token}",
+                                                         "parent_attempt_id": attempt}})
+                    mine, = [t for t in targets if t["session_id"] == supervisor]
+                    self.assertEqual(mine["lineage"]["kind"], "attempt-parent")
+                    for run, code, wakes in (("failed", 6, True), ("fine", 0, False)):
+                        session_notice.notify(
+                            harness, supervisor, key=f"compute-run:{run}-{token}",
+                            subject="compute run" if wakes else "compute run, quiet", lineage=mine["lineage"],
+                            text=f"run {run}-{token} on here ended with exit {code}; read it with: compute-hosts tail {run}-{token}",
+                            jobs=jobs)
+                    records, _ = sweep.sweep_deliver(state, carrier, supervisor)
+                    self.assertEqual(sorted(session_notice.wakes_resting_recipient(r) for r in records), [False, True])
+
+    def test_the_notice_to_a_worker_s_own_session_still_needs_the_worker_to_be_alive(self):
+        import dispatch_session_sweep as sweep
+        import session_notice
+        for status in ("killed", "cancelled"):
+            with self.subTest(worker=status):
+                state = self.root / f"own-{status}"
+                state.mkdir()
+                jobs, attempt, owner = state / "jobs.log", f"att-own-{status}", f"sid-own-{status}"
+                meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                                 "worker_type=stage", "harness=claude", "parent_sid=sid-up",
+                                 "parent_completion_delivery=claude-parent-runtime"))
+                jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt", "worker", meta)) + "\n")
+                session_notice.notify("claude", owner, key=f"compute-run:own-{status}", subject="compute run",
+                    text=f"run own-{status} on here ended with exit 6; read it with: compute-hosts tail own-{status}",
+                    lineage={"kind": "owner-session", "harness": "claude", "session_id": owner,
+                             "attempt_id": attempt}, jobs=jobs)
+                self.assertEqual(sweep.sweep_deliver(state, "claude-parent-runtime", owner)[0], [])
+
     def _make_quiet(self, module):
         (self.run_dir / "log").write_text("epoch 1\n")
         old = time.time() - module.RUN_QUIET_SECONDS - 3600
