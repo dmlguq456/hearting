@@ -1880,7 +1880,7 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
             return _completed_result(request, services, route, binding_value, terminal_nodes, envelope)
         if state.get("state") == "owner-envelope-sealed":
             if production_services:
-                _verify_settled_outputs(request, route, commit_id, binding_value)
+                _verify_settled_outputs(request, route, commit_id, binding_value, historical=True)
             try:
                 envelope_text, after_seal = _sealed_owner_envelope(request, commit_id)
             except TerminalCommitError as exc:

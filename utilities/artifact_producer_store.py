@@ -1263,8 +1263,9 @@ def _read_pass_entry(name: str, factory):
     return scope[name]
 
 
-def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
-    """Resolve this record's manifest without scanning other cycle bindings."""
+def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any], *,
+                                missing_if_reused: bool = False) -> Optional[Path]:
+    """Resolve the manifest; a no-lineage caller may treat another cycle as absent."""
     root = Path(root).resolve()
     if record.get("request_binding"):
         return cycle_dir(root, record["campaign_id"], record["cycle_id"], record) / "manifest.json"
@@ -1313,6 +1314,8 @@ def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
         binding.get("campaign_id") != campaign_id
         or binding.get("cycle_id") != cycle_id
     ):
+        if missing_if_reused and binding.get("cycle_id") != cycle_id:
+            return None
         raise ProducerError(
             "sealed-cycle-state-unknown",
             f"{cycle_id}: cycle-binding-identity-mismatch",
