@@ -89,8 +89,11 @@ def job_summary(snapshot):
     else:
         current = [item for item in (_get(answer_waits, "items", ()) or ())
                    if _get(item, "stale") == "current"]
-        gates = sum(_get(item, "source") == "S2" for item in current)
-        other_waits = len(current) - gates
+        gates = sum(_get(item, "source") == "S2" and _get(item, "answer") != "sent" for item in current)
+        # The producer's one count: every wait a person must answer, wherever it is answered
+        # (11-14); a blocked owner, its parent agent's to answer, is listed, not counted.
+        total = _get(answer_waits, "total")
+        other_waits = (max(0, total - gates) if type(total) is int else len(current) - gates)
         if gates:
             parts.insert(2, f"{wait} {gates}")
         if other_waits:

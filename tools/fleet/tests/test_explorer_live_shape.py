@@ -92,12 +92,16 @@ _QUESTION_TEXT_FIELDS = frozenset(("node", "since_at", "route_id", "route_title"
                                    "registered"))
 _QUESTION_ENUMS = {"owner_state": ("live", "successor", "none", "unknown"),
                    "fold": ("older", "ownerless")}
+# Rule 5 (11-14): the person's answer is on its way.
+_QUESTION_FLAGS = frozenset(("sent",))
 
 
 def question_extension(key, value):
     """Validate the optional who/when/route fields of an answer-wait row (body-free text)."""
     if value is None:
         return True
+    if key in _QUESTION_FLAGS:
+        return type(value) is bool
     if key in _QUESTION_ENUMS:
         return value in _QUESTION_ENUMS[key]
     return isinstance(value, str)
@@ -207,7 +211,8 @@ def conform(live, samples, path, problems):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue
-            if path == "questions[]" and (key in _QUESTION_TEXT_FIELDS or key in _QUESTION_ENUMS):
+            if path == "questions[]" and (key in _QUESTION_TEXT_FIELDS or key in _QUESTION_ENUMS
+                                          or key in _QUESTION_FLAGS):
                 if not question_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional question field shape")
                 continue

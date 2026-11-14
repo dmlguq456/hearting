@@ -15,7 +15,12 @@ def capacity(rows):
 # answered in that session's own window: below in this session's own panel (`answer_below`), in
 # its window from Fleet or another session (`answer_there`).
 _SENDING_REASONS = frozenset({"action-pending", "owner-correction-already-pending"})
-_CLOSED_MARKS = ("no-longer-current", "not-current", "not-pending", "cancelled")
+# A registered question whose seat another session took (11-14: the same session in a new
+# process keeps it) is closed for this window too.
+_CLOSED_MARKS = ("no-longer-current", "not-current", "not-pending", "cancelled", "incarnation-changed")
+# The answer record's states once the person's answer was sent (rule 5, 11-14): the panel's one
+# dim line, in no box number or pane count.
+_SENT_STATES = frozenset({"submitted", "received", "applied"})
 
 
 def unanswerable_state(reason, *, own=True):
@@ -39,6 +44,9 @@ def question_state(item, *, own=True):
 def question_presentations(items, columns, *, native_wait=None, own=True):
     """Private display-only rows consumed by the local editor, not input proof."""
     listed = [(item, question) for item in items for question in item.get("questions") or ()]
+    # Rule 5 (11-14): a sent answer is one dim line, never a box; `N · i/N` numbers the boxes.
+    boxes = sum(1 for item, _question in listed if question_state(item, own=own) not in _SENT_STATES)
+    number = 0
     width = max(1, columns - 4)
     for item in items:
         state = question_state(item, own=own)
@@ -46,12 +54,16 @@ def question_presentations(items, columns, *, native_wait=None, own=True):
             item["answer_state"] = state
         else:
             item.pop("answer_state", None)
-    for index, (item, question) in enumerate(listed):
+    for item, question in listed:
         state = question_state(item, own=own)
         key = "lvl_g" if state == "applied" else "g_blocked" if state == "open" else "dim"
-        heading = [("" if native_wait is not None else "◑ ", key),
-                   (ui_text("fleet.session_block.questions") + " " + str(len(listed)), "dim"),
-                   (f" · {index+1}/{len(listed)} · ", "dim"),
+        if state in _SENT_STATES:
+            count = [(ui_text("fleet.session_block.questions") + " · ", "dim")]
+        else:
+            number += 1
+            count = [(ui_text("fleet.session_block.questions") + " " + str(boxes), "dim"),
+                     (f" · {number}/{boxes} · ", "dim")]
+        heading = [("" if native_wait is not None else "◑ ", key), *count,
                    (ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + state), key)]
         source = []
         choices = (["approve", "reject", "defer"] if item.get("answer_kind") == "decision"

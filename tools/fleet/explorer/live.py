@@ -1465,7 +1465,8 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
         route_wait = unknown_kind([unknown_route_kind(route) for route in routes if route["repo"] == name]
                                   + [row.get("route_wait") for row in session_rows
                                      if row["repo_id"] == name])
-        asked = sum(1 for item in questions if item.get("project") == name and not item.get("older"))
+        asked = sum(1 for item in questions if item.get("project") == name and not item.get("older")
+                    and not item.get("sent"))
         result = (results or {}).get(name) or {}
         done_at = _num(result.get("at")) if result.get("result") == "success" else None
         if doc is None and not (open_routes or route_wait or asked or repo.get("done")):
@@ -1476,7 +1477,7 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
             status["routes_wait"] = route_wait
         question_lines = []
         for question in questions:
-            if question.get("project") != name or question.get("older"):
+            if question.get("project") != name or question.get("older") or question.get("sent"):
                 continue
             source = raw_by_id.get(str(question.get("id")))
             value = source.get("question") if isinstance(source, Mapping) else None
@@ -1656,9 +1657,11 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "owner_sid": sid[:8] if sid and not session else None,
             "registered": registered if owner_state == "successor" else None,
             "fold": fold,
+            # The person's answer is on its way (rule 5, 11-14): listed as sent, waiting on no one.
+            "sent": item.get("answer") == "sent",
         }
         questions.append(record)
-        if session and not older:
+        if session and not older and not record["sent"]:
             session["ask"] = "answer needed"
             marker = "◑" if source == "S2" else "●"
             if session.get("answer_wait_marker") != "●":

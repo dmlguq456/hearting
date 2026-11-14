@@ -63,6 +63,7 @@ class SessionBlockTest(unittest.TestCase):
             ("codex-native-request-not-current", "answer_closed", "answer_closed"),
             ("selected-marker-no-longer-current", "answer_closed", "answer_closed"),
             ("message-question-no-longer-current", "answer_closed", "answer_closed"),
+            ("message-session-incarnation-changed", "answer_closed", "answer_closed"),
             ("opencode-form-not-pending", "answer_closed", "answer_closed"),
             ("opencode-form-cancelled", "answer_closed", "answer_closed"),
             ("a-reason-nobody-named-yet", "answer_below", "answer_there"),

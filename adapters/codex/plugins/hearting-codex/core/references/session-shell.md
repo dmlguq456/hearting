@@ -743,8 +743,32 @@ parent` (`부모 창에서 답`) for a blocked worker's answer whose parent coul
 confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
 (`닫힘`) for a request already gone (an existing state word such as expired
 stays). The head carries the short form under 64 columns and the body row the
-whole words; the `◑ N` count still counts every wait. Long questions remain readable
-with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
+whole words. Every count of answer waits (Fleet's head and session rows, the
+`questions list` head, the status line, the panel's `◑ N`, the notice line under
+the input and the folded strip) counts every wait a person must answer, wherever
+it is answered: a question the panel answers, a Claude native request, a marker
+question and a human gate. Only a blocked worker's wait (its parent agent's) and
+a finished one (closed, replaced, expired, an answer on its way) are not counted.
+The question block holds what the person can answer here now (answerable ones
+first; `Ctrl+]` opens on the first of them); a counted wait answered in another
+place is one dim guidance line beside the count saying where
+(`QUESTIONS 1 · answer below`), and the notice line names `Ctrl+]` only when the
+panel answers one. A blocked worker's wait is in no count or question block (the
+route row shows the route blocked), and it closes once the route closes or its
+parent holds the worker's exact acknowledged completion receipt. Once the person
+sends an answer it has left their hands: while it travels (the existing answer
+record's `submitted`/`received`) the question box folds to one dim line
+(`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice),
+`Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
+it as sent); the line goes when its session takes the answer, and a failed
+delivery brings the question back with its existing word. Answering returns
+focus to the native input, and one lone Esc within ten seconds of the answer is
+taken by the shell (never the native's interrupt of a running turn).
+A registered question belongs to its session id: the same session in a new
+process (a native resume, a restart, a compaction) still answers it, and only
+another session that took the seat ends it. Long questions remain readable
+with focused scrolling (PgUp/PgDn while choosing, named before focus too) and an
+explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields. The former rows/3 estimate does
 not hide a question or require another user decision at 80 columns.

@@ -234,11 +234,18 @@ def notice_line(values, routes, questions):
     are the panel's own; nothing here collects, judges or authorizes anything new.
     """
     from .render_cells import _LIVE_GLYPH
-    waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
-                  and (item.get("request_state") or "open") == "open")
+    here = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
+               and (item.get("request_state") or "open") == "open")
+    # The panel's own count (11-14): every wait of this session a person must answer, the ones
+    # answered in another place too. `Ctrl+]` is named only when the panel answers one; else the
+    # place the answer goes, from the guidance line.
+    counted = values.get("answer_wait")
+    waiting = counted if type(counted) is int and counted > here else here
     if waiting:
         from .session_line import answer_wait_word
-        return [(answer_wait_word() + " " + str(waiting), "g_blocked"), (" │ Ctrl+]", "dim")]
+        place = sanitize_title(str(values.get("wait_place") or ""))[:40]
+        return [(answer_wait_word() + " " + str(waiting), "g_blocked"),
+                *([(" │ Ctrl+]", "dim")] if here else [(" │ " + place, "dim")] if place else [])]
     if compaction_imminent(values.get("compaction_pressure")):
         return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
     readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
@@ -757,6 +764,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
             "context_side": gauge,
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
+            # A wait this panel cannot answer: one line saying where it is answered (11-14),
+            # never counted with the answer wait.
+            "wait_guide": sanitize_title(str(values.get("wait_guide") or ""))[:120],
             "session_title": sanitize_title(str(values.get("title") or ""))[:320],
             "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
                     if values.get("jobs") else [],
