@@ -85,9 +85,9 @@ panel opens Fleet except **f**. In Fleet, **Ctrl+]** on a session page opens
 that exact session's panel.
 
 <p align="center">
-  <img src="fleet/panel-question.png" alt="A narrow window: the panel folded below the native area. Its head shows session [9c], Sonnet 5.5, context 33%, two answers waiting, the title Release notes 2.4 and NOW Choose a layout; below it the question box with three numbered choices, the first recommended, and the hint Ctrl+] · reply needed." width="90%">
+  <img src="fleet/panel-question.png" alt="A narrow window with the panel open below the native area. Its head shows session [9c], Sonnet 5.5, context 33%, two answers waiting, the title Release notes 2.4 and NOW Choose a layout; below it the question box with three numbered choices, the first recommended, and the hint Ctrl+] · answer needed." width="90%">
 </p>
-<p align="center"><sub>The bottom layout in a narrow window: the question comes first. Demo data.</sub></p>
+<p align="center"><sub>The bottom layout, opened in a narrow window: the question comes first. The conversation is illustrative; demo data.</sub></p>
 
 ## Narrow windows and folding
 
@@ -96,9 +96,10 @@ session number, route count, `LB` for experiments, answer waits) and gives the
 native area the freed columns; a press on the strip opens it again. Where the
 open panel would leave the native area under 80 columns (a 40-column panel in
 a terminal under 122 columns) it folds by itself and opens again with room; a
-choice made by hand wins at that width. In the bottom layout (narrow windows,
-or `layout` set to bottom) the panel sits under the native area, the question
-comes first, and **▾** / **▴** fold it to one status row.
+choice made by hand wins at that width. In the bottom layout (when `layout` is set to bottom,
+or when you open the panel in a window too narrow to hold it beside the native
+area) the panel sits under the native area, the question comes first, and
+**▾** / **▴** fold it to one status row.
 
 ## Settings
 
@@ -175,8 +176,8 @@ the route box. Folded it reads `3 LAB 12:00` (the selected group's condition
 count, the word, the board's read time) with its most pressing counts at the
 right (`failed 1`, `stuck 1`, `unknown 1`, `waiting 1`, else `running 3`), the
 goal, and the one condition to look at. A press opens the condition table in
-place (name, progress, latest, difference, with the values a row does not show
-under it) and a press closes it. The panel and Fleet's `LAB` table on the
+place (name and progress, then latest and difference or the state, as the
+width allows; the values a row does not show go under it) and a press closes it. The panel and Fleet's `LAB` table on the
 project page word a condition alike, from the same board. No experiments and no
 problem means no section; a broken catalog or an unnamed run is an unconfirmed
 warning, never “no experiments”. An experiment's failure never colors the

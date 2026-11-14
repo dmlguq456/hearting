@@ -99,7 +99,7 @@ running, stuck, or waiting for you.
 <p align="center">
   <img src="docs/fleet/walkthrough.gif" alt="Fleet walk-through in five steps: the OVERVIEW of all sessions, the ROUTES list of open requests, one session's page, that session's own window with its Hearting panel, and one request's stage graph with the owner's raw output." width="100%">
 </p>
-<p align="center"><sub>OVERVIEW → ROUTES → a session page → that session's own panel → a request's raw output. Demo data.</sub></p>
+<p align="center"><sub>OVERVIEW → ROUTES → a session page → that session's own panel → a request's raw output. Demo data; the conversation beside a panel is illustrative.</sub></p>
 
 | Screen | What it tells you |
 |---|---|
@@ -155,10 +155,11 @@ out, `◂` work handed to you, `✓` finished.
 <p align="center"><sub>The same request in the panel of the session that asked (<code>[4f]</code>) and the one asked (<code>[b2]</code>). Demo data.</sub></p>
 
 Short messages and watching work the same way: a session can send another a
-note, or watch it and be woken once when it finishes, stops, or needs you.
+note, or watch it and be woken once when it finishes, stops, or needs you
+(the wake differs by runtime — see the table below).
 None of this needs herdr or tmux; it runs on Hearting's own records. How fast
 an idle session is reached differs by runtime (see
-[Runtimes and models](#runtimes-and-models)). Fleet does not list requests yet,
+[Runtimes and models](#runtimes-and-models)). Fleet does not list session-to-session requests yet,
 and you cannot send one from Fleet yet. For scripts, the commands are
 `hearting run peer-steward request`, `report`, and `show`
 ([core/OPERATIONS.md](core/OPERATIONS.md), “Peer requests”).

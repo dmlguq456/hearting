@@ -1729,7 +1729,8 @@ def render_fleet(d: dict) -> str:
       experiments (<code>LAB</code>); recent messages and saved memory; the usage windows.</p>
       <p class="t"><b>A question waiting for you</b> gets its own box. Press <code>Ctrl+]</code> to focus the
       panel, answer with <code>Tab</code>, <code>1&ndash;9</code>, and <code>Enter</code>, and <code>Ctrl+]</code>
-      again to return to typing. In a narrow window the panel sits below and the question comes first.</p>
+      again to return to typing. In a narrow window the panel folds to a narrow strip; opened there, it sits below and the question
+      comes first. The conversation in these pictures is illustrative.</p>
       <p class="t"><code>hearting session shell disable</code> turns it off for new terminals.
       <a href="{REPO_URL}/blob/main/docs/session-panel.md">Keys, settings, and per-runtime details &rarr;</a></p>
     </div>

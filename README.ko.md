@@ -97,7 +97,7 @@ Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 �
 <p align="center">
   <img src="docs/fleet/walkthrough.gif" alt="Fleet 다섯 단계 둘러보기: 모든 세션의 OVERVIEW, 열린 요청 목록 ROUTES, 한 세션의 페이지, 그 세션 자신의 창과 하팅 패널, 한 요청의 단계 그림과 owner 원문 출력." width="100%">
 </p>
-<p align="center"><sub>OVERVIEW → ROUTES → 세션 페이지 → 그 세션의 패널 → 요청의 원문 출력. 데모 데이터.</sub></p>
+<p align="center"><sub>OVERVIEW → ROUTES → 세션 페이지 → 그 세션의 패널 → 요청의 원문 출력. 데모 데이터이며, 패널 옆 대화는 예시입니다.</sub></p>
 
 | 화면 | 알려 주는 것 |
 |---|---|
@@ -151,10 +151,11 @@ fleet --json       # 같은 상태를 JSON으로(스크립트용)
 <p align="center"><sub>같은 요청이 맡긴 세션(<code>[4f]</code>)과 맡은 세션(<code>[b2]</code>)의 패널에 보입니다. 데모 데이터.</sub></p>
 
 짧은 메시지와 감시도 같은 방식입니다. 세션은 다른 세션에 쪽지를 보내거나, 그
-세션을 지켜보다가 끝나거나 멈추거나 사용자를 기다릴 때 한 번 깨어날 수 있습니다.
+세션을 지켜보다가 끝나거나 멈추거나 사용자를 기다릴 때 한 번 깨어날 수 있습니다(깨우는
+방식은 하네스마다 다릅니다 — 아래 표).
 이 가운데 어느 것도 herdr나 tmux가 필요하지 않고, 하팅 자체 기록으로 돕니다. 쉬고
 있는 세션에 얼마나 빨리 닿는지는 하네스마다 다릅니다([하네스와
-모델](#하네스와-모델)). Fleet는 아직 요청 목록을 보여 주지 않고, Fleet에서 요청을
+모델](#하네스와-모델)). Fleet는 아직 세션 간 요청 목록을 보여 주지 않고, Fleet에서 요청을
 보낼 수도 아직 없습니다. 스크립트에서는 `hearting run peer-steward request`,
 `report`, `show`를 씁니다([core/OPERATIONS.md](core/OPERATIONS.md)의 “Peer requests”).
 
