@@ -20,11 +20,13 @@ not measured under the same conditions.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -629,7 +631,11 @@ def describe_observation(root: Path, run_id: str, row_id: Optional[str], summary
     point = {"metric": key, "epoch": latest.get("epoch"), "value": latest.get("value")} \
         if latest and key and latest.get("key") == key and latest.get("value") is not None else None
     return {**info, "metric_key": key, "metric_unit": (metric or {}).get("unit"), "latest": latest,
-            "decision_point": point, "comparison": comparison}
+            "decision_point": point, "comparison": comparison,
+            # The words the notice's first line carries: the table's metric line and the catalog's terms.
+            "metric": metric, "target": target,
+            "base_name": (control_cond or {}).get("display_name") or None,
+            "other_names": _other_names(cond), "terms": list(doc.get("terms") or [])}
 
 
 # ---------------------------------------------------------------------------
@@ -1332,36 +1338,90 @@ def card_context(cwd: Any) -> Optional[Tuple[Path, Dict[str, Any]]]:
 
 
 def catalog_brief(doc: Mapping[str, Any], path: str, limit: int, lang: Optional[str] = None) -> str:
-    """The catalog's location, each group's goal and its condition names, in at most `limit` bytes.
+    """The results-table command, each group's goal, metric line and condition names, and the catalog's
+    words for them, in at most `limit` bytes.
 
-    Tries the whole thing, then without goals, then fewer names with "… and N more", and at the end only
-    the location line; "" when no group has a named condition."""
+    The words are the ones the table itself carries (`words_line`): a term only when a shown name, goal
+    or metric says it, and a condition's other names (aliases, former names) beside the name they lead
+    to; the words take the room the rest leaves, whole items only.  Tries the whole thing, then without
+    the location and the goals (the words whole), then with the words counted, without the other names,
+    the words and the metric line, then fewer names with "… and N more", and at the end only the table
+    command; "" when no group has a named condition."""
     t = _translator(lang)
     groups = []
     for group in doc.get("groups", []):
-        names = [c["display_name"] for c in doc.get("conditions", []) if c.get("group") == group.get("id") and c.get("display_name")]
-        if names:
-            groups.append((group, names))
+        conds = [c for c in doc.get("conditions", []) if c.get("group") == group.get("id") and c.get("display_name")]
+        if conds:
+            groups.append((group, conds))
     if not groups:
         return ""
+    names = {c["id"]: c.get("display_name") for c in doc.get("conditions", []) if c.get("id")}
 
-    def build(goals: bool, keep: int) -> str:
-        lines = [t("experiment.card.catalog", path=path)]
-        for group, names in groups:
+    def build(location: bool, goals: bool, metric: str, words: str, others: bool, keep: int) -> Optional[str]:
+        lines = [t("experiment.card.catalog", path=path)] if location else []
+        lines.append(t("experiment.card.table", command=TABLE_COMMAND))
+        shown_all: List[Mapping[str, Any]] = []
+        metrics: List[Mapping[str, Any]] = []
+        for group, conds in groups:
             head = f"[{group.get('display_name') or t('experiment.no_group')}]"
             if goals and group.get("goal"):
                 head += " " + t("experiment.goal", goal=group["goal"])
-            shown = names[:keep]
-            lines += [head, t("experiment.card.conditions", names=", ".join(shown) + (
-                t("experiment.card.more", n=len(names) - len(shown)) if len(names) > len(shown) else ""))]
-        return "\n".join(lines + [t("experiment.card.rule")])
+            lines.append(head)
+            if metric and (group.get("metric") or group.get("target")):   # nothing declared: Fleet says so, a brief need not
+                lines.append(metric_head(group, names, t, short=metric == "short"))
+                metrics.append(group.get("metric") or {})
+            shown = conds[:keep]
+            shown_all += shown
+            lines.append(t("experiment.card.conditions", names=", ".join(c["display_name"] for c in shown) + (
+                t("experiment.card.more", n=len(conds) - len(shown)) if len(conds) > len(shown) else "")))
+        lines.append(t("experiment.card.rule"))
+        if words:
+            pairs = [(c["display_name"], _other_names(c)) for c in shown_all] if others else []
+            if words_line(lines, doc.get("terms") or [], pairs, metrics, t, signs=False):
+                room = limit - len("\n".join(lines).encode("utf-8")) - 1
+                line = words_line(lines, doc.get("terms") or [], pairs, metrics, t, budget=room, signs=False)
+                if not line or (words == "whole" and line != words_line(lines, doc.get("terms") or [], pairs,
+                                                                      metrics, t, signs=False)):
+                    return None             # the words do not fit as this form needs: the next, shorter form
+                lines.insert(len(lines) - 1, line)
+        return "\n".join(lines)
 
-    for goals, keep in ((True, 99), (False, 99), (False, 6), (False, 3), (False, 1)):
-        text = build(goals, keep)
-        if len(text.encode("utf-8")) <= limit:
+    # The words come whole before a goal stays; counted ("… and N more") only once the goals are gone.
+    for flags in ((True, True, "full", "whole", True, 99), (False, True, "full", "whole", True, 99),
+                  (False, False, "full", "whole", True, 99), (False, False, "short", "whole", True, 99),
+                  (False, False, "full", "some", True, 99), (False, False, "short", "some", True, 99),
+                  (False, False, "short", "some", False, 99), (False, False, "short", "", False, 99),
+                  (False, False, "", "", False, 99), (False, False, "", "", False, 6),
+                  (False, False, "", "", False, 3), (False, False, "", "", False, 1)):
+        text = build(*flags)
+        if text is not None and len(text.encode("utf-8")) <= limit:
             return text
-    only = t("experiment.card.catalog", path=path)
+    only = t("experiment.card.table", command=TABLE_COMMAND)
     return only if len(only.encode("utf-8")) <= limit else ""
+
+
+def folder_brief(cwd: Any, limit: int, lang: Optional[str] = None) -> Tuple[str, bool]:
+    """`(text, from_catalog)` for a work folder's start context and card guide, in at most `limit` bytes.
+
+    A folder whose catalog names a condition gets `catalog_brief`.  A folder with public run records and
+    no catalog file gets one line that says how to make one (`register`), so the advice the catalog
+    gives elsewhere reaches a project that has none yet; it is advice, never a requirement.  Anything
+    else, or any failure, gives `("", False)`."""
+    try:
+        context = card_context(cwd)
+        if context is not None:
+            root, doc = context
+            return catalog_brief(doc, str(catalog_path(root)), limit, lang), True
+        root = root_for_cwd(cwd)
+        if root is None or load(root).status != "missing":
+            return "", False
+        runs = _list_runs(root)
+        if not runs:
+            return "", False
+        text = _translator(lang)("experiment.card.missing", count=len(runs), command=register_command())
+        return (text if len(text.encode("utf-8")) <= limit else ""), False
+    except Exception:  # noqa: BLE001 -- a card or a start never waits on this
+        return "", False
 
 
 def lint_read(read: CatalogRead, expect: Sequence[str] = (), unlinked: Sequence[str] = ()) -> List[Dict[str, str]]:
@@ -1651,6 +1711,147 @@ def _value_parts(latest: Optional[Mapping[str, Any]], comparison: Optional[Mappi
     return parts
 
 
+# ---------------------------------------------------------------------------
+# the results table and its words: one form for a conversation, a card, a notice and Fleet
+# ---------------------------------------------------------------------------
+
+TABLE_COMMAND = "hearting run experiment_catalog leaderboard"
+REGISTER_COMMAND = "hearting run experiment_catalog register"
+# The conversation table is the Fleet LAB table narrowed the way a narrow screen narrows it: the first
+# columns of `lab_table.DROP_ORDER` leave first.  These two (observation age, time since progress)
+# count from the moment of the call, so with them the same catalog would print a new table each time.
+CHAT_DROPPED = 2
+OTHER_NAMES_MAX = 3      # other names (aliases, former names) a words line gives one condition
+NOTICE_WORDS_BYTES = 240  # a notice's words line: one notice part stays within its 600 characters
+
+
+def table_command(group: Optional[str] = None) -> str:
+    """The command that prints the results table, for one group when its name is given."""
+    return TABLE_COMMAND + (" --group " + shlex.quote(group) if group else "")
+
+
+def register_command(run_id: Optional[str] = None, lang: Optional[str] = None) -> str:
+    t = _translator(lang)
+    return (f"{REGISTER_COMMAND} --group-name <{t('experiment.placeholder.group')}> "
+            f"--condition-name <{t('experiment.placeholder.condition')}> --run {run_id or '<run>'}")
+
+
+def _other_names(cond: Mapping[str, Any]) -> List[str]:
+    """A condition's former names, then its aliases: the names someone may still use for it."""
+    out: List[str] = []
+    for name in list(cond.get("former_names") or []) + list(cond.get("aliases") or []):
+        if name and name != cond.get("display_name") and name not in out:
+            out.append(str(name))
+    return out[:OTHER_NAMES_MAX]
+
+
+def metric_text(metric: Optional[Mapping[str, Any]], *, short: bool = False) -> str:
+    """Fleet LAB's metric row: `wer (%) ↓ · validation · AMI Dev`; `short` leaves the split and scoring
+    out (`wer (%) ↓`); "" without a declared key."""
+    if not isinstance(metric, Mapping) or not metric.get("key"):
+        return ""
+    arrow = {"max": " ↑", "min": " ↓"}.get(metric.get("direction"), "")
+    text = str(metric["key"]) + (f" ({metric['unit']})" if metric.get("unit") else "") + arrow
+    return text + ("" if short else "".join(" · " + str(metric[k]) for k in ("split", "scoring") if metric.get(k)))
+
+
+def metric_head(group: Mapping[str, Any], names: Mapping[str, Any], t: Callable[..., str], *, short: bool = False) -> str:
+    """The line above a results table: Fleet LAB's METRIC and BASE rows in one line, in their words.
+
+    `지표: wer (%) ↓ · validation · AMI Dev · 기준: fix 19.99%`; `names` gives a control condition its
+    name.  A metric or a baseline the catalog does not declare is said in Fleet's own words."""
+    metric = group.get("metric") if isinstance(group.get("metric"), Mapping) else {}
+    text = metric_text(metric, short=short)
+    parts = [f"{t('fleet.lab.metric')}: {text}" if text else t("fleet.lab.metric_missing")]
+    target = group.get("target") if isinstance(group.get("target"), Mapping) else {}
+    unit = metric.get("unit")
+    if target.get("kind") == "fixed" and _num(target.get("value")) is not None:
+        value = _unit_text(target["value"], unit) if unit else _fmt(target["value"])
+        parts.append(f"{t('fleet.lab.base')}: " + (f"{target['label']} " if target.get("label") else "") + value)
+    elif target.get("kind") == "condition":
+        parts.append(f"{t('fleet.lab.base')}: " + t("fleet.lab.base_condition",
+                                                      name=names.get(target.get("condition")) or t("experiment.unnamed")))
+    else:
+        parts.append(t("fleet.lab.base_missing"))
+    return " · ".join(parts)
+
+
+def _mentions(folded: str, term: str) -> bool:
+    """Whether a (case-folded) text says `term` as a word: `var` in `E-var 0.3`, not in `variance`."""
+    word = _fold(term).strip()
+    if not word:
+        return False
+    left = r"(?<![0-9a-z])" if word[0].isascii() and word[0].isalnum() else ""
+    right = r"(?![0-9a-z])" if word[-1].isascii() and word[-1].isalnum() else ""
+    return re.search(left + re.escape(word) + right, folded) is not None
+
+
+def words_line(texts: Sequence[str], terms: Sequence[Mapping[str, Any]], names: Sequence[Tuple[str, Sequence[str]]],
+               metrics: Sequence[Mapping[str, Any]], t: Callable[..., str], budget: Optional[int] = None,
+               signs: bool = True, size: Optional[Callable[[str], int]] = None) -> str:
+    """`낱말: ↓ 낮을수록 좋음 · %p 퍼센트포인트 · retain030 → E-var · var: …`, or "" when there is nothing to say.
+
+    Only what the shown text carries: the direction of each shown metric, `%p` when a value says it, the
+    other names of each shown condition beside its name (a former name leads to the current one; nothing
+    is refused), and a catalog term the text says as a word.  `signs=False` leaves the arrow and `%p`
+    words out (an agent-facing line whose metric line already shows the arrow).  With `budget` (UTF-8
+    bytes, or what `size` measures) whole items are kept in that order while they fit, and the rest are
+    counted, never cut."""
+    size = size or (lambda text: len(text.encode("utf-8")))
+    folded = _fold("\n".join(texts))
+    items: List[str] = []
+    for metric in metrics if signs else ():
+        direction = (metric or {}).get("direction")
+        arrow = {"max": "↑", "min": "↓"}.get(direction)
+        word = f"{arrow} " + t(f"experiment.direction.{direction}") if arrow else ""
+        if word and word not in items:
+            items.append(word)
+    if signs and "%p" in folded:
+        items.append(t("experiment.words.pp"))
+    for name, others in names:
+        if others:
+            items.append(t("experiment.words.other_names", names=", ".join(others), name=name))
+    for row in terms:
+        if isinstance(row, Mapping) and row.get("meaning") and _mentions(folded, str(row.get("term") or "")):
+            items.append(f"{row['term']}: {row['meaning']}")
+    if not items:
+        return ""
+    line = t("experiment.words", items=" · ".join(items))
+    if budget is None or size(line) <= budget:
+        return line
+    for keep in range(len(items) - 1, 0, -1):
+        line = t("experiment.words", items=" · ".join(items[:keep]) + t("experiment.card.more", n=len(items) - keep))
+        if size(line) <= budget:
+            return line
+    return ""
+
+
+@contextlib.contextmanager
+def _screen_language(lang: Optional[str]):
+    """Fleet's words in `lang` for the duration: its one preference path (`FLEET_NOW_LANG`), restored after."""
+    if not lang:
+        yield
+        return
+    old = os.environ.get("FLEET_NOW_LANG")
+    os.environ["FLEET_NOW_LANG"] = lang
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("FLEET_NOW_LANG", None)
+        else:
+            os.environ["FLEET_NOW_LANG"] = old
+
+
+def _lab_table():
+    """Fleet's LAB table module: its `cells()`, column names and narrowing order are the table's form."""
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.explorer import lab_table
+    return lab_table
+
+
 def notice_line(info: Mapping[str, Any], lang: Optional[str] = None) -> str:
     """The first line of an experiment notice: `name — goal; latest, versus the target`."""
     t = _translator(lang)
@@ -1659,11 +1860,42 @@ def notice_line(info: Mapping[str, Any], lang: Optional[str] = None) -> str:
                                            info.get("metric_key"))))
 
 
+def notice_metric(info: Optional[Mapping[str, Any]], lang: Optional[str] = None) -> str:
+    """The results table's metric line for a linked run's notice (`metric_head`); "" without a name."""
+    if not info or not info.get("name") or "metric" not in info:
+        return ""
+    target = info.get("target") if isinstance(info.get("target"), Mapping) else {}
+    return metric_head({"metric": info.get("metric"), "target": target},
+                       {target.get("condition"): info.get("base_name")}, _translator(lang))
+
+
+def notice_words(info: Optional[Mapping[str, Any]], room: int, lang: Optional[str] = None) -> str:
+    """The results table's words for a linked run's notice, in at most `room` characters (whole items)."""
+    if not info or not info.get("name"):
+        return ""
+    t = _translator(lang)
+    texts = [notice_line(info, lang), notice_metric(info, lang)]
+    return words_line(texts, info.get("terms") or [], [(info["name"], info.get("other_names") or [])],
+                      [info.get("metric") or {}], t, budget=room, signs=False, size=len)
+
+
+def notice_tail(info: Optional[Mapping[str, Any]], lang: Optional[str] = None) -> str:
+    """The last line of a linked run's notice: the command that prints its group's results table."""
+    if not info or not info.get("name"):
+        return ""
+    return _translator(lang)("experiment.notice.table", command=table_command(info.get("group_name")))
+
+
 UNREGISTERED_NOTICE = "experiment.notice.unregistered"
 
 
 def unregistered_line(lang: Optional[str] = None) -> str:
     return _translator(lang)(UNREGISTERED_NOTICE)
+
+
+def register_line(run_id: Optional[str] = None, lang: Optional[str] = None) -> str:
+    """The run has no catalog name: the one command that gives it one (advice, never a requirement)."""
+    return _translator(lang)("experiment.notice.register", command=register_command(run_id, lang))
 
 
 def _condition_line(row: Mapping[str, Any], group: Mapping[str, Any], t: Callable[..., str]) -> str:
@@ -1735,39 +1967,6 @@ def render_status(doc: Mapping[str, Any], lang: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-def _leader_point(point: Optional[Mapping[str, Any]], unit: Optional[str], key: Optional[str] = None) -> str:
-    if not point or point.get("value") is None:
-        return "-"
-    return _measured_text(point, key, unit) + (f"@{point['epoch']}" if point.get("epoch") is not None else "")
-
-
-def _leader_row(row: Mapping[str, Any], unit: Optional[str], t: Callable[..., str], key: Optional[str] = None) -> List[str]:
-    comparison = row.get("comparison") or {}
-    state, reason = comparison.get("state"), comparison.get("reason")
-    baseline = comparison.get("baseline") if state == "ok" else None
-    delta = relative = "-"
-    if state == "ok":
-        delta = _signed(comparison["delta"]) + ("%p" if comparison.get("delta_unit") == "pp"
-                                                else f" {comparison['delta_unit']}" if comparison.get("delta_unit") else "")
-        if comparison.get("relative_percent") is not None:
-            relative = _signed(round(comparison["relative_percent"], 1)) + "%"
-    words = [t(f"experiment.anomaly.{a}") for a in row.get("anomalies") or ()]
-    if state == "ok":
-        words.append(t("experiment.leaderboard.comparable"))
-    elif state == "not-comparable":
-        words.append(t("experiment.not_comparable", reason=t(f"experiment.reason.{reason}")))
-    elif state == "no-target":
-        words.append(t(f"experiment.reason.{reason}"))
-    else:
-        words.append(t("experiment.latest_none"))
-    base = "-"
-    if baseline:
-        base = ((baseline.get("label") + " ") if baseline.get("label") else "") + _leader_point(baseline, unit)
-    return [row.get("display_name") or t("experiment.unnamed"), (row.get("current_run") or {}).get("run_id") or "-",
-            _leader_point(row.get("latest"), unit, key), _leader_point(row.get("best"), unit, key), base, delta, relative,
-            ", ".join(words)]
-
-
 def _leader_order(rows: Sequence[Mapping[str, Any]], direction: Optional[str]) -> List[Mapping[str, Any]]:
     """Comparable rows first, the better latest value on top; the rest below in catalog order."""
     ok = [r for r in rows if (r.get("comparison") or {}).get("state") == "ok" and (r.get("latest") or {}).get("value") is not None]
@@ -1776,45 +1975,139 @@ def _leader_order(rows: Sequence[Mapping[str, Any]], direction: Optional[str]) -
     return ok + rest
 
 
-def render_leaderboard(doc: Mapping[str, Any], group: Optional[str] = None, fmt: str = "md",
-                       lang: Optional[str] = None) -> str:
-    """One table per group from a `status()` document; every number is the one `compare()` made.
+def chat_columns() -> Tuple[str, ...]:
+    """The conversation table's columns: Fleet LAB's, less the first `CHAT_DROPPED` of its narrowing order."""
+    lab = _lab_table()
+    dropped = set(lab.DROP_ORDER[:CHAT_DROPPED])
+    return ("name",) + tuple(c for c in lab.COLUMNS if c not in dropped)
 
-    Groups are never mixed, and a row compared to nothing sits below the ranked ones with its reason.
-    `fmt` is `md` (a markdown table per group) or `tsv` (group name first, one header line)."""
+
+def _md_cell(text: str) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def render_leaderboard(doc: Mapping[str, Any], group: Optional[str] = None, fmt: str = "md",
+                       lang: Optional[str] = None, catalog_doc: Optional[Mapping[str, Any]] = None) -> str:
+    """The results table per group from a `status()` document, drawn as Fleet's LAB table draws it.
+
+    Every cell is `lab_table.cells()` on the shared board (`experiment_board`), with Fleet's column words
+    (`fleet.lab.*`) and number form; the conversation form leaves out the columns a narrow screen drops
+    first (`chat_columns`).  Above each table: the group and goal, and the metric line (`metric_head`);
+    below it, a line per row that has a reason, and the catalog's words for what the table shows
+    (`words_line`; `catalog_doc`, the catalog itself, adds each condition's former names, which a status
+    document never carries).  Rows rank against the target (comparable rows first, the better value on top) and
+    groups are never mixed.  `fmt` is `md` (one block per group, no blank line inside, so it can be pasted
+    or quoted whole) or `tsv` (group name first, one header line).  The same catalog and run records
+    give the same table on every call."""
     t = _translator(lang)
     catalog = doc.get("catalog") or {}
     if catalog.get("status") == "invalid":
         return t("experiment.leaderboard.unreadable", code=catalog.get("code") or "?")
-    groups = list(doc.get("groups") or ())
+    import experiment_board
+    board = experiment_board.board(doc)
+    pairs = list(zip(doc.get("groups") or (), board.get("groups") or ()))
     if group:
         wanted = _fold(group)
-        groups = [g for g in groups if wanted in (_fold(g.get("id") or ""), _fold(g.get("display_name") or ""))]
-    groups = [g for g in groups if g.get("conditions")]
-    if not groups:
+        pairs = [(g, b) for g, b in pairs if wanted in (_fold(g.get("id") or ""), _fold(g.get("display_name") or ""))]
+    pairs = [(g, b) for g, b in pairs if g.get("conditions")]
+    if not pairs:
+        if catalog.get("status") == "missing":
+            return t("experiment.leaderboard.missing", command=register_command(None, lang))
         return t("experiment.leaderboard.empty")
-    heads = [t(f"experiment.leaderboard.col.{k}") for k in ("name", "run", "latest", "best", "baseline", "delta", "relative", "state")]
+    lab = _lab_table()
+    now = _ts(doc.get("generated_at"))
+    names = {row["id"]: row.get("display_name") for g in doc.get("groups") or () for row in g.get("conditions") or ()}
+    conds = _conditions_by_id(catalog_doc) if isinstance(catalog_doc, Mapping) else {}
+    columns = chat_columns()
     out: List[str] = []
-    for g in groups:
-        metric = g.get("metric") or {}
-        unit = metric.get("unit") or None
-        rows = [_leader_row(r, unit, t, metric.get("key")) for r in _leader_order(g["conditions"], metric.get("direction"))]
-        name = g.get("display_name") or t("experiment.no_group")
-        if fmt == "tsv":
-            if not out:
-                out.append("\t".join([t("experiment.leaderboard.col.group")] + heads))
-            out.extend("\t".join([name] + [c.replace("\t", " ") for c in row]) for row in rows)
-            continue
-        head = f"### {name}"
-        if g.get("goal"):
-            head += " " + t("experiment.goal", goal=g["goal"])
-            if metric.get("key"):
-                head += " " + t("experiment.metric", key=metric["key"], unit=unit or "?",
-                                direction=t(f"experiment.direction.{metric.get('direction') or 'min'}"))
-        out += [head, "", "| " + " | ".join(heads) + " |", "|" + "|".join("---" for _ in heads) + "|"]
-        out += ["| " + " | ".join(c.replace("|", "\\|") for c in row) + " |" for row in rows]
-        out += ["", t("experiment.leaderboard.note"), ""]
-    return "\n".join(out).rstrip("\n")
+    with _screen_language(lang):
+        headers = [lab._header(c) for c in columns]
+        for g, b in pairs:
+            metric = g.get("metric") or {}
+            by_id = {row.get("condition_id"): row for row in b.get("rows") or ()}
+            rows = [by_id[r["id"]] for r in _leader_order(g["conditions"], metric.get("direction")) if r["id"] in by_id]
+            table = [lab.cells(row, b, now) for row in rows]
+            name = g.get("display_name") or t("experiment.no_group")
+            if fmt == "tsv":
+                if not out:
+                    out.append("\t".join([t("experiment.leaderboard.col.group")] + headers))
+                out.extend("\t".join([name] + [cells[c][0].replace("\t", " ") for c in columns]) for cells in table)
+                continue
+            block = [f"### {name} — " + (t("experiment.goal", goal=g["goal"]) if g.get("goal") else t("fleet.lab.goal_missing")),
+                     metric_head(g, names, t),
+                     "| " + " | ".join(headers) + " |",
+                     "|" + "|".join("---" if c in ("name", "state") else "---:" for c in columns) + "|"]
+            block += ["| " + " | ".join(_md_cell(cells[c][0]) for c in columns) + " |" for cells in table]
+            reasons = [(cells["name"][0], lab.reason_text(row)) for row, cells in zip(rows, table)]
+            block += [f"- {who}: {why}" for who, why in reasons if why]
+            words = words_line(block, doc.get("terms") or [],
+                               [(r.get("display_name"), _other_names(conds.get(r["id"]) or r))
+                                for r in g["conditions"] if r.get("display_name")], [metric], t)
+            if words:
+                block.append("- " + words)
+            out.append("\n".join(block))
+    if fmt == "tsv":
+        return "\n".join(out)
+    tail = [t("experiment.leaderboard.note")]
+    unlinked = board.get("unlinked") or {}
+    if unlinked.get("count"):
+        ids = list(unlinked.get("run_ids") or ())[:3]
+        extra = int(unlinked["count"]) - len(ids)
+        tail.append(t("experiment.unlinked", count=unlinked["count"],
+                      ids=", ".join(ids) + (t("experiment.and_more", n=extra) if extra > 0 else "")))
+    return "\n\n".join(out + ["\n".join(tail)])
+
+
+REPORT_TABLES_CHARS = 1200
+
+
+def report_tables(text: str, limit: int = REPORT_TABLES_CHARS, lang: Optional[str] = None) -> str:
+    """The results tables a report carries as `leaderboard` printed them, whole blocks, at most `limit` characters.
+
+    A block is found by its header row (Fleet's column words in either language) and runs from the group
+    line and metric line above it through the table and the reason and word lines below it.  Blocks are
+    joined without a blank line, a repeat is kept once, and a block that does not fit is counted, never
+    cut; "" when the report has none."""
+    if "|" not in (text or ""):
+        return ""
+    try:
+        lab = _lab_table()
+        heads = set()
+        for code in ("en", "ko"):
+            with _screen_language(code):
+                heads.add("| " + " | ".join(lab._header(c) for c in chat_columns()) + " |")
+        lines = [line.strip() for line in text.splitlines()]
+        blocks: List[str] = []
+        index = 0
+        while index < len(lines):
+            if lines[index] not in heads or index + 1 >= len(lines) or not lines[index + 1].startswith("|"):
+                index += 1
+                continue
+            start = index
+            if start and lines[start - 1] and not lines[start - 1].startswith(("|", "#")):
+                start -= 1                          # the metric line
+            if start and lines[start - 1].startswith("### "):
+                start -= 1                          # the group and its goal
+            end = index
+            while end < len(lines) and lines[end].startswith("|"):
+                end += 1
+            while end < len(lines) and lines[end].startswith("- "):
+                end += 1
+            block = "\n".join(lines[start:end])
+            if block not in blocks:
+                blocks.append(block)
+            index = end
+        kept: List[str] = []
+        used = 0
+        for block in blocks:
+            if used + len(block) + 1 <= limit:
+                kept.append(block)
+                used += len(block) + 1
+        if len(kept) < len(blocks):
+            kept.append(_translator(lang)("experiment.tables_more", n=len(blocks) - len(kept)))
+        return "\n".join(kept) if blocks else ""
+    except Exception:  # noqa: BLE001 -- a summary is the same without it
+        return ""
 
 
 def render_show(read: CatalogRead, lang: Optional[str] = None) -> str:
@@ -1969,7 +2262,12 @@ def _read_command(args: argparse.Namespace) -> int:
                   "terms": [], "groups": [], "waiting": [], "unlinked_runs": {"run_ids": [], "truncated": 0},
                   "warnings": [_warn("catalog-invalid", CATALOG_REL, code)]}
     if args.command == "leaderboard":
-        print(render_leaderboard(report, args.group, args.format, args.lang))
+        try:
+            read = (load(Path(report["artifact_root"]))
+                    if report.get("artifact_root") and report["catalog"]["status"] == "ok" else None)
+        except Exception:  # noqa: BLE001 -- the table is the same without the former names
+            read = None
+        print(render_leaderboard(report, args.group, args.format, args.lang, read.doc if read else None))
     elif args.command == "lint":
         _print({"catalog": report["catalog"], "warnings": report["warnings"]}) if args.json else \
             print(render_status({**report, "groups": [], "unlinked_runs": {"run_ids": [], "truncated": 0}}, args.lang))
@@ -1988,6 +2286,9 @@ def _scan_command(args: argparse.Namespace) -> int:
         root = _root_from(args)
         read = load(root)
         report["catalog"] = {"status": read.status, "path": CATALOG_REL, "code": read.code}
+        if read.status == "missing":    # no catalog to read names from: say how to start one (advice)
+            report["advice"] = _translator(args.lang)("experiment.leaderboard.missing",
+                                                      command=register_command(None, args.lang))
         if read.status == "ok":
             unlinked: List[str] = []
             try:

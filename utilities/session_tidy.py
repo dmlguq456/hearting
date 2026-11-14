@@ -2595,15 +2595,11 @@ LAB_BLOCK_BYTES = 360
 
 
 def _lab_block(cwd: str, room: int) -> str:
-    """The folder's experiment catalog names for the start context: at most 360 bytes and never more than `room`."""
+    """The folder's experiment catalog for the start context (the results-table command, names, metric line
+    and words; or how to start a catalog when runs exist without one): at most 360 bytes, never more than `room`."""
     try:
         import experiment_catalog
-        context = experiment_catalog.card_context(cwd)
-        if context is None:
-            return ""
-        root, doc = context
-        return experiment_catalog.catalog_brief(doc, str(experiment_catalog.catalog_path(root)),
-                                                max(0, min(LAB_BLOCK_BYTES, room)))
+        return experiment_catalog.folder_brief(cwd, max(0, min(LAB_BLOCK_BYTES, room)))[0]
     except Exception:  # noqa: BLE001
         return ""
 

@@ -981,7 +981,20 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     artifact = t("completion.artifact", path=primary) if primary else t("completion.no_artifact")
     lines.append(artifact + (" · PR " + " ".join(prs) if prs else ""))
     rendered = "\n".join(line for line in lines if line.strip())
-    return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n"
+    return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n" + _results_tables(text)
+
+
+def _results_tables(text: str) -> str:
+    """The report's experiment results tables as the catalog printed them, after the summary lines, so the
+    route parent pastes the worker's table instead of drawing another one; "" when the report has none."""
+    if "|" not in (text or ""):
+        return ""
+    try:
+        import experiment_catalog
+        tables = experiment_catalog.report_tables(text)
+        return tables + "\n" if tables else ""
+    except Exception:  # noqa: BLE001 -- the summary is the same without it
+        return ""
 
 
 def sealed_summary(metadata, attempt_id: str) -> str:
