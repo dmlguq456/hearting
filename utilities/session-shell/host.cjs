@@ -1201,7 +1201,7 @@ function inputBytes(data) {
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
     // 11-15: while the popup stands its editor takes every key (a read page under it keeps none);
-    // nothing typed there reaches the native. Esc or Ctrl+] closes it and the rest goes on.
+    // nothing typed there reaches the native. A lone Esc closes it; Ctrl+] closes it and the rest goes on.
     if(block.focused&&!relay&&!fleetView){
       actionLines=[];const rest=block.input(data);epoch+=data.length-rest.length;
       data=rest;queueDisplay();continue;

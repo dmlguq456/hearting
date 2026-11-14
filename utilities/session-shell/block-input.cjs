@@ -281,12 +281,14 @@ module.exports=function({changed,answer,action,page}) {
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
         if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
           if(pasting){escape='';character('\x1b');character(c);continue;}
-          // Alt+letter (`ESC` then a printable or Backspace) and Shift/Alt+Enter (`ESC` then CR or LF): a
-          // combination this editor has no meaning for is dropped, never the native's (an Enter there would
-          // submit its text); the popup stands. Whatever else follows a lone Esc
-          // (Ctrl+], Tab, another Esc) closes it as before and goes on.
-          if(byte>=0x20||byte===0x0d||byte===0x0a){escape='';if(byte>=0xc0)skipTail=true;continue;}
-          leave();return data.subarray(i);
+          // Whatever follows an Esc in this read (or within the Esc window) other than `[` or `O` (an arrow or
+          // function key) is a combination this editor has no meaning for: Alt+letter, Shift/Alt+Enter,
+          // Esc then a control byte. It is dropped, never the native's (an Enter there would submit its
+          // text, a ^C interrupt its turn); the popup stands. Only a second Esc closes it, and is dropped.
+          escape='';
+          if(byte===0x1b){leave();escapedAt=Date.now();return data.subarray(i+1);}
+          if(byte>=0xc0)skipTail=true;
+          continue;
         }
         escape+=c;
         if(escape==='\x1b[200~'){pasting=true;escape='';}
