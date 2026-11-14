@@ -1345,6 +1345,69 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(json.loads((Path(env['CLAUDE_CONFIG_DIR']) / 'worker-home.json')
                                     .read_text())['native_agents'], [])
 
+    def test_a_definition_that_cannot_be_placed_never_stops_the_worker_home(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        outside = self.base / 'someone-elses'
+        outside.write_text('kept')
+        def build(name, prepare):
+            home = self.base / f'collide-{name}'
+            home.mkdir()
+            prepare(home)
+            env = prepare_worker_home(ROOT, 'claude', 'owner', f'collide-{name}', env=self.env,
+                                      destination=home)
+            return home, json.loads((home / 'worker-home.json').read_text())['native_agents']
+        def agents_file(home):
+            (home / 'agents').write_text('mine')
+        def agents_link(home):
+            (home / 'agents').symlink_to(outside)
+        def light_link(home):
+            (home / 'agents').mkdir()
+            (home / 'agents/light.md').symlink_to(outside)
+        def light_folder(home):
+            (home / 'agents/light.md').mkdir(parents=True)
+        for name, prepare in (('file', agents_file), ('link', agents_link),
+                              ('light-link', light_link), ('light-folder', light_folder)):
+            with self.subTest(case=name):
+                home, native = build(name, prepare)
+                self.assertTrue((home / 'CLAUDE.md').exists())
+                self.assertEqual(outside.read_text(), 'kept')
+                if name in ('file', 'link'):
+                    self.assertEqual(native, [])
+                else:
+                    self.assertEqual(native, ['balanced', 'deep'])
+                    self.assertTrue((home / 'agents/light.md').is_symlink() or
+                                    (home / 'agents/light.md').is_dir())
+        self.assertEqual((self.base / 'collide-file/agents').read_text(), 'mine')
+        self.assertEqual((self.base / 'collide-link/agents').resolve(), outside)
+
+    def test_an_unwritable_agents_folder_builds_the_home_without_definitions(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        home = self.base / 'collide-readonly'
+        (home / 'agents').mkdir(parents=True)
+        (home / 'agents').chmod(0o500)
+        try:
+            prepare_worker_home(ROOT, 'claude', 'owner', 'collide-readonly', env=self.env,
+                                destination=home)
+            native = json.loads((home / 'worker-home.json').read_text())['native_agents']
+            self.assertTrue((home / 'CLAUDE.md').exists())
+            self.assertEqual(sorted(p.name for p in (home / 'agents').iterdir()),
+                             [f'{n}.md' for n in native])  # empty, or all three when the user may write anyway
+        finally:
+            (home / 'agents').chmod(0o700)
+
+    def test_a_stale_definition_vanishing_during_cleanup_does_not_stop_the_build(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        env = prepare_worker_home(ROOT, 'claude', 'owner', 'vanish', env=self.env)
+        agents = Path(env['CLAUDE_CONFIG_DIR']) / 'agents'
+        self._user_models_conf('claude', self.source, CFG_MAIN_SESSION_ONLY_MODELS='"fable opus"')
+        real = Path.unlink
+        def racing(path, missing_ok=False):
+            real(path, missing_ok=True)       # another builder removed it first
+            return real(path, missing_ok=missing_ok)
+        with patch.object(Path, 'unlink', racing):
+            prepare_worker_home(ROOT, 'claude', 'owner', 'vanish', env=self.env)
+        self.assertEqual(sorted(p.name for p in agents.iterdir()), ['balanced.md', 'light.md'])
+
     def test_opencode_v1_worker_gets_the_agents_and_v2_keeps_the_service_ones(self):
         self.env['OPENCODE_CONFIG_DIR'] = str(self.source)
         env = prepare_worker_home(ROOT, 'opencode', 'owner', 'v1-agents', env=self.env)

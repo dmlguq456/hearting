@@ -416,41 +416,58 @@ def publish_worker_native_agents(agent_home, harness, model_config_home, home, n
     Every file is a regular file (Codex refuses a linked role file). An agent the
     config withholds (main-session-only model) or cannot render gets no file, and
     a file an earlier build of this home wrote for it is removed. A plan that
-    cannot be made leaves the home without definitions, as before.
+    cannot be made, or a path that cannot be written (an existing file, link or
+    folder, an unwritable folder), leaves the home with only what was written;
+    nothing already on the path is touched and the build does not fail.
     """
     names = [name for name in names if name in WORKER_NATIVE_AGENTS]
+    if not names:
+        return []
     agents_dir = Path(home) / 'agents'
     wanted = {}
-    if names:
-        try:
-            renderer = _native_agent_renderer(agent_home, harness)
-            fmt = renderer.FORMAT
-            plan = renderer.native_agents.runtime_plan(fmt, Path(model_config_home))
-            for row in plan['agents']:
-                if row['name'] not in names or row['status'] not in ('shipped', 'rendered'):
-                    continue
-                body = row.get('content')
-                if body is None:
-                    body = (fmt.out_dir / row['shipped_relpath']).read_text(encoding='utf-8')
-                wanted[row['dest_name']] = (row['name'], body)
-        except Exception:
-            wanted = {}
-    if agents_dir.is_symlink() or (agents_dir.exists() and not agents_dir.is_dir()):
-        raise ValueError(f'worker home collision: {agents_dir}')
-    if wanted:
-        agents_dir.mkdir(exist_ok=True)
-    for dest_name, (_name, body) in sorted(wanted.items()):
-        target = agents_dir / dest_name
-        if target.is_symlink() or (target.exists() and not target.is_file()):
-            raise ValueError(f'worker home collision: {target}')
-        write_worker_text(target, body)
-    if agents_dir.is_dir():
-        for path in agents_dir.iterdir():
-            stem = path.name.rsplit('.', 1)[0]
-            if (stem in WORKER_NATIVE_AGENTS and path.name not in wanted
-                    and path.is_file() and not path.is_symlink()):
-                path.unlink()
-    return sorted(name for name, _body in wanted.values())
+    try:
+        renderer = _native_agent_renderer(agent_home, harness)
+        fmt = renderer.FORMAT
+        plan = renderer.native_agents.runtime_plan(fmt, Path(model_config_home))
+        for row in plan['agents']:
+            if row['name'] not in names or row['status'] not in ('shipped', 'rendered'):
+                continue
+            body = row.get('content')
+            if body is None:
+                body = (fmt.out_dir / row['shipped_relpath']).read_text(encoding='utf-8')
+            wanted[row['dest_name']] = (row['name'], body)
+    except Exception:
+        wanted = {}
+    # A definition that cannot be placed never stops the worker: an existing
+    # file, link or folder on the path is left as it is, and the home is built
+    # with the definitions that could be written.
+    written = []
+    try:
+        if agents_dir.is_symlink() or (agents_dir.exists() and not agents_dir.is_dir()):
+            return []
+        if wanted:
+            agents_dir.mkdir(exist_ok=True)
+        for dest_name, (name, body) in sorted(wanted.items()):
+            target = agents_dir / dest_name
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                continue
+            try:
+                write_worker_text(target, body)
+            except OSError:
+                continue
+            written.append(name)
+        if agents_dir.is_dir():
+            for path in agents_dir.iterdir():
+                stem = path.name.rsplit('.', 1)[0]
+                if (stem in WORKER_NATIVE_AGENTS and path.name not in wanted
+                        and path.is_file() and not path.is_symlink()):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return sorted(written)
 
 
 def link(target, linkpath):
