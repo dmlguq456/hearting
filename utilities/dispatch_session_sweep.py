@@ -721,10 +721,10 @@ def sweep_deliver(
     ``select``, when given, is a predicate on an addressed record: a record it
     rejects is not claimed here and stays with its existing carriers.
 
-    ``defer_native_queued`` (a Claude tool boundary or Stop): a record whose exact
-    receipt waits in Claude's own prompt queue (``natively_queued``) is left to that
-    queue, which attaches it to this turn or starts the next one; the next prompt's
-    sweep still carries it if the queue lost it.
+    ``defer_native_queued`` (a Claude tool boundary): a record whose exact receipt
+    Claude's own prompt queue provably still holds (``natively_queued``) is left to
+    that queue, which attaches it to this turn or starts the next one. Only until
+    the turn ends: Stop and the next prompt's sweep carry it if the queue lost it.
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """

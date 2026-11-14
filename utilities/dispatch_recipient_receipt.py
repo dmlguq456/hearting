@@ -25,11 +25,16 @@ OPENCODE_MARKER_LINE_RE = re.compile(
 )
 MAX_CLAUDE_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 CLAUDE_STOP_FEEDBACK_PREFIX = "Stop hook feedback:"
-CLAUDE_TASK_NOTIFICATION_SUMMARY_RE = re.compile(
-    r"<task-notification>(?:(?!</task-notification>).)*?"
-    r"<summary>Stop hook feedback</summary>(?:(?!</task-notification>).)*?"
-    r"</task-notification>", re.DOTALL,
-)
+# A Stop-hook notification block where a text begins (``match`` at a position), and the
+# reminder Claude Code puts the hook's output in, right after it. Claude Code's block holds
+# only its summary; one holding a ``<result>`` or another notification tag is a different
+# notification (a background agent's) whatever it quotes.
+_BLOCK_BODY = r"(?:(?!</?task-notification>|<result>).)*?"
+_LEADING_STOP_FEEDBACK_RE = re.compile(
+    r"\s*<task-notification>" + _BLOCK_BODY + r"<summary>Stop hook feedback</summary>" + _BLOCK_BODY
+    + r"</task-notification>", re.DOTALL)
+_LEADING_REMINDER_RE = re.compile(r"\s*<system-reminder>(?:(?!</system-reminder>).)*?</system-reminder>",
+                                  re.DOTALL)
 LEGACY_COMPLETION_RE = re.compile(
     r"Runtime owner completion receipt schema=2 state=(success|attention) "
     r"attempt_id=([^\s]+) armed=([^\s]+) status=([^\s]+) "
@@ -181,24 +186,43 @@ def _native_notification(value: Any) -> bool:
     return (isinstance(value, dict) and value.get("kind") == "task-notification")
 
 
-def _stop_feedback_bindings(text: str) -> list[tuple[str, str]]:
-    """Markers in a text that carries a Claude Stop-hook-feedback task notification.
+def _stop_feedback_head(text: str) -> str:
+    """The Stop-hook-feedback notifications a text begins with, each with its reminder.
 
-    Claude Code puts the hook's output after the notification block (in the
-    system reminder that follows it), the same text a user event holds."""
-    if not isinstance(text, str) or CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(text) is None:
-        return []
-    return [(match.group(1), match.group(2)) for match in MARKER_RE.finditer(text)]
+    Claude Code puts the hook's output after the notification block (in the system
+    reminder that follows it), the same text a user event holds. Only blocks at the
+    top count: the text starts with one and the next directly follows it. A block or
+    marker inside another notification (a background agent's ``<result>`` quoting a
+    transcript) is that notification's content, never a receipt."""
+    if not isinstance(text, str):
+        return ""
+    end = 0
+    while True:
+        block = _LEADING_STOP_FEEDBACK_RE.match(text, end)
+        if block is None:
+            return text[:end]
+        end = block.end()
+        reminder = _LEADING_REMINDER_RE.match(text, end)
+        if reminder is not None:
+            end = reminder.end()
+
+
+def _stop_feedback_bindings(text: str) -> list[tuple[str, str]]:
+    """Markers of the Stop-hook-feedback notifications a text begins with (``_stop_feedback_head``)."""
+    return [(match.group(1), match.group(2)) for match in MARKER_RE.finditer(_stop_feedback_head(text))]
 
 
 def _claude_queued(events: list, session_id: str) -> list[tuple[str, str]]:
-    """Bindings of Stop-hook notifications still waiting in this session's native queue.
+    """Bindings of Stop-hook notifications this session's native queue provably still holds.
 
     Claude Code records its prompt queue in the transcript: ``enqueue`` carries the
-    text, ``dequeue`` takes the oldest item into a new turn, and ``remove`` takes the
-    named item into the running turn. What is left was handed to Claude and has not
-    reached the model yet; it is not a receipt, only a reason not to show it again
-    at this boundary.
+    text; ``remove``, ``popAll`` and ``popOne`` name the item they take; ``dequeue``
+    names none (Claude takes by priority), and neither does a ``remove`` a hook
+    dropped. Only the content counts, never a guessed order: an item an unnamed
+    operation may have taken is no longer counted as waiting, so the boundary shows
+    it rather than leave it to a queue that may have lost it. What is left was handed
+    to Claude and has not reached the model yet; it is not a receipt, only a reason
+    a tool boundary need not show it again in this turn.
     """
     queue: list[str] = []
     for event in events:
@@ -208,10 +232,11 @@ def _claude_queued(events: list, session_id: str) -> list[tuple[str, str]]:
         operation, content = event.get("operation"), event.get("content")
         if operation == "enqueue":
             queue.append(content if isinstance(content, str) else "")
-        elif operation == "dequeue" and queue:
-            queue.pop(0)
-        elif operation == "remove" and isinstance(content, str) and content in queue:
-            queue.remove(content)
+        elif operation in {"remove", "popAll", "popOne"} and isinstance(content, str):
+            if content in queue:
+                queue.remove(content)
+        else:
+            queue.clear()
     return sorted({binding for text in queue for binding in _stop_feedback_bindings(text)})
 
 
@@ -231,10 +256,10 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             attachment = event.get("attachment")
             if (isinstance(attachment, dict) and attachment.get("type") == "queued_command"
                     and attachment.get("commandMode") == "task-notification"
-                    and _native_notification(attachment.get("origin"))
-                    and isinstance(attachment.get("prompt"), str)
-                    and CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(attachment["prompt"])):
-                texts.append(attachment["prompt"])
+                    and _native_notification(attachment.get("origin"))):
+                head = _stop_feedback_head(attachment.get("prompt"))
+                if head:
+                    texts.append(head)
             continue
         if not isinstance(event, dict) or event.get("type") != "user":
             continue
@@ -252,9 +277,12 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             and event["origin"].get("kind") == "task-notification"
             and event.get("promptSource") == "system"
             and event.get("turnOrigin") == "task_notification"
-            and CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(text) is not None
         )
-        if not (legacy_feedback or stop_feedback or native_notification):
+        if native_notification and not (legacy_feedback or stop_feedback):
+            # Only the Stop-hook notifications the turn's text begins with (not one quoted
+            # in another notification's result).
+            text = _stop_feedback_head(text)
+        elif not (legacy_feedback or stop_feedback):
             continue
         if text:
             texts.append(text)

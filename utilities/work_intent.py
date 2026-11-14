@@ -600,6 +600,11 @@ _VERDICT_LINE = re.compile(r"^\s*(?:[-*]\s+)?\**\s*(?:최종\s*판정|판정|결
                            r"(?P<verdict>.+?)\s*$", re.I)
 # A line naming the publication: a PR link or number with its head, CI or mergeability.
 _PUBLICATION_LINE = re.compile(r"pull/(?P<url>\d+)|\bPR\s*#\s*(?P<number>\d+)", re.I)
+# The PR a verdict line names: `PR #1637`, `PR 1637` or a `pull/1637` link; a bare `#1637`
+# only when it is the line's one `#number` and the report names that PR elsewhere (a
+# finding's `#1` is not a PR).
+_VERDICT_PR = re.compile(r"pull/(\d+)|\bPR\s*#?\s*(\d+)", re.I)
+_BARE_NUMBER = re.compile(r"(?<![\w&])#(\d+)\b")
 _PUBLICATION_WORDS = re.compile(r"\bhead\b|\bCI\b|mergeable|\bsha\b", re.I)
 _PUBLICATION_FIELDS = (
     re.compile(r"\bhead\W{0,3}(?P<value>[0-9a-f]{7,40})\b", re.I),
@@ -715,27 +720,69 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
     return sections
 
 
-def report_verdict(text: str) -> str:
-    """The report's first non-heading line when it states the verdict, else ""."""
+def _unfenced_lines(text: str):
+    """The report's lines outside fenced blocks (an example, a quoted notice or log)."""
     fence = False
     for raw in (text or "").splitlines():
-        line = raw.strip()
-        if line.startswith(("```", "~~~")):
+        if raw.strip().startswith(("```", "~~~")):
             fence = not fence
             continue
-        if fence or not line or line.startswith("#"):
+        if not fence:
+            yield raw
+
+
+def _verdict_match(text: str):
+    for raw in _unfenced_lines(text):
+        line = raw.strip()
+        if not line or line.startswith("#"):
             continue
-        match = _VERDICT_LINE.match(line.replace("**", ""))
-        return _line(match["verdict"].strip("* "), 100) if match else ""
-    return ""
+        return _VERDICT_LINE.match(line.replace("**", ""))
+    return None
+
+
+def report_verdict(text: str) -> str:
+    """The report's first non-heading line when it states the verdict, else ""."""
+    match = _verdict_match(text)
+    return _line(match["verdict"].strip("* "), 100) if match else ""
+
+
+def _verdict_pr(text: str) -> str | None:
+    """The PR number the report's verdict line names (``_VERDICT_PR``), else None."""
+    match = _verdict_match(text)
+    if match is None:
+        return None
+    found = _VERDICT_PR.search(match["verdict"])
+    if found:
+        return next(value for value in found.groups() if value)
+    bare = set(_BARE_NUMBER.findall(match["verdict"]))
+    named = {next(value for value in found.groups() if value)
+             for raw in _unfenced_lines(text) for found in _PUBLICATION_LINE.finditer(raw)}
+    return bare.pop() if len(bare) == 1 and bare <= named else None
+
+
+def _pr_number(line: str) -> str | None:
+    found = _PUBLICATION_LINE.search(line)
+    return (found["url"] or found["number"]) if found else None
 
 
 def _publication_lines(text: str):
-    for raw in (text or "").splitlines():
+    """Lines naming a PR with its head, CI or mergeability, outside fenced blocks. When
+    the verdict line names this work's PR, only lines about that PR."""
+    own = _verdict_pr(text)
+    for raw in _unfenced_lines(text):
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
-        if (line and not line.startswith(("#", "|", "```")) and not _VERDICT_LINE.match(line.replace("**", ""))
-                and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)):
+        if (line and not line.startswith(("#", "|")) and not _VERDICT_LINE.match(line.replace("**", ""))
+                and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)
+                and own in (None, _pr_number(line.replace("`", "")))):
             yield line
+
+
+def report_pr_urls(text: str, limit: int = 3) -> list[str]:
+    """PR links outside fenced blocks; only this work's PR when the verdict line names it."""
+    own = _verdict_pr(text)
+    urls = [url for raw in _unfenced_lines(text) for url in _PR_URL.findall(raw)
+            if own is None or url.rsplit("/", 1)[-1] == own]
+    return list(dict.fromkeys(urls))[:limit]
 
 
 def is_publication_line(line: str) -> bool:
@@ -812,7 +859,8 @@ def _verified_summary(lines, t):
         summary = t("completion.command_checks_unmarked", count=len(commands))
     else:
         summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
-    return _joined([*prose, summary], MAX_CHECKS_CHARS)
+    # The counts first: a long prose line is cut at the cap, never the failure count.
+    return _joined([summary, *prose], MAX_CHECKS_CHARS)
 
 
 def _review_degraded(route_file) -> list[str]:
@@ -1046,7 +1094,7 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     published = report_publication(text)
     if published:
         lines.append(t("completion.publication", line=published))
-    prs = [] if published else list(dict.fromkeys(_PR_URL.findall(text)))[:3]
+    prs = [] if published else report_pr_urls(text)
     entrance = _entrance_line(route, primary, t)
     if entrance:
         lines.append(entrance)

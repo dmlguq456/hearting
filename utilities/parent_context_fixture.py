@@ -21,8 +21,10 @@ records the body it was given.
 Measured per completion: characters Hearting carried into the model context
 (per kind), how many carriers carried that completion, the turns it woke, and
 whether finishing it needed a follow-up command. Per typed prompt: the
-characters the prompt hooks added. Nothing here reads a real session, registry
-or transcript.
+characters the prompt hooks added. For Claude, separately, the queue orders
+(``QUEUE_ORDERS``): how often a completion reached the model when Claude's own
+queue absorbs, drops or reorders it, and whether it did without a person.
+Nothing here reads a real session, registry or transcript.
 
 Usage::
 
@@ -64,6 +66,16 @@ COMPLETIONS = (
     ("normal", "busy"), ("normal", "prompt"),
 )
 PROMPTS_AFTER = {1: "P1", 3: "P2", 5: "P3", 7: "P4", 9: "P5"}
+# Claude queue orders, each a separate completion measured on its own (no typed prompt
+# follows any of them): how many times it reached the model and whether it did without a
+# person. "q-absorbed": a tool boundary leaves it to the queue, which absorbs it mid-turn.
+# "q-dropped": the queue drops it without content (`remove`, reason `dropped_by_hook`) and
+# the turn ends. "q-turn-end": it lands during the turn's last reply, waits in the queue past
+# the rewake's lease and starts the next turn. "q-typed": a person types during the turn,
+# Claude takes the typed prompt first and the notification's own turn after. "q-quoted": a
+# background agent's notification quotes it while it waits, then the turn ends.
+QUEUE_ORDERS = (("normal", "q-absorbed"), ("normal", "q-dropped"), ("normal", "q-turn-end"),
+                ("normal", "q-typed"), ("normal", "q-quoted"))
 CLAIM_LEASE_GAP_NS = 31 * 1_000_000_000
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 MARKER = re.compile(r"HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]+) [0-9a-f]{64}")
@@ -100,8 +112,9 @@ def _final_text(kind: str, report: Path) -> str:
 
 
 class Scenario:
-    def __init__(self, source: Path, base: Path, harness: str):
+    def __init__(self, source: Path, base: Path, harness: str, completions=COMPLETIONS):
         self.source, self.base, self.harness = source, base, harness
+        self.completions = completions
         self.repo = base / "repo"
         self.reports = base / "reports" / ".agent_reports"
         self.state = base / "state" / "dispatch"
@@ -140,7 +153,7 @@ class Scenario:
         import dispatch_pending_delivery as pending
         import dispatch_supervisor_terminal as terminal
         from dispatch_terminal_commit import terminal_slot
-        for index, (kind, pattern) in enumerate(COMPLETIONS):
+        for index, (kind, pattern) in enumerate(self.completions):
             attempt = f"att-scc-{self.harness}-{index:02d}" + "0" * 16
             route = {"capability": "autopilot-code", "capability_mode": "dev",
                      "work_request": {"text": f"합성 과제 {index}: 부모 세션 문맥 측정용 작업을 끝낸다."},
@@ -263,7 +276,7 @@ def _load(path: Path, name: str):
     return module
 
 
-def _claude(scenario: Scenario) -> None:
+def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
     import dispatch_pending_delivery as pending
     source = scenario.source
     rewake = _load(source / "hooks" / "dispatch-owner-rewake.py", "scc_rewake")
@@ -330,7 +343,10 @@ def _claude(scenario: Scenario) -> None:
     def tool_boundary() -> str:
         payload = scenario.payload("PostToolUse", tool_name="Bash")
         pmr.settle_stop_records(payload)
-        kwargs = {"payload": payload} if "payload" in inspect.signature(pmr.tool_boundary_records).parameters else {}
+        parameters = inspect.signature(pmr.tool_boundary_records).parameters
+        kwargs = {"payload": payload} if "payload" in parameters else {}
+        if "defer_queued" in parameters:
+            kwargs["defer_queued"] = True
         text, batches = pmr.tool_boundary_records(PARENT_SID, time.monotonic() + 6, **kwargs)
         pmr.settle_tool_boundary_records(PARENT_SID, batches, bool(text))
         if text:
@@ -388,6 +404,21 @@ def _claude(scenario: Scenario) -> None:
                 scenario.advance(5 * 1_000_000_000)
                 scenario.carry("tool-boundary", tool_boundary())
                 scenario.carry("stop", stop(), extra_turn=True)
+            elif pattern.startswith("q-"):
+                item["carried_from"] = len(scenario.carried)
+                follows = _claude_queue_order(scenario, item, rewake_emit, prompt_hook, tool_boundary, stop)
+                if follows:
+                    # Claude takes the notification into a turn of its own; its prompt hooks run with it.
+                    note, body = follows
+                    scenario.transcript({"type": "queue-operation", "operation": "dequeue"})
+                    scenario.carry("rewake", body, wake=True)
+                    scenario.carry("prompt-hook(wake)", prompt_hook(note, typed=False))
+                    scenario.transcript({"type": "user", "origin": {"kind": "task-notification",
+                                         "producer": "session-task"}, "promptSource": "system",
+                                         "turnOrigin": "task_notification", "message": {"content": note}})
+                    scenario.carry("tool-boundary", tool_boundary())
+                    scenario.carry("stop", stop(), extra_turn=True)
+                item["carried_to"] = len(scenario.carried)
             else:  # mid: a tool call longer than the rewake's claim lease
                 body = rewake_emit(item)
                 scenario.carry("rewake", body)
@@ -403,8 +434,56 @@ def _claude(scenario: Scenario) -> None:
                 scenario.advance(5 * 1_000_000_000)
                 scenario.carry("tool-boundary", tool_boundary())
                 scenario.carry("stop", stop(), extra_turn=True)
-            if index in PROMPTS_AFTER:
-                typed_prompt(PROMPTS_AFTER[index])
+            if index in prompts:
+                typed_prompt(prompts[index])
+
+
+def _claude_queue_order(scenario, item, rewake_emit, prompt_hook, tool_boundary, stop):
+    """One `QUEUE_ORDERS` item up to the point Claude's queue would start its own turn:
+    ``(note, rewake text)`` when that turn follows, else ``None``. The rewake's text is
+    counted only where the queue puts it in front of the model."""
+    pattern = item["pattern"]
+    body = rewake_emit(item)
+    note = scenario.notification(body)
+    scenario.transcript({"type": "queue-operation", "operation": "enqueue", "content": note})
+    scenario.advance(CLAIM_LEASE_GAP_NS)
+    if pattern == "q-absorbed":
+        scenario.carry("tool-boundary", tool_boundary())
+        scenario.transcript({"type": "queue-operation", "operation": "remove", "content": note,
+                             "reason": "absorbed_mid_turn"})
+        scenario.transcript({"type": "attachment", "attachment": {
+            "type": "queued_command", "commandMode": "task-notification", "prompt": note,
+            "origin": {"kind": "task-notification", "producer": "session-task"}}})
+        scenario.carry("rewake", body)
+        scenario.carry("tool-boundary", tool_boundary())
+        scenario.carry("stop", stop(), extra_turn=True)
+    elif pattern == "q-dropped":
+        scenario.carry("tool-boundary", tool_boundary())
+        scenario.transcript({"type": "queue-operation", "operation": "remove", "reason": "dropped_by_hook"})
+        scenario.carry("stop", stop(), extra_turn=True)
+    elif pattern == "q-turn-end":
+        scenario.carry("stop", stop(), extra_turn=True)
+        return note, body
+    elif pattern == "q-typed":
+        typed = "사람 입력(작업 중): 이것도 봐 줘."
+        scenario.transcript({"type": "queue-operation", "operation": "enqueue", "content": typed})
+        scenario.carry("stop", stop(), extra_turn=True)
+        scenario.transcript({"type": "queue-operation", "operation": "dequeue"})
+        scenario.carry("prompt-hook", prompt_hook(typed, typed=True), prompt="typed")
+        scenario.transcript({"type": "user", "message": {"content": typed}})
+        scenario.carry("stop", stop(), extra_turn=True)
+        return note, body
+    elif pattern == "q-quoted":
+        marker = next(line for line in note.splitlines() if line.startswith("HEARTING_RECEIPT_V1"))
+        quoted = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
+                  "<summary>Agent \"grep the transcript\" completed</summary>\n<result>matching line: "
+                  + note.replace("\n", " ") + " " + marker + "</result>\n</task-notification>")
+        scenario.transcript({"type": "attachment", "attachment": {
+            "type": "queued_command", "commandMode": "task-notification", "prompt": quoted,
+            "origin": {"kind": "task-notification", "producer": "session-task"}}})
+        scenario.carry("tool-boundary", tool_boundary())
+        scenario.carry("stop", stop(), extra_turn=True)
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -643,17 +722,37 @@ def _own_obligation_runners():
                 process.wait(timeout=5)
 
 
-def _child(source: Path, output: Path, harness: str) -> int:
+def _queue_orders(scenario: Scenario) -> list[dict]:
+    """Per `QUEUE_ORDERS` item: how often it reached the model within its own order, by
+    which carriers, and whether it did without a person's prompt (a typed prompt's hook
+    needs a person). A later order's turn carrying it does not count: that is another
+    completion happening to arrive, not this order reaching its end."""
+    orders = []
+    for item in scenario.items:
+        segment = scenario.carried[item["carried_from"]:item["carried_to"]]
+        carriers = [row["carrier"] for row in segment if item["delivery_id"] in row["ids"]]
+        orders.append({"order": item["pattern"], "times": len(carriers), "carriers": carriers,
+                       "without_person": any(carrier != "prompt-hook" for carrier in carriers)})
+    return orders
+
+
+def _child(source: Path, output: Path, harness: str, queue_orders: bool = False) -> int:
     sys.path.insert(0, str(source / "utilities"))
     sys.path.insert(0, str(source / "hooks"))
     sys.path.insert(0, str(source))
     with tempfile.TemporaryDirectory(prefix="scc-") as temporary, _own_obligation_runners():
-        scenario = Scenario(source, Path(temporary), harness)
-        scenario.build()
-        {"claude": _claude, "codex": _codex, "opencode": _opencode}[harness](scenario)
-        result = _summarize(scenario)
-        result["harness"] = harness
-        result["steward"] = _steward(scenario)
+        if queue_orders:
+            scenario = Scenario(source, Path(temporary), harness, completions=QUEUE_ORDERS)
+            scenario.build()
+            _claude(scenario, prompts={})
+            result = {"harness": harness, "orders": _queue_orders(scenario)}
+        else:
+            scenario = Scenario(source, Path(temporary), harness)
+            scenario.build()
+            {"claude": _claude, "codex": _codex, "opencode": _opencode}[harness](scenario)
+            result = _summarize(scenario)
+            result["harness"] = harness
+            result["steward"] = _steward(scenario)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return 0
 
@@ -663,7 +762,9 @@ def run(source_root: Path, output_dir: Path, harnesses=("claude", "codex", "open
     source_root = source_root.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
-    for harness in harnesses:
+    # Claude's queue orders run in a process of their own, after the scenario they extend.
+    runs = [(harness, False) for harness in harnesses] + [("claude", True)] * ("claude" in harnesses)
+    for harness, queue_orders in runs:
         with tempfile.TemporaryDirectory(prefix="scc-home-") as temporary:
             temp = Path(temporary)
             env = {key: value for key, value in os.environ.items()
@@ -675,13 +776,18 @@ def run(source_root: Path, output_dir: Path, harnesses=("claude", "codex", "open
                         "AGENT_HOME": str(source_root), "TMPDIR": str(temp)})
             for name in ("home", "xdg-config", "xdg-state", "xdg-data", "xdg-cache"):
                 (temp / name).mkdir()
-            target = output_dir / f"{harness}.json"
+            target = output_dir / (f"{harness}-queue-orders.json" if queue_orders else f"{harness}.json")
             done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child", "--harness", harness,
-                                   "--source-root", str(source_root), "--output", str(target)],
+                                   "--source-root", str(source_root), "--output", str(target)]
+                                  + ["--queue-orders"] * queue_orders,
                                   cwd=str(temp), env=env, text=True, capture_output=True, timeout=600)
             if done.returncode:
                 raise RuntimeError(f"{harness} measurement failed:\n{done.stdout[-2000:]}\n{done.stderr[-4000:]}")
-            results[harness] = json.loads(target.read_text(encoding="utf-8"))
+            measured = json.loads(target.read_text(encoding="utf-8"))
+            if queue_orders:
+                results[harness]["queue_orders"] = measured["orders"]
+            else:
+                results[harness] = measured
     return results
 
 
@@ -691,9 +797,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--harness", default="claude,codex,opencode")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--queue-orders", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.child:
-        return _child(args.source_root.resolve(), args.output, args.harness)
+        return _child(args.source_root.resolve(), args.output, args.harness, queue_orders=args.queue_orders)
     results = run(args.source_root, args.output, tuple(args.harness.split(",")))
     for harness, result in results.items():
         rows = result["completions"]
@@ -705,6 +812,8 @@ def main() -> int:
                           "steward_woke": [step["woke"] for step in result["steward"]["steps"]],
                           "steward_chars": [step["chars"] for step in result["steward"]["steps"]]},
                          ensure_ascii=False))
+        for order in result.get("queue_orders", ()):
+            print(json.dumps({"harness": harness, **order}, ensure_ascii=False))
     return 0
 
 

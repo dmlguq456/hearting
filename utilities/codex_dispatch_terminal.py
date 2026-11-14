@@ -1078,9 +1078,11 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
             or parsed.get("artifact_shape") != "file"):
         return False
     if parsed.get("disposition"):
-        # The owner itself wrote a closed review disposition (e.g. `수정 후 병합`) as its
-        # verdict and named a readable report: a finished review of any capability.
-        return True
+        # The owner wrote a closed review disposition (e.g. `수정 후 병합`) as its verdict:
+        # a finished review of any capability only when its report opens on a closed
+        # negative review verdict and nothing blocks it (route_authority.handoff_search).
+        return (pass_blocker_note(parsed.get("blocker")) is not None
+                and closed_review_kind(artifact_path) in {"fix", "hold"})
     try:
         import route_identity
         path = binding.get("owner_route_file") or binding.get("route_file")
@@ -1097,12 +1099,16 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
 
 # Same whole-line forms/normalization as pr-chain.py (PR #1430). Only the
 # negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
+# A held review (`보류`/`hold`) is a closed judgment too; only a verdict-word
+# handoff reads it (`closed_review_kind`), an audit FAIL still needs `fix`.
 _AUDIT_OPENING_BYTES = 64 * 1024
 _AUDIT_VERDICT_FORMS = (
     ("merge", "최종 판정: 병합 가능"),
     ("merge", "Final verdict: mergeable"),
     ("fix", "최종 판정: 수정 후 병합"),
     ("fix", "Final verdict: changes requested"),
+    ("hold", "최종 판정: 보류"),
+    ("hold", "Final verdict: hold"),
 )
 
 
@@ -1118,21 +1124,25 @@ _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
                 for kind, label in _AUDIT_VERDICT_FORMS}
 
 
-def _completed_negative_audit_report(path):
-    """Read only the first nonblank, non-heading line, like pr-chain.py.
+def closed_review_kind(path):
+    """``merge``, ``fix`` or ``hold`` when the report opens on a closed review verdict.
 
-    The body is not an authority source: no prose, fence, history or conflicting
-    later verdict interpretation. A missing/unreadable opening retains FAIL.
+    Reads only the first nonblank, non-heading line, like pr-chain.py. The body is
+    not an authority source: no prose, fence, history or conflicting later verdict
+    interpretation. A missing, unreadable or differently shaped opening is ``None``,
+    as is anything but a regular file (a pipe or device is never opened).
     """
     if path is None:
-        return False
+        return None
     try:
+        if not Path(path).is_file():
+            return None
         with Path(path).open("rb") as handle:
             remaining = _AUDIT_OPENING_BYTES
             while remaining > 0:
                 raw = handle.readline(remaining + 1)
                 if not raw or len(raw) > remaining:
-                    return False
+                    return None
                 remaining -= len(raw)
                 for line in raw.decode("utf-8").splitlines():
                     line = line.strip()
@@ -1142,12 +1152,17 @@ def _completed_negative_audit_report(path):
                     line = line[:-1].rstrip() if line.endswith(".") else line
                     match = _AUDIT_CLOSED.fullmatch(line)
                     if not match:
-                        return False
+                        return None
                     label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
-                    return _AUDIT_KINDS[label] == "fix"
+                    return _AUDIT_KINDS[label]
     except (OSError, UnicodeError):
         pass
-    return False
+    return None
+
+
+def _completed_negative_audit_report(path):
+    """A legacy audit FAIL reconciles only on a report that opens on `수정 후 병합`."""
+    return closed_review_kind(path) == "fix"
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed
