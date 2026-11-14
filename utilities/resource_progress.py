@@ -1475,9 +1475,35 @@ def _declared_progress_file(run):
     if not isinstance(path, str) or not path:
         return None
     log = run.get("log")
-    if isinstance(log, str) and log and os.path.normpath(path) == os.path.normpath(log + ".progress.json"):
+    if isinstance(log, str) and log and _same_progress_place(run, path, log + ".progress.json"):
         return None
     return path
+
+
+def _same_progress_place(run, path, place):
+    """Whether `path` names the runner's own progress place, however the path is spelled.
+
+    Spelling alone (`normpath`) decides for a run on another host: its paths mean nothing on this
+    machine's disk. A local run's relative (against its cwd), absolute and symlinked spellings of
+    one place, and a hard link to it, are the same place."""
+    if os.path.normpath(path) == os.path.normpath(place):
+        return True
+    if run.get("host_is_local") is False or run.get("path_namespace"):
+        return False
+    cwd = run.get("cwd")
+    try:
+        here = []
+        for item in (path, place):
+            if not os.path.isabs(item):
+                if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+                    return False
+                item = os.path.join(cwd, item)
+            here.append(item)
+        if os.path.realpath(here[0]) == os.path.realpath(here[1]):
+            return True
+        return os.path.samefile(here[0], here[1])
+    except (OSError, ValueError):
+        return False
 
 
 def declaration_note(run):
@@ -1740,7 +1766,13 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
             entries.append(t("resource.elapsed", elapsed=_duration(observation.get("elapsed_seconds"), t)))
         if observation.get("attention"):
             entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
-        entries.append(t(_UNDECLARED_TEXT[undeclared]))
+        if _UNDECLARED_TEXT[undeclared] == "resource.progress_not_visible":
+            # A progress file the run named is a file, not a folder: say which one was declared.
+            file_declared = bool(_declared_progress_file(run)) and not run.get("output_dir")
+            entries.append(t("resource.progress_not_visible", what=t(
+                "resource.progress_word_file" if file_declared else "resource.progress_word_folder")))
+        else:
+            entries.append(t(_UNDECLARED_TEXT[undeclared]))
     elif event_kind == "final":
         entries.append(f"status={run.get('status') or 'unknown'}; exit={run.get('exit_code')}")
         entries.append(t("resource.final_metrics", latest=points("latest_metrics", latest),
