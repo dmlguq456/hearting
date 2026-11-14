@@ -769,8 +769,10 @@ def _verdict_pr(text: str) -> str | None:
 
 
 def _request_pr(request) -> str | None:
-    """The one PR the route's request names, else None (none, or more than one)."""
-    named = {next(value for value in found.groups() if value) for found in _VERDICT_PR.finditer(str(request or ""))}
+    """The one PR the request's first line (its title) names, else None (none, or more than one).
+    The body names PRs as references, not as this work's."""
+    title = next((line for line in str(request or "").splitlines() if line.strip()), "")
+    named = {next(value for value in found.groups() if value) for found in _VERDICT_PR.finditer(title)}
     return next(iter(named)) if len(named) == 1 else None
 
 
@@ -859,11 +861,19 @@ def _unnegated(text: str) -> str:
 # A row that says what a check did before the fix ("고치기 전 코드로 돌리면 FAIL"): the evidence that the
 # check can fail, not a failure now. Its pass/fail words cannot be told from the checks that ran
 # on the finished work, so such a row is never counted and a group holding one gives no numbers.
+# "전/이전" counts only when the word ends there (space, mark, line end or a particle): "변경 전체",
+# "구현 전반", "수정 전략" are other words. "수정하지 않은" counts only before the thing it ran on.
+_BEFORE_END = r"(?=$|[\s,.;:·()\[\]（）…—–/-]|(?:에는|에서|에도|에|엔|의|은|는|이|가|도|부터)(?![가-힣]))"
 _BEFORE_FIX = re.compile(
-    r"(?:고치|수정하|패치하|변경하|적용하|구현하)기\s*(?:전|이전)|(?:수정|패치|변경|적용|구현)\s*(?:전|이전)"
-    r"|(?:고치|수정하|패치하)지\s*않은|되돌린\s*(?:코드|트리)"
+    r"(?:(?:고치|수정하|패치하|변경하|적용하|구현하)기|(?:수정|패치|변경|적용|구현))\s*(?:전|이전)" + _BEFORE_END
+    + r"|(?:고치|수정하|패치하)지\s*않은\s*(?:코드|트리|사본|상태|hook|base|HEAD)|되돌린\s*(?:코드|트리)"
     r"|\b(?:before|prior to|without)\s+(?:the\s+|this\s+|my\s+|our\s+)?(?:fix|patch|changes?)\b"
     r"|\bpre-?fix\b|\bunfixed\b|\bbefore fixing\b", re.I)
+# What the before-fix phrase says runs up to the words that turn to the finished work; a failure
+# word anywhere else on that row (ahead of the phrase, or after "고친 뒤"/"after"/"지금") is a failure now.
+_AFTER_FIX = (r"(?:고친|수정한|패치한|적용한|구현한|변경한|수정|패치|적용|구현|변경)\s*(?:뒤|후)|이후|이제|지금|현재"
+              r"|\b(?:after|now|then)\b")
+_BEFORE_CLAUSE = re.compile("(?:" + _BEFORE_FIX.pattern + r").*?(?=" + _AFTER_FIX + r"|$)", re.I)
 
 
 def _command_failures(line) -> int:
@@ -953,7 +963,12 @@ def _failure_kind(line, *, verified=False) -> str | None:
     rest = _unnegated(text)
     if verified:
         if _BEFORE_FIX.search(text):
-            return None  # what the check did before the fix is not a failure now
+            # What the check did before the fix is not a failure now; a failure word outside that
+            # clause, or a row that says it still fails, is: it points at the report.
+            outside = _unnegated(_BEFORE_CLAUSE.sub(" ", text))
+            failed = (_STILL_FAILING.search(text) or _ERROR_WORD.search(outside)
+                      or any(match.group(0).lower() in {"fail", "failed", "실패"} for match in _COMMAND_RESULT.finditer(outside)))
+            return "check" if failed else None
         if _COMMAND_LINE.search(text):
             return "check" if _command_failures(text) else None
         return "check" if _failure_kind(_UNRUN_WORD.sub(" ", text)) == "failure" else None

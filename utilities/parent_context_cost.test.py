@@ -601,6 +601,21 @@ class SummaryContentTest(unittest.TestCase):
                           work_intent.report_pr_urls(report, request="PR #1637 검토")), ("", []))
         self.assertEqual(self.carried(self.summary(report, "PR #1637 검토")), ([], []))
 
+    def test_a_pr_the_request_body_names_for_reference_is_not_this_works(self):
+        # Only the request's first line (its title) says which PR this work is about; a body that
+        # mentions another PR as a reference carries no PR line or link.
+        report = self.CLOSED + "## 근거\n" + self.EVIDENCE.replace("- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n", "")
+        report += "- PR #1636 · head 54922faf6 · CI 15/15 통과\n"
+        for request in ("# 겹치는 파일 정리\n\nPR #1636과 겹치는 파일을 정리한다", "# 후속 정리\n\n앞 PR #1636의 후속 정리",
+                        "\n\n# 정리\n본문 https://github.com/o/r/pull/1636"):
+            with self.subTest(request=request):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+                self.assertEqual(self.carried(self.summary(report, request)), ([], []))
+        # The title naming the PR still carries it (and a blank first line is skipped).
+        for request in ("# 검토 — PR #1636\n\nPR #1637과 비교", "\n# 검토 — PR #1636\n본문"):
+            self.assertTrue(work_intent.report_publication(report, request).startswith("#1636 · head 54922faf6 · CI 15/15"))
+
     def test_no_other_pr_is_carried_whatever_its_head(self):
         # R3's synthetic shapes: another PR's line or link is never carried, with or without a
         # head that matches the verdict's, a merge's second head, a fenced example or a section

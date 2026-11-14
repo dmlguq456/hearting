@@ -465,6 +465,32 @@ class CompletionSummaryTest(unittest.TestCase):
         checks, _result = self._checks_and_result([failing])
         self.assertEqual(checks, "검증: 명령 1개 · 통과 1 · 실패 1")
 
+    def test_a_failure_now_on_the_same_row_as_the_before_the_fix_words_is_still_seen(self):
+        # The before-fix clause is the evidence; a failure word outside it is a failure now, and
+        # a word that only starts like the phrase ("변경 전체") is not the phrase at all.
+        passed = "`python3 tools/run-tests.py --select utilities/a.test.py`: 22 passed"
+        for row in ("`bash x.test.sh`: 고치기 전 FAIL 1, 고친 뒤에도 여전히 FAIL 1",
+                    "`python3 tools/run-tests.py --select b`: 고친 뒤 20 passed, 2 failed (고치기 전 5 failed)",
+                    "`pytest b`: before the fix 3 failed; after the fix 1 failed",
+                    "`python3 tools/run-tests.py` 변경 전체 묶음: 40 passed, 2 failed",
+                    "`python3 tools/run-tests.py` 구현 전반 시험: PASS 40 · FAIL 2",
+                    "`python3 tools/run-tests.py --select s` (수정 전략 시험): FAIL 1",
+                    "`pytest c`: 2 failed (fails without the patch too)",
+                    "`python3 tools/run-tests.py` 수정하지 않은 모듈 시험 FAIL 1",
+                    "로컬에서 FAIL 1건이 남는다. 수정 전 HEAD 파일에서도 똑같이 실패한다"):
+            with self.subTest(row=row):
+                result = self._checks_and_result([passed, row])[1]
+                self.assertNotEqual(result, "결과: 완료")
+                self.assertIn("확인", result)
+        # Words that end the phrase (space, mark, particle, line end) are still the evidence.
+        for row in ("`bash x.test.sh`: 수정 전에는 FAIL 1, 수정 후 PASS 22·FAIL 0", "`bash x.test.sh`: 수정 전 FAIL 1 · 수정 후 PASS 22",
+                    "`bash x.test.sh`: 고치기 전(FAIL 1) 고친 뒤 PASS 22", "고치지 않은 코드로 돌리면 FAIL 이었다"):
+            with self.subTest(row=row):
+                self.assertEqual(self._checks_and_result([passed, row])[1], "결과: 완료")
+        # A look-alike row is a row like any other: its numbers are counted.
+        checks, _result = self._checks_and_result(["`python3 tools/run-tests.py` 변경 전체 묶음: 40 passed, 2 failed"])
+        self.assertEqual(checks, "검증: 명령 1개 · 통과 1 · 실패 1")
+
     def test_command_line_with_only_an_error_word_is_not_zero_failures(self):
         self.report.write_text("## 검증\npython3 tools/check.py -> 오류 발생\n")
         text = WI.completion_summary(self.route, self.report)
@@ -525,14 +551,17 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertIn("전체 시험은 서버 부하로 돌리지 않음", lines[5])
         self.assertIn("2주 뒤 전달 비율 확인", lines[5])
         self.assertEqual(lines[6], "독립 리뷰 없이 닫힌 노드: review")
-        self.assertEqual(lines[7], f"산출물: {self.report} · PR https://github.com/o/r/pull/12")
+        self.assertEqual(lines[7], f"산출물: {self.report}")  # the request body names PR #12 only as a reference
         self.assertNotIn("\n\n", text)
 
-    def test_a_pr_the_report_names_is_carried_only_when_the_request_names_it(self):
+    def test_a_pr_the_report_names_is_carried_only_when_the_requests_title_names_it(self):
         # The report's follow-up line links pull/12; no verdict line or title names a PR.
-        text = WI.completion_summary(self.route, self.report, route_file=self.route_file)
-        self.assertTrue(text.splitlines()[-1].endswith(" · PR https://github.com/o/r/pull/12"))
-        for request in ("Fix the summary", "PR #12와 PR #13 비교"):
+        for request in ("PR #12 정리", "\nPR #12 정리\n\n본문 PR #13"):
+            with self.subTest(request=request):
+                route = {**self.route, "work_request": {"text": request, "owner_harness": None}}
+                text = WI.completion_summary(route, self.report, route_file=self.route_file)
+                self.assertTrue(text.splitlines()[-1].endswith(" · PR https://github.com/o/r/pull/12"))
+        for request in ("Fix the summary", "PR #12와 PR #13 비교", "Fix the summary\n\nBody. Follows PR #12."):
             with self.subTest(request=request):
                 route = {**self.route, "work_request": {"text": request, "owner_harness": None}}
                 lines = WI.completion_summary(route, self.report, route_file=self.route_file).splitlines()
@@ -669,7 +698,7 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.assertTrue(lines[4].startswith("Checks: "))
         self.assertTrue(lines[5].startswith("Unverified / remaining: "))
         self.assertEqual(lines[6], "Nodes closed without independent review: review")
-        self.assertEqual(lines[7], f"Artifact: {self.report} · PR https://github.com/o/r/pull/12")
+        self.assertEqual(lines[7], f"Artifact: {self.report}")  # the request body names PR #12 only as a reference
         runtime_lines = lines[:3] + lines[6:7] + [lines[7].split(str(self.report))[0]]   # not the report's own words
         self.assertIsNone(re.search(r"[\uac00-\ud7a3]", "\n".join(runtime_lines)))
 
