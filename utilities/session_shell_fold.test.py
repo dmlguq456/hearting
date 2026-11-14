@@ -95,8 +95,11 @@ const model={tag:'[e9]',styles,repo_side:[P('hearting','loc_repo')],selected:[P(
  route_label:'route 3 ⠏2 ✕1',route_count:3,route_total:3,messages_new:2,
  routes:[{title:'패널 자동 접힘 기준 60칸',kind:'working',paint:{glyph:P('⠸','g_spin')}},{title:'LAB 표 칸 정리',kind:'working',paint:{glyph:P('⠸','g_spin')}},
   {title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕','g_dead')}}],lab:{strip:[P('!1','lvl_r'),P('LB','dim')],strip_attention:true}};
-const question=()=>[[P('◑ QUESTIONS 1 · 1/1','g_blocked')],[P('접힌 모양을 어느 안으로 할까요?','loc_repo')],[P('Ctrl+] · 답 필요','dim')]];
-const strip=(o={},m={})=>v.render({width:120,height:4,folded:true,model:{...model,...m},state:'working',frame:3,harness:'claude',questions:question,...o});
+// The question's summary (11-15): the strip's row of what to do carries its first line.
+const ask=(choices=[])=>()=>({count:1,label:'QUESTIONS',rows:[[P('◑ ','g_blocked'),P('접힌 모양을 어느 안으로 할까요?','loc_repo')],[P('  ','dim'),...choices]],
+ one:[[P('◑ ','g_blocked'),P('접힌 모양을 어느 안으로 할까요?','loc_repo')]],line:[P('접힌 모양을 어느 안으로 할까요?','loc_repo')],choices:choices.length?2:0});
+const question=ask();
+const strip=(o={},m={})=>v.render({width:120,height:4,folded:true,model:{...model,...m},state:'working',frame:3,harness:'claude',brief:question,...o});
 const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
 let r=strip(),rows=text(r);
 // Four rows the window's width, one placement for every harness (side or not, left or right).
@@ -109,12 +112,20 @@ assert(rows.every(s=>cells(s)===120),rows.join('\n'));
 for(const o of [{side:true},{side:true,configuration:{position:'left'}},{harness:'codex'},{harness:'opencode'},{configuration:{layout:'bottom'}}])
  assert.deepEqual(text(strip(o)),rows,JSON.stringify(o));
 // The rule takes the messages' line color, `▴` and the labels are dim; no frame, gear, beat or moving rule:
-// only the session's glyph turns. A press anywhere opens the panel.
+// only the session's glyph turns. A press on the rule or the session or routes row opens the panel;
+// the row of what to do, carrying the question, opens the question popup (11-15).
 assert.equal(r.rows[0][0].role,'messages');assert(r.rows[0].at(-1).text==='▴'&&r.rows[0].at(-1).dim);
 for(const word of ['CTX ','MESSAGES',' LAB'])assert(r.rows.flat().find(x=>x.text===word).dim===true,word);
 assert(!/[┌┐└┘⚙⚑]/.test(rows.join(''))&&r.motion===null&&!r.rows.flat().some(x=>x.beat||x.motion),rows.join('\n'));
 assert.deepEqual([r.spins,r.animated],[[1],true]);
-assert.deepEqual(r.hits,[0,1,2,3].map(row=>({row,left:0,right:119,action:'unfold'})));
+assert.deepEqual(r.hits,[0,1,2,3].map(row=>({row,left:0,right:119,action:row===2?'question':'unfold'})));
+// Where cells are left the question's choices follow on its row, whole, else their count alone (11-15).
+const choices=[P('1 ','dim'),P('아래 두 줄','loc_repo'),P(' · 2 ','dim'),P('옆 띠','loc_repo')];
+assert.equal(text(strip({brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? · 1 아래 두 줄 · 2 옆 띠');
+assert.equal(text(strip({width:56,brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? · +2');
+assert.equal(text(strip({width:48,brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요?');
+// No question to answer here (a wait answered elsewhere): the row opens the panel as the rest do.
+assert.equal(strip({brief:()=>null}).hits[2].action,'unfold');
 // Only failed routes' titles; none failed, the running ones'.
 const running=text(strip({},{route_label:'route 2 ⠏2',routes:model.routes.slice(0,2),route_count:2,route_total:2}))[3].trimEnd();
 assert.equal(running,'2 ROUTE ⠏2 │ ⠸ 패널 자동 접힘 기준 60칸 │ ⠸ LAB 표 칸 정리 │ MESSAGES ←2 │ !1 LAB');
@@ -146,8 +157,8 @@ const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5'),P(' ')
  quota:[P('5h '),P('12%'),P('(↻ 2h 0m)'),P(' │ '),P('7d '),P('66%'),P('(↻ 5d 0h)')],wait:'◑답 대기 1',
  route_label:'route 3 ⠏2 ✕1',route_count:3,messages_new:2,routes:[{title:'a',kind:'working'},{title:'b',kind:'working'},{title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕')}}],
  lab:{strip:[P('!1'),P('LB')],strip_attention:true}};
-const question=()=>[[P('◑ head')],[P('접힌 모양을 어느 안으로 할까요?')],[P('Ctrl+]')]];
-const rows=w=>v.render({width:w,height:4,folded:true,model,state:'idle',harness:'claude',questions:question}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
+const question=()=>({count:1,rows:[[P('◑ '),P('접힌 모양을 어느 안으로 할까요?')]],one:[[P('◑ '),P('접힌 모양을 어느 안으로 할까요?')]],line:[P('접힌 모양을 어느 안으로 할까요?')],choices:0});
+const rows=w=>v.render({width:w,height:4,folded:true,model,state:'idle',harness:'claude',brief:question}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // (A row keeps one blank cell at its right end: `w` columns hold `w - 1` cells.)
 const session=[[90,'● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━━━──── 58% │ 5h 12%(↻ 2h 0m) │ 7d 66%(↻ 5d 0h)'],
@@ -161,7 +172,7 @@ const routes=[[54,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2
  [44,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험'],[30,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시…'],[24,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 …'],[23,'3 ROUTE ⠏2 ✕1'],[12,'3 ROUTE ⠏2…']];
 for(const [w,want] of routes)assert.equal(rows(w)[3],want,String(w));
 // No row runs past the window, at any width.
-for(let w=1;w<=200;w++)for(const row of v.render({width:w,height:4,folded:true,model,state:'working',harness:'claude',questions:question}).rows)
+for(let w=1;w<=200;w++)for(const row of v.render({width:w,height:4,folded:true,model,state:'working',harness:'claude',brief:question}).rows)
  assert(cells(row.map(x=>x.text).join(''))===w,w+' '+row.map(x=>x.text).join(''));
 """)
 
@@ -176,7 +187,7 @@ assert.deepEqual(d.FOLD_ROWS,[24,16]);
 assert.deepEqual([60,40,24,23,16,15,12,6,3,2,1].map(d.foldRows),[4,4,4,3,3,2,2,2,2,1,1]);
 const P=t=>({text:t});
 const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5')],context_side:[P('━━── 58%')],wait:'◑답 대기 1',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]};
-const draw=(height,m={})=>v.render({width:60,height,folded:true,model:{...model,...m},state:'idle',harness:'claude',questions:()=>[[P('head')],[P('Q?')]]}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
+const draw=(height,m={})=>v.render({width:60,height,folded:true,model:{...model,...m},state:'idle',harness:'claude',brief:()=>({count:1,rows:[[P('◑ '),P('Q?')]],one:[[P('◑ '),P('Q?')]],line:[P('Q?')],choices:0})}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
 assert.deepEqual(draw(4),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?','1 ROUTE ⠏1 │ · run']);
 assert.deepEqual(draw(3),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?']);
 assert.deepEqual(draw(2),['─'.repeat(58)+' ▴','◑답 대기 1 · Q?']);

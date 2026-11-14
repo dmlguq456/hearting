@@ -293,10 +293,27 @@ module.exports=function({changed,answer,action,page}) {
     changed();return Buffer.alloc(0);
   }
   // The first input after an answer returned focus: a lone Esc within a few seconds was meant
-  // for the block it left (rule 5), so it is taken here; any other input goes on as typed.
+  // for the popup it left (rule 5), so it is taken here, and so is a lone Enter (11-15: the
+  // second press of an Enter meant for the popup never submits the native input's text); any
+  // other input goes on as typed.
   function answeredEscape(data){
     const fresh=answeredAt&&Date.now()-answeredAt<10000;answeredAt=0;
-    return !!fresh&&data.length===1&&data[0]===0x1b;
+    return !!fresh&&data.length===1&&[0x1b,0x0d,0x0a].includes(data[0]);
   }
-  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,sent:sentLines,references};
+  // 11-15 (popup design A): the panel's summary of the question Ctrl+] opens on (the one shown,
+  // else the first answerable one): how many there are, its two-row and one-row forms and its
+  // whole first line, from the backend's rows at the panel's width. The popup reads it whole.
+  function summary(){
+    const listed=flat();if(!listed.length)return null;
+    let row=current();
+    if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}
+    const view=(row||listed[0]).question.display||{};
+    const fallback=[[span('◑ ','g_blocked'),span((row||listed[0]).question.question||'?','loc_repo')]];
+    return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),
+      line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length};
+  }
+  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
+    get question(){return !!current();},enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+    // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
+    wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};
 };

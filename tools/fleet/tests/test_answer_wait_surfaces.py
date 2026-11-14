@@ -446,7 +446,7 @@ try {
             command = herdr_projection._metadata_command("herdr", "claude", "sid-a", "pane-a")
         self.assertIn("--title", command)
         title = command[command.index("--title") + 1]
-        self.assertIn("◑답변 필요", title)
+        self.assertIn("◑답 필요", title)
         self.assertIn("기존 제목", title)
         with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"}), \
              mock.patch.object(herdr_projection, "session_title", return_value="title"), \

@@ -495,8 +495,8 @@ class HumanWaitStateTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines, [
             "tmux [-S] [%s] [list-clients] [-F] [#{client_name}]" % sock,
-            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답변 필요: 배포 ##1 진행?]" % sock,
-            "notify-send [-a] [Hearting] [--] [◑답변 필요] [배포 #1 진행?]",
+            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답 필요: 배포 ##1 진행?]" % sock,
+            "notify-send [-a] [Hearting] [--] [◑답 필요] [배포 #1 진행?]",
         ])
 
     @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notification words
@@ -515,7 +515,7 @@ class HumanWaitStateTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         herdr = [line for line in lines if line.startswith("herdr ")]
         self.assertEqual(len(herdr), 3)
-        self.assertTrue(all(line.startswith("herdr notification show ◑답변 필요 · ") and "--sound request" in line
+        self.assertTrue(all(line.startswith("herdr notification show ◑답 필요 · ") and "--sound request" in line
                             for line in herdr))
         self.assertEqual(sum("[display-message] [-c] [/dev/pts/9]" in line for line in lines), 1)
         self.assertFalse(any(line.startswith("notify-send") for line in lines))

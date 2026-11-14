@@ -352,7 +352,7 @@ const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
                            for row in result['questions'] if row.get('request_state') is None]
                     with self.subTest(check='box head'):
                         self.assertEqual([head.split(' · ')[:2] for head in heads],
-                                         [['◑ '+ui_text('fleet.session_block.questions')+' 1','1/1']]*count)
+                                         [['◑ 1 '+ui_text('fleet.session_block.questions'),'1/1']]*count)
                     self.assertEqual(result['panel']['wait'],answer_wait_word()+' '+str(count) if count else '')
                     self.assertEqual([(row['id'],row.get('request_state'),row.get('sent')) for row in result['questions']],
                                      [(i['id'],'submitted' if i is sent else None,['Beta'] if i is sent else None)
