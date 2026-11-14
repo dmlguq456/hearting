@@ -450,6 +450,119 @@ def prompt_block(route) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The owner that actually ran, named where people read when it is not the one asked for
+# ---------------------------------------------------------------------------
+
+_LIMIT_STATE = re.compile(r"^(?:usage-)?limited\((?P<detail>.*)\)$")
+
+
+def requested_owner(route) -> str | None:
+    """The owner harness the work asked for (`--owner` / `--pin owner=`), or None for automatic."""
+    if not isinstance(route, dict):
+        return None
+    try:
+        from route_authority import sealed_pin_harness
+        pinned = sealed_pin_harness(route, worker_type="owner")
+    except Exception:  # noqa: BLE001 -- an unreadable pin change falls back to the sealed request
+        pinned = None
+    request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
+    return pinned or request.get("owner_harness") or None
+
+
+def launched_owner(launches) -> dict:
+    """What the last owner launch receipt says ran; `{}` when no owner harness was selected.
+
+    Reads the receipt lines the selector and the wrapper already print: `adapter`/`owner_harness`,
+    `model`, `model_profile`, `explicit_adapter` and each `rejected.<n>=<harness>:<state>`."""
+    for launch in reversed(list(launches or [])):
+        receipt = str((launch or {}).get("receipt") or "") if isinstance(launch, dict) else ""
+        lines = receipt.splitlines()
+        if "worker_type=owner" not in lines:
+            continue
+        first, last, rejected = {}, {}, {}
+        for line in lines:
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            if key.startswith("rejected."):
+                harness, _, state = value.partition(":")
+                rejected.setdefault(harness, state)
+            first.setdefault(key, value)
+            last[key] = value
+        harness = last.get("owner_harness") or last.get("adapter")
+        if not harness or harness == "-":
+            return {}
+        found = {"harness": harness, "rejected": rejected}
+        for key, name in (("model", "model"), ("model_profile", "profile"), ("selection_source", "source")):
+            if last.get(key) not in (None, "", "-"):
+                found[name] = last[key]
+        if first.get("explicit_adapter") not in (None, "", "none"):
+            found["requested"] = first["explicit_adapter"]
+        return found
+    return {}
+
+
+def _local_reset(detail, tz=None) -> str | None:
+    try:
+        stamp = datetime.fromisoformat(str(detail).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        return None
+    return stamp.astimezone(tz).strftime("%m-%d %H:%M")
+
+
+def _owner_words(harness, model, profile, sealed_profile, t) -> str:
+    words = " ".join(part for part in (harness, model) if part)
+    if profile and sealed_profile and profile != sealed_profile:
+        return words + "(" + t("owner.tier_changed", sealed=sealed_profile, actual=profile) + ")"
+    return words + (f"({profile})" if profile else "")
+
+
+def owner_change_line(route, launches, *, t=None, tz=None) -> str | None:
+    """`[경로]`'s one line when the owner that started is not the harness the work asked for.
+
+    None when nothing was asked for, nothing started, or the asked-for harness started."""
+    actual = launched_owner(launches)
+    requested = actual.get("requested") or requested_owner(route)
+    if not actual or not requested or actual["harness"] == requested:
+        return None
+    t = t or ui_translator()
+    state = (actual.get("rejected") or {}).get(requested)
+    match = _LIMIT_STATE.match(state or "")
+    if match:
+        detail = match.group("detail")
+        when = _local_reset(detail, tz)
+        reason = (t("owner.reason.limited_reset", harness=requested, when=when) if when
+                  else t("owner.reason.model_unavailable", harness=requested)
+                  if detail.startswith("provider-model-unavailable") else t("owner.reason.limited", harness=requested))
+    elif state:
+        reason = t("owner.reason.state", harness=requested, state=state)
+    else:
+        reason = t("owner.reason.selected", source=actual.get("source") or "-")
+    words = _owner_words(actual["harness"], actual.get("model"), actual.get("profile"),
+                         route.get("owner_model_profile") if isinstance(route, dict) else None, t)
+    return t("owner.changed", requested=requested, actual=words, reason=reason)
+
+
+def owner_summary_line(route, owner, *, t=None) -> str | None:
+    """The completion summary's one line naming the owner that ran when it differs from the request.
+
+    `owner` is the owner attempt's registry metadata (`harness`, `resolved_model`/`model`,
+    `model_profile`); None or the requested harness adds no line."""
+    if not isinstance(owner, dict):
+        return None
+    harness = owner.get("harness") or owner.get("owner_harness")
+    requested = requested_owner(route)
+    if not harness or not requested or harness == requested:
+        return None
+    t = t or ui_translator()
+    words = _owner_words(harness, owner.get("resolved_model") or owner.get("model"), owner.get("model_profile"),
+                         route.get("owner_model_profile"), t)
+    return t("completion.owner_changed", actual=words, requested=requested)
+
+
+# ---------------------------------------------------------------------------
 # The end: one mechanical completion summary, sealed with the owner envelope
 # ---------------------------------------------------------------------------
 
@@ -803,7 +916,7 @@ def _entrance_line(route, primary, t):
 
 
 def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None, assessment=None,
-                       publication=None) -> str:
+                       publication=None, owner=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -826,6 +939,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         original = (t("completion.intent_original", original=_line(intent["original"], 100))
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
+    owner_line = owner_summary_line(route, owner, t=t)
+    if owner_line:
+        lines.append(owner_line)
     try:
         text = Path(primary).read_text(encoding="utf-8") if primary else ""
     except (OSError, UnicodeError):
