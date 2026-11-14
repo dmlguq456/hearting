@@ -5,8 +5,12 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
 
     ``subagent-model``  headless, the model spawns a built-in sub-agent with no
                         model and a Hearting catalog agent that carries a pin;
-                        the oracle is the ``model`` of the sub-agent's own
-                        request at the loopback model.
+                        then, in a registered owner worker's home built from
+                        the same home (``tools/profile/build-home.py``), it
+                        names ``light``, ``balanced`` and ``deep``. The oracle
+                        is the ``model`` of each sub-agent's own request at the
+                        loopback model; a worker spawn passes when it carries
+                        the model its definition pins.
 
 The role default is the portable ``light`` profile
 (``utilities/native_agents.py`` ``NATIVE_SUBAGENT_PROFILE``): Claude injects it
@@ -65,6 +69,21 @@ OPENCODE_LIGHT, OPENCODE_DEEP = "hearting-light", "hearting-deep"
 # (built-in agent with no model, catalog agent with a pin) per harness.
 AGENTS = {"claude": ("Explore", "deep"), "codex": ("default", "deep"),
           "opencode": ("general", "deep")}
+# The agents a worker calls by name (build-home.py WORKER_NATIVE_AGENTS).
+WORKER_AGENTS = ("light", "balanced", "deep")
+WORKER = "worker-"   # marker label prefix of a spawn inside the worker home
+
+BUILD_WORKER = r"""
+import json, os, sys
+from pathlib import Path
+source, harness, identity = sys.argv[1:4]
+sys.path.insert(0, source + "/utilities")
+import worker_runtime_home as w
+values = w.prepare_worker_home(Path(source), harness, "owner", identity, env=dict(os.environ))
+env = {**os.environ, **{k: v for k, v in values.items() if v is not None}}
+args = {"claude": w.claude_worker_arguments, "codex": w.codex_worker_arguments}.get(harness)
+print(json.dumps({"values": values, "argv": args(env) if args else []}))
+"""
 
 
 def _source() -> Path:
@@ -130,6 +149,12 @@ class SubagentModelScenario(Scenario):
     def markers(self, agent: str):
         return f"SUBMODEL-MAIN-{agent}-{self.nonce}", f"SUBMODEL-SUB-{agent}-{self.nonce}"
 
+    @staticmethod
+    def labels(harness: str):
+        """``{marker label: agent type}`` of every spawn this scenario drives."""
+        return {**{agent: agent for agent in AGENTS[harness]},
+                **{WORKER + agent: agent for agent in WORKER_AGENTS}}
+
     # -- per harness home --------------------------------------------------
     def prepare(self, run):
         getattr(self, f"_prepare_{run.harness}", lambda _run: None)(run)
@@ -183,7 +208,7 @@ class SubagentModelScenario(Scenario):
     # -- model script --------------------------------------------------------
     def script(self, run):
         def answer(record, earlier):
-            for agent in AGENTS[run.harness]:
+            for agent, agent_type in self.labels(run.harness).items():
                 main, sub = self.markers(agent)
                 if ce._is_sub(record, main, sub):
                     return Reply(f"sub done {agent}")
@@ -196,7 +221,7 @@ class SubagentModelScenario(Scenario):
                         return Reply(shell=ce.wait_call(found.group(1)))
                     return Reply(f"parent done {agent}")
                 if not any(c.startswith("spawn:") for c in calls):
-                    return Reply(shell=ce.spawn_call(agent, f"{sub} say hi"))
+                    return Reply(shell=ce.spawn_call(agent_type, f"{sub} say hi"))
                 return Reply(f"parent done {agent}")
             return Reply("OK")
         return answer
@@ -204,33 +229,107 @@ class SubagentModelScenario(Scenario):
     def session_model(self, harness: str) -> str:
         return _codex_session() if harness == "codex" else base.FIXTURE_MODEL
 
-    def spawn(self, run, agent: str) -> dict:
+    def spawn(self, run, agent: str, env=None, extra=()) -> dict:
         main, sub = self.markers(agent)
         argv = {"claude": [run.binary, "-p", "--model", base.FIXTURE_MODEL, "--permission-mode",
                            "bypassPermissions"],
                 "codex": [run.binary, "exec", "--skip-git-repo-check"],
                 "opencode": [run.binary, "run"]}[run.harness]
         start = len(run.fixture.requests)
-        done = subprocess.run([*argv, f"{main} spawn one sub-agent"], env=run.home.env,
+        done = subprocess.run([*argv, *extra, f"{main} spawn one sub-agent"],
+                              env=run.home.env if env is None else env,
                               cwd=str(run.home.workspace), text=True, capture_output=True,
                               timeout=240, stdin=subprocess.DEVNULL)
         time.sleep(2)
         records = run.fixture.requests[start:]
         subs = [r.get("model") for r in records if ce._is_sub(r, main, sub)]
         mains = [r.get("model") for r in records if main in r["text"] and r["main"]]
-        return {"exit": done.returncode, "sub_models": subs, "session_models": sorted(set(mains)),
-                "stderr_tail": done.stderr[-300:] if done.returncode else ""}
+        row = {"exit": done.returncode, "sub_models": subs, "session_models": sorted(set(mains)),
+               "stderr_tail": done.stderr[-300:] if done.returncode else ""}
+        if "stream-json" in extra:
+            # Claude's start record lists the agent types this session loaded.
+            for line in done.stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    row["session_agents"] = sorted(event.get("agents") or [])
+                    break
+        return row
+
+    # -- the same home through a registered owner worker's home ---------------
+    @staticmethod
+    def _pinned_model(path: Path):
+        found = re.search(r'(?m)^model\s*[:=]\s*"?([^"\s]+)"?\s*$', path.read_text(encoding="utf-8"))
+        return found.group(1) if found else None
+
+    def worker_definitions(self, run, values: dict) -> dict:
+        """``{agent: pinned model or None}`` the worker session reads its agents from."""
+        home = Path(values["HEARTING_WORKER_HOME"])
+        agents = home / "agents"
+        suffix = ".toml" if run.harness == "codex" else ".md"
+        if run.harness == "opencode" and not agents.is_dir():
+            # A V2 worker's shared service reads the home's own agents (build-home.py).
+            agents = Path(run.home.env["XDG_CONFIG_HOME"]) / "opencode" / "agents"
+        return {name: (self._pinned_model(agents / f"{name}{suffix}")
+                       if (agents / f"{name}{suffix}").is_file() else None)
+                for name in WORKER_AGENTS}
+
+    def worker(self, run) -> dict:
+        # The builder tells an OpenCode V2 runtime from V1 by the binary it runs.
+        build_env = ({**run.home.env, "OPENCODE_BIN": run.binary} if run.harness == "opencode"
+                     else run.home.env)
+        built = subprocess.run([sys.executable, "-B", "-c", BUILD_WORKER, str(_source()), run.harness,
+                                f"att-subagent-model-{self.nonce}"], env=build_env, text=True,
+                               capture_output=True, timeout=120)
+        if built.returncode != 0:
+            return {"verdict": "fail", "error": built.stderr[-400:]}
+        launch = json.loads(built.stdout.strip().splitlines()[-1])
+        values = launch["values"]
+        env = {key: value for key, value in build_env.items() if key not in values}
+        env.update({key: value for key, value in values.items() if value is not None})
+        manifest = Path(values["HEARTING_WORKER_HOME"]) / "worker-home.json"
+        result = {"home_agents": json.loads(manifest.read_text(encoding="utf-8")).get("native_agents"),
+                  "definitions": self.worker_definitions(run, values), "spawns": {}}
+        extra = list(launch["argv"])
+        if run.harness == "claude":
+            extra += ["--output-format", "stream-json", "--verbose"]
+        for agent in WORKER_AGENTS:
+            result["spawns"][agent] = self.spawn(run, WORKER + agent, env=env, extra=extra)
+        listed = [row.get("session_agents") for row in result["spawns"].values()]
+        if run.harness == "claude":
+            result["session_agents"] = listed[0]
+        failures = []
+        for agent, row in result["spawns"].items():
+            want, got = result["definitions"][agent], row["sub_models"]
+            # Claude sends an alias pin (`sonnet`) as the model id it resolves to.
+            same = bool(want and got) and (got[0] == want or want.split("/")[-1] == got[0]
+                                           or want in re.split(r"[^a-z0-9]+", got[0].lower()))
+            if not same:
+                failures.append(f"{agent}: definition {want or 'missing'} -> {got or 'no sub request'}")
+        if run.harness == "claude" and not set(WORKER_AGENTS) <= set(result["session_agents"] or ()):
+            failures.append(f"session agents {result['session_agents']}")
+        result["verdict"] = "fail" if failures else "pass"
+        result["failures"] = failures
+        return result
 
     def drive(self, run):
         builtin, pinned = AGENTS[run.harness]
         ev = run.evidence
         ev["builtin"] = {"agent": builtin, **self.spawn(run, builtin)}
         ev["pinned"] = {"agent": pinned, **self.spawn(run, pinned)}
+        ev["worker"] = self.worker(run)
         session = self.session_model(run.harness)
         b, p = ev["builtin"]["sub_models"], ev["pinned"]["sub_models"]
         run.note(f"session={session}; {builtin} (no model) -> {b or 'no sub request'}; "
                  f"{pinned} (pinned) -> {p or 'no sub request'}")
-        if not b or not p:
+        run.note("worker by name: " + "; ".join(
+            f"{agent} -> {row['sub_models'] or 'no sub request'}"
+            for agent, row in ev["worker"].get("spawns", {}).items()))
+        if not b or not p or ev["worker"]["verdict"] != "pass":
+            for failure in ev["worker"].get("failures", ()):
+                run.note("worker " + failure)
             return "fail"
         if b[0] == session:
             run.note("the built-in sub-agent inherited the session model")
