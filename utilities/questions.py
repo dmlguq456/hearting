@@ -201,7 +201,7 @@ def render(board, rows, folded):
     if not board.get("complete"):
         head += " · observation incomplete"
     lines = [head]
-    recommended_label = HWS.ui_translator()("fleet.session_block.recommended")
+    recommended_label = "recommended"
     for row in rows:
         place = " · " + row["project"] if row.get("project") else ""
         lines.append("%s  %s · %s%s · %s" % (row["id"], row["kind"], row["age"], place,

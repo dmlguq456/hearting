@@ -725,7 +725,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "narrow", "auxiliary", "height", "side", "bottom", "compact", "summary",
         "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
-        "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
+        "theme_mono", "shade", "shade_none", "shade_light", "shade_medium",
+        # 11-15: the table popups' keys (the question popup's are the editor's own).
+        "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page", "popup_sessions")}
     # Fixed words are English in every language (spec rule 3).
     labels.update(settings="Settings", routes="route", context="context", route_line="route line",
                   rule_motion="rule motion")

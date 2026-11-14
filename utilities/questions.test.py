@@ -55,7 +55,7 @@ class BuildResponseTest(unittest.TestCase):
         with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}), \
              mock.patch.object(questions.HWS, "ui_translator", return_value=lambda _key: "추천"):
             out = questions.render({"items": [], "complete": True}, [row], [])
-        self.assertIn("(추천)", out)
+        self.assertIn("(recommended)", out)
 
     def test_render_indents_continuation_lines_of_decision_questions(self):
         row = {"id": "q1", "kind": "question", "age": "now", "project": "",

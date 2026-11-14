@@ -160,7 +160,7 @@ class Consumers(T.Base):
             self.assertIn("+0.5%p", texts[consumer], consumer)
             self.assertIn(NEW_A, texts[consumer], consumer)                      # the control carries its new name too
             self.assertNotIn(OLD_A, bare[consumer], consumer)
-        self.assertIn(f"| {NEW_B} | 진행 | 12/40 ep | 20.50@12 | 19.50@11 |", texts["leaderboard"])  # latest and best are different values
+        self.assertIn(f"| {NEW_B} | 진행 중 | 12/40 ep | 20.50@12 | 19.50@11 |", texts["leaderboard"])  # latest and best are different values
         self.assertIn(f"run-b (= {NEW_B})", texts["card"])                          # the bare run id got its name, the id stays
         self.assertEqual(texts["question-advice"], f"run-b={NEW_B}")
 
@@ -258,7 +258,7 @@ class CrossPresentation(T.Base):
         summary = lab_table.summary(board, NOW)                                  # Fleet's header: the first group's numbers
         self.assertIn("조건 3 · 실패 1 · 정체 1", summary)
         self.assertNotIn("미확인", summary)
-        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행")
+        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행 중")
         self.assertEqual(lab_table.cells(rows["관측 끊긴 조건"], second, NOW)["state"][0], "미확인")
         second_view = session_lab.view({**board, "selected": second["id"]}, NOW)
         self.assertEqual([p[0]["text"] for p in second_view["counts"]], ["미확인 1", "이름 없음 1", "대기 1"])
@@ -268,7 +268,7 @@ class CrossPresentation(T.Base):
         for name in ("실패 조건", "정체 조건", "관측 끊긴 조건", "긴 에폭 정상"):
             self.assertIn(name, fleet)
         lines = fleet.splitlines()
-        self.assertIn("진행", next(line for line in lines if "긴 에폭 정상" in line))
+        self.assertIn("진행 중", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertNotIn("미확인", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertIn("미확인", next(line for line in lines if "관측 끊긴 조건" in line))
         view = session_lab.view(board, NOW)

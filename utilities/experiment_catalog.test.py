@@ -676,8 +676,8 @@ class ReviewFindings(Base):
         # RV-PR1596-R2: the text says in words what state each row is in
         self.assertIn("행 종료, 결과 기록 없음", line)
         live_line = next(line for line in E.render_status(report, "ko").splitlines() if line.startswith("- 진행 중 행"))
-        self.assertIn("실행 중", live_line)
-        self.assertNotIn("실행 중", next(line for line in E.render_status(report, "ko").splitlines()
+        self.assertIn("진행 중", live_line)
+        self.assertNotIn("진행 중", next(line for line in E.render_status(report, "ko").splitlines()
                                        if line.startswith("- 함께 끝난 행")))
 
 

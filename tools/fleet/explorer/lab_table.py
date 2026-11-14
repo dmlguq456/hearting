@@ -221,7 +221,9 @@ def _head_lines(grid, group, x, y, right):
     grid.put(x, y, ui_text("fleet.lab.base"), "dim", limit=right)
     if isinstance(target, Mapping) and target.get("kind") == "fixed" and target.get("value") is not None:
         value = _board().value_text(target["value"], metric.get("unit"))
-        text, key = ((str(target["label"]) + " " if target.get("label") else "") + value), "soft"
+        # A label that is the row's own word (`기준`) is said once (`기준 12.40 dB@40`).
+        label = str(target.get("label") or "").strip()
+        text, key = ((label + " " if label and label != ui_text("fleet.lab.base") else "") + value), "soft"
     elif isinstance(target, Mapping) and target.get("kind") == "condition":
         control = next((_g(r, "name") for r in _rows(group) if _g(r, "condition_id") == target.get("condition")), None)
         text, key = ui_text("fleet.lab.base_condition", name=control or ui_text("experiment.unnamed")), "soft"

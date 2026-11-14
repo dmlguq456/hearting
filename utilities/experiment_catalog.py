@@ -1767,7 +1767,8 @@ def metric_head(group: Mapping[str, Any], names: Mapping[str, Any], t: Callable[
     unit = metric.get("unit")
     if target.get("kind") == "fixed" and _num(target.get("value")) is not None:
         value = _unit_text(target["value"], unit) if unit else _fmt(target["value"])
-        parts.append(f"{t('fleet.lab.base')}: " + (f"{target['label']} " if target.get("label") else "") + value)
+        label = str(target.get("label") or "").strip()
+        parts.append(f"{t('fleet.lab.base')}: " + (f"{label} " if label and label != t("fleet.lab.base") else "") + value)
     elif target.get("kind") == "condition":
         parts.append(f"{t('fleet.lab.base')}: " + t("fleet.lab.base_condition",
                                                       name=names.get(target.get("condition")) or t("experiment.unnamed")))

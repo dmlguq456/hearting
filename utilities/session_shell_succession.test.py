@@ -681,14 +681,15 @@ class SessionShellSuccessionTest(unittest.TestCase):
         cache.with_suffix('.new').write_text(json.dumps(value)); cache.with_suffix('.new').chmod(0o600)
         os.replace(cache.with_suffix('.new'), cache)
         window.until('ROUTE_PAGE'); window.pump(.5)
+        # 11-15 (popup design E): a press on the ROUTE section opens the routes popup over the window.
         point = None
         for y, line in enumerate(window.screen()['lines']):
-            if '╭─ 1 ROUTE' in line:
-                point = (line.index('╭─ 1')+4, y+1)
+            if '1 ROUTE ' in line and '─' in line:
+                point = (line.index('1 ROUTE')+2, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
-        window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('PgUp/PgDn')
+        window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('╰─ ')
 
-    def test_an_open_read_page_defers_the_hand_over_until_it_is_closed(self):
+    def test_an_open_popup_defers_the_hand_over_until_it_is_closed(self):
         window = self.window()
         first = window.wait_binding(); self.settle(window)
         self.open_read_page(window)
@@ -696,25 +697,19 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.point('rel-b'); window.pump(2.0)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])
-        # The page has no notice slot: its head says a new release waits, one row under the page counter.
-        wait = re.compile(r'New release waiting|새 판 대기')
-        end = time.monotonic()+8
-        while time.monotonic() < end and not any(wait.search(row) for row in window.screen()['lines']):
-            window.pump(.3)
-        rows = window.screen()['lines']
-        counter = [index for index, row in enumerate(rows) if 'PgUp/PgDn' in row]
-        self.assertEqual([index for index, row in enumerate(rows) if wait.search(row)], [counter[0]+1], rows)
-        window.type(b'\x1b')  # closes the page; nothing else happens
+        # The popup stands over the window: the panel under it keeps its notice slot (a new release waits).
+        self.assertTrue(any('✕ ─╮' in row for row in window.screen()['lines']), window.screen()['lines'])
+        window.type(b'\x1b')  # closes the popup; nothing else happens
         self.switched(window, first['host_pid'])
         self.assert_keeps_native(window, native)
 
-    def test_an_opencode_plugin_reload_keeps_an_open_read_page_and_the_hand_over_waits_for_its_close(self):
+    def test_an_opencode_plugin_reload_keeps_an_open_popup_and_the_hand_over_waits_for_its_close(self):
         window = self.window('opencode')
         first = window.wait_binding(); self.settle(window)
         self.open_read_page(window)
         native = process_row(window.native_pid())
         os.kill(native['pid'], signal.SIGUSR1); window.pump(1.0)
-        window.until('PgUp/PgDn')
+        window.until('╰─ ')
         window.point('rel-b'); window.pump(2.5)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])

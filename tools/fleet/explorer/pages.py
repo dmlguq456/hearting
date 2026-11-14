@@ -6,7 +6,7 @@ from ..config import ui_text
 from .grid import cell_width
 from .grid import clip_cells as clip
 from .tables import repo_rule_label
-from .tables import _clip, _tint_row, draw_overview, draw_routes, route_is_history
+from .tables import _clip, _put_wrapped, _tint_row, draw_overview, draw_routes, route_is_history
 
 
 def draw_scope(grid, vm, state):
@@ -405,17 +405,34 @@ def _route_page(grid, vm, ident, x, right, bottom, state):
 _VISIBILITY_TONE = {"good": "done", "bad": "lvl_r", "mixed": "lvl_y", "info": "soft", "dim": "dim"}
 
 
+class _RowCounter:
+    """A grid that draws nothing: ``_put_wrapped`` on it only tells how many rows a value takes."""
+
+    @staticmethod
+    def put(x, y, text, key=None, tint=None, limit=None):
+        return x + sum(cell_width(char) for char in str(text))
+
+
 def _route_visibility_lines(grid, visibility, x, right, y, bottom):
     """How the route was chosen, what was verified and what comes next (display only)."""
     lines = tuple((visibility or {}).get("lines") or ()) if isinstance(visibility, Mapping) else ()
     room = max(0, bottom - y - 16)      # leave the route row and its stage frame their rows
     if not lines or room < 2:
         return y
-    shown = lines[:room]
+    # A long value wraps, so count rows (not lines) against the room the route frame leaves.
+    shown, used = [], 0
+    for line in lines:
+        _, last = _put_wrapped(_RowCounter(), x + 16, 0,
+                               [(str(line[1]), "soft")], right, x + 16)
+        if used + last + 1 > room:
+            break
+        shown.append(line)
+        used += last + 1
     for label, text, tone in shown:
         grid.put(x + 3, y, clip(str(label) + ":", 12), "dim", limit=right)
-        grid.put(x + 16, y, clip(str(text), max(0, right - x - 19)),
-                 _VISIBILITY_TONE.get(str(tone), "soft"), limit=right)
+        # A long value (a path, a reason) goes on under itself at the value column, whole.
+        _, y = _put_wrapped(grid, x + 16, y, [(str(text), _VISIBILITY_TONE.get(str(tone), "soft"))],
+                            right, x + 16)
         y += 1
     if len(lines) > len(shown):
         grid.put(x + 16, y, clip("+%d more" % (len(lines) - len(shown)), max(0, right - x - 19)),

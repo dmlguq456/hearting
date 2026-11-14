@@ -110,7 +110,7 @@ class OneTable(Briefing):
         for header in (lab_table._header(c) for c in columns):
             self.assertIn(header, fleet)
         self.assertNotIn("%@", text)                                           # the unit is on the metric line, as in Fleet
-        self.assertIn("| mix2 long | 진행 | 12/40 ep | 11.60@12 | 11.60@12 | fix 12.00% | -0.4%p |", text)
+        self.assertIn("| mix2 long | 진행 중 | 12/40 ep | 11.60@12 | 11.60@12 | fix 12.00% | -0.4%p |", text)
         english = self.table("en")
         self.assertIn("| CONDITION | STATE | PROGRESS | LATEST | BEST | BASE | DIFF | EXPECT |", english)
         self.assertEqual(os.environ["FLEET_NOW_LANG"], "Korean")                # the screen language is put back
