@@ -128,7 +128,8 @@ def effort_label(effort):
     return "med" if text == "medium" else text
 
 
-def line_segments(values, columns, *, complete=False, reported_only=False, fields=None, branch_room=None):
+def line_segments(values, columns, *, complete=False, reported_only=False, fields=None, branch_room=None,
+                  jobs=False):
     """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ route N │ 5h … 7d …``.
 
     Shorten words before losing a known count; never invent an unknown value.
@@ -139,6 +140,10 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     ``reported_only`` leaves out the context and quota readings the native
     callback has not reported yet (Claude sends them only after its first
     response), as the native statusline did, instead of painting ``?``.
+
+    ``jobs`` ends the line with the running jobs (``>_ name``) for a surface that
+    has no row of its own for them (Claude's one statusline row inside the shell);
+    their words are the first to shorten, and they go before another group shortens.
 
     Input is the same observed Session fields plus the shared question/route
     projection and the account's seven-day window. Exact native display telemetry
@@ -216,6 +221,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     for label, used in values.get("model_quotas") or ():
         words("model_quota", _percent(used), _level(used), 8, 99,
               before=[(_text(label) + " ", _model_key(label))], minimum=8)
+    if jobs and values.get("jobs"):
+        words("jobs", values["jobs"], "loc_repo", 48 if complete else 24, 0, before=[(">_ ", "lvl_g")], minimum=4)
 
     separator = SEPARATOR
 
@@ -233,23 +240,60 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     def size():
         return sum(cell_width(text) for text, _key in render())
 
-    for group in sorted(groups, key=lambda group: group["priority"]):
-        extra = max(0, size() - columns)
-        group["budget"] -= min(extra, group["budget"] - group["minimum"])
-    if size() > columns:
-        separator = " "
+    for group in groups:
+        group["room"] = group["budget"]
+
+    def fit():
+        # Each pass starts from the whole words, so a group that gave way returns its
+        # cells to the ones that stay (a dropped folder no longer leaves the model as `…`).
+        nonlocal separator
+        separator = SEPARATOR
+        for group in groups:
+            group["budget"] = group["room"]
+        for group in sorted(groups, key=lambda group: group["priority"]):
+            extra = max(0, size() - columns)
+            group["budget"] -= min(extra, group["budget"] - group["minimum"])
+        if size() > columns:
+            separator = " "
+
+    fit()
+    # The running jobs give way whole before another group gives a cell (the folder keeps its name).
+    if any(group["name"] == "jobs" for group in groups) and any(
+            group["budget"] < group["room"] for group in groups if group["name"] != "jobs"):
+        groups[:] = [group for group in groups if group["name"] != "jobs"]
+        fit()
     for group in groups:
         if size() > columns and group.get("short"):
-            group["text"] = group["short"]; group["budget"] = cell_width(group["short"])
-    for name in ("thread", "folder", "model"):
+            group["text"] = group["short"]
+            group["room"] = group["budget"] = group["minimum"] = cell_width(group["short"])
+            fit()
+    for name in ("jobs", "thread", "folder", "model"):
         if size() <= columns:
             break
         groups[:] = [group for group in groups if group["name"] != name]
+        fit()
     output = render()
     if size() > columns:
-        # At exceptionally small sizes the native terminal still gets its full
-        # viewport. Preserve the two action counts before optional telemetry.
-        groups[:] = [group for group in groups if group["name"] in {"route", "wait"}]
+        # At exceptionally small sizes the native terminal still gets its full viewport.
+        # What the person must act on stays, the most urgent last to go: the answer wait,
+        # compaction imminent, a context or usage reading at Fleet's red level, then the
+        # route count; calm readings go. The kept readings first lose their reset time, then
+        # the context gauge (words before values).
+        def urgency(group):
+            name, red = group["name"], group["key"] == "lvl_r"
+            return {"wait": 0, "compaction": 1}.get(name, 2 if name == "context" and red else
+                                                  3 if name in QUOTA_GROUPS and red else
+                                                  4 if name == "route" else None)
+        groups[:] = [group for group in groups if urgency(group) is not None]
+        for group in groups:
+            if size() > columns and group["name"] in QUOTA_GROUPS:
+                group["after"] = []
+        for group in groups:
+            if size() > columns and group["name"] == "context":
+                group["before"] = group["before"][:1]
+        while size() > columns and len(groups) > 1:
+            least = max(urgency(group) for group in groups)
+            groups.remove([group for group in groups if urgency(group) == least][-1])
         output = render()
     return output
 
@@ -372,10 +416,12 @@ def claude_native_statusline(callback, environ):
     except ValueError:
         columns = 100
     colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
-    # Every field stays in this row on every callback. While the visible panel
-    # paints these values, the shell blanks exactly this recorded output; if the
-    # panel goes away, the native row is already complete.
-    rows = [clip_segments(line, columns) for line in status_lines(values, columns, reported_only=True)]
+    # One row on every callback (2026-11-14): Claude keeps as many rows under its
+    # input as this output has, so the common line at the native width, shortened
+    # by its own narrow-width rule, with the running jobs at its end. While the
+    # visible panel paints these values, the shell blanks exactly this recorded row
+    # (its notice row); hidden or folded, the row is already there.
+    rows = [clip_segments(line_segments(values, columns, reported_only=True, jobs=True), columns)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
     return statusline_ansi(rows, colors=colors, no_color="NO_COLOR" in environ)
 
