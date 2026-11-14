@@ -2,7 +2,7 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 module.exports=function({changed,answer,action,section}) {
-  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0;
+  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   // 11-15 (popup design D): another session's questions, opened from the sessions popup, stand in
   // the editor apart from this session's own (`own`, kept and updated meanwhile): they are answered
   // with that session as their owner, and leaving brings this session's own back.
@@ -94,13 +94,13 @@ module.exports=function({changed,answer,action,section}) {
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
   function enter(){
-    focused=true;scroll=0;follow=true;answeredAt=0;changeArmed=false;
+    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
   function leave(){
-    focused=false;changeArmed=false;resetParser();scroll=0;follow=true;
+    focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;
     if(foreign){foreign=null;items=[];index=0;frozen=undefined;stale=false;const rows=ownUpdate;ownUpdate=null;own=null;apply(rows||[]);return;}
     release();index=Math.min(index,Math.max(0,flat().length-1));changed();
   }
@@ -108,7 +108,7 @@ module.exports=function({changed,answer,action,section}) {
     if(!foreign){own=items;ownUpdate=items;}
     foreign=Object.freeze({tag:String(tag),owner:Object.freeze({...owner})});if(words)labels={...labels,...words};
     items=[];index=0;frozen=undefined;stale=false;apply(rows);
-    focused=true;scroll=0;follow=true;answeredAt=0;changeArmed=false;
+    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
     const open=flat().findIndex(r=>active(r));if(open>=0)index=open;
     changed();
   }
@@ -307,10 +307,11 @@ module.exports=function({changed,answer,action,section}) {
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
         if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
           if(pasting){escape='';character('\x1b');character(c);continue;}
-          // Alt+letter (`ESC` then a printable or Backspace): a combination this editor has no meaning for is
-          // dropped, never the native's; the popup stands. Whatever else follows a lone Esc
-          // (Ctrl+], Enter, another Esc) closes it as before and goes on.
-          if(byte>=0x20){escape='';if(byte>=0xc0)skipTail=true;continue;}
+          // Alt+letter (`ESC` then a printable or Backspace) and Shift/Alt+Enter (`ESC` then CR or LF): a
+          // combination this editor has no meaning for is dropped, never the native's (an Enter there would
+          // submit its text); the popup stands. Whatever else follows a lone Esc
+          // (Ctrl+], Tab, another Esc) closes it as before and goes on.
+          if(byte>=0x20||byte===0x0d||byte===0x0a){escape='';if(byte>=0xc0)skipTail=true;continue;}
           leave();return data.subarray(i);
         }
         escape+=c;
@@ -327,7 +328,7 @@ module.exports=function({changed,answer,action,section}) {
           }
           escape='';
         }else if(escape.length>64)escape='';
-      }else if(byte===0x1b){escape=c;if(!pasting)escapeTimer=setTimeout(()=>{if(escape==='\x1b')leave();},25);}
+      }else if(byte===0x1b){escape=c;if(!pasting)escapeTimer=setTimeout(()=>{if(escape==='\x1b'){leave();escapedAt=Date.now();}},25);}
       else if(byte===0x1d&&!pasting){leave();return data.subarray(i+1);}
       else for(const char of decoder.write(data.subarray(i,i+1)))character(char);
     }
@@ -336,10 +337,11 @@ module.exports=function({changed,answer,action,section}) {
   // The first input after an answer returned focus: a lone Esc within a few seconds was meant
   // for the popup it left (rule 5), so it is taken here, and so is a lone Enter (11-15: the
   // second press of an Enter meant for the popup never submits the native input's text); any
-  // other input goes on as typed.
+  // other input goes on as typed. The same goes for the lone Esc within a second of the Esc that closed
+  // the popup (a second press of the key that closed it is no interrupt or cancel of the native's).
   function answeredEscape(data){
-    const fresh=answeredAt&&Date.now()-answeredAt<10000;answeredAt=0;
-    return !!fresh&&data.length===1&&[0x1b,0x0d,0x0a].includes(data[0]);
+    const now=Date.now(),fresh=answeredAt&&now-answeredAt<10000,closed=escapedAt&&now-escapedAt<1000;answeredAt=escapedAt=0;
+    return data.length===1&&(!!fresh&&[0x1b,0x0d,0x0a].includes(data[0])||!!closed&&data[0]===0x1b);
   }
   // 11-15 (popup design A): the panel's summary of the question Ctrl+] opens on (the one shown,
   // else the first answerable one): how many there are, its two-row and one-row forms and its
@@ -357,7 +359,7 @@ module.exports=function({changed,answer,action,section}) {
     return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),
       line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length};
   }
-  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
+  return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
     get question(){return foreign?flatOf(own||[]).length>0:!!current();},get foreign(){return foreign;},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,enterForeign,updateForeign,
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.

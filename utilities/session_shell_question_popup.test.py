@@ -188,7 +188,58 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
  {const b=make();b.input(Buffer.from('\x1b'));b.input(Buffer.from('b'));assert.equal(b.focused,true,'split across reads');}
  {const b=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
  {const b=make();const rest=b.input(Buffer.from('\x1b\x1dZ'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\x1dZ','Esc then Ctrl+] closes and goes on');}
- {const b=make();const rest=b.input(Buffer.from('\x1b\r'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\r');}
+ {const b=make();const rest=b.input(Buffer.from('\x1b\t'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\t','Esc then Tab closes and goes on as before');}
+ {const b=make();const rest=b.input(Buffer.from('\x1b\x1b'));assert.equal(b.focused,false);assert.equal(rest.toString(),'\x1b','Esc then Esc closes and goes on as before');}
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_esc_then_enter_is_dropped_and_the_popup_stands(self):
+        # Shift+Enter / Alt+Enter arrive as ESC then CR (or LF), in one read or split within the Esc
+        # window: this editor has no meaning for them, so they are dropped like Alt+letter. They never
+        # close the popup and never reach the native (a CR there submits the native input's text).
+        # A lone Esc still closes it.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+(async()=>{
+ const make=()=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?'}]}],'',{});b.enter();return b;};
+ const shows=(b,word)=>b.detail({budget:6,columns:60}).some(row=>row.some(p=>p.text.includes(word)));
+ for(const combo of ['\x1b\r','\x1b\n']){
+  const b=make();b.input(Buffer.from('abc'));
+  const rest=b.input(Buffer.from(combo));
+  assert.equal(rest.length,0,'nothing goes on: '+JSON.stringify(combo));
+  assert.equal(b.focused,true,'the popup stands: '+JSON.stringify(combo));
+  b.input(Buffer.from('d'));await new Promise(r=>setTimeout(r,60));
+  assert.equal(b.focused,true,'no stale Esc timer closes it later');
+  assert(shows(b,'abcd'),'the draft stays and goes on');
+ }
+ {const b=make();b.input(Buffer.from('abc'));b.input(Buffer.from('\x1b'));const rest=b.input(Buffer.from('\r'));
+  assert.equal(rest.length,0,'split across reads');assert.equal(b.focused,true);await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,true);assert(shows(b,'abc'));}
+ {const b=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_the_lone_esc_right_after_an_esc_close_is_the_shells_once(self):
+        # The Esc that closes the popup is often pressed twice. The second lone Esc within a second
+        # belongs to the shell (the native's would interrupt the turn or cancel its own prompt); any
+        # other input, or an Esc after a second, goes on as typed. Other ways of closing are as before.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+(async()=>{
+ const wait=ms=>new Promise(r=>setTimeout(r,ms));
+ const make=()=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?'}]}],'',{});b.enter();return b;};
+ const escClosed=async()=>{const b=make();b.input(Buffer.from('\x1b'));await wait(60);assert.equal(b.focused,false);return b;};
+ {const b=await escClosed();await wait(200);assert.equal(b.answeredEscape(Buffer.from('\x1b')),true,'Esc 0.2 s later is the shell\'s');
+  assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'once only');}
+ for(const key of ['x','\r','\n','\x1b[A','\x1b\x1b','\x1b[200~p\x1b[201~']){
+  const b=await escClosed();assert.equal(b.answeredEscape(Buffer.from(key)),false,'goes on: '+JSON.stringify(key));
+  assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'any other input ends the window');}
+ {const b=await escClosed();await wait(1100);assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'after a second it is the native\'s');}
+ {const b=make();b.leave();assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'Ctrl+] / ✕ / a press outside: as before');}
+ {const b=make();b.input(Buffer.from('\x1d'));assert.equal(b.focused,false);assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'Ctrl+]: as before');}
+ {const b=await escClosed();b.enter();b.leave();assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'a later close by another way ends it');}
+ {const b=await escClosed();b.enter();assert.equal(b.answeredEscape(Buffer.from('\x1b')),false,'opening it again ends it');}
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 

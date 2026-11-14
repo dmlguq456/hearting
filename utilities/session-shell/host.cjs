@@ -1465,13 +1465,14 @@ function tableInput(data){
     if(text.startsWith('\x1b[200~')){tablePaste=true;text=text.slice(6);continue;}
     if(text[0]==='\x1d'){closePopup();return Buffer.from(text.slice(1),'latin1');}
     if(text[0]==='\x1b'){
-      if(text.length===1){tableTail=text;tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){tableTail='';closePopup();}},25);return Buffer.alloc(0);}
+      if(text.length===1){tableTail=text;tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){tableTail='';closePopup();block.escaped();}},25);return Buffer.alloc(0);}
       const csi=/^\x1b(?:\[[0-9;]*[\x40-\x7e]|O[A-D])/.exec(text);
       if(!csi){
         if(/^\x1b\[[0-9;]*$/.test(text)){tableTail=text;return Buffer.alloc(0);}
-        // ESC then anything else: Alt+letter (dropped) or a lone Esc before another key (closes).
-        // (A UTF-8 letter's further bytes are no key either.)
-        if(text.charCodeAt(1)>=0x20){text=text.slice(2);continue;}
+        // ESC then anything else: Alt+letter and Shift/Alt+Enter (ESC then CR or LF) are dropped, as in the
+        // question popup (an Enter reaching the native would submit its text); a lone Esc before another
+        // key closes. (A UTF-8 letter's further bytes are no key either.)
+        if(text.charCodeAt(1)>=0x20||text[1]==='\r'||text[1]==='\n'){text=text.slice(2);continue;}
         closePopup();return Buffer.from(text.slice(1),'latin1');
       }
       const key=csi[0].replace('\x1bO','\x1b[');text=text.slice(csi[0].length);
