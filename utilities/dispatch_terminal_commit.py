@@ -556,13 +556,17 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
         if (slot / work_intent.SUMMARY_NAME).exists():
             return
         from dispatch_owner_input import completion_corrections
-        from dispatch_completion_join import exact_attempt_row
         assessment = owner = None
-        try:  # the owner row names the harness and model that ran; without it the summary omits that line
-            owner = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
-        except Exception:  # noqa: BLE001
-            owner = None
+        if work_intent.requested_owner(route):
+            # Only work that asked for an owner harness can differ from it; the owner row names
+            # the harness and model that ran, and without it the summary omits that line.
+            try:
+                from dispatch_completion_join import exact_attempt_row
+                owner = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
+            except Exception:  # noqa: BLE001
+                owner = None
         if route.get("capability") == "audit":
+            from dispatch_completion_join import exact_attempt_row
             row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id)
             if row.metadata.get("reconcile_reason") == "completed-audit-with-findings":
                 assessment = "FAIL"
