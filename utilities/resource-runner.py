@@ -2573,6 +2573,7 @@ def _main(argv=None, *, controller=None):
         import resource_progress
         note = resource_progress.declaration_note({
             "command": list(command), "cwd": str(cwd), "route": str(route_file), "node": args.node,
+            "log": str(Path(args.log).resolve()),
             "observation": node.get("observation") if isinstance(node.get("observation"), dict) else None,
             "output_dir": node.get("output_dir")})
         if note:

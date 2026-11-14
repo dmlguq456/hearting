@@ -1868,6 +1868,53 @@ class ExperimentObservationTest(unittest.TestCase):
                 self.assertIn("진행 파일 선언 없음", text)
                 self.assertNotIn(not_visible, text)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_the_launch_note_and_the_notice_come_from_the_same_undeclared_result(self):
+        # RV-PR1619-R3-1114: a run that writes progress at the runner's own place was told by the
+        # launch note that its notices carry no step or epoch, while its notice showed 12/60.
+        # The note speaks only when the notice's `undeclared` is set, and states facts, no prediction.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, now = Path(tmp), 1_800_000_000.0
+            log = str(base / "run.log")
+            default = log + ".progress.json"
+            run = {"run_id": "default-run", "node": "train", "status": "running", "log": log,
+                   "progress_file": default, "started_at": now - 3600}
+
+            def notice(name):
+                with mock.patch.object(progress, "_observation_state_path", return_value=base / f"{name}.json"):
+                    result = progress.observe_experiment(run, base / "registry.json", now,
+                                                         progress=progress.read_progress(run, now),
+                                                         alive=True, status="running", notify_events=False)
+                return result["observation"], "; ".join(progress._notice_texts(
+                    run, "checkpoint", result["observation"], None, result["metrics"]))
+
+            # Launch time: the place is empty. One note, no claim, the place shown; the notice says so too.
+            note = progress.declaration_note(run)
+            self.assertIn(default, note)
+            self.assertIn("--config", note)
+            self.assertNotIn("실리지 않습니다", note)
+            self.assertEqual(note.count("\n"), 0)
+            observation, text = notice("empty")
+            self.assertEqual(observation["undeclared"], "not-declared")
+            self.assertIn("진행 파일 선언 없음", text)
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+                english = progress.declaration_note(run)
+            self.assertIn(default, english)
+            self.assertNotIn("carry no", english)
+            # The workload writes 12/60 at that place: no note, and the notice carries it.
+            Path(default).write_text(json.dumps({"schema_version": 1, "run_id": "default-run", "node": "train",
+                                                 "updated_at": now - 60, "completed": 12, "total": 60,
+                                                 "unit": "epoch"}))
+            self.assertIsNone(progress.declaration_note(run, now))
+            observation, text = notice("written")
+            self.assertIsNone(observation["undeclared"])
+            self.assertIn("진행 12/60 epoch", text)
+            # A declaration (file or folder, there or not) gets no note either.
+            for declared in ({**run, "progress_file": str(base / "other.json")},
+                             {**run, "output_dir": str(base / "out")}):
+                with self.subTest(declared=declared):
+                    self.assertIsNone(progress.declaration_note(declared, now))
+
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},

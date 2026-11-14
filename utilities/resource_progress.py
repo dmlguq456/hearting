@@ -1480,7 +1480,7 @@ def _declared_progress_file(run):
     return path
 
 
-def declaration_note(run):
+def declaration_note(run, now=None):
     """The one line a launch prints when its run declares no progress file or output folder.
 
     A note, never a refusal: the run starts all the same and its notices say so in one phrase.
@@ -1495,9 +1495,17 @@ def declaration_note(run):
             return None
         if reason == "not-declared" and _public_output_state(run, None, binding_given=False)[0] == "none":
             return None
+        # The notice's own result: a value already read at the runner's place means its `undeclared`
+        # is None (no folder here, a tracker from the read), so no note.
+        now = time.time() if now is None else now
+        if _progress_signal(read_progress(run, now), [], None, run, None, now) is not None:
+            return None
         t = _ui_translator()
-        return t("resource.declare_progress_note" if reason == "not-declared"
-                 else "resource.declared_progress_unmapped_note")
+        if reason != "not-declared":
+            return t("resource.declared_progress_unmapped_note")
+        log = run.get("log")
+        return t("resource.declare_progress_note",
+                 place=(log + ".progress.json") if isinstance(log, str) and log else "<log>.progress.json")
     except Exception:  # noqa: BLE001 -- a note never stops a launch
         return None
 
