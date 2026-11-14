@@ -3543,6 +3543,20 @@ def _open_question_line(waits, harness, sid, seat_key):
             % (own["id"], question, own["id"]))
 
 
+def answer_wait_text(questions, limit: int = 3) -> list[str]:
+    """One ``[답변 필요]`` line per distinct wait, a repeat folded into its count.
+
+    Several children waiting on the person without a question of their own would
+    otherwise print the same line once each on every prompt.
+    """
+    counts: dict[str, int] = {}
+    for question in questions:
+        text = str(question)[:160]
+        counts[text] = counts.get(text, 0) + 1
+    return ["[답변 필요] " + text + (f" ×{count}" if count > 1 else "")
+            for text, count in list(counts.items())[:limit]]
+
+
 def run_hook(*args, **kwargs) -> str:
     """Record the session and print its card / notices (see ``_run_hook``).
 
@@ -3671,6 +3685,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if event == "start":
                 session_tidy_runner.reconcile_reservation_queue(seat)
     answer_wait_lines = []
+    wait_questions: list = []
     if render_context and event in ("start", "prompt"):
         with contextlib.suppress(BaseException):
             utilities = str(Path(__file__).resolve().parent)
@@ -3703,10 +3718,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if (event == "prompt" and item.get("source") == "S4"
                         and owner.get("seat_key") == seat.key):
                     continue
-                question = item.get("question") or "사용자 답 대기"
-                answer_wait_lines.append("[답변 필요] " + str(question)[:160])
-                if len(answer_wait_lines) == 3:
-                    break
+                wait_questions.append(item.get("question") or "사용자 답 대기")
+    answer_wait_lines = answer_wait_text(wait_questions)
     state_seats = [seat]
     if _native_session_key(harness, sid) and prior_seat:
         state_seats.append(prior_seat)

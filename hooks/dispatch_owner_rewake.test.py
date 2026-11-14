@@ -607,7 +607,10 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         )
         message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
         self.assertIn("attempt_id=att-owner-1", message)
-        self.assertIn("Do not start or re-arm Background Bash", message)
+        # The no-waiting rule is every adapter bootstrap's; the receipt does not repeat it.
+        self.assertNotIn("re-arm Background Bash", message)
+        bootstrap = (Path(__file__).resolve().parents[1] / "adapters/claude/CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Do not build your own waiting: no sleep or poll loops, background watchers", bootstrap)
         self.assertIn("required_action=inspect-done-failure", message)
         self.assertIn("state=attention", message)
         self.assertIn("Hearting dispatch requires attention", message)
@@ -769,12 +772,12 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             _state, message = rewake.classified_receipt(
                 launch, "attention", "terminal-failure-or-unclosed", self.root)
         flat = " ".join(message.split())
-        self.assertIn("ask only what only the person can decide", flat)
-        self.assertIn("state a recommended in-scope, reversible next step (such as fixing and re-testing) "
-                      "as proceeding", flat)
-        self.assertIn("point to the detailed record", flat)
+        # The receipt points at the §0.5 close contract, which the bootstrap and WORKFLOW hold.
+        self.assertIn("Close per §0.5", flat)
         self.assertIn("do not reproduce it for the person", flat)
         self.assertNotIn("at most one decision", flat)
+        workflow = (Path(__file__).resolve().parents[1] / "core/WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("### 0.5. Post-Execution Completion Report", workflow)
 
     def test_marker_open_row_failed_advance_is_nonblocking_attention(self) -> None:
         self.write_marker_bound_owner()

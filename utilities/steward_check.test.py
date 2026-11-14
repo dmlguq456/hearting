@@ -622,6 +622,29 @@ class StewardCheckIdleTest(CheckBase):
         self.assertEqual(self.notify.call_count, 2)
         self.assertEqual(self.notice()["required_action"], "tidy-and-release")
 
+    def test_finished_targets_do_not_wake_again_when_only_own_records_change(self):
+        # Every target ended; the holder keeps working on its own open records, which
+        # change between checks. Nobody is left to watch, so after the one release
+        # reminder the check does not open another turn (BC-SUPERVISOR-CONTEXT-COST-1114).
+        ended = [target(name, state="idle", liveness="ended") for name in ("a", "b", "c", "d")]
+        self.seen = {"targets": ended, "pending_messages": 0, "open_work": ["#1 own record"]}
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.assertEqual(self.notify.call_count, 1)
+        self.deliver_and_ack()
+        self.step(T0 + INTERVAL + 100)
+        for index, records in enumerate((["#1 own record", "#2 new record"], ["#2 new record"],
+                                         ["#3 another"]), start=2):
+            self.seen = {"targets": ended, "pending_messages": index, "open_work": records,
+                         "user_decisions": [f"decision {index}"]}
+            self.step(T0 + index * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 1)
+        self.assertEqual(self.obs()["reason"], "quiet-no-change")
+        # A target that comes back to life is watched again.
+        self.seen = {"targets": [target("a", state="working"), *ended[1:]], "pending_messages": 0}
+        self.step(T0 + 5 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 2)
+
     def test_a_working_target_is_checked_every_interval(self):
         self.register()
         self.step(T0 + INTERVAL)
