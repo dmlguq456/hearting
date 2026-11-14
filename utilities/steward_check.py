@@ -722,6 +722,23 @@ def _signature(action: str, observation: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _none_live(observation: dict) -> bool:
+    """Every target has ended (or never proved live): nobody is left to watch or assign to."""
+    return not any(t["liveness"] != "ended" for t in observation["targets"]
+                   if not t.get("unresolved") or t["liveness"] == "live")
+
+
+def _quiet_signature(observation: dict) -> str:
+    """What a role with no live target is quiet about: its targets alone.
+
+    The holder's own open records, decisions and queued requests reach it on their own
+    (its memory, its prompts, the courier); with nobody left to watch or to take work
+    they open no turn. A live idle target keeps the full signature: new work is for it."""
+    rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"])
+                  for t in observation["targets"])
+    return hashlib.sha256(repr(("quiet", rows)).encode("utf-8")).hexdigest()[:16]
+
+
 def _quiet(observation: dict) -> bool:
     """No live unfinished target: an unchanged state sends no further model turn. Open
     records alone do not repeat; a live unfinished target is checked every interval.
@@ -1036,8 +1053,8 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
     retained = dict(observation.get("lab_notified") or [])
     line, names, current = _lab_summary(seen, retained)
     new_lab = any(count > retained.get(rid, 0) for rid, count in current.items())
-    signature = _signature(action, seen)
     quiet = _quiet(seen)
+    signature = _quiet_signature(seen) if quiet and _none_live(seen) else _signature(action, seen)
     if action == "release-if-idle":
         text = TEXT_RELEASE_IF_IDLE
     elif action == "tidy-and-release":

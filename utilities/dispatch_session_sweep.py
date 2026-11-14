@@ -703,7 +703,7 @@ def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
     notice_context=None, deadline_ns: int | None = None, read_context=None,
-    select=None,
+    select=None, defer_native_queued: bool = False,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -720,6 +720,11 @@ def sweep_deliver(
 
     ``select``, when given, is a predicate on an addressed record: a record it
     rejects is not claimed here and stays with its existing carriers.
+
+    ``defer_native_queued`` (a Claude tool boundary): a record whose exact receipt
+    Claude's own prompt queue provably still holds (``natively_queued``) is left to
+    that queue, which attaches it to this turn or starts the next one. Only until
+    the turn ends: Stop and the next prompt's sweep carry it if the queue lost it.
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """
@@ -843,6 +848,10 @@ def sweep_deliver(
         delivery_id = current["delivery_id"]
         observed_evidence.clear()
         if settle_observed(current)["received"]:
+            continue
+        if defer_native_queued and harness == "claude" and any(
+                natively_queued(current, storage_key, evidence)
+                for evidence in observed_evidence.values()):
             continue
         if not currently_addressed(current, storage_key):
             continue
@@ -990,7 +999,14 @@ def sweep_deliver(
     return claimed, entry_count
 
 
+# One line: a notice may be a run's end, a resumed route or a steward check, so it keeps
+# only what the bootstrap does not already say (report a run's metrics against the plan).
 NOTICE_DELIVERY_HEADER = (
+    "Hearting notice. Act only where a line's required_action asks for it; for a run, report "
+    "metrics, trend and elapsed/ETA against the plan, or say they are unavailable."
+)
+# The notice header v4.32.4 shipped (frozen; receipt recovery only).
+_SHIPPED_NOTICE_DELIVERY_HEADER = (
     "Hearting notice about work you started (a paused route resumed, a remote run ended). "
     "Report observed metrics, trend, and elapsed or ETA against the criteria and plan; state when unavailable. "
     "Act only where a line's required_action asks for it. "
@@ -1008,7 +1024,14 @@ GATE_DELIVERY_HEADER = (
     "`await-release` or has paused at the gate; the release continues the work either way. "
     "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
 )
+# One line: following required_action, keeping open work and not building a wait are
+# the adapter bootstrap's rules already; the header names the delivery and points at them.
 COMPLETION_DELIVERY_HEADER = (
+    "Hearting runtime delivery. Act on each required_action; keep failures, unfinished work "
+    "and questions; no polling."
+)
+# The header v4.32.4 shipped (frozen; receipt recovery only).
+_SHIPPED_COMPLETION_DELIVERY_HEADER = (
     "Hearting runtime delivery. Follow required_action/next-action receipt; "
     "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
     "Keep new failures/conflicts, unfinished work, questions; no extra "
@@ -1150,6 +1173,23 @@ def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[di
     return text
 
 
+def _shipped_headers(text: str) -> str:
+    """The same body under the block headers v4.32.4 shipped (receipt recovery only)."""
+    from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE
+    shipped = {COMPLETION_DELIVERY_HEADER: _SHIPPED_COMPLETION_DELIVERY_HEADER,
+               NOTICE_DELIVERY_HEADER: _SHIPPED_NOTICE_DELIVERY_HEADER}
+    blocks, previous = [], None
+    for block in text.split("\n\n"):
+        header, separator, body = block.partition("\n")
+        if (header in shipped
+                and (previous is None
+                     or OPENCODE_MARKER_LINE_RE.fullmatch(previous.rsplit("\n", 1)[-1]))):
+            header = shipped[header]
+        blocks.append(header + separator + body)
+        previous = block
+    return "\n\n".join(blocks)
+
+
 def _previous_runtime_v1_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
     """The immediately previous body: same headers, previous follow-up wording."""
     return _replace_runtime_v1_followups(text, roots, records, _PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIXES)
@@ -1225,8 +1265,36 @@ def _compute_run_notice(record: dict) -> dict | None:
 
 
 _EXPERIMENT_FINAL_KEY_RE = re.compile(r"^experiment:(?P<run_id>[^:]+):final(?::|$)")
-_STATUS_EXIT_RE = re.compile(
-    r"status=(?P<status>[^;,\s]+)(?P<sep>;\s*)exit=(?P<exit>[^;,\s]+)")
+_STATUS_EXIT_FALLBACK = "status={status}; exit={exit}"
+
+
+def _status_exit_forms() -> list:
+    """Every language's `status=…; exit=…` key as ``(template, regex)``, read from the UI catalog.
+
+    The producer writes this key from ``resource.key.status`` in the notice's own language, so the
+    words come from that one catalog entry (a new language or a changed word is followed, not copied
+    here). An unreadable catalog leaves the English form alone; a delivery never fails over it."""
+    templates = [_STATUS_EXIT_FALLBACK]
+    try:
+        entry = json.loads((Path(__file__).resolve().parents[1] / "tools" / "i18n" / "messages.json")
+                           .read_text(encoding="utf-8"))["messages"]["resource.key.status"]
+        templates += [value for value in entry.values()
+                      if isinstance(value, str) and value not in templates
+                      and 0 <= value.find("{status}") < value.find("{exit}")]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    forms = []
+    for template in templates:
+        head, rest = template.split("{status}", 1)
+        middle, tail = rest.split("{exit}", 1)
+        word = "[^;,\\s]+"
+        # A space in the template is any run of spaces, as the key was always read (`;\s*exit=`).
+        pattern = "".join((re.escape(head), word, re.escape(middle), word, re.escape(tail))).replace("\\ ", "\\s*")
+        forms.append((template, re.compile(pattern)))
+    return forms
+
+
+_STATUS_EXIT_FORMS = _status_exit_forms()
 
 
 def _utc_epoch(value) -> float | None:
@@ -1288,12 +1356,14 @@ def _refreshed_notice_text(root: Path, record: dict, cache: dict) -> str | None:
     run = _experiment_run_state(root, record, cache)
     # Only the one `status=…; exit=…` the producer writes: a catalog name in front of it may
     # hold the same words, and then which one is the run's own cannot be told from the text.
-    if run is None or len(_STATUS_EXIT_RE.findall(text)) != 1:
+    # The same holds across languages: the key of every language together must appear exactly once.
+    found = [(template, pattern) for template, pattern in _STATUS_EXIT_FORMS if pattern.search(text)]
+    if run is None or len(found) != 1 or len(found[0][1].findall(text)) != 1:
         return None
+    template, pattern = found[0]
     exit_code = run.get("exit_code")
     exit_text = "None" if exit_code is None else str(exit_code)
-    return _STATUS_EXIT_RE.sub(
-        f"status={run['status']}; exit={exit_text}", text, count=1)
+    return pattern.sub(lambda _match: template.format(status=run["status"], exit=exit_text), text, count=1)
 
 
 def _notice_text(root: Path, record: dict, cache: dict | None = None) -> str:
@@ -1755,6 +1825,54 @@ def claude_hook_evidence(payload, session_id: str):
         runtime_home=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
 
 
+def claude_receipt_observer(payload, session_id: str):
+    """A ``sweep_deliver`` receipt observer for one Claude hook call, or ``None``.
+
+    Re-reads the transcript only when it changed (size and mtime). On a prompt that
+    is itself a Stop-hook notification (the turn it woke), that prompt's receipts
+    count too: the model reads it in the same request as this hook's context.
+    """
+    if not isinstance(payload, dict):
+        return None
+    transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
+    if not isinstance(transcript_path, str) or not isinstance(payload.get("cwd"), str):
+        return None
+    from dispatch_recipient_receipt import claude_prompt_bindings
+    prompt = claude_prompt_bindings(payload.get("prompt"))
+    cache = {"signature": object(), "evidence": None}
+
+    def observe(_root=None, _storage=None, _record=None):
+        try:
+            info = Path(transcript_path).stat()
+            signature = (info.st_size, info.st_mtime_ns)
+        except OSError:
+            signature = None
+        if signature != cache["signature"]:
+            try:
+                evidence = claude_hook_evidence(payload, session_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                evidence = None
+            if prompt and isinstance(evidence, dict):
+                evidence = {**evidence, "bindings": sorted(
+                    {*map(tuple, evidence.get("bindings") or ()), *prompt})}
+            cache.update(signature=signature, evidence=evidence)
+        return cache["evidence"]
+
+    return observe
+
+
+def natively_queued(record: dict, storage_key: str, evidence) -> bool:
+    """Whether Claude's own prompt queue holds this exact delivery right now."""
+    if not isinstance(evidence, dict) or not evidence.get("queued"):
+        return False
+    try:
+        from dispatch_recipient_receipt import binding_digest
+        binding = (record.get("delivery_id"), binding_digest(record, storage_key))
+    except Exception:  # noqa: BLE001 - unproven is not queued
+        return False
+    return binding in {tuple(item) for item in evidence["queued"]}
+
+
 def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
     """Keep what a flushed Stop `block` reason showed open until it is taken.
 
@@ -2016,12 +2134,17 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
             [record for _root, record in selected]) if rendered else ""
         # Shipped forms: current; the three previous follow-ups under current headers
         # (the earliest one also under the older headers); and the legacy full body.
-        short_rendered, decision_rendered = (_replace_runtime_v1_followups(
+        from dispatch_completion_join import SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES
+        short_rendered, decision_rendered, shipped_rendered = (_replace_runtime_v1_followups(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected], frozen) if rendered else ""
-            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES))
+            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES,
+                           SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES))
         variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
+                    shipped_rendered,
                     _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
+        # Everything shipped up to v4.32.4 went out under that release's block headers.
+        variants.update(_shipped_headers(text) for text in tuple(variants) if text)
         if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
                for _root, record in selected):
             # Recover the previous wording from the same stored diagnosis.

@@ -4791,10 +4791,10 @@ class NextLegReceiptTest(unittest.TestCase):
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed",
                                  "next_leg": self.NEXT_LEG}]}
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
-        self.assertIn("Original request/format apply", text)
+        self.assertIn("Close per §0.5", text)
         self.assertIn(self.NEXT_LEG["compose_command"], text)
         self.assertIn("If this next leg is already approved, execute it in this turn", text)
-        self.assertIn("Receipt/ACK isn't execution", text)
+        self.assertIn("Nothing starts it from receipt alone", text)
         plain = JOIN.completion_followup_text({"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]},
                                               jobs=str(jobs))
         self.assertNotIn("next leg", plain)
@@ -4811,18 +4811,24 @@ class NextLegReceiptTest(unittest.TestCase):
             receipt, jobs=str(jobs))
         from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
         fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
-        required = ("Original request/format apply", "Review the result",
-                    "continue approved work", "First close:",
-                    "one or two sentences", "important remaining failure",
-                    "ask only what only the person can decide", "in-scope, reversible next step", "as proceeding",
-                    "point to the detailed record",
-                    "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
-                    "handled exact repeats need no ACK", "new failures/conflicts",
-                    "unfinished work, questions")
+        # The receipt names the delivery, says no harvest is owed and points at the close
+        # contract; the contract itself lives once in every adapter bootstrap and WORKFLOW
+        # §0.5, which the session already holds, instead of on every notice.
+        required = ("Act on each required_action", "keep failures, unfinished work and questions",
+                    "Owner finished; no harvest.", "Close per §0.5")
         missing = [part for part in required if part not in fixed_text]
-        self.assertFalse(missing, f"missing completion-close obligations: {missing}")
+        self.assertFalse(missing, f"missing completion-close pointers: {missing}")
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
+        repo = Path(JOIN.__file__).resolve().parents[1]
+        contract = ("Close material work with the §0.5 contract: result in one or two sentences",
+                    "keep requested output", "A receipt, queue entry or ACK is not execution")
+        for bootstrap in ("adapters/claude/CLAUDE.md", "adapters/codex/AGENTS.md", "adapters/opencode/AGENTS.md"):
+            flat = " ".join((repo / bootstrap).read_text(encoding="utf-8").split())
+            missing = [part for part in contract if part not in flat]
+            self.assertFalse(missing, f"{bootstrap} lacks the close contract: {missing}")
+        workflow = (repo / "core/WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("first close gives\nthe result in one or two sentences", workflow)
 
     def test_completion_followup_carries_the_runtime_sealed_summary(self):
         import dispatch_terminal_commit as DTC
@@ -4842,15 +4848,10 @@ class NextLegReceiptTest(unittest.TestCase):
         summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
         (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
-        self.assertIn("First close: give the result in one or two sentences", before)
-        self.assertIn("point to the detailed record", before)
-        self.assertIn("ask only what only the person can decide", before)
-        self.assertIn("in-scope, reversible next step (such as fixing and re-testing) as proceeding", before)
-        self.assertNotIn("at most one", before)
+        self.assertEqual(before, "Owner finished; no harvest. Close per §0.5.")
         self.assertNotIn("[완료 요약]", before)
-        self.assertTrue(text.startswith("Original request/format apply."))
-        self.assertIn("one or two sentences", text)
-        self.assertIn("Keep the runtime summary below as agent context and record; do not reproduce it for the person.", text)
+        self.assertTrue(text.startswith("Owner finished; no harvest. Close per §0.5;"))
+        self.assertIn("the summary below is agent context: do not reproduce it for the person.", text)
         self.assertNotIn("show the runtime summary below to the person", text)
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
@@ -6377,7 +6378,7 @@ class WorkContinuationReceiptTest(unittest.TestCase):
         text = self.render([("owner","advance-completed")])
         self.assertNotIn("capability-route.py start",text)
         self.assertNotIn("preflight.sh harvest",text)
-        self.assertIn("Original request/format apply",text)
+        self.assertIn("Owner finished; no harvest.",text)
         self.assertNotIn("advance the route",text)
 
     def test_parked_owner_followup_says_paused_and_keeps_start_handle(self):

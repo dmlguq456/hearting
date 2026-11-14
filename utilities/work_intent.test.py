@@ -842,12 +842,16 @@ class ClaudeWakeSummaryTest(unittest.TestCase):
                 state, message = module.classified_receipt(launch, "ready", "terminal", Path("/home"))
             self.assertEqual(state, "success")
             reader.assert_called_once_with(row.metadata, "att-owner")
-            self.assertIn("the registered owner completed.", message)
+            self.assertIn("Owner finished; no harvest.", message)
             self.assertEqual(summary in message, bool(sealed))
-            self.assertEqual("one or two sentences" in message, bool(sealed))
-            self.assertEqual("Keep the runtime summary below as agent context" in message, bool(sealed))
+            self.assertEqual("do not reproduce it for the person" in message, bool(sealed))
             self.assertNotIn("show this runtime summary to the person", message)
-            self.assertTrue(message.endswith("Do not emit a periodic progress recap."))
+            # The close contract is the bootstrap's (§0.5); the receipt only points at it, and
+            # the runtime's own row hashes and fixed waiting rules are not carried.
+            self.assertIn("Close per §0.5", message)
+            for absent in ("one or two sentences", "row_revision=", "row_digest=",
+                           "periodic progress recap", "re-arm Background Bash"):
+                self.assertNotIn(absent, message)
 
 
 class NotDoingTest(unittest.TestCase):

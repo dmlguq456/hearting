@@ -29,7 +29,7 @@ from dispatch_supervisor_terminal import (
 # (`failure_class=fail`) is unchanged. Only a `worker_type=review` row with a
 # readable artifact earns it; every other FAIL keeps the dead-worker note.
 from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
-from route_authority import HANDOFF_RE, pass_blocker_note, pass_blocker_violation
+from route_authority import HANDOFF_RE, handoff_search, pass_blocker_note, pass_blocker_violation
 REVIEW_WORKER_TYPE = "review"
 
 
@@ -372,8 +372,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     # search, not fullmatch: the pattern itself anchors the block to the end of
     # the message, so anything before it is ignored rather than fatal. A
     # trailing fence or up to two sentences are tolerated the same way (G1).
-    match = _HANDOFF_RE.search(final_message.strip())
-    if match is None:
+    handoff = handoff_search(final_message)
+    if handoff is None:
         return _result(
             3,
             "invalid",
@@ -384,7 +384,6 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             reason="malformed-handoff",
         )
 
-    handoff = match.groupdict()
     if pass_blocker_violation(handoff["verdict"], handoff["blocker"]):
         return _result(
             3,
@@ -420,6 +419,11 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     note = pass_blocker_note(handoff["blocker"]) if verdict == "PASS" else None
     normalized = {"envelope_normalized": "pass-blocker-note",
                   "pass_note_excerpt": _escape_and_bound(note)[0]} if note else {}
+    if handoff.get("disposition"):
+        # A closed disposition word read as the verdict it names (route_authority.handoff_search).
+        normalized["disposition"] = _escape_and_bound(handoff["disposition"])[0]
+        normalized["envelope_normalized"] = ",".join(
+            filter(None, (normalized.get("envelope_normalized"), "verdict-disposition")))
     failure_note = (
         "dead-sandbox-init"
         if verdict == "BLOCKED" and sandbox_init
@@ -1073,6 +1077,12 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
             or parsed.get("artifact_state") != "readable"
             or parsed.get("artifact_shape") != "file"):
         return False
+    if parsed.get("disposition"):
+        # The owner wrote a closed review disposition (e.g. `수정 후 병합`) as its verdict:
+        # a finished review of any capability only when its report opens on a closed
+        # negative review verdict and nothing blocks it (route_authority.handoff_search).
+        return (pass_blocker_note(parsed.get("blocker")) is not None
+                and closed_review_kind(artifact_path) in {"fix", "hold"})
     try:
         import route_identity
         path = binding.get("owner_route_file") or binding.get("route_file")
@@ -1089,12 +1099,16 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
 
 # Same whole-line forms/normalization as pr-chain.py (PR #1430). Only the
 # negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
+# A held review (`보류`/`hold`) is a closed judgment too; only a verdict-word
+# handoff reads it (`closed_review_kind`), an audit FAIL still needs `fix`.
 _AUDIT_OPENING_BYTES = 64 * 1024
 _AUDIT_VERDICT_FORMS = (
     ("merge", "최종 판정: 병합 가능"),
     ("merge", "Final verdict: mergeable"),
     ("fix", "최종 판정: 수정 후 병합"),
     ("fix", "Final verdict: changes requested"),
+    ("hold", "최종 판정: 보류"),
+    ("hold", "Final verdict: hold"),
 )
 
 
@@ -1110,21 +1124,25 @@ _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
                 for kind, label in _AUDIT_VERDICT_FORMS}
 
 
-def _completed_negative_audit_report(path):
-    """Read only the first nonblank, non-heading line, like pr-chain.py.
+def closed_review_kind(path):
+    """``merge``, ``fix`` or ``hold`` when the report opens on a closed review verdict.
 
-    The body is not an authority source: no prose, fence, history or conflicting
-    later verdict interpretation. A missing/unreadable opening retains FAIL.
+    Reads only the first nonblank, non-heading line, like pr-chain.py. The body is
+    not an authority source: no prose, fence, history or conflicting later verdict
+    interpretation. A missing, unreadable or differently shaped opening is ``None``,
+    as is anything but a regular file (a pipe or device is never opened).
     """
     if path is None:
-        return False
+        return None
     try:
+        if not Path(path).is_file():
+            return None
         with Path(path).open("rb") as handle:
             remaining = _AUDIT_OPENING_BYTES
             while remaining > 0:
                 raw = handle.readline(remaining + 1)
                 if not raw or len(raw) > remaining:
-                    return False
+                    return None
                 remaining -= len(raw)
                 for line in raw.decode("utf-8").splitlines():
                     line = line.strip()
@@ -1134,12 +1152,17 @@ def _completed_negative_audit_report(path):
                     line = line[:-1].rstrip() if line.endswith(".") else line
                     match = _AUDIT_CLOSED.fullmatch(line)
                     if not match:
-                        return False
+                        return None
                     label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
-                    return _AUDIT_KINDS[label] == "fix"
+                    return _AUDIT_KINDS[label]
     except (OSError, UnicodeError):
         pass
-    return False
+    return None
+
+
+def _completed_negative_audit_report(path):
+    """A legacy audit FAIL reconciles only on a report that opens on `수정 후 병합`."""
+    return closed_review_kind(path) == "fix"
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed

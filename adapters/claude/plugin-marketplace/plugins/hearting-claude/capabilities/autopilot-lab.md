@@ -221,7 +221,10 @@ Call an experiment condition by the name in the project catalog
 (`python3 utilities/experiment_catalog.py status` or `show`), not by a run id, a config name,
 or a private label. A condition the catalog does not list is registered first
 (`experiment_catalog.py register`); a missing goal or baseline there is a warning and does not
-stop the run. Run ids stay as references next to the name.
+stop the run. Run ids stay as references next to the name. Report results with the table
+`hearting run experiment_catalog leaderboard` prints, pasted as printed (in a stage report
+too, so the parent pastes it instead of drawing another); it is Fleet's LAB table with the
+catalog's metric line and words.
 
 Admission is another optional observation axis, independent of metric progress.
 The shared observer can use bounded records tied to exact run provenance when

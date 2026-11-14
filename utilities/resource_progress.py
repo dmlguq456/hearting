@@ -1610,7 +1610,10 @@ def _experiment_context(run, identity, observation, has_decision_metric):
                                             observation.get("summary") or {}, doc=doc)
         if info is not None and not info.get("name"):
             info = None  # a condition without a name cannot give one
-        return {"info": info, "catalog": read.status, "has_decision_metric": bool(has_decision_metric)}
+        summary = observation.get("summary") if isinstance(observation.get("summary"), dict) else {}
+        return {"info": info, "catalog": read.status, "has_decision_metric": bool(has_decision_metric),
+                "run_id": run.get("run_id"),
+                "has_metrics": bool(summary.get("latest") or summary.get("latest_metrics"))}
     except Exception:  # noqa: BLE001 -- the catalog is read-only context for a notice
         return None
 
@@ -1629,6 +1632,55 @@ def _experiment_lines(context, *, first, final):
     except Exception:  # noqa: BLE001
         pass
     return []
+
+
+def _experiment_optional(context, *, first, final):
+    """The catalog's optional notice pieces, most useful first: `[(place, text or fn(room) -> text)]`.
+
+    A named run gets the command that prints its results table at the end (`end`), then the table's
+    metric line (shortened when short of room) and words beside its name line (`front`).  A run with no name, on its first and final
+    notice, gets the command that names it, including in a project with no catalog yet once the run
+    reports values.  `_notice_texts` adds a piece only while the notice stays one part, so none of them
+    ever makes a notice longer than it was split before."""
+    if not context:
+        return []
+    try:
+        catalog = _catalog_module()
+        info = context.get("info")
+        if info is not None:
+            return [("end", catalog.notice_tail(info)), ("front", lambda room: catalog.notice_metric(info, None, room)),
+                    ("front", lambda room: catalog.notice_words(info, room))]
+        if (first or final) and (context["catalog"] == "ok" or context["has_decision_metric"]
+                                 or (context["catalog"] == "missing" and context.get("has_metrics"))):
+            line = catalog.register_line(context.get("run_id"))
+            if context["catalog"] == "missing" and not context["has_decision_metric"]:
+                line = catalog.unregistered_line() + "; " + line   # no name line in front of it here
+            return [("front", line)]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def _fit_optional(name_lines, entries, optional, limit=600):
+    """`(front, end)`: the optional pieces that fit in one part of `limit` characters, in their order."""
+    front, end = [], []
+    for place, piece in optional or ():
+        used = len("; ".join([*name_lines, *front, *entries, *end]))
+        room = limit - used - 2
+        text = piece(room) if callable(piece) else piece
+        if text and len(text) <= room:
+            (front if place == "front" else end).append(text)
+    return front, end
+
+
+def _value_text(value):
+    """A metric value in the catalog's one number form (`experiment_catalog._fmt`); a non-number as it is."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return value
+    try:
+        return _catalog_module()._fmt(float(value))
+    except Exception:  # noqa: BLE001 -- a notice never waits on its number form
+        return value
 
 
 def _decision_mark(context, samples):
@@ -1685,7 +1737,7 @@ def _quiet_event(event_kind, observation, status):
     return short or not metrics
 
 
-def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=()):
+def _notice_texts(run, event_kind, observation, record_path, sources, name_lines=(), optional=()):
     t = _ui_translator()
     undeclared = observation.get("undeclared")
     summary = observation.get("summary") or {}
@@ -1705,20 +1757,20 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
             if not isinstance(value, dict):
                 continue
             number = value.get("value")
-            shown = (number if isinstance(number, (int, float)) and math.isfinite(float(number))
+            shown = (_value_text(number) if isinstance(number, (int, float)) and math.isfinite(float(number))
                      else "NaN/Inf")
             rendered.append(f"{name}={shown}@{value.get('epoch')}")
         if rendered:
             return ",".join(rendered)
-        return (f"{metric}={fallback['value']}@{fallback['epoch']}"
+        return (f"{metric}={_value_text(fallback['value'])}@{fallback['epoch']}"
                 if isinstance(fallback, dict) and metric else t("resource.no_metrics"))
     record = str(record_path) if record_path else t("resource.no_record_path")
     trend = summary.get("trend") or "판정 불가"
     trend = t(_TREND_TEXT[trend]) if trend in _TREND_TEXT else trend
-    run_line = f"run={run.get('run_id') or 'unknown'}"
+    run_line = t("resource.key.run", run=run.get('run_id') or 'unknown')
     if run.get("row_id"):
-        run_line += f" row={run['row_id']}"
-    entries = [run_line, f"public run record={record}"]
+        run_line += " " + t("resource.key.row", row=run['row_id'])
+    entries = [run_line, t("resource.key.record", record=record)]
     admission_line = (f"admission={admission.get('state', 'unknown')}; coverage="
         f"{admission.get('coverage', 'unknown')}; samples denied/valid="
         f"{admission.get('denied_samples', 0)}/{admission.get('valid_samples', 0)}; "
@@ -1746,18 +1798,18 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
             + " target=" + str(counter.get("target_run_id") or "unknown")
             + " at=" + str(counter.get("observed_at") or "unknown"))
     if stagnation.get("state") == "stagnant":
-        anchor = ("last actual increase" if stagnation.get("since") == "last-increase"
-                  else "first comparable observation")
-        entries.append(f"no observed increase for {_duration(stagnation.get('seconds_since_anchor'), t)} since {anchor}")
+        anchor = t("resource.stagnant.last_increase" if stagnation.get("since") == "last-increase"
+                   else "resource.stagnant.first_observation")
+        entries.append(t("resource.stagnant", duration=_duration(stagnation.get('seconds_since_anchor'), t), anchor=anchor))
     elif stagnation.get("state") == "unknown":
-        entries.append("progress stagnation=unknown")
+        entries.append(t("resource.stagnation_unknown"))
     # Nothing was read because nothing was declared (or it is not visible here): one phrase.
     bare = (undeclared in _UNDECLARED_TEXT and not sources
             and not (latest or summary.get("latest_metrics"))
             and observation.get("reached") is None and not observation.get("source_observations"))
     if bare:
         if event_kind == "final":
-            entries.append(f"status={run.get('status') or 'unknown'}; exit={run.get('exit_code')}")
+            entries.append(t("resource.key.status", status=run.get('status') or 'unknown', exit=run.get('exit_code')))
             entries.append(t("resource.final_time", actual=_duration(observation.get("elapsed_seconds"), t),
                              plan=_duration(observation.get("planned_seconds"), t))
                            if observation.get("planned_seconds")
@@ -1765,7 +1817,7 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
         else:
             entries.append(t("resource.elapsed", elapsed=_duration(observation.get("elapsed_seconds"), t)))
         if observation.get("attention"):
-            entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
+            entries.append(t("resource.key.attention", items=",".join(item.get("kind", "unknown") for item in observation["attention"][:3])))
         if _UNDECLARED_TEXT[undeclared] == "resource.progress_not_visible":
             # A progress file the run named is a file, not a folder: say which one was declared.
             file_declared = bool(_declared_progress_file(run)) and not run.get("output_dir")
@@ -1774,24 +1826,24 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
         else:
             entries.append(t(_UNDECLARED_TEXT[undeclared]))
     elif event_kind == "final":
-        entries.append(f"status={run.get('status') or 'unknown'}; exit={run.get('exit_code')}")
+        entries.append(t("resource.key.status", status=run.get('status') or 'unknown', exit=run.get('exit_code')))
         entries.append(t("resource.final_metrics", latest=points("latest_metrics", latest),
                          best=points("best_metrics", best), trend=trend))
         entries.append(t("resource.final_time", actual=_duration(observation.get("elapsed_seconds"), t),
                          plan=_duration(observation.get("planned_seconds"), t)))
         if observation.get("attention"):
-            entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
+            entries.append(t("resource.key.attention", items=",".join(item.get("kind", "unknown") for item in observation["attention"][:3])))
     else:
         delta = summary.get("baseline_delta")
         entries.append(t("resource.checkpoint_metrics", latest=points("latest_metrics", latest),
                          best=points("best_metrics", best),
-                         delta=delta if delta is not None else t("resource.no_baseline"), trend=trend))
+                         delta=_value_text(delta) if delta is not None else t("resource.no_baseline"), trend=trend))
         eta = observation.get("predicted_total_seconds")
         entries.append(t("resource.eta", total=_duration(eta, t),
                          plan=_duration(observation.get("planned_seconds"), t),
                          elapsed=_duration(observation.get("elapsed_seconds"), t)))
         if observation.get("attention"):
-            entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
+            entries.append(t("resource.key.attention", items=",".join(item.get("kind", "unknown") for item in observation["attention"][:3])))
     if not bare:
         # Step or epoch reached, and how long ago the progress or metric files last changed.
         if observation.get("reached") is not None:
@@ -1807,26 +1859,28 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
         path = source.get("path")
         if isinstance(path, list):
             path = path[0] if path else None
-        source_lines.append(f"source {source.get('format') or 'unknown'}={path or t('resource.no_path')}")
+        source_lines.append(t("resource.key.source", format=source.get('format') or 'unknown', path=path or t('resource.no_path')))
     if not source_lines and not bare:
-        source_lines.append("source metrics unavailable")
+        source_lines.append(t("resource.source_unavailable"))
     entries.extend(source_lines)
     text = "; ".join([*name_lines, *entries])
     if len(text) <= 600:
-        return [text]
+        # The catalog's optional pieces (metric line, words, table command) only while it stays one part.
+        front, end = _fit_optional(name_lines, entries, optional)
+        return ["; ".join([*name_lines, *front, *entries, *end])]
     # Keep every field in immutable bounded parts; numbered chunks can be
     # concatenated in order when a path is longer than one notice.
     output = []
-    for label, value in [("run", "; ".join([*name_lines, run_line])), ("record", record),
-                         ("metrics", "; ".join(entries[2:]))]:
-        value = f"{label}: {value}"
+    for label, value in [("resource.part.run", "; ".join([*name_lines, run_line])), ("resource.part.record", record),
+                         ("resource.part.metrics", "; ".join(entries[2:]))]:
+        value = f"{t(label)}: {value}"
         if len(value) <= 600:
             output.append(value)
             continue
         width = 500
         chunks = [value[index:index + width] for index in range(0, len(value), width)]
         total = len(chunks)
-        output.extend(f"part {index}/{total}: {chunk}"
+        output.extend(f"{t('resource.part.chunk', index=index, total=total)}: {chunk}"
                       for index, chunk in enumerate(chunks, 1))
     return output
 
@@ -2252,7 +2306,8 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                                           **({"status": status} if event_kind == "final" and status else {})},
                                          event_kind,
                 observation, record_locator, sources or previous.get("sources", []),
-                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"))
+                _experiment_lines(experiment(), first=first_notice, final=event_kind == "final"),
+                _experiment_optional(experiment(), first=first_notice, final=event_kind == "final"))
             outbox.append({"key": event_key, "kind": event_kind,
                            "recipients": _notice_targets(run),
                            "texts": notice_texts, "text": notice_texts[0],
