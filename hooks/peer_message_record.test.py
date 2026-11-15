@@ -625,6 +625,26 @@ class StopFollowThroughTest(_BaseTest):
         self.assertIn("This is the only continuation for this turn.", first[0]["reason"])
         self.assertEqual(self._stop(stop_hook_active=True), [])
 
+    def test_a_session_that_moved_folders_still_shows_its_rewake_receipt_at_stop(self):
+        # The transcript stays in the folder the session started in; the hook payload's
+        # cwd is only where the session is now. The Stop must read the record the hook
+        # was given, so the completion the rewake already delivered is acked, not re-sent.
+        for where in ("sub/dir", "../other-worktree", "../../outside-the-repo"):
+            with self.subTest(cwd=where):
+                self.setUp()
+                self._completion()
+                self._rewake_delivered()
+                moved = (self.tmp_root / "start" / where).resolve()
+                moved.mkdir(parents=True, exist_ok=True)
+                # Only the owed-action follow-through may speak; the completion itself
+                # is not carried again ("Arrived before this turn ended").
+                stop = self._stop(cwd=str(moved))
+                self.assertFalse([out for out in stop if "Arrived before" in out.get("reason", "")])
+                self.assertEqual(self._state(), "acked")
+                self.assertEqual(pending_delivery.read(
+                    self.tmp_root, self.SID, self.DELIVERY)["attempts"], 1)
+                self.assertEqual(self._stop(cwd=str(moved), prompt_id="prompt-2"), [])
+
     def test_a_tool_naming_the_attempt_meets_the_action(self):
         self._completion()
         self._rewake_delivered()
