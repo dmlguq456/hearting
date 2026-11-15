@@ -936,17 +936,22 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
       order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i)});});
     for(const item of order)add(item.parts,item.action,item.groups);
-    // Each section stands whole (its head and the rows it kept), one after another from the top;
-    // the rows left over go under the last of them, right above the panel's last row.
+    // Each section stands whole (its head and the rows it kept), one after another from the top; the
+    // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
+    // the panel's bottom, right above the last row), or under the last section when there are none.
+    const lower=[];
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
       // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
-      if(s.name!=='QUESTIONS'&&content.length+sectionSize(s)>budget-1)break;
-      add(s.head(),s.action,s.groups);
+      if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)>budget-1)break;
+      const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
+      into(s.head(),s.action,s.groups);
       // A route's or a session's own row opens the popup with it unfolded.
-      sectionRows(s).forEach((row,i)=>add(row,s.name==='ROUTE'&&ranked[i]?'popup:ROUTE:'+ranked[i].id:
+      sectionRows(s).forEach((row,i)=>into(row,s.name==='ROUTE'&&ranked[i]?'popup:ROUTE:'+ranked[i].id:
         s.name==='SESSIONS'&&sessionList[i]?'popup:SESSIONS:'+clean(P(sessionList[i].tag).map(p=>p.text).join('')).replace(/^\[|\]$/g,''):s.action));
     }
+    if(fill&&lower.length)while(content.length+lower.length<height-2-1)add([]);
+    for(const row of lower)add(row.parts,row.action,row.groups);
     // A reset time that does not fit goes whole, never as a cut `(↻ …`. Spec rule 49 (b): 5h/7d
     // share the last row with the fold button and the gear, which stay however short rows run.
     // Correction 7 (11-13): the model windows (Fable's) stand after 7d; short of cells the row
