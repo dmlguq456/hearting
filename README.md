@@ -179,8 +179,9 @@ MESSAGES, a finished route's result in ROUTE. With the panel hidden the
 row shows the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
-state's color the moment the native screen changes (running, waiting; idle stays
-neutral); a failed route or experiment colors only its own row. Below the model and
+state's color the moment the native screen changes (running: three short lights,
+brightest in the middle, go round it together once every six seconds; waiting: it
+breathes red; idle stays neutral); a failed route or experiment colors only its own row. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
 Under the head (folder, branch and Git state, model and context, title and now,
@@ -191,7 +192,12 @@ and its choices), `4 ROUTE ⠏2 ✕1` (three routes, failed first), `4 LAB faile
 (three experiment conditions, the one to look at first), `5 SESSIONS ◑2 ⠏1`
 (three other sessions on this machine, the ones waiting for you first),
 `MESSAGES +3` (three messages and requests) and `MEM` (two saved memories), each
-head `N NAME counts ─── ›`. A 40-row window keeps two or three rows per section,
+head `N NAME counts ─── ›`. The question you can answer here now reads as a button:
+its rows stand on a dark rose fill across the panel, its choices are numbered chips,
+and `↵ answer · Ctrl+]` stands under them (a rose bar at the left in mono, eight
+colors or `NO_COLOR`); nothing else in the panel is filled. Once you answer, the
+question is one line, `✓ answer sent` in the passing green and what you chose
+after it. A 40-row window keeps two or three rows per section,
 a 20-row one one each, and lower windows let MEM go first. The ROUTE, LAB and
 SESSIONS popups are Fleet's own tables at the popup's width (a route unfolded
 with its failure reason whole, Enter for its page with its paths; the LAB
@@ -201,8 +207,9 @@ a session waiting for you (`◑`) answers its question right there, once, as tha
 session's answer. Press a section, or **Ctrl+]** (the question popup when one
 waits here, else the first section), and use **p** in any popup to fold or open
 the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
-press outside closes it; while it stands every key is its own, and ordinary keys
-stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
+press outside closes it; while it stands every key is its own, everything around
+it reads in one dark gray (the native's output keeps arriving, still gray, and the
+native is never told), and ordinary keys stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
 **t** for text (including pasted text), and **Enter** after every form field is
 answered. Choices and drafts survive question navigation. A transport receipt
 is shown separately from proved consumption; expired or cancelled questions

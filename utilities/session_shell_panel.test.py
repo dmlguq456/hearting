@@ -1319,6 +1319,118 @@ assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\
 """
         self.node(script, "panel-view.cjs")
 
+    def test_the_question_to_answer_here_reads_as_one_button(self):
+        # 11-15 (panel polish 1): in the open panel's QUESTIONS section the question a press answers
+        # here, now, stands on the rose fill across the inside width: its first row bright, its
+        # choices numbered chips, `↵ 답하기 · Ctrl+]` in rose at the right under them; a press on any
+        # of its rows opens the question popup. The head row keeps the form of every other head. A
+        # wait answered elsewhere and the answers on their way are never painted; nothing else in
+        # the panel is. Short of rows the action row goes first, then the choices, the first row to
+        # the last (heights 5-60 × widths 12-60, no row past the panel, none wider). The folded
+        # strip's row of what to do takes the same fill. Mono, eight colors and NO_COLOR lead the
+        # rows with a rose bar instead. The fill is one value per face (52 dark, 224 light).
+        script = r"""
+const assert=require('node:assert/strict'),pv=require(process.argv[1]);
+const p=(text,extra={})=>({text,...extra});
+const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
+const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150}};
+const model={tag:'[e9]',repo:[p('hearting/')],selected:[p('Opus 5.5')],context_side:[p('━━─── '),p('46%')],wait:'◑답 대기 1',styles,
+ labels:{answer_action:'↵ 답하기 · Ctrl+]'},session_title:'패널 손질',now:'그리는 중',route_label:'route 1',route_count:1,route_total:1,
+ routes:[{id:'a',title:'휠 입력 시험',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'3m',paint:{glyph:p('✕')}}],
+ messages:[{way:'←',who:'[73]',text:'설치 확인 끝났습니다'}],memory_items:[{kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],
+ quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
+const choice=(answerable=true)=>({count:1,label:'QUESTIONS',answerable,
+ rows:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요? 지금 둘 중 하나',{foreground:253})],
+  [p('  ',styles.dim),p('1 ',styles.dim),p('파일',{foreground:253}),p(' · ',styles.dim),p('2 ',styles.dim),p('표준 출력',{foreground:253}),p(' (추천)',styles.dim),
+   p(' · ',styles.dim),p('3 ',styles.dim),p('둘 다',{foreground:253})]],
+ one:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})]],line:[p('로그를 어느 쪽에 남길까요?',{foreground:253})],choices:3});
+const there={...choice(false),rows:[[p('◑ '),p('다른 세션의 질문')],[p('  '),p('그 창에서 답',styles.dim)]],choices:0};
+const sent=()=>[[p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('2 표준 출력',{foreground:253})]];
+const paint=(o={})=>pv.render({width:o.width||44,height:o.height||30,side:o.folded?false:true,fill:!o.folded,folded:!!o.folded,
+ model:{...model,...(o.model||{})},state:'idle',sid:'s',harness:'claude',frame:0,brief:()=>o.q,sent:o.sent||(()=>[]),configuration:o.cfg||{},background:o.background||''});
+const str=r=>r.map(x=>x.text).join('');
+const inside=r=>r.slice(2,-2);
+const grounds=v=>v.rows.map(r=>r.some(x=>x.background!==undefined));
+// (a) 256 colors: the head, then three painted rows; their every inside cell on the fill or a chip.
+{const v=paint({q:choice(),sent}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ 1 QUESTIONS ─+ › │$/.test(r));
+ assert(head>0,rows.join('\n'));assert.equal(rows[head+1],'│ ✓ 답 보냄 · 2 표준 출력                  │');
+ const at=[head+2,head+3,head+4],painted=grounds(v);
+ assert.deepEqual(painted.map((x,i)=>x?i:-1).filter(i=>i>=0),at,rows.join('\n'));
+ for(const i of at){const parts=inside(v.rows[i]);
+  assert.equal(parts.reduce((n,x)=>n+cells(x.text),0),40,rows[i]);
+  assert(parts.every(x=>x.background===52||x.background===235),rows[i]+JSON.stringify(parts));}
+ // The first row: `◑` rose, the words bright.
+ const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
+ assert(first.find(x=>x.text==='◑').foreground===174&&first.filter(x=>/로그/.test(x.text)).every(x=>x.foreground===255),JSON.stringify(first));
+ // The choices: numbered chips on the chip ground, one fill cell apart, the first under the words.
+ const chips=[];let cur='';for(const x of inside(v.rows[at[1]])){if(x.background===235)cur+=x.text;else if(cur){chips.push(cur);cur='';}}if(cur)chips.push(cur);
+ assert.deepEqual(chips,[' 1 파일 ',' 2 표준 출력 (추천) ',' 3 둘 다 '],rows[at[1]]);assert(rows[at[1]].startsWith('│   1 파일 '),rows[at[1]]);
+ // The action at the right, in rose.
+ assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │'),rows[at[2]]);
+ assert(inside(v.rows[at[2]]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[at[2]]));
+ // A press on any painted row (and the head) opens the question popup.
+ for(const i of [head,...at])assert(v.hits.some(h=>h.row===i&&h.action==='question'),String(i));
+ // The sent line keeps its own colors, unpainted.
+ assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150);}
+// (b) A wait answered elsewhere, the sent line alone, no question: nothing painted, no action row.
+for(const q of [there,null]){const v=paint({q,sent});assert(!grounds(v).some(Boolean),JSON.stringify(q));assert(!v.rows.map(str).join('').includes('↵'));}
+// (c) Mono, eight colors, NO_COLOR: no ground anywhere, a rose bar leading each of the three rows.
+for(const [cfg,m] of [[{theme:'mono'},{}],[{},{colors:8}],[{},{no_color:true}]]){
+ const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);assert(!grounds(v).some(Boolean),JSON.stringify(cfg));
+ const bars=rows.filter(r=>r.startsWith('│ ▌ '));assert.equal(bars.length,3,rows.join('\n'));
+ assert(bars[0].startsWith('│ ▌ ◑ 로그를')&&bars[1].includes('1 파일 · 2 표준 출력')&&bars[2].endsWith('↵ 답하기 · Ctrl+] │'),bars.join('\n'));}
+// (d) A light face and a shade keep the fill (the shade never covers it).
+{const v=paint({q:choice(),cfg:{theme:'light'}}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
+ assert(inside(r).every(x=>x.background===224)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===232),JSON.stringify(r));}
+{const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
+ assert(inside(r).every(x=>x.background===52),JSON.stringify(r));}
+// (e) Short of rows: the action row goes first, then the choices; the first row stays to the last.
+// Every height 5-60 at every width 12-60 keeps its rows within the panel, each as wide.
+const kinds=new Set();
+for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
+ const v=paint({q:choice(),height:h,width:w,sent}),rows=v.rows.map(str),label=h+'x'+w+'\n'+rows.join('\n');
+ assert(rows.length<=h&&rows.every(r=>cells(r)===w),label);
+ const painted=grounds(v).map((x,i)=>x?i:-1).filter(i=>i>=0),head=rows.findIndex(r=>/^│ 1 QUESTIONS/.test(r)||/^│ 1 Q/.test(r));
+ if(w>=20)assert(painted.length>=1,label);
+ if(!painted.length)continue;
+ // One block, right under the head or the sent line, inside the frame.
+ assert(painted.every((y,i)=>!i||y===painted[i-1]+1)&&painted[0]>0&&painted.at(-1)<rows.length-2,label);
+ if(head>=0)assert(painted[0]===head+1||painted[0]===head+2,label);
+ const action=rows[painted.at(-1)].includes('↵'),n=painted.length;
+ assert(n===1&&!action||n===2&&!action||n===3&&action,label);
+ kinds.add(n);
+}
+assert.deepEqual([...kinds].sort(),[1,2,3]);
+// (f) The folded strip: its row of what to do on the fill across the whole width while it carries the
+// question to answer here; a wait answered elsewhere leaves it plain; without color, the rose bar.
+{const v=paint({q:choice(),folded:true,width:60,height:4}),i=v.rows.findIndex(r=>str(r).startsWith('◑답 대기 1'));
+ assert(i>0&&v.rows[i].every(x=>x.background===52)&&v.rows[i].reduce((n,x)=>n+cells(x.text),0)===60,JSON.stringify(v.rows[i]));
+ assert(grounds(v).filter(Boolean).length===1);assert(v.hits.some(h=>h.row===i&&h.action==='question'));}
+{const v=paint({q:there,folded:true,width:60,height:4});assert(!grounds(v).some(Boolean));}
+{const v=paint({q:choice(),folded:true,width:60,height:4,model:{colors:8}}),r=v.rows.map(str).find(r=>r.includes('◑답 대기'));
+ assert(r.startsWith('▌ ◑답 대기 1 · 로그를')&&!grounds(v).some(Boolean),r);}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_the_veil_is_one_gray_per_face_and_none_where_no_hue_is_shown(self):
+        # 11-15 (panel polish 3): the gray the host veils everything behind a standing popup with: 239 on
+        # a dark or unknown face, 250 on a light one; none in mono, eight colors or NO_COLOR, where the
+        # popup's frame line is bright (not dim) instead.
+        script = r"""
+const assert=require('node:assert/strict'),pv=require(process.argv[1]);
+assert.equal(pv.veil({},{colors:256}),239);assert.equal(pv.veil({},{colors:1<<24,background:'dark'}),239);
+assert.equal(pv.veil({theme:'light'},{colors:256}),250);assert.equal(pv.veil({},{colors:256,background:'light'}),250);
+for(const [cfg,o] of [[{theme:'mono'},{colors:256}],[{},{colors:8}],[{},{colors:256,noColor:true}]])assert.equal(pv.veil(cfg,o),null,JSON.stringify([cfg,o]));
+const styles={dim:{foreground:-1,dim:true}};
+const lines=v=>v.rows.flat().filter(x=>/^[╭╮╰╯│─ ]+$/.test(x.text)&&/[╭╮╰╯│─]/.test(x.text));
+const frame=(model,cfg={})=>lines(pv.popup({cols:100,rows:30,title:[{text:'T'}],body:[[{text:'x'}]],sections:['QUESTIONS'],model:{styles,...model},configuration:cfg}));
+assert(frame({colors:256}).every(x=>x.dim===false&&x.foreground===undefined||x.dim===true||x.role==='messages'));
+assert(frame({colors:256}).some(x=>x.dim===true));
+for(const [m,cfg] of [[{colors:8},{}],[{colors:256,no_color:true},{}],[{colors:256},{theme:'mono'}]])
+ assert(frame(m,cfg).every(x=>x.dim!==true),JSON.stringify([m,cfg]));
+"""
+        self.node(script, "panel-view.cjs")
+
     def test_mem_stands_under_the_messages_and_gives_way_first(self):
         # Spec E9 rule 46, 11-15: MEM leaves the head for its own section under the messages (its head
         # first and a thin rule on from it, as the messages' `MESSAGES`, no `›`: it opens no popup), two
@@ -1538,17 +1650,19 @@ for(const open of [[],['lab:grp_1']])for(const folded of [false,true]){
         self.node(script, "panel-view.cjs")
 
     def test_the_outer_frame_carries_the_sessions_moving_state(self):
-        # Spec E9 rule 47 (11-14: the outer frame instead of the head rule), rules 51, 52 and 25 as
-        # it retunes them. Running (and while an answer is typed in), a bright arc goes round the
-        # outer frame clockwise without rest: its head the brightest (the running frame's vanilla),
-        # its tail four shades down into the neutral frame gray, a quarter of the frame's cells
-        # long (it grows with the panel), once round every 60 frames (6 s) whatever the size; the
-        # cells of the head's words are passed behind. Waiting, the whole frame breathes red every
-        # 48 frames (4.8 s), three shades in 256 colors and six in 24-bit, one at a time. Idle and
-        # an unknown state, rule motion off, mono, NO_COLOR, eight colors and the settings screen:
-        # the still frame in the state's color. The head rule is the plain thin rule in every
-        # state. Between frames only the frame's line cells (and the spinner glyph) change; the
-        # host gets those cells, their paint at any frame and the next frame they change at.
+        # Spec E9 rule 47 (11-14: the outer frame instead of the head rule; 11-15 panel polish 4:
+        # scanners instead of one arc), rules 51, 52 and 25 as it retunes them. Running (and while an
+        # answer is typed in), three short lights go round the outer frame clockwise together, evenly
+        # spaced: each eleven cells whole, its middle the brightest (the running frame's vanilla) and
+        # fading alike to both sides (230 → 187 → 144 → 101 → the neutral frame gray), once round
+        # every 60 frames (6 s) whatever the size; a frame too short for three keeps fewer (the dark
+        # stretch between two never shorter than one light); the cells of the head's words are passed
+        # behind. Waiting, the whole frame breathes red every 48 frames (4.8 s), three shades in 256
+        # colors and six in 24-bit, one at a time. Idle and an unknown state, rule motion off, mono,
+        # NO_COLOR, eight colors and the settings screen: the still frame in the state's color. The
+        # head rule is the plain thin rule in every state. Between frames only the frame's line cells
+        # (and the spinner glyph) change; the host gets those cells, their paint at any frame and the
+        # next frame they change at.
         script = self.FIXTURE + r"""
 const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},
  tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}};
@@ -1556,7 +1670,9 @@ const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side
  model:{...head,tag:'[e9]',routes:[],route_count:0,messages:[],styles,...(o.model||{})},state:o.state,frame:o.frame||0,since:o.since,
  configuration:o.cfg||{},background:o.background||'',questions:()=>[],...(o.extra||{})});
 const text=r=>r.map(p=>p.text).join('');
-assert.deepEqual(view.BORDER,{LAP:60,ARC:1/4,SHADES:4,BREATHE:48,BREATHE_STEPS:6,BREATHE_STEPS_256:3});
+// The four values a person tunes stand at the top of panel-view.cjs.
+assert.deepEqual(view.BORDER,{SCANNERS:3,HALF:5,LAP:60,PEAK:0,SHADES:4,BREATHE:48,BREATHE_STEPS:6,BREATHE_STEPS_256:3});
+assert(/^'use strict';\n(?:\/\/.*\n)+const BORDER_SCANNERS=3,BORDER_HALF=5,BORDER_LAP=60,BORDER_PEAK=0;\n/.test(require('node:fs').readFileSync(process.argv[1],'utf8')));
 assert.deepEqual(view.FACES.dark.orbit,[230,187,144,101]);assert.deepEqual(view.FACES.light.orbit,[22,65,108,151]);
 assert.deepEqual(view.FACES.dark.breath,[217,210,174]);assert.deepEqual(view.FACES.light.breath,[88,124,131]);
 // Every cell of a painted panel, by row and column, with the part it stands in.
@@ -1564,54 +1680,60 @@ const grid=v=>v.rows.map(r=>{const out=[];for(const p of r)for(const ch of p.tex
 // The frame's cells clockwise from the top-left corner, as [row, column].
 const around=(W,H)=>{const out=[];for(let x=0;x<W;x++)out.push([0,x]);for(let y=1;y<H-1;y++)out.push([y,W-1]);
  for(let x=W-1;x>=0;x--)out.push([H-1,x]);for(let y=H-2;y>0;y--)out.push([y,0]);return out;};
-// Each frame cell's look: 'text' (the head's words), 'base' (the neutral frame), or its arc shade 0..3.
+// Each frame cell's look: 'text' (the head's words), 'base' (the neutral frame), or its shade 0..3.
 const ramp=view.FACES.dark.orbit;
 const looks=v=>{const g=grid(v),W=g[0].length,H=g.length;return around(W,H).map(([y,x])=>{const c=g[y][x];
  if(!'┌┐└┘─│'.includes(c.ch))return 'text';
  if(c.p.role==='frame')return 'base';
  assert(c.p.role==='orbit'&&ramp.includes(c.p.foreground)&&c.p.dim!==true,JSON.stringify(c.p));return ramp.indexOf(c.p.foreground);});};
-const lit=l=>l.map((x,i)=>typeof x==='number'?i:-1).filter(i=>i>=0);
-// The arc's head: a brightest cell whose next cell clockwise is no arc cell (null while it is behind the head's words).
-const headOf=l=>{const n=l.length,h=l.findIndex((x,i)=>x===0&&l[(i+1)%n]==='base');return h<0?null:h;};
-// (a) Running: every frame shows one arc, a quarter of the frame long, its head the brightest and
-// four shades down to its tail; behind it the neutral frame. One lap is 60 frames for every size.
+// One light, end to end: the middle the brightest, fading alike to both sides.
+const LIGHT=[3,2,2,1,0,0,0,1,2,2,3];
+// The lights of a frame's looks: each maximal run of lit cells round the ring, its start, and
+// whether the head's words cut it (a short run beside 'text').
+const lightsOf=l=>{const n=l.length,lit=i=>typeof l[i%n]==='number';let from=l.findIndex((x,i)=>!lit(i));if(from<0)return [];
+ const out=[];for(let k=1;k<=n;k++){const i=(from+k)%n;if(lit(i)&&!lit(i-1+n)){let j=i;const run=[];while(lit(j)){run.push(l[j%n]);j++;}
+  out.push({at:i,run,cut:run.length<11&&(l[(i-1+n)%n]==='text'||l[j%n]==='text')});}}return out;};
+// (a) Running: three lights, each the eleven-cell ramp, evenly spaced, moving on clockwise every frame
+// by the same step (within a cell), round in exactly 60 frames for every size.
 for(const [o,W,H] of [[{},40,40],[{width:60},60,40],[{side:false,width:100,height:14},100,0]]){
- const rowsOf=run({...o,state:'working'}).rows.length,P=2*W+2*((H||rowsOf)-2),arc=Math.round(P/4),heads=[];
+ const rowsOf=run({...o,state:'working'}).rows.length,P=2*W+2*((H||rowsOf)-2),mids=[];
  for(let f=0;f<=120;f++){
   const v=run({...o,state:'working',frame:f}),l=looks(v);assert.equal(l.length,P);
   // The glyphs stay the frame's own on every frame.
   const g=grid(v);assert(g[0][0].ch==='┌'&&g[0].at(-1).ch==='┐'&&g.at(-1)[0].ch==='└'&&g.at(-1).at(-1).ch==='┘',String(f));
-  const on=lit(l),h=headOf(l);heads.push(h);
-  if(h!==null&&!l.slice(0).some((x,i)=>x==='text'&&((h-i+P)%P)<=arc)){
-   // Walking back from the head: shades 0, 1, 2, 3 in order, each a quarter of the arc (within a cell), then the neutral frame.
-   const back=Array.from({length:arc+1},(_,k)=>l[(h-k+P)%P]);
-   assert.equal(back[arc],'base',f+' '+back.join(''));
-   for(let k=1;k<arc;k++)assert(back[k]>=back[k-1]&&back[k]-back[k-1]<=1,f+' '+back.join(''));
-   for(let s=0;s<4;s++){const n=back.filter(x=>x===s).length;assert(Math.abs(n-arc/4)<=1,f+' '+s+' '+back.join(''));}
-   assert.equal(on.length,arc,f+' '+P);
-  }
-  assert(on.length<=arc&&on.length>=arc-15,f+' '+on.length);
+  const lights=lightsOf(l),whole=lights.filter(x=>!x.cut);
+  assert(lights.length<=3&&whole.length>=2,f+' '+l.join(''));
+  for(const x of whole)assert.deepEqual(x.run,LIGHT,f+' '+l.join(''));
+  // No lit cell outside the lights; a light the words cut is a piece of the ramp.
+  for(const x of lights.filter(x=>x.cut))assert(x.run.length<11&&LIGHT.join(',').includes(x.run.join(',')),f+' '+l.join(''));
+  mids.push(whole.length===3?whole.map(x=>(x.at+5)%P).sort((a,b)=>a-b):null);
  }
- // The head moves on clockwise every frame by the same step (within a cell), never back, and
- // comes round to where it was after exactly 60 frames; half a lap later it is half the frame on.
- const steps=[];for(let f=0;f<120;f++)if(heads[f]!==null&&heads[f+1]!==null)steps.push((heads[f+1]-heads[f]+P)%P);
- assert(steps.length>60&&steps.every(s=>s>=Math.floor(P/60)&&s<=Math.ceil(P/60)),JSON.stringify(steps));
+ // Evenly spaced: a third of the frame apart (within a cell).
+ const full=mids.filter(Boolean);assert(full.length>30,String(W));
+ for(const m of full)for(let k=0;k<3;k++){const gap=(m[(k+1)%3]-m[k]+P)%P;assert(Math.abs(gap-P/3)<=1,JSON.stringify(m)+' '+P);}
+ // Moving on: the first middle steps P/60 (within a cell) a frame, never back; a lap is 60 frames.
+ const steps=[];for(let f=0;f<120;f++)if(mids[f]&&mids[f+1]){const d=Math.min(...mids[f+1].map(b=>(b-mids[f][0]+P)%P));steps.push(d);}
+ assert(steps.length>30&&steps.every(s=>s>=Math.floor(P/60)&&s<=Math.ceil(P/60)),JSON.stringify(steps));
  for(let f=0;f<60;f++)assert.deepEqual(run({...o,state:'working',frame:f}).rows,run({...o,state:'working',frame:f+60}).rows,String(f));
- const half=[0,10,20].find(f=>heads[f]!==null&&heads[f+30]!==null);assert(Math.abs((heads[half+30]-heads[half]+P)%P-P/2)<=1,String(half));
- // (b) One passage a lap: each cell lights once, brightest first, then steps down to the neutral
- // frame, in 256 colors too (a turning arc, never a blink).
+ // (b) Three passages a lap: each cell lights three times and goes back to the neutral frame between
+ // (in 256 colors too: lights turning, never a blink); every shade shows along the way.
  const seq=Array.from({length:60},(_,f)=>looks(run({...o,state:'working',frame:f})));
  for(let i=0;i<P;i++){if(seq[0][i]==='text')continue;
-  const s=seq.map(l=>l[i]);const from=s.findIndex((x,k)=>x==='base'&&s[(k+1)%60]!=='base');
-  const turn=[...s.slice(from+1),...s.slice(0,from+1)];const end=turn.indexOf('base');
-  assert(end>0&&turn.slice(end).every(x=>x==='base'),i+' '+s.join(''));
-  for(let k=1;k<end;k++)assert(turn[k]>=turn[k-1],i+' '+s.join(''));
-  assert(turn[0]===0&&turn[end-1]===3,i+' '+s.join(''));}
+  const s=seq.map(l=>l[i]),rises=s.filter((x,k)=>x!=='base'&&s[(k+59)%60]==='base').length;
+  assert.equal(rises,3,i+' '+s.join(''));}
+ assert.deepEqual([...new Set(seq.flat().filter(x=>typeof x==='number'))].sort(),[0,1,2,3]);
 }
-// (c) The arc starts with the state: at `since` its head is the first line cell right of the head's words.
+// A frame too short for three keeps fewer, the dark stretch between two at least one light long (11 cells).
+for(const [W,H,n] of [[30,20,3],[20,4,2],[12,4,1],[8,4,1]]){
+ const v=run({side:false,width:W,height:H,state:'working',frame:0,since:0}),l=looks(v),P=l.length,on=l.filter(x=>typeof x==='number').length;
+ const lit=lightsOf(l.map(x=>x==='text'?'base':x));assert.equal(lit.length,n,W+'x'+H+' '+l.join(''));
+ assert(on<=11*n,W+'x'+H);
+ if(n>1)for(let k=0;k<n;k++){const a=lit[k],b=lit[(k+1)%n];assert((b.at-(a.at+a.run.length)+P)%P>=11,W+'x'+H+' '+l.join(''));}
+}
+// (c) The lights start with the state: at `since` the first one stands whole right after the head's words.
 for(const since of [0,7,59,1000]){const v=run({state:'working',frame:since,since}),l=looks(v);
- const words=text(v.rows[0]).indexOf(' ─')+1;assert.equal(headOf(l),words,since+' '+text(v.rows[0]));
- assert.deepEqual(looks(run({state:'working',frame:since+13,since})),looks(run({state:'working',frame:13})),'the same arc, '+since+' frames on');}
+ const words=text(v.rows[0]).indexOf(' ─')+1;assert.equal(l[words-1],'text');assert.deepEqual(l.slice(words,words+11),LIGHT,since+' '+l.join(''));
+ assert.deepEqual(looks(run({state:'working',frame:since+13,since})),looks(run({state:'working',frame:13})),'the same lights, '+since+' frames on');}
 // (d) The host's cells: the frame's line cells (never the head's words), their paint at any frame as painted, the next change.
 const v3=run({state:'working',frame:3});
 assert(v3.animated&&!v3.blinks&&v3.motion&&v3.motion.cells.length===156-text(v3.rows[0]).indexOf(' ─'));

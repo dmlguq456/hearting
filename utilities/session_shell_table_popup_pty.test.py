@@ -138,6 +138,13 @@ const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─
   const left=[...s[top]].indexOf('╭');return {top,bottom,title:s[top],foot:s[bottom]||'',rows:s.slice(top,bottom+1),left};};
 const popupHas=word=>s=>{const b=box(s);return !!b&&b.rows.some(l=>l.includes(word));};
 const unfolded=s=>{const b=box(s);return b?b.rows.find(l=>l.includes('▶'))||'':'';};
+// 11-15 (panel polish 3): how many cells outside the standing popup (its frame and the empty cell
+// round it) do not read as the one gray (another color, weight or ground; a ground on an empty cell).
+const outside=async()=>{const s=await screen(),b=box(s);if(!b)return -1;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮');let n=0;
+  for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){if(y>=b.top-1&&y<=b.bottom+1&&x>=left-1&&x<=right+1)continue;
+    const cell=line?.getCell(x);if(!cell)continue;const blank=!cell.getChars().trim();
+    if(!cell.isBgDefault()||cell.isInverse()||!blank&&(cell.isFgDefault()||cell.getFgColor()!==239||cell.isBold()||cell.isDim()))n++;}}return n;};
+const veil={};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
@@ -147,11 +154,11 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   // A press on the ROUTE section's head: Fleet's routes table, the most pressing route unfolded.
   let p=await at('2 ROUTE');await press(p.x+2,p.y);
   let s=await until(popupHas('PROGRESS'),'the routes popup');
-  s=await until(s=>unfolded(s).includes('휠 입력'),'the failed route unfolded');frames.route=s;
+  s=await until(s=>unfolded(s).includes('휠 입력'),'the failed route unfolded');frames.route=s;veil.route=await outside();
   checks.route_title=box(s).title;checks.route_foot=box(s).foot;
   // ↑↓ unfold the route before or after it in Fleet's order; Enter its page (Fleet's route page); Enter again the table.
   await key('\x1b[A',300);s=await until(s=>unfolded(s).includes('질문 팝업'),'the route before it unfolded');frames.route_down=s;
-  await key('\r',300);s=await until(s=>!!box(s)&&box(s).rows.some(l=>l.includes('╔')),'the route page');frames.route_page=s;
+  await key('\r',300);s=await until(s=>!!box(s)&&box(s).rows.some(l=>l.includes('╔')),'the route page');frames.route_page=s;veil.route_page=await outside();
   await key('\r',300);s=await until(s=>!!box(s)&&!box(s).rows.some(l=>l.includes('╔'))&&popupHas('PROGRESS')(s),'the table again');
   // While it stands the route is renamed: the projection's route rows change (the existing watch on the
   // shared cache) and the popup reads Fleet's table again.
@@ -160,15 +167,15 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   cache.route_panels[cfg.key][0].title='RENAMED_ROUTE 이름 바뀜';write(cfg.cache,cache);
   s=await until(popupHas('RENAMED_ROUTE'),'the routes popup drawn again');frames.route_changed=s;
   // → the next section's popup: LAB (Fleet's LAB table), then SESSIONS (Fleet's session table); ← back.
-  await key('\x1b[C',300);s=await until(popupHas('분리 모델 비교'),'the LAB popup');frames.lab=s;checks.lab_foot=box(s).foot;
-  await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup');frames.sessions=s;
-  await key('\x1b[D',300);s=await until(popupHas('분리 모델 비교'),'back to LAB');
+  await key('\x1b[C',300);s=await until(popupHas('분리 모델 비교'),'the LAB popup');frames.lab=s;checks.lab_foot=box(s).foot;veil.lab=await outside();
+  await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup');frames.sessions=s;veil.sessions=await outside();
+  await key('\x1b[D',300);s=await until(popupHas('분리 모델 비교'),'back to LAB');veil.back=await outside();
   await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup again');
   // ↓ until the waiting session [12] unfolds; Enter opens its question in the question popup.
   for(let i=0;i<6&&!unfolded(await screen()).includes('[12]');i++)await key('\x1b[B',500);
   s=await until(s=>unfolded(s).includes('[12]'),'the waiting session unfolded');frames.sessions_open=s;
   await key('\r',300);s=await until(s=>!!box(s)&&box(s).title.includes('[12]'),'the other session\'s question');frames.foreign=s;
-  checks.foreign_title=box(s).title;
+  checks.foreign_title=box(s).title;veil.foreign=await outside();
   await key('2',150);await key('\r',600);s=await until(s=>!box(s),'the answer sent and the popup closed');frames.answered=s;
   // Nothing of it reached the native: its draft stands, never submitted.
   s=await screen();checks.draft=s.some(l=>l.startsWith('❯ draft9'));checks.submitted=s.some(l=>l.includes('DONE_draft9'));
@@ -176,13 +183,13 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   // A resize while a popup stands: it stands again in the middle, Fleet's table read at the new width.
   await key('\x1d',300);await until(s=>!!box(s),'the question popup by Ctrl+]');
   await key('\x1b[C',300);await until(popupHas('PROGRESS'),'the routes popup by →');
-  await resize(120,30);s=await until(s=>!!box(s)&&popupHas('ROUTE')(s),'the popup after a resize');frames.resized=s;
+  await resize(120,30);s=await until(s=>!!box(s)&&popupHas('ROUTE')(s),'the popup after a resize');frames.resized=s;veil.resized=await outside();
   checks.resized_width=[...box(s).title.trimEnd()].length-box(s).left;checks.resized_left=box(s).left;
   await key('\x1b',300);await until(s=>!box(s),'closed');
   // The folded strip (90 columns): its LAB and SESSIONS groups open their popups; the strip stays.
   await resize(90,24);s=await until(has('SESSIONS ◑'),'the folded strip');frames.strip=s;
   p=await at('LAB 실패');await press(p.x,p.y,300);s=await until(popupHas('분리 모델 비교'),'LAB from the strip');frames.strip_lab=s;
-  checks.strip_kept=s.slice(-3).join('\n')===frames.strip.slice(-3).join('\n');
+  checks.strip_kept=s.slice(-3).join('\n')===frames.strip.slice(-3).join('\n');veil.strip_lab=await outside();
   await key('\x1b',300);await until(s=>!box(s),'closed');
   p=await at('SESSIONS ◑');await press(p.x,p.y,300);s=await until(popupHas('TITLE'),'SESSIONS from the strip');frames.strip_sessions=s;
   await key('\x1b',300);await until(s=>!box(s),'closed');
@@ -194,7 +201,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   s=await until(s=>!!box(s)&&box(s).rows.some(l=>/│ \d+\/\d+ · /.test(l)),'a routes popup longer than its rows');frames.narrow_route=s;
   const page=box(s).rows.join('\n');await wheel(box(s).left+4,box(s).top+2);await wheel(box(s).left+4,box(s).top+2);
   s=await screen();checks.wheel_table=!!box(s)&&box(s).rows.join('\n')!==page;frames.narrow_wheel=s;
-  checks.narrow_width=Math.max(...s.map(l=>[...l].length));
+  checks.narrow_width=Math.max(...s.map(l=>[...l].length));veil.narrow_route=await outside();checks.veil=veil;
   await key('\x1b',300);s=await until(s=>!box(s),'closed at 60×16');
   checks.native_mouse_end=raw.includes('NATIVE_ESC_');
   s=await screen();checks.draft_end=s.some(l=>l.startsWith('❯ draft9'));checks.submitted_end=s.some(l=>l.includes('DONE_draft9'));
@@ -369,6 +376,10 @@ class SessionShellTablePopupTest(unittest.TestCase):
         self.assertIn('◑ [12] 분리 모델 학습 비교', panel)
         self.assertNotIn('[e9] 이 창', panel)  # this window's own session is no row of its own section
         # The routes popup: Fleet's table, its title the section's head, the sections on its bottom line.
+        # 11-15 (panel polish 3): behind every table popup (and the other session's question), through
+        # ←→, a page, a resize, the strip and 60×16, everything outside it reads in the one gray.
+        self.assertEqual(checks['veil'], {name: 0 for name in ('route', 'route_page', 'lab', 'sessions', 'back', 'foreign',
+                                                               'resized', 'strip_lab', 'narrow_route')}, checks['veil'])
         self.assertIn('2 ROUTE ⠏1 ✕1', checks['route_title'])
         for name in ('QUESTIONS', 'ROUTE', 'LAB', 'SESSIONS'):
             self.assertIn(name, checks['route_foot'])

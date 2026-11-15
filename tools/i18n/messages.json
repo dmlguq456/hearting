@@ -1398,6 +1398,10 @@
    "en": "answer needed",
    "ko": "답 필요"
   },
+  "fleet.session_panel.answer_action": {
+   "en": "↵ answer · Ctrl+]",
+   "ko": "↵ 답하기 · Ctrl+]"
+  },
   "fleet.session_panel.apply": {
    "en": "Apply",
    "ko": "적용"

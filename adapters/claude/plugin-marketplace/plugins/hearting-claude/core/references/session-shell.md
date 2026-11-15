@@ -189,7 +189,8 @@ beat or moving rule, and only the state glyph turns. While the strip paints its
 session row, Claude's row under its input keeps the notice (what to do now) as
 with the panel open, so no value shows twice; the strip carries no Git or job
 row. A press on the rule or the session row opens the panel; a press on the row of what to do
-while it carries the question opens the question popup, and a press on a group of the routes row
+while it carries the question opens the question popup (that row then stands on the question's
+rose fill across the strip, or leads with the rose bar where no hue shows), and a press on a group of the routes row
 opens that section's popup, above the strip (the strip stays and the native keeps its width).
 **Ctrl+]** always opens a popup and every popup names **`p`**, which folds or opens the panel: the
 keyboard alone unfolds a folded panel (Ctrl+], then `p`). Where the open panel
@@ -267,20 +268,22 @@ with `rule motion` off, in `mono`, under `NO_COLOR`, in eight colors and on the
 settings screen. Otherwise the open panel's outer frame moves with this
 session's own state (not a route's), beside the native area and under it alike
 (the folded strip has no frame: only its state glyph turns). While the session runs (an answer
-being typed in included) a bright arc goes round it clockwise without rest: its
-head the running color (the session spinner's vanilla), its tail four shades
-down into the neutral frame gray, a quarter of the frame's cells long (it grows
-with the panel), once round every six seconds whatever the size; the cells of
-the head's words are passed behind. The arc starts with the state: on the very
-paint that shows the session running its head stands right after the head's
+being typed in included) three short scanners go round it clockwise together without rest,
+evenly spaced: each eleven cells whole, its middle the running color (the session spinner's
+vanilla) and fading alike to both sides through four shades (230 → 187 → 144 → 101) into the
+neutral frame gray, once round every six seconds whatever the size; a frame too short for
+three keeps fewer, so the dark stretch between two is never shorter than one scanner; the
+cells of the head's words are passed behind. The scanners start with the state: on the very
+paint that shows the session running the first stands whole right after the head's
 words. While an answer or a confirmation waits the whole frame breathes red,
 never blinking, once every 4.8 seconds on a cosine through six shades in 24-bit
 color (when `COLORTERM` says the terminal takes it) or three in 256 colors, one
 shade at a time, each for an equal stretch, starting at the frame's waiting red;
 the steward `⚑` keeps its own blink. Idle and an unknown state keep the still
-neutral frame. Every value (the arc's length, its shades and lap, the breath and
-its shade count) is a constant in one place (`BORDER_*` and `FACES.*.orbit`,
-`breath`, `breathRGB` in `panel-view.cjs`). A route's state stays on its own row's
+neutral frame. Every value is a constant in one place in `panel-view.cjs`: the four a person
+tunes stand at its top (`BORDER_SCANNERS` 3, `BORDER_HALF` 5, `BORDER_LAP` 60 frames,
+`BORDER_PEAK` 0, the brightest shade), the breath and its shade count with the other
+`BORDER_*`, the colors in `FACES.*.orbit`, `breath`, `breathRGB`. A route's state stays on its own row's
 glyph (a failed one Fleet's failure red) and a running one pulses the ROUTE head's count;
 the question's count and `◑` keep their rose. An experiment's failure never colors the frame.
 `HEARTING` names the settings screen alone. What runs shares Fleet's one beat
@@ -290,7 +293,7 @@ working route's mark, the running stage, the open route count and a steward's
 blinks even while the session is idle; the steward's number does not blink (plain
 weight without color), and the moving frame. The host keeps that beat
 only while the painted panel shows one of them and wakes at the next frame
-anything painted changes (a spinner's frame, the arc's next step, a breath's
+anything painted changes (a spinner's frame, the scanners' next step, a breath's
 next shade); a spinner turn swaps only its own cells, the moving frame sends
 only its changed cells (a run at a time, the cursor kept where it was), the
 blink repaints the panel once a second (a panel with only a blink wakes once a
@@ -351,10 +354,18 @@ opens in place: a press on a head or on any row of its section opens its popup
 (a route's row with that route unfolded, a session's row with that session).
 
 - QUESTIONS: the count is the answer wait's (the `◑답 대기 N` row is merged into
-  it, in the question's rose), then the answers on their way (one dim line each),
+  it, in the question's rose), then the answers on their way (one line each),
   the next question's summary (its first row `◑ …` and its choices on one row
   `1 label (recommended) · 2 … · +2`, or its first two rows) and, for a wait
-  answered elsewhere, where (`1 QUESTIONS · answer below`).
+  answered elsewhere, where (`1 QUESTIONS · answer below`). The question a press
+  answers here, now, reads as one button (11-15, panel polish 1): its rows stand on
+  the rose fill across the panel's inside width (`FACES.*.fill`, 52 on a dark or
+  unknown face, 224 on a light one), its first row bright, its choices numbered
+  chips (` 1 label `), and under them `↵ answer · Ctrl+]` in rose at the right; a
+  press on any of them opens the question popup. Short of rows the action row goes
+  first, then the choices; the first row stays to the last. Mono, eight colors and
+  `NO_COLOR` lead those rows with a rose bar `▌` instead. Nothing else in the panel
+  is painted: not a wait answered elsewhere, not an answer on its way.
 - ROUTE: three rows, failed first, then running, waiting and finished (`✕` → `⠏`
   → `●` → `✓`), each Fleet's ROUTES columns picked: the state glyph, ROUTE (the
   title, a finished one's result word first, cut with `…`), PROGRESS
@@ -634,8 +645,10 @@ panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
 parent holds the worker's exact acknowledged completion receipt. Once the person
 sends an answer it has left their hands: while it travels (the existing answer
-record's `submitted`/`received`) the popup closes and the question is one dim line
-(`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice),
+record's `submitted`/`received`) the popup closes and the question is one line
+(`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice;
+`✓ answer sent` in the passing green of a route's `✓`, the `·` dim, what was sent
+in plain text, a secret `•••`),
 `Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
 it as sent); the line goes when its session takes the answer, and a failed
 delivery brings the question back with its existing word. Answering returns
@@ -706,7 +719,16 @@ digits, Enter, Tab and action letters, remains native while it is closed. The
 popup is one layer over the host's own screen: the native's output under it
 keeps arriving in the host's copy, every paint lays the popup again in the same
 synchronized frame (a moving frame or spinner under it leaves it whole), closing
-writes its rows again from that copy, and the PTY keeps its size. One frame
+writes its rows again from that copy, and the PTY keeps its size. While a popup
+stands (11-15, panel polish 3) everything outside it, the native area, the panel
+and the strip, reads in one dark gray without any other color, weight or ground
+(`FACES.*.veil`, 239 on a dark or unknown face, 250 on a light one): each row the
+host writes anyway is written with that gray, so output under it keeps arriving
+veiled at the frames it would have come at, and nothing in the panel turns (the
+moving frame is a still gray line). Laying or lifting the veil writes every row
+whole once; closing shows the screen as it is now in its own colors. The native
+is never told (no size change, no focus report). Mono, eight colors and `NO_COLOR`
+veil nothing; the popup's frame line is bright there instead. One frame
 serves every popup: a thin grey rounded line one empty cell from what it covers,
 the title and `✕` on its top line, the sections on its bottom line (the current
 one bright) and the keys on the row above; text 76 cells wide, a table the window

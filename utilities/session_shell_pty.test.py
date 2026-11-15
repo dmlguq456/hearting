@@ -418,10 +418,12 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const displayLag=[],stateLag=[],stateColors=[];
  if(cfg.scenario==='state-border'){
-   // The border's own state word, read from the painted top border, and the color
-   // of the border's own corner cell painted with it (spec rule 25).
+   // The border's own state word, read from the painted top border, and the colors of the
+   // top border's line cells painted with it (spec rule 25; 11-15: running, the scanners'
+   // shades stand on it from that paint, the first right of the words).
    const border=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);if(m)return m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running';}return '';};
-   const corner=()=>{for(let y=0;y<sideTerm.rows;y++){const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),x=(line?.translateToString()||'').indexOf('┌');if(x>=0){const c=line.getCell(x);return c.getFgColorMode()+':'+c.getFgColor()+(c.isDim()?':dim':'');}}return '';};
+   const corner=()=>{for(let y=0;y<sideTerm.rows;y++){const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),t=line?.translateToString()||'',x=t.indexOf('┌');if(x>=0){const seen=new Set();
+     for(let i=x;i<t.length;i++){const c=line.getCell(i);if(c&&'┌─┐'.includes(c.getChars()))seen.add(c.getFgColorMode()+':'+c.getFgColor()+(c.isDim()?':dim':''));}return [...seen].sort().join(',');}}return '';};
    const until=async(word,began)=>{while(Date.now()-began<4000){await new Promise(resolve=>sideTerm.write('',resolve));if(border()===word)return Date.now()-began;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('the border never showed '+word+' (shows '+border()+')');};
    await until('idle',Date.now());stateColors.push(['idle',corner()]);
    // Every projection from here waits on a held backend: only the event itself can repaint.
@@ -469,8 +471,8 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const borderMotion={};
  if(cfg.scenario==='border-motion'||cfg.scenario==='border-motion-bottom'){
-   // Spec E9 rule 47 (d) (11-14): while the session runs, an arc goes round the panel's outer
-   // frame on the spinner's beat, and a beat sends only the frame's changed cells; a wait breathes
+   // Spec E9 rule 47 (d) (11-14; 11-15: scanners): while the session runs, three lights go round the
+   // panel's outer frame on the spinner's beat, and a beat sends only the frame's changed cells; a wait breathes
    // the frame red; idle, nothing is sent. Beside the native area and under it alike.
    const bottom=cfg.scenario==='border-motion-bottom';
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve)),sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -478,7 +480,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    // The panel's box: beside the native area its 40 columns at the right edge; under it, from its top border down.
    const box=()=>{if(!bottom)return {top:0,left:sideTerm.cols-40,W:40,H:sideTerm.rows};
      for(let y=0;y<sideTerm.rows;y++){const t=lineAt(y)?.translateToString()||'';if(t.startsWith('┌')&&t.endsWith('┐'))return {top:y,left:0,W:sideTerm.cols,H:sideTerm.rows-y};}return null;};
-   // A frame cell's look: an arc shade (`0` the head .. `3`), `b` the neutral frame (the terminal's dim),
+   // A frame cell's look: a scanner's shade (`0` the brightest .. `3`), `b` the neutral frame (the terminal's dim),
    // `p<N>` another color, `t` the head's words.
    const RAMP=[230,187,144,101];
    const look=c=>{const ch=c.getChars();if(!ch||!'┌┐└┘─│'.includes(ch))return 't';
@@ -507,9 +509,12 @@ function existing(file){return new Promise((resolve,reject)=>{
    // (The terminal here takes a large paint in pieces: the readings start once that paint is in.)
    await sleep(60);await flush();first=first&&read();
    const chunks=[];const sub=child.onData(t=>chunks.push(t));
-   await sleep(950);await flush();const second=read();
+   // (A reading 150 ms on tells the way round: three alike lights a third of the frame apart look the
+   // same a third of a lap on.)
+   await sleep(150);await flush();const near=read();
+   await sleep(800);await flush();const second=read();
    await sleep(950);await flush();const third=read();sub.dispose();
-   Object.assign(borderMotion,{first,second,third,chunks,window_ms:third&&first?third.at-first.at:0});
+   Object.assign(borderMotion,{first,near,second,third,chunks,window_ms:third&&first?third.at-first.at:0});
    // Waiting: the whole frame breathes red (256 colors here: a shade every 1.2 s).
    // (The draft goes in as its own line first.)
    await send('\rturn-wait\r');await waitFor(/DONE_turn-wait/);borderMotion.waiting=await until('waiting');
@@ -826,25 +831,30 @@ class SessionShellPTYTest(unittest.TestCase):
         return max(range(n),key=score)
 
     def check_border_motion(self,result,cells):
-        first,second,third=result['first'],result['second'],result['third']
-        for value in (first,second,third):self.assertIsNotNone(value,result)
+        first,near,second,third=result['first'],result['near'],result['second'],result['third']
+        for value in (first,near,second,third):self.assertIsNotNone(value,result)
         P=len(first['looks'])
         self.assertEqual(P,cells(first),first)
-        # Shown within 0.3 s of the turn (the arc starts with the state).
+        # Shown within 0.3 s of the turn (the lights start with the state).
         self.assertLess(result['lit_after_ms'],300,result)
         for value in (first,second,third):
-            # A quarter of the frame (of its size at that reading), less the cells behind the head's words.
-            arc=round(cells(value)/4);lit=sum(1 for x in value['looks'] if x in '0123')
-            self.assertTrue(arc-20<=lit<=arc,(lit,arc,''.join(x[0] for x in value['looks'])))
+            # 11-15 (panel polish 4): three lights of eleven cells (of the frame's size at that reading),
+            # less the cells behind the head's words (one light at most).
+            lights=min(3,cells(value)//22);lit=sum(1 for x in value['looks'] if x in '0123')
+            self.assertTrue(11*lights-11<=lit<=11*lights,(lit,lights,''.join(x[0] for x in value['looks'])))
             self.assertTrue(set(value['looks'])<={'0','1','2','3','b','t'},value['looks'])
             self.assertEqual(value['word'],'running')
-        # One way round, at one lap every 6 s whatever the size: clockwise by the elapsed time's share
-        # of the frame (two readings of one size; a panel that grew a row between them is not compared).
-        pairs=[(a,b) for a,b in ((first,second),(second,third)) if len(a['looks'])==len(b['looks'])]
-        self.assertTrue(pairs)
+        # One way round, at one lap every 6 s whatever the size: clockwise by the elapsed time's share of
+        # the frame (two readings of one size; a panel that grew a row between them is not compared).
+        # The lights look alike a third of the frame apart: the 150 ms reading tells the way round,
+        # the later ones how far (within the lights' spacing).
+        pairs=[(a,b) for a,b in ((first,near),(first,second),(second,third)) if len(a['looks'])==len(b['looks'])]
+        self.assertTrue(len(pairs)>=2 and pairs[0][1] is near,pairs)
         for a,b in pairs:
             n=len(a['looks']);moved=self.turned(a['looks'],b['looks']);expected=n*(b['at']-a['at'])/6000
-            self.assertTrue(0<moved<n/2 and abs(moved-expected)<=10,(moved,expected))
+            spacing=n/min(3,n//22);off=(moved-expected)%spacing;off=min(off,spacing-off)
+            if b is near:self.assertTrue(0<moved<spacing/2 and abs(moved-expected)<=4,(moved,expected))
+            else:self.assertTrue(off<=10,(moved,expected,spacing))
         # The native area (with its draft) and the cursor never move for it.
         self.assertEqual(first['native'],second['native']);self.assertEqual(second['native'],third['native'])
         self.assertTrue(any('DRAFT_TEXT' in row for row in first['native']),first['native'])
@@ -881,15 +891,16 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def test_the_outer_frame_turns_on_the_spinner_beat_sending_only_its_changed_cells(self):
         # Spec E9 rule 47 (d) (11-14: the outer frame instead of the head rule): a running session's
-        # frame carries an arc round it on the beat the spinner already keeps; each beat sends only
+        # frame carries its scanners round it on the beat the spinner already keeps; each beat sends only
         # the frame's changed cells (and the spinner glyph), so a beat stays small and the native
         # area, its draft and the cursor stay put. A wait breathes the frame red; idle sends nothing.
         result=self.run_loop('border-motion')['border_motion']
         load=self.check_border_motion(result,lambda reading:2*40+2*38)
         load.update(self.check_border_wait_and_idle(result))
         print(json.dumps({'event':'session-shell-border-motion',**load}))
-        # A beat is a small part of the frame's 156 cells: about 2 KB would repaint the whole frame.
-        self.assertLess(load['bytes_per_beat'],700,load)
+        # A beat is a part of the frame's 156 cells: about 2 KB would repaint the whole frame (11-15
+        # panel polish 4: three lights change about three times the cells one arc did).
+        self.assertLess(load['bytes_per_beat'],1200,load)
 
     def test_the_outer_frame_turns_alike_under_the_native_area(self):
         # The bottom layout's frame moves the same way, and its beats never write the native rows above it.

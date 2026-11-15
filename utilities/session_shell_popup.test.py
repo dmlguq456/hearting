@@ -24,10 +24,15 @@ SHOW_FRAMES = False
 # A native that reports its own start, paints `❯ <what is typed>` and answers each line with
 # `DONE_<line>`. `later` prints twelve lines a little later (output while the popup stands);
 # `busy`/`calm` report a turn's start and end (the moving frame). Codex and OpenCode read the
-# mouse: every escape sequence they receive is shown as `NATIVE_ESC_…`.
+# mouse: every escape sequence they receive is shown as `NATIVE_ESC_…`. 11-15 (panel polish 3):
+# `paint` adds a row in its own colors (bold red, a blue ground, inverse); `show` brings, a little
+# later, every kind of output (lines one at a time, a scroll, the alternate screen in and out, one
+# inverse cell poked in); `flood` a line every 2 ms for 1.5 s; a size change shows as `WINCH_N`.
 FAKE_NATIVE = r"""
-import json,os,select,socket,sys,time,tty
+import json,os,select,signal,socket,sys,time,tty
 harness,sid=sys.argv[1],sys.argv[2]
+winch=[];signal.signal(signal.SIGWINCH,lambda *_:winch.append(1))
+PAINT='\x1b[1;31mRED_TEXT\x1b[0m \x1b[44mBLUE_BG\x1b[0m \x1b[7mINVERSE\x1b[0m\r\n'
 def event(kind):
     raw=open('/proc/self/stat').read();start=raw.rsplit(') ',1)[1].split()[19]
     req={'op':'event','event':kind,'harness':harness,'sid':sid,'pid':os.getpid(),'start':start,
@@ -36,15 +41,18 @@ def event(kind):
         c.settimeout(5);c.connect(os.environ['HEARTING_SHELL_SOCKET']);c.sendall((json.dumps(req)+'\n').encode());c.recv(8192)
 tty.setraw(0)
 event('start')
-pending='';said='READY_'+harness;later=[];seen=[]
+pending='';said='READY_'+harness;later=[];seen=[];colored=False
 def screen():
-    print('\x1b[2J\x1b[H'+said+'\r\n'+''.join(s+'\r\n' for s in seen[-14:])+'❯ '+pending.replace('\x1b','^')+'\r\n',end='',flush=True)
+    print('\x1b[2J\x1b[H'+said+(' WINCH_%d'%len(winch) if winch else '')+'\r\n'+(PAINT if colored else '')+''.join(s+'\r\n' for s in seen[-14:])+'❯ '+pending.replace('\x1b','^')+'\r\n',end='',flush=True)
 if harness!='claude':print('\x1b[?1000h\x1b[?1006h',end='',flush=True)
 screen()
 while True:
     wait=max(0,later[0][0]-time.monotonic()) if later else None
     ready,_,_=select.select([0],[],[],wait)
-    while later and later[0][0]<=time.monotonic():seen.append(later.pop(0)[1]);screen()
+    while later and later[0][0]<=time.monotonic():
+        item=later.pop(0)[1]
+        if isinstance(item,tuple):print(item[1],end='',flush=True)
+        else:seen.append(item);screen()
     if not ready:continue
     data=os.read(0,65536)
     if not data:break
@@ -56,6 +64,16 @@ while True:
         line,pending=pending.split('\r',1)
         if line=='quit':raise SystemExit
         if line=='later':later=[(time.monotonic()+0.5+i*0.02,'LATER_%02d'%i) for i in range(12)]
+        if line=='paint':colored=True
+        if line=='show':
+            t=time.monotonic()+0.6
+            later=[(t+i*0.03,'DRIP_%02d'%i) for i in range(8)]
+            later+=[(t+0.3,('raw',''.join('SCROLL_%02d\r\n'%i for i in range(30)))),
+                    (t+0.5,('raw','\x1b[?1049h\x1b[2J\x1b[H\x1b[1;33mALT_SCREEN\x1b[0m\r\n')),(t+0.8,('raw','\x1b[?1049l')),
+                    (t+0.9,('raw','\x1b[3;3H\x1b[7;32mPOKE\x1b[0m'))]
+        if line=='flood':
+            t=time.monotonic()+0.6
+            later=[(t+i*0.002,('raw','FLOOD_%04d '%i+'x'*60+'\r\n')) for i in range(750)]
         if line=='busy':event('prompt')
         if line=='calm':event('stop')
         said='DONE_'+line.replace('\x1b','^')
@@ -102,7 +120,7 @@ const term=new Terminal({cols,rows,allowProposedApi:true,scrollback:0});
 term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid],{cols,rows,cwd:cfg.project,
-  env:{...process.env,TERM:'xterm-256color',NODE_OPTIONS:'--require '+cfg.launcher}});
+  env:{...process.env,TERM:cfg.term||'xterm-256color',...(cfg.no_color?{NO_COLOR:'1'}:{}),NODE_OPTIONS:'--require '+cfg.launcher}});
 child.onData(d=>{term.write(d);raw+=d;});
 const flush=()=>new Promise(r=>term.write('',r));
 // Each row as one character per cell (a wide character's second cell is empty).
@@ -127,7 +145,68 @@ const resize=async(c,r)=>{cols=c;rows=r;term.resize(c,r);child.resize(c,r);await
 // and ends with ?2026l around it.
 const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;const open=raw.lastIndexOf('\x1b[?2026h',at),shut=raw.lastIndexOf('\x1b[?2026l',at);
   return open>shut&&raw.indexOf('\x1b[?2026l',at)>at;};
+// 11-15 (panel polish 3): every cell's look, and the cells outside the popup (its frame and the empty
+// cell round it) that do not read as the one gray: a letter in another color, weight or ground, or
+// a ground on an empty cell. Where nothing is veiled (`veil` 0) the native's own colors stand.
+const VEIL=239;
+const looks=()=>{const out=[];for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y),row=[];
+  for(let x=0;x<cols;x++){const c=line?.getCell(x);row.push(!c?null:{ch:c.getChars(),fg:c.isFgDefault()?-1:c.getFgColor(),bg:c.isBgDefault()?-1:c.getBgColor(),
+    bold:!!c.isBold(),dim:!!c.isDim(),inverse:!!c.isInverse()});}out.push(row);}return out;};
+const layer=s=>{const top=s.findIndex(l=>l.includes('╭')&&l.includes('╮'));if(top<0)return null;let bottom=top;while(bottom+1<s.length&&!s[bottom].includes('╯'))bottom++;
+  const c=cells(top),left=c.indexOf('╭'),right=c.indexOf('╮');return {top:top-1,bottom:bottom+1,left:left-1,right:right+1};};
+const bright=async()=>{const s=await screen(),l=layer(s),all=looks(),bad=[];
+  all.forEach((row,y)=>row.forEach((c,x)=>{if(!c||l&&y>=l.top&&y<=l.bottom&&x>=l.left&&x<=l.right)return;
+    const blank=!c.ch.trim();
+    if(c.bg!==-1||c.inverse||!blank&&(c.fg!==VEIL||c.bold||c.dim))bad.push([y,x,c]);}));
+  return bad;};
+// The look of the cell where `word` starts.
+const lookAt=async word=>{const p=await at(word);return p?looks()[p.y][p.x]:null;};
+// The colors of the panel's line cells (its outer frame and rules), the 40 columns at the right.
+const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=cells(y);for(let x=Math.max(0,cols-40);x<cols;x++)if('─│┌┐└┘'.includes(c[x]))out.push(all[y][x].fg);}return JSON.stringify(out);};
 (async()=>{try{
+  if(cfg.scenario==='veil'||cfg.scenario==='plain'){
+    await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
+    await key('paint\r',300);await key('busy\r',600);
+    let s=await until(has('RED_TEXT'),'the colored row');
+    checks.red_before=await lookAt('RED_TEXT');checks.blue_before=await lookAt('BLUE_BG');
+    const moving=new Set();for(let i=0;i<6;i++){moving.add(frameLooks());await sleep(150);}checks.moving_before=moving.size;
+    // Output of every kind while it stands: sampled every 40 ms for 1.6 s.
+    await key('show\r',100);await key('\x1d',150);s=await until(s=>!!box(s),'the popup');
+    checks.bright_open=(await bright()).length;checks.bright_sample=JSON.stringify((await bright()).slice(0,3));
+    {const all=looks(),b=box(s),x=cells(b.top).indexOf('╭');checks.red_open=await lookAt('RED_TEXT');checks.corner=all[b.top][x];}
+    const still=new Set();let leaks=0,samples=0;const seen=new Set();
+    for(let t=0;t<40;t++){const b=await bright();leaks+=b.length;samples++;still.add(frameLooks());
+      for(const w of ['DRIP_07','SCROLL_29','ALT_SCREEN','POKE'])if(has(w)(await screen()))seen.add(w);await sleep(40);}
+    checks.leaks=leaks;checks.samples=samples;checks.seen=[...seen].sort();checks.still=still.size;
+    s=await screen();checks.native_input=(s.find(l=>l.startsWith('❯'))||'').slice(0,cols-42);checks.winch=s.some(l=>l.includes('WINCH_'));
+    // No hue to take away (NO_COLOR, eight colors): the native's own colors stand, the frame is bright.
+    if(cfg.scenario==='plain'){fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;}
+    frames.open=s;
+    // Closed: the native as it is now, in its own colors, and the panel's; nothing gray is left.
+    await key('\x1b',300);s=await until(s=>!box(s),'closed');frames.closed=s;
+    const after=looks();checks.gray_left=after.flat().filter(c=>c&&c.fg===VEIL).length;
+    checks.poke_after=await lookAt('POKE');
+    const turning=new Set();for(let i=0;i<6;i++){turning.add(frameLooks());await sleep(150);}checks.moving_after=turning.size;
+    // While it stands the window changes: narrower, folded by itself, open again; the panel under the
+    // native (opened by hand where it cannot stand beside) and back beside it.
+    await key('\x1d',250);await until(s=>!!box(s),'the popup again');
+    const sizes={};
+    for(const [c,r,name] of [[120,30,'side'],[90,24,'strip'],[160,40,'open']]){await resize(c,r);s=await until(s=>!!box(s),'the popup at '+name);
+      sizes[name]=(await bright()).length;frames['veil_'+name]=s;}
+    await key('\x1b',300);await resize(80,24);await until(has('◑답 대기'),'the strip at 80');
+    await key('\x1d',250);await key('p',600);s=await until(s=>s.some(l=>l.includes('QUESTIONS ─')),'the panel under the native');
+    await key('\x1d',300);s=await until(s=>!!box(s),'the popup over the panel under the native');sizes.bottom=(await bright()).length;frames.veil_bottom=s;
+    await resize(160,40);s=await until(s=>!!box(s),'the popup beside again');sizes.beside=(await bright()).length;
+    checks.sizes=sizes;await key('\x1b',300);await until(s=>!box(s),'closed after the sizes');
+    // The cost: frames (one synchronized paint each) and bytes while the native floods, closed and open.
+    const flood=async open=>{await key('flood\r',100);if(open){await key('\x1d',150);await until(s=>!!box(s),'the popup for the flood');}
+      await until(s=>s.some(l=>/FLOOD_\d{4}/.test(l)),'the flood',4000);const from=raw.length,began=Date.now();await sleep(1200);
+      const part=raw.slice(from),took=(Date.now()-began)/1000;
+      const out={seconds:took,frames:part.split('\x1b[?2026h').length-1,bytes:Buffer.byteLength(part),bright:open?(await bright()).length:0};
+      await until(has('FLOOD_0749'),'the flood ending',4000);if(open){await key('\x1b',300);await until(s=>!box(s),'closed after the flood');}return out;};
+    checks.flood_closed=await flood(false);checks.flood_open=await flood(true);
+    fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
+  }
   if(cfg.scenario==='empty'){
     // No question waits: Ctrl+] opens a popup all the same, whose keys name `p` (the panel's fold):
     // a folded panel opens by the keyboard alone; `r` is the messages' popup.
@@ -270,8 +349,8 @@ class SessionShellPopupTest(unittest.TestCase):
         cls.launcher = cls.root / 'launcher.cjs'; cls.launcher.write_text(LAUNCHER)
         cls.driver = cls.root / 'driver.cjs'; cls.driver.write_text(DRIVER)
 
-    def popup(self, harness, scenario=None):
-        case = self.root / (harness + (scenario or '')); case.mkdir(mode=0o700)
+    def popup(self, harness, scenario=None, term=None, no_color=False):
+        case = self.root / (harness + (scenario or '') + (term or '') + ('-nc' if no_color else '')); case.mkdir(mode=0o700)
         project = case / 'project'; project.mkdir()
         sid = {'claude': '00000000-0000-4000-8000-0000000000c1', 'codex': '00000000-0000-4000-8000-0000000000c2',
                'opencode': 'ses_popupfixture'}[harness]
@@ -300,7 +379,8 @@ class SessionShellPopupTest(unittest.TestCase):
         backend.chmod(0o700)
         config = {'harness': harness, 'sid': sid, 'python': sys.executable, 'fake': str(self.fake),
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
-                  'scenario': scenario, 'backend': str(backend), 'diagnostic': str(case / 'display-errors'),
+                  'scenario': scenario, 'term': term, 'no_color': no_color,
+                  'backend': str(backend), 'diagnostic': str(case / 'display-errors'),
                   'project': str(project), 'result': str(case / 'result.json')}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
@@ -324,7 +404,10 @@ class SessionShellPopupTest(unittest.TestCase):
         panel = '\n'.join(frames['closed'])
         self.assertIn('2 QUESTIONS ─', panel)
         self.assertIn('◑ 패널을 접었을 때의 모양을 어느 안…', panel)
-        self.assertIn('  1 아래 두 줄 (다) (추천) · +3', panel)
+        # 11-15 (panel polish 1): the question to answer here is one button: its choices are chips
+        # (` 1 label `, `+N` for the rest) and `↵ 답하기 · Ctrl+]` stands under them at the right.
+        self.assertIn('│   1 아래 두 줄 (다) (추천)  +3 ', panel)
+        self.assertIn('↵ 답하기 · Ctrl+] │', panel)
         self.assertNotIn('╭─ ◑', panel)
         # Drawn in one synchronized frame; the native's output under it leaves it whole; closed,
         # the native as it is now shows where it stood.
@@ -377,6 +460,62 @@ class SessionShellPopupTest(unittest.TestCase):
         self.assertIn('✉', read)
         self.assertIn('MESSAGES', read)
         self.assertIn('REPO', '\n'.join(frames['closed']))
+
+    def veil(self, harness):
+        # 11-15 (panel polish 3): while a popup stands, everything outside it (the native, the panel,
+        # the strip) reads in one dark gray (256-color 239) without any other color, weight or ground;
+        # the moving frame stands still meanwhile. Output of every kind under it (lines one at a
+        # time, a scroll, the alternate screen in and out, a poked inverse cell) never shows a bright
+        # piece; nothing tells the native (no size change, no input). Closed, the screen as it is
+        # now in its own colors, nothing gray left and the frame turning again. The window narrower,
+        # folded by itself, open again, the panel under the native and back beside: veiled each time.
+        # The cost: no more frames than without it while the native floods.
+        result = self.popup(harness, 'veil'); frames, checks = result['frames'], result['checks']
+        red, blue = checks['red_before'], checks['blue_before']
+        self.assertTrue(red['bold'] and red['fg'] != 239 and blue['bg'] != -1, checks)
+        self.assertGreater(checks['moving_before'], 1, checks)
+        self.assertEqual(checks['bright_open'], 0, checks['bright_sample'])
+        self.assertEqual(checks['leaks'], 0, checks)
+        self.assertEqual(checks['seen'], ['ALT_SCREEN', 'DRIP_07', 'POKE', 'SCROLL_29'], checks)
+        self.assertEqual(checks['still'], 1, checks)
+        self.assertFalse(checks['winch'], checks)
+        self.assertEqual(checks['native_input'].strip(), '❯', checks)
+        self.assertEqual(checks['gray_left'], 0, '\n'.join(frames['closed']))
+        poke = checks['poke_after']
+        self.assertTrue(poke and poke['inverse'] and poke['fg'] == 2, checks)
+        self.assertGreater(checks['moving_after'], 1, checks)
+        self.assertEqual(checks['sizes'], {'side': 0, 'strip': 0, 'open': 0, 'bottom': 0, 'beside': 0},
+                         '\n'.join(frames['veil_bottom']))
+        closed, opened = checks['flood_closed'], checks['flood_open']
+        self.assertEqual(opened['bright'], 0, checks)
+        # One frame per 8 ms at most (the host's frame timer), and no more than it paints without the veil.
+        for flood in (closed, opened):
+            self.assertLessEqual(flood['frames'], flood['seconds'] / 0.008 + 5, checks)
+        self.assertLessEqual(opened['frames'], closed['frames'] * 1.25 + 10, checks)
+        print('VEIL ' + harness + ' ' + json.dumps({'flood_closed': closed, 'flood_open': opened}), flush=True)
+
+    def plain(self, **paint):
+        # Mono-like terminals (NO_COLOR, eight colors): nothing is veiled; the native keeps its own
+        # colors while the popup stands, and the popup's frame is bright (not dim) instead.
+        checks = self.popup('claude', 'plain', **paint)['checks']
+        self.assertTrue(checks['red_open']['bold'], checks)
+        self.assertFalse(checks['corner']['dim'], checks)
+        self.assertGreater(checks['leaks'], 0, checks)
+
+    def test_veil_claude(self):
+        self.veil('claude')
+
+    def test_veil_codex(self):
+        self.veil('codex')
+
+    def test_veil_opencode(self):
+        self.veil('opencode')
+
+    def test_no_veil_without_color(self):
+        self.plain(no_color=True)
+
+    def test_no_veil_in_eight_colors(self):
+        self.plain(term='xterm')
 
     def test_claude(self):
         self.check('claude')
