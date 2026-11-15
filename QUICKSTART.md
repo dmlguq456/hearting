@@ -85,9 +85,11 @@ question shows under `QUESTIONS` in the panel as a rose button: press
 **Tab**, **1–9**, and **Enter**, and the popup closes and your keys go back to
 the agent (**Esc** closes it unanswered).
 
-Open a second session in another terminal, on any runtime: each panel lists
-the other under `SESSIONS`. In either one press **Ctrl+]** and then **f**:
-Fleet opens in that window and shows both sessions, each with its number
+Open a second session in another terminal, on any runtime. When one of them
+waits for your answer, `SESSIONS` appears in the other's panel with it first;
+the sessions table is always one of the **Ctrl+]** popups (**←/→** move between
+them), and once you open it `SESSIONS` stays in the panel. In either one press
+**Ctrl+]** and then **f**: Fleet opens in that window and shows both sessions, each with its number
 (`[4f]`, `[b2]`). **Ctrl+]** closes Fleet again. Fleet also runs on its own:
 
 ```sh

@@ -762,7 +762,8 @@ SHOTS = {
              "conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report "
              "from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and "
              "context 46%, the title Rate limiting and what it is doing now; ROUTE with Rate limiting at 2/4 execute; "
-             "SESSIONS with seven other sessions, three of them running; MESSAGES with the request Test run to [b2] at a "
+             "SESSIONS with seven other sessions, [9c] waiting for an answer first and three of them running; MESSAGES "
+             "with the request Test run to [b2] at a "
              "partial answer, a finished review, and a note to [9c]; MEM with a project decision and a global lesson."),
     "overview": (1440, 810, "Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, "
                  "Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run "
@@ -1421,10 +1422,10 @@ def render_index(d: dict) -> str:
 <main>
 <section class="hero"><div class="wrap">
   <span class="eyebrow"><i></i>For Claude Code, Codex, and OpenCode</span>
-  <h1>Supervise every coding agent <span class="grad">from one seat.</span></h1>
-  <p class="lede">Each session gets <b>a panel</b> with its route, workers, and messages; <b>Fleet</b> shows
-  every session and which one needs you. A capable model settles the plan, and lower-cost workers carry it
-  out in small, checked steps.</p>
+  <h1>Different agents. <span class="grad">One way of working.</span></h1>
+  <p class="lede">On Claude Code, Codex, or OpenCode, the work runs the same way, the way you meant, and
+  sessions hand work to each other. Every step shows in <b>the panel</b> and in <b>Fleet</b>, and you can
+  correct it at any point.</p>
 
   <div class="install" id="install">
     <span class="p">$</span>
@@ -1622,10 +1623,9 @@ def render_index(d: dict) -> str:
     scripts = (f'<script type="application/json" id="info-data">{info_json}</script>\n'
                f'<script>{MAP_JS}</script>')
     return page(
-        "Hearting — supervise every coding agent from one seat",
-        "Supervise every coding agent from one seat, on Claude Code, Codex, and OpenCode: each session gets a "
-        "panel with its route, workers, and messages; Fleet shows every session and which one needs you; a "
-        "capable model settles the plan, and lower-cost workers carry it out in small, checked steps.",
+        "Hearting — different agents, one way of working",
+        "Different agents, one way of working: on Claude Code, Codex, or OpenCode the work runs the way you "
+        "meant, sessions hand work to each other, and every step shows in the panel and in Fleet.",
         body, "home", scripts)
 
 

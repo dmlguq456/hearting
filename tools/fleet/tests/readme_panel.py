@@ -394,18 +394,8 @@ function tableGuide(m,kind,expanded=true){
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
-function wrapGuide(lines,inner){
-  const out=[];
-  for(const line of lines){
-    let row='';
-    for(const piece of String(line).split(' · ')){
-      const next=row?row+' · '+piece:piece;
-      if(row&&cellWidth(next)>inner){out.push(row);row=piece;}else row=next;
-    }
-    if(row)out.push(row);
-  }
-  if(out.length>1&&/^\d+\/\d+$/.test(out[0])&&cellWidth(out[0]+' · '+out[1])<=inner)out.splice(0,2,out[0]+' · '+out[1]);
-  return out;
+function wrapGuide(lines,inner,rows){
+  return view.keyRows(lines.flatMap(line=>String(line).split(' · ')),inner,{rows,cellWidth});
 }
 function tableTitle(m,kind,sessionsSummary){
   const dim=v=>({text:v,dim:true});
@@ -419,7 +409,7 @@ function tableTitle(m,kind,sessionsSummary){
   for(const job of jobs){
     const p=job.payload;
     // An answer is on its way once sent (`submitted`): the panel keeps its receipt line.
-    const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){},page(){}});
+    const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){},page(){},cellWidth});
     block.update(p.questions||[],p.help||'',p.block||{});
     for(const key of job.keys||[]){
       if(key==='enter')block.enter();else if(key==='leave')block.leave();else block.input(Buffer.from(key));
@@ -443,7 +433,7 @@ function tableTitle(m,kind,sessionsSummary){
           ...(table.lines||[]).slice(0,room).map(text=>[{text,dim:true}])]:tableParts(table.result||{});
         const fits=room-tableGuide(base,table.kind).length;
         const place=all.length>Math.max(1,fits)?`1/${all.length}`:'';
-        const guide=wrapGuide([place,...tableGuide(base,table.kind)].filter(Boolean),inner).map(text=>[{text,dim:true}]);
+        const guide=wrapGuide([place,...tableGuide(base,table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
         const space=Math.max(1,room-guide.length);
         title=tableTitle(base,table.kind,job.sessions);
         body=[...all.slice(0,space),...guide];

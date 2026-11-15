@@ -8,10 +8,10 @@
 
 <h1 align="center">Hearting</h1>
 
-<p align="center"><strong>Supervise every coding agent from one seat — on Claude Code, Codex, and OpenCode.</strong></p>
+<p align="center"><strong>Different agents. One way of working.</strong></p>
 
-<p align="center">Each session gets a panel with its questions, routes, other sessions, and messages; Fleet shows every session and which one needs you.<br>
-A capable model settles the plan, and lower-cost workers carry it out in small, checked steps.</p>
+<p align="center">On Claude Code, Codex, or OpenCode, the work runs the same way, the way you meant, and sessions hand work to each other.<br>
+Every step shows in the panel and in Fleet, and you can correct it at any point.</p>
 
 <p align="center">
   <img alt="Claude Code: native" src="https://img.shields.io/badge/Claude_Code-native-D97757?style=flat-square">
@@ -32,7 +32,7 @@ A capable model settles the plan, and lower-cost workers carry it out in small, 
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; ROUTE with Rate limiting at 2/4 execute; SESSIONS with seven other sessions, three of them running; MESSAGES with the request Test run to [b2] at a partial answer, a finished review, and a note to [9c]; MEM with a project decision and a global lesson." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; ROUTE with Rate limiting at 2/4 execute; SESSIONS with seven other sessions, [9c] waiting for an answer first and three of them running; MESSAGES with the request Test run to [b2] at a partial answer, a finished review, and a note to [9c]; MEM with a project decision and a global lesson." width="100%">
 </p>
 <p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</sub></p>
 
@@ -91,9 +91,9 @@ Codex, and OpenCode terminal. Under the project and Git state, the model and
 context, and the session's title and what it is doing now, each section keeps a
 few rows: questions waiting for you, this session's routes, this project's
 experiments (`LAB`), the other sessions on the machine, messages and requests,
-and saved memory (`MEM`) with its scope and kind. Press a section and its whole
-Fleet table opens in a popup in the middle of the window, the rest gray behind
-it. A question you can answer here reads as a rose button. **Ctrl+]** always
+and saved memory (`MEM`) with its scope and kind. Press a section (MEM has no
+popup) and its whole Fleet table opens in a popup in the middle of the window,
+the rest gray behind it. A question you can answer here reads as a rose button. **Ctrl+]** always
 opens a popup, that question first: answer with **Tab**, **1–9**, and
 **Enter**, and the popup closes with `✓ answer sent`. In a popup **←/→** move
 between sections, **f** opens Fleet in the same window, **p** folds the panel

@@ -8,10 +8,10 @@
 
 <h1 align="center">Hearting</h1>
 
-<p align="center"><strong>모든 코딩 에이전트를 한 자리에서 감독합니다 — Claude Code, Codex, OpenCode 어디서든.</strong></p>
+<p align="center"><strong>에이전트가 달라도, 일하는 방식은 하나.</strong></p>
 
-<p align="center">세션마다 옆 패널에 질문·route·다른 세션·메시지가 보이고, Fleet는 모든 세션과 지금 답을 기다리는 세션을 보여 줍니다.<br>
-강한 모델이 계획을 정하고, 싼 작업자가 작게 확인받으며 실행합니다.</p>
+<p align="center">Claude Code, Codex, OpenCode 어디서든 같은 방식으로, 뜻한 대로 일하고 세션끼리 일을 주고받습니다.<br>
+그 과정은 패널과 Fleet에 그대로 보이고, 언제든 바로잡을 수 있습니다.</p>
 
 <p align="center">
   <img alt="Claude Code: 네이티브" src="https://img.shields.io/badge/Claude_Code-native-D97757?style=flat-square">
@@ -35,7 +35,7 @@
 > 명령, 경로, 설정 키와 식별자는 영문 원문을 기준으로 합니다.
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting이 든 ROUTE, 다른 세션 일곱(셋이 도는 중)의 SESSIONS, [b2]에 맡긴 요청 Test run(일부 답)과 끝난 검토, [9c]에 보낸 메모가 든 MESSAGES, 이 프로젝트의 결정과 전역 교훈이 든 MEM." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting이 든 ROUTE, 다른 세션 일곱(답을 기다리는 [9c]가 맨 앞, 셋이 도는 중)의 SESSIONS, [b2]에 맡긴 요청 Test run(일부 답)과 끝난 검토, [9c]에 보낸 메모가 든 MESSAGES, 이 프로젝트의 결정과 전역 교훈이 든 MEM." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. 데모 데이터이며 대화는 예시입니다.</sub></p>
 
@@ -90,8 +90,8 @@
 패널이 열립니다. 프로젝트와 Git 상태, 모델과 문맥, 세션 제목과 지금 하는 일 아래로
 구획마다 몇 줄씩 보입니다: 사용자의 답을 기다리는 질문, 이 세션의 route, 이 프로젝트의
 실험(`LAB`), 이 기계의 다른 세션, 메시지와 요청, 범위와 종류가 붙은 저장된 기억(`MEM`).
-구획을 누르면 그 구획의 Fleet 표 전부가 창 가운데 팝업으로 뜨고, 뒤는 회색으로
-가라앉습니다. 여기서 답할 질문은 장미색 단추로 보입니다. **Ctrl+]** 키는 늘 팝업을
+구획을 누르면(MEM은 팝업이 없습니다) 그 구획의 Fleet 표 전부가 창 가운데 팝업으로
+뜨고, 뒤는 회색으로 가라앉습니다. 여기서 답할 질문은 장미색 단추로 보입니다. **Ctrl+]** 키는 늘 팝업을
 열고 그 질문을 먼저 띄웁니다. **Tab**, **1–9**, **Enter**로 답하면 팝업이 닫히고
 `✓ answer sent`가 남습니다. 팝업에서 **←/→** 키는 구획을 옮기고, **f**는 같은 창에서
 Fleet를 열고, **p**는 패널을 에이전트 화면 아래 띠로 접으며, **Esc**나 **Ctrl+]** 키는

@@ -125,8 +125,10 @@ def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), exp
     """One demo session's panel, painted by the shell's own renderer (``readme_panel``):
     ``{"rows", "popup"}``. With ``window`` (``cols``, ``rows``) the popup the host would lay over it:
     the question popup while ``keys`` leave the editor focused, or the ``table`` popup (``ROUTE``,
-    ``LAB``, ``SESSIONS`` or ``MESSAGES``) pressed in the panel. A side panel shows the SESSIONS
-    section from the backend's sessions reading of the same demo world, as the host reads it."""
+    ``LAB``, ``SESSIONS`` or ``MESSAGES``) pressed in the panel. The SESSIONS section stands as the
+    host reads it (``host.cjs`` ``refreshPopups``): the backend's sessions reading of the same demo world,
+    made while the projection's ``sessions_key`` names another session waiting on the person or once the
+    sessions popup has been opened; with no reading the section is not drawn."""
     from tools.fleet.tests import readme_panel
     session = world.sessions[sid]
     state = state or {"working": "working", "blocked": "blocked"}.get(session.liveness, "idle")
@@ -136,7 +138,8 @@ def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), exp
     if "lab" in expanded:
         expanded = [key for key in expanded if key != "lab"] + [str((payload["panel"].get("lab") or {}).get("key") or "lab:")]
     table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160, "table") - 4))
-    summary = readme_panel.popup_read(world, sid, "sessions", columns=table_cols)["summary"] if side else None
+    read = bool(payload["panel"].get("sessions_key")) or table == "SESSIONS"
+    summary = readme_panel.popup_read(world, sid, "sessions", columns=table_cols)["summary"] if read else None
     job_table = None
     if table:
         job_table = {"kind": table}

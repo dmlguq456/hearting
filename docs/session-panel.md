@@ -52,7 +52,7 @@ motion, or none, under [Settings](#settings)). From the top:
 | `N QUESTIONS` | The questions waiting for you: an answer on its way (`✓ answer sent · Public only`, the first words green), then the next question. The one you can answer here reads as a button on a rose ground: its first line, its choices as numbered chips, and `↵ answer · Ctrl+]` (a rose bar at the left in mono, eight colors, or `NO_COLOR`); nothing else in the panel is filled |
 | `N ROUTE ⠏2 ✕1` | Three routes, failed first, then running, waiting, finished: the mark, the title, where it stands (`2/4 execute ●`), and its age (or the doer's model, with `route line` set to `model`). A finished route stays with its result (`✓`, or `✕` and `FAIL · title`) until your next input or ten minutes |
 | `N LAB` | This project's experiment board; see [The LAB section](#the-lab-section) |
-| `N SESSIONS ◑1 ⠏3` | Three other sessions on this machine from Fleet's session table, the ones waiting for you first, then the running: mark, number, title, age |
+| `N SESSIONS ◑1 ⠏3` | Three other sessions on this machine from Fleet's session table, the ones waiting for you first, then the running: mark, number, title, age. Drawn once another session waits for you or its popup has been opened |
 | `MESSAGES +N` | Requests this session sent (`→`) or received (`◂`), then recent messages, one row each, three at most; see [Requests and messages](#requests-and-messages) |
 | `MEM` | The two newest saved memory records of this repository and global ones: `◆` durable or `◇` working, its scope (`project`, `global`) and kind, its headline, its age |
 | Last row | The usage windows (`5h 18% │ 7d 40%`), the fold button `»`, and the gear `⚙` |
@@ -60,7 +60,7 @@ motion, or none, under [Settings](#settings)). From the top:
 Each section head reads `N NAME counts ─── ›`; a 40-row window keeps two or
 three rows per section and a 20-row one one each, and lower windows let MEM go
 first. MESSAGES and MEM keep to the bottom. A press on a section's head or rows
-opens its popup (below). A failed route or experiment shows only in its own
+opens its popup (below); MEM has none. A failed route or experiment shows only in its own
 row. Values the host could not refresh for a while are shown, not claimed:
 nothing spins, and the frame takes no route state. A value that cannot be read
 stays `?`.
@@ -78,7 +78,7 @@ and **Esc**, **Ctrl+]**, its `✕`, or a press outside it closes it.
 |---|---|
 | **Ctrl+]** | Open a popup: the question you can answer here, else the first section with something in it; again (or **Esc**) closes it |
 | **←/→** | Move to the next or previous section (its name on the popup's bottom line) |
-| **Tab**, **1–9**, **t** | In a question: the next waiting question, an option (**↑/↓** too; **PgUp/PgDn** read a long question), an answer in text, including pasted text |
+| **Tab**, **1–9**, **t** | In a question: the next waiting question, an option (**↑/↓** too; **PgUp/PgDn** read a long question), an answer in text, including pasted text; **p**, **f**, **r**, **w** below work while you choose and are letters while you type |
 | **Enter** | In a question: send, once every form field is answered; the popup closes and keys go back to the native CLI. In ROUTE: the unfolded route's page, and again back to the table. In SESSIONS: answer the question of a session waiting for you (`◑`) |
 | **↑/↓**, **Tab** | In ROUTE or SESSIONS: unfold the next route or session; elsewhere read on (**PgUp/PgDn** a page) |
 | **p** | Fold the panel into the strip, or open a folded one (the popup closes) |
