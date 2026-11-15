@@ -161,6 +161,9 @@ let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,dragging=false;
+// The route box's place in its routes (spec rule 23: rows short, it scrolls in place under the wheel)
+// and the rows it takes on the panel, as the last paint drew them.
+let routeScroll=0,routeArea=null;
 // Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`
 // folded or `{folded:false}` opened by hand, at every width); without one `expanded` follows the width.
 let foldChoice=null;
@@ -358,7 +361,7 @@ function panelViewNow(){
   const model=stale?{...panelModel,stale}:panelModel;
   return panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:sessionsSummary?{...model,sessions:sessionsSummary}:model,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
-    settings,focused:block.focused,cwd:process.cwd(),cellWidth,background:terminalBackground,folded:!expanded,
+    settings,routeScroll,focused:block.focused,cwd:process.cwd(),cellWidth,background:terminalBackground,folded:!expanded,
     brief:()=>block.summary(),sent:()=>block.sent()});
 }
 // One beat for everything that runs (Fleet's 100 ms spinner frame and its
@@ -700,7 +703,7 @@ function openPopup(name,open=''){
   epoch++;empty=false;actionLines=[];resetTableInput();
   if(name==='QUESTIONS'){table=null;popupWatch=[];if(block.foreign)block.leave();block.enter();queueDisplay();return;}
   const was=table;
-  // The routes popup opens with the pressed route unfolded, else the most pressing one (the panel's first).
+  // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
   table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table')};
   if(block.focused)block.leave();
@@ -711,7 +714,7 @@ function openPopup(name,open=''){
   }
   queueDisplay();
 }
-// The panel's route order (failed, running, waiting, finished), for the popup's first unfolded route.
+// The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
 function rankedRoutes(){
   const routes=Array.isArray(panelModel.routes)?panelModel.routes.filter(r=>r&&r.id):[];
   const rank=r=>r.kind==='dead'||r.kind==='done'&&r.outcome_key==='g_dead'?0:({working:1,blocked:2,idle:2,stale:3,done:4})[r.kind]??2;
@@ -804,7 +807,7 @@ const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=
 // while the panel is being drawn for another placement (folding or opening) is dropped.
 let panelHitsPlacement='';
 function placement(){const g=geometry();return [expanded,g.side,g.folded,g.left,g.panelCols,cols,rows,!!settings].join(':');}
-function panelContent(){const view=panelViewNow();panelHits=view.hits;panelHitsPlacement=placement();viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;panelHitsPlacement=placement();routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
 function height(){
   if(fleetView)return 0;
   if(geometry().side)return rows;
@@ -1304,6 +1307,13 @@ function panelAction(action){
   }
   queueDisplay();
 }
+// Scroll the route box by `delta` routes; a box that shows every route keeps still.
+function scrollRoutes(delta){
+  if(!routeArea||!routeArea.max)return false;
+  const next=Math.max(0,Math.min(routeArea.max,routeScroll+delta));
+  if(next!==routeScroll){routeScroll=next;queueDisplay();}
+  return true;
+}
 let settingsTail='',settingsEscapeTimer,settingsPaste=false;
 function settingsInput(data){
   clearTimeout(settingsEscapeTimer);
@@ -1340,8 +1350,9 @@ function panelMouse(code,x,y,release){
   // panel, the right edge of a left one.
   if(g.side&&!g.folded&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
-  // The wheel over the panel does nothing (its sections read whole in their popups).
-  if((code&0xc3)===64||(code&0xc3)===65)return true;
+  // The wheel over the route box scrolls it in place (spec rule 23); elsewhere in the panel it does
+  // nothing (the other sections read whole in their popups).
+  if((code&0xc3)===64||(code&0xc3)===65){if(!release&&!settings&&routeArea&&row>=routeArea.top&&row<=routeArea.bottom)scrollRoutes((code&1)?1:-1);return true;}
   if(release||code>=32||(code&3)!==0)return true;
   // The targets drawn for this very placement are what the person pressed, a queued layout or not.
   if(panelHitsPlacement!==placement())return true;
@@ -1563,7 +1574,7 @@ async function lifecycle(req) {
     // A popup reads one session's values: another selection closes it; the same session selected again
     // with no key between (an OpenCode plugin reload) keeps it, read again for the session as it is now.
     const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
-    table=again?unselected.table:null;popupWatch=[];unselected=null;if(table)setImmediate(askTable);
+    table=again?unselected.table:null;routeScroll=again?unselected.routeScroll:0;popupWatch=[];unselected=null;if(table)setImmediate(askTable);
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
@@ -1579,7 +1590,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    unselected={sid:req.sid,nativeEpoch,table};
+    unselected={sid:req.sid,nativeEpoch,table,routeScroll};
     selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;popupWatch=[];block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};

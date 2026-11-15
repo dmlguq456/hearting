@@ -1,6 +1,8 @@
 """11-15 (popup design B, C, D, E): the route, LAB and sessions popups over the real host in a private PTY.
 
-For each harness's synthetic native: a press on a panel section opens its popup (Fleet's own table),
+For each harness's synthetic native: a press on a panel section opens its popup (Fleet's own table), a
+press on a route's row in the panel's route box the routes popup with that route unfolded (the popup on
+its own ground, none left once it closes),
 ←→ move between sections, ↑↓ unfold the next route or session, Enter opens a route's page; the popup
 draws again when what it shows changes (an existing watch event, no timer), stands again after a
 resize, opens from the folded strip's groups, answers another session's question once with that
@@ -146,12 +148,28 @@ const outside=async()=>{const s=await screen(),b=box(s);if(!b)return -1;const c=
     const cell=line?.getCell(x);if(!cell)continue;const blank=!cell.getChars().trim();
     if(!cell.isBgDefault()||cell.isInverse()||!blank&&(cell.isFgDefault()||cell.getFgColor()!==239||cell.isBold()||cell.isDim()))n++;}}return n;};
 const veil={};
+// 11-15 (the person: "팝업은 ... 배경 컬러도 다르고 폰트가 좀 더 밝아야"): the standing popup's frame cells and how
+// many stand on the popup's ground (palette 236, the dark face's: the fixture's face is unknown) or read
+// dim (a hue too), in the terminal's own color or in a gray fainter than the floor (palette 232-246); and anywhere
+// on the screen, the cells on that ground (none once it is closed).
+const ground=async()=>{const s=await screen(),b=box(s);if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮');let all=0,on=0,faint=0;
+  for(let y=b.top;y<=b.bottom;y++){const line=term.buffer.active.getLine(y);for(let x=left;x<=right;x++){const cell=line?.getCell(x);if(!cell||cell.getWidth()===0)continue;all++;
+    if(cell.isBgPalette()&&cell.getBgColor()===236)on++;
+    if(cell.getChars().trim()&&(cell.isDim()||cell.isFgDefault()||cell.isFgPalette()&&cell.getFgColor()>=232&&cell.getFgColor()<247))faint++;}}return {all,on,faint};};
+const grounded=async()=>{await flush();let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const cell=line?.getCell(x);
+  if(cell&&cell.isBgPalette()&&cell.getBgColor()===236)n++;}}return n;};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
   await until(s=>has('READY_'+cfg.harness)(s)&&has('2 ROUTE')(s)&&has('LAB')(s)&&has('SESSIONS')(s),'the panel with its sections');
   await key('draft9',300);
   frames.closed=await screen();
+  // 11-15 (the route box again): a press on a route's own row in the panel's route box opens the routes
+  // popup with that route unfolded (here the working one, not the most pressing one); the popup stands on
+  // its own ground with bright words, and closed it leaves no ground behind.
+  {const at0=await at('질문 팝업 구현');await press(at0.x+2,at0.y);
+   const t=await until(s=>unfolded(s).includes('질문 팝업'),'the pressed route unfolded');frames.route_row=t;
+   checks.ground=await ground();await key('\x1b',300);await until(s=>!box(s),'closed after the route row');checks.ground_left=await grounded();}
   // A press on the ROUTE section's head: Fleet's routes table, the most pressing route unfolded.
   let p=await at('2 ROUTE');await press(p.x+2,p.y);
   let s=await until(popupHas('PROGRESS'),'the routes popup');
@@ -431,8 +449,14 @@ class SessionShellTablePopupTest(unittest.TestCase):
         text = lambda name: '\n'.join(frames[name])  # noqa: E731
         # The panel: each section its head and rows (11-15, design E).
         panel = text('closed')
-        for head in ('1 QUESTIONS', '2 ROUTE ⠏1 ✕1', 'LAB', '2 SESSIONS ◑1'):
+        for head in ('1 QUESTIONS', '╭─ 2 ROUTE ', 'LAB', '2 SESSIONS ◑1'):
             self.assertIn(head, panel)
+        # The route box again (11-15): a press on a route's own row opened the popup with it unfolded; the
+        # popup's every frame cell stood on its ground, no word in it faint; closed, no ground was left.
+        self.assertIn('질문 팝업', text('route_row'))
+        ground = checks['ground']
+        self.assertTrue(ground['all'] > 200 and ground['on'] == ground['all'] and ground['faint'] == 0, ground)
+        self.assertEqual(checks['ground_left'], 0)
         self.assertIn('◑ [12] 분리 모델 학습 비교', panel)
         self.assertNotIn('[e9] 이 창', panel)  # this window's own session is no row of its own section
         # The routes popup: Fleet's table, its title the section's head, the sections on its bottom line.

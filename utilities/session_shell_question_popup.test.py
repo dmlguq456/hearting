@@ -95,8 +95,8 @@ console.log('ok');
         self.assertIn('ok', out)
 
     def test_one_popup_frame_stands_in_the_middle_above_the_strip(self):
-        # Design 공통: the middle of the window (above the folded strip, never over it), a thin grey
-        # rounded line one empty cell from what it covers, the title and `✕` on the top line, the
+        # Design 공통: the middle of the window (above the folded strip, never over it), a thin rounded
+        # line (11-15: bright, on the popup's own ground) one empty cell from what it covers, the title and `✕` on the top line, the
         # sections on the bottom line (the current one bright), the keys on the row above it; 76
         # cells for text, the window less 4 under 80 columns, the whole window under 28; the
         # content's height, at most the rows above the strip less 2.
@@ -113,9 +113,11 @@ assert.equal(rows[0],' '.repeat(78));assert.equal(rows.at(-1),' '.repeat(78));
 assert(/^ ╭─ › ◑ 3 QUESTIONS · 1\/3 · 답 필요 ─+ ✕ ─╮ $/.test(rows[1]),rows[1]);
 assert(/^ ╰─ QUESTIONS · ROUTE ─+╯ $/.test(rows.at(-2)),rows.at(-2));
 assert(rows[rows.length-3].includes('Enter 보내기'),rows.join('\n'));
-// The thin line is the messages' grey; the current section bright, the others dim; `✕` and the names press.
-const line=r.rows[1].find(p=>p.text.startsWith('╭'));assert.equal(line.role,'messages');
-const names=r.rows.at(-2);assert.equal(names.find(p=>p.text==='QUESTIONS').bold,true);assert.equal(names.find(p=>p.text==='ROUTE').dim,true);
+// 11-15: the thin line is bright (`popupLine`) on the popup's own ground (`popup`); the current section
+// bright, the others the readable floor (`popupFloor`); `✕` and the names press.
+const line=r.rows[1].find(p=>p.text.startsWith('╭'));assert.equal(line.foreground,v.FACES.dark.popupLine);assert.equal(line.background,v.FACES.dark.popup);
+const names=r.rows.at(-2);assert.equal(names.find(p=>p.text==='QUESTIONS').bold,true);
+const other=names.find(p=>p.text==='ROUTE');assert(other.dim!==true&&other.foreground===v.FACES.dark.popupFloor,JSON.stringify(other));
 assert.deepEqual(r.hits.map(h=>h.action),['popup-close','popup:QUESTIONS','popup:ROUTE']);
 const close=r.hits[0],cellAt=(s,x)=>{let at=0;for(const c of s){if(at===x)return c;at+=c.codePointAt(0)>0x2e7f?2:1;}return '';};
 assert.equal(cellAt(rows[1],close.left-r.left),'✕');
@@ -347,8 +349,9 @@ const assert=require('node:assert/strict'),path=require('node:path'),v=require(p
 const styles={g_dead:{foreground:217,bold:true},dim:{dim:true}};
 const r=v.render({width:40,height:20,side:true,model:{styles,route_count:1,routes:[{id:'d',title:'FAILED',kind:'dead',paint:{glyph:{text:'✕',foreground:217,bold:true}}}]},
  state:'idle',harness:'claude',configuration:{},background:'dark'});
-// 11-15 (popup design E): no route box; the failed route's row keeps its glyph's red on the dark face.
-assert.equal(r.rows.flat().some(p=>p.role==='route-dead'),false,'no box line is drawn');
+// (11-15: the route box again) the failed route's box line is its glyph's red on the dark face.
+const line=r.rows.flat().find(p=>p.role==='route-dead'&&p.text.startsWith('╭'));
+assert.equal(line.foreground,217,'the failed route line is its glyph\'s red on the dark face');
 const glyph=r.rows.flat().find(p=>p.text==='✕'&&p.role==='state:dead');
 assert.equal(glyph.foreground,217,'the failed route keeps its glyph\'s red on the dark face');
 """)

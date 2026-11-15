@@ -175,33 +175,38 @@ own statusline is one row under the input. While the panel, or its folded strip,
 shows the status area, that row is a notice row that stays empty unless you must
 act now: an answer you owe, compaction about to happen, a red context or usage
 reading, or a failed or blocked route. News stays in the panel: messages in
-MESSAGES, a finished route's result in ROUTE. With the panel hidden the
+MESSAGES, a finished route's result in the route box. With the panel hidden the
 row shows the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
 state's color the moment the native screen changes (running: the frame stands lit and
 a light passes over the rule under the model and context, then rests a second; waiting: it
 breathes red; idle stays neutral). **Settings → rule motion** picks `border` (one arc round the
-frame) or `scanners` (a wide wave flowing round it) instead, or `off`. A failed route or
-experiment colors only its own row. Below the model and
+frame) or `scanners` (a wide wave flowing round it) instead, or `off`. A failed route
+colors only the route box's line, a failed experiment only its own row. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
 Under the head (folder, branch and Git state, model and context, title and now,
 running jobs) the panel is a few rows per section, each a press away from a
 popup in the middle of the window that shows the whole thing, so nothing has to
 be opened outside the terminal: `3 QUESTIONS` (the next question's first line
-and its choices), `4 ROUTE ⠏2 ✕1` (three routes, failed first), `4 LAB failed 1`
+and its choices), the route box (`╭─ 4 ROUTE │ 2 REQUEST ─╮`: every route, who works on it
+now with its role, harness, model and effort, its `CTX` gauge with the time after it, its
+title, its kind and where it stands, its live workers in a smaller box under it, then the
+requests this session sent or received), `4 LAB failed 1`
 (three experiment conditions, the one to look at first), `5 SESSIONS ◑2 ⠏1`
 (three other sessions on this machine, the ones waiting for you first),
-`MESSAGES +3` (three messages and requests) and `MEM` (the two newest saved memories of
+`MESSAGES +3` (three messages) and `MEM` (the two newest saved memories of
 this repository and global ones, each `◆` durable or `◇` working, then its scope and kind), each
-head `N NAME counts ─── ›`. The question you can answer here now reads as a button:
+head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
+routes popup with that route unfolded, a request's row the MESSAGES popup. The question you can answer here now reads as a button:
 its rows stand on a dark rose fill across the panel, its choices are numbered chips,
 and `↵ answer · Ctrl+]` stands under them (a rose bar at the left in mono, eight
 colors or `NO_COLOR`); nothing else in the panel is filled. Once you answer, the
 question is one line, `✓ answer sent` in the passing green and what you chose
-after it. A 40-row window keeps two or three rows per section,
-a 20-row one one each, and lower windows let MEM go first. The ROUTE, LAB and
+after it. Short of rows the other sections step down to one row first, then the route
+box folds its routes (context into the first row, then the kind row, then one row each)
+and scrolls in place under the wheel, its border counting what it hides. The ROUTE, LAB and
 SESSIONS popups are Fleet's own tables at the popup's width (a route unfolded
 with its failure reason whole, Enter for its page with its paths; the LAB
 table; the session table), drawn again when what they show changes; **←/→**
@@ -212,7 +217,8 @@ waits here, else the first section), and use **p** in any popup to fold or open
 the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
 press outside closes it; while it stands every key is its own, everything around
 it reads in one dark gray (the native's output keeps arriving, still gray, and the
-native is never told), and ordinary keys stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
+native is never told) while the popup stands on its own lighter ground with bright
+words, and ordinary keys stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
 **t** for text (including pasted text), and **Enter** after every form field is
 answered. Choices and drafts survive question navigation. A transport receipt
 is shown separately from proved consumption; expired or cancelled questions
