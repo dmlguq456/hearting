@@ -177,9 +177,11 @@ fit), and `▴` at its right end; a group with nothing in it does not stand. Sho
 way whole value by whole value, in this order: the reset times, the branch, the effort, the model
 windows, 7d, 5h, OpenCode's MCP count, the model, the messages' sessions (their count stays,
 `MESSAGES 3`), MESSAGES, the project, the notices, the CTX bar (its percent stays), the routes'
-counts by state, and narrower than 44 cells `CTX` itself; the glyph and number, the wait,
-`N ROUTE` and `▴` stay, and nothing wraps. Labels are dark gray upper case; there is no frame,
-gear, beat or moving rule, and only the state glyph turns. While the strip paints its
+counts by state, and narrower than 44 cells `CTX` itself; past that last step the cell before `▴`
+is taken too, and then the session's number gives way (11-15, review A5: from 30 cells the wait and
+`N ROUTE` stand whole beside each other); the glyph, the wait, `N ROUTE` and `▴` stay, and nothing
+wraps. Labels are dark gray upper case; there is no frame, gear, beat or moving rule, and only the
+state glyph turns and, while an answer waits, `◑답 대기 N` blinks (below). The strip has no status button. While the strip paints its
 session, Claude's row under its input keeps the notice (what to do now) as
 with the panel open, so no value shows twice; the strip carries no Git or job
 row. A press on the wait opens the question popup, on the routes the routes popup, on MESSAGES
@@ -262,7 +264,7 @@ Fleet's session keys, idle and an unknown state the neutral frame gray (the
 terminal's dim on an unknown face), no hue in `mono`; it stands still that way
 with `rule motion` off, in `mono`, under `NO_COLOR`, in eight colors and on the
 settings screen. Otherwise this session's own state (not a route's) moves the open panel, beside the
-native area and under it alike (the folded strip has no frame: only its state glyph turns), as the
+native area and under it alike (the folded strip has no frame: only its state glyph turns, and its wait blinks), as the
 setting `rule motion` picks (11-15). While the session runs (an answer being typed in included):
 `rule` (the default) keeps the outer frame still and lit one step below the running color (187;
 `BORDER_LIT`) and passes a light over the thin head rule: its middle five cells brightest and four
@@ -282,12 +284,23 @@ under every value but `off`, never blinking, once every 4.8 seconds on a cosine 
 in 24-bit color (when `COLORTERM` says the terminal takes it) or three in 256 colors, one shade at a
 time, each for an equal stretch, starting at the frame's waiting red, and the head rule stays the
 plain thin rule; the steward `⚑` keeps its own blink. Idle and an unknown state keep the still
-neutral frame under every value. Every value is a constant in one place in `panel-view.cjs`; those
+neutral frame under every value. What waits for the person's answer blinks (11-15, the person: "대기 중인건
+점멸을 시키자" / "질문만"), whatever the session's state: between two reds, `FACES.*.waitBlink` (174 then
+131 on a dark or unknown face, 131 then 174 on a light one; the person tunes them on the installed
+copy), never off and always readable, on the breath's beat (the lit red through the breath's brighter
+half, frames 36-11 of its 48, the other through 12-35: a change every 2.4 seconds) and on the tick
+that turns it, which runs folded too and wakes for nothing while no answer waits. It is the red
+letters of the question answered here (its first row, its choices' row and `↵ answer · Ctrl+]`), the
+`◑` of one answered elsewhere and the guide line's count (`1 QUESTIONS · answer below`, its count in
+the wait's red), and the folded strip's `◑답 대기 N`; never the head's state glyph, the section head's
+count, the route box, an answer on its way or anything in a popup. A beat writes those cells alone
+(the moving frame's cells, a run at a time). Nothing blinks with `rule motion` `off`, in `mono`, under
+`NO_COLOR`, in eight colors or on the settings screen. Every value is a constant in one place in `panel-view.cjs`; those
 a person tunes stand at its top (the rule's light `RULE_PEAK` 5, `RULE_FADE` 4, `RULE_SCAN` 26
 frames, `RULE_REST` 10 frames, the lit frame `BORDER_LIT` 1; the wave `WAVE_COUNT` 3, `WAVE_LAP` 56
 frames, `WAVE_STEPS` 10, `WAVE_FLOOR` 0.3, `WAVE_MIN` 24; the arc `BORDER_ARC` 1/4, `BORDER_LAP` 60
 frames), the breath and its shade count with the other `BORDER_*`, the colors in `FACES.*.orbit`,
-`scan`, `waveRGB`, `breath`, `breathRGB`. A route's state stays in
+`scan`, `waveRGB`, `breath`, `breathRGB`, the blink's two reds in `FACES.*.waitBlink`. A route's state stays in
 the route box: a failed current route turns that box's line to the failure
 color and a running one pulses `N ROUTE` (`route N`); the question's count and `◑` keep their rose. An experiment's failure never colors the frame.
 `HEARTING` names the settings screen alone. What runs shares Fleet's one beat
@@ -307,7 +320,12 @@ Then the metadata, one block. Beside the native area the repository and Git rows
 start with dim labels in the label column of `TITLE` and `NOW` (`REPO`, `GIT`;
 narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
 the repository name in its color with no trailing `/` and the worktree count
-dim (none for zero or an unknown count), and `GIT    main ✓`, all dim with no
+dim (none for zero or an unknown count), the status button `현황 ›` (`STATUS ›`, Fleet's
+`fleet.repo.status`) at the row's right end (11-15, design 2: the word in the body color, `›` dim in
+the section heads' `›` column, no ground and no count; short of cells the word goes first, then
+`· wt N` whole, then the name is cut with `…`, the name and `›` staying; the unlabelled head and the
+bottom layout carry it at their first row's right end; no status document: all of it dim, a press
+still opens it; no artifact root: no button; a press anywhere on the row opens the status popup), and `GIT    main ✓`, all dim with no
 parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
@@ -380,8 +398,9 @@ popup; a request row the MESSAGES popup).
   shows), and under them `↵ answer · Ctrl+]` in rose at the right; a press on any of them opens
   the question popup. Short of rows the action row goes first, then the choices; the first row
   stays to the last. Eight colors read the letters in red, mono and `NO_COLOR` in bold (the
-  `accent` rule). Nothing else is red: not a wait answered elsewhere, not an answer on its way,
-  not a guide line or `질문 변경됨`.
+  `accent` rule). Nothing else is red but a wait answered elsewhere's `◑` and the guide line's
+  count (11-15: what waits blinks, above): not an answer on its way, not the guide line's words or
+  `질문 변경됨`.
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
   this session sent (→) or received (◂, `✓` closed) with their status and age, every
@@ -429,7 +448,9 @@ popup; a request row the MESSAGES popup).
 - MESSAGES: the recent messages, one row each (`← [e7] text`), three at most;
   `+N` counts the rest. The requests stand once, in the route box (above); the
   popup reads both whole, the requests first (a request's numbers, reports and
-  sealed body).
+  sealed body; a markdown table in the body drawn as aligned columns by Fleet's one table rule,
+  `transcript.table_parts`, its other lines wrapped as before). A received message comes as one line
+  (the backend joins its text), so it has no table.
 - MEM: the newest saved memory records of this repository and the global ones
   together (11-15), newest first, two at most, from the journal Fleet reads (the
   newest `add`/`supersede` rows of its project, and the global ones of the same
@@ -641,8 +662,8 @@ drawn inside OpenCode's sidebar. Panel placement never changes question authorit
 
 The current question's summary (its first row, and its choices on one row or
 its second row) and exact request state are readable in the panel before the
-popup opens; the popup reads it whole (its body, every choice, a text or secret
-answer, `i/N` with Tab). An empty questions section reserves no space. Retain choices and drafts
+popup opens; the popup reads it whole (its body, a markdown table in it drawn as aligned
+columns by Fleet's one table rule, every choice, a text or secret answer, `i/N` with Tab). An empty questions section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
 Enter submits only explicit, complete answers. Keep a single active action.
 A settled question (answered, expired, cancelled) stays to show its receipt
@@ -712,15 +733,24 @@ the panel together; above the folded strip, never over it): the question popup
 while a question waits to be answered here, else the first section with
 something in it. A press on a panel section (its head or a row) or on a group of
 the folded strip opens that section's popup, and a new question or a failed
-route never opens one. The popups are three
-kinds over one frame and one set of keys: QUESTIONS (the question editor),
+route never opens one. The popups are four
+kinds over one frame and one set of keys: STATUS (11-15, design 2: the REPO row's button; the table
+popup's frame, width and keys; its title `현황 <campaign> · <age>`, `현황` alone without a document;
+Fleet's status lines for the project as its project page draws them, an empty row, then the whole
+document's first 64 KiB as Fleet's cards, fences as written and markdown tables aligned,
+`session_status.popup_rows`; without a document Fleet's `fleet.repo.no_status` and where it would
+stand. The value, `session_status.read`, is read in its own worker at the first projection, when this
+session's route list changes and at an event of the existing file watch on the paths it names, never
+per paint, and the rows it read stand until such an event or another width), QUESTIONS (the question editor),
 ROUTE (Fleet's own table: the backend's `popup` reading draws
 Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid of
 the popup's width and sends the painted cells, Fleet's row tints left out; narrow,
 Fleet's columns leave as Fleet leaves them), and MESSAGES (the requests and messages whole, then
 the peer delivery reading `r`). The bottom line lists the sections with
-something in them, the current one bright; ←→ (or a press on a name) moves to
-the next or previous one. In a table ↑↓, Tab and Shift+Tab unfold the next or
+something in them in the panel's order, `현황 · QUESTIONS · ROUTE · MESSAGES` (STATUS by its button's
+word, there while the button stands), the current one bright; ←→ (or a press on a name) moves to
+the next or previous one. A popup row reaches the terminal with every control character (C0, DEL and
+C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the
 unfolded route's page (Fleet's route page: what is to do, the verification lines
 with the route's paths, the stage frame) and again goes back to the table; PgUp/PgDn and the wheel read a longer table on (its place,

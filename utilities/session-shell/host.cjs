@@ -452,8 +452,8 @@ function motionSpan(y,screen,column){
   for(let k=0;k<list.length;){
     if(!stale(list[k])||covered(screen,column+list[k].col-1)){k++;continue;}
     let run=`\x1b[${screen+1};${column+list[k].col}H`,current=null;
-    for(let x=list[k].col;k<list.length&&list[k].col===x&&stale(list[k])&&!covered(screen,column+x-1);k++,x++){
-      const c=list[k];if(current!==now[c.i]){run+=`\x1b[${now[c.i]}m`;current=now[c.i];}run+=c.ch;
+    for(let x=list[k].col;k<list.length&&list[k].col===x&&stale(list[k])&&!covered(screen,column+x-1);k++){
+      const c=list[k];x+=Math.max(1,cellWidth(c.ch));if(current!==now[c.i]){run+=`\x1b[${now[c.i]}m`;current=now[c.i];}run+=c.ch;
       motionShown.set(screen+','+(column+c.col),now[c.i]);
     }
     out+=run+'\x1b[0m';
@@ -532,7 +532,7 @@ function spinPaint(){
       if(!quiet){motionWrote(y,y,column);wrote.add(y);}
       last[y]=line;written[y]=panelKey[y];
     }else{
-      const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
+      const row=rows-height()+y;if(expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
       if(last[row]===panel)continue;
       const quiet=last[row]!==undefined&&written[row]===panelKey[y];
       text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H`+panel;
@@ -561,13 +561,49 @@ let popupLayer=null,popupRect=null,overlayLast=[],overlayBase=null;
 // (11-15: the panel's LAB and SESSIONS sections are gone, the person's word "실험 현황은 다소 섣부른
 // 추가같은데. 지금은 일단 빼" and the answer that "세션 현황" meant this session's own progress.)
 let table=null,tableAsking=false,tableAgain=false;
-const SECTIONS=['QUESTIONS','ROUTE','MESSAGES'];
-const POPUP_KIND={ROUTE:'routes'};
+// 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
+const SECTIONS=['STATUS','QUESTIONS','ROUTE','MESSAGES'];
+const POPUP_KIND={ROUTE:'routes',STATUS:'status'};
+// 11-15 (design 2): the panel's status button value (Fleet's `session_status.read`: the status document of
+// this session's campaign, else the one Fleet's project line picks; null where the project has no
+// artifact root, and no button then), read in its own worker so a slow first read holds neither the panel
+// nor a key: at the first projection, when this session's route list changes, and at an event of the file
+// watch on the paths it names (no timer, no poller); between them the value read last stands. The popup's
+// rows are kept the same way (`statusPopup`: read again only at such an event, or at another width).
+let statusValue=null,statusAsking=false,statusAgain=false,statusAgainDirty=false,statusKey='',statusDirty=false,statusGeneration=0,
+  statusTargets=new Set(),statusPopup=null,lastWatch=[];
+const STATUS_ROUTE=/^[A-Za-z0-9_.-]{1,80}$/;
+function statusRoutes(panel=panelModel){return [...new Set((Array.isArray(panel.routes)?panel.routes:[]).map(r=>r&&r.id).filter(id=>typeof id==='string'&&STATUS_ROUTE.test(id)))].slice(0,8);}
+function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true}:null;}
+function askStatus(dirty=false,routes=statusRoutes()){
+  if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
+  statusAsking=true;statusAgain=false;statusAgainDirty=false;
+  const selected=selection;
+  readAction({cwd:process.cwd(),routes},'status',true).then(result=>{
+    if(selected!==selection||!result?.ok)return;
+    const value=result.status&&typeof result.status==='object'?result.status:null;
+    const changed=JSON.stringify(value)!==JSON.stringify(statusValue);
+    statusValue=value;
+    statusTargets=new Set((Array.isArray(value?.watch)?value.watch:[]).filter(t=>typeof t==='string'&&path.isAbsolute(t)).slice(0,9));
+    if(changed||dirty)statusGeneration++;
+    if(observeFiles([...lastWatch,...statusTargets]))queueProjection();
+    panelModel={...panelModel,status_doc:statusDoc()};
+    if(table?.kind==='STATUS'&&(changed||dirty))askTable();
+    queueDisplay();
+  }).finally(()=>{statusAsking=false;if(statusAgain)askStatus(statusAgainDirty);});
+}
+// At a projection: the value is read again when this session's route list changed or a watch event came on its paths.
+function observeStatus(panel){
+  const key=JSON.stringify([process.cwd(),statusRoutes(panel)]);
+  if(key!==statusKey||statusDirty){const dirty=statusDirty;statusKey=key;statusDirty=false;askStatus(dirty,statusRoutes(panel));}
+}
+// The name a section has on a popup's bottom line: STATUS goes by its button's word (`현황`).
+function sectionLabel(name){return name==='STATUS'?String(statusValue?.word||'STATUS'):name;}
 function popupShown(){return (block.focused||!!table)&&activated&&!relay&&!ended&&!fleetView&&!settings&&!succeeding;}
 // The sections with something in them, in the panel's order (the one standing always).
 function sections(){
   const m=panelModel,list=v=>Array.isArray(v)&&v.length>0;
-  const has={QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+  const has={STATUS:!!statusDoc(),QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
     MESSAGES:list(m.messages)||list(m.requests)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
@@ -588,6 +624,9 @@ function wrapGuide(lines,inner,rows){
 function tableTitle(kind){
   const dim=v=>({text:v,dim:true}),m=panelModel;
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim());return r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];}
+  // `현황 <campaign> · <age>` (the word as the button's, dim; `현황` alone without a document).
+  if(kind==='STATUS'){const word=sectionLabel('STATUS'),whole=String(table?.title||statusValue?.title||word);
+    return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   return [dim('MESSAGES')];
 }
 function tableRows(inner){
@@ -612,7 +651,7 @@ function popupNow(){
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
     // The table's own press targets, moved to where its rows stand on the screen.
     const first=view.frame.top+1,left=view.frame.left+2;
     view.tableHits=(table.hits||[]).filter(h=>h.row>=table.scroll&&h.row<table.scroll+space)
@@ -624,13 +663,14 @@ function popupNow(){
     if(actionLines.length)body=actionLines.slice(0,room);
     else if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
     else body=block.detail({budget:room,columns:inner});
-    view=panelView.popup({cols,rows,band,title,body,sections:names,current,model:panelModel,
+    view=panelView.popup({cols,rows,band,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,
       configuration:displayConfiguration,cellWidth,background:terminalBackground});
   }
   // OpenCode paints its own background: every popup row starts from the terminal's own look. The cell
   // each side of the frame on its own ground (`margin`) is first written plain and then painted: a wide
   // character it cuts in half leaves its other half blank in the terminal's own look, not the popup's.
-  view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f]/g,' ')}`).join('')+'\x1b[0m');
+  // (11-15: no control character reaches the terminal from a popup row: C0, DEL and C1 alike.)
+  view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f-\x9f]/g,' ')}`).join('')+'\x1b[0m');
   if(table)return view;
   // The caret stands after the answer being typed (its row starts `› `), as it did in the panel.
   const edit=part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
@@ -639,10 +679,13 @@ function popupNow(){
     view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}
   return view;
 }
-// The table's rows as painted parts: the backend sends runs `[text, style index]` and the styles.
+// The table's rows as painted parts: the backend sends runs `[text, style index]` and the styles; a run
+// may carry its cells as Fleet measured them (`[text, style, cells]`, the status popup), which the popup
+// lays the row out by.
 function tableParts(result){
   const styles=Array.isArray(result.styles)?result.styles:[];
-  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{})})));
+  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{}),
+    ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
 }
 // One reading at a time for the table standing; a reason to read again while one is under way is
 // taken up when it ends (the content as it is then).
@@ -652,10 +695,13 @@ function askTable(){
   tableAsking=true;tableAgain=false;
   const selected=selection,columns=Math.max(20,Math.min(200,panelView.popupWidth(cols,'table')-4));
   const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
-  readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room},'popup',true).then(result=>{
+  const generation=statusGeneration;
+  readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room,
+    ...(t.kind==='STATUS'?{cwd:process.cwd(),routes:statusRoutes()}:{})},'popup',true).then(result=>{
     if(table!==t||selected!==selection)return;
     if(!result?.ok){t.error=!t.loaded;queueDisplay();return;}
     t.rows=tableParts(result);t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;followOpen(t);
+    if(t.kind==='STATUS'){t.title=typeof result.title==='string'?result.title:'';statusPopup={rows:t.rows,title:t.title,width:t.width,generation};}
     if(Array.isArray(result.routes))t.routes=result.routes;
     if(t.kind==='ROUTE'&&t.page&&result.page!==true)t.page=false;
     queueDisplay();
@@ -678,9 +724,12 @@ function openPopup(name,open=''){
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
   table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table')};
+  // The status popup's rows as read last, while no watch event came and the width is the same.
+  const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
+  if(kept)Object.assign(table,{rows:statusPopup.rows,title:statusPopup.title,loaded:true});
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
-  else askTable();
+  else if(!kept)askTable();
   queueDisplay();
 }
 // The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
@@ -922,7 +971,8 @@ function rebuildDisplay() {
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else{
     // Spec rule 49 (c): folded, the strip under the native area.
-    lines=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
+    // (11-15: the answer wait's blink is the strip's moving cells.)
+    lines=panelContent();groups=viewGroups;spins=viewSpins;motion=viewMotion;animated=viewAnimated;
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }
   displayLines(lines,height(),(painted,lengths,plain)=>{
@@ -1033,10 +1083,13 @@ function observeFiles(paths) {
         const changed=name?path.join(directory,String(name)):directory;
         // The watched folder's own removal or move comes under its own name.
         if(event==='rename'&&(name===path.basename(directory)||folderIdentity(directory)!==row.identity)){
+          if(row.targets.some(target=>statusTargets.has(target)))statusDirty=true;
           row.watch.close();watchers.delete(directory);queueProjection(folder(row.targets));return;
         }
         const hits=name?row.targets.filter(target=>target===changed||target.startsWith(changed+path.sep)
           ||target.endsWith(path.sep)&&changed.startsWith(target)):row.targets;
+        // A change on a path the status value names: the value (and a standing status popup) is read again.
+        if(hits.some(target=>statusTargets.has(target)))statusDirty=true;
         if(hits.length){
           // The native's own turn record is read at once; the rest waits for the projection.
           if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
@@ -1069,7 +1122,7 @@ async function projection() {
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const asked=++clock;
-    const data=await source('projection',{columns:openColumns(),popup_columns:panelView.popupWidth(cols),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
+    const data=await source('projection',{columns:openColumns(),popup_columns:panelView.popupWidth(cols),table_columns:panelView.popupWidth(cols,'table')-4,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
       ...(typeof displayValues.model==='string'&&displayValues.model?{native_model:displayValues.model}:{})});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
@@ -1078,13 +1131,15 @@ async function projection() {
     if(turnRecord)readTurnRecord();
     else noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
     // Close the read-before-watch gap once when the input set changes.
-    if(observeFiles(Array.isArray(data.watch)?data.watch:[]))projectionPending=true;
+    lastWatch=Array.isArray(data.watch)?data.watch.slice(0,64):[];
+    if(observeFiles([...lastWatch,...statusTargets]))projectionPending=true;
     refreshPopups(data.panel||{});
+    observeStatus(data.panel||{});
     const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState(),upgradeNoteNow()]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,status_doc:statusDoc(),answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints

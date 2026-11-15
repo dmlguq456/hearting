@@ -917,10 +917,13 @@ const route={id:'a',title:'ROUTE_A',kind:'working',tool:'apply_patch',agents:1,k
 const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
 // A working route the height (a question) dropped from the panel: nothing turns.
 const q={count:1,label:'QUESTIONS',rows:[[p('◑ '),p('Q_HEAD')],[p('  '),p('1 YES · 2 NO')]],one:[[p('◑ '),p('Q_HEAD')]],line:[p('Q_HEAD')],choices:2};
+// (11-15: the waiting question's `◑` blinks on the breath's beat: its cell is the only moving one.)
 for(const [width,height,side] of [[40,8,true],[80,6,false]]){
  const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});
  assert(!rows(r).join('\n').includes(side?'1 ROUTE':'route 1'),rows(r).join('\n'));
- assert.deepEqual(r.spins,[]);assert.equal(r.animated,false,width+'x'+height);
+ assert.deepEqual(r.spins,[]);assert.deepEqual(r.motion.cells.map(c=>c.ch),['◑'],width+'x'+height);
+ const off=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},brief:()=>q,configuration:{rule_motion:'off'}});
+ assert.equal(off.animated,false,width+'x'+height);
 }
 // The same route with room to show it: its mark spins and the beat runs.
 const shown=view.render({width:40,height:30,side:true,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});

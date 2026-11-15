@@ -43,12 +43,16 @@ const FACES={
     // its side lines too), its line in `popupLine`, its words in `bright`, and a word drawn dim or gray
     // never reads below `popupFloor`. ("질문 선지 선택 효과를 틴트로 해 명확하게"): the choice the
     // question popup has chosen stands on `chosen` across the popup's inside, one ground and no other.
-    bright:255,popup:236,popupLine:250,popupFloor:247,chosen:24},
+    bright:255,popup:236,popupLine:250,popupFloor:247,chosen:24,
+    // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): what waits for the person's answer (the
+    // question's red letters in QUESTIONS, `◑답 대기 N` on the folded strip) goes between these two reds,
+    // the lit one first, on the waiting frame's breath (lit while the breath is in its brighter half).
+    waitBlink:[174,131]},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[251,151,108,65,22],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
-    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153},
+    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153,waitBlink:[131,174]},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -100,7 +104,7 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     else if(foreground!==null&&(known==='light'||shade))foreground=HUES[known||'dark'][foreground]??foreground;
     // The question's border, `◑` and `›` are rose; mono keeps them by weight.
     // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
-    if(role==='accent'||role==='accent-line'){if(theme!=='mono')foreground=F.accent;else if(role==='accent')bold=true;dim=false;}
+    if(role==='accent'||role==='accent-line'){if(theme!=='mono')foreground=Number.isInteger(part.blinkTone)?F.waitBlink[part.blinkTone]??F.accent:F.accent;else if(role==='accent')bold=true;dim=false;}
     // A state glyph takes its face's state color, at full strength.
     else if(role.startsWith('state:')&&theme!=='mono'&&(shade||known==='light')&&F[role.slice(6)]){foreground=F[role.slice(6)];dim=false;}
     // The session's own state keeps Fleet's session keys (running g_spin, idle
@@ -170,6 +174,25 @@ function breathStep(tick,steps){
   const slots=2*(steps-1),s=Math.floor(mod(tick,BORDER_BREATHE)*slots/BORDER_BREATHE);
   return s<steps?s:slots-s;
 }
+// 11-15: the waiting blink on the breath's beat: lit (`FACES.*.waitBlink[0]`) through the breath's brighter
+// half (its first and last quarter, the frame's brightest shade in the middle of it), the other red
+// through the darker half; and the next frame it changes at.
+function blinkTone(tick){const q=mod(tick,BORDER_BREATHE),Q=BORDER_BREATHE/4;return q<Q||q>=3*Q?0:1;}
+function blinkNext(tick){const t=Math.trunc(tick),q=mod(t,BORDER_BREATHE),Q=BORDER_BREATHE/4;return t+Math.ceil(q<Q?Q-q:q<3*Q?3*Q-q:BORDER_BREATHE-q+Q);}
+// The cells of the parts marked `blink` in rows of parts (row, column, glyph, the part): one per glyph,
+// spaces and a glyph a zero-width mark joins left out (the host swaps one cell at a time).
+function blinkCells(rows,measure,clean,first=0,last=rows.length){
+  const cells=[];
+  for(let y=first;y<last;y++){let x=0;
+    for(const part of rows[y]||[]){
+      for(const c of clean(part.text)){const w=measure(c);
+        if(!w){if(cells.at(-1)?.row===y&&cells.at(-1).col+cells.at(-1).w===x)cells.pop();continue;}
+        if(part.blink&&c.trim())cells.push({row:y,col:x,ch:c,w,blink:part});
+        x+=w;}
+    }
+  }
+  return cells.map(({w,...c})=>c);
+}
 // `border`: where the arc's head stands at a frame on a frame of `cells` cells, from `start`, and its
 // shade at a cell `behind` cells back from its head (0 the head .. BORDER_SHADES-1), or -1 past its tail.
 function orbitHead(tick,cells,start){return mod(start+Math.floor(Math.trunc(tick)*cells/BORDER_LAP),cells);}
@@ -231,6 +254,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     return items;
   }
   let inner=width-4,routeArea=null;const content=[],hits=[],edge=[];
+  // 11-15: what waits for the person's answer blinks between two reds on the waiting breath's beat (spec
+  // rule 47's tick; not with `rule motion` off, mono, NO_COLOR, fewer than 256 colors or the settings).
+  const waitBlinks=!settings&&cfg.rule_motion!=='off'&&model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+  const blinking=part=>waitBlinks&&part.role==='accent'?{...part,blink:true}:part;
   // 11-15 (popup design A): the question the person would answer next, as its summary (the
   // shell's editor reads it whole in the popup): `count` boxes, `rows` (its first row and its
   // choices on one row, or its first two rows), `one` (its first row), `line` (its whole first
@@ -326,6 +353,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   function foldedView(){
     const own=LIVE[state];
     const plain=model.no_color===true||cfg.theme==='mono';
+    // 11-15: the answer wait blinks on the waiting breath's beat (not with `rule motion` off, mono, NO_COLOR
+    // or fewer than 256 colors, as the frame's breath).
+    const blinking=cfg.rule_motion!=='off'&&!plain&&(model.colors??256)>=256;
     const P=v=>Array.isArray(v)?v.filter(p=>p&&typeof p==='object'):[];
     const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
     const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,text('…','dim')];
@@ -351,7 +381,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const branchName=clean(String(P(model.git_side)[0]?.text??'')).trim().split(/\s+/)[0]||'';
     const branch=branchName&&project.length?[text(' ('+(measure(branchName)>12?clip([text(branchName)],11).parts.map(x=>x.text).join('')+'…':branchName)+')','dim')]:[];
     // The answer wait, then compaction imminent and a tidy notice, in the same place.
-    const wait=model.wait?[{...text(clean(model.wait),'g_blocked'),role:'accent',...(model.no_color===true?{bold:true}:{})}]:[];
+    const wait=model.wait?[{...text(clean(model.wait),'g_blocked'),role:'accent',...(model.no_color===true?{bold:true}:{}),...(blinking?{blink:true}:{})}]:[];
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
     const notices=[...(model.warning?[[text('⚠ ','lvl_r'),text(clean(model.warning),'lvl_r')]]:[]),...(tidy&&!model.answerable?[[text('⚠ ','lvl_y'),text(tidy,'lvl_y')]]:[])];
     // The routes: the count first, the name tag dim, then the counts by state.
@@ -375,8 +405,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return messagesName;
     };
     const room=Math.max(0,width-2);
-    // Each step lets one more thing go; the first that fits is drawn.
-    const steps=['resets','branch','effort','modelWindows','week','windows','mcp','model','numbers','messages','project','notices','bar','tally','ctx'];
+    // Each step lets one more thing go; the first that fits is drawn. (11-15, review A5: past the last
+    // step the cell before `▴` is taken too, and then the session's number gives way, the glyph staying,
+    // so the wait and `N ROUTE` stand whole from 30 cells.)
+    const steps=['resets','branch','effort','modelWindows','week','windows','mcp','model','numbers','messages','project','notices','bar','tally','ctx','tight','number'];
     const build=(gone,noticeRoom=Infinity)=>{
       let q=windows;
       if(gone.has('resets'))q=q.map(g=>g.filter(part=>!/^\s*\(↻/.test(String(part.text))));
@@ -385,7 +417,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(gone.has('windows'))q=q.filter(g=>kind(g)!=='window');
       const m=gone.has('model')?[]:gone.has('effort')?selected.slice(0,1):selected;
       const c=gauge.length&&!gone.has('ctx')?[text('CTX ','dim'),...(gone.has('bar')?percent:gauge),...(!gone.has('mcp')&&P(model.mcp).length?[text(' │ ','dim'),...P(model.mcp)]:[])]:[];
-      const head=[...lead,...(!gone.has('project')&&project.length?[...(lead.length?[text(' ')]:[]),...project,...(gone.has('branch')?[]:branch)]:[])];
+      const lead2=gone.has('number')?glyph:lead;
+      const head=[...lead2,...(!gone.has('project')&&project.length?[...(lead2.length?[text(' ')]:[]),...project,...(gone.has('branch')?[]:branch)]:[])];
       const session=[head,m,c,...q];
       const n=gone.has('notices')?[]:notices.map(x=>size(x)<=noticeRoom?x:cut(x,Math.max(3,noticeRoom)));
       const route=routeHead.length?[...routeHead,...(gone.has('tally')?[]:tally)]:[];
@@ -397,10 +430,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return groups.filter(g=>g.parts.length);
     };
     let groups=null;const gone=new Set();
+    const limit=()=>gone.has('tight')?Math.max(0,width-1):room;
     for(let i=0;i<=steps.length&&!groups;i++){
       if(i)gone.add(steps[i-1]);
       let g=build(gone);
-      if(size(joinAll(g.map(x=>x.parts)))<=room){groups=g;break;}
+      if(size(joinAll(g.map(x=>x.parts)))<=limit()){groups=g;break;}
       // A notice's words are cut before the next value goes, while six cells of them stay.
       if(notices.length&&!gone.has('notices')){const over=size(joinAll(g.map(x=>x.parts)))-room,longest=Math.max(...notices.map(size));
         if(longest-over>=8){g=build(gone,longest-over);if(size(joinAll(g.map(x=>x.parts)))<=room){groups=g;break;}}}
@@ -408,11 +442,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     if(!groups)groups=build(gone);
     const spans=[],parts=[];let x=0;
     groups.forEach((g,i)=>{if(i){parts.push(...bar);x+=3;}const w=size(g.parts);if(g.action)spans.push({left:x,right:x+w-1,action:g.action});parts.push(...g.parts);x+=w;});
-    const body=cut(parts,room);
+    const body=cut(parts,limit());
     const row=[...body,text(' '.repeat(Math.max(0,width-1-size(body)))),text('▴','dim')];
     const out=[row];while(out.length<height)out.push([text(' '.repeat(width))]);
     const hits=[];
-    for(const sp of spans)if(sp.left<room)hits.push({row:0,left:sp.left,right:Math.min(sp.right,room-1),action:sp.action});
+    for(const sp of spans)if(sp.left<limit())hits.push({row:0,left:sp.left,right:Math.min(sp.right,limit()-1),action:sp.action});
     hits.push({row:0,left:0,right:width-1,action:'unfold'});
     const shown=new Set(body);
     const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
@@ -420,7 +454,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const groupsPainted=['head',...(groups.some(g=>g.parts.some(p=>p.text==='CTX '))?['context']:[]),...(body.some(part=>quotaParts.has(part))?['quota']:[]),
       ...(wait.length&&body.some(p=>wait.includes(p))?['wait']:[]),...(groups.some(g=>g.route)?['route']:[])];
     const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
-    return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0,spins,motion:null,folded:true};
+    // The wait's cells, swapped by the host between the two reds on the breath's beat (only those cells).
+    const anchored=Number.isFinite(since),local=t=>anchored?Math.trunc(t)-Math.trunc(since):Math.trunc(t);
+    const cells=blinkCells(out,measure,clean,0,1);
+    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background};
+    const motion=cells.length?{cells,at:tick=>appearance([cells.map(c=>({...c.blink,text:c.ch,blinkTone:blinkTone(local(tick))}))],look,paint)[0],
+      next:tick=>Math.trunc(tick)-local(tick)+blinkNext(local(tick))}:null;
+    return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0||!!motion,spins,motion,folded:true};
   }
   // Spec rule 49 (a), (b), (e): the panel's last row inside carries the gear `⚙` (dim) at its
   // right end and, three cells left of it, the fold button: `»` beside the native area (`«`
@@ -580,6 +620,25 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
+    // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
+    // button `현황 ›` (`STATUS ›`, Fleet's `fleet.repo.status`) at the right end of the REPO row: the word in
+    // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
+    // (a press still opens it). Short of cells the word goes first (`›` stays), then `· wt N` whole, then
+    // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
+    // status popup. No artifact root: no button (`status_doc` absent).
+    const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
+    const topActions=new Map();
+    const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
+      return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
+    // `name` and `count` with the button at the right end of `room` cells, or null without a button.
+    const withButton=(name,count,room)=>{
+      if(!statusDoc)return null;
+      // In order: the whole button, `›` alone, then `› ` without the count; the word does not come back.
+      for(const [lead,whole] of [[[...name,...count],true],[[...name,...count],false],...(count.length?[[name,false]]:[])]){
+        const b=statusButton(whole);if(size(lead)+1+size(b)<=room)return [...lead,pad(room-size(lead)-size(b)),...b];
+      }
+      return [...cut(name,Math.max(1,room-2)),pad(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
+    };
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, two at
     // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
@@ -602,7 +661,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // The name keeps its color; the count (dim) shows whole or not at all.
         const room=inner-labelWidth,count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
         const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
-        top.push(labelled('REPO',withCount?[...sideRepo,...count]:cut(sideRepo,room)));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
+        const button=withButton(sideRepo,count,room);
+        if(button)topActions.set(top.length,'popup:STATUS');
+        top.push(labelled('REPO',button||(withCount?[...sideRepo,...count]:cut(sideRepo,room))));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -653,8 +714,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // The bottom layout has few rows: the metadata row (or rows) first, then one
       // content row; the row break parts them (no rule).
       const first=joined([repo,selected,contextParts]);
-      if(size(first)<=inner){top.push(first);mark(0,'head',...(contextParts.length?['context']:[]));}
-      else{put(top,joined([repo,selected]),1);mark(0,'head');const from=top.length;put(top,contextParts,1);mark(from,'context');}
+      // The status button at the first row's right end (the word first gives way, then the row is cut).
+      const atEnd=row=>{if(!statusDoc)return row;topActions.set(0,'popup:STATUS');
+        for(const whole of [true,false]){const b=statusButton(whole);if(size(row)+1+size(b)<=inner)return [...row,pad(inner-size(row)-size(b)),...b];}
+        return [...cut(row,Math.max(1,inner-2)),pad(Math.max(1,inner-Math.min(size(row),Math.max(1,inner-2))-1)),...statusButton(false)];};
+      if(size(first)<=inner){top.push(atEnd(first));mark(0,'head',...(contextParts.length?['context']:[]));}
+      else{put(top,joined([repo,selected]),1);top[0]=atEnd(top[0]);mark(0,'head');const from=top.length;put(top,contextParts,1);mark(from,'context');}
       // Running jobs join that row when they fit; otherwise they take a row (below Git) that can give way.
       const joinJobs=jobs.length&&size(top.at(-1))+3+size(jobs)<=inner;
       if(joinJobs){top[top.length-1]=joined([top.at(-1),jobs]);mark(top.length-1,'jobs');}
@@ -742,16 +807,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const shown=measure(words)<=inner?words:first,a=[{...text(shown,'g_blocked'),role:'accent'}];
       return [pad(inner-size(a)),...a];
     };
+    // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): the red of what waits for the answer blinks:
+    // the question answered here (its rows' red letters), and for one answered elsewhere its `◑` and the
+    // guide line's count (in the wait's red). The sent answers' lines never blink.
     const summaryRows=()=>{
       const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(P(row)));
-      if(!here)return list.map(row=>cut(row,inner));
+      if(!here)return list.map(row=>cut(row,inner).map(blinking));
       const out=list.map((row,i)=>i===1&&summary.choices>0?choiceLine(row):cut(row.map(part=>part.role==='accent'||!clean(part.text).trim()?part:red(part)),inner));
       if(keepAction&&briefTwo)out.push(actionRow());
-      return out;
+      return out.map(row=>row.map(blinking));
     };
+    const guideRow=()=>{const m=/^(\d+)(.*)$/su.exec(guide);
+      return cut(m?[blinking(red(text(m[1],'g_blocked'))),text(m[2],'dim')]:[text(guide,'dim')],inner);};
     const questionRows=()=>[...(keepSent?sentRows:[]),
       ...(summary?summaryRows():[]),
-      ...(guide&&keepGuide?[cut([text(guide,'dim')],inner)]:[])];
+      ...(guide&&keepGuide?[guideRow()]:[])];
     // ROUTE (restored 11-15 from v4.36.4, the user's correction: "라우트도 비슷한 방식으로 팝업으로 뜨게"
     // asked for a popup on a press, not for the box to go): the route box as the person shaped it
     // (spec rules 23, 24, 25, 34, 36, 38, 43, 48, 57), drawn by the same code. A press on any of its
@@ -1300,7 +1370,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
-      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i)});});
+      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});});
     for(const item of order)add(item.parts,item.action,item.groups);
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
     // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
@@ -1433,13 +1503,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const y=rows.findIndex((r,i)=>i>0&&i<count-1&&r.some(part=>part.rule));
     if(y>0)for(let x=0;x<inner;x++)cells.push({row:y,col:2+x,ch:'─',rule:x});
   }
+  // 11-15: the waiting blink's cells (the QUESTIONS rows' red letters) ride the same motion.
+  const framed=cells.length;
+  if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
+  const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
-    next:tick=>{const local=borderTick(tick),shift=Math.trunc(tick)-local;
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(borderTick(tick))}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+    next:tick=>Math.min(blinked?Math.trunc(tick)-borderTick(tick)+blinkNext(borderTick(tick)):Infinity,framed?frameNext(tick):Infinity)}:null;
+  function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
       if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
       if(moving==='scanners')return Math.trunc(tick)+1;
       if(moving==='border'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
-      const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}}:null;
+      const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}
   const animated=!!motion||rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
@@ -1518,12 +1593,16 @@ function popupWidth(cols,kind='text'){
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels=sections,current=0,model={},configuration,cellWidth,background=''}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
-  function clip(parts,limit){let out=[],used=0;for(const part of parts){let t='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;t+=c;used+=w;}if(t)out.push({...part,text:t});if(used>=limit)break;}return {parts:out,used};}
+  // (11-15: a part that carries its cells as Fleet measured them, `cells`, takes them whole: the row is laid
+  // out by the measure Fleet drew it with.)
+  function clip(parts,limit){let out=[],used=0;for(const part of parts){
+    if(Number.isInteger(part.cells)&&used+part.cells<=limit){const {cells,...rest}=part;out.push({...rest,text:clean(part.text)});used+=cells;continue;}
+    let t='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;t+=c;used+=w;}if(t){const {cells,...rest}=part;out.push({...rest,text:t});}if(used>=limit)break;}return {parts:out,used};}
   const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,{...text('…','dim')}];
   const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
   const maxH=popupHeight(space),shut=maxH>3,list=body.slice(0,Math.max(0,shut?maxH-2:maxH-1)),H=Math.min(maxH,list.length+(shut?2:1));
@@ -1538,7 +1617,9 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   const close=W>=8?[text(' ','dim'),text('✕','dim'),line(' ─╮')]:[line('╮')];
   const top=[...head,line('─'.repeat(Math.max(0,W-size(head)-size(close)))),...close];
   // The bottom line: the sections, the current one bright.
-  const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(s,i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
+  // (11-15: a section's name on the line is its label, `현황` for STATUS; its press opens it by its key.)
+  const named=i=>String(labels[i]??sections[i]);
+  const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(named(i),i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
   const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
   const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];
   const frame=[top];
@@ -1574,7 +1655,7 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   // Presses, in window cells: `✕` closes, a section's name opens its popup.
   const hits=[];
   if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});
-  let at=x+3;for(let i=0;i<sections.length&&shut&&listed.length>2;i++){const n=measure(sections[i]);hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
+  let at=x+3;for(let i=0;i<sections.length&&shut&&listed.length>2;i++){const n=measure(clean(named(i)));hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
   return {rows:painted,left:x-left,top:y-above,width:W+left+right,height:out.length,frame:{left:x,top:y,width:W,height:H},inner,body:list.length,hits};
 }
 // 11-15 (panel polish 3): while a popup stands, the one gray everything behind it reads in (the
@@ -1614,7 +1695,11 @@ function messagesBody({model={},columns=72,cellWidth}={}){
     out.push([text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo'),text(' '),text(String(q.who||''),'dim'),text(' '),
       text(String(q.title||q.id),'loc_repo'),...(q.status?[text(' · '+q.status,'dim')]:[]),...(q.age?[text(' '+q.age,'dim')]:[])]);
     for(const [label,value,tone] of Array.isArray(q.details)?q.details:[])out.push(...wrapText((label?label+': ':'')+String(value||''),({lvl_r:'lvl_r',lvl_g:'lvl_g',dim:'dim'})[tone]||'loc_repo',columns));
-    for(const value of Array.isArray(q.body)?q.body:[])out.push(...wrapText(value,'loc_repo',columns));
+    // (11-15: a body's markdown tables come drawn by Fleet as aligned rows, two cells in; its other lines wrap.)
+    for(const value of Array.isArray(q.body_parts)?q.body_parts:Array.isArray(q.body)?q.body:[]){
+      if(Array.isArray(value))out.push([text('  '),...value.filter(part=>part&&typeof part==='object').map(part=>({...part,text:clean(part.text)}))]);
+      else out.push(...wrapText(value,'loc_repo',columns));
+    }
     if(q.body_more)out.push([text('  …')]);
   }
   for(const m of (Array.isArray(model.messages)?model.messages:[]).slice().reverse()){

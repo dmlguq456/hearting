@@ -299,6 +299,59 @@ def _indented(line):
     return len(line) - len(line.lstrip(" ")) >= 4
 
 
+def _table_end(lines, index):
+    """The index past the markdown table that starts at ``lines[index]`` (GFM: a ``|`` line, then a
+    delimiter row with as many cells; it runs on while non-empty ``|`` lines follow), else None."""
+    line = lines[index]
+    if not ("|" in line.strip() and index + 1 < len(lines) and not _indented(line) and not _indented(lines[index + 1])):
+        return None
+    if not table_aligns(lines[index + 1], len(split_cells(line))):
+        return None
+    end = index + 2
+    while end < len(lines) and "|" in lines[end] and lines[end].strip():
+        end += 1
+    return end
+
+
+def _drawn_table(block, width):
+    """A table's lines (header, delimiter, body) drawn at ``width``: aligned columns, else as written."""
+    header = split_cells(block[0])
+    drawn = table_rows(header, table_aligns(block[1], len(header)), [split_cells(row) for row in block[2:]], width)
+    if drawn is None:                     # no room even at the floors: as written, one row each
+        drawn = [_cut([(row.strip(), "soft")], width) for row in block]
+    return drawn
+
+
+def table_parts(lines, width):
+    """``lines`` with each markdown table drawn at ``width`` cells, the rest untouched (11-15).
+
+    A list of items in order: a line that is no table's is the ``str`` as it came (the caller wraps it
+    as before); a table is the list of its drawn ``(text, key)`` rows (``doc_rows``' one table rule).
+    Inside a code fence nothing is a table. A message body or a question's text keeps its own look and
+    only its tables read aligned."""
+    width = max(1, int(width))
+    lines = [str(line) for line in lines]
+    plain = [_plain(line) for line in lines]
+    out, fence, index = [], None, 0
+    while index < len(lines):
+        text = plain[index].strip()
+        marker = re.match(r"^(```|~~~)", text)
+        if fence is not None:
+            if marker and marker.group(1) == fence and not text.strip(marker.group(1)):
+                fence = None
+        elif marker:
+            fence = marker.group(1)
+        else:
+            end = _table_end(plain, index)
+            if end:
+                out.append([row if _width(row) <= width else _cut(row, width) for row in _drawn_table(plain[index:end], width)])
+                index = end
+                continue
+        out.append(lines[index])
+        index += 1
+    return out
+
+
 def doc_rows(lines, width):
     """A document's lines drawn at ``width`` cells: ``(text, key)`` rows, none wider than ``width``."""
     width = max(1, int(width))
@@ -331,22 +384,13 @@ def doc_rows(lines, width):
             fence = marker.group(1)
             index += 1
             continue
-        if "|" in text and index + 1 < len(lines) and not _indented(line) and not _indented(lines[index + 1]):
-            header = split_cells(line)
-            aligns = table_aligns(lines[index + 1], len(header))
-            if aligns:
-                end, body = index + 2, []
-                while end < len(lines) and "|" in lines[end] and lines[end].strip():
-                    body.append(split_cells(lines[end]))
-                    end += 1
-                flush()
-                drawn = table_rows(header, aligns, body, width)
-                if drawn is None:         # no room even at the floors: as written, one row each
-                    drawn = [_cut([(row.strip(), "soft")], width) for row in lines[index:end]]
-                out.extend(drawn)
-                out.append([])            # one empty row parts the table from what follows
-                index = end
-                continue
+        end = _table_end(lines, index)
+        if end:
+            flush()
+            out.extend(_drawn_table(lines[index:end], width))
+            out.append([])                # one empty row parts the table from what follows
+            index = end
+            continue
         if not text and prose and not prose[-1].strip():
             index += 1
             continue

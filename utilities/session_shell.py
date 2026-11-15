@@ -1004,7 +1004,7 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="", native_model=None, popup_columns=None) -> dict:
+                     upgrade_note="", native_model=None, popup_columns=None, table_columns=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -1189,6 +1189,15 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     request_views, request_paths = _request_views(harness, sid, time.time(), request_errors)
     watched.extend(request_paths)
     panel["requests"] = request_rows(request_views, time.time(), assigned_tag) if request_views else []
+    # 11-15: a request body's markdown tables read aligned in the MESSAGES popup (its rows two cells in,
+    # at the popup's width); its other lines stay the strings the popup wraps as before.
+    from fleet.explorer.transcript import table_parts
+    for request in panel["requests"]:
+        parts = table_parts(request.get("body") or (), max(8, (table_columns or popup_columns or columns) - 2))
+        if any(isinstance(item, list) for item in parts):
+            # One item a row: a line the popup wraps (``str``), or a drawn table row (painted parts).
+            request["body_parts"] = [row for item in parts for row in
+                                     ([item] if isinstance(item, str) else [_runs(row, colors, no_color) for row in item])]
     if request_errors:
         panel["request_error"] = request_errors[0]
     if harness == "claude":
@@ -1235,6 +1244,19 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
             "panel": panel, "help": ui_text("fleet.session_block.editor_help")}
+
+
+def _runs(row, colors, no_color):
+    """A Fleet row of ``(text, key)`` segments as painted parts (a segment with no key: the terminal's own look)."""
+    from fleet.palette import style_components
+    out = []
+    for text, key in row:
+        try:
+            look = style_components(key, colors=colors, no_color=no_color) if key else {}
+        except Exception:  # noqa: BLE001 -- an unknown key draws in the terminal's own look
+            look = {}
+        out.append({"text": str(text), **look})
+    return out
 
 
 def _block_action(binding, request):
@@ -1300,7 +1322,7 @@ def _block_answer(binding, request):
 # 11-15 (popup design B): the routes popup is Fleet's own table, drawn by Fleet's own functions into a
 # grid of the popup's width; nothing here draws a table of its own. (The LAB and sessions popups went
 # with their panel sections, 11-15.)
-POPUP_KINDS = frozenset({"routes"})
+POPUP_KINDS = frozenset({"routes", "status"})
 POPUP_ROWS = 160     # rows a table popup carries at most (the popup pages them with PgUp/PgDn)
 
 
@@ -1406,6 +1428,79 @@ def _popup_view_model(harness, sid, kind):
     return live.build_view_model(snapshot)
 
 
+_ROUTE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+
+
+def _status_request(request):
+    """``(cwd, route ids)`` a status read names: the session's folder (absolute) and its route ids, else None."""
+    cwd, routes = request.get("cwd"), request.get("routes")
+    if (not isinstance(cwd, str) or not os.path.isabs(cwd) or len(cwd) > 4096 or "\0" in cwd
+            or not isinstance(routes, list) or len(routes) > 64):
+        return None
+    return cwd, [route for route in routes if isinstance(route, str) and _ROUTE_ID.match(route)][:8]
+
+
+def _panel_status(binding, request):
+    """The panel's status button value (``fleet.session_status.read``), read in its own worker: the host asks
+    at its first projection, when this session's routes change and at a watch event on the paths the value
+    names, never per paint, so a slow first read holds neither the panel nor a key. No artifact root: None."""
+    named = _status_request(request)
+    if named is None:
+        return {"ok": False, "reason": "invalid-status"}
+    registry_root()
+    from fleet import session_status
+    return {"ok": True, "status": session_status.read(*named)}
+
+
+def _status_popup(binding, request, columns, colors, no_color):
+    """The status popup: Fleet's status lines for this project and the whole document, at the popup's width
+    (``fleet.session_status.popup_rows``, with the value this read made itself: no path comes from the host)."""
+    named = _status_request(request)
+    if named is None:
+        return {"ok": False, "reason": "invalid-status"}
+    from fleet import session_status
+    from fleet.session_tags import assigned_tag
+    view = session_status.read(*named)
+    if view is None:
+        return {"ok": False, "reason": "no-status"}
+    status = None
+    try:
+        vm = _popup_view_model(binding["harness"], binding["sid"], "status")
+        tag = str(assigned_tag(binding["harness"], binding["sid"]))
+        own = next((row for row in tuple(getattr(vm, "sessions", ()) or ()) if str(row.get("tag")) == tag), None)
+        repo = next((row for row in tuple(getattr(vm, "repos", ()) or ())
+                     if own is not None and str(row.get("id")) == str(own.get("repo_id"))), None)
+        status = repo.get("status") if repo is not None else None
+    except Exception:  # noqa: BLE001 -- without Fleet's lines the document still reads
+        status = None
+    rows = session_status.popup_rows(view, status, columns)
+    styles, index = [], {}
+
+    def style(key):
+        if key not in index:
+            index[key] = len(styles)
+            styles.append(_runs([("", key)], colors, no_color)[0] if key else {})
+            styles[-1].pop("text", None)
+        return index[key]
+    # Each run carries its cells as Fleet measured them (``cell_width``), so the host lays the rows out by
+    # the same measure Fleet drew them with (its own differs for some characters: Thai marks, jamo, new emoji).
+    from fleet.explorer.grid import cell_width
+    runs = [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows]
+    result = {"ok": True, "kind": "status", "rows": runs, "styles": styles, "hits": [], "page": False,
+              "title": view.get("title") or view.get("word") or "", "has_doc": view.get("has_doc") is True}
+
+    def weight(value):
+        return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
+    if weight(result) <= POPUP_ANSWER_BYTES:
+        return result
+    low, high = 0, len(runs)      # the most rows that fit with a dim `…` under them
+    dim = style("dim")
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if weight({**result, "rows": runs[:middle] + [[["…", dim, 1]]]}) <= POPUP_ANSWER_BYTES else (low, middle)
+    return {**result, "rows": runs[:low] + [[["…", dim, 1]]]}
+
+
 def _panel_popup(binding, request):
     """One popup's content, read when the person opens it and again at the watch events it names."""
     registry_root()
@@ -1416,6 +1511,8 @@ def _panel_popup(binding, request):
         return {"ok": False, "reason": "invalid-popup"}
     colors, no_color = _paint_mode()
     harness, sid = binding["harness"], binding["sid"]
+    if kind == "status":
+        return _status_popup(binding, request, columns, colors, no_color)
     opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""
     vm = _popup_view_model(harness, sid, kind)
     grid = CellGrid(columns, POPUP_ROWS + 8)
@@ -1560,10 +1657,13 @@ def _backend_operation(request: dict) -> dict:
         # The question popup's width (11-15); an older host sends none and keeps the panel's.
         popup = request.get("popup_columns")
         popup = popup if type(popup) is int and 20 <= popup <= 10000 else None
+        # The MESSAGES popup's inside (a table popup's width); an older host sends none.
+        table = request.get("table_columns")
+        table = table if type(table) is int and 16 <= table <= 10000 else None
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
-            popup_columns=popup,
+            popup_columns=popup, table_columns=table,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,
@@ -1573,6 +1673,8 @@ def _backend_operation(request: dict) -> dict:
         return _block_answer(binding, request)
     if op == "popup":
         return _panel_popup(binding, request)
+    if op == "status":
+        return _panel_status(binding, request)
     if op == "action":
         return _block_action(binding, request)
     if op == "readiness":
