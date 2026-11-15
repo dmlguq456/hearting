@@ -416,7 +416,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
 
     verdict = handoff["verdict"]
     # RA-8: a PASS whose blocker is `none (note)` is a PASS; the note is kept.
-    note = pass_blocker_note(handoff["blocker"]) if verdict == "PASS" else None
+    note = (pass_blocker_note(handoff["blocker"]) or (handoff.get("verdict_note") or "").strip(" \t—–:-")
+            if verdict == "PASS" else None)
     normalized = {"envelope_normalized": "pass-blocker-note",
                   "pass_note_excerpt": _escape_and_bound(note)[0]} if note else {}
     if handoff.get("disposition"):

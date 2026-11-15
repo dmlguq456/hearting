@@ -388,6 +388,71 @@ class DispositionHandoffTest(unittest.TestCase):
         self.assertEqual(classify("artifact: /r\nverdict: 수정 후 병합").note, "dead-contract")
 
 
+class PassWithMemoHandoffTest(unittest.TestCase):
+    """A PASS that carries a memo (after `verdict: PASS` or after `blocker: none`) is a normal
+    completion; a real blockage, a failing or held verdict and a handoff that cannot be read still
+    ask for attention. Reports and values are synthetic."""
+
+    REVIEW = "최종 판정: 수정 후 병합 — head 8cbccb3\n\n## 필수 지적\n- P1 하나\n"
+
+    def setUp(self):
+        import dispatch_supervisor_terminal
+        self.terminal = dispatch_supervisor_terminal
+        self.tmp = tempfile.TemporaryDirectory(prefix="scc-memo-")
+        self.addCleanup(self.tmp.cleanup)
+        self.report = Path(self.tmp.name) / "report.md"
+        self.report.write_text(self.REVIEW, encoding="utf-8")
+
+    def classify(self, verdict, blocker):
+        text = f"artifact: {self.report}\nverdict: {verdict}\nblocker: {blocker}"
+        return self.terminal.classify_session_result(
+            {"subtype": "success", "is_error": False, "result": text}, 0, runtime="claude")
+
+    def test_the_two_real_shapes_are_normal_completions(self):
+        for label, verdict, blocker in (
+                ("blocker note after a dash", "PASS", "none — 최종 판정: 수정 후 병합 — head 8cbccb3 (필수 지적 2건: ① a, ② b)"),
+                ("verdict note in parentheses", "PASS (최종 판정: 병합 가능 — head d79893e)", "none"),
+                ("blocker note after a colon", "PASS", "none: 필수 지적 2건"),
+                ("blocker note in parentheses", "PASS", "none (필수 지적 2건)"),
+                ("verdict note after a dash", "PASS — 병합 가능", "none"),
+                ("verdict note after a hyphen", "PASS - 병합 가능", "none"),
+                ("both notes", "PASS (병합 가능)", "none — 필수 지적 없음")):
+            with self.subTest(label):
+                outcome = self.classify(verdict, blocker)
+                self.assertEqual((outcome.note, outcome.failure_class), ("completed-supervisor", "pass"))
+                found = route_authority.handoff_search(f"artifact: {self.report}\nverdict: {verdict}\nblocker: {blocker}")
+                self.assertEqual(found["verdict"], "PASS")
+        self.assertEqual(route_authority.pass_blocker_note("none — a note"), "a note")
+        self.assertEqual(route_authority.pass_blocker_note("none: a note"), "a note")
+
+    def test_a_real_blockage_still_asks_for_attention(self):
+        for label, verdict, blocker in (
+                ("blocker text", "PASS", "필수 지적 2건"),
+                ("blocker starting with none", "PASS", "none, but G1 was skipped"),
+                ("blocker naming something else", "PASS", "nonexistent (x)"),
+                ("blocker with an empty note", "PASS", "none —"),
+                ("not PASS", "not PASS", "none"),
+                ("FAIL naming PASS", "FAIL (was PASS)", "none"),
+                ("BLOCKED with a note", "BLOCKED (PASS pending)", "none"),
+                ("PASSED", "PASSED", "none"),
+                ("PASS-like word", "PASS-ish", "none"),
+                ("empty verdict note", "PASS (", "none"),
+                ("no verdict word", "완료 (PASS)", "none")):
+            with self.subTest(label):
+                outcome = self.classify(verdict, blocker)
+                self.assertEqual((outcome.note, outcome.failure_class), ("dead-contract", "contract"))
+        for verdict, note in (("FAIL", "dead-worker-fail"), ("BLOCKED", "dead-worker-blocked"),
+                              ("보류 (PASS 아님)", "dead-worker-fail")):
+            with self.subTest(verdict):
+                self.assertEqual(self.classify(verdict, "none — see report").note, note)
+        self.assertEqual(self.classify("PASS", "none").note, "completed-supervisor")
+        for text in ("artifact: /r\nverdict: PASS (ok)", "verdict: PASS (ok)\nblocker: none"):
+            with self.subTest(text):
+                self.assertEqual(self.terminal.classify_session_result(
+                    {"subtype": "success", "is_error": False, "result": text}, 0, runtime="claude").note,
+                    "dead-contract")
+
+
 class UnfinishedOwnerVerdictTest(unittest.TestCase):
     """A registered owner that stops on `보류`/`hold` still asks for attention; a finished
     review ending on `수정 후 병합` stays a normal completion (the live terminal path)."""
@@ -457,8 +522,9 @@ class SummaryContentTest(unittest.TestCase):
         text = ("# 보고\n\n**최종 판정: 수정 후 병합 — head 0123456789ab**\n\n## 해결하지 못한 것\n- P1\n\n"
                 "- PR #1640 · head `0123456789abcdef0123` · CI 15/15 통과 · GitHub mergeable `MERGEABLE`\n")
         self.assertEqual(work_intent.report_verdict(text), "수정 후 병합 — head 0123456789ab")
-        self.assertEqual(work_intent.report_publication(text),
+        self.assertEqual(work_intent.report_publication(text, "PR #1640 검토"),
                          "#1640 · head 0123456789ab · CI 15/15 통과 · MERGEABLE")
+        self.assertEqual(work_intent.report_publication(text), "")
         self.assertEqual(work_intent.report_verdict("## 바꾼 것\n- x\n"), "")
         self.assertEqual(work_intent.report_publication("PR #12 opened\n"), "")
         self.assertEqual(work_intent.report_sections(text)["remaining"], ["P1", text.splitlines()[-1][2:]])
@@ -487,70 +553,107 @@ class SummaryContentTest(unittest.TestCase):
         self.assertEqual(work_intent.report_publication(own), "#1637 · head 350a5b428243 · CI 15/15 통과 · MERGEABLE")
         self.assertEqual((work_intent.report_publication(report), work_intent.report_pr_urls(report)), ("", []))
 
-    def test_a_closed_review_verdict_still_keeps_the_other_pr_out(self):
-        # A review's first line is the closed `최종 판정: … — head <hex>` and cannot name a PR.
-        evidence = ("- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- https://github.com/o/r/pull/1636\n"
-                    "- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n")
-        closed = "최종 판정: 병합 가능 — head 350a5b4\n\n"
-        own = "#1637 · head 350a5b428243 · CI 15/15 통과"
-        # No PR in the verdict line: the head it names picks this work's PR line.
-        report = closed + "# 검토\n\n## 근거\n" + evidence
-        self.assertEqual(work_intent.report_publication(report), own)
+    def summary(self, report, request="x", capability="review"):
         with tempfile.TemporaryDirectory(prefix="scc-summary-") as temporary:
             path = Path(temporary) / "report.md"
             path.write_text(report, encoding="utf-8")
-            summary = work_intent.completion_summary(
-                {"capability": "review", "work_request": {"text": "x"}}, str(path))
-        self.assertIn("\nPR: #1637 · head 350a5b428243", summary)
-        self.assertNotIn("PR: #1636", summary)
-        # The title names this work's PR: it wins, and the other PR's link goes too.
-        titled = closed + "# 검토 — PR #1637\n\n## 근거\n" + evidence
-        self.assertEqual(work_intent.report_publication(titled), own)
+            return work_intent.completion_summary(
+                {"capability": capability, "work_request": {"text": request}}, str(path))
+
+    @staticmethod
+    def carried(summary):
+        """The summary's `PR:` lines and the PR links on its artifact line."""
+        lines = summary.splitlines()
+        return ([line for line in lines if line.startswith("PR:")],
+                re.findall(r"pull/\d+", " ".join(line for line in lines if line.startswith(("Artifact", "산출물")))))
+
+    EVIDENCE = ("- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- https://github.com/o/r/pull/1636\n"
+                "- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n")
+    CLOSED = "최종 판정: 병합 가능 — head 350a5b4\n\n"
+    OWN = "#1637 · head 350a5b428243 · CI 15/15 통과"
+
+    def test_the_pr_is_the_one_the_verdict_line_or_title_names_else_the_one_the_request_names(self):
+        # A closed review verdict cannot name a PR and this report has no title: no PR is guessed
+        # from the evidence, though the PR line's head equals the verdict's.
+        report = self.CLOSED + "## 근거\n" + self.EVIDENCE
+        self.assertEqual((work_intent.report_publication(report), work_intent.report_pr_urls(report)), ("", []))
+        self.assertEqual(self.carried(self.summary(report)), ([], []))
+        # The title names this work's PR: it wins over the request, and the other PR's link goes too.
+        titled = self.CLOSED + "# 검토 — PR #1637\n\n## 근거\n" + self.EVIDENCE
+        self.assertEqual(work_intent.report_publication(titled), self.OWN)
+        self.assertEqual(work_intent.report_publication(titled, "PR #1636 검토"), self.OWN)
         self.assertEqual(work_intent.report_pr_urls(titled), [])
-        self.assertEqual(work_intent.report_publication(
-            closed + "# 검토 — PR #1637\n\n## 근거\n- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n"), "")
-        # A title naming a PR beats a head that matches no line.
-        self.assertEqual(work_intent.report_publication(
-            "최종 판정: 병합 가능 — head 9999999\n\n# 검토 — PR #1637\n" + evidence), own)
-        # No PR in the verdict line or title, no head either: the first PR line, as before.
-        self.assertTrue(work_intent.report_publication("# 검토\n\n" + evidence).startswith("#1636"))
-
-    def test_a_merge_makes_the_verdict_head_and_the_pr_line_head_differ_for_the_same_pr(self):
-        # The verdict line and the PR line each name the commit the other calls "head" (a merge).
-        base = "- PR #1637 · head {line} · CI 15/15 통과 · MERGEABLE\n"
-        forms = {
-            "verdict has my commit, line has the merge and names mine": (
-                "최종 판정: 완료 — head 2b1d684\n\n"
-                + base.format(line="7002da8af (내 commit 2b1d684fb + main 병합 7002da8af)")),
-            "verdict has the merge, line has mine and names the merge": (
-                "최종 판정: 완료 — head 7002da8\n\n"
-                + base.format(line="2b1d684fb (+ main 병합 commit 7002da8af)")),
-            "verdict names both, line has mine": (
-                "최종 판정: 완료 — head 7002da8 (내 commit 2b1d684 + 병합)\n\n" + base.format(line="2b1d684fb")),
-        }
-        for label, report in forms.items():
-            with self.subTest(label):
-                self.assertTrue(work_intent.report_publication(report).startswith("#1637 · head "), label)
-        # A line sharing no commit with the verdict line is still another PR's.
-        other = "- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n"
-        report = forms["verdict has my commit, line has the merge and names mine"]
-        self.assertTrue(work_intent.report_publication(
-            report.replace("\n\n", "\n\n" + other, 1)).startswith("#1637 · head "))
-
-    def test_a_pr_link_the_pr_lines_rule_out_is_not_carried_either(self):
-        other = "- base main = PR #1636 (https://github.com/o/r/pull/1636) merge, head 54922faf6 (CI 15/15)\n"
-        closed = "최종 판정: 병합 가능 — head 350a5b4\n\n## 근거\n"
-        # The only PR named is on a line whose head is not the verdict's: no link at all.
-        for tail in ("- 대상 head 350a5b428243 · CI 15/15\n",
-                     "- https://github.com/o/r/pull/1636\n- 대상: 브랜치 x, head 350a5b428243 · CI 15/15\n"):
-            with self.subTest(tail):
-                self.assertEqual(work_intent.report_pr_urls(closed + other + tail), [])
-        # The same PR also named on a line with the verdict's head keeps its link.
-        kept = closed + other + "- PR #1636 · head 350a5b428243 · CI 15/15\n"
-        self.assertEqual(work_intent.report_pr_urls(kept), ["https://github.com/o/r/pull/1636"])
-        # A link on a line that states no head is kept, as before.
-        self.assertEqual(work_intent.report_pr_urls(closed + "- https://github.com/o/r/pull/1636\n"),
+        self.assertEqual(self.carried(self.summary(titled)), (["PR: " + self.OWN], []))
+        # No PR in the verdict line or title: the one PR the request names, once the report has
+        # a line for that number.
+        self.assertEqual(work_intent.report_publication(report, "PR #1637 head 350a5b4 를 검토"), self.OWN)
+        self.assertEqual(self.carried(self.summary(report, "PR #1637 검토")), (["PR: " + self.OWN], []))
+        self.assertEqual(work_intent.report_pr_urls(report, request="PR #1636 검토"),
                          ["https://github.com/o/r/pull/1636"])
+        for request in ("x", "", None, "PR #1636과 PR #1637 비교", "https://github.com/o/r/pull/1636 와 PR 1637"):
+            with self.subTest(request=request):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+
+    def test_a_request_pr_the_report_never_names_is_not_carried(self):
+        report = self.CLOSED + "## 근거\n- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- 대상 head 350a5b428243 · CI 15/15\n"
+        self.assertEqual((work_intent.report_publication(report, "PR #1637 검토"),
+                          work_intent.report_pr_urls(report, request="PR #1637 검토")), ("", []))
+        self.assertEqual(self.carried(self.summary(report, "PR #1637 검토")), ([], []))
+
+    def test_a_pr_the_request_body_names_for_reference_is_not_this_works(self):
+        # Only the request's first line (its title) says which PR this work is about; a body that
+        # mentions another PR as a reference carries no PR line or link.
+        report = self.CLOSED + "## 근거\n" + self.EVIDENCE.replace("- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n", "")
+        report += "- PR #1636 · head 54922faf6 · CI 15/15 통과\n"
+        for request in ("# 겹치는 파일 정리\n\nPR #1636과 겹치는 파일을 정리한다", "# 후속 정리\n\n앞 PR #1636의 후속 정리",
+                        "\n\n# 정리\n본문 https://github.com/o/r/pull/1636"):
+            with self.subTest(request=request):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+                self.assertEqual(self.carried(self.summary(report, request)), ([], []))
+        # The title naming the PR still carries it (and a blank first line is skipped).
+        for request in ("# 검토 — PR #1636\n\nPR #1637과 비교", "\n# 검토 — PR #1636\n본문"):
+            self.assertTrue(work_intent.report_publication(report, request).startswith("#1636 · head 54922faf6 · CI 15/15"))
+
+    def test_no_other_pr_is_carried_whatever_its_head(self):
+        # R3's synthetic shapes: another PR's line or link is never carried, with or without a
+        # head that matches the verdict's, a merge's second head, a fenced example or a section
+        # heading naming it.
+        other = "- base main = PR #1636 (https://github.com/o/r/pull/1636) merge, head 54922faf6 (CI 15/15)\n"
+        merge = "최종 판정: 완료 — head 7002da8\n\n- PR #1636 · head 2b1d684fb · CI 15/15 통과\n"
+        for label, report, request in (
+                ("other PR with its link", self.CLOSED + "## 근거\n" + other + "- 대상 head 350a5b428243 · CI 15/15\n", "PR #1637 검토"),
+                ("other PR link, target line has no PR", self.CLOSED + "## 근거\n- https://github.com/o/r/pull/1636\n- 대상: head 350a5b428243 · CI 15/15\n", "PR #1637 검토"),
+                ("a merge's second head", merge, "PR #1637 검토"),
+                ("a fenced title", self.CLOSED + "```text\n# PR #1636 예시\n```\n## 근거\n" + other, "PR #1637 검토"),
+                ("a code line", self.CLOSED + "    # PR #1636 예시\n" + other, "PR #1637 검토"),
+                ("a section heading", self.CLOSED + "## PR #1636과 겹치는 파일\n" + other, "PR #1637 검토"),
+                ("a request naming two", self.CLOSED + other, "PR #1636 · PR #1637")):
+            with self.subTest(label):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+
+    def test_the_head_is_not_compared_when_the_pr_is_known(self):
+        # A merge makes the verdict's head and the PR line's head differ; the PR is known, so both read.
+        for line in ("7002da8af (내 commit 2b1d684fb + main 병합 7002da8af)", "2b1d684fb (+ main 병합 commit 7002da8af)", "2b1d684fb"):
+            with self.subTest(line):
+                report = "최종 판정: 완료 — PR #1637, head 7002da8\n\n- PR #1637 · head " + line + " · CI 15/15 통과\n"
+                self.assertTrue(work_intent.report_publication(report).startswith("#1637 · head "))
+        self.assertEqual(work_intent.report_pr_urls("최종 판정: 완료 — PR #1637\n\n- https://github.com/o/r/pull/1637\n"),
+                         ["https://github.com/o/r/pull/1637"])
+
+    def test_a_wide_table_row_is_never_the_verification(self):
+        # A proposal's results table: its first cell may start with a heading word, its other cells are data.
+        report = ("# 제안서\n\n## 실제 수\n\n| 일 | Claude | Codex | OpenCode |\n|---|---|---|---|\n"
+                  "| 스크립트(python) | 17% · 18% | 12% · 12% | 15% · 16% |\n| 시험·점검 | 12% · 16% | 6% · 5% | 14% · 14% |\n")
+        self.assertEqual(work_intent.report_sections(report), {})
+        text = self.summary(report)
+        self.assertIn(work_intent.ui_translator()("completion.unreadable"), text.splitlines())
+        self.assertFalse([line for line in text.splitlines() if line.startswith(("Checks:", "검증:"))])
+        # A two-cell `| label | value |` row is still a field.
+        self.assertEqual(work_intent.report_sections("| 남은 것 | 저장 오류를 고치지 못함 |\n"),
+                         {"remaining": ["저장 오류를 고치지 못함"]})
 
     def test_the_check_counts_survive_a_long_prose_line(self):
         prose = "검증은 격리 HOME과 사설 tmux에서 loopback 모델로 세 하네스 각각 돌렸고 보고서 기록에 남김 — " * 3

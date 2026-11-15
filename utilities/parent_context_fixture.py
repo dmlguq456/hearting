@@ -156,7 +156,7 @@ class Scenario:
         for index, (kind, pattern) in enumerate(self.completions):
             attempt = f"att-scc-{self.harness}-{index:02d}" + "0" * 16
             route = {"capability": "autopilot-code", "capability_mode": "dev",
-                     "work_request": {"text": f"합성 과제 {index}: 부모 세션 문맥 측정용 작업을 끝낸다."},
+                     "work_request": {"text": f"합성 과제 {index}: PR #{4100 + index}의 부모 세션 문맥 측정용 작업을 끝낸다."},
                      "artifact_root": str(self.reports), "cwd": str(self.repo)}
             route["route_hash"] = route_identity.route_hash(route)
             route["route_id"] = route_identity.route_id_from_hash(route["route_hash"])

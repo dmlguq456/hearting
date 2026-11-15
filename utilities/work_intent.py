@@ -703,8 +703,10 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             normalized_cells = [re.sub(r"[*:]", "", cell).strip().casefold() for cell in cells]
             if len(normalized_cells) >= 2 and normalized_cells[:2] in (["검사", "결과"], ["check", "result"], ["item", "result"]):
                 continue
-            label = re.sub(r"[*:]", "", cells[0]).strip() if cells else ""
-            field = _section_field(label, numbered=numbered)
+            # Only a two-cell `| label | value |` row is a field; a wider table's first cell is a row
+            # name, and its other cells are data (`| 시험·점검 | 12% | 6% |` is not the checks).
+            label = re.sub(r"[*:]", "", cells[0]).strip() if len(cells) == 2 else ""
+            field = _section_field(label, numbered=numbered) if label else None
             if field:
                 value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
                 if value:
@@ -748,8 +750,7 @@ def report_verdict(text: str) -> str:
 
 def _verdict_pr(text: str) -> str | None:
     """The PR this report is about: the one its verdict line names (``_VERDICT_PR``), else
-    the one its first heading names (a review's closed verdict line cannot carry a PR number
-    but its title does), else None."""
+    the one its title (the first level-1 heading) names, else None."""
     match = _verdict_match(text)
     if match is not None:
         found = _VERDICT_PR.search(match["verdict"])
@@ -761,26 +762,25 @@ def _verdict_pr(text: str) -> str | None:
         if len(bare) == 1 and bare <= named:
             return bare.pop()
     for raw in _unfenced_lines(text):
-        line = raw.strip()
-        if line.startswith("#"):
-            found = _VERDICT_PR.search(line)
+        if raw.startswith("# "):
+            found = _VERDICT_PR.search(raw)
             return next(value for value in found.groups() if value) if found else None
     return None
 
 
-_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])", re.I)
+def _request_pr(request) -> str | None:
+    """The one PR the request's first line (its title) names, else None (none, or more than one).
+    The body names PRs as references, not as this work's."""
+    title = next((line for line in str(request or "").splitlines() if line.strip()), "")
+    named = {next(value for value in found.groups() if value) for found in _VERDICT_PR.finditer(title)}
+    return next(iter(named)) if len(named) == 1 else None
 
 
-def _hexes(text: str) -> set[str]:
-    return {value.lower() for value in _HEX.findall(text.replace("`", ""))}
-
-
-def _verdict_head(text: str) -> set[str]:
-    """Every commit the verdict line names when it states a head, else empty."""
-    match = _verdict_match(text)
-    if match is None or not _PUBLICATION_FIELDS[0].search(match["verdict"]):
-        return set()
-    return _hexes(match["verdict"])
+def _report_pr(text: str, request=None) -> str | None:
+    """The one PR the summary may carry: what the verdict line or title names, else the one PR
+    the request names. Never a PR guessed from the report's other lines; the caller carries it
+    only if the report has a line or link for that number."""
+    return _verdict_pr(text) or _request_pr(request)
 
 
 def _pr_number(line: str) -> str | None:
@@ -788,44 +788,26 @@ def _pr_number(line: str) -> str | None:
     return (found["url"] or found["number"]) if found else None
 
 
-def _other_head(line: str, verdict_head: set[str]) -> bool:
-    """A line that states a head, none of whose commits is one the verdict line names (a
-    merge makes the verdict's head and the PR line's head differ while naming each other's;
-    a line with no head is kept)."""
-    if not verdict_head or not _PUBLICATION_FIELDS[0].search(line.replace("`", "")):
-        return False
-    return not any(a.startswith(b) or b.startswith(a) for a in _hexes(line) for b in verdict_head)
-
-
-def _publication_lines(text: str):
-    """Lines naming a PR with its head, CI or mergeability, outside fenced blocks. When
-    the verdict line names this work's PR, only lines about that PR."""
-    own = _verdict_pr(text)
-    verdict_head = set() if own else _verdict_head(text)
+def _publication_lines(text: str, request=None):
+    """Lines naming this work's PR with its head, CI or mergeability, outside fenced blocks."""
+    own = _report_pr(text, request)
+    if own is None:
+        return
     for raw in _unfenced_lines(text):
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (line and not line.startswith(("#", "|")) and not _VERDICT_LINE.match(line.replace("**", ""))
                 and _PUBLICATION_LINE.search(line) and _PUBLICATION_WORDS.search(line)
-                and own in (None, _pr_number(line.replace("`", "")))
-                and not _other_head(line, verdict_head)):
+                and own == _pr_number(line.replace("`", ""))):
             yield line
 
 
-def report_pr_urls(text: str, limit: int = 3) -> list[str]:
-    """PR links outside fenced blocks; only this work's PR when the verdict line or title
-    names it. Otherwise the PR lines' own judgment: the link of a PR named only on lines
-    whose head is not the verdict line's head is not this work's."""
-    own = _verdict_pr(text)
-    verdict_head = set() if own else _verdict_head(text)
-    kept: set[str] = set()
-    other: set[str] = set()
-    for raw in _unfenced_lines(text):
-        if verdict_head and _PUBLICATION_FIELDS[0].search(raw.replace("`", "")):
-            for found in _PUBLICATION_LINE.finditer(raw):
-                (other if _other_head(raw, verdict_head) else kept).add(found["url"] or found["number"])
-    skip = other - kept
+def report_pr_urls(text: str, limit: int = 3, request=None) -> list[str]:
+    """This work's PR links outside fenced blocks (``_report_pr``); none when no PR is known."""
+    own = _report_pr(text, request)
+    if own is None:
+        return []
     urls = [url for raw in _unfenced_lines(text) for url in _PR_URL.findall(raw)
-            if (own is None or url.rsplit("/", 1)[-1] == own) and url.rsplit("/", 1)[-1] not in skip]
+            if url.rsplit("/", 1)[-1] == own]
     return list(dict.fromkeys(urls))[:limit]
 
 
@@ -833,9 +815,9 @@ def is_publication_line(line: str) -> bool:
     return bool(_PUBLICATION_LINE.search(line or "") and _PUBLICATION_WORDS.search(line or ""))
 
 
-def report_publication(text: str) -> str:
+def report_publication(text: str, request=None) -> str:
     """``#<n> · head <sha12> · CI <state> · <mergeability>`` from the report's PR line, else ""."""
-    for line in _publication_lines(text):
+    for line in _publication_lines(text, request):
         plain = line.replace("`", "")
         found = _PUBLICATION_LINE.search(plain)
         parts = ["#" + (found["url"] or found["number"])]
@@ -876,6 +858,42 @@ def _unnegated(text: str) -> str:
     return _NEGATED_FAILURE.sub(" ", text)
 
 
+# A row that says what a check did before the fix ("고치기 전 코드로 돌리면 FAIL"): the evidence that the
+# check can fail, not a failure now. Its pass/fail words cannot be told from the checks that ran
+# on the finished work, so such a row is never counted and a group holding one gives no numbers.
+# "전/이전" counts only when the word ends there (space, mark, line end or a particle): "변경 전체",
+# "구현 전반", "수정 전략" are other words. "수정하지 않은" counts only before the thing it ran on.
+_BEFORE_END = r"(?=$|[\s,.;:·()\[\]（）…—–/-]|(?:에는|에서|에도|에|엔|의|은|는|이|가|도|부터)(?![가-힣]))"
+_BEFORE_FIX = re.compile(
+    r"(?:(?:고치|수정하|패치하|변경하|적용하|구현하)기|(?:수정|패치|변경|적용|구현))\s*(?:전|이전)" + _BEFORE_END
+    + r"|(?:고치|수정하|패치하)지\s*않은\s*(?:코드|트리|사본|상태|hook|base|HEAD)|되돌린\s*(?:코드|트리)"
+    r"|\b(?:before|prior to|without)\s+(?:the\s+|this\s+|my\s+|our\s+)?(?:fix|patch|changes?)\b"
+    r"|\bpre-?fix\b|\bunfixed\b|\bbefore fixing\b", re.I)
+# What the before-fix phrase says runs up to the words that turn to the finished work; a failure
+# word anywhere else on that row (ahead of the phrase, or after "고친 뒤"/"after"/"지금") is a failure now.
+_AFTER_FIX = (r"(?:고친|수정한|패치한|적용한|구현한|변경한|수정|패치|적용|구현|변경)\s*(?:뒤|후)|이후|이제|지금|현재"
+              r"|\b(?:after|now|then)\b")
+_BEFORE_CLAUSE = re.compile("(?:" + _BEFORE_FIX.pattern + r").*?(?=" + _AFTER_FIX + r"|$)", re.I)
+
+
+# A row that opens with a code span a particle follows ("`name`은 이 사본에서 …") is prose about it,
+# not a command, whatever its backtick suggests.
+_NOUN_SPAN = re.compile(r"`[^`\n]*`[가-힣]")
+# A result statement inside the before-the-fix phrase: a pass/fail word with a count other than 0. A
+# bracket right after it ("FAIL (PASS 21·FAIL 1)", "FAIL(2건)") belongs to it; so do the error names
+# that follow ("FAIL — … PermissionError"), which are not result words.
+_RESULT_STATEMENT = re.compile(r"\b(?:pass(?:ed)?|fail(?:ed)?(?![-_][a-z])|통과|실패)\b", re.I)
+_ZERO_RESULT = re.compile(r"\b0\s*(?:pass(?:ed)?|통과)\b|\b(?:pass(?:ed)?|통과)\s*[=:：]?\s*0(?![\w가-힣]|[.,]\d)", re.I)
+_RESULT_DETAIL = re.compile(
+    r"(?<=[A-Za-z가-힣])\s*(?:\d+\s*(?:건|개)?\s*)?[(（][^()（）]*[)）]")
+
+
+def _result_statements(clause: str) -> int:
+    text = _ZERO_RESULT.sub(" ", _unnegated(clause))
+    text = _RESULT_DETAIL.sub(" ", text)
+    return len(_RESULT_STATEMENT.findall(text))
+
+
 def _command_failures(line) -> int:
     """Fail words on one command row; an error word alone counts once, never as zero."""
     rest = _unnegated(line)
@@ -894,6 +912,8 @@ def _verified_summary(lines, t):
     prose = [line for line in lines if line not in commands]
     if not commands:
         return _joined(lines, MAX_CHECKS_CHARS) or t("completion.no_checks")
+    if any(_BEFORE_FIX.search(line) for line in commands):
+        return _joined([t("completion.no_checks"), *prose], MAX_CHECKS_CHARS)
     passed = failures = 0
     for line in commands:
         words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(_unnegated(line))]
@@ -960,6 +980,18 @@ def _failure_kind(line, *, verified=False) -> str | None:
         return None
     rest = _unnegated(text)
     if verified:
+        if _BEFORE_FIX.search(text):
+            # What the check did before the fix is not a failure now; a failure word outside that
+            # clause, or a row that says it still fails, is: it points at the report.
+            # The text outside it reads as the same row without the phrase would. More than one
+            # result inside the phrase ("FAIL 3 → FAIL 1") cannot be told apart from a failure now.
+            clauses = [match.group(0) for match in _BEFORE_CLAUSE.finditer(text)]
+            outside = _unnegated(_BEFORE_CLAUSE.sub(" ", text))
+            if _STILL_FAILING.search(text) or any(_result_statements(c) > 1 for c in clauses):
+                return "check"
+            if _COMMAND_LINE.search(text) and not _NOUN_SPAN.match(text):
+                return "check" if _command_failures(outside) else None
+            return "check" if _failure_kind(_UNRUN_WORD.sub(" ", outside)) == "failure" else None
         if _COMMAND_LINE.search(text):
             return "check" if _command_failures(text) else None
         return "check" if _failure_kind(_UNRUN_WORD.sub(" ", text)) == "failure" else None
@@ -1135,10 +1167,11 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         lines.append(t("completion.unreadable"))
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
-    published = report_publication(text)
+    asked = request.get("text")
+    published = report_publication(text, asked)
     if published:
         lines.append(t("completion.publication", line=published))
-    prs = [] if published else report_pr_urls(text)
+    prs = [] if published else report_pr_urls(text, request=asked)
     entrance = _entrance_line(route, primary, t)
     if entrance:
         lines.append(entrance)
