@@ -2219,6 +2219,8 @@ function createCompletionCarrier(ctx) {
 
   // Watch receipts waiting for this idle session: send them once as its next turn, then ACK.
   const watchSent = new Map()
+  // Sessions whose completion carrier opened a turn; the timer's watch pass leaves those to it.
+  const opened = new Set()
   async function watchWake(sid) {
     if (!sid || busy.has(sid) || !available() || knownChildSession(sid)) return
     if (["busy", "retry", "blocked", "working"].includes(status.get(sid))) return
@@ -2463,6 +2465,7 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, "final-admission-withheld-released")
         return
       }
+      opened.add(sid)
       let taken = false
       let promptReason = "not-accepted"
       let httpStatus
@@ -2558,8 +2561,14 @@ function createCompletionCarrier(ctx) {
             // OpenCode 2: every plugin instance of the shared service sees every
             // session; one known to be another directory's or a child spawns nothing.
             if (v2 && v2ForeignSession(ctx, id)) continue
-            deliver(id).catch(() => {})
-            if (status.get(id) === "idle") { idlePeers.push(id); watchWake(id).catch(() => {}) }
+            // The watch pass runs after the completion carrier has settled (deliver holds `busy`
+            // until then, so a pass started beside it would always turn back), and not at all
+            // when the carrier just opened this session's turn.
+            opened.delete(id)
+            deliver(id).catch(() => {}).finally(() => {
+              if (status.get(id) === "idle" && !opened.has(id)) watchWake(id).catch(() => {})
+            })
+            if (status.get(id) === "idle") idlePeers.push(id)
           }
           if (!v2) {
             for (const id of idlePeers) pendingPeerDelivery(ctx, id).catch(() => {})

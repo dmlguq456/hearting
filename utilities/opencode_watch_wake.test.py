@@ -44,6 +44,7 @@ elif sys.argv[1:2] == ["ack"]:
 
 JS = r'''
 import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
 const { AgentHarnessGuards } = await import(pathToFileURL(PLUGIN));
 const prompts = [];
 const accept = ACCEPT;
@@ -64,8 +65,10 @@ const hooks = await AgentHarnessGuards({client: {app: {log: async () => {}}, ses
 const out = {env: {}};
 await hooks["shell.env"]({sessionID: SID}, out);
 const settle = async (ms) => { await new Promise(r => setTimeout(r, ms)); };
+const late = LATE_FILES;   // written after the first idle event: the receipt the session has not yet seen
 for (let round = 0; round < ROUNDS; round++) {
   await hooks.event({event: {type: "session.idle", properties: {sessionID: SID}}});
+  if (round === 0 && late.length) { await settle(1000); for (const [path, text] of late) writeFileSync(path, text) }
   await settle(GAP);
 }
 hooks.dispose();
@@ -81,6 +84,7 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         self.rt, self.state = base / "rt", base / "state"
         (self.state / "peer-watches").mkdir(parents=True)
         (self.state / "jobs.log").touch()
+        self.late_files = []
         self.addCleanup(self.reap_helpers)
         plugins = self.rt / "adapters/opencode/plugins"
         plugins.mkdir(parents=True)
@@ -119,16 +123,22 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
                     pass
             time.sleep(0.2)
 
-    def arm_receipt(self, steward_sid=SID, harness="opencode"):
+    def arm_receipt(self, steward_sid=SID, harness="opencode", after_idle=False):
         watches = self.state / "peer-watches"
-        (watches / f"{WATCH}.json").write_text(json.dumps(
-            {"watch_id": WATCH, "steward": {"harness": harness, "session_id": steward_sid}}))
-        (watches / f"{WATCH}.receipt.json").write_text(json.dumps({"state": "idle"}))
+        files = [(watches / f"{WATCH}.json", json.dumps(
+            {"watch_id": WATCH, "steward": {"harness": harness, "session_id": steward_sid}})),
+                 (watches / f"{WATCH}.receipt.json", json.dumps({"state": "idle"}))]
+        if after_idle:   # the plugin's script writes them once its only idle event has passed
+            self.late_files = [[str(path), text] for path, text in files]
+            return
+        for path, text in files:
+            path.write_text(text)
 
     def run_plugin(self, *, accept=True, rounds=2, store=True, ack="ok", gap=300):
         js = JS.replace("PLUGIN", json.dumps(str(self.rt / "adapters/opencode/plugins/hearting-guards.js"))
                         ).replace("ACCEPT", "true" if accept else "false").replace(
             "STORE", "true" if store else "false").replace("GAP", str(gap)).replace(
+            "LATE_FILES", json.dumps(self.late_files)).replace(
             "SID", json.dumps(SID)).replace("ROUNDS", str(rounds))
         env = dict(os.environ, HARNESS_STATE_ROOT=str(self.state), AGENT_DISPATCH_JOBS=str(self.state / "jobs.log"),
                    AGENT_HOME=str(self.rt), STUB_STATE=str(self.state), STUB_ACK=ack)
@@ -158,6 +168,24 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         acks = [call for call in self.calls() if call["argv"][:1] == ["ack"]]
         self.assertEqual([call["argv"] for call in acks], [["ack", WATCH, "--carrier", "opencode-turn"]])
         self.assertTrue(all(call["session"] == SID and call["harness"] == "opencode" for call in self.calls()))
+
+    def test_a_receipt_written_after_the_session_went_idle_wakes_it_on_the_timer(self):
+        """RV-PR1645-R2-1115 follow-up 1: the timer ran the completion carrier first, which holds the
+        session's `busy` until it settles, so the watch pass beside it always turned back and only a
+        `session.idle` event (before the receipt existed) ever ran it. One idle event, receipt later,
+        then only the 5 s timer: the session is woken within one tick."""
+        self.arm_receipt(after_idle=True)
+        result = self.run_plugin(rounds=1, gap=7000)
+        self.assertEqual(len(result["prompts"]), 1)
+        self.assertIn(f"watch_id={WATCH}", result["prompts"][0]["body"]["parts"][0]["text"])
+        self.assertEqual([call["argv"] for call in self.calls() if call["argv"][:1] == ["ack"]],
+                         [["ack", WATCH, "--carrier", "opencode-turn"]])
+
+    def test_a_late_receipt_whose_prompt_never_shows_is_sent_again_by_the_timer_and_only_twice(self):
+        self.arm_receipt(after_idle=True)
+        result = self.run_plugin(store=False, rounds=1, gap=20000)
+        self.assertEqual(len(result["prompts"]), 2)
+        self.assertEqual([call for call in self.calls() if call["argv"][:1] == ["ack"]], [])
 
     def test_a_receipt_of_another_session_or_harness_spawns_nothing_and_wakes_nothing(self):
         for case, kwargs in (("other-session", {"steward_sid": "ses-other"}),

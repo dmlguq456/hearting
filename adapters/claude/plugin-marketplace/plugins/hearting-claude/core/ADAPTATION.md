@@ -823,8 +823,10 @@ carrier value but cannot wake, so it keeps `wake=none` and the bounded `join`, b
 before. The plugin starts the idle session's next turn with the undelivered receipts through
 `promptAsync` and acknowledges them only after that exact text shows in the session's native
 history; an accepted prompt that never shows leaves the receipt un-acked, and it stays visible
-to `status --undelivered`. A receipt opens at most two such turns (`WATCH_SEND_LIMIT`),
-whether or not its ACK succeeds.
+to `status --undelivered`. Within one plugin process a receipt opens at most two such turns (`WATCH_SEND_LIMIT`),
+whether or not its ACK succeeds; a reloaded plugin starts the count again. An idle session is also
+woken by a receipt that appears after it went idle: the plugin's existing five-second timer runs
+the same pass once the completion carrier has settled.
 
 ### 7.4. Carrier taxonomy and selection
 
