@@ -67,24 +67,7 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     opened_for = nav.opened_for if nav is not None else lambda _key, default="": default
 
     y = _section(grid, x, right, 3, ui_text("fleet.repo.status"))
-    status = repo.get("status")
-    status = status if isinstance(status, Mapping) else {}
-    campaigns = tuple(status.get("campaigns") or ())
-    if campaigns:
-        for doc in campaigns[:3]:
-            title = str(doc.get("campaign") or doc.get("title") or "·")
-            line = str(doc.get("line") or "?")
-            if doc.get("stale"):
-                line = str(doc.get("doc_age") or "?") + " · " + line
-            grid.put(x + 3, y, clip(title + ": " + line, max(0, right - x - 3)), "soft", limit=right)
-            y += 1
-        if status.get("next"):
-            y = _put_line(grid, x + 3, y, "next:", status["next"], right=right)
-    elif status:
-        y = _repo_status_block(grid, x, right, y, status)
-    else:
-        grid.put(x + 3, y, ui_text("fleet.repo.no_status"), "dim", limit=right)
-        y += 1
+    y = repo_status_lines(grid, x, right, y, repo.get("status"))
 
     lab = repo.get("lab")
     if isinstance(lab, Mapping) and lab.get("visible"):
@@ -163,6 +146,32 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
                       opened_for=opened_for), x=x, y=y, session_table=True)
     else:
         grid.put(x + 3, y, ui_text("fleet.repo.no_sessions"), "dim", limit=right)
+
+
+def repo_status_lines(grid, x, right, y, status):
+    """The lines under a project's status heading, from row ``y``; returns the next row.
+
+    With campaign status documents: ``campaign: line`` (three at most, a stale one with its age) and
+    ``next:``. Otherwise the four-line block, or Fleet's no-status word when Fleet holds nothing.
+    The project page and the shell's status popup draw these lines through this one function."""
+    status = status if isinstance(status, Mapping) else {}
+    campaigns = tuple(status.get("campaigns") or ())
+    if campaigns:
+        for doc in campaigns[:3]:
+            title = str(doc.get("campaign") or doc.get("title") or "·")
+            line = str(doc.get("line") or "?")
+            if doc.get("stale"):
+                line = str(doc.get("doc_age") or "?") + " · " + line
+            grid.put(x + 3, y, clip(title + ": " + line, max(0, right - x - 3)), "soft", limit=right)
+            y += 1
+        if status.get("next"):
+            y = _put_line(grid, x + 3, y, "next:", status["next"], right=right)
+    elif status:
+        y = _repo_status_block(grid, x, right, y, status)
+    else:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_status"), "dim", limit=right)
+        y += 1
+    return y
 
 
 def _repo_status_block(grid, x, right, y, status):
