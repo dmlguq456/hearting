@@ -65,10 +65,11 @@ class QuestionPopupTest(unittest.TestCase):
         self.assertEqual(text(second[0]), "◑ MESSAGES 구분선의 색을 지금 회색 그대로 둘까요")
         self.assertTrue(text(second[1]).startswith("  , 한 단계 밝게"))
 
-    def test_a_long_question_leaves_the_routes_lab_and_messages_in_a_20_row_window(self):
-        # Design "지금 모습에서 본 것": in a 20-row window the question box pushed out ROUTE, LAB and
-        # MESSAGES. Its summary is three rows: every section stays, and a press on any of the
+    def test_a_long_question_leaves_the_routes_and_messages_in_a_20_row_window(self):
+        # Design "지금 모습에서 본 것": in a 20-row window the question box pushed out ROUTE and MESSAGES.
+        # Its summary is three rows: the routes and the messages stay, and a press on any of the
         # question's rows opens the popup. The same rows under the native area (bottom layout).
+        # (11-15: no LAB section any more, whatever the backend sends.)
         out = self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
 const create=require(path.join(process.argv[1],'block-input.cjs'));
@@ -83,7 +84,8 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // Both inputs a host ever gave: the editor's rows (before 11-15) and the summary (now).
  const r=v.render({width,height:20,side,model,state:'idle',harness:'claude',configuration:{},questions:o=>b.detail(o),brief:()=>b.summary(),sent:()=>b.sent()});
  const rows=r.rows.map(row=>row.map(p=>p.text).join('')),all=rows.join('\n');
- for(const want of [side?'4 ROUTE':'route 4','ROUTE_0',...(side?['LAB']:[]),'MESSAGE_3','3 QUESTIONS ─','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3','3 QUESTIONS ─','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ assert(!/\bLAB\b/.test(all),all);
  assert(!/╭─ › ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
  assert(rows.filter(s=>/패널을|아래 두 줄|넓힌|지금 그대로|21칸/.test(s)).length<=2,all);
  const q=rows.findIndex(s=>s.includes('3 QUESTIONS ─'));
@@ -95,8 +97,8 @@ console.log('ok');
         self.assertIn('ok', out)
 
     def test_one_popup_frame_stands_in_the_middle_above_the_strip(self):
-        # Design 공통: the middle of the window (above the folded strip, never over it), a thin grey
-        # rounded line one empty cell from what it covers, the title and `✕` on the top line, the
+        # Design 공통: the middle of the window (above the folded strip, never over it), a thin rounded
+        # line (11-15: bright, on the popup's own ground) one empty cell from what it covers, the title and `✕` on the top line, the
         # sections on the bottom line (the current one bright), the keys on the row above it; 76
         # cells for text, the window less 4 under 80 columns, the whole window under 28; the
         # content's height, at most the rows above the strip less 2.
@@ -113,9 +115,11 @@ assert.equal(rows[0],' '.repeat(78));assert.equal(rows.at(-1),' '.repeat(78));
 assert(/^ ╭─ › ◑ 3 QUESTIONS · 1\/3 · 답 필요 ─+ ✕ ─╮ $/.test(rows[1]),rows[1]);
 assert(/^ ╰─ QUESTIONS · ROUTE ─+╯ $/.test(rows.at(-2)),rows.at(-2));
 assert(rows[rows.length-3].includes('Enter 보내기'),rows.join('\n'));
-// The thin line is the messages' grey; the current section bright, the others dim; `✕` and the names press.
-const line=r.rows[1].find(p=>p.text.startsWith('╭'));assert.equal(line.role,'messages');
-const names=r.rows.at(-2);assert.equal(names.find(p=>p.text==='QUESTIONS').bold,true);assert.equal(names.find(p=>p.text==='ROUTE').dim,true);
+// 11-15: the thin line is bright (`popupLine`) on the popup's own ground (`popup`); the current section
+// bright, the others the readable floor (`popupFloor`); `✕` and the names press.
+const line=r.rows[1].find(p=>p.text.startsWith('╭'));assert.equal(line.foreground,v.FACES.dark.popupLine);assert.equal(line.background,v.FACES.dark.popup);
+const names=r.rows.at(-2);assert.equal(names.find(p=>p.text==='QUESTIONS').bold,true);
+const other=names.find(p=>p.text==='ROUTE');assert(other.dim!==true&&other.foreground===v.FACES.dark.popupFloor,JSON.stringify(other));
 assert.deepEqual(r.hits.map(h=>h.action),['popup-close','popup:QUESTIONS','popup:ROUTE']);
 const close=r.hits[0],cellAt=(s,x)=>{let at=0;for(const c of s){if(at===x)return c;at+=c.codePointAt(0)>0x2e7f?2:1;}return '';};
 assert.equal(cellAt(rows[1],close.left-r.left),'✕');
@@ -140,12 +144,13 @@ const create=require(path.join(process.argv[1],'block-input.cjs'));
 const items=JSON.parse(process.argv[2]);
 const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});b.update(items,'',{labels:{},styles:{}});
 const P=t=>({text:t});
-const r=v.render({width:90,height:4,folded:true,model:{tag:'[e9]',wait:'◑답 대기 3',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]},
+const r=v.render({width:90,height:1,folded:true,model:{tag:'[e9]',wait:'◑답 대기 3',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]},
  state:'idle',harness:'claude',questions:o=>b.detail(o),brief:()=>b.summary()});
-const rows=r.rows.map(row=>row.map(p=>p.text).join('').trimEnd());
-assert.equal(rows[2],'◑답 대기 3 · 패널을 접었을 때의 모양을 어느 안으로 구현할까요? · 1 아래 두 줄 (다) (… +3');
-// 11-15 (popup design E): the routes row's groups open their popups, the rest of it the panel.
-assert.deepEqual(r.hits.map(h=>h.action),['unfold','unfold','question','popup:ROUTE','unfold']);
+const rows=r.rows.map(row=>row.map(p=>p.text).join('').replace(/ +▴$/,''));
+// 11-15 (one row): the wait alone stands for the question; its words and choices are not on the strip.
+assert.equal(rows.length,1);assert.equal(rows[0],'● [e9] │ Checking │ ◑답 대기 3 │ 1 ROUTE ⠏1');
+// The wait opens the question popup, the routes the routes popup, the rest of it the panel.
+assert.deepEqual(r.hits.map(h=>h.action),['question','popup:ROUTE','unfold']);
 console.log('ok');
 """, json.dumps(presented(76, 90), ensure_ascii=False))
         self.assertIn('ok', out)
@@ -347,8 +352,9 @@ const assert=require('node:assert/strict'),path=require('node:path'),v=require(p
 const styles={g_dead:{foreground:217,bold:true},dim:{dim:true}};
 const r=v.render({width:40,height:20,side:true,model:{styles,route_count:1,routes:[{id:'d',title:'FAILED',kind:'dead',paint:{glyph:{text:'✕',foreground:217,bold:true}}}]},
  state:'idle',harness:'claude',configuration:{},background:'dark'});
-// 11-15 (popup design E): no route box; the failed route's row keeps its glyph's red on the dark face.
-assert.equal(r.rows.flat().some(p=>p.role==='route-dead'),false,'no box line is drawn');
+// (11-15: the route box again) the failed route's box line is its glyph's red on the dark face.
+const line=r.rows.flat().find(p=>p.role==='route-dead'&&p.text.startsWith('╭'));
+assert.equal(line.foreground,217,'the failed route line is its glyph\'s red on the dark face');
 const glyph=r.rows.flat().find(p=>p.text==='✕'&&p.role==='state:dead');
 assert.equal(glyph.foreground,217,'the failed route keeps its glyph\'s red on the dark face');
 """)

@@ -331,7 +331,7 @@ const look=b=>b.sent().map(r=>r.map(x=>[x.text,x.foreground??null,!!x.dim]));
  b.enter();b.input(Buffer.from('2\r'));await tick();
  assert.deepEqual(look(b),[[['✓ 답 보냄',150,false],[' · ',-1,true],['Beta',253,false]]]);
  assert.equal(b.summary(),null);
- // Sent from elsewhere (another session's popup, Fleet): the same line from the record's words.
+ // Sent from elsewhere (Fleet, another window): the same line from the record's words.
  const f=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  f.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}],'',{styles,labels:{sent:'✓ 답 보냄'}});
  assert.deepEqual(look(f),[[['✓ 답 보냄',150,false],[' · ',-1,true],['Alpha',253,false]]]);
@@ -346,9 +346,6 @@ const look=b=>b.sent().map(r=>r.map(x=>[x.text,x.foreground??null,!!x.dim]));
  const w=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  w.update([there],'',{styles});assert.equal(w.summary().answerable,false);
  w.update([there,a],'',{styles});assert.equal(w.summary().answerable,true);
- // The panel's own summary while another session's question stands in the editor.
- w.enterForeign({tag:'12',owner:{harness:'codex',session_id:'x'},items:[{...a,id:'f'}]});
- assert.equal(w.summary().answerable,true);
  console.log('PASS');
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
 """

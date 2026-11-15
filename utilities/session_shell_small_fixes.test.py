@@ -3,9 +3,8 @@
 1. A popup's key line is never cut in a word: it breaks between its ` · ` pieces (the question popup, the
    table popups and the MESSAGES popup all use `panelView.keyRows`), and the closing key stays.
 2. The choices row of a question to answer here always shows the first choice (its name cut with `…`,
-   its number kept), the rest counted `+N`; the folded strip's row of what to do follows the same rule.
-3. The sessions section puts every session Fleet's table counts as waiting on a person first, whatever
-   glyph it paints, and counts it apart from the idle sessions of the same glyph.
+   its number kept), the rest counted `+N`.
+3. (The sessions section went from the panel, 11-15; its tests with it.)
 4. `veilRow` also turns colon-form SGR gray.
 5. The question summary's `answerable` is `active(row)`, the one formula.
 6. The head rule stands without a session title (the default `rule motion` must not wait on one).
@@ -13,11 +12,9 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
-import json
 import subprocess
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = ROOT / "utilities/session-shell"
@@ -75,7 +72,7 @@ assert(shown>2000,String(shown));
 """)
 
     def test_the_table_and_messages_popups_break_their_key_lines_by_the_same_rule(self):
-        # The routes, LAB, sessions and MESSAGES popups: their keys (`←→ section · PgUp/PgDn · p fold panel · f Fleet ·
+        # The routes and MESSAGES popups: their keys (`←→ section · PgUp/PgDn · p fold panel · f Fleet ·
         # Esc/Ctrl+] back`) break between pieces at any width 20-200 and the closing key stays, down to the lowest
         # window the popup keeps rows in; a piece wider than a row (narrowest windows) breaks at its spaces only.
         self.node(r"""
@@ -86,7 +83,7 @@ let shown=0;
 for(const lang of ['en','ko']){
  const l=words(lang,'fleet.session_panel.'),close=lang==='en'?'back':'돌아가기';
  const known=new Set(Object.values(l).flatMap(v=>String(v).replace('{panel}','p fold panel').split(' · ').flatMap(p=>p.split(' '))).filter(Boolean).concat(['3/20']));
- for(const own of ['',l.popup_route,l.popup_route_page,l.popup_sessions])for(const place of ['','3/20'])for(const fold of [l.popup_fold,l.popup_unfold])
+ for(const own of ['',l.popup_route,l.popup_route_page])for(const place of ['','3/20'])for(const fold of [l.popup_fold,l.popup_unfold])
   for(let cols=20;cols<=200;cols++)for(const rows of [8,12,24]){
    const lines=[place,own,l.popup_keys.replace('{panel}',fold)].filter(Boolean);
    const inner=view.popupWidth(cols,'table')-4,room=view.popupRoom(rows,0),limit=Math.max(1,room-1);
@@ -125,91 +122,39 @@ const firsts=['ＡＢＣＤＥＦ (추천)','파일','🙂🙂🙂 emoji label t
 """
 
     def test_the_choices_row_always_shows_the_first_choice(self):
-        # Inner width 26 and a first choice `ＡＢＣＤＥＦ (추천)` left only `+3`. Now the first choice shows (its name cut
+        # Inner width 26 and a first choice `ＡＢＣＤＥＦ (추천)` left only `+3`. The first choice shows (its name cut
         # with `…`, its number kept) and the rest are counted; never wider than the panel (Korean, full-width,
-        # emoji), heights 5-60 x widths 12-60; the folded strip's row of what to do follows the same rule.
+        # emoji), heights 5-60 x widths 12-60. (11-15, "그냥 질문은 글자 자체를 붉은 색으로": the row is words in the
+        # answer wait's red on no ground of their own, not chips; the folded strip is one row with `◑답 대기 N` alone.)
         self.node(self.CHOICE + r"""
 let rows=0;
 for(const first of firsts)for(const n of [1,2,5]){
  for(let h=5;h<=60;h+=1)for(let w=12;w<=60;w++){
   const v=paint({q:choice(first,n),height:h,width:w}),lines=v.rows.map(str),tag=h+'x'+w+' '+first+' '+n+'\n'+lines.join('\n');
   assert(lines.length<=h&&lines.every(r=>cells(r)===w),tag);
-  const chip=v.rows.find(r=>r.some(x=>x.background===235||x.background===255));
-  if(!chip)continue;
-  const text=chip.filter(x=>x.background===235).map(x=>x.text).join(''),line=str(chip);
-  assert(/^ 1/.test(text),'the first chip, its number kept\n'+tag);
+  const at=lines.findIndex(r=>r.includes('◑ 로그를'));
+  if(at<0||!/^│   (1 |\+\d)/.test(lines[at+1]||''))continue;
+  const row=v.rows[at+1],line=lines[at+1],text=line.slice(4,-2);
+  assert(/^1 /.test(text),'the first choice, its number kept\n'+tag);
+  assert(row.every(x=>x.background===undefined),'no ground of its own\n'+tag);
+  assert(row.filter(x=>/[^\s·+\d│]/.test(x.text)).every(x=>x.foreground===174&&x.dim!==true),'its words in the answer wait\'s red\n'+tag);
   const first1=[...first].slice(0,1).join('');
   if(w>=16)assert(text.includes(first1)||first.length<1,'its name starts\n'+tag);
   assert(text.includes(first)||text.includes('…'),'whole or cut with …\n'+tag);
-  if(n>1&&!text.includes('2 '))assert(/\+\d+/.test(line),'the rest counted\n'+tag);
+  if(n>1&&!text.includes('2 '))assert(/\+\d+/.test(line)||w<18,'the rest counted\n'+tag);
   rows++;
  }
 }
 assert(rows>5000,String(rows));
-// The folded strip's row of what to do.
-let strips=0;
-for(const first of firsts)for(const n of [1,2,4])for(let w=20;w<=90;w++){
- const v=paint({q:choice(first,n),folded:true,width:w,height:4}),lines=v.rows.map(str);
- assert(lines.every(r=>cells(r)<=w),w+'\n'+lines.join('\n'));
- const todo=lines.find(r=>r.startsWith('◑답 대기')),bare=paint({q:{...choice(first,n),choices:0,rows:[choice(first,n).rows[0]]},folded:true,width:w,height:4}).rows.map(str).find(r=>r.startsWith('◑답 대기')).trimEnd();
- assert(todo,w+'\n'+lines.join('\n'));
- if(w-1-cells(bare)>=5)assert(todo.includes(' · 1'),'the first choice stands (room '+(w-1-cells(bare))+')\n'+w+' '+first+'\n'+todo);
- if(n>1&&w-1-cells(bare)>=9&&!todo.includes(' · 2 ')&&todo.includes(' · 1'))assert(/\+\d+\s*$/.test(todo),'the rest counted\n'+todo);
- strips++;
+// The folded strip is one row: `◑답 대기 1` stands, the question's words and choices do not.
+for(const first of firsts)for(const n of [1,2,4])for(let w=44;w<=120;w++){
+ const v=paint({q:choice(first,n),folded:true,width:w,height:1}),lines=v.rows.map(str);
+ assert(lines.length===1&&cells(lines[0])===w,w+'\n'+lines.join('\n'));
+ assert(lines[0].includes('◑답 대기 1')&&!lines[0].includes('로그를')&&!lines[0].includes(' · 1 ')&&!lines[0].includes('둘 2'),w+'\n'+lines[0]);
 }
-assert(strips>600,String(strips));
 // The case from the review: inner width 26, `ＡＢＣＤＥＦ (추천)`, three more choices.
 {const lines=paint({q:choice('ＡＢＣＤＥＦ (추천)',4),width:30}).rows.map(str);assert(lines.some(r=>/│   1 ＡＢＣＤＥＦ.*\+3 +│/.test(r)),lines.join('\n'));}
 """)
-
-    def test_the_sessions_section_leads_with_every_session_waiting_on_a_person(self):
-        # Fleet paints a native decision's wait `●` (blocked color), not `◑`: that session was ranked with the idle
-        # ones, left off the three lines, and its count merged into the idle `●N` in one color.
-        from fleet.palette import style_components
-        import session_shell
-        rows = [
-            {"tag": "10", "harness": "claude", "state": "working", "title": "me", "age": "1m"},                       # own
-            {"tag": "11", "harness": "codex", "state": "idle", "title": "idle one", "age": "2m"},
-            {"tag": "12", "harness": "opencode", "state": "idle", "title": "idle two", "age": "3m"},
-            {"tag": "13", "harness": "claude", "state": "working", "title": "runs", "age": "4m"},
-            {"tag": "14", "harness": "claude", "state": "working", "title": "native decision", "age": "5m",
-             "ask": "answer needed", "answer_wait_marker": "●"},
-            {"tag": "15", "harness": "codex", "state": "idle", "title": "gate", "age": "6m",
-             "ask": "answer needed", "answer_wait_marker": "◑"},
-            {"tag": "16", "harness": "claude", "state": "idle", "title": "idle three", "age": "7m"},
-        ]
-        from fleet import session_tags
-        original = session_tags.assigned_tag
-        session_tags.assigned_tag = lambda harness, sid: "10"
-        self.addCleanup(setattr, session_tags, "assigned_tag", original)
-        out = session_shell.session_summary(SimpleNamespace(sessions=rows), "claude", "s")
-        tags = [next(p["text"] for p in row["tag"] if p["text"] not in "[]") for row in out["rows"] if not row["own"]]
-        self.assertEqual(set(tags[:2]), {"14", "15"}, "the sessions waiting on a person lead: " + str(tags))
-        self.assertEqual(tags[2], "13", "then the running, then the idle: " + str(tags))
-        counts = [part[0]["text"] for part in out["counts"]]
-        self.assertEqual(counts, ["◑1", "●1", "⠏1", "●3"], counts)
-        waiting, idle = [part[0] for part in out["counts"] if part[0]["text"].startswith("●")]
-        self.assertNotEqual({k: v for k, v in waiting.items() if k != "text"}, {k: v for k, v in idle.items() if k != "text"},
-                            "the waiting `●` and the idle `●` are different colors, so different groups")
-        # A row's glyph and color are Fleet's session table's own.
-        glyphs = {next(p["text"] for p in row["tag"] if p["text"] not in "[]"): row["glyph"][0] for row in out["rows"]}
-        self.assertEqual(glyphs["14"], {"text": "●", **style_components("blocked", colors=256, no_color=False)})
-        self.assertEqual(out["count"], 6)
-
-    def test_the_sessions_key_follows_the_same_set(self):
-        # Another session's wait wakes the section only while that session is one Fleet counts as waiting: an owner, a
-        # current wait (not folded as older), one a person must answer (not a blocked owner's, not an answer on its way).
-        import session_shell
-        item = lambda n, **extra: {"id": "w" + str(n), "source": "S1", "owner": {"harness": "codex", "session_id": "s" + str(n)}, **extra}
-        key = lambda items: session_shell._sessions_key({"items": items}, "claude", "me")
-        nothing = key([])
-        self.assertEqual(nothing, "")
-        for quiet in (item(1, stale=True), item(2, source="S3"), item(3, answer="sent"),
-                      {"id": "w4", "source": "S1", "owner": {}}, {"id": "w5", "source": "S1", "owner": {"harness": "claude", "session_id": "me"}}):
-            self.assertEqual(key([quiet]), "", quiet)
-        self.assertNotEqual(key([item(6)]), "")
-        self.assertEqual(key([item(6), item(1, stale=True)]), key([item(6)]), "an older wait changes nothing")
-        self.assertNotEqual(key([item(6)]), key([item(7)]))
 
     def test_veil_row_turns_colon_form_sgr_gray_too(self):
         self.node(r"""
@@ -229,21 +174,18 @@ assert.equal(veil('no escape'),'no escape');
 """)
 
     def test_the_summary_answerable_is_the_one_formula_of_active(self):
-        # Another session's question (opened from the sessions popup) reads `answerable` as the own session's `active(row)`.
+        # The summary reads `answerable` as `active(row)`, one formula (11-15: the other session's editor is gone).
         src = (SHELL / "block-input.cjs").read_text()
         summary = src[src.index("function summary()"):]
         self.assertNotIn("answerable:!stale", summary, "no second formula for the same meaning")
-        self.assertEqual(summary.count("answerable:active("), 2, "both summaries use active(row)")
+        self.assertEqual(summary.count("answerable:active("), 1)
         self.node(r"""
 const create=require(path.join(shell,'block-input.cjs'));
 const make=()=>create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 const item=(id,extra={})=>({id,revision:'r',answerable:true,questions:[{id:'q',question:'Q?'}],...extra});
-// The panel's summary is this session's own question, whatever the popup shows.
 for(const [extra,want] of [[{},true],[{answerable:false},false]]){
  const own=make();own.update([item('a',extra)],'',{});assert.equal(own.summary().answerable,want);
- const b=make();b.update([item('a',extra)],'',{});
- b.enterForeign({tag:'7',owner:{harness:'codex',session_id:'x'},items:[item('f')]});
- assert.equal(b.summary().answerable,want,'another session\'s question open: the same word');
+ assert.equal(typeof own.enterForeign,'undefined','no other session\'s editor');
 }
 """)
 

@@ -1,4 +1,6 @@
-"""The shell panel's LAB section (draft A): its projection from the shared experiment board.
+"""The host's file watch as the shell panel's LAB section (draft A) needed it: folders watched whole, made
+again, a busy folder's pace, failing watches. (11-15: the LAB section left the panel, the person: "실험 현황은
+다소 섣부른 추가같은데. 지금은 일단 빼"; its projection tests went with it, see the PR. The watch itself stays.)
 
 Fixtures are synthetic projects in a ``TemporaryDirectory`` with their own HOME and without
 ``AGENT_ARTIFACT_ROOT`` (the catalog test's ``Base``); run records come from the real
@@ -26,8 +28,6 @@ _spec.loader.exec_module(T)
 
 import experiment_board as B  # noqa: E402
 import experiment_catalog as E  # noqa: E402
-from fleet import session_lab  # noqa: E402  (the module the shell backend loads)
-from fleet.explorer import lab_table  # noqa: E402
 
 NOW = T.NOW
 GROUP = "AMI 가변 화자 개선"
@@ -46,9 +46,8 @@ def texts(parts):
 class LabBase(T.Base):
     def setUp(self):
         super().setUp()
-        for clear in (session_lab.clear_cache, B.clear_cache):
-            clear()
-            self.addCleanup(clear)
+        B.clear_cache()
+        self.addCleanup(B.clear_cache)
 
     def project(self, *, failed=True):
         root = self.make_root()
@@ -61,155 +60,6 @@ class LabBase(T.Base):
         return root
 
 
-class ShellLab(LabBase):
-    def test_the_projection_is_the_boards_in_fleets_own_words(self):
-        root = self.project()
-        board, watch = session_lab.read(root.parent, now=NOW)
-        # The catalog and the run folder watched whole (its records, however many, redraw with it).
-        self.assertEqual(watch, [str(E.catalog_path(root)), str(root / "resource-runs") + os.sep])
-        view = session_lab.view(board, NOW)
-        group = board["groups"][0]
-        self.assertEqual((view["key"], view["count"]), ("lab:" + group["id"], "3"))
-        self.assertEqual(view["clock"], B.clock_text(board["generated_at"], NOW))
-        # The same cells Fleet's LAB table draws for the same rows: one source, one wording. The rows
-        # come in the board's look-first order (11-15), so each is matched to Fleet's by its name.
-        fleet_rows = {lab_table.cells(row, group, NOW)["name"][0]: lab_table.cells(row, group, NOW) for row in group["rows"]}
-        self.assertEqual(len(view["rows"]), 3)
-        for shown in view["rows"]:
-            fleet = fleet_rows[shown["name"]["text"]]
-            self.assertEqual(sorted(shown["cells"]), ["delta", "progress", "state"])
-            for column in ("delta", "state", "progress"):   # an unknown PROGRESS is Fleet's own `?`
-                self.assertEqual(shown["cells"][column]["text"], fleet[column][0], column)
-        # The failed condition is the one to look at, so it leads the rows.
-        self.assertEqual(view["rows"][0]["name"]["text"], "짧은 발화 제외")
-        self.assertEqual(view["rows"][0]["cells"]["state"]["text"], fleet_rows["짧은 발화 제외"]["state"][0])
-        # The head counts the failed and the stuck conditions; the board's headline names the failed one.
-        self.assertEqual([texts(c) for c in view["counts"]],
-                         [lab_table.ui_text("fleet.lab.n_failed", n=1), lab_table.ui_text("fleet.lab.n_stagnant", n=1)])
-        self.assertEqual(view["counts"][0][0]["key"], "lvl_r")
-        self.assertEqual(view["goal"][0]["text"], T.group_spec()["goal"])
-        self.assertTrue(view["strip_attention"])   # the folded strip's LAB group asks for a look
-        # No more than three rows, whatever the board holds; nothing the old table carried stays.
-        for gone in ("strip", "metric", "header", "more", "reason", "headline", "warnings", "unlinked", "more_rows"):
-            self.assertNotIn(gone, view)
-        # A healthy board: the running count and nothing asking for a look.
-        B.clear_cache()
-        healthy = self.make_root("ok", "b")
-        self.register(healthy, {"groups": [T.group_spec()], "conditions": [condition("짧은 발화 유지", "run-a")]})
-        self.write_run(healthy, "run-a", stagnation=HEALTHY, series={"wer": [(10, 21.0), (12, 18.5)]})
-        view = session_lab.view(session_lab.read(healthy.parent, now=NOW)[0], NOW)
-        self.assertEqual([texts(c) for c in view["counts"]], [lab_table.ui_text("fleet.lab.n_running", n=1)])
-        self.assertEqual([row["name"]["text"] for row in view["rows"]], ["짧은 발화 유지"])
-        self.assertFalse(view["strip_attention"])
-
-    def test_no_experiments_draw_no_section_and_a_folder_without_a_root_reads_nothing(self):
-        blank = self.make_root("blank", "c")
-        board, watch = session_lab.read(blank.parent, now=NOW)
-        self.assertFalse(board["visible"])
-        self.assertIsNone(session_lab.view(board, NOW))
-        self.assertIn(str(E.catalog_path(blank)), watch)   # a catalog made later still redraws
-        plain = self.base / "plain"
-        plain.mkdir()
-        self.assertEqual(session_lab.read(plain, now=NOW), (None, []))
-        self.assertEqual(session_lab.read(None, now=NOW), (None, []))
-        self.assertIsNone(session_lab.view(None, NOW))
-
-    def test_a_renamed_condition_redraws_with_its_new_name(self):
-        root = self.project()
-        first = session_lab.view(session_lab.read(root.parent, now=NOW)[0], NOW)
-        # The rows come in the board's look-first order, so the condition is looked up by its name.
-        names = lambda view: [row["name"]["text"] for row in view["rows"]]
-        self.assertIn("짧은 발화 제외", names(first))
-        E.run_write(root, lambda ctx: E.op_rename(ctx, "짧은 발화 제외", "짧은 발화를 뺀 학습"), now=NOW + 1)
-        board, watch = session_lab.read(root.parent, now=NOW + 2)    # inside the board's 60 s limit
-        second = session_lab.view(board, NOW + 2)
-        self.assertIn("짧은 발화를 뺀 학습", names(second))
-        self.assertNotIn("짧은 발화 제외", names(second))
-        self.assertEqual(names(second)[0], "짧은 발화를 뺀 학습")   # the failed one still leads
-        self.assertIn(str(E.catalog_path(root)), watch)
-
-    def test_a_broken_catalog_or_unnamed_runs_are_unconfirmed_never_no_experiments(self):
-        missing = self.make_root()
-        self.write_run(missing, "run-x")
-        self.write_run(missing, "run-y")
-        view = session_lab.view(session_lab.read(missing.parent, now=NOW)[0], NOW)
-        self.assertEqual((view["count"], view["strip_attention"]), ("", True))
-        self.assertEqual(texts(view["goal"]), lab_table.ui_text("fleet.lab.catalog_missing"))
-        # The unnamed runs are told in a note (the count of them, not their ids: the popup lists them).
-        self.assertIn(lab_table.ui_text("fleet.lab.unnamed_runs") + " · " + lab_table.ui_text("fleet.lab.runs_n", n=2),
-                      [texts(note) for note in view["notes"]])
-        self.assertEqual([texts(c) for c in view["counts"]], [lab_table.ui_text("fleet.lab.n_unnamed", n=2)])
-        broken = self.make_root("broken", "b")
-        path = E.catalog_path(broken)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{not json", encoding="utf-8")
-        view = session_lab.view(session_lab.read(broken.parent, now=NOW)[0], NOW)
-        self.assertTrue(view["strip_attention"])
-        self.assertEqual(texts(view["goal"]), lab_table.ui_text("fleet.lab.unreadable", code=B.read(broken, now=NOW, cache={})[0]["catalog"]["code"]))
-        # A read that fails is the same: unconfirmed, never an empty board.
-        B.clear_cache()
-        with mock.patch.object(E, "status", side_effect=RuntimeError("boom")):
-            view = session_lab.view(session_lab.read(missing.parent, now=NOW + 5)[0], NOW + 5)
-        self.assertTrue(view["strip_attention"])
-
-    def project_panel(self, harness, cwd):
-        import session_shell as shell
-        import human_wait_state
-        from fleet import session_view
-        observed = lambda *args, **kwargs: ({"cwd": str(cwd)}, [])
-        with mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")), \
-                mock.patch.object(session_view, "observe", observed), \
-                mock.patch.object(shell, "_codex_footer_plan", return_value=(None, None)):
-            return shell.panel_projection(harness, "00000000-0000-4000-8000-00000000lab1", native_pid=os.getpid(),
-                                          native_start="1", columns=40, rows=30)
-
-    def test_the_panel_projection_carries_lab_in_every_harness_and_watches_its_files_last(self):
-        root = self.project()
-        lab_watch = session_lab.read(root.parent, now=NOW)[1]
-        results = {harness: self.project_panel(harness, root.parent) for harness in ("claude", "codex", "opencode")}
-        labs = {harness: result["panel"]["lab"] for harness, result in results.items()}
-        for harness, result in results.items():
-            self.assertEqual(result["watch"][-len(lab_watch):], lab_watch, harness)
-            self.assertTrue(labs[harness]["key"].startswith("lab:"), harness)
-        # The head's counts and the strip's attention carry what the old strip said (`!2 LB`).
-        # (The projection reads the clock now, not the fixture's: a further `unknown` count may follow.)
-        counts = lambda lab: [texts(count) for count in lab["counts"]][:2]
-        self.assertEqual({harness: counts(lab) for harness, lab in labs.items()},
-                         {harness: [lab_table.ui_text("fleet.lab.n_failed", n=1), lab_table.ui_text("fleet.lab.n_stagnant", n=1)] for harness in labs})
-        self.assertEqual({harness: lab["strip_attention"] for harness, lab in labs.items()}, {harness: True for harness in labs})
-        drop_clock = lambda lab: json.dumps({**lab, "clock": ""}, sort_keys=True, ensure_ascii=False)
-        self.assertEqual(drop_clock(labs["codex"]), drop_clock(labs["claude"]))
-        self.assertEqual(drop_clock(labs["opencode"]), drop_clock(labs["claude"]))
-        # A project without experiments: no LAB in the projection at all.
-        blank = self.make_root("blank", "c")
-        self.assertIsNone(self.project_panel("claude", blank.parent)["panel"]["lab"])
-
-    def test_projection_and_render_draw_the_same_section_in_every_harness(self):
-        root = self.project()
-        view = session_lab.view(session_lab.read(root.parent, now=NOW)[0], NOW)
-        script = r"""
-const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.parse(process.argv[2]);
-// Folded, the strip under the native area (spec rule 49 (c)): LAB's group (its count and its first count) ends its routes row.
-const draw=(harness,width,folded=false)=>v.render({width:folded?width*3:width,height:folded?4:60,side:!folded,fill:!folded,folded,harness,state:'idle',configuration:{},
- model:{lab,repo:[{text:'proj'}]},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')).filter(s=>!s.startsWith('┌'));
-for(const width of [40,32])for(const folded of [false,true]){
- const claude=draw('claude',width,folded);
- for(const h of ['codex','opencode'])assert.deepEqual(draw(h,width,folded),claude,h);
- if(folded)assert(claude.some(s=>/^3 LAB \S+ 1 +$/.test(s)),claude.join('\n'));
- else{const head=claude.findIndex(s=>/^│ 3 LAB ─+ .* ›/.test(s));assert(head>=0,claude.join('\n'));
-  // The failed condition is the one to look at, so it leads the rows, by its catalog name (cut with `…` only when narrow).
-  assert(/짧은 발/.test(claude[head+1]),claude.join('\n'));
-  assert(claude.slice(head+1,head+4).length===3&&!claude.some(s=>/^│ 조건 /.test(s)),claude.join('\n'));}
-}
-"""
-        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
-                                 json.dumps(view, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-
-# The host's own `queueProjection` and `observeFiles` (real `fs.watch`, its real batches: 25 ms for a
-# watched file, at most one redraw a second for a watched folder); `projection` counts the redraws
-# they schedule and, given the paths, observes them again as the host's projection does.
 HOST = r"""
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8');
@@ -466,11 +316,9 @@ class ShellLabWatch(LabBase):
                              "conditions": [condition("조건 %02d" % n, name) for n, name in enumerate(names)]})
         for name in names:
             self.write_run(root, name, stagnation=HEALTHY)
-        board, watch = session_lab.read(root.parent, now=NOW)
         runs = root / "resource-runs"
-        self.assertEqual(board["groups"][0]["count"], 40)
         # The catalog, then the run folder as one folder target: no record listed one by one.
-        self.assertEqual(watch, [str(E.catalog_path(root)), str(runs) + os.sep])
+        watch = [str(E.catalog_path(root)), str(runs) + os.sep]
         other = self.base / "other"
         (other / "resource-runs").mkdir(parents=True)
         existing_root = self.base / "existing"
@@ -519,130 +367,6 @@ class ShellLabWatch(LabBase):
             (self.base / folder).mkdir()
             files.append(str(self.base / folder / name))
         self.host(HOST_FAILING_FILES, {"files": files})
-
-    def test_more_record_folders_than_the_cap_are_unconfirmed_never_left_out_silently(self):
-        root = self.project()
-        board = B.read(root, now=NOW, cache={})[0]
-        cap = session_lab.FOLDER_CAP
-        folders = [str(self.base / ("records-%d" % n)) for n in range(cap + 2)]
-        listed = [str(E.catalog_path(root)), str(root / "resource-runs")] + [
-            os.path.join(folder, "run-%d.json" % n) for n, folder in enumerate(folders)]
-        with mock.patch.object(B, "read", return_value=(board, listed)):
-            seen, watch = session_lab.read(root.parent, now=NOW)
-        self.assertEqual(watch, [listed[0]] + [folder + os.sep for folder in ([listed[1]] + folders)[:cap]])
-        view = session_lab.view(seen, NOW)
-        self.assertIn(lab_table.ui_text("fleet.lab.unwatched", n=3), [texts(note) for note in view["notes"]])
-        self.assertEqual(view["notes"][-1][0]["key"], "lvl_y")
-        # A failure still leads the head's counts and the strip asks for a look.
-        self.assertEqual(texts(view["counts"][0]), lab_table.ui_text("fleet.lab.n_failed", n=1))
-        self.assertTrue(view["strip_attention"])
-        # Without a failure the strip still asks for a look (unconfirmed); the values stay.
-        healthy = self.make_root("ok", "b")
-        self.register(healthy, {"groups": [T.group_spec()], "conditions": [condition("짧은 발화 유지", "run-a")]})
-        self.write_run(healthy, "run-a", stagnation=HEALTHY)
-        board = B.read(healthy, now=NOW, cache={})[0]
-        with mock.patch.object(B, "read", return_value=(board, listed)):
-            view = session_lab.view(session_lab.read(healthy.parent, now=NOW)[0], NOW)
-        self.assertTrue(view["strip_attention"])
-        self.assertIn(lab_table.ui_text("fleet.lab.unwatched", n=3), [texts(note) for note in view["notes"]])
-        self.assertEqual([texts(count) for count in view["counts"]], [lab_table.ui_text("fleet.lab.n_running", n=1)])
-        self.assertEqual(view["rows"][0]["name"]["text"], "짧은 발화 유지")
-
-
-class ShellLabFailure(LabBase):
-    """Review RV-PR1612 R2: LAB's own failure is LAB's unconfirmed state, never no LAB nor no panel."""
-
-    def unconfirmed(self, view, code):
-        self.assertTrue(view["strip_attention"])
-        self.assertEqual(texts(view["goal"]), lab_table.ui_text("fleet.lab.unreadable", code=code))
-
-    def test_a_read_that_fails_is_unconfirmed_and_keeps_its_watch(self):
-        root = self.project()
-        board, watch = session_lab.read(root.parent, now=NOW)
-        later = NOW + session_lab.INTERVAL + 1          # the session folder's root is looked up again
-        with mock.patch.object(session_lab.project_status, "artifact_root", side_effect=PermissionError("denied")):
-            failed, kept = session_lab.read(root.parent, now=later)
-        self.unconfirmed(session_lab.view(failed, later), "PermissionError")
-        self.assertEqual(kept, watch)
-        with mock.patch.object(B, "read", side_effect=RuntimeError("boom")):
-            failed, kept = session_lab.read(root.parent, now=later + 1)
-        self.unconfirmed(session_lab.view(failed, later + 1), "RuntimeError")
-        self.assertEqual(kept, watch)
-        # The next read that works draws the board again.
-        self.assertEqual(session_lab.view(session_lab.read(root.parent, now=later + 2)[0], later + 2)["count"], "3")
-        # A first read that fails: the root's catalog and run folder are still watched.
-        session_lab.clear_cache()
-        with mock.patch.object(B, "read", side_effect=RuntimeError("boom")):
-            failed, kept = session_lab.read(root.parent, now=later + 3)
-        self.unconfirmed(session_lab.view(failed, later + 3), "RuntimeError")
-        self.assertEqual(kept, watch)
-        # No experiments stays no section: no catalog and no runs, or no artifact folder at all.
-        blank = self.make_root("blank", "c")
-        self.assertIsNone(session_lab.view(session_lab.read(blank.parent, now=NOW)[0], NOW))
-        plain = self.base / "plain"
-        plain.mkdir()
-        self.assertEqual(session_lab.read(plain, now=NOW), (None, []))
-        # Wording that fails is unconfirmed too, and never raises.
-        self.unconfirmed(session_lab.unconfirmed(NOW, "RuntimeError"), "RuntimeError")
-
-    def panel(self, harness, cwd, ledger):
-        import session_shell as shell
-        import human_wait_state
-        from fleet import session_view
-        sid = "00000000-0000-4000-8000-00000000lab2"
-        question = {"id": "owned", "revision": "r", "answerable": True,
-                    "questions": [{"id": "q", "question": "LAB 옆 질문?"}]}
-        routes = {"route_panels": {harness + "\0" + sid: [{"id": "rt-lab", "title": "ROUTE", "state": "working",
-                                                          "marker": "working"}]}}
-        observed = lambda *args, **kwargs: ({"cwd": str(cwd)}, [])
-        with mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": str(ledger)}):
-            shard = shell._peer_message()._ledger_path(sid)
-            shard.parent.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            shard.write_text(json.dumps({"ts": stamp, "from": {"session_id": sid},
-                                         "to": {"harness": "codex", "session_id": "x", "name": "n"}, "kind": "note",
-                                         "summary": "SENT_LAB", "message_id": "m1", "delivery": {"status": "unknown"}}) + "\n")
-        with mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": str(ledger)}), \
-                mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")), \
-                mock.patch.object(human_wait_state, "cached_view", return_value=routes), \
-                mock.patch.object(shell, "session_questions", return_value=[question]), \
-                mock.patch.object(session_view, "observe", observed), \
-                mock.patch.object(shell, "_codex_footer_plan", return_value=(None, None)):
-            return shell.panel_projection(harness, sid, native_pid=os.getpid(), native_start="1", columns=40, rows=30)
-
-    def test_a_lab_failure_stays_in_lab_and_the_rest_of_the_projection_draws_on(self):
-        root = self.project()
-        ledger = self.base / "ledger"
-        for harness in ("claude", "codex", "opencode"):
-            session_lab.clear_cache()
-            healthy = self.panel(harness, root.parent, ledger)
-            lab_watch = session_lab.read(root.parent)[1]
-            self.assertEqual(healthy["watch"][-len(lab_watch):], lab_watch, harness)
-            rest = healthy["watch"][:-len(lab_watch)]
-            self.assertEqual([q["id"] for q in healthy["questions"]], ["owned"], harness)
-            self.assertEqual([r["id"] for r in healthy["panel"]["routes"]], ["rt-lab"], harness)
-            self.assertEqual([m["text"] for m in healthy["panel"]["messages"]], ["SENT_LAB"], harness)
-            injections = (
-                ("PermissionError", (mock.patch.object(session_lab, "INTERVAL", 0),
-                                     mock.patch.object(session_lab.project_status, "artifact_root",
-                                                       side_effect=PermissionError("denied")))),
-                ("RuntimeError", (mock.patch.object(B, "read", side_effect=RuntimeError("boom")),)),
-                ("RuntimeError", (mock.patch.object(session_lab, "view", side_effect=RuntimeError("boom")),)))
-            for code, patches in injections:
-                with contextlib.ExitStack() as stack:
-                    for patch in patches:
-                        stack.enter_context(patch)
-                    result = self.panel(harness, root.parent, ledger)
-                what = harness + " " + code
-                self.unconfirmed(result["panel"]["lab"], code)
-                self.assertEqual(result["questions"], healthy["questions"], what)
-                route = lambda rows: [(r["id"], r["title"], r["state"]) for r in rows]   # the spinner moves on
-                self.assertEqual(route(result["panel"]["routes"]), route(healthy["panel"]["routes"]), what)
-                self.assertEqual([m["text"] for m in result["panel"]["messages"]], ["SENT_LAB"], what)
-                self.assertEqual(result["watch"], rest + lab_watch, what)
-            # No experiments: still no section.
-            blank = self.make_root("blank-" + harness, "c")
-            self.assertIsNone(self.panel(harness, blank.parent, ledger)["panel"]["lab"], harness)
 
 
 if __name__ == "__main__":

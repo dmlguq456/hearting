@@ -735,7 +735,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium",
         # 11-15: the table popups' keys (the question popup's are the editor's own).
-        "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page", "popup_sessions",
+        "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page",
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action")}
     # Fixed words are English in every language (spec rule 3).

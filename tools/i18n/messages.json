@@ -1626,10 +1626,6 @@
    "en": "Enter back to the table",
    "ko": "Enter 표로 돌아가기"
   },
-  "fleet.session_panel.popup_sessions": {
-   "en": "↑↓ session · Enter its question",
-   "ko": "↑↓ 세션 · Enter 그 세션의 질문"
-  },
   "fleet.session_panel.popup_unfold": {
    "en": "p open panel",
    "ko": "p 패널 펼치기"

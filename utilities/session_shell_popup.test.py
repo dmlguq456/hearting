@@ -243,6 +243,20 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   await press(label.x+2,label.y);
   s=await until(s=>!!box(s),'the popup by a press on QUESTIONS');
   frames.pressed=s;
+  // 11-15 ("질문 선지 선택 효과를 틴트로 해 명확하게"): the chosen choice's row stands on the chosen ground (palette
+  // 24, the dark face's: the fixture's face is unknown) across the popup's inside, the cell between it and
+  // each side line on the popup's ground (236); ↓ moves it to the next choice; the cell each side of the
+  // frame stands on the popup's ground too.
+  const tint=async()=>{await flush();const b=box(await screen());if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),out=[];
+    for(let y=b.top+1;y<b.bottom;y++){const line=term.buffer.active.getLine(y),bg=x=>{const cell=line?.getCell(x);return cell&&cell.isBgPalette()?cell.getBgColor():-1;};
+      const inside=[];for(let x=left+2;x<=right-2;x++){const cell=line?.getCell(x);if(cell&&cell.getWidth()===0)continue;inside.push(bg(x));}
+      out.push({text:cells(y).slice(left,right+1).join(''),inside,beside:[bg(left+1),bg(right-1)],margin:[bg(left-1),bg(right+1)]});}
+    return out;};
+  {const t=await tint(),chosen=t.filter(r=>r.inside.every(b=>b===24));
+   checks.tint_rows=chosen.map(r=>r.text);checks.tint_beside=chosen.length>0&&chosen.every(r=>r.beside.every(b=>b===236));
+   checks.tint_others=t.filter(r=>!chosen.includes(r)).every(r=>r.inside.every(b=>b===236));
+   checks.margins=t.every(r=>r.margin.every(b=>b===236));
+   await key('\x1b[B',250);checks.tint_moved=(await tint()).filter(r=>r.inside.every(b=>b===24)).map(r=>r.text);}
   await key('abc');await key('\t');
   s=await until(s=>box(s)&&s[box(s).top].includes('2/2'),'Tab to 2/2');frames.tab=s;
   await key('\x1b[Z');s=await until(s=>box(s)&&s[box(s).top].includes('1/2'),'Shift+Tab back to 1/2');
@@ -253,6 +267,9 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   await key('2',100);await key('\r',400);
   s=await until(s=>!box(s)&&has('✓')(s),'the answer sent and the popup closed');
   frames.answered=s;
+  // Closed, no popup ground or chosen ground is left anywhere.
+  await flush();{let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const c=line?.getCell(x);
+    if(c&&c.isBgPalette()&&[24,236].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
   await key('\r',400);checks.enter_swallowed=!(await screen()).some(l=>l.includes('DONE_draft1'));
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');
   // The other question: a text answer in Korean and a paste, kept when the popup closes.
@@ -302,7 +319,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   await resize(90,24);s=await until(has('◑답 대기'),'the folded strip');frames.strip=s;
   const todo=await at('◑답 대기');await press(todo.x+1,todo.y);
   s=await until(s=>!!box(s),'the popup from the strip');frames.strip_popup=s;
-  checks.strip_kept=s.slice(-4).join('\n')===frames.strip.slice(-4).join('\n');
+  checks.strip_kept=s.slice(-1).join('\n')===frames.strip.slice(-1).join('\n');
   // A press outside closes it and reaches nothing else.
   const native=raw.split('NATIVE_ESC_').length;
   await press(1,1);s=await until(s=>!box(s),'a press outside closing it');
@@ -419,9 +436,9 @@ class SessionShellPopupTest(unittest.TestCase):
         panel = '\n'.join(frames['closed'])
         self.assertIn('2 QUESTIONS ─', panel)
         self.assertIn('◑ 패널을 접었을 때의 모양을 어느 안…', panel)
-        # 11-15 (panel polish 1): the question to answer here is one button: its choices are chips
-        # (` 1 label `, `+N` for the rest) and `↵ 답하기 · Ctrl+]` stands under them at the right.
-        self.assertIn('│   1 아래 두 줄 (다) (추천)  +3 ', panel)
+        # 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"): the question to answer here reads in red letters: its
+        # choices one row of words (`1 label`, `+N` for the rest), `↵ 답하기 · Ctrl+]` under them at the right.
+        self.assertRegex(panel, r'│   1 아래 두 줄 \(다\) \(추천\) · \+3 ')
         self.assertIn('↵ 답하기 · Ctrl+] │', panel)
         self.assertNotIn('╭─ ◑', panel)
         # Drawn in one synchronized frame; the native's output under it leaves it whole; closed,
@@ -429,6 +446,15 @@ class SessionShellPopupTest(unittest.TestCase):
         self.assertTrue(checks['synchronized'])
         self.assertTrue(checks['region_kept'])
         self.assertIn('› ◑ 2 QUESTIONS · 1/2 · 답 필요', checks['title'])
+        # The chosen choice's ground (11-15): one row, the recommended choice, moved by ↓; the cell beside
+        # each side line the popup's ground, as every other row's inside and the cell past each side line;
+        # none left once it closes.
+        self.assertEqual(len(checks['tint_rows']), 1, checks['tint_rows'])
+        self.assertIn('▸ 1 아래 두 줄 (다) (추천)', checks['tint_rows'][0])
+        self.assertEqual(len(checks['tint_moved']), 1, checks['tint_moved'])
+        self.assertIn('▸ 2 넓힌 옆 띠 (가)', checks['tint_moved'][0])
+        self.assertTrue(checks['tint_beside'] and checks['tint_others'] and checks['margins'], checks)
+        self.assertEqual(checks['grounds_left'], 0)
         self.assertEqual(checks['later_after_close'], 12, '\n'.join(frames['output_closed']))
         self.assertFalse(checks['leaked'])
         # Exactly one answer, for that question and with the chosen value.

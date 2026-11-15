@@ -1,12 +1,14 @@
-"""11-15 (popup design B, C, D, E): the route, LAB and sessions popups over the real host in a private PTY.
+"""11-15 (popup design B, E): the routes and MESSAGES popups over the real host in a private PTY.
 
-For each harness's synthetic native: a press on a panel section opens its popup (Fleet's own table),
-←→ move between sections, ↑↓ unfold the next route or session, Enter opens a route's page; the popup
-draws again when what it shows changes (an existing watch event, no timer), stands again after a
-resize, opens from the folded strip's groups, answers another session's question once with that
-session as its owner, and stands in a 60×16 window, where the wheel reads it on. Keys and presses
-stay the popup's: the native's draft is untouched. Frames are text read back from a private headless
-terminal; nothing here reaches a real account, session or terminal (Fleet's collection is a fixture).
+For each harness's synthetic native: a press on a panel section opens its popup (Fleet's own table), a
+press on a route's row in the panel's route box the routes popup with that route unfolded (the popup on
+its own ground, a cell past each side line too, none left once it closes), ←→ move between sections
+(QUESTIONS, ROUTE and MESSAGES where it has something: no LAB or SESSIONS, 11-15), ↑↓ unfold the next route, Enter opens a
+route's page; the popup draws again when what it shows changes (an existing watch event, no timer),
+stands again after a resize, opens from the one-row folded strip's routes, and stands in a 60×16
+window, where the wheel reads it on. Keys and presses stay the popup's: the native's draft is
+untouched. Frames are text read back from a private headless terminal; nothing here reaches a real
+account, session or terminal (Fleet's collection is a fixture).
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -81,7 +83,7 @@ BACKEND = r"""#!{python}
 import json,os,sys,time
 sys.path.insert(0,{utilities!r});sys.path.insert(0,{tools!r})
 import session_shell as m
-from fleet import session_tags,session_lab
+from fleet import session_tags
 OWN,OTHER={sid!r},{other!r}
 def tag(harness,sid):return {{OWN:'e9',OTHER:'12'}}.get(sid)
 session_tags.assigned_tag=tag
@@ -90,10 +92,6 @@ def vm(harness,sid,kind):
     while os.path.exists({vm!r}+'.hang'):time.sleep(0.2)
     return ExplorerViewModel.from_mapping(json.load(open({vm!r})))
 m._popup_view_model=vm
-def board(cwd,now=None):
-    import experiment_board
-    return experiment_board.board(json.load(open({lab!r}))),[{lab!r}]
-session_lab.read=board
 def answered():
     try:return [json.loads(line) for line in open({answers!r})]
     except OSError:return []
@@ -134,9 +132,10 @@ const wheel=async(x,y,down=true)=>{child.write(`\x1b[<${down?65:64};${x+1};${y+1
 const key=async(bytes,ms=200)=>{child.write(bytes);await sleep(ms);};
 const frames={},checks={};
 // The popup's rows: its top line `╭─ … ✕ ─╮` to its bottom line; `title` the top line, `foot` the bottom one.
+// (Its bottom line is the one under its own `╭`: the panel's route box beside it has a `╰─ … ╯` of its own.)
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
-  const bottom=s.findIndex((l,i)=>i>top&&l.includes('╰─')&&l.includes('╯'));
-  const left=[...s[top]].indexOf('╭');return {top,bottom,title:s[top],foot:s[bottom]||'',rows:s.slice(top,bottom+1),left};};
+  const left=[...s[top]].indexOf('╭'),bottom=s.findIndex((l,i)=>i>top&&[...l][left]==='╰'&&l.includes('╯'));
+  return {top,bottom,title:s[top],foot:s[bottom]||'',rows:s.slice(top,bottom+1),left};};
 const popupHas=word=>s=>{const b=box(s);return !!b&&b.rows.some(l=>l.includes(word));};
 const unfolded=s=>{const b=box(s);return b?b.rows.find(l=>l.includes('▶'))||'':'';};
 // 11-15 (panel polish 3): how many cells outside the standing popup (its frame and the empty cell
@@ -146,12 +145,33 @@ const outside=async()=>{const s=await screen(),b=box(s);if(!b)return -1;const c=
     const cell=line?.getCell(x);if(!cell)continue;const blank=!cell.getChars().trim();
     if(!cell.isBgDefault()||cell.isInverse()||!blank&&(cell.isFgDefault()||cell.getFgColor()!==239||cell.isBold()||cell.isDim()))n++;}}return n;};
 const veil={};
+// 11-15 (the person: "팝업은 ... 배경 컬러도 다르고 폰트가 좀 더 밝아야"): the standing popup's frame cells and how
+// many stand on the popup's ground (palette 236, the dark face's: the fixture's face is unknown) or read
+// dim (a hue too), in the terminal's own color or in a gray fainter than the floor (palette 232-246); and anywhere
+// on the screen, the cells on that ground (none once it is closed).
+// (11-15: "스페이스바 한칸 정도 여백을 더") the cell each side of the frame on its rows is on the ground too
+// (`margins`), and the cell past it is not (`beyond`).
+const ground=async()=>{const s=await screen(),b=box(s);if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮');let all=0,on=0,faint=0,margins=0,beyond=0;
+  const grounded=cell=>cell&&cell.isBgPalette()&&cell.getBgColor()===236;
+  for(let y=b.top;y<=b.bottom;y++){const line=term.buffer.active.getLine(y);for(let x=left;x<=right;x++){const cell=line?.getCell(x);if(!cell||cell.getWidth()===0)continue;all++;
+    if(grounded(cell))on++;
+    if(cell.getChars().trim()&&(cell.isDim()||cell.isFgDefault()||cell.isFgPalette()&&cell.getFgColor()>=232&&cell.getFgColor()<247))faint++;}
+    for(const x of [left-1,right+1])if(grounded(line?.getCell(x)))margins++;for(const x of [left-2,right+2])if(grounded(line?.getCell(x)))beyond++;}
+  return {all,on,faint,margins,beyond,rows:b.bottom-b.top+1};};
+const grounded=async()=>{await flush();let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const cell=line?.getCell(x);
+  if(cell&&cell.isBgPalette()&&cell.getBgColor()===236)n++;}}return n;};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
-  await until(s=>has('READY_'+cfg.harness)(s)&&has('2 ROUTE')(s)&&has('LAB')(s)&&has('SESSIONS')(s),'the panel with its sections');
+  await until(s=>has('READY_'+cfg.harness)(s)&&has('2 ROUTE')(s)&&has('QUESTIONS')(s),'the panel with its sections');
   await key('draft9',300);
   frames.closed=await screen();
+  // 11-15 (the route box again): a press on a route's own row in the panel's route box opens the routes
+  // popup with that route unfolded (here the working one, not the most pressing one); the popup stands on
+  // its own ground with bright words, and closed it leaves no ground behind.
+  {const at0=await at('질문 팝업 구현');await press(at0.x+2,at0.y);
+   const t=await until(s=>unfolded(s).includes('질문 팝업'),'the pressed route unfolded');frames.route_row=t;
+   checks.ground=await ground();await key('\x1b',300);await until(s=>!box(s),'closed after the route row');checks.ground_left=await grounded();}
   // A press on the ROUTE section's head: Fleet's routes table, the most pressing route unfolded.
   let p=await at('2 ROUTE');await press(p.x+2,p.y);
   let s=await until(popupHas('PROGRESS'),'the routes popup');
@@ -167,19 +187,11 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));cache.observed_at=Date.now()/1000;
   cache.route_panels[cfg.key][0].title='RENAMED_ROUTE 이름 바뀜';write(cfg.cache,cache);
   s=await until(popupHas('RENAMED_ROUTE'),'the routes popup drawn again');frames.route_changed=s;
-  // → the next section's popup: LAB (Fleet's LAB table), then SESSIONS (Fleet's session table); ← back.
-  await key('\x1b[C',300);s=await until(popupHas('분리 모델 비교'),'the LAB popup');frames.lab=s;checks.lab_foot=box(s).foot;veil.lab=await outside();
-  await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup');frames.sessions=s;veil.sessions=await outside();
-  await key('\x1b[D',300);s=await until(popupHas('분리 모델 비교'),'back to LAB');veil.back=await outside();
-  await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup again');
-  // ↓ until the waiting session [12] unfolds; Enter opens its question in the question popup.
-  for(let i=0;i<6&&!unfolded(await screen()).includes('[12]');i++)await key('\x1b[B',500);
-  s=await until(s=>unfolded(s).includes('[12]'),'the waiting session unfolded');frames.sessions_open=s;
-  // (↓ comes in the same read as Enter, while the question is being read: the question opened, its number
-  // and its answer are the session Enter was pressed on, not the one ↓ moved to.)
-  await key('\r\x1b[B',300);s=await until(s=>!!box(s)&&box(s).title.includes('[12]'),'the other session\'s question');frames.foreign=s;
-  checks.foreign_title=box(s).title;veil.foreign=await outside();
-  await key('2',150);await key('\r',600);s=await until(s=>!box(s),'the answer sent and the popup closed');frames.answered=s;
+  // → the next section with something in it (11-15: the LAB and SESSIONS popups are gone; no message here):
+  // the question popup; ← back.
+  await key('\x1b[C',300);s=await until(s=>!!box(s)&&box(s).title.includes('QUESTIONS'),'the question popup by →');frames.next=s;checks.next_foot=box(s).foot;veil.next=await outside();
+  await key('\x1b[D',300);s=await until(popupHas('PROGRESS'),'back to the routes');veil.back=await outside();
+  await key('\x1b',300);s=await until(s=>!box(s),'closed after the sections');
   // Nothing of it reached the native: its draft stands, never submitted.
   s=await screen();checks.draft=s.some(l=>l.startsWith('❯ draft9'));checks.submitted=s.some(l=>l.includes('DONE_draft9'));
   checks.native_mouse=raw.includes('NATIVE_ESC_');
@@ -189,12 +201,11 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   await resize(120,30);s=await until(s=>!!box(s)&&popupHas('ROUTE')(s),'the popup after a resize');frames.resized=s;veil.resized=await outside();
   checks.resized_width=[...box(s).title.trimEnd()].length-box(s).left;checks.resized_left=box(s).left;
   await key('\x1b',300);await until(s=>!box(s),'closed');
-  // The folded strip (90 columns): its LAB and SESSIONS groups open their popups; the strip stays.
-  await resize(90,24);s=await until(has('SESSIONS ◑'),'the folded strip');frames.strip=s;
-  p=await at('LAB 실패');await press(p.x,p.y,300);s=await until(popupHas('분리 모델 비교'),'LAB from the strip');frames.strip_lab=s;
-  checks.strip_kept=s.slice(-3).join('\n')===frames.strip.slice(-3).join('\n');veil.strip_lab=await outside();
-  await key('\x1b',300);await until(s=>!box(s),'closed');
-  p=await at('SESSIONS ◑');await press(p.x,p.y,300);s=await until(popupHas('TITLE'),'SESSIONS from the strip');frames.strip_sessions=s;
+  // The folded strip (90 columns, one row): its routes group opens the routes popup; the strip stays.
+  await resize(90,24);s=await until(s=>s.at(-1).includes('2 ROUTE')&&!s.some(l=>l.includes('REPO')),'the folded strip');frames.strip=s;
+  checks.strip_one_row=!/LAB|SESSIONS|QUESTIONS ─/.test(s.join('\n'))&&s.at(-1).includes('▴');
+  p=await at('2 ROUTE');await press(p.x,p.y,300);s=await until(popupHas('PROGRESS'),'the routes popup from the strip');frames.strip_route=s;
+  checks.strip_kept=s.slice(-1).join('\n')===frames.strip.slice(-1).join('\n');veil.strip_route=await outside();
   await key('\x1b',300);await until(s=>!box(s),'closed');
   // 60×16: the question popup and the routes popup stand in it; the wheel over them reads them on.
   await resize(60,16);await key('\x1d',400);s=await until(s=>!!box(s),'the question popup at 60×16');frames.narrow_question=s;
@@ -215,7 +226,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   await resize(160,40);
   // The native's input row, its own cells only (the panel beside it starts at its frame `│`).
   const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split('│')[0].trimEnd():null;};
-  const kinds=['QUESTIONS','ROUTE','LAB','SESSIONS'];
+  const kinds=['QUESTIONS','ROUTE'];
   const open=async kind=>{await key('\x1d',400);await until(s=>!!box(s),'a popup by Ctrl+]');
     for(let i=0;i<kinds.indexOf(kind);i++)await key('\x1b[C',400);
     return until(s=>!!box(s)&&box(s).title.includes(kind),'the '+kind+' popup');};
@@ -245,11 +256,11 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
     await open('ROUTE');
     await key('\x1b[200~prwf hello\rworld\x1b[A'+END.slice(0,cut),150);await key(END.slice(cut),150);
     await key('\x1b[C',300);s=await screen();
-    const r={moved:!!box(s)&&box(s).title.includes('LAB'),draft:await kept()};
+    const r={moved:!!box(s)&&box(s).title.includes('QUESTIONS'),draft:await kept()};
     await key('\x1b',300);s=await screen();r.closed=!box(s);checks.paste['split'+cut]=r;
   }
   // Never ended: the three ways out, each then a normal popup (→ moves it, Esc closes it).
-  const fresh=async name=>{await open('ROUTE');await key('\x1b[C',300);const t=await screen();const ok=!!box(t)&&box(t).title.includes('LAB');
+  const fresh=async name=>{await open('ROUTE');await key('\x1b[C',300);const t=await screen();const ok=!!box(t)&&box(t).title.includes('QUESTIONS');
     await key('\x1b',300);return ok&&!box(await screen());};
   for(const way of ['ctrl','esc','press','tail']){
     await open('ROUTE');
@@ -265,7 +276,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   // next popup's `01~` and → are keys of its own.
   await open('ROUTE');await key('\x1b[200~abc\x1b[',200);await key('\x1b',500);s=await screen();
   checks.paste.front_closed=!box(s);await open('ROUTE');await key('01~',200);await key('\x1b[C',300);s=await screen();
-  checks.paste.front_next=!!box(s)&&box(s).title.includes('LAB');await key('\x1b',300);checks.paste.front_draft=await kept();
+  checks.paste.front_next=!!box(s)&&box(s).title.includes('QUESTIONS');await key('\x1b',300);checks.paste.front_draft=await kept();
   // ↑↓ follow: a popup longer than its rows keeps the unfolded row in view, up and down (60×16).
   await resize(60,16);await key('\x1d',400);await until(s=>!!box(s),'a popup at 60×16');await key('\x1b[C',400);
   s=await until(popupHas('ROUTE'),'the routes popup at 60×16');await until(s=>unfolded(s)!=='','the unfolded route in view');
@@ -273,8 +284,6 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   checks.follow={down:[],up:[],place:[]};
   for(let i=0;i<14;i++){await key('\x1b[B',350);s=await screen();checks.follow.down.push(unfolded(s)!=='');checks.follow.place.push(place(s));}
   for(let i=0;i<14;i++){await key('\x1b[A',350);s=await screen();checks.follow.up.push(unfolded(s)!=='');checks.follow.place.push(place(s));}
-  await key('\x1b[C',300);await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup at 60×16');checks.follow.sessions=[];
-  for(let i=0;i<4;i++){await key('\x1b[B',400);s=await screen();checks.follow.sessions.push(unfolded(s)!=='');}
   await key('\x1b',300);await resize(160,40);
   // Children: the popup opened and closed 100 times leaves no read behind, and a read that hangs ends at 12 s.
   const reads=()=>{const kids=new Map();for(const id of fs.readdirSync('/proc').filter(n=>/^\d+$/.test(n))){try{
@@ -431,39 +440,43 @@ class SessionShellTablePopupTest(unittest.TestCase):
         text = lambda name: '\n'.join(frames[name])  # noqa: E731
         # The panel: each section its head and rows (11-15, design E).
         panel = text('closed')
-        for head in ('1 QUESTIONS', '2 ROUTE ⠏1 ✕1', 'LAB', '2 SESSIONS ◑1'):
+        for head in ('1 QUESTIONS', '╭─ 2 ROUTE '):
             self.assertIn(head, panel)
-        self.assertIn('◑ [12] 분리 모델 학습 비교', panel)
-        self.assertNotIn('[e9] 이 창', panel)  # this window's own session is no row of its own section
+        # (11-15: no LAB and no SESSIONS section, whatever the backend sends.)
+        self.assertNotRegex(panel, r'\bLAB\b|SESSIONS|분리 모델')
+        # The route box again (11-15): a press on a route's own row opened the popup with it unfolded; the
+        # popup's every frame cell stood on its ground, no word in it faint; closed, no ground was left.
+        self.assertIn('질문 팝업', text('route_row'))
+        ground = checks['ground']
+        self.assertTrue(ground['all'] > 200 and ground['on'] == ground['all'] and ground['faint'] == 0, ground)
+        self.assertEqual((ground['margins'], ground['beyond']), (2 * ground['rows'], 0), ground)
+        self.assertEqual(checks['ground_left'], 0)
         # The routes popup: Fleet's table, its title the section's head, the sections on its bottom line.
-        # 11-15 (panel polish 3): behind every table popup (and the other session's question), through
-        # ←→, a page, a resize, the strip and 60×16, everything outside it reads in the one gray.
-        self.assertEqual(checks['veil'], {name: 0 for name in ('route', 'route_page', 'lab', 'sessions', 'back', 'foreign',
-                                                               'resized', 'strip_lab', 'narrow_route')}, checks['veil'])
+        # 11-15 (panel polish 3): behind every popup, through ←→, a page, a resize, the strip and 60×16,
+        # everything outside it reads in the one gray.
+        self.assertEqual(checks['veil'], {name: 0 for name in ('route', 'route_page', 'next', 'back',
+                                                               'resized', 'strip_route', 'narrow_route')}, checks['veil'])
         self.assertIn('2 ROUTE ⠏1 ✕1', checks['route_title'])
-        for name in ('QUESTIONS', 'ROUTE', 'LAB', 'SESSIONS'):
+        for name in ('QUESTIONS', 'ROUTE'):
             self.assertIn(name, checks['route_foot'])
+        self.assertNotRegex(checks['route_foot'] + checks['next_foot'], r'LAB|SESSIONS')
         self.assertIn('BLOCKED:', text('route'))
         self.assertIn('╔', text('route_page'))
         self.assertIn('RENAMED_ROUTE', text('route_changed'))
-        self.assertIn('긴 문맥', text('lab'))
-        self.assertIn('[12]', checks['foreign_title'])
-        self.assertIn('학습률을 얼마로 할까요?', text('foreign'))
-        # Exactly one answer, for the other session's question, with that session as its owner.
-        self.assertEqual(result['answers'], [{'question_id': 'S4:other', 'revision': 'c' * 64, 'answers': {'lr': ['3e-4']},
-                                              'owner': {'harness': 'claude', 'session_id': OTHER}}])
+        # No answer goes from these popups (the other session's question is no longer opened here).
+        self.assertEqual(result['answers'], [])
         # Nothing reached the native: its draft stands unsubmitted; no press reached a native that reads the mouse.
         self.assertTrue(checks['draft'] and checks['draft_end'])
         self.assertFalse(checks['submitted'] or checks['submitted_end'])
         self.assertFalse(checks['native_mouse'] or checks['native_mouse_end'])
-        self.assertTrue(checks['strip_kept'], text('strip_lab'))
-        self.assertIn('분리 모델 비교', text('strip_lab'))
-        self.assertIn('TITLE', text('strip_sessions'))
+        self.assertTrue(checks['strip_kept'], text('strip_route'))
+        self.assertTrue(checks['strip_one_row'], text('strip'))
+        self.assertIn('PROGRESS', text('strip_route'))
         self.assertLessEqual(checks['narrow_width'], 60)
         self.assertTrue(checks['wheel_question'], text('narrow_question'))
         self.assertTrue(checks['wheel_table'], text('narrow_wheel'))
-        # The Esc rule is the same in the four popups (11-15, #1641's fixes): nothing reached the native.
-        for kind in ('QUESTIONS', 'ROUTE', 'LAB', 'SESSIONS'):
+        # The Esc rule is the same in every popup (11-15, #1641's fixes): nothing reached the native.
+        for kind in ('QUESTIONS', 'ROUTE'):
             self.assertEqual(checks['esc'][kind], {'esc_tab_stands': True, 'esc_ctrl_c_stands': True, 'esc_esc_closes': True,
                                                    'after_esc_esc': 'draft9', 'lone_esc_closes': True, 'second_esc_stays': True,
                                                    'after_second': 'draft9'}, kind)
@@ -478,7 +491,7 @@ class SessionShellTablePopupTest(unittest.TestCase):
         self.assertTrue(paste['front_closed'] and paste['front_next'] and paste['front_draft'], paste)
         # ↑↓ keep the unfolded row in view; its place reads `i/N` with i inside N.
         follow = checks['follow']
-        self.assertTrue(all(follow['down']) and all(follow['up']) and all(follow['sessions']), follow)
+        self.assertTrue(all(follow['down']) and all(follow['up']), follow)
         self.assertTrue(all(place and 1 <= place[0] <= place[1] for place in follow['place']), follow)
         self.assertGreater(len({place[0] for place in follow['place']}), 3, follow)
         # No read is left behind by 100 openings; a read that hangs (Claude's run) is ended at its 12 seconds.
