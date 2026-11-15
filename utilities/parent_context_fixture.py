@@ -78,10 +78,12 @@ PROMPTS_AFTER = {1: "P1", 3: "P2", 5: "P3", 7: "P4", 9: "P5"}
 # a tool call and the turn's end follow; the turn's Stop must carry it), "q-esc" (the queue
 # hands the notification back on Esc, the turn is cut and no Stop runs; the next typed prompt
 # carries it) and "q-error" (no rewake, the turn ends on an API error and no Stop runs; the next
-# typed prompt carries it). The last two end with a typed prompt by definition.
+# typed prompt carries it). The last two end with a typed prompt by definition. "q-moved" is
+# "q-absorbed" in a session that `cd`'d into a subfolder first: the transcript stays in the
+# folder the session started in, and the hooks' payload cwd is the new one.
 QUEUE_ORDERS = (("normal", "q-absorbed"), ("normal", "q-dropped"), ("normal", "q-turn-end"),
                 ("normal", "q-typed"), ("normal", "q-quoted"), ("normal", "q-unarmed"),
-                ("normal", "q-esc"), ("normal", "q-error"))
+                ("normal", "q-esc"), ("normal", "q-error"), ("normal", "q-moved"))
 CLAIM_LEASE_GAP_NS = 31 * 1_000_000_000
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 MARKER = re.compile(r"HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]+) [0-9a-f]{64}")
@@ -139,6 +141,7 @@ class Scenario:
         self.items: list[dict] = []
         self.transcript_events: list[dict] = []
         self.carried: list[dict] = []  # one row per text that reached the model
+        self.cwd_now = self.repo  # the session's current folder (a `cd` moves it; its transcript stays)
         self.turn = 0  # the running turn's prompt id, as Claude Code gives every hook of one prompt
 
     # -- setup -----------------------------------------------------------------
@@ -268,7 +271,7 @@ class Scenario:
 
     def payload(self, event: str, **extra) -> dict:
         return {"session_id": PARENT_SID, "transcript_path": str(self.transcript_path()),
-                "cwd": str(self.repo), "hook_event_name": event, "prompt_id": f"prompt-fixture-{self.turn}",
+                "cwd": str(self.cwd_now), "hook_event_name": event, "prompt_id": f"prompt-fixture-{self.turn}",
                 **extra}
 
 
@@ -482,7 +485,10 @@ def _claude_queue_order(scenario, item, rewake_emit, prompt_hook, tool_boundary,
         scenario.transcript({"type": "queue-operation", "operation": "popAll", "content": note})
         scenario.turn += 1
         scenario.carry("prompt-hook", prompt_hook(typed_next, typed=True), prompt="typed")
-    elif pattern == "q-absorbed":
+    elif pattern in {"q-absorbed", "q-moved"}:
+        if pattern == "q-moved":
+            scenario.cwd_now = scenario.repo / "sub" / "dir"
+            scenario.cwd_now.mkdir(parents=True, exist_ok=True)
         scenario.carry("tool-boundary", tool_boundary(item))
         scenario.transcript({"type": "queue-operation", "operation": "remove", "content": note,
                              "reason": "absorbed_mid_turn"})

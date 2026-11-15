@@ -337,6 +337,12 @@ class QueueOrderTest(unittest.TestCase):
     def test_a_completion_the_queue_absorbs_reaches_the_model_once(self):
         self.assertEqual(self.orders["q-absorbed"]["carriers"], ["rewake"])
 
+    def test_a_session_that_moved_folders_gets_the_absorbed_completion_once(self):
+        # Before the fix its transcript was not found from the new folder, so Stop carried it again.
+        row = self.orders["q-moved"]
+        self.assertEqual((row["times"], row["without_person"], row["carriers"]),
+                         (1, True, ["rewake"]))
+
     def test_a_rewake_that_was_never_armed_is_made_up_by_the_turns_stop(self):
         row = self.orders["q-unarmed"]
         self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
