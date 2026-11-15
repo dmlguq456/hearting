@@ -36,19 +36,19 @@ const FACES={
     // red), in 256 colors, and its two ends in 24-bit color.
     orbit:[230,187,144,101],waveRGB:[[128,128,128],[255,255,215]],scan:[243,101,144,187,230],
     breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]],
-    // 11-15 (panel polish 1): a question to answer here stands on `fill` (the waiting red's dark
-    // end; bright text on it 12:1), its choices on `chip`, its first row in `bright`. Polish 3: while
-    // a popup stands, everything outside it reads in `veil` alone.
-    fill:52,chip:235,bright:255,veil:239,
+    // 11-15 (panel polish 3): while a popup stands, everything outside it reads in `veil` alone.
+    veil:239,
     // 11-15 (the person: "팝업이 여전히 구분이 잘 안되는데? 배경 컬러도 다르고 팝업은 폰트가 좀 더 밝아야"):
-    // a popup's frame stands on `popup` (a step or two off the terminal's own background), its line in
-    // `popupLine`, its words in `bright`, and a word drawn dim or gray never reads below `popupFloor`.
-    popup:236,popupLine:250,popupFloor:247},
+    // a popup's frame stands on `popup` (a step or two off the terminal's own background; one cell past
+    // its side lines too), its line in `popupLine`, its words in `bright`, and a word drawn dim or gray
+    // never reads below `popupFloor`. ("질문 선지 선택 효과를 틴트로 해 명확하게"): the choice the
+    // question popup has chosen stands on `chosen` across the popup's inside, one ground and no other.
+    bright:255,popup:236,popupLine:250,popupFloor:247,chosen:24},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[251,151,108,65,22],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
-    fill:224,chip:255,bright:232,veil:250,popup:254,popupLine:240,popupFloor:241},
+    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -101,8 +101,6 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // The question's border, `◑` and `›` are rose; mono keeps them by weight.
     // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
     if(role==='accent'||role==='accent-line'){if(theme!=='mono')foreground=F.accent;else if(role==='accent')bold=true;dim=false;}
-    // 11-15 (panel polish 1): the words of a question to answer here, bright on its fill.
-    else if(role==='bright'&&theme!=='mono'){foreground=F.bright;dim=false;}
     // A state glyph takes its face's state color, at full strength.
     else if(role.startsWith('state:')&&theme!=='mono'&&(shade||known==='light')&&F[role.slice(6)]){foreground=F[role.slice(6)];dim=false;}
     // The session's own state keeps Fleet's session keys (running g_spin, idle
@@ -128,19 +126,16 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
     else if(LINES.has(role)&&known&&theme!=='mono'){foreground=F[role];dim=false;}
-    // 11-15 (panel polish 1): a part on a question's fill or chip takes that ground on every face (an
-    // unknown face the dark one's), over a shade too; mono and eight colors draw a bar instead.
-    const ground=part.ground&&theme!=='mono'&&Number.isInteger(F[part.ground])?{background:F[part.ground]}:{};
     if(shade){
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
       else if(role==='title'){foreground=F.title;dim=false;}
       else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
-      return {...part,foreground,dim,bold,background:F[shade],...ground};
+      return {...part,foreground,dim,bold,background:F[shade]};
     }
     // A declared light terminal: secondary text takes its color instead of a dim default.
     if(theme==='light'&&foreground===null&&dim){foreground=F.secondary;dim=false;}
-    return {...part,foreground,dim,bold,...ground};
+    return {...part,foreground,dim,bold};
   }));
 }
 // A combining mark or joined emoji stays with the character it belongs to.
@@ -314,55 +309,29 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       list(model.selected).length?model.selected:line(t('checking','Checking'));
   }
   if(folded)return foldedView();
-  // Spec rule 49 (c): folded (by itself or by hand, beside or under the native area) the panel is
-  // one strip under the native area: a thin rule in the messages' line color with the unfold mark
-  // `▴` at its right end, then three rows, each the most pressing first and giving way whole item
-  // by whole item from its end:
-  //   1. the session: the state glyph and number, the project, model and effort, `CTX` and its
-  //      gauge, 5h, 7d (short of cells the reset times go first, then the effort, the project);
-  //   2. what to do now: the answer wait with its question's first row, where a wait answered
-  //      elsewhere is answered, compaction imminent, a tidy notice;
-  //   3. the routes: `N ROUTE ⠏2 ✕1`, the failed routes' titles (else the running ones'),
-  //      `MESSAGES ←N` (received since the person's last input) and LAB's attention token.
-  // Short of rows the routes row goes first, then the session row: what to do stays to the last;
-  // a row with nothing on it gives its place to the next, and rows stand from the top. Labels are
-  // dark gray upper case. No frame, gear, beat or moving rule: only the state glyph turns. A press
-  // anywhere on it opens the panel.
+  // Spec rule 49 (c), as the person changed it (11-15: "최소로 접었을때 패널이 좀 못생겼어 ... 전체를 한줄로만
+  // 만들자"): folded (by itself or by hand, beside or under the native area) the panel is one row under
+  // the native area, whatever the window's height and whatever it shows: the session (the state glyph
+  // and number, the project, the model and effort, `CTX` with its gauge, 5h, 7d) │ the answer wait
+  // (`◑답 대기 N` in its red, only while one waits; compaction imminent and a tidy notice stand in the
+  // same place, after it) │ the routes (`4 ROUTE ⠏2 ✕1`, no titles) │ `MESSAGES` with the sessions the
+  // recent messages came from or went to (`← [e7] → [73]`: each way and session once, the newest first,
+  // `+N` for those that do not fit) … `▴` at the right end. A group with nothing in it does not stand.
+  // Short of cells, in this order: the reset times, the branch, the effort, the model windows (Fable's),
+  // 7d, 5h, OpenCode's MCP count, the model, the messages' numbers (their count stays), MESSAGES, the
+  // project, the notices, the CTX bar (its percent stays), the routes' counts by state, and narrower than
+  // 44 cells `CTX` itself; the glyph and number, the wait, `N ROUTE` and `▴` stay. Nothing wraps. A press on the wait opens the question
+  // popup, on the routes the routes popup, on MESSAGES its popup; anywhere else, and `▴`, opens the
+  // panel. No frame, gear, beat or moving rule: only the state glyph turns.
   function foldedView(){
-    const own=LIVE[state],color=own&&own[1]!=='g_work_off'?own[1]:'dim';
+    const own=LIVE[state];
     const plain=model.no_color===true||cfg.theme==='mono';
     const P=v=>Array.isArray(v)?v.filter(p=>p&&typeof p==='object'):[];
     const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
-    const room=Math.max(0,width-1);
     const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,text('…','dim')];
-    // A row's items, most pressing first: an item is `head` (whole or not at all) and `tail` (cut
-    // with `…` where cells run short, while it keeps four cells; a `titled` item without its tail
-    // goes whole); the first item that does not fit ends the row.
-    const pack=(items,room=Math.max(0,width-1))=>{
-      const out=[];let used=0;
-      for(const item of items){
-        const gap=out.length&&!item.choices?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
-        if(used+size(head)+size(tail)<=room){out.push(...head,...tail);used+=size(head)+size(tail);continue;}
-        // The question's line keeps its cells (it never gives them to its choices).
-        // The choices after the question's first line: whole, else the first one cut with `…` and
-        // the rest counted (`+N`), never nothing.
-        if(item.choices){
-          const first=choiceItems(item.head)[0],left=Math.max(0,(item.total||0)-1);
-          for(const rest of [left?[text(' +'+left,'dim')]:[],[]]){
-            const space=room-used-size(item.lead)-size(rest);
-            if(first&&space>=2){out.push(...item.lead,...cut(first,space),...rest);break;}
-          }
-          continue;
-        }
-        const left=room-used-size(head);
-        if(tail.length&&left>=5)out.push(...head,...cut(tail,left));
-        else if(left>=0&&!item.titled)out.push(...head);
-        else if(!out.length)out.push(...cut([...item.head,...tail],room));
-        break;
-      }
-      return out;
-    };
-    // 1. The session row.
+    const bar=[text(' │ ','dim')];
+    const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[...bar,...g]:g);
+    // The session.
     const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
     const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
     const number=tag?[text('[','dim'),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
@@ -371,122 +340,87 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // `CTX` stands for the word `context` (a backend without `context_side` has its word taken off here, as the open panel's).
     const unworded=parts=>{const head=parts[0],rest=String(head?.text??'').replace(/^context /,'');return !head||rest===String(head.text)?parts:rest?[{...head,text:rest},...parts.slice(1)]:parts.slice(1);};
     const selected=selectedParts(),gauge=Array.isArray(model.context_side)?P(model.context_side):unworded(P(model.context));
-    const ctxLabel=text('CTX ','dim'),ctx=gauge.length?[ctxLabel,...gauge,...(P(model.mcp).length?[text(' │ ','dim'),...P(model.mcp)]:[])]:[];
+    // The gauge without its bar: the percent alone.
+    const percent=gauge.filter(p=>!/^[━─]+$/.test(clean(p.text))).map((p,i)=>i?p:{...p,text:clean(p.text).replace(/^\s+/,'')}).filter(p=>p.text);
     const windows=[];let current=[];
     for(const part of P(model.quota)){if(String(part.text)===' │ '){if(current.length)windows.push(current);current=[];}else current.push(part);}
     if(current.length)windows.push(current);
     const quotaParts=new Set(windows.flat());
     const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
-    const bare=gs=>gs.map(g=>g.filter(part=>!/^\(↻/.test(String(part.text))));
-    const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(' │ ','dim'),...g]:g);
     // The checkout after the project, as Fleet's session row writes it (` (branch)`, twelve cells at most).
     const branchName=clean(String(P(model.git_side)[0]?.text??'')).trim().split(/\s+/)[0]||'';
     const branch=branchName&&project.length?[text(' ('+(measure(branchName)>12?clip([text(branchName)],11).parts.map(x=>x.text).join('')+'…':branchName)+')','dim')]:[];
-    const sessionRow=()=>{
-      // Each step lets one more value go: the branch, the reset times, the effort, the project, 5h
-      // (the windows shorter than 7d), the model windows from the last, 7d, the model, the context.
-      const steps=[];let q=windows,m=selected,named=true,c=ctx,b=branch;
-      const add=()=>steps.push([[...lead,...(named&&project.length?[...(lead.length?[text(' ')]:[]),...project,...b]:[])],m,c,...q]);
-      add();b=[];add();q=bare(q);add();m=selected.slice(0,1);add();named=false;add();
-      q=q.filter(g=>kind(g)!=='window');add();
-      while(q.some(g=>kind(g)==='model')){const at=q.map(kind).lastIndexOf('model');q=q.filter((_,i)=>i!==at);add();}
-      q=[];add();m=[];add();c=[];add();
-      for(const groups of steps){const row=joinAll(groups);if(size(row)<=room)return row;}
-      return cut(lead,room);
-    };
-    // 2. What to do now.
-    const first=model.wait&&summary?P(summary.line).map(p=>({...p,text:clean(p.text)})).filter(p=>p.text.trim()):[];
-    // 11-15 (popup design E): where cells are left, the choices follow on the same row, whole or as
-    // their count alone (`· +4`).
-    const choiceRow=summary&&Array.isArray(summary.rows)&&summary.choices>0?P(summary.rows[1]).filter((p,i)=>i>0||String(p.text).trim()):[];
+    // The answer wait, then compaction imminent and a tidy notice, in the same place.
+    const wait=model.wait?[{...text(clean(model.wait),'g_blocked'),role:'accent',...(model.no_color===true?{bold:true}:{})}]:[];
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    // A wait answered elsewhere (#1633): where, dim, after the wait (never part of its count).
-    const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
-    const todo=[
-      ...(model.wait?[{head:[text(clean(model.wait),'g_blocked')],tail:first.length?[text(' · ','dim'),...first]:[]}]:[]),
-      ...(first.length&&choiceRow.length?[{choices:true,lead:[text(' · ','dim')],total:summary.choices,head:[text(' · ','dim'),...choiceRow]}]:[]),
-      ...(guide?[{titled:true,head:[],tail:[text(guide,'dim')]}]:[]),
-      ...(model.warning?[{head:[text('⚠ ','lvl_r')],tail:[text(clean(model.warning),'lvl_r')]}]:[]),
-      ...(tidy&&!model.answerable?[{head:[text('⚠ ','lvl_y')],tail:[text(tidy,'lvl_y')]}]:[])];
-    // 3. The routes, LAB, the sessions, the new messages (11-15, popup design E): one group each
-    // (`4 ROUTE ⠏2 ✕1 · ✕ title │ 4 LAB failed 1 │ 5 SESSIONS ◑2 │ MESSAGES ←2`), a press on a group
-    // opens its popup. The route count and the groups after it are whole or leave from the last; the
-    // failed routes' titles (else the running ones') take the cells between, cut with `…`.
+    const notices=[...(model.warning?[[text('⚠ ','lvl_r'),text(clean(model.warning),'lvl_r')]]:[]),...(tidy&&!model.answerable?[[text('⚠ ','lvl_y'),text(tidy,'lvl_y')]]:[])];
+    // The routes: the count first, the name tag dim, then the counts by state.
     const counted=routes.slice(0,Math.max(0,model.route_count??routes.length));
     const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:counted.length;
     const label=clean(model.route_label||'').trim().replace(/^route (\d+)/,'$1 ROUTE')||(total?total+' ROUTE':'');
     const labelMatch=/^(\d+) ROUTE(.*)$/u.exec(label);
-    // The count, then the name tag in dark gray as every other one, then the counts by state.
-    const labelParts=labelMatch?[text(labelMatch[1],'loc_repo'),text(' '),{...text('ROUTE','dim'),role:'title'},...(labelMatch[2]?[text(labelMatch[2],'dim')]:[])]:label?[{...text(label,'dim'),role:'title'}]:[];
-    const failed=counted.filter(r=>r&&r.kind==='dead'),running=counted.filter(r=>r&&r.kind==='working');
-    const titles=(failed.length?failed:running).filter(r=>clean(r.title).trim()).map(r=>[
-      {...(r.paint?.glyph||text(r.kind==='dead'?'✕':'·',r.kind==='dead'?'g_dead':'dim')),role:'state:'+r.kind},text(' '),...line(clean(r.title).trim(),'loc_repo')]);
-    const unread=Number.isInteger(model.messages_new)&&model.messages_new>0?model.messages_new:0;
-    const labCounts=model.lab&&Array.isArray(model.lab.counts)?model.lab.counts.map(P).filter(c=>c.length):[];
-    const folks=model.sessions&&typeof model.sessions==='object'?model.sessions:null;
-    const folkCounts=folks&&Array.isArray(folks.counts)?folks.counts.map(P).filter(c=>c.length):[];
-    const groupsAfter=[
-      // LAB stands only while it needs a look (failed, stuck, unconfirmed, unnamed runs).
-      ...(labCounts.length&&model.lab.strip_attention===true?[{action:'popup:LAB',parts:[...(model.lab.count?[text(clean(model.lab.count),'loc_repo'),text(' ')]:[]),{...text('LAB','dim'),role:'title'},text(' '),...labCounts[0]]}]:[]),
-      ...(folks&&folkCounts.length?[{action:'popup:SESSIONS',parts:[...(Number.isInteger(folks.count)?[text(String(folks.count),'loc_repo'),text(' ')]:[]),{...text('SESSIONS','dim'),role:'title'},text(' '),...folkCounts[0]]}]:[]),
-      ...(unread?[{action:'popup:MESSAGES',parts:[{...text('MESSAGES','dim'),role:'title'},text(' ←'+unread,'loc_repo')]}]:[])];
-    const bar=()=>text(' │ ','dim');
-    const routeRow=(()=>{
-      const out=[];let used=size(labelParts);
-      if(used>room)return {parts:cut(labelParts,room),spans:[]};
-      const fixed=[];
-      for(const g of groupsAfter){const w=(used||fixed.length?3:0)+size(g.parts);if(used+w>room)break;used+=w;fixed.push(g);}
-      const spans=[];let x=0;
-      // A group is one press target however many pieces it has (the count and the titles after it).
-      const put=(parts,action)=>{const w=size(parts),last=spans.at(-1);
-        if(action&&last&&last.action===action&&last.right===x-1)last.right=x+w-1;else if(action)spans.push({left:x,right:x+w-1,action});
-        out.push(...parts);x+=w;};
-      put(labelParts,'popup:ROUTE');
-      // The titles: the first cut to what is left (four cells at least), each further one whole.
-      let left=room-used;
-      titles.forEach((t,i)=>{
-        const sep=labelParts.length||i?[text(' · ','dim')]:[],w=size(sep)+size(t);
-        if(w<=left){put([...sep,...t],'popup:ROUTE');left-=w;}
-        else if(!i&&left-size(sep)>=5){const c=cut(t,left-size(sep));put([...sep,...c],'popup:ROUTE');left=0;}
-      });
-      for(const g of fixed){if(out.length)put([bar()]);put(g.parts,g.action);}
-      return {parts:out,spans};
-    })();
-    // 11-15 (panel polish 1): while the row of what to do carries a question to answer here it stands
-    // on that question's fill, the strip's whole width (mono, eight colors and NO_COLOR: the rose bar).
-    const here=first.length>0&&summary.answerable===true;
-    const grounded=(model.colors??256)>=256&&model.no_color!==true&&cfg.theme!=='mono';
-    const todoRow=()=>!todo.length?[]:here&&!grounded?[{...text('▌','g_blocked'),role:'accent'},text(' '),...pack(todo,Math.max(0,width-3))]:pack(todo);
-    const rowsOf={session:sessionRow(),todo:todoRow(),routes:routeRow.parts};
-    // What stays, by rank: what to do, the session, the routes; a row with nothing on it gives its place.
-    const strip=height>=2,count=strip?height-1:1;
-    const chosen=new Set(['todo','session','routes'].filter(name=>rowsOf[name].length).slice(0,count));
-    const order=['session','todo','routes'].filter(name=>chosen.has(name));
-    const out=[],hits=[],groups=[],named=[];
-    const pad=parts=>[...parts,text(' '.repeat(Math.max(0,width-size(parts))))];
-    const withMark=parts=>{const body=cut(parts,Math.max(0,width-2));return [...body,text(' '.repeat(Math.max(0,width-1-size(body)))),text('▴','dim')];};
-    if(strip)out.push(width>=3?[{...text('─'.repeat(width-2),'dim'),role:'messages'},text(' '),text('▴','dim')]:withMark([]));
-    for(const name of order){
-      const parts=rowsOf[name];
-      named[out.length]=name;
-      const row=strip?pad(parts):withMark(parts);
-      out.push(name==='todo'&&here&&grounded?row.map(part=>({...part,ground:'fill'})):row);
-      if(name==='session')groups.push('head',...(parts.includes(ctxLabel)?['context']:[]),...(parts.some(part=>quotaParts.has(part))?['quota']:[]));
-      if(name==='todo'&&model.wait)groups.push('wait');
-      if(name==='routes'&&label)groups.push('route');
+    const routeHead=labelMatch?[text(labelMatch[1],'loc_repo'),text(' '),{...text('ROUTE','dim'),role:'title'}]:label?[{...text(label,'dim'),role:'title'}]:[];
+    const tally=labelMatch&&labelMatch[2].trim()?[text(' '+labelMatch[2].trim(),'dim')]:[];
+    // The messages: the way and the other session of each, once, the newest first.
+    const seen=new Set(),pairs=[];
+    for(const m of P(model.messages).slice().reverse()){const who=clean(m.who).trim(),way=clean(m.way).trim();
+      if(!who||!way||seen.has(way+who))continue;seen.add(way+who);pairs.push([text(way,way==='←'?'lvl_g':'loc_repo'),text(' '+who,'loc_repo')]);}
+    const messagesName=[{...text('MESSAGES','dim'),role:'title'}];
+    const messageGroup=(numbers,room)=>{
+      if(!pairs.length)return [];
+      if(!numbers)return [...messagesName,text(' '+pairs.length,'loc_repo')];
+      // As many as fit in `room`, the newest first, `+N` for the rest.
+      for(let k=pairs.length;k>=1;k--){const more=pairs.length-k,row=[...messagesName,...pairs.slice(0,k).flatMap(p=>[text(' '),...p]),...(more?[text(' +'+more,'dim')]:[])];
+        if(size(row)<=room||k===1)return row;}
+      return messagesName;
+    };
+    const room=Math.max(0,width-2);
+    // Each step lets one more thing go; the first that fits is drawn.
+    const steps=['resets','branch','effort','modelWindows','week','windows','mcp','model','numbers','messages','project','notices','bar','tally','ctx'];
+    const build=(gone,noticeRoom=Infinity)=>{
+      let q=windows;
+      if(gone.has('resets'))q=q.map(g=>g.filter(part=>!/^\s*\(↻/.test(String(part.text))));
+      if(gone.has('modelWindows'))q=q.filter(g=>kind(g)!=='model');
+      if(gone.has('week'))q=q.filter(g=>kind(g)!=='week');
+      if(gone.has('windows'))q=q.filter(g=>kind(g)!=='window');
+      const m=gone.has('model')?[]:gone.has('effort')?selected.slice(0,1):selected;
+      const c=gauge.length&&!gone.has('ctx')?[text('CTX ','dim'),...(gone.has('bar')?percent:gauge),...(!gone.has('mcp')&&P(model.mcp).length?[text(' │ ','dim'),...P(model.mcp)]:[])]:[];
+      const head=[...lead,...(!gone.has('project')&&project.length?[...(lead.length?[text(' ')]:[]),...project,...(gone.has('branch')?[]:branch)]:[])];
+      const session=[head,m,c,...q];
+      const n=gone.has('notices')?[]:notices.map(x=>size(x)<=noticeRoom?x:cut(x,Math.max(3,noticeRoom)));
+      const route=routeHead.length?[...routeHead,...(gone.has('tally')?[]:tally)]:[];
+      const groups=[...session.map(g=>({parts:g})),...(wait.length?[{parts:wait,action:'question'}]:[]),...n.map(x=>({parts:x})),
+        ...(route.length?[{parts:route,action:'popup:ROUTE',route:true}]:[])];
+      const before=size(joinAll(groups.map(g=>g.parts)));
+      const msg=gone.has('messages')?[]:messageGroup(!gone.has('numbers'),room-before-3);
+      if(msg.length)groups.push({parts:msg,action:'popup:MESSAGES'});
+      return groups.filter(g=>g.parts.length);
+    };
+    let groups=null;const gone=new Set();
+    for(let i=0;i<=steps.length&&!groups;i++){
+      if(i)gone.add(steps[i-1]);
+      let g=build(gone);
+      if(size(joinAll(g.map(x=>x.parts)))<=room){groups=g;break;}
+      // A notice's words are cut before the next value goes, while six cells of them stay.
+      if(notices.length&&!gone.has('notices')){const over=size(joinAll(g.map(x=>x.parts)))-room,longest=Math.max(...notices.map(size));
+        if(longest-over>=8){g=build(gone,longest-over);if(size(joinAll(g.map(x=>x.parts)))<=room){groups=g;break;}}}
     }
-    if(!strip&&!out.length)out.push(withMark([]));
-    while(out.length<height)out.push(pad([]));
-    // 11-15 (popup design E): the row of what to do opens the question popup while it carries the
-    // question; the rule with `▴` and every other row open the panel.
-    // The routes row's groups open their popups; a press between them opens the panel.
-    for(let i=0;i<out.length;i++){
-      if(named[i]==='routes')for(const span of routeRow.spans)hits.push({row:i,...span});
-      hits.push({row:i,left:0,right:width-1,action:named[i]==='todo'&&first.length?'question':'unfold'});
-    }
+    if(!groups)groups=build(gone);
+    const spans=[],parts=[];let x=0;
+    groups.forEach((g,i)=>{if(i){parts.push(...bar);x+=3;}const w=size(g.parts);if(g.action)spans.push({left:x,right:x+w-1,action:g.action});parts.push(...g.parts);x+=w;});
+    const body=cut(parts,room);
+    const row=[...body,text(' '.repeat(Math.max(0,width-1-size(body)))),text('▴','dim')];
+    const out=[row];while(out.length<height)out.push([text(' '.repeat(width))]);
+    const hits=[];
+    for(const sp of spans)if(sp.left<room)hits.push({row:0,left:sp.left,right:Math.min(sp.right,room-1),action:sp.action});
+    hits.push({row:0,left:0,right:width-1,action:'unfold'});
+    const shown=new Set(body);
     const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
-    const spins=out.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0);
-    return {rows:painted,hits,color,groups:[...new Set(groups)],animated:spins.length>0,spins,motion:null,folded:true};
+    const spins=out.map((r,i)=>r.some(part=>part.spin)?i:-1).filter(i=>i>=0);
+    const groupsPainted=['head',...(groups.some(g=>g.parts.some(p=>p.text==='CTX '))?['context']:[]),...(body.some(part=>quotaParts.has(part))?['quota']:[]),
+      ...(wait.length&&body.some(p=>wait.includes(p))?['wait']:[]),...(groups.some(g=>g.route)?['route']:[])];
+    const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
+    return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0,spins,motion:null,folded:true};
   }
   // Spec rule 49 (a), (b), (e): the panel's last row inside carries the gear `⚙` (dim) at its
   // right end and, three cells left of it, the fold button: `»` beside the native area (`«`
@@ -657,16 +591,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
       return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
     })();
-    // The LAB section (spec rule 59, 11-15): this project's experiment board, worded by the backend
-    // with Fleet's LAB-table cells (its head and rows below). Beside the native area only, as MEM.
-    const lab=side&&model.lab&&typeof model.lab==='object'&&!Array.isArray(model.lab)?model.lab:null;
     const P=v=>Array.isArray(v)?v.filter(p=>p&&typeof p==='object'):[];
-    // A cut name ends in `…` right after its last letter (no space before it).
-    const labCut=(parts,limit)=>{const out=cut(parts,limit);if(size(out)<size(parts)&&out.length){const last=out.at(-1);
-      if(String(last.text).endsWith('…')){const body=String(last.text).slice(0,-1).replace(/\s+$/u,'');
-        if(body)return [...out.slice(0,-1),{...last,text:body+'…'}];
-        const before=out.slice(0,-1);if(before.length){const prev=before.at(-1);return [...before.slice(0,-1),{...prev,text:String(prev.text).replace(/\s+$/u,'')},last];}}}
-      return out;};
     if(side){
       // Spec rule 29 (b), 30 (a): the metadata first, one block (the repository, Git,
       // model and effort, context, jobs, the repo's open work), then one thin rule, then
@@ -783,50 +708,46 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const questionCount=waitCount||(summary?String(summary.count):'');
     const asked=!!(summary||sentRows.length||model.wait||guide);
     let briefTwo=true,keepGuide=true,keepSent=true,keepAction=true;
-    // 11-15 (panel polish 1): the question to answer here, now, reads as one button: its rows stand
-    // on the rose fill across the panel's inside width (its first row bright, its choices numbered
-    // chips) over `↵ answer · Ctrl+]` in rose at the right. Short of rows the action row goes first,
-    // then the choices; the first row stays to the last. Mono, eight colors and NO_COLOR lead each
-    // row with a rose bar `▌` instead. A wait answered elsewhere and the answers on their way are
-    // never painted: what is painted is what a press answers now.
+    // 11-15 (the person: "빨간 틴트 안에 다시 검은 틴트는 못생겼는데" / "그냥 질문은 글자 자체를 붉은 색으로"): the
+    // question to answer here, now, reads apart from the messages' and memories' rows by its letters
+    // alone: its words (the first row, the second where there are no choices) and its choices' row are
+    // in the answer wait's red (`accent`, as its count and `◑`), never dimmed, no weight added, on no
+    // ground of their own; the choices' row is one line of words (`1 label · 2 label`, the ` · ` and
+    // `+N` dim). `↵ answer · Ctrl+]` stands in rose at the right under them. Short of rows the action
+    // row goes first, then the choices; the first row stays to the last. Eight colors keep the red;
+    // mono and NO_COLOR the weight. A wait answered elsewhere, the answers on their way and the guide
+    // line are never red: what is red is what a press answers now.
     const here=!!summary&&summary.answerable===true;
-    const grounded=(model.colors??256)>=256&&model.no_color!==true&&cfg.theme!=='mono';
-    const bar=()=>({...text('▌','g_blocked'),role:'accent'});
-    const button=row=>{
-      if(!grounded)return [bar(),text(' '),...cut(row,Math.max(0,inner-2))];
-      const fit=cut(row,inner);return [...fit,pad(inner-size(fit))].map(part=>({...part,ground:part.ground||'fill'}));
-    };
-    // The choices' row as chips (` 1 label ` on the chip ground, one fill cell apart, the first under
-    // the question's words); short of cells the last chips leave for their count (`+N`).
-    const chips=parts=>{
-      const items=choiceItems(parts).map(c=>c.map((part,i)=>i?(part.dim===true?part:{...part,role:'bright'}):{...part,role:'accent'}));
+    const red=part=>({...part,...(styles.g_blocked||{}),role:'accent',dim:false,bold:part.bold===true||model.no_color===true});
+    // The choices as one row of words: the first one always shows (short of cells its name is cut with
+    // `…`, its number kept, the rest counted `+N`; narrower still the count gives way first).
+    const choiceLine=parts=>{
+      const lead=parts.length&&!clean(parts[0].text).trim()?[parts[0]]:[];
+      const items=choiceItems(parts).map(c=>c.map(part=>part.dim===true&&!/^\d+ $/.test(clean(part.text))?part:red(part)));
       const more=Math.max(0,...parts.map(part=>{const m=/^(?: · )?\+(\d+)$/u.exec(clean(part.text));return m?Number(m[1]):0;}));
-      const chip=c=>[text(' '),...c,text(' ')].map(part=>({...part,ground:'chip'}));
-      const count=n=>n?[text(' +'+n,'dim')]:[];
+      const count=n=>n?[text(' · +'+n,'dim')]:[];
       for(let k=items.length;k>=1;k--){
-        const row=[text(' '),...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' ')]:[]),...chip(c)]),...count(items.length-k+more)];
+        const row=[...lead,...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' · ','dim')]:[]),...c]),...count(items.length-k+more)];
         if(size(row)<=inner)return row;
       }
-      // Not even the first chip fits beside the count: it shows with its name cut (`…`), its number
-      // kept, and the rest are counted; narrower still, the count gives way before the choice.
       if(items.length)for(const rest of [count(items.length-1+more),[]]){
-        const room=inner-1-2-size(rest);
-        if(room>=2||!rest.length)return [text(' '),...chip(cut(items[0],Math.max(1,room))),...rest];
+        const room=inner-size(lead)-size(rest);
+        if(room>=2||!rest.length)return [...lead,...cut(items[0],Math.max(1,room)),...rest];
       }
-      return [text(' '),...count(more)];
+      return [...lead,...count(more)];
     };
     // `↵ answer · Ctrl+]` at the right; narrow, its first word alone.
     const actionRow=()=>{
-      const room=grounded?inner:Math.max(0,inner-2),words=t('answer_action','↵ answer · Ctrl+]'),first=words.split(' · ')[0];
-      const shown=measure(words)<=room?words:first,a=[{...text(shown,'g_blocked'),role:'accent'}];
-      return [pad(room-size(a)),...a];
+      const words=t('answer_action','↵ answer · Ctrl+]'),first=words.split(' · ')[0];
+      const shown=measure(words)<=inner?words:first,a=[{...text(shown,'g_blocked'),role:'accent'}];
+      return [pad(inner-size(a)),...a];
     };
     const summaryRows=()=>{
       const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(P(row)));
       if(!here)return list.map(row=>cut(row,inner));
-      const out=list.map((row,i)=>!i?row.map(part=>part.role==='accent'?part:{...part,role:'bright'}):i===1&&summary.choices>0&&grounded?chips(row):row);
+      const out=list.map((row,i)=>i===1&&summary.choices>0?choiceLine(row):cut(row.map(part=>part.role==='accent'||!clean(part.text).trim()?part:red(part)),inner));
       if(keepAction&&briefTwo)out.push(actionRow());
-      return out.map(button);
+      return out;
     };
     const questionRows=()=>[...(keepSent?sentRows:[]),
       ...(summary?summaryRows():[]),
@@ -1292,52 +1213,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       block.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};
     };
-    // LAB (spec rule 59): this project's experiment board, worded by the backend with Fleet's LAB-table
-    // cells: `N LAB ──── failed 1 waiting 1 ›`, then the conditions in the board's order of what to
-    // look at (failed, stuck, unconfirmed, …, the best), each CONDITION, STATE, PROGRESS and DIFF.
-    // A value is whole or its column leaves; only a condition name ends in `…`. Beside the native
-    // area only. A failure here never colors the frame or the glyph.
-    const labRowsOf=()=>lab&&Array.isArray(lab.rows)?lab.rows.filter(r=>r&&typeof r==='object'):[];
-    const labHead=()=>{
-      const counts=(Array.isArray(lab.counts)?lab.counts:[]).map(P).filter(c=>c.length);
-      const spaced=list=>list.flatMap((c,i)=>i?[text(' '),...c]:c);
-      // Short of cells the later counts go first.
-      return sectionHead(lab.count?[text(clean(lab.count),'loc_repo')]:[],'LAB',[],counts.map((_,i)=>spaced(counts.slice(0,counts.length-i))).concat([[]]));
-    };
-    const LAB_GAP=2,LAB_NAME=6;
-    const labLines=n=>{
-      const list=labRowsOf().slice(0,n),notes=(Array.isArray(lab.notes)?lab.notes:[]).map(P).filter(x=>x.length).map(x=>cut(x,inner));
-      // Without a condition the goal (or why there is none) stands; a note (a catalog not read, another
-      // group to look at) takes a row the conditions leave.
-      if(!list.length)return [...(P(lab.goal).length?[cut(P(lab.goal),inner)]:[]),...notes].slice(0,n);
-      const cellOf=(r,c)=>r.cells&&r.cells[c]&&typeof r.cells[c]==='object'?r.cells[c]:text('');
-      const width=c=>Math.max(0,...list.map(r=>measure(clean(cellOf(r,c).text))));
-      const room=f=>inner-f.reduce((n,c)=>n+width(c)+LAB_GAP,0);
-      const cols=[['state','progress','delta'],['state','progress'],['state'],[]].find(f=>room(f)>=LAB_NAME)||[];
-      const nameWidth=Math.max(1,room(cols));
-      return list.map(r=>{
-        const name=labCut(r.name&&typeof r.name==='object'?[r.name]:[text('')],nameWidth),out=[...name,pad(nameWidth-size(name))];
-        // STATE reads from the left; PROGRESS and DIFF are numbers, right-aligned.
-        for(const c of cols){const v=[cellOf(r,c)];out.push(...(c==='state'?[pad(LAB_GAP),...v,pad(width(c)-size(v))]:[pad(LAB_GAP+width(c)-size(v)),...v]));}
-        return out;
-      }).concat(notes).slice(0,n);
-    };
-    // SESSIONS (popup design D, new): the sessions on this machine from Fleet's session table, those
-    // a person must answer first, then the running, then the idle, this window's own left out; each
-    // its state glyph, ID, TITLE and AGE. Beside the native area only, as LAB and MEM.
-    const sessions=side&&model.sessions&&typeof model.sessions==='object'&&Array.isArray(model.sessions.rows)?model.sessions:null;
-    const sessionList=sessions?sessions.rows.filter(s=>s&&typeof s==='object'&&!s.own):[];
-    const sessionHead=()=>{
-      const counts=(Array.isArray(sessions.counts)?sessions.counts:[]).map(P).filter(c=>c.length);
-      return sectionHead(Number.isInteger(sessions.count)?[text(String(sessions.count),'loc_repo')]:[],'SESSIONS',
-        counts.flatMap((c,i)=>i?[text(' '),...c]:c));
-    };
-    const sessionRow=s=>{
-      const glyph=P(s.glyph).map(p=>SPIN.includes(String(p.text))?{...p,...spinGlyph}:p);
-      const lead=[...glyph,text(' '),...P(s.tag),text(' ')],age=P(s.age),title=P(s.title);
-      const room=inner-size(lead)-(age.length?size(age)+1:0),n=cut(title,Math.max(1,room));
-      return room>=4?[...lead,...n,pad(room-size(n)),...(age.length?[text(' '),...age]:[])]:cut([...lead,...title],inner);
-    };
     // MESSAGES (spec rules 31, 45 (b), 58): the recent messages, one row each (`← [e7] text`), three
     // at most; `+N` counts the rest. The requests this session sent or received stand in the route box
     // (above), once; the popup reads both whole.
@@ -1368,8 +1243,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
       {name:'ROUTE',on:!!routeTitle,box:true},
-      {name:'LAB',on:!!lab,max:3,head:()=>labHead(),rows:n=>labLines(n),action:'popup:LAB'},
-      {name:'SESSIONS',on:!!sessions&&(sessionList.length>0||sessions.count>0),max:3,head:()=>sessionHead(),rows:n=>sessionList.slice(0,n).map(sessionRow),action:'popup:SESSIONS'},
       {name:'MESSAGES',on:messageTotal>0,max:3,head:()=>messageHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
       {name:'MEM',on:memItems.length>0,max:2,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).map(memRow)}];
     const take={},kept={};
@@ -1388,12 +1261,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // take one row each; the workers go (the kind row counts them); the kind rows go; every route takes
     // one row; the box shows fewer routes and scrolls in place, down to one. Then Git, then the route
     // box (v4.36.4's place for it: before the running jobs), then the running jobs; then MEM gives its
-    // row, then its name, then MESSAGES, SESSIONS and LAB the same; QUESTIONS keeps its head and first
+    // row, then its name, then MESSAGES the same; QUESTIONS keeps its head and first
     // row to the last; 5h/7d last of all. A step that freed more than it had to gives its rows back,
     // the most important first.
     const gave=[];
     const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
-    const lowest=['MEM','MESSAGES','SESSIONS','LAB'];
+    const lowest=['MEM','MESSAGES'];
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     for(const down of [2,1])for(const name of [...lowest,'QUESTIONS']){
@@ -1446,9 +1319,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
-      // A session's own row opens the popup with it unfolded.
-      sectionRows(s).forEach((row,i)=>into(row,
-        s.name==='SESSIONS'&&sessionList[i]?'popup:SESSIONS:'+clean(P(sessionList[i].tag).map(p=>p.text).join('')).replace(/^\[|\]$/g,''):s.action));
+      sectionRows(s).forEach(row=>into(row,s.action));
     }
     if(fill&&lower.length)while(content.length+lower.length<height-2-1)add([]);
     for(const row of lower)add(row.parts,row.action,row.groups);
@@ -1623,14 +1494,15 @@ function grayLevel(fg){
   return Math.max(r,g,b)-Math.min(r,g,b)<=8?Math.round((r+g+b)/3):null;
 }
 // 11-15: a popup's own look where the panel shows hue (the face's `popup`, `popupLine`, `bright` and
-// `popupFloor`; an unknown face the dark one's, as the veil): every cell of its frame on the ground (a
-// part with a ground of its own keeps it), the line and the title bright, a word in the terminal's own
-// color the brightest, a dim or gray word no fainter than the floor. A hue (a state, a harness, the
-// question's rose) keeps its color and reads at its full strength (a dim one is no longer dimmed).
+// `popupFloor`; an unknown face the dark one's, as the veil): every cell of its frame on the ground (no
+// part keeps a ground or a reversed cell of its own: inside a popup there are two grounds, the popup's
+// and the chosen choice's), the line and the title bright, a word in the terminal's own color the
+// brightest, a dim or gray word no fainter than the floor. A hue (a state, a harness, the question's
+// rose) keeps its color and reads at its full strength (a dim one is no longer dimmed).
 function popupLook(part,F,light){
   const floor=grayLevel(F.popupFloor),level=grayLevel(part.foreground),faint=v=>light?v>floor:v<floor;
-  const ground=Number.isInteger(part.background)?{}:{background:F.popup};
-  if(part.popupLine)return {...part,foreground:F.popupLine,dim:false,background:F.popup};
+  const ground={background:F.popup,reverse:false};
+  if(part.popupLine)return {...part,foreground:F.popupLine,dim:false,...ground};
   const own=part.foreground===null||part.foreground===undefined||part.foreground===-1;
   if(!own&&level===null)return {...part,dim:false,...ground};
   if(part.popupTitle)return {...part,foreground:F.bright,dim:false,...ground};
@@ -1670,7 +1542,12 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
   const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];
   const frame=[top];
-  for(const row of list){const fit=clip(Array.isArray(row)?row:[],inner);frame.push([line('│ '),...fit.parts,text(' '.repeat(Math.max(0,inner-fit.used))),line(' │')]);}
+  // 11-15 ("질문 선지 선택 효과를 틴트로"): a row the question editor marks chosen (`tint`) stands on the
+  // chosen ground across the popup's inside, its content's cells exactly (the cell each side between
+  // it and the side line keeps the popup's ground); mono, eight colors and NO_COLOR reverse those cells.
+  for(const row of list){const fit=clip(Array.isArray(row)?row:[],inner),chosen=Array.isArray(row)&&row.some(p=>p&&p.tint===true);
+    const cells=[...fit.parts,text(' '.repeat(Math.max(0,inner-fit.used)))].map(p=>chosen?{...p,chosenRow:true}:p);
+    frame.push([line('│ '),...cells,line(' │')]);}
   if(shut)frame.push(bottom);
   // One empty cell round the frame where the window has it.
   const left=x>0?1:0,right=x+W<cols?1:0,above=y>0?1:0,below=y+H<space?1:0;
@@ -1681,16 +1558,19 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   if(below)out.push([blank(W+left+right)]);
   const cfg={...defaults,...configuration,shade:'none'};
   let painted=appearance(out,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
-  // Where the panel shows hue the frame stands on its own ground (`popupLook`); the empty cells round it
-  // keep the terminal's own (they part it from what it covers).
+  // Where the panel shows hue the frame stands on its own ground (`popupLook`), and (11-15: "바운더리와
+  // 틴트의 간격이 ... 좌우가 더 좁거든? 스페이스바 한칸 정도 여백을 더") so does the one empty cell each side of it
+  // on the frame's rows, where the window has it; the empty rows above and below keep the terminal's
+  // own (they part it from what it covers). The chosen row's cells take the chosen ground.
   if(!bright){
     const known=face(cfg.theme,background),F=FACES[known||'dark'],light=known==='light';
     painted=painted.map((row,i)=>{
       const inFrame=i>=above&&i<above+frame.length;if(!inFrame)return row;
-      return row.map((part,k)=>(left&&k===0)||(right&&k===row.length-1)?part:popupLook(part,F,light));
+      return row.map((part,k)=>(left&&k===0)||(right&&k===row.length-1)?{...part,background:F.popup,margin:true}:
+        part.chosenRow?{...popupLook(part,F,light),background:F.chosen}:popupLook(part,F,light));
     });
-  }
-  painted=painted.map(row=>row.map(({popupLine,popupTitle,...part})=>part));
+  }else painted=painted.map(row=>row.map(part=>part.chosenRow?{...part,reverse:true}:part));
+  painted=painted.map(row=>row.map(({popupLine,popupTitle,chosenRow,tint,...part})=>part));
   // Presses, in window cells: `✕` closes, a section's name opens its popup.
   const hits=[];
   if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});

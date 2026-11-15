@@ -16,8 +16,6 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
-import json
-import subprocess
 import time
 import unittest
 from dataclasses import replace
@@ -144,12 +142,9 @@ class Consumers(T.Base):
         texts, board = self.consumers(root)
         row = next(r for r in board["groups"][0]["rows"] if r["name"] == NEW_B)
         self.assertEqual((row["comparison_state"], round(row["delta"], 2), row["delta_unit"]), ("ok", 0.5, "pp"))
-        from fleet import session_lab
         from fleet.explorer import lab_table
-        view = session_lab.view(board, NOW + 3)
-        shown = next(item for item in view["rows"] if item["name"]["text"] == NEW_B)
-        self.assertEqual(shown["cells"]["delta"]["text"], lab_table.cells(row, board["groups"][0], NOW + 3)["delta"][0])
-        self.assertIn("+0.5", shown["cells"]["delta"]["text"])
+        # (11-15: the shell panel's LAB section, one consumer here, left the panel; Fleet's cell stands.)
+        self.assertIn("+0.5", lab_table.cells(row, board["groups"][0], NOW + 3)["delta"][0])
         # A former name shows only as the way to the current one (`old → new` in the words line).
         bare = {k: v.replace(f"{OLD_B} → {NEW_B}", "").replace(f"{OLD_A} → {NEW_A}", "") for k, v in texts.items()}
         for consumer in ("board", "fleet", "notice", "compute-hosts", "leaderboard", "card"):
@@ -238,7 +233,7 @@ class CrossPresentation(T.Base):
             return SC._observe_lab({str(root.parent)})
 
     def test_counts_names_renderer_and_steward_new_unknown(self):
-        from fleet import session_lab
+        # (11-15: the shell panel's LAB section left the panel; Fleet's table and the supervisor's line stay.)
         from fleet.explorer import lab_table
         import steward_check as SC
         root = self.mixed()
@@ -260,10 +255,6 @@ class CrossPresentation(T.Base):
         self.assertNotIn("미확인", summary)
         self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행 중")
         self.assertEqual(lab_table.cells(rows["관측 끊긴 조건"], second, NOW)["state"][0], "미확인")
-        second_view = session_lab.view({**board, "selected": second["id"]}, NOW)
-        self.assertEqual([p[0]["text"] for p in second_view["counts"]], ["미확인 1", "이름 없음 1", "대기 1"])
-        for row, shown in zip(second["rows"], second_view["rows"]):
-            self.assertEqual(shown["cells"]["state"]["text"], lab_table.cells(row, second, NOW)["state"][0])
         fleet = self.fleet_page(board)
         for name in ("실패 조건", "정체 조건", "관측 끊긴 조건", "긴 에폭 정상"):
             self.assertIn(name, fleet)
@@ -271,41 +262,17 @@ class CrossPresentation(T.Base):
         self.assertIn("진행 중", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertNotIn("미확인", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertIn("미확인", next(line for line in lines if "관측 끊긴 조건" in line))
-        view = session_lab.view(board, NOW)
-        self.assertEqual([p[0]["text"] for p in view["counts"]], ["실패 1", "정체 1", "이름 없음 1", "대기 1"])
-        # 11-15 (popup design E): the panel's rows are the board's look-first order, its headline first,
-        # each Fleet's own cells.
-        self.assertEqual(view["rows"][0]["name"]["text"], first["headline"]["name"])
-        import experiment_board
-        for row, shown in zip(experiment_board.look_order(first["rows"], first.get("metric")), view["rows"]):
-            cells = lab_table.cells(row, first, NOW)
-            self.assertEqual(shown["name"]["text"], cells["name"][0])
-            self.assertEqual(shown["cells"]["delta"]["text"], cells["delta"][0])
-        self.assertTrue(view["strip_attention"])
         seen = self.observe(root, board)
         line, names, notified = SC._lab_summary({"lab": seen}, [])
         self.assertIn("미확인 1·이름 없음 1·실패 1·정체 1 (묶음 2개)", line)
-        # One word for the runs without a catalog name: supervisor line, shell head and Fleet's lower line.
+        # One word for the runs without a catalog name: supervisor line and Fleet's lower line.
         for lang, word in (("ko", "이름 없"), ("en", "unnamed")):
             with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
                 self.assertIn(word, SC._lab_summary({"lab": seen}, [])[0])
-                self.assertIn(word, "".join(p["text"] for p in session_lab.view(board, NOW)["counts"][2]))
                 self.assertIn(word, lab_table.ui_text("experiment.unlinked", count=1, ids="loose-run"))
         self.assertIn("둘째 묶음 — 관측 끊긴 조건", names)
         _, fallback, _ = SC._lab_summary({"lab": seen}, notified)
         self.assertIn(GROUP + " — 실패 조건", fallback)
-        script = r"""
-const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.parse(process.argv[2]);
-const draw=folded=>v.render({width:folded?120:40,height:folded?4:60,side:!folded,fill:!folded,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-{const lines=draw(false).join('\n');assert(lines.includes('실패 조건'),lines);assert(lines.includes('3 LAB'),lines);}
-// Folded, the strip under the native area carries LAB while it needs a look: its count, name tag and
-// most pressing count (spec rule 59 (g), 11-15).
-assert(draw(true).some(s=>/^3 LAB 실패 1 +$/.test(s)),draw(true).join('\n'));
-const head=draw(false).join('\n');assert(head.includes('3 LAB')&&head.includes('실패 1 정체 1'),head);
-"""
-        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
-                                 json.dumps(view, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_new_unknown_selects_its_groups_headline_not_necessarily_the_unknown(self):
         import steward_check as SC
@@ -318,8 +285,8 @@ const head=draw(false).join('\n');assert(head.includes('3 LAB')&&head.includes('
         _, names, _ = SC._lab_summary({"lab": self.observe(root, board)}, [])
         self.assertIn(second["name"] + " — " + second["headline"]["name"], names)
 
-    def test_fallback_matches_shell_even_when_failure_is_in_second_group(self):
-        from fleet import session_lab
+    def test_the_fallback_names_the_boards_selected_group_even_when_failure_is_in_second_group(self):
+        # (11-15: it matched the shell panel's LAB group too; that section left the panel.)
         import steward_check as SC
         root = self.make_root()
         second = "둘째 묶음"
@@ -335,7 +302,6 @@ const head=draw(false).join('\n');assert(head.includes('3 LAB')&&head.includes('
         _, names, _ = SC._lab_summary({"lab": seen}, [])
         selected = next(g for g in board["groups"] if g["id"] == board["selected"])
         self.assertIn(selected["name"] + " — " + selected["headline"]["name"], names)
-        self.assertEqual(session_lab._selected(board)["id"], selected["id"])
 
 
 def _reason_text(code):

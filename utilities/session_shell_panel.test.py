@@ -344,11 +344,8 @@ assert.equal(r.find(p=>p.text==='kimi-k3').foreground,110);assert.notEqual(r.fin
         sid = "00000000-0000-4000-8000-000000001112"
         me = os.getpid()
         start = open("/proc/self/stat").read().rsplit(") ", 1)[1].split()[19]
-        # This process's own folder is the checkout: its experiment board is not this test's to read.
-        from fleet import session_lab
-        no_lab = mock.patch.object(session_lab, "read", return_value=(None, []))
         quiet = mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, ""))
-        with tempfile.TemporaryDirectory() as home, quiet, no_lab, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+        with tempfile.TemporaryDirectory() as home, quiet, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
             record = Path(home) / "sessions" / f"{me}.json"
             record.parent.mkdir()
             project = lambda: shell.panel_projection("claude", sid, native_pid=me, native_start=start, columns=40, rows=30)
@@ -367,7 +364,7 @@ assert.equal(r.find(p=>p.text==='kimi-k3').foreground,110);assert.notEqual(r.fin
             for other in ({"sessionId": "another"}, {"procStart": "1"}):
                 record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": "busy", **other}))
                 self.assertNotIn("native_turn", project(), other)
-        with quiet, no_lab, mock.patch.object(codex, "exact_rollout_for_session_id", return_value=__file__), \
+        with quiet, mock.patch.object(codex, "exact_rollout_for_session_id", return_value=__file__), \
                 mock.patch.object(codex, "_tail_token_count", return_value=None):
             for event, turn in (("task_started", "working"), ("task_complete", "idle"), ("turn_aborted", "idle")):
                 with mock.patch.object(codex, "_latest_task_lifecycle", return_value=(event, "turn")):
@@ -1619,11 +1616,11 @@ assert(i>0&&rows[i].includes('…')&&!rows.some(s=>/^│   \S/.test(s)),rows.joi
         self.node(script, "panel-view.cjs")
 
     def test_each_section_keeps_its_rows_beside_the_route_box(self):
-        # 11-15 (popup design E; the route box again): a side panel 44 wide with every section. With
-        # room (46 rows) QUESTIONS keeps its summary's two rows (and the guide line), the route box every
-        # route whole, LAB, SESSIONS and MESSAGES three rows, MEM two; short of rows (24) each other
-        # section keeps one and the box scrolls in place. The heads in order and the press actions of
-        # every head and row; a route's rows open the route popup with it unfolded.
+        # 11-15 (popup design E; the route box again; no LAB or SESSIONS, whatever the backend sends): a
+        # side panel 44 wide with every section. With room (46 rows) QUESTIONS keeps its summary's two rows
+        # (and the guide line), the route box every route whole, MESSAGES three rows, MEM two; short of rows
+        # (20) each other section keeps one and the box scrolls in place. The heads in order and the press
+        # actions of every head and row; a route's rows open the route popup with it unfolded.
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -1648,54 +1645,50 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
 const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
 const paint=height=>pv.render({width:44,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
-const HEADS=[['QUESTIONS',/^│ 3 QUESTIONS ─+ › │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: ↓\d+ ─)?╮ │$|^│ ╭─ 4 ROUTE ─+╮ │$/],['LAB',/^│ 4 LAB ─+ 실패 1 대기 1 › │$/],['SESSIONS',/^│ 4 SESSIONS ◑1 ⠏1 ●2 ─+ › │$/],
+const HEADS=[['QUESTIONS',/^│ 3 QUESTIONS ─+ › │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: ↓\d+ ─)?╮ │$|^│ ╭─ 4 ROUTE ─+╮ │$/],
  ['MESSAGES',/^│ MESSAGES \+\d+ ─+ › │$/],['MEM',/^│ MEM ─+ │$/]];
 // The rows under each head, up to the next head (MEM: its `◆` rows; the route box: up to its bottom line).
 const sections=rows=>{const at=HEADS.map(([name,re])=>[name,rows.findIndex(s=>re.test(s))]);
  assert(at.every(([,i])=>i>0),rows.join('\n'));assert(at.every(([,i],k)=>!k||i>at[k-1][1]),'order of the heads\n'+rows.join('\n'));
  const out={};at.forEach(([name,i],k)=>{const end=name==='ROUTE'?rows.findIndex((s,j)=>j>i&&s.startsWith('│ ╰'))+1:k+1<at.length?at[k+1][1]:rows.findIndex((s,j)=>j>i&&!/^│ ◆ /.test(s));
   const body=rows.slice(i+1,end);while(body.length&&/^│ +│$/.test(body.at(-1)))body.pop();out[name]={head:i,rows:body,from:i+1};});return out;};
-for(const [height,rowsOf] of [[46,{QUESTIONS:2,LAB:3,SESSIONS:3,MESSAGES:3,MEM:2}],[24,{QUESTIONS:1,LAB:1,SESSIONS:1,MESSAGES:1,MEM:1}]]){
+for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:3,MEM:2}],[20,{QUESTIONS:1,MESSAGES:1,MEM:1}]]){
  const v=paint(height),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),label=height+'\n'+rows.join('\n');
  assert(rows.length<=height&&rows.at(-2).includes('7d 64%'),label);
+ assert(!/\bLAB\b|SESSIONS|긴 문맥|분리 모델/.test(rows.join('\n')),label);
  // QUESTIONS: the summary's rows (the guide line stands under them while there is room), the others: their rows.
  const summary=sec.QUESTIONS.rows.filter(s=>!/입력창에 답/.test(s));
  assert.equal(summary.length,rowsOf.QUESTIONS,label);assert(summary[0].startsWith('│ ◑ 패널을'),label);
  assert.equal(sec.QUESTIONS.rows.some(s=>/입력창에 답/.test(s)),height===46,label);
- for(const name of ['LAB','SESSIONS','MESSAGES','MEM'])assert.equal(sec[name].rows.length,rowsOf[name],name+' '+label);
+ for(const name of ['MESSAGES','MEM'])assert.equal(sec[name].rows.length,rowsOf[name],name+' '+label);
  // The route box: with room every route whole (its glyph and title, its time, its kind row), in the producer's
  // order; short of rows a window of them, the working first, the border counting the rest.
  const box=sec.ROUTE.rows,routeRows=box.filter(s=>/^│ │ [⠏⠋✕✓] /.test(s));
  if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   (one-shot|staged)/.test(s)).length===4&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
  else assert(routeRows.length>=1&&routeRows.length<4&&/↓\d+ ─╯/.test(box.at(-1))&&routeRows[0].includes('질문 팝업'),label);
- // Press actions: the question's head and rows open it; every head and row of LAB/SESSIONS/MESSAGES its popup;
+ // Press actions: the question's head and rows open it; every head and row of MESSAGES its popup;
  // the box's top line the route popup and a route's rows the popup with that route unfolded; MEM opens nothing.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
  for(let i=sec.QUESTIONS.head;i<=sec.QUESTIONS.head+sec.QUESTIONS.rows.length;i++)assert.deepEqual(act(i),['question'],'question '+i+label);
  assert.deepEqual(act(sec.ROUTE.head),['popup:ROUTE']);assert.deepEqual(act(sec.ROUTE.from),['popup:ROUTE:a']);
  if(height===46)assert.deepEqual(box.slice(0,-1).map((_,k)=>act(sec.ROUTE.from+k)[0]),['a','a','a','b','b','b','c','c','c','d','d','d'].map(id=>'popup:ROUTE:'+id),label);
  assert.deepEqual(act(sec.ROUTE.from+box.length-1),[],'the bottom line opens nothing');
- assert.deepEqual(act(sec.LAB.head),['popup:LAB']);sec.LAB.rows.forEach((_,k)=>assert.deepEqual(act(sec.LAB.from+k),['popup:LAB']));
- assert.deepEqual(act(sec.SESSIONS.head),['popup:SESSIONS']);assert.deepEqual(act(sec.SESSIONS.from),['popup:SESSIONS:12']);
- if(height===46)assert.deepEqual([0,1,2].map(k=>act(sec.SESSIONS.from+k)[0]),['popup:SESSIONS:12','popup:SESSIONS:73','popup:SESSIONS:e7'],label);
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);sec.MESSAGES.rows.forEach((_,k)=>assert.deepEqual(act(sec.MESSAGES.from+k),['popup:MESSAGES']));
  assert.deepEqual(act(sec.MEM.head),[]);sec.MEM.rows.forEach((_,k)=>assert.deepEqual(act(sec.MEM.from+k),[]));
- // A LAB row whose PROGRESS is unknown shows Fleet's `?`.
- if(height===46){const unknown=sec.LAB.rows.find(s=>s.includes('작은 배치'));assert(unknown&&/ \? /.test(unknown),label);
-  assert(sec.SESSIONS.rows.every(s=>!s.includes('[e9]')),'this window\'s own session is left out');
+ if(height===46){
   assert.deepEqual(sec.MESSAGES.rows.map(s=>s.slice(2,10)),['→ [73] 설','← [12] 답','← [52] 정'].map(s=>s.slice(0,8)));}
  // MESSAGES and MEM keep to the bottom: MEM's last row is right above the 5h/7d row.
  assert(/^│ ◆ /.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);
 }
-// Taller than the sections need: the blank rows stand between SESSIONS and the MESSAGES head, not under MEM.
+// Taller than the sections need: the blank rows stand between the route box and the MESSAGES head, not under MEM.
 {const v=paint(52),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),blank=s=>/^│ +│$/.test(s),label=rows.join('\n');
- const end=sec.SESSIONS.from+sec.SESSIONS.rows.length;
+ const end=sec.ROUTE.from+sec.ROUTE.rows.length;
  assert(sec.MESSAGES.head-end>=1&&rows.slice(end,sec.MESSAGES.head).every(blank),label);
  assert(/^│ ◆ /.test(rows.at(-3))&&rows.at(-2).includes('7d 64%')&&sec.MEM.rows.length===2,label);
  // The press targets of the moved rows moved with them.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);assert.deepEqual(act(sec.MESSAGES.from),['popup:MESSAGES']);
- assert.deepEqual(act(sec.SESSIONS.from),['popup:SESSIONS:12']);assert.deepEqual(act(end),[]);}
+ assert.deepEqual(act(end),[]);}
 """
         self.node(script, "panel-view.cjs")
 
@@ -1733,16 +1726,16 @@ assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\
 """
         self.node(script, "panel-view.cjs")
 
-    def test_the_question_to_answer_here_reads_as_one_button(self):
-        # 11-15 (panel polish 1): in the open panel's QUESTIONS section the question a press answers
-        # here, now, stands on the rose fill across the inside width: its first row bright, its
-        # choices numbered chips, `↵ 답하기 · Ctrl+]` in rose at the right under them; a press on any
-        # of its rows opens the question popup. The head row keeps the form of every other head. A
-        # wait answered elsewhere and the answers on their way are never painted; nothing else in
-        # the panel is. Short of rows the action row goes first, then the choices, the first row to
-        # the last (heights 5-60 × widths 12-60, no row past the panel, none wider). The folded
-        # strip's row of what to do takes the same fill. Mono, eight colors and NO_COLOR lead the
-        # rows with a rose bar instead. The fill is one value per face (52 dark, 224 light).
+    def test_the_question_to_answer_here_reads_in_red_letters(self):
+        # 11-15 (the person: "빨간 틴트 안에 다시 검은 틴트는 못생겼는데" / "그냥 질문은 글자 자체를 붉은 색으로 하는
+        # 정도로하자"; it replaces panel polish 1's button): in the open panel's QUESTIONS section the question a
+        # press answers here, now, stands on no ground of its own (no fill, no chips): its words and its
+        # choices' row (`1 파일 · 2 표준 출력 (추천) · 3 둘 다`, the ` · ` dim) are in the answer wait's red
+        # (`accent`, 174 / 131), never dimmed, no weight added; `↵ 답하기 · Ctrl+]` stands in rose at the right
+        # under them; a press on any of its rows opens the question popup. A wait answered elsewhere, the
+        # answers on their way and the guide line are never red. Short of rows the action row goes first,
+        # then the choices, the first row to the last (heights 5-60 × widths 12-60). Eight colors keep the
+        # red, mono and NO_COLOR the weight; no `▌` bar anywhere. A panel shade keeps its own ground.
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -1765,64 +1758,60 @@ const paint=(o={})=>pv.render({width:o.width||44,height:o.height||30,side:o.fold
 const str=r=>r.map(x=>x.text).join('');
 const inside=r=>r.slice(2,-2);
 const grounds=v=>v.rows.map(r=>r.some(x=>x.background!==undefined));
-// (a) 256 colors: the head, then three painted rows; their every inside cell on the fill or a chip.
+const red=x=>x.foreground===174&&x.dim!==true;
+// (a) 256 colors: the head, the sent line, then three rows; no ground anywhere, the words red.
 {const v=paint({q:choice(),sent}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ 1 QUESTIONS ─+ › │$/.test(r));
  assert(head>0,rows.join('\n'));assert.equal(rows[head+1],'│ ✓ 답 보냄 · 2 표준 출력                  │');
- const at=[head+2,head+3,head+4],painted=grounds(v);
- assert.deepEqual(painted.map((x,i)=>x?i:-1).filter(i=>i>=0),at,rows.join('\n'));
- for(const i of at){const parts=inside(v.rows[i]);
-  assert.equal(parts.reduce((n,x)=>n+cells(x.text),0),40,rows[i]);
-  assert(parts.every(x=>x.background===52||x.background===235),rows[i]+JSON.stringify(parts));}
- // The first row: `◑` rose, the words bright.
+ assert(!grounds(v).some(Boolean),rows.join('\n'));
+ const at=[head+2,head+3,head+4];
+ // The first row: `◑` and the words in red, no weight added.
  const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
- assert(first.find(x=>x.text==='◑').foreground===174&&first.filter(x=>/로그/.test(x.text)).every(x=>x.foreground===255),JSON.stringify(first));
- // The choices: numbered chips on the chip ground, one fill cell apart, the first under the words.
- const chips=[];let cur='';for(const x of inside(v.rows[at[1]])){if(x.background===235)cur+=x.text;else if(cur){chips.push(cur);cur='';}}if(cur)chips.push(cur);
- assert.deepEqual(chips,[' 1 파일 ',' 2 표준 출력 (추천) ',' 3 둘 다 '],rows[at[1]]);assert(rows[at[1]].startsWith('│   1 파일 '),rows[at[1]]);
+ assert(first.filter(x=>x.text.trim()).every(x=>red(x)&&x.bold!==true),JSON.stringify(first));
+ // The choices: one row of words, the numbers and names red, the ` · ` and `(추천)` dim.
+ assert(rows[at[1]].startsWith('│   1 파일 · 2 표준 출력 (추천) · 3 둘 다'),rows[at[1]]);
+ const ch=inside(v.rows[at[1]]);
+ assert(ch.filter(x=>/파일|표준 출력|둘 다|^\d $/.test(x.text)).every(red)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
  // The action at the right, in rose.
  assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │'),rows[at[2]]);
  assert(inside(v.rows[at[2]]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[at[2]]));
- // A press on any painted row (and the head) opens the question popup.
+ // A press on any of its rows (and the head) opens the question popup.
  for(const i of [head,...at])assert(v.hits.some(h=>h.row===i&&h.action==='question'),String(i));
- // The sent line keeps its own colors, unpainted.
- assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150);}
-// (b) A wait answered elsewhere, the sent line alone, no question: nothing painted, no action row.
-for(const q of [there,null]){const v=paint({q,sent});assert(!grounds(v).some(Boolean),JSON.stringify(q));assert(!v.rows.map(str).join('').includes('↵'));}
-// (c) Mono, eight colors, NO_COLOR: no ground anywhere, a rose bar leading each of the three rows.
-for(const [cfg,m] of [[{theme:'mono'},{}],[{},{colors:8}],[{},{no_color:true}]]){
- const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);assert(!grounds(v).some(Boolean),JSON.stringify(cfg));
- const bars=rows.filter(r=>r.startsWith('│ ▌ '));assert.equal(bars.length,3,rows.join('\n'));
- assert(bars[0].startsWith('│ ▌ ◑ 로그를')&&bars[1].includes('1 파일 · 2 표준 출력')&&bars[2].endsWith('↵ 답하기 · Ctrl+] │'),bars.join('\n'));}
-// (d) A light face and a shade keep the fill (the shade never covers it).
+ // The sent line keeps its own colors, not red.
+ assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150&&!v.rows[head+1].some(red));
+ // The messages' and memories' rows are not red: the question reads apart from them.
+ for(const r of v.rows.filter(r=>/\[73\]|패널 접힘/.test(str(r))))assert(!r.some(red),str(r));}
+// (b) A wait answered elsewhere, the sent line alone, no question: nothing red but the count, no action row.
+for(const q of [there,null]){const v=paint({q,sent}),rows=v.rows.map(str);
+ assert(!grounds(v).some(Boolean)&&!rows.join('').includes('↵'),JSON.stringify(q));
+ for(const r of v.rows.filter(r=>/다른 세션의 질문|그 창에서 답/.test(str(r))))assert(!r.filter(x=>x.text!=='◑').some(red),str(r));}
+// (c) Eight colors: the words in the terminal's red; mono and NO_COLOR: by weight; no bar, no ground.
+for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold===true],[{},{colors:8,styles:{...styles,g_blocked:{foreground:1}}},x=>x.foreground===1],[{},{no_color:true},x=>x.bold===true]]){
+ const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);
+ assert(!grounds(v).some(Boolean)&&!rows.join('').includes('▌'),JSON.stringify(cfg)+'\n'+rows.join('\n'));
+ const r=v.rows.find(r=>str(r).includes('◑ 로그를'));assert(inside(r).filter(x=>/로그/.test(x.text)).every(look),JSON.stringify([cfg,m,r]));}
+// (d) A light face: the deep rose; a shade keeps the panel's own ground under the red words.
 {const v=paint({q:choice(),cfg:{theme:'light'}}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
- assert(inside(r).every(x=>x.background===224)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===232),JSON.stringify(r));}
+ assert(inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===131)&&!grounds(v).some(Boolean),JSON.stringify(r));}
 {const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
- assert(inside(r).every(x=>x.background===52),JSON.stringify(r));}
+ assert(inside(r).every(x=>x.background===235)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===174),JSON.stringify(r));}
 // (e) Short of rows: the action row goes first, then the choices; the first row stays to the last.
 // Every height 5-60 at every width 12-60 keeps its rows within the panel, each as wide.
 const kinds=new Set();
 for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
  const v=paint({q:choice(),height:h,width:w,sent}),rows=v.rows.map(str),label=h+'x'+w+'\n'+rows.join('\n');
  assert(rows.length<=h&&rows.every(r=>cells(r)===w),label);
- const painted=grounds(v).map((x,i)=>x?i:-1).filter(i=>i>=0),head=rows.findIndex(r=>/^│ 1 QUESTIONS/.test(r)||/^│ 1 Q/.test(r));
- if(w>=20)assert(painted.length>=1,label);
- if(!painted.length)continue;
- // One block, right under the head or the sent line, inside the frame.
- assert(painted.every((y,i)=>!i||y===painted[i-1]+1)&&painted[0]>0&&painted.at(-1)<rows.length-2,label);
- if(head>=0)assert(painted[0]===head+1||painted[0]===head+2,label);
- const action=rows[painted.at(-1)].includes('↵'),n=painted.length;
- assert(n===1&&!action||n===2&&!action||n===3&&action,label);
- kinds.add(n);
+ const at=rows.findIndex(r=>r.includes('◑ 로'));
+ if(w>=20)assert(at>0,label);
+ if(at<0)continue;
+ const choices=/^│   1 /.test(rows[at+1]||''),action=(rows[at+(choices?2:1)]||'').includes('↵');
+ assert(!action||choices,label);
+ kinds.add(1+(choices?1:0)+(action?1:0));
 }
 assert.deepEqual([...kinds].sort(),[1,2,3]);
-// (f) The folded strip: its row of what to do on the fill across the whole width while it carries the
-// question to answer here; a wait answered elsewhere leaves it plain; without color, the rose bar.
-{const v=paint({q:choice(),folded:true,width:60,height:4}),i=v.rows.findIndex(r=>str(r).startsWith('◑답 대기 1'));
- assert(i>0&&v.rows[i].every(x=>x.background===52)&&v.rows[i].reduce((n,x)=>n+cells(x.text),0)===60,JSON.stringify(v.rows[i]));
- assert(grounds(v).filter(Boolean).length===1);assert(v.hits.some(h=>h.row===i&&h.action==='question'));}
-{const v=paint({q:there,folded:true,width:60,height:4});assert(!grounds(v).some(Boolean));}
-{const v=paint({q:choice(),folded:true,width:60,height:4,model:{colors:8}}),r=v.rows.map(str).find(r=>r.includes('◑답 대기'));
- assert(r.startsWith('▌ ◑답 대기 1 · 로그를')&&!grounds(v).some(Boolean),r);}
+// (f) The folded strip: one row, no ground, the wait red; the question's words are not on it.
+{const v=paint({q:choice(),folded:true,width:90,height:1}),r=v.rows[0];
+ assert(!grounds(v).some(Boolean)&&r.find(x=>x.text==='◑답 대기 1').foreground===174&&!str(r).includes('로그를'),str(r));
+ assert(v.hits.some(h=>h.action==='question'));}
 """
         self.node(script, "panel-view.cjs")
 
@@ -1972,137 +1961,62 @@ const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const labStart=rows=>rows.findIndex(s=>/^│ (\d+ )?LAB( |$)/.test(s));
 """
 
-    def test_lab_stands_under_the_routes_above_the_sessions_and_the_messages(self):
-        # Draft A, 11-15: `5 LAB ─── 진행 5 ›` (the count leads its upper-case word, spec rule 45; the word a
-        # dim title as MESSAGES and MEM; the most pressing counts at the right) and up to three condition
-        # rows (CONDITION, STATE, PROGRESS, DIFF); under the route box and above the sessions and the messages
-        # (QUESTIONS, ROUTE, LAB, SESSIONS, MESSAGES); a press on any of its rows (and only those) opens the LAB popup.
+    def test_no_lab_or_sessions_section_stands_whatever_the_backend_sends(self):
+        # 11-15: the LAB section (the person: "실험 현황은 다소 섣부른 추가같은데. 지금은 일단 빼") and the SESSIONS
+        # section ("세션 현황" meant this session's own progress, not the other sessions) left the panel: an
+        # older backend's `lab` or `sessions` draws nothing, changes no frame, glyph or row and opens nothing.
+        # The sections stand QUESTIONS, the route box, MESSAGES, MEM.
         script = self.FIXTURE + self.LAB + r"""
 const sessions={count:3,counts:[[T('◑1')],[T('●2')]],rows:[1,2,3].map(i=>({glyph:[T('●')],tag:[T('['),T('7'+i),T(']')],title:[T('다른 세션 '+i)],age:[T(i+'m')]}))};
 const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
-const at=(o={})=>view.render({width:o.width||40,height:o.height||60,side:true,fill:true,
- model:{...head,routes:[oneShot],route_count:1,lab:lab(o.lab||{}),sessions,...(o.model||{})},state:'idle',configuration:{},brief:()=>o.q||null});
-for(const width of [40,32]){
- const v=at({width,q}),rows=plain(v),at0=labStart(rows),route=rows.findIndex(s=>s.startsWith('│ ╭─ 1 ROUTE ')),qa=rows.findIndex(s=>s.includes('1 QUESTIONS')),
-  ses=rows.findIndex(s=>/^│ 3 SESSIONS /.test(s)),msg=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
- assert(qa>0&&qa<route&&route<at0&&at0<ses&&ses<msg&&rows[at0-1].startsWith('│ ╰'),rows.join('\n'));
- // The head: count, word, then the counts at the right before `›`; the rows are CONDITION, STATE, PROGRESS, DIFF.
- assert(new RegExp('^│ 5 LAB ─+ 진행 5 › │$').test(rows[at0]),rows[at0]);
- // Short of cells (32) DIFF leaves, whole, and the name keeps its place.
- if(width===32)assert(/^│ 기본 분리 +진행 +36\/60 ep │$/.test(rows[at0+1])&&/^│ 잡음 섞기 +진행 +34\/60 ep │$/.test(rows[at0+3]),rows.join('\n'));
- else assert(/^│ 기본 분리 +진행 +36\/60 ep +\+0\.4 dB │$/.test(rows[at0+1])&&/^│ 잔향 줄임 +진행 +35\/60 ep +\+0\.5 dB │$/.test(rows[at0+2])&&/^│ 잡음 섞기 +진행 +34\/60 ep +\+0\.6 dB │$/.test(rows[at0+3]),rows.join('\n'));
- assert(/^│ 3 SESSIONS /.test(rows[at0+4]),rows.join('\n'));
- const word=v.rows[at0].find(p=>p.text==='LAB');assert(word.dim===true&&word.role==='title',JSON.stringify(word));
- // A press on the LAB rows (exactly those) opens the LAB popup; nothing opens in place.
- assert.deepEqual(v.hits.filter(h=>h.action==='popup:LAB').map(h=>h.row),[at0,at0+1,at0+2,at0+3],JSON.stringify(v.hits));
- assert(v.hits.filter(h=>h.action==='popup:LAB').every(h=>h.left===2&&h.right===width-3));
- assert(!v.hits.some(h=>/^lab:/.test(h.action)));
+const items=[{tier:'durable',kind:'decision',age:'3m',text:'평가 조건을 같게 유지'}];
+for(const state of ['idle','working','blocked'])for(const folded of [false,true])for(const width of [40,32]){
+ const at=extra=>view.render({width:folded?120:width,height:folded?1:60,side:!folded,fill:!folded,folded,frame:3,
+  model:{...head,tag:'[e9]',routes:[oneShot],route_count:1,memory_items:items,...extra},state,harness:'claude',configuration:{},brief:()=>q});
+ const none=at({}),both=at({lab:failedLab(),sessions});
+ assert.deepEqual(both.rows,none.rows,state+' '+folded+' '+width);assert.deepEqual(both.hits,none.hits);assert.equal(both.color,none.color);
+ const rows=plain(both);
+ assert(!/\bLAB\b|SESSIONS|다른 세션|잡음 섞기/.test(rows.join('\n')),rows.join('\n'));
+ assert(!both.hits.some(h=>/LAB|SESSIONS/.test(h.action)));
+ if(!folded){const order=['1 QUESTIONS','╭─ 1 ROUTE','MESSAGES','MEM'].map(w=>rows.findIndex(r=>r.includes(w)));
+  assert(order.every((y,k)=>y>0&&(!k||y>order[k-1])),order+'\n'+rows.join('\n'));}
 }
-// No route: LAB right under the question; no route box.
-let rows=plain(at({model:{routes:[],route_count:0}}));
-assert(labStart(rows)>0&&!rows.join('').includes('ROUTE')&&!rows.join('').includes('╭'),rows.join('\n'));
-// A question: LAB keeps its place below the routes, the question stays above them.
-rows=plain(at({q,height:44}));
-const qa=rows.findIndex(s=>s.includes('조건을 계속')),la=labStart(rows),ra=rows.findIndex(s=>s.startsWith('│ ╭─ 1 ROUTE '));
-assert(la>0&&qa>0&&qa<ra&&ra<la&&rows.some(s=>s.includes('1 QUESTIONS'))&&rows.some(s=>s.includes('1 계속 · 2 멈춤')),rows.join('\n'));
-// A condition whose PROGRESS is unknown keeps Fleet's `?`.
-rows=plain(at({lab:{rows:[labRow('큰 학습률',0,{progress:'?'})]}}));
-assert(rows.some(s=>/^│ 큰 학습률 +진행 +\? +\+0\.4 dB │$/.test(s)),rows.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
-    def test_lab_gives_way_in_its_order_and_the_question_keeps_its_rows(self):
-        # Draft A's order merged with the panel's (spec rule 34 (b), 46 (d), 11-15): short of rows every
-        # section steps down to two rows and then to one, the lowest first (MEM, MESSAGES, SESSIONS,
-        # LAB); only then the route box folds and scrolls in place, and (v4.36.4's place) goes before the
-        # others give their last rows; then MEM goes, then each section's rows and head in the same
-        # order. The question keeps its head and first row, the fold and settings row stay.
-        script = self.FIXTURE + self.LAB + r"""
+    def test_the_sections_give_way_in_their_order_and_the_question_keeps_its_rows(self):
+        # The panel's order (spec rule 34 (b), 46 (d), 11-15): short of rows MESSAGES steps down to two rows
+        # and then to one, MEM to one; only then the route box folds and scrolls in place, and (v4.36.4's
+        # place) goes before the others give their last rows; then MEM goes, then MESSAGES' row and head.
+        # The question keeps its head and first row, the fold and settings row stay.
+        script = self.FIXTURE + r"""
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const items=[{tier:'durable',kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{tier:'durable',kind:'lesson',age:'2h',text:'one fix per review finding'}];
-const sessions={count:3,counts:[[T('◑1')],[T('●2')]],rows:[1,2,3].map(i=>({glyph:[T('●')],tag:[T('['),T('7'+i),T(']')],title:[T('다른 세션 '+i)],age:[T(i+'m')]}))};
 const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
-const labDraw=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged,oneShot],route_count:3,memory_items:items,sessions,lab:lab(),...(o.model||{})},
+const sections=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged,oneShot],route_count:3,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},brief:()=>o.q||null}));
 const n=(rows,re)=>rows.filter(s=>re.test(s)).length;
-const state=rows=>{const a=labStart(rows);
- return {lab:a<0?-1:n(rows.slice(a+1),/^│ (기본|잔향|잡음)/),ses:rows.some(s=>/SESSIONS/.test(s))?n(rows,/^│ ● \[/):-1,msg:rows.some(s=>/^│ MESSAGES/.test(s))?n(rows,/^│ [←→] \[/):-1,
-  box:rows.some(s=>s.startsWith('│ ╭─ 3 ROUTE'))?n(rows,/^│ │ [⠋●✕] /):-1,whole:n(rows,/│ │   (one-shot|staged)/),mem:rows.some(s=>/^│ MEM ─/.test(s))?n(rows,/^│ ◆/):-1};};
-// The first height each section stands at a given row count or fewer.
+const state=rows=>({msg:rows.some(s=>/^│ MESSAGES/.test(s))?n(rows,/^│ [←→] \[/):-1,mem:rows.some(s=>/^│ MEM ─/.test(s))?n(rows,/^│ ◆/):-1,
+ box:rows.some(s=>s.startsWith('│ ╭─ 3 ROUTE'))?n(rows,/^│ │ [⠋●✕] /):-1,whole:n(rows,/│ │   (one-shot|staged)/)});
+// The first height (from 90 down) each step is taken.
 const first={};const seen=[];
 for(let h=90;h>=8;h--){
- const rows=labDraw(h),s=state(rows);seen.push(h+':'+JSON.stringify(s));
- for(const [k,v] of Object.entries(s))for(const at of [2,1,0,-1])if(!['box','whole'].includes(k)&&v<=at&&first[k+at]===undefined&&!(k==='mem'&&at===2))first[k+at]=h;
- // The route box: its whole form (every route's kind row), its window (fewer routes than three), gone.
+ const rows=sections(h),s=state(rows);seen.push(h+':'+JSON.stringify(s));
+ for(const k of ['msg','mem'])for(const at of [2,1,0,-1])if(s[k]<=at&&first[k+at]===undefined&&!(k==='mem'&&at===2))first[k+at]=h;
  if(s.whole<3&&first.fold===undefined)first.fold=h;if(s.box>=0&&s.box<3&&first.scroll===undefined)first.scroll=h;if(s.box<0&&first.boxGone===undefined)first.boxGone=h;
  assert(rows.at(-2).endsWith('»   ⚙ │'),h+'\n'+rows.join('\n'));
  assert(rows.length<=h,h);
 }
-// (A later step that frees more rows than it needed gives them back to the earlier ones, so a
-// state may come back one height lower; the order is that of the first height each step is taken.)
-const lowest=['msg','ses','lab'];
-for(const at of [2,1])for(let i=1;i<lowest.length;i++)assert(first[lowest[i-1]+at]>=first[lowest[i]+at],lowest[i-1]+at+' goes before '+lowest[i]+at+'\n'+JSON.stringify(first));
-assert(first.mem1>=first.msg1,JSON.stringify(first));
-// Down to two rows every section first, then to one, then (MEM first) to none, then the head goes.
-for(const k of ['msg','ses','lab'])assert(first[k+2]>first[k+1]&&first[k+1]>first[k+0]&&(first[k+'-1']===undefined||first[k+0]>first[k+'-1']),k+JSON.stringify(first));
-assert(first.mem0>first.msg0&&first.msg0>first.ses0&&first.ses0>first.lab0,JSON.stringify(first));
-// The route box keeps its whole form until every other section is down to one row, then folds, then
-// scrolls, then goes, before any other section gives its last row.
-assert(first.fold<=Math.min(first.msg1,first.ses1,first.lab1)&&first.scroll<first.fold&&first.boxGone<first.scroll&&first.boxGone>first.mem0,JSON.stringify(first)+'\n'+seen.join('\n'));
-// With a question: its head and first row stay at every height, the three rows while room allows.
+const label=JSON.stringify(first)+'\n'+seen.join('\n');
+assert(first.msg2>first.msg1&&first.mem1>=first.msg1&&first.msg1>first.msg0&&first.msg0>first['msg-1'],label);
+assert(first.fold<=Math.min(first.msg1,first.mem1)&&first.scroll<first.fold&&first.boxGone<first.scroll,label);
+assert(first.boxGone>first.mem0&&first.mem0>first['mem-1']&&first['mem-1']>first.msg0,label);
+// With a question: its head and first row stay at every height, the three rows while MESSAGES keeps two or more.
 const asked=rows=>rows.filter(s=>/1 QUESTIONS|조건을 계속|1 계속 · 2 멈춤/.test(s));
-for(let h=40;h>=10;h--){const rows=labDraw(h,{q});
+for(let h=40;h>=10;h--){const rows=sections(h,{q});
  assert(asked(rows).length>=2,h+'\n'+rows.join('\n'));
- // Its choices' row goes only after LAB is down to one row (the lowest sections first).
- if(state(rows).lab>=2)assert.equal(asked(rows).length,3,h+'\n'+rows.join('\n'));
+ if(state(rows).msg>=2)assert.equal(asked(rows).length,3,h+'\n'+rows.join('\n'));
  assert(rows.at(-2).endsWith('»   ⚙ │'),h);}
-"""
-        self.node(script, "panel-view.cjs")
-
-    def test_lab_is_absent_without_a_board_and_an_unconfirmed_board_says_so(self):
-        # No experiments and no problem: the backend sends no LAB and no row stands. A broken or
-        # missing catalog with runs found, or runs without a name, never reads as "no experiments".
-        # 11-15: without conditions the head's counts say so and the goal (or why there is none) and
-        # the notes stand on one row each.
-        script = self.FIXTURE + self.LAB + r"""
-const labDraw=(model,o={})=>view.render({width:40,height:40,side:true,fill:true,model:{...head,routes:[oneShot],route_count:1,...model},state:'idle',configuration:{},
- questions:()=>[]});
-for(const none of [null,undefined,'x',[]]){const rows=plain(labDraw({lab:none}));assert(!/\bLAB\b/.test(rows.join('\n'))&&labStart(rows)<0,rows.join('\n'));}
-const unread=lab({count:'',counts:[[T('이름 없음 2','lvl_y')]],goal:[T('실험 정본 아직 없음; run은 id로만 보임','lvl_y')],rows:[],key:'lab:',strip_attention:true});
-let rows=plain(labDraw({lab:unread})),a=labStart(rows);
-// Without a group the head says so at the right and the second row says why, on one row (cut with `…`).
-assert(/^│ LAB ─+ 이름 없음 2 › │$/.test(rows[a])&&rows[a+1].startsWith('│ 실험 정본 아직 없음;')&&rows[a+1].includes('…'),rows.join('\n'));
-assert(!rows.some(s=>/^│ 조건 /.test(s))&&!rows.join('').includes('run-x'),rows.join('\n'));
-// Another group's trouble is told, not hidden behind the selected one (a row the conditions leave).
-rows=plain(labDraw({lab:lab({rows:[labRow('기본 분리',0)],notes:[[T('다른 묶음 잡음 실험도 확인 필요: 실패 1','lvl_y')]]})}));a=labStart(rows);
-assert(rows[a+1].startsWith('│ 기본 분리')&&rows[a+2].startsWith('│ 다른 묶음 잡음 실험도'),rows.join('\n'));
-"""
-        self.node(script, "panel-view.cjs")
-
-    def test_an_experiment_failure_never_changes_the_frame_or_the_session_glyph(self):
-        # The frame, the head's glyph and number, and the folded strip's rule and session row are the
-        # session's own state (spec rule 25, 49 (c)); a failed or unconfirmed experiment stays inside
-        # LAB (folded: its `5 LAB 실패 1` group at the end of the routes row).
-        script = self.FIXTURE + self.LAB + r"""
-const frame=v=>JSON.stringify(v.folded?[v.color,v.rows[0],v.rows[1]]:[v.color,v.rows[0],v.rows.map(r=>[r[0],r.at(-1)]),v.rows.at(-1)]);
-for(const state of ['idle','working','blocked','unknown'])for(const folded of [false,true]){
- const labDraw=lab=>view.render({width:folded?120:40,height:folded?4:30,side:!folded,fill:!folded,folded,frame:3,model:{...head,tag:'[e9]',routes:[oneShot],route_count:1,lab},
-  state,harness:'claude',configuration:{},questions:()=>[]});
- const none=labDraw(null),failed=labDraw(failedLab());
- assert.equal(frame(failed),frame(none),state+' '+folded);
- if(!folded)assert(plain(failed).some(s=>s.includes('실패 1')));
- else assert(plain(failed).some(s=>/ │ 5 LAB 실패 1 +$/.test(s))&&!plain(none).join('').includes('LAB')&&plain(failed)[1].includes('CTX ━━━━'),plain(failed).join('\n'));
-}
-"""
-        self.node(script, "panel-view.cjs")
-
-    def test_lab_reads_the_same_in_every_harness(self):
-        script = self.FIXTURE + self.LAB + r"""
-for(const open of [[],['lab:grp_1']])for(const folded of [false,true]){
- const labDraw=harness=>plain(view.render({width:folded?120:40,height:folded?4:50,side:!folded,fill:!folded,folded,model:{...head,lab:failedLab()},state:'idle',harness,
-  configuration:{},expandedKeys:open,questions:()=>[]})).filter(s=>!s.startsWith('┌'));
- const claude=labDraw('claude');
- for(const harness of ['codex','opencode'])assert.deepEqual(labDraw(harness),claude,harness);
-}
 """
         self.node(script, "panel-view.cjs")
 

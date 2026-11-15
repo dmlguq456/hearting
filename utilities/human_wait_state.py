@@ -116,15 +116,6 @@ def person_wait(item):
             and item.get("answer") != "sent")
 
 
-def waiting_owner(item):
-    """Whether this wait keeps a named session waiting on a person: a wait with an owner session that
-    is current (not folded as older) and a person's to answer (``person_wait``). The one set the
-    sessions section reads again for (`session_shell._sessions_key`)."""
-    owner = item.get("owner") if isinstance(item, dict) else None
-    return (isinstance(owner, dict) and bool(owner.get("harness")) and bool(owner.get("session_id"))
-            and not item.get("stale") and person_wait(item))
-
-
 def wait_counts(items):
     """The single count every surface shows: current, folded (older), and ownerless.
 

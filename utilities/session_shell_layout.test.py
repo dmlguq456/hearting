@@ -22,7 +22,7 @@ assert.equal(d.layout({cols:89,rows:40,configuration}).side,false);assert.equal(
 assert.equal(d.layout({cols:180,rows:7,configuration}).side,false);
 // Folded, in every placement: the strip under the native area, which keeps the whole width (spec rule 49 (c)).
 g=d.layout({cols:180,rows:40,configuration,expanded:false,panelRows:d.foldRows(40)});
-assert.deepEqual([g.side,g.folded,g.panelCols,g.nativeCols,g.nativeRows,g.panelColumn,g.nativeColumn,g.gap,g.panelRow],[false,true,180,180,36,0,0,0,null]);
+assert.deepEqual([g.side,g.folded,g.panelCols,g.nativeCols,g.nativeRows,g.panelColumn,g.nativeColumn,g.gap,g.panelRow],[false,true,180,180,39,0,0,0,null]);
 g=d.layout({cols:180,rows:40,configuration:{...configuration,position:'left'},expanded:false,panelRows:d.foldRows(40)});
 assert.deepEqual([g.left,g.panelColumn,g.nativeColumn,g.nativeCols],[false,0,0,180]);
 for(const configuration of [null,{}, {layout:'side',side_width:-1,side_min_columns:132}])

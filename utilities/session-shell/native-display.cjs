@@ -177,17 +177,11 @@ function fold({cols,choice=null,configuration={},pinned=false,expanded=true}) {
   const roomy=!(configuration.layout==='side'&&width)||cols-width-2>=NATIVE_MIN+(expanded?0:REOPEN_MARGIN);
   return {folded:!roomy&&!pinned,choice:null};
 }
-// Spec rule 49 (c): folded, the panel is one strip under the native area in every placement and
-// however it folded (by itself or by hand): a thin rule carrying `▴`, then three rows. Its height
-// follows the window's rows alone, never what it shows, so a question coming or going never
-// moves the native area: three rows from FOLD_ROWS[0] window rows (the native keeps 20 or more),
-// two from FOLD_ROWS[1], else one; a window of two rows or fewer keeps one strip row and the native
-// the rest. The native always keeps its whole width.
-const FOLD_ROWS=[24,16];
-function foldRows(rows){
-  const content=rows>=FOLD_ROWS[0]?3:rows>=FOLD_ROWS[1]?2:1;
-  return Math.max(1,Math.min(content+1,rows-1));
-}
+// Spec rule 49 (c), as the person changed it (11-15: "전체를 한줄로만 만들자"): folded, the panel is one
+// row under the native area in every placement and however it folded (by itself or by hand), whatever
+// the window's height and whatever it shows, so a question coming or going never moves the native
+// area. The native always keeps its whole width.
+function foldRows(rows){return 1;}
 // `panelRows` is the panel's row count under the native area; the native keeps at least one row.
 function layout({cols,rows,expanded=true,configuration={},panelRows=1}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
@@ -249,4 +243,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,FOLD_ROWS,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

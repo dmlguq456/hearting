@@ -111,7 +111,7 @@ context.mouse(65,93+1+10,20,false);assert.equal(context.get().routeScroll,1,'the
 context.set({top:4,bottom:12,offset:0,max:0,step:3},0);context.mouse(65,93+1+10,6,false);assert.equal(context.get().routeScroll,0,'a box that shows every route keeps still');
 // The panel paints the window the host keeps (its border counts what it hides).
 const many={...golden.scenes.na,routes:Array.from({length:6},(_,i)=>({...golden.scenes.na.routes[1],id:'rt-'+String(i).repeat(16),title:'route '+i})),route_count:6,route_total:6};
-const at=s=>pv.render({width:40,height:22,side:true,fill:true,model:many,state:'working',configuration:{},routeScroll:s});
+const at=s=>pv.render({width:40,height:18,side:true,fill:true,model:many,state:'working',configuration:{},routeScroll:s});
 const top=at(0),down=at(2);assert(top.routeArea&&top.routeArea.max>0,JSON.stringify(top.routeArea));
 assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑2 ─╮/.test(s)),down.rows.map(txt).join('\n'));
 assert.equal(down.routeArea.offset,2);

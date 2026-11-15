@@ -183,7 +183,7 @@ state's color the moment the native screen changes (running: the frame stands li
 a light passes over the rule under the model and context, then rests a second; waiting: it
 breathes red; idle stays neutral). **Settings → rule motion** picks `border` (one arc round the
 frame) or `scanners` (a wide wave flowing round it) instead, or `off`. A failed route
-colors only the route box's line, a failed experiment only its own row. Below the model and
+colors only the route box's line. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
 Under the head (folder, branch and Git state, model and context, title and now,
@@ -193,32 +193,30 @@ be opened outside the terminal: `3 QUESTIONS` (the next question's first line
 and its choices), the route box (`╭─ 4 ROUTE │ 2 REQUEST ─╮`: every route, who works on it
 now with its role, harness, model and effort, its `CTX` gauge with the time after it, its
 title, its kind and where it stands, its live workers in a smaller box under it, then the
-requests this session sent or received), `4 LAB failed 1`
-(three experiment conditions, the one to look at first), `5 SESSIONS ◑2 ⠏1`
-(three other sessions on this machine, the ones waiting for you first),
+requests this session sent or received),
 `MESSAGES +3` (three messages) and `MEM` (the two newest saved memories of
 this repository and global ones, each `◆` durable or `◇` working, then its scope and kind), each
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
-routes popup with that route unfolded, a request's row the MESSAGES popup. The question you can answer here now reads as a button:
-its rows stand on a dark rose fill across the panel, its choices are numbered chips,
-and `↵ answer · Ctrl+]` stands under them (a rose bar at the left in mono, eight
-colors or `NO_COLOR`); nothing else in the panel is filled. Once you answer, the
+routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
+machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can
+answer here now reads in rose letters, on no fill: its first line, its choices as text
+(`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors, bold in
+mono or `NO_COLOR`); nothing else in the panel is red. Once you answer, the
 question is one line, `✓ answer sent` in the passing green and what you chose
 after it. Short of rows the other sections step down to one row first, then the route
 box folds its routes (context into the first row, then the kind row, then one row each)
-and scrolls in place under the wheel, its border counting what it hides. The ROUTE, LAB and
-SESSIONS popups are Fleet's own tables at the popup's width (a route unfolded
-with its failure reason whole, Enter for its page with its paths; the LAB
-table; the session table), drawn again when what they show changes; **←/→**
-moves between the sections, **↑/↓** through routes or sessions, and **Enter** on
-a session waiting for you (`◑`) answers its question right there, once, as that
-session's answer. Press a section, or **Ctrl+]** (the question popup when one
+and scrolls in place under the wheel, its border counting what it hides. The ROUTE
+popup is Fleet's own table at the popup's width (a route unfolded
+with its failure reason whole, Enter for its page with its paths), drawn again when what it
+shows changes; **←/→** moves between the sections and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
 waits here, else the first section), and use **p** in any popup to fold or open
 the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
 press outside closes it; while it stands every key is its own, everything around
 it reads in one dark gray (the native's output keeps arriving, still gray, and the
 native is never told) while the popup stands on its own lighter ground with bright
-words, and ordinary keys stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
+words, one cell wider than its line on each side; in the question popup the chosen choice (and the
+answer you are typing) stands on its own blue ground (reversed in mono, eight colors or `NO_COLOR`),
+and ordinary keys stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
 **t** for text (including pasted text), and **Enter** after every form field is
 answered. Choices and drafts survive question navigation. A transport receipt
 is shown separately from proved consumption; expired or cancelled questions
@@ -245,16 +243,14 @@ to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
 The default is a 40-column side panel. **»** beside the gear (**▾** under the
 native area) folds it into a strip under the native area, which gets the whole
-width back: a thin rule with **▴**, then three rows: the session (state,
-number, project, model, context, 5h and 7d), what to do now (an answer you owe
-with the question's first line, compaction about to happen), and the sections
-(`4 ROUTE ⠏2 ✕1 · ✕ title │ 4 LAB failed 1 │ 5 SESSIONS ◑2 │ MESSAGES ←2`, the Git
-branch on the session row where it fits). Each row drops whole items from its end
-when narrow. The strip keeps its height whatever it shows (a short window gets
-fewer rows: three from 24 rows, two from 16, else one, with what to do kept
-longest); a press on its rule or session row opens the panel again, the row of what
-to do opens the question popup, and each section group opens its popup above the
-strip; with the keyboard, **Ctrl+]** then **p** opens the panel. Where the open panel would leave the
+width back: one row at any window height, `● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━──── 58% │
+5h 12% │ 7d 66% │ ◑to answer 1 │ 3 ROUTE ⠏2 ✕1 │ MESSAGES ← [e7] → [73]` with **▴** at its right
+end (the wait only while you owe an answer, compaction about to happen or a tidy notice in its
+place; the Git branch after the project where it fits). Narrow, whole values go: reset times,
+branch, effort, 7d, 5h, the model, the message sessions (their count stays), MESSAGES, the
+project, the context bar (its percent stays), the route counts; the state, number, wait,
+`N ROUTE` and **▴** stay. A press on the wait opens the question popup, on the routes or
+MESSAGES their popup above the strip, anywhere else opens the panel again; with the keyboard, **Ctrl+]** then **p** opens the panel. Where the open panel would leave the
 native area under 60 columns (a 40-column panel in a terminal under 102
 columns) it folds by itself into the same strip and opens again with room; a
 choice made by hand holds at every width (a panel opened by hand in a window
