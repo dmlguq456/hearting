@@ -186,6 +186,10 @@ frame) or `scanners` (a wide wave flowing round it) instead, or `off`. A failed 
 colors only the route box's line. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
+The head's REPO row carries a **STATUS ›** button at its right end (the screen's language word): a press on the row
+opens this session's campaign status document whole in a popup (Fleet's status lines for the
+project first, markdown tables as aligned columns), dim when there is no document yet and
+absent where the project keeps no artifact root.
 Under the head (folder, branch and Git state, model and context, title and now,
 running jobs) the panel is a few rows per section, each a press away from a
 popup in the middle of the window that shows the whole thing, so nothing has to
@@ -201,14 +205,17 @@ routes popup with that route unfolded, a request's row the MESSAGES popup. Exper
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can
 answer here now reads in rose letters, on no fill: its first line, its choices as text
 (`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors, bold in
-mono or `NO_COLOR`); nothing else in the panel is red. Once you answer, the
+mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
+While an answer waits those red letters, and the folded strip's `◑to answer N`, go slowly between
+two reds on the waiting frame's breath (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
 question is one line, `✓ answer sent` in the passing green and what you chose
 after it. Short of rows the other sections step down to one row first, then the route
 box folds its routes (context into the first row, then the kind row, then one row each)
 and scrolls in place under the wheel, its border counting what it hides. The ROUTE
 popup is Fleet's own table at the popup's width (a route unfolded
 with its failure reason whole, Enter for its page with its paths), drawn again when what it
-shows changes; **←/→** moves between the sections and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
+shows changes; a markdown table in a request's body or a question reads as aligned columns;
+**←/→** moves between the sections (`STATUS · QUESTIONS · ROUTE · MESSAGES`) and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
 waits here, else the first section), and use **p** in any popup to fold or open
 the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
 press outside closes it; while it stands every key is its own, everything around
@@ -248,8 +255,8 @@ width back: one row at any window height, `● [e9] hearting │ Opus 5.5 xhigh 
 end (the wait only while you owe an answer, compaction about to happen or a tidy notice in its
 place; the Git branch after the project where it fits). Narrow, whole values go: reset times,
 branch, effort, 7d, 5h, the model, the message sessions (their count stays), MESSAGES, the
-project, the context bar (its percent stays), the route counts; the state, number, wait,
-`N ROUTE` and **▴** stay. A press on the wait opens the question popup, on the routes or
+project, the context bar (its percent stays), the route counts, and at 30 cells the session
+number; the state, wait, `N ROUTE` and **▴** stay. A press on the wait opens the question popup, on the routes or
 MESSAGES their popup above the strip, anywhere else opens the panel again; with the keyboard, **Ctrl+]** then **p** opens the panel. Where the open panel would leave the
 native area under 60 columns (a 40-column panel in a terminal under 102
 columns) it folds by itself into the same strip and opens again with room; a

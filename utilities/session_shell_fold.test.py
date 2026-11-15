@@ -120,7 +120,9 @@ const parts=r.rows[0];
 assert.equal(parts.find(x=>x.text==='◑답 대기 1').foreground,174);
 for(const word of ['CTX ','MESSAGES','ROUTE'])assert(parts.find(x=>x.text===word).dim===true,word);
 assert(parts.at(-1).text==='▴'&&parts.at(-1).dim);
-assert(!/[┌┐└┘⚙⚑]/.test(rows[0])&&r.motion===null&&!parts.some(x=>x.beat||x.motion),rows[0]);
+// (11-15: "대기 중인건 점멸을 시키자": the wait's glyphs are the strip's only moving cells, its blink.)
+assert(!/[┌┐└┘⚙⚑]/.test(rows[0])&&!parts.some(x=>x.beat||x.motion),rows[0]);
+assert.equal(r.motion.cells.map(c=>c.ch).join(''),'◑답대기1');
 assert.deepEqual([r.spins,r.animated],[[0],true]);
 assert(parts.every(x=>x.background===undefined),'no ground anywhere on it');
 // A press on the wait opens the question popup, on the routes the routes popup, on MESSAGES its popup;

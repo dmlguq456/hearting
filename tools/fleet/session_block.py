@@ -138,8 +138,13 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
             for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix) - 2))):
                 options.append([(prefix if line_index == 0 else " " * cell_width(prefix), "dim"), *line])
         body = []
-        for source_line in str(question.get("question") or "?").splitlines():
-            if source_line.strip():
+        # 11-15: a markdown table in the question's text reads as aligned columns (the documents' one
+        # table rule, ``transcript.table_parts``); every other line wraps as before.
+        from .explorer.transcript import table_parts
+        for source_line in table_parts(str(question.get("question") or "?").splitlines(), width):
+            if isinstance(source_line, list):
+                body.extend(source_line)
+            elif source_line.strip():
                 body.extend(wrap_parts([(source_line, "loc_repo")], width))
         question["display"] = {
             "head": heading, "source": source,
