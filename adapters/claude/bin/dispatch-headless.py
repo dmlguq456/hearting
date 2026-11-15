@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from worker_runtime_home import prepare_worker_home, claude_worker_arguments
+from foreground_activity import BLOCKING_COMMAND_MAX_SECONDS
 from dispatch_contract import (
     _atomic_registry_replace,
     workflow_completion_receipt,  # noqa: E402
@@ -490,7 +491,7 @@ PERMISSION_MODE_FLAG_VALUES = {
 HEADLESS_BACKGROUND_OFF = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 HEADLESS_BASH_TIMEOUT_DEFAULTS = {
     "BASH_DEFAULT_TIMEOUT_MS": "600000",
-    "BASH_MAX_TIMEOUT_MS": "3000000",
+    "BASH_MAX_TIMEOUT_MS": str(int(BLOCKING_COMMAND_MAX_SECONDS * 1000)),
 }
 
 

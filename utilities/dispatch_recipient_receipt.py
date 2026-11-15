@@ -212,34 +212,6 @@ def _stop_feedback_bindings(text: str) -> list[tuple[str, str]]:
     return [(match.group(1), match.group(2)) for match in MARKER_RE.finditer(_stop_feedback_head(text))]
 
 
-def _claude_queued(events: list, session_id: str) -> list[tuple[str, str]]:
-    """Bindings of Stop-hook notifications this session's native queue provably still holds.
-
-    Claude Code records its prompt queue in the transcript: ``enqueue`` carries the
-    text; ``remove``, ``popAll`` and ``popOne`` name the item they take; ``dequeue``
-    names none (Claude takes by priority), and neither does a ``remove`` a hook
-    dropped. Only the content counts, never a guessed order: an item an unnamed
-    operation may have taken is no longer counted as waiting, so the boundary shows
-    it rather than leave it to a queue that may have lost it. What is left was handed
-    to Claude and has not reached the model yet; it is not a receipt, only a reason
-    a tool boundary need not show it again in this turn.
-    """
-    queue: list[str] = []
-    for event in events:
-        if (not isinstance(event, dict) or event.get("type") != "queue-operation"
-                or event.get("sessionId", event.get("session_id")) != session_id):
-            continue
-        operation, content = event.get("operation"), event.get("content")
-        if operation == "enqueue":
-            queue.append(content if isinstance(content, str) else "")
-        elif operation in {"remove", "popAll", "popOne"} and isinstance(content, str):
-            if content in queue:
-                queue.remove(content)
-        else:
-            queue.clear()
-    return sorted({binding for text in queue for binding in _stop_feedback_bindings(text)})
-
-
 def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | None:
     """Accept only this session's native user feedback transcript events.
 
@@ -286,9 +258,7 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             continue
         if text:
             texts.append(text)
-    evidence = _evidence("claude", session_id, "claude-transcript", texts)
-    evidence["queued"] = _claude_queued(events, session_id)
-    return evidence
+    return _evidence("claude", session_id, "claude-transcript", texts)
 
 
 def claude_prompt_bindings(prompt: Any) -> list[tuple[str, str]]:

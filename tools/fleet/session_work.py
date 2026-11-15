@@ -1,5 +1,6 @@
 """Use the repo page's bounded read-only work source for one session's repo."""
 import datetime
+import re
 from .collectors import memory
 from .model import project_of
 
@@ -28,6 +29,28 @@ def observe(cwd, journal_ids=()):
     # finished records never count and never hide open work behind the cut.
     rows = [row for row in project.get("open") or () if memory.open_stage(row) is not None]
     return WorkRows(rows, project.get("open_total"), data.get("headlines")), [str(path), str(path) + "-wal"]
+
+
+_ROUTE_ID = re.compile(r"(?<![A-Za-z0-9])rt-[0-9a-f]{16}(?![A-Za-z0-9])")
+
+
+def route_ids(row):
+    """The route ids a record names in its headline, links or artifact refs."""
+    row = row if isinstance(row, dict) else {}
+    texts = [str(row.get("headline") or ""), *map(str, row.get("links") or ()),
+             *map(str, row.get("artifact_refs") or ())]
+    return {found for text in texts for found in _ROUTE_ID.findall(text)}
+
+
+def delegated(rows, running_routes):
+    """Rows whose work sits wholly with routes that run now (a hand-off, not this session's
+    remaining work): ``running_routes(ids)`` names which of the ids are this session's running
+    routes. A record naming a route that is not running (a finished route's unreceived result,
+    another session's route), or no route at all, stays open work."""
+    named = {id(row): route_ids(row) for row in rows}
+    candidates = set().union(*named.values()) if named else set()
+    live = set(running_routes(candidates)) if candidates else set()
+    return [row for row in rows if named[id(row)] and named[id(row)] <= live]
 
 
 def recent_memory(cwd, limit=2):

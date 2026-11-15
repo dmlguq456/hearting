@@ -201,22 +201,15 @@ class ClaudeReceiptEvidenceTest(unittest.TestCase):
         return {"type": "queue-operation", "sessionId": self.SID, "operation": operation,
                 **({"content": self.note(f"delivery-{name}")} if name else {}), **extra}
 
-    def test_a_notification_still_in_the_queue_is_queued_not_received(self):
-        # Only what the queue's record names counts: `dequeue` names no item (Claude takes
-        # by priority), so nothing enqueued before it is still counted as waiting.
-        events = [self.queue("enqueue", name) for name in ("a", "b", "c")]
-        events += [self.queue("dequeue"), self.queue("remove", "c", reason="absorbed_mid_turn"),
-                   self.queue("enqueue", "d"), self.queue("enqueue", "e"), self.queue("popOne", "e")]
+    def test_claudes_own_queue_records_are_never_read_as_state(self):
+        # `queue-operation` is not documented: a notification counts only where the model
+        # reads it (a user event, an absorbed `queued_command`), never by what the queue holds.
+        events = [self.queue("enqueue", name) for name in ("a", "b")]
+        events += [self.queue("dequeue"), self.queue("remove", reason="dropped_by_hook"),
+                   self.queue("popAll", "b")]
         evidence = receipt.claude_feedback_evidence(events, self.SID)
-        self.assertEqual(evidence["bindings"], [])
-        self.assertEqual(evidence["queued"], [("delivery-d", "a" * 64)])
-
-    def test_a_content_less_removal_ends_what_the_queue_was_holding(self):
-        # Claude Code 2.1.325 writes a hook's drop as `remove` with no content.
-        events = [self.queue("enqueue", "d"), self.queue("remove", reason="dropped_by_hook")]
-        self.assertEqual(receipt.claude_feedback_evidence(events, self.SID)["queued"], [])
-        self.assertEqual(receipt.claude_feedback_evidence(events[:1], self.SID)["queued"],
-                         [("delivery-d", "a" * 64)])
+        self.assertEqual((evidence["bindings"], evidence["legacy_texts"]), ([], []))
+        self.assertNotIn("queued", evidence)
 
     def quoted(self, delivery_id):
         # A background agent's completion whose result quotes a Hearting notice it read.
@@ -237,9 +230,6 @@ class ClaudeReceiptEvidenceTest(unittest.TestCase):
             with self.subTest(event=event["type"]):
                 evidence = receipt.claude_feedback_evidence([event], self.SID)
                 self.assertEqual((evidence["bindings"], evidence["legacy_texts"]), ([], []))
-        queued = {"type": "queue-operation", "sessionId": self.SID, "operation": "enqueue",
-                  "content": self.quoted("delivery-q")}
-        self.assertEqual(receipt.claude_feedback_evidence([queued], self.SID)["queued"], [])
         self.assertEqual(receipt.claude_prompt_bindings(self.quoted("delivery-q")), [])
         # Top-level notifications still count, each one, up to the first that is not one.
         joined = self.note("delivery-1") + "\n" + self.note("delivery-2") + "\n" + self.quoted("delivery-3")
@@ -255,7 +245,7 @@ class ClaudeReceiptEvidenceTest(unittest.TestCase):
 
 
 class NoLostDeliveryTest(unittest.TestCase):
-    """A boundary that leaves a delivery to Claude's own queue never drops it."""
+    """A tool boundary carries no completion, and neither it nor the turn's Stop loses one."""
 
     SID = "ses-queued"
 
@@ -282,58 +272,97 @@ class NoLostDeliveryTest(unittest.TestCase):
         pending.mark_sent_ambiguous(self.root, self.SID, self.delivery, claim_owner="claude-async-rewake:1:1")
         time.sleep(0.01)  # the rewake's claim lease is over
 
-    def evidence(self, queued):
+    def evidence(self, received):
         record = pending.read(self.root, self.SID, self.delivery)
         binding = (self.delivery, receipt.binding_digest(record, self.SID))
         return {"harness": "claude", "session_id": self.SID, "source": "claude-transcript",
-                "bindings": [], "legacy_texts": [], "queued": [binding] if queued else []}
+                "bindings": [binding] if received else [], "legacy_texts": []}
 
-    def sweep(self, *, queued, defer):
+    def sweep(self, *, received, defer, seen=None):
         with mock.patch.object(sweep, "record_jobs", return_value=self.jobs):
             records, _count = sweep.sweep_deliver(self.root, "claude-parent-runtime", self.SID,
-                                                  native_evidence=self.evidence(queued),
-                                                  defer_native_queued=defer)
+                                                  native_evidence=self.evidence(received),
+                                                  defer_completions=defer, received_out=seen)
         sweep.release_claims(self.SID, [(self.root, records)], "claude-parent-runtime", reason="test")
         return [record["delivery_id"] for record in records]
 
-    def test_a_tool_boundary_leaves_a_notice_in_claudes_queue_to_that_queue(self):
-        self.assertEqual(self.sweep(queued=True, defer=True), [])
+    def test_a_tool_boundary_leaves_a_completion_to_the_rewake(self):
+        self.assertEqual(self.sweep(received=False, defer=True), [])
         self.assertEqual(pending.read(self.root, self.SID, self.delivery)["state"], "sent-ambiguous")
 
-    def test_the_next_prompt_still_carries_a_queued_notice_the_queue_may_have_lost(self):
-        self.assertEqual(self.sweep(queued=True, defer=False), [self.delivery])
+    def test_the_turns_stop_and_the_next_prompt_still_carry_it(self):
+        # Whatever the queue did with the rewake's notification, nothing but the model's own
+        # transcript receipt ends the duty.
+        self.assertEqual(self.sweep(received=False, defer=False), [self.delivery])
 
-    def test_without_a_queued_copy_the_tool_boundary_carries_it_as_before(self):
-        self.assertEqual(self.sweep(queued=False, defer=True), [self.delivery])
+    def test_a_completion_the_transcript_shows_received_is_settled_and_counted_at_a_tool_boundary(self):
+        seen = []
+        self.assertEqual(self.sweep(received=True, defer=True, seen=seen), [])
+        self.assertEqual([record["delivery_id"] for record in seen], [self.delivery])
+        self.assertEqual(pending.read(self.root, self.SID, self.delivery)["state"], "acked")
+
+    def test_only_a_completion_is_left_to_the_rewake(self):
+        base = {"receipt": {"kind": "notice"}}
+        for record, completion in (
+                ({"receipt": {"children": [{"required_action": "advance-completed"}]}}, True),
+                ({"receipt": {"kind": "notice"}}, False), ({"receipt": {"kind": "supervision"}}, False),
+                ({"receipt": {"kind": "human-gate"}}, False),
+                ({"receipt": {"children": [{"required_action": "human-gate:frame-review"}]}}, False)):
+            with self.subTest(receipt=record["receipt"]):
+                self.assertIs(sweep.is_completion_record(record), completion)
 
 
 class QueueOrderTest(unittest.TestCase):
-    """A notice a tool boundary leaves to Claude's queue reaches the model even when that
-    queue drops it, before the turn ends and without a person (the measured orders)."""
+    """A completion reaches the model whatever Claude's queue does with the rewake's notification:
+    before the turn ends and without a person, or, when the turn is cut (Esc, an API error),
+    with the next typed prompt (the measured orders)."""
+
+    NEXT_INPUT = {"q-esc", "q-error"}
 
     @classmethod
     def setUpClass(cls):
         cls.orders = {row["order"]: row for row in _measured()["claude"]["queue_orders"]}
 
-    def test_a_notice_the_queue_drops_without_content_still_reaches_the_model(self):
+    def test_every_order_is_measured(self):
+        self.assertEqual(set(self.orders), {order for _kind, order in fixture.QUEUE_ORDERS})
+
+    def test_a_completion_the_queue_drops_without_content_still_reaches_the_model(self):
         row = self.orders["q-dropped"]
         self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
 
-    def test_a_notice_quoted_by_another_notification_still_reaches_the_model(self):
+    def test_a_completion_quoted_by_another_notification_still_reaches_the_model(self):
         row = self.orders["q-quoted"]
-        self.assertEqual((row["times"], row["without_person"]), (1, True))
+        self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
 
-    def test_a_notice_the_queue_absorbs_reaches_the_model_once(self):
+    def test_a_completion_the_queue_absorbs_reaches_the_model_once(self):
         self.assertEqual(self.orders["q-absorbed"]["carriers"], ["rewake"])
 
-    def test_every_order_reaches_the_model_without_a_person_at_most_twice(self):
-        # Twice is the price of never leaving one to a queue that may lose it: a notice still
-        # queued when the turn ends is shown by Stop and again by the turn the queue starts.
-        self.assertEqual(set(self.orders), {order for _kind, order in fixture.QUEUE_ORDERS})
+    def test_a_rewake_that_was_never_armed_is_made_up_by_the_turns_stop(self):
+        row = self.orders["q-unarmed"]
+        self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
+
+    def test_a_cut_turn_leaves_it_to_the_next_typed_prompt(self):
+        for name in sorted(self.NEXT_INPUT):
+            with self.subTest(order=name):
+                row = self.orders[name]
+                self.assertEqual((row["times"], row["without_person"], row["carriers"]),
+                                 (1, False, ["prompt-hook"]))
+
+    def test_no_tool_boundary_carries_a_completion_in_any_order(self):
         for name, row in self.orders.items():
             with self.subTest(order=name):
-                self.assertTrue(row["without_person"])
+                self.assertNotIn("tool-boundary", row["carriers"])
+
+    def test_every_order_reaches_the_model_without_a_person_at_most_twice(self):
+        # Twice is the price of never leaving one to a queue that may lose it: a completion
+        # still queued when the turn ends is shown by Stop and again by the turn the queue starts.
+        for name, row in self.orders.items():
+            with self.subTest(order=name):
+                if name not in self.NEXT_INPUT:
+                    self.assertTrue(row["without_person"])
                 self.assertIn(row["times"], (1, 2))
+        self.assertEqual({name for name, row in self.orders.items() if row["times"] == 2},
+                         {"q-turn-end", "q-typed"})
 
 
 class DispositionHandoffTest(unittest.TestCase):
