@@ -1,7 +1,8 @@
 'use strict';
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
-module.exports=function({changed,answer,action,section}) {
+const {keyRows}=require('./panel-view.cjs');
+module.exports=function({changed,answer,action,section,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   // 11-15 (popup design D): another session's questions, opened from the sessions popup, stand in
   // the editor apart from this session's own (`own`, kept and updated meanwhile): they are answered
@@ -142,7 +143,9 @@ module.exports=function({changed,answer,action,section}) {
   function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
   function references(){return (mine()||[]).slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
   function preview({budget=10,columns=100}={}) {
-    const row=current();if(!row)return focused?[[span(help||text('navigate','Tab next · Esc/Ctrl+] back'))]]:[];
+    // Every key line is packed by the popup's one rule: broken between its ` · ` pieces, the closing key last.
+    const keys=(pieces,rows)=>keyRows(pieces.flatMap(piece=>String(piece).split(' · ')),columns,{rows,cellWidth}).map(line=>[span(line)]);
+    const row=current();if(!row)return focused?keys([help||text('navigate','Tab next · Esc/Ctrl+] back')],Math.max(1,budget)):[];
     const local=state(row.item),id=row.question.id,view=row.question.display;
     const status=local.sending?'submitted':local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
     let head=view?.head||[span('◑ '+(index+1)+'/'+flat().length+' · '+text(status,status),'g_blocked')];
@@ -171,8 +174,7 @@ module.exports=function({changed,answer,action,section}) {
       const ready=complete(row,formValues(row));
       const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send · t text'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
       const navigate=text('navigate','Tab next · Esc/Ctrl+] back');
-      if(columns<64){if(active(row))tail.push([span(instruction)]);tail.push([span(navigate)]);}
-      else tail.push([span((active(row)?instruction+' · ':'')+navigate)]);
+      tail.push(...keys([...(active(row)?[instruction]:[]),navigate],Math.max(1,Math.max(2,budget)-2)));
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
     const footer=tail.slice(-tailLimit),space=Math.max(0,limit-1-footer.length);
@@ -352,10 +354,10 @@ module.exports=function({changed,answer,action,section}) {
   // `answerable` (panel polish 1): it is one a press answers here, now (the panel paints it so).
   function summary(){
     // The panel's summary is this session's own question, whatever the popup shows.
-    if(foreign){const listed=flatOf(own||[]);if(!listed.length)return null;const row=listed.find(r=>!stale&&r.item.answerable===true&&!state(r.item).state)||listed[0];
+    if(foreign){const listed=flatOf(own||[]);if(!listed.length)return null;const row=listed.find(active)||listed[0];
       const view=row.question.display||{},fallback=[[span('◑ ','g_blocked'),span(row.question.question||'?','loc_repo')]];
       return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),line:view.brief_line||fallback[0].slice(1),choices:choices(row).length,
-        answerable:!stale&&row.item.answerable===true&&!state(row.item).state};}
+        answerable:active(row)};}
     const listed=flat();if(!listed.length)return null;
     let row=current();
     if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}

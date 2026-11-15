@@ -143,7 +143,7 @@ const P=t=>({text:t});
 const r=v.render({width:90,height:4,folded:true,model:{tag:'[e9]',wait:'◑답 대기 3',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]},
  state:'idle',harness:'claude',questions:o=>b.detail(o),brief:()=>b.summary()});
 const rows=r.rows.map(row=>row.map(p=>p.text).join('').trimEnd());
-assert.equal(rows[2],'◑답 대기 3 · 패널을 접었을 때의 모양을 어느 안으로 구현할까요? · +4');
+assert.equal(rows[2],'◑답 대기 3 · 패널을 접었을 때의 모양을 어느 안으로 구현할까요? · 1 아래 두 줄 (다) (… +3');
 // 11-15 (popup design E): the routes row's groups open their popups, the rest of it the panel.
 assert.deepEqual(r.hits.map(h=>h.action),['unfold','unfold','question','popup:ROUTE','unfold']);
 console.log('ok');

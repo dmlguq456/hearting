@@ -1001,6 +1001,21 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
                     "hb_claude", "hb_codex", "hb_opencode", "hb_other")
 
 
+def _sessions_key(view, harness, sid):
+    """11-15 (popup design D): another session's answer waits, as the shared observation holds them:
+    when they change, the sessions section and a standing sessions popup are read again (the host
+    reads them from Fleet's session table, apart from this projection). The key looks at the sessions
+    Fleet's table counts as waiting on a person (``human_wait_state.waiting_owner``: an owner, a wait
+    not folded as older, one a person must answer), whatever glyph the table paints them with."""
+    import human_wait_state
+    others = sorted("%s:%s:%s:%s" % (owner.get("harness"), owner.get("session_id"), item.get("id"), item.get("answer") or "")
+                    for item in (view or {}).get("items", ()) if isinstance(item, dict)
+                    for owner in (item.get("owner") or {},)
+                    if (owner.get("harness"), owner.get("session_id")) != (harness, sid)
+                    and human_wait_state.waiting_owner(item))
+    return hashlib.sha256("\n".join(others).encode()).hexdigest()[:16] if others else ""
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
@@ -1178,14 +1193,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # The repo's open work, as the earlier panel's tail row read it.
     # (`◌` is Fleet's stale route alone: the open work's line has no glyph, popup design F 10.)
     panel["work"] = styled([(str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
-    # 11-15 (popup design D): another session's answer waits, as the shared observation holds them:
-    # when they change, the sessions section and a standing sessions popup are read again (the host
-    # reads them from Fleet's session table, apart from this projection).
-    others = sorted("%s:%s:%s:%s" % (owner.get("harness"), owner.get("session_id"), item.get("id"), item.get("answer") or "")
-                    for item in view.get("items", ()) if isinstance(item, dict)
-                    for owner in (item.get("owner") or {},)
-                    if (owner.get("harness"), owner.get("session_id")) != (harness, sid) and human_wait_state.person_wait(item))
-    panel["sessions_key"] = hashlib.sha256("\n".join(others).encode()).hexdigest()[:16] if others else ""
+    panel["sessions_key"] = _sessions_key(view, harness, sid)
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
@@ -1462,10 +1470,13 @@ def _session_folders():
 
 def session_summary(vm, harness, sid, *, colors=256, no_color=False):
     """The sessions section's values from Fleet's session table (popup design D): the count, each
-    state's count and the rows, the person's waits first, then the running, then the idle; each row
+    state's count and the rows, the sessions waiting on a person first (Fleet's own "answer needed"
+    set, whatever glyph the table paints them with), then the running, then the idle; each row
     Fleet's own cells (its state glyph and key, `[number]`, the title in its harness's bold hue, the
     age), painted. ``own`` marks this window's own session: the panel leaves it out of its rows, and
-    out of the count and the state counts too, so the head and the rows count the same sessions."""
+    out of the count and the state counts too, so the head and the rows count the same sessions. A
+    state's count is one glyph in one color: a `●` waiting on a person (blocked color) is not counted
+    with the `●` idle sessions, and the waiting groups head the counts as they head the rows."""
     from fleet.explorer.tables import session_marker
     from fleet.palette import style_components
     from fleet.session_tags import assigned_tag
@@ -1477,19 +1488,24 @@ def session_summary(vm, harness, sid, *, colors=256, no_color=False):
     for session in tuple(getattr(vm, "sessions", ()) or ()):
         glyph, key = session_marker(session)
         tag = _plain(session.get("tag") or "·", 16)
+        asking = bool(session.get("ask")) or glyph == "◑"
         if tag != own:
-            counts.setdefault(glyph, [0, key])[0] += 1
+            group = counts.setdefault((glyph, key), [0, False])
+            group[0] += 1
+            group[1] = group[1] or asking
         title_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0), "opencode": ("l", 1, 0)}.get(
             str(session.get("harness") or ""), "unknown")
         rows.append({"glyph": [paint(glyph, key)],
                      "tag": [paint("[", "dim"), paint(tag, "steward" if session.get("steward") else "soft"), paint("]", "dim")],
                      "title": [paint(_plain(session.get("title") or "·", 160), title_key)],
                      "age": [paint(_plain(session.get("age") or "", 12), "dim")] if session.get("age") else [],
-                     "own": tag == own, "rank": {"◑": 0, "⠏": 1}.get(glyph, 2)})
+                     "own": tag == own, "rank": 0 if asking else {"⠏": 1}.get(glyph, 2)})
     rows.sort(key=lambda row: row.pop("rank"))
+    order = ("◑", "⠏", "●", "✕", "✓")
+    groups = sorted((group for group in counts if group[0] in order),
+                    key=lambda group: (0 if counts[group][1] else 1, order.index(group[0])))
     return {"count": sum(1 for row in rows if not row["own"]),
-            "counts": [[paint(glyph + str(counts[glyph][0]), counts[glyph][1])]
-                       for glyph in ("◑", "⠏", "●", "✕", "✓") if glyph in counts],
+            "counts": [[paint(group[0] + str(counts[group][0]), group[1])] for group in groups],
             "rows": rows[:12]}
 
 

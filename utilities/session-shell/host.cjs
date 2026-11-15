@@ -575,20 +575,10 @@ function tableGuide(kind){
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
-// Key words packed into rows of `inner` cells, broken only between their ` · ` pieces.
-function wrapGuide(lines,inner){
-  const out=[];
-  for(const line of lines){
-    let row='';
-    for(const piece of String(line).split(' · ')){
-      const next=row?row+' · '+piece:piece;
-      if(row&&cellWidth(next)>inner){out.push(row);row=piece;}else row=next;
-    }
-    if(row)out.push(row);
-  }
-  // The place stands alone only where nothing else fits beside it.
-  if(out.length>1&&/^\d+\/\d+$/.test(out[0])&&cellWidth(out[0]+' · '+out[1])<=inner)out.splice(0,2,out[0]+' · '+out[1]);
-  return out;
+// Key words packed into rows of `inner` cells, broken only between their ` · ` pieces (the one
+// rule of every popup's key line, `panelView.keyRows`); short of `rows` the closing key stays.
+function wrapGuide(lines,inner,rows){
+  return panelView.keyRows(lines.flatMap(line=>String(line).split(' · ')),inner,{rows,cellWidth});
 }
 // A table popup's title: the section's own head (`4 ROUTE ⠏2 ✕1`, `4 LAB failed 1`, `5 SESSIONS ◑2 ⠏1`).
 function tableTitle(kind){
@@ -614,7 +604,7 @@ function popupNow(){
     // table is longer than its rows, the reading's place first (`3/20 · …`).
     const all=tableRows(inner),fits=room-tableGuide(table.kind).length;
     const place=all.length>Math.max(1,fits)?`${Math.min(all.length,table.scroll+1)}/${all.length}`:'';
-    const guide=wrapGuide([place,...tableGuide(table.kind)].filter(Boolean),inner).map(text=>[{text,dim:true}]);
+    const guide=wrapGuide([place,...tableGuide(table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
     const space=Math.max(1,room-guide.length);
     table.scroll=Math.max(0,Math.min(table.scroll,Math.max(0,all.length-space)));
     table.space=space;
@@ -780,7 +770,7 @@ let veiledFrame=null;
 function veilTone(){return popupLayer&&!fleetView&&!relay?panelView.veil(displayConfiguration,{colors:panelModel.colors??256,noColor:panelModel.no_color===true,background:terminalBackground}):null;}
 // A serialized row in the veil: every SGR is the gray (a concealed cell stays concealed).
 function veilRow(row,tone){
-  return String(row).replace(/\x1b\[([0-9;]*)m/g,(_,list)=>{
+  return String(row).replace(/\x1b\[([0-9;:]*)m/g,(_,list)=>{
     const p=list.split(';');let hidden=false;
     for(let i=0;i<p.length;i++){if(p[i]==='38'||p[i]==='48')i+=p[i+1]==='2'?4:2;else if(p[i]==='8')hidden=true;}
     return `\x1b[0;38;5;${tone}${hidden?';8':''}m`;
@@ -957,7 +947,7 @@ function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
   setImmediate(()=>{layoutQueued=false;try{applyLayout();}catch{rawRelay();}});
 }
-const block=require('./block-input.cjs')({changed:queueDisplay,
+const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
   action:key=>blockAction(key),
   // ←→ in the question popup move to the next section's popup, as in every other popup.
