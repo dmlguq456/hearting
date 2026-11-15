@@ -141,7 +141,7 @@ sends a **request**: it gets a number, the other session receives one short
 line and opens the body itself, sends partial reports while it works and a
 final report (or a rejection) when done, and each report wakes the session that
 asked. The asker can send a new revision or cancel. Both panels list the
-request until it closes. Short notes and watching (“tell me when [e8]
+request under `MESSAGES` until it closes. Short notes and watching (“tell me when [e8]
 finishes”) work the same way. None of this needs herdr or tmux.
 
 In a terminal with the panel, an idle session on any runtime is reached at

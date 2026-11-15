@@ -751,33 +751,37 @@
   same records Fleet reads, so the panel&rsquo;s head and the session&rsquo;s Fleet row agree. After <code>Ctrl+]</code>,
   <code>f</code> opens Fleet in that window; on a session page in Fleet, <code>Ctrl+]</code> opens that exact
   session&rsquo;s panel.</p>
-  <div class="split">
-    <a class="shot" href="fleet/panel.png" target="_blank" rel="noopener"><img src="fleet/panel.png" width="390" height="884" alt="The panel of session [d1] in project ml-train: model and context, a lab route at stage eval-asr with its worker, the LAB table with three conditions against the baseline, and two messages." loading="lazy" /></a>
+  <div style="margin-top:30px"><a class="shot" href="fleet/panel.png" target="_blank" rel="noopener"><img src="fleet/panel.png" width="1128" height="596" alt="Session [d1]&#x27;s window in project ml-train with its LAB section pressed: Fleet&#x27;s LAB table in a popup in the middle of the window, with the goal, the metric and the 12.4% baseline, and three conditions with their state, progress, latest and best word error rate, and difference from the baseline; behind it the conversation and the panel in gray, and on the popup&#x27;s bottom line ROUTE, LAB, SESSIONS, and MESSAGES." loading="lazy" /></a></div>
+  <div class="split" style="margin-top:26px">
     <div>
       <h3>What it shows</h3>
-      <p class="t">Project and Git, model and context, the title and what the session is doing now; each route
-      with its owner and the worker running the current stage; requests sent and received; the project&rsquo;s
-      experiments (<code>LAB</code>); recent messages and saved memory; the usage windows.</p>
-      <p class="t"><b>A question waiting for you</b> shows under <code>QUESTIONS</code>. Press <code>Ctrl+]</code>
-      and it opens in a popup in the middle of the window: answer with <code>Tab</code>, <code>1&ndash;9</code>, and
+      <p class="t">Project and Git, model and context, the title and what the session is doing now; then a few
+      rows each of the questions waiting for you, this session&rsquo;s routes, the project&rsquo;s experiments
+      (<code>LAB</code>), the other sessions on the machine, messages and requests, and saved memory with its scope
+      and kind; the usage windows. Press a section and its whole Fleet table opens in a popup in the middle of the
+      window, the rest gray behind it.</p>
+    </div>
+    <div>
+      <p class="t"><b>A question you can answer here</b> reads as a rose button under <code>QUESTIONS</code>. Press
+      <code>Ctrl+]</code> and it opens in the popup: answer with <code>Tab</code>, <code>1&ndash;9</code>, and
       <code>Enter</code>, and the popup closes. In a narrow window the panel folds into a strip under the agent&rsquo;s
       screen; opened there by hand, it sits below. The conversation in these pictures is illustrative.</p>
       <p class="t"><code>hearting session shell disable</code> turns it off for new terminals.
       <a href="https://github.com/dmlguq456/hearting/blob/main/docs/session-panel.md">Keys, settings, and per-runtime details &rarr;</a></p>
     </div>
   </div>
-  <div style="margin-top:26px"><a class="shot" href="fleet/panel-question.png" target="_blank" rel="noopener"><img src="fleet/panel-question.png" width="930" height="470" alt="The bottom layout in a 100-column window: the panel under the native area, with the session&#x27;s head and the waiting question in two rows, its three choices on one." loading="lazy" /></a></div>
+  <div style="margin-top:26px"><a class="shot" href="fleet/panel-question.png" target="_blank" rel="noopener"><img src="fleet/panel-question.png" width="930" height="470" alt="The bottom layout in a 100-column window: the panel under the native area, with the session&#x27;s head and the question to answer here on a rose ground, its three choices as numbered chips, and answer, Ctrl+] at the right." loading="lazy" /></a></div>
   <div class="split" style="margin-top:34px">
     <div>
       <h3>Sessions hand each other work</h3>
       <p class="t">A session can hand another session work as a <b>request</b>: it gets a number, the other session
       opens the body itself, partial reports keep it open, and a final report closes it and wakes the session
-      that asked. Both panels list it until it closes &mdash; <code>&rarr;</code> handed out, <code>&#9666;</code>
-      handed to you, <code>&#10003;</code> finished.</p>
+      that asked. Both panels list it under <code>MESSAGES</code> until it closes &mdash; <code>&rarr;</code> handed
+      out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished.</p>
       <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet shows
       requests only as PEERS links.</p>
     </div>
-    <a class="shot" href="fleet/requests.png" target="_blank" rel="noopener"><img src="fleet/requests.png" width="764" height="884" alt="Two panels: the session that asked shows its requests to [b2], one opened with revision, delivery, a partial answer and what is left; the session that was asked shows the same request with its report and a link to the body." loading="lazy" /></a>
+    <a class="shot" href="fleet/requests.png" target="_blank" rel="noopener"><img src="fleet/requests.png" width="764" height="596" alt="Two panels side by side. Left, the session [4f] that asked: under MESSAGES, an arrow to [b2], Test run, partial answer, then a finished review and a note to [9c]. Right, the session [b2] that was asked: under MESSAGES, an arrow from [4f], Test run, partial answer, and its reply to [4f]." loading="lazy" /></a>
   </div>
 </div></section>
 
@@ -799,7 +803,7 @@
 <section class="sec" id="run"><div class="wrap">
   <div class="kick">Run it</div>
   <h2>Installed with Hearting. One word to start.</h2>
-  <p class="lead">Press <code>Ctrl+]</code> then <code>f</code> in any session&rsquo;s panel, or run
+  <p class="lead">Press <code>Ctrl+]</code> then <code>f</code> in any session&rsquo;s window, or run
   <code>fleet</code> in any terminal.</p>
   <div class="split" style="margin-top:30px">
     <pre class="code">fleet              # the Explorer, full screen (needs curses)

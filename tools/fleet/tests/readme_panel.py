@@ -7,9 +7,11 @@ demo world: the route rows are the ones Fleet's session line reads from the same
 same session show the same values. Only the backend's readers of live state (the native session,
 answer waits, prompt record, message ledger, request records, memory journal, open work) are
 replaced by the demo values below; the LAB section reads a demo experiment board written by the
-real catalog and run-record writers into the temporary HOME. The panel is painted by
-``utilities/session-shell/panel-view.cjs`` under node, with the question editor
-``block-input.cjs`` for focus and answers.
+real catalog and run-record writers into the temporary HOME. The SESSIONS section and the ROUTE,
+LAB and SESSIONS popups are the backend's own popup reading (``_panel_popup``) over Fleet's view
+model of the same demo world, so they read as Fleet's screens of that world do. The panel and its
+popups are painted by ``utilities/session-shell/panel-view.cjs`` under node, with the question
+editor ``block-input.cjs`` for focus and answers.
 
 Nothing here reads the real home directory, a registry, herdr, tmux or the network; no live
 window, session or model is started. ``readme_captures.py`` draws the published images from it.
@@ -127,13 +129,18 @@ def _questions(now):
 
 
 def _memory(clock):
-    """The newest saved memory records of each demo project (``recent_memory``). The panel counts
-    a record's age from the wall clock, so ``clock`` is the capture's own real time."""
+    """The newest saved memory records of each demo project and the global ones (``recent_memory``:
+    both, newest first), each with its tier and scope as the memory system names them. The panel
+    counts a record's age from the wall clock, so ``clock`` is the capture's own real time."""
+    def record(kind, tier, scope, minutes, text):
+        return {"type": kind, "tier": tier, "scope": scope, "ts": _iso(_ago(clock, minutes)),
+                "headline_id": None, "headline": "", "snippet": text}
+    everywhere = record("lesson", "working", "global", 95, "Keep long test runs on the shared runner.")
     return {
-        "web-api": [{"type": "decision", "ts": _iso(_ago(clock, 41)), "headline_id": None,
-                     "headline": "", "snippet": "The limit lives in the gateway, per API key."}],
-        "ml-train": [{"type": "decision", "ts": _iso(_ago(clock, 180)), "headline_id": None,
-                      "headline": "", "snippet": "Evaluate on the 16 kHz subset first."}],
+        "web-api": [record("decision", "durable", "project", 41, "The limit lives in the gateway, per API key."),
+                    everywhere],
+        "ml-train": [everywhere,
+                     record("decision", "durable", "project", 180, "Evaluate on the 16 kHz subset first.")],
     }
 
 
@@ -195,6 +202,24 @@ class World:
         # The LAB board of the project that runs experiments, in the temporary HOME.
         home = Path(os.environ["HOME"])
         self.lab_roots = {"ml-train": write_lab_board(home / "demo-projects" / "ml-train", now)}
+        self._view_model = None
+
+    def view_model(self):
+        """Fleet's view model of this world at its moment, built as the backend's popups build it
+        (``_popup_view_model``: the same builder over the collected snapshot), read once."""
+        if self._view_model is None:
+            from fleet.explorer import live
+            with mock.patch("time.time", return_value=self.now):
+                self._view_model = live.build_view_model(self.snapshot, now=self.now)
+        return self._view_model
+
+    def lab_read(self, real):
+        """``session_lab.read`` for the demo: only the project that runs experiments has a board
+        (written into the temporary HOME); ``real`` is the reader the board is read with."""
+        def read(cwd, now=None):
+            board = self.lab_roots.get(os.path.basename(str(cwd or "")))
+            return real(str(board.parent), now=now) if board else (None, [])
+        return read
 
     def tag(self, harness, sid):
         return self.tags.get((harness, sid), "")
@@ -227,7 +252,16 @@ class World:
         return {"received": self.received.get(sid, []), "human_state": "none", "human": None}
 
 
-def projection(world, harness, sid, *, columns=40, rows=46, state="working"):
+def popup_width(cols, kind="text"):
+    """``panel-view.cjs`` ``popupWidth``: a popup's width in a window of ``cols`` cells."""
+    if cols < 28:
+        return max(4, cols)
+    if cols < 80:
+        return cols - 4
+    return min(116, cols - 4) if kind == "table" else 76
+
+
+def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None):
     """``panel_projection``'s payload for one demo session, its live readers replaced."""
     import human_wait_state
     import session_shell
@@ -242,12 +276,7 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working"):
     def memory(cwd):
         return [dict(row) for row in world.memory.get(os.path.basename(str(cwd or "")), [])], []
 
-    real_lab_read = session_lab.read
-
-    def lab_read(cwd, now=None):
-        # Only the demo project that runs experiments has a board (written into the temporary HOME).
-        board = world.lab_roots.get(os.path.basename(str(cwd or "")))
-        return real_lab_read(str(board.parent), now=now) if board else (None, [])
+    lab_read = world.lab_read(session_lab.read)
 
     patches = [
         mock.patch("time.time", return_value=now),
@@ -259,7 +288,7 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working"):
         mock.patch.object(session_tidy, "waiting_notice_display", lambda *a, **k: ("", [])),
         mock.patch.object(session_tidy, "session_seat", lambda *a, **k: None),
         mock.patch.object(session_tidy, "_prompt_seq_path", lambda *a, **k: Path("/nonexistent/seq")),
-        mock.patch.object(session_tags, "assigned_tag", lambda h, s: world.tag(h, s)),
+        mock.patch.object(session_tags, "assigned_tag", lambda h, s: world.tag(h, s).strip("[]")),
         mock.patch.object(session_view, "observe", observe),
         mock.patch.object(steward, "role_flag", lambda h, s, cwd=None: bool(world.sessions[s].steward)),
         mock.patch.object(session_work, "recent_memory", memory),
@@ -281,14 +310,64 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working"):
         session_lab.clear_cache()
         payload = session_shell.panel_projection(harness, sid, native_pid=81000 + len(sid),
                                                  native_start=1, columns=columns, rows=rows,
-                                                 state=state, expanded=True)
+                                                 state=state, expanded=True, popup_columns=popup_columns)
     return payload
 
 
+def popup_read(world, sid, kind, *, columns, opened="", rows=30):
+    """What the backend answers the host for one popup of a demo session (``_panel_popup``:
+    ``routes``, ``lab`` or ``sessions``): Fleet's own table drawn from Fleet's view model of the same
+    demo world, its live readers replaced as in ``projection``. ``summary`` (sessions) is what the
+    panel's SESSIONS section shows."""
+    import session_shell
+    from fleet import session_lab, session_tags, session_view
+    session = world.sessions[sid]
+    binding = {"harness": session.harness, "sid": sid, "native_pid": 81000 + len(sid), "native_start": 1}
+
+    def observe(h, pid, start, s, **_):
+        return world.values(h, s), []
+    patches = [
+        mock.patch("time.time", return_value=world.now),
+        mock.patch.object(session_shell, "_popup_view_model", lambda h, s, k: world.view_model()),
+        mock.patch.object(session_shell, "_session_folders", lambda: []),
+        mock.patch.object(session_tags, "assigned_tag", lambda h, s: world.tag(h, s).strip("[]")),
+        mock.patch.object(session_view, "observe", observe),
+        mock.patch.object(session_lab, "read", world.lab_read(session_lab.read)),
+        mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
+    ]
+    with contextlib.ExitStack() as stack:
+        for patch in patches:
+            stack.enter_context(patch)
+        os.environ.pop("COLORTERM", None)
+        os.environ.pop("NO_COLOR", None)
+        session_lab.clear_cache()
+        result = session_shell._panel_popup(binding, {"kind": kind, "columns": columns, "open": opened,
+                                                      "page": False, "rows": rows})
+    if not result.get("ok"):
+        raise RuntimeError(f"{kind} popup: {result}")
+    return result
+
+
+def unreceived_lines(world, sid):
+    """The lines the MESSAGES popup reads under the messages (the backend's ``r`` action: this
+    session's own peer messages not yet received). Every demo message was received, so the
+    pending list is empty and the backend answers its own empty line."""
+    import peer_steward_status
+    import session_shell
+    session = world.sessions[sid]
+    binding = {"harness": session.harness, "sid": sid, "native_pid": 81000 + len(sid), "native_start": 1}
+    with mock.patch.object(peer_steward_status, "_peer_status_rows", lambda s, h: ([], 0)):
+        result = session_shell._block_action(binding, {"action": "r"})
+    return list(result.get("lines") or ())
+
+
 # Paints one or more panel frames with the real renderer and question editor; prints the rows.
-# The panel is rendered as ``host.cjs`` renders it (``panelViewNow``: the editor's summary and sent
-# lines); with ``window`` set and the editor focused, the question popup is laid out over that
-# window as ``host.cjs`` ``popupNow`` lays it (panel-view's ``popup`` with the editor's rows).
+# The panel is rendered as ``host.cjs`` renders it (``panelViewNow``: the sessions section's summary,
+# the editor's summary and sent lines). With ``window`` set, a popup is laid out over that window as
+# ``host.cjs`` ``popupNow`` lays it: the question popup while the editor is focused, or the table
+# popup ``table`` names (``ROUTE``, ``LAB``, ``SESSIONS`` with the backend's rows, or ``MESSAGES``),
+# with the sections that have something in them, the section's own head as its title and its keys;
+# ``veil`` is the gray everything behind a popup reads in (``panel-view`` ``veil``), null where none.
 _NODE = r"""
 const fs=require('node:fs');
 const [viewPath,blockPath]=process.argv.slice(1);
@@ -296,32 +375,88 @@ const view=require(viewPath),create=require(blockPath);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
   dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
+const cellWidth=s=>[...String(s)].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const SECTIONS=['QUESTIONS','ROUTE','LAB','SESSIONS','MESSAGES'];
+// host.cjs: tableParts, sections, label, tableGuide, wrapGuide, tableTitle (the same code).
+const tableParts=result=>{const styles=Array.isArray(result.styles)?result.styles:[];
+  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{})})));};
+function sections(m,block,table){
+  const list=v=>Array.isArray(v)&&v.length>0;
+  const has={QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,LAB:!!m.lab,
+    SESSIONS:true,MESSAGES:list(m.messages)||list(m.requests)};
+  const current=table?table.kind:'QUESTIONS';
+  return SECTIONS.filter(name=>has[name]||name===current);
+}
+function tableGuide(m,kind,expanded=true){
+  const label=(name,fallback)=>m.labels?.[name]||fallback;
+  const own=kind==='ROUTE'?label('popup_route','↑↓ route · Enter open'):
+    kind==='SESSIONS'?label('popup_sessions','↑↓ session · Enter its question'):'';
+  const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
+  return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
+}
+function wrapGuide(lines,inner){
+  const out=[];
+  for(const line of lines){
+    let row='';
+    for(const piece of String(line).split(' · ')){
+      const next=row?row+' · '+piece:piece;
+      if(row&&cellWidth(next)>inner){out.push(row);row=piece;}else row=next;
+    }
+    if(row)out.push(row);
+  }
+  if(out.length>1&&/^\d+\/\d+$/.test(out[0])&&cellWidth(out[0]+' · '+out[1])<=inner)out.splice(0,2,out[0]+' · '+out[1]);
+  return out;
+}
+function tableTitle(m,kind,sessionsSummary){
+  const dim=v=>({text:v,dim:true});
+  if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim());return r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];}
+  if(kind==='LAB'){const lab=m.lab||{};return [...(lab.count?[{text:String(lab.count)},dim(' ')]:[]),dim('LAB'),...(Array.isArray(lab.counts)?lab.counts:[]).flatMap(c=>[dim(' '),...c])];}
+  if(kind==='SESSIONS'){const s=sessionsSummary||{};return [...(Number.isInteger(s.count)?[{text:String(s.count)},dim(' ')]:[]),dim('SESSIONS'),...(Array.isArray(s.counts)?s.counts:[]).flatMap(c=>[dim(' '),...c])];}
+  return [dim('MESSAGES')];
+}
 (async()=>{
   const jobs=JSON.parse(fs.readFileSync(0,'utf8')),out=[];
   for(const job of jobs){
     const p=job.payload;
-    // An answer is on its way once sent (`submitted`): the panel keeps its dim receipt line.
+    // An answer is on its way once sent (`submitted`): the panel keeps its receipt line.
     const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){},page(){}});
     block.update(p.questions||[],p.help||'',p.block||{});
     for(const key of job.keys||[]){
       if(key==='enter')block.enter();else if(key==='leave')block.leave();else block.input(Buffer.from(key));
       await tick();await tick();
     }
-    const model={...p.panel,answerable:(p.questions||[]).some(i=>i.answerable===true&&(i.request_state||'open')==='open')};
+    const base={...p.panel,answerable:(p.questions||[]).some(i=>i.answerable===true&&(i.request_state||'open')==='open')};
+    const model=job.sessions?{...base,sessions:job.sessions}:base;
+    const configuration=job.configuration||{};
     const r=view.render({width:job.width,height:job.height,side:job.side,fill:job.side,model,
       native:p.native_display||{},state:job.state,sid:job.sid,harness:job.harness,frame:job.frame||0,since:job.since,
-      sections:p.block,configuration:job.configuration||{},expandedKeys:job.expanded||[],focused:block.focused,
+      sections:p.block,configuration,expandedKeys:job.expanded||[],focused:block.focused,
       cwd:'',background:'dark',folded:job.folded===true,brief:()=>block.summary(),sent:()=>block.sent()});
     let popup=null;
-    if(job.window&&block.focused){
-      const {cols,rows}=job.window,width=view.popupWidth(cols),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
-      const label=[{text:block.summary()?.label||'QUESTIONS',dim:true}];
-      let title=label,body;
-      if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
-      else body=block.detail({budget:room,columns:inner});
-      const shown=view.popup({cols,rows,band:0,title,body,sections:['QUESTIONS'],current:0,model,
-        configuration:job.configuration||{},background:'dark'});
-      popup={left:shown.left,top:shown.top,rows:shown.rows.map(row=>row.map(plain))};
+    const table=job.table||null;
+    if(job.window&&(block.focused||table)){
+      const {cols,rows}=job.window,kind=table?'table':'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
+      const names=sections(base,block,table),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
+      let title,body;
+      if(table){
+        const all=table.kind==='MESSAGES'?[...view.messagesBody({model:base,columns:inner,cellWidth}),
+          ...(table.lines||[]).slice(0,room).map(text=>[{text,dim:true}])]:tableParts(table.result||{});
+        const fits=room-tableGuide(base,table.kind).length;
+        const place=all.length>Math.max(1,fits)?`1/${all.length}`:'';
+        const guide=wrapGuide([place,...tableGuide(base,table.kind)].filter(Boolean),inner).map(text=>[{text,dim:true}]);
+        const space=Math.max(1,room-guide.length);
+        title=tableTitle(base,table.kind,job.sessions);
+        body=[...all.slice(0,space),...guide];
+      }else{
+        const label=[{text:block.summary()?.label||'QUESTIONS',dim:true}];
+        title=label;
+        if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
+        else body=block.detail({budget:room,columns:inner});
+      }
+      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,current,model:base,
+        configuration,cellWidth,background:'dark'});
+      const veil=view.veil(configuration,{colors:base.colors??256,noColor:base.no_color===true,background:'dark'});
+      popup={left:shown.left,top:shown.top,rows:shown.rows.map(row=>row.map(plain)),veil};
     }
     out.push({rows:r.rows.map(row=>row.map(plain)),popup});
   }
@@ -332,7 +467,8 @@ const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??
 
 def paint(jobs):
     """``{"rows", "popup"}`` for each job (``payload``, ``width``, ``height``, ``side``, ``state`` …):
-    the panel's rows of parts, and the question popup laid over ``window`` while focused (else None)."""
+    the panel's rows of parts, and the popup laid over ``window`` (``{"left", "top", "rows", "veil"}``)
+    while the editor is focused or a ``table`` popup stands (else None)."""
     result = subprocess.run(["node", "-e", _NODE, str(PANEL_VIEW), str(BLOCK_INPUT)],
                             input=json.dumps(jobs), capture_output=True, text=True, timeout=60)
     if result.returncode:
@@ -580,3 +716,9 @@ def overlay(grid, layer, top, left):
             x = end
     return [[cell for cell in line if cell is not None] for line in out]
 
+
+def veiled(grid, tone):
+    """``grid`` as it reads behind a popup (``host.cjs`` ``veilRow``): every cell in the one gray
+    ``tone``, no other color, no background, no weight."""
+    return [[(glyph, tone, None, False, False, False, width) for glyph, _fg, _bg, _dim, _bold, _rev, width in row]
+            for row in grid]

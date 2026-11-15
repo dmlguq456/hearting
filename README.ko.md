@@ -10,7 +10,7 @@
 
 <p align="center"><strong>모든 코딩 에이전트를 한 자리에서 감독합니다 — Claude Code, Codex, OpenCode 어디서든.</strong></p>
 
-<p align="center">세션마다 옆 패널에 route·작업자·메시지가 보이고, Fleet는 모든 세션과 지금 답을 기다리는 세션을 보여 줍니다.<br>
+<p align="center">세션마다 옆 패널에 질문·route·다른 세션·메시지가 보이고, Fleet는 모든 세션과 지금 답을 기다리는 세션을 보여 줍니다.<br>
 강한 모델이 계획을 정하고, 싼 작업자가 작게 확인받으며 실행합니다.</p>
 
 <p align="center">
@@ -35,7 +35,7 @@
 > 명령, 경로, 설정 키와 식별자는 영문 원문을 기준으로 합니다.
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, owner와 execute 작업자가 든 staged 2/4 route 상자, [b2]에 맡긴 요청 Test run(일부 답)과 끝난 검토, [b2]·[9c]와 주고받은 메시지, 저장된 결정 하나." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting이 든 ROUTE, 다른 세션 일곱(셋이 도는 중)의 SESSIONS, [b2]에 맡긴 요청 Test run(일부 답)과 끝난 검토, [9c]에 보낸 메모가 든 MESSAGES, 이 프로젝트의 결정과 전역 교훈이 든 MEM." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. 데모 데이터이며 대화는 예시입니다.</sub></p>
 
@@ -87,24 +87,26 @@
 ### 세션 옆 패널
 
 새 설치에서는 새로 여는 Claude Code, Codex, OpenCode 터미널마다 오른쪽에 40칸
-패널이 열립니다. 위에서부터 프로젝트와 Git 상태, 모델과 문맥, 세션 제목과 지금
-하는 일, route마다 owner와 지금 단계를 도는 작업자, 이 세션이 맡기거나 받은
-요청, 이 프로젝트의 실험(`LAB`), 사용자의 답을 기다리는 질문, 최근 메시지, 저장된
-기억(`MEM`), 사용량 창이 보입니다. **Ctrl+]** 키를 누르면 기다리는 질문이 창 가운데
-팝업으로 뜹니다. **Tab**, **1–9**, **Enter**로 답하면 팝업이 닫히고 키가 다시
-에이전트로 갑니다. 답하지 않고 닫으려면 **Esc**나 **Ctrl+]** 키를 누릅니다. 기다리는
-질문이 없으면 **Ctrl+]** 키는 패널을 열고, 이어서 **f**를 누르면 같은 창에서 Fleet를
-엽니다. **»** 단추는 패널을 에이전트 화면 아래 띠로 접습니다. `hearting session shell disable`은
-새 터미널부터 패널을 끕니다. 키, 설정, 좁은 창 배치, 하네스별 세부는
-[docs/session-panel.md](docs/session-panel.md)(영어)에 있습니다.
+패널이 열립니다. 프로젝트와 Git 상태, 모델과 문맥, 세션 제목과 지금 하는 일 아래로
+구획마다 몇 줄씩 보입니다: 사용자의 답을 기다리는 질문, 이 세션의 route, 이 프로젝트의
+실험(`LAB`), 이 기계의 다른 세션, 메시지와 요청, 범위와 종류가 붙은 저장된 기억(`MEM`).
+구획을 누르면 그 구획의 Fleet 표 전부가 창 가운데 팝업으로 뜨고, 뒤는 회색으로
+가라앉습니다. 여기서 답할 질문은 장미색 단추로 보입니다. **Ctrl+]** 키는 늘 팝업을
+열고 그 질문을 먼저 띄웁니다. **Tab**, **1–9**, **Enter**로 답하면 팝업이 닫히고
+`✓ answer sent`가 남습니다. 팝업에서 **←/→** 키는 구획을 옮기고, **f**는 같은 창에서
+Fleet를 열고, **p**는 패널을 에이전트 화면 아래 띠로 접으며, **Esc**나 **Ctrl+]** 키는
+팝업을 닫습니다. 세션이 도는 동안 테두리는 밝게 켜져 있고 모델 아래 구분선 위로 빛이
+지나갑니다. **⚙** → rule motion에서 다른 움직임이나 움직임 없음을 고릅니다.
+`hearting session shell disable`은 새 터미널부터 패널을 끕니다. 키, 설정, 좁은 창 배치,
+하네스별 세부는 [docs/session-panel.md](docs/session-panel.md)(영어)에 있습니다.
 
 <p align="center">
-  <img src="docs/fleet/panel.png" alt="ml-train 프로젝트 세션 [d1]의 패널: Git 상태, 모델 Opus 5.5 high, 문맥 38%, 제목 Checkpoint eval, eval-asr 단계의 lab route와 그 작업자, 조건 셋의 최근 단어 오류율과 기준값을 보여 주는 LAB 표, 세션 [e8]과 주고받은 메시지 둘, 사용량." width="390">
+  <img src="docs/fleet/panel.png" alt="ml-train 프로젝트 세션 [d1]의 창에서 LAB 구획을 누른 모습: 창 가운데 팝업에 Fleet의 LAB 표가 뜬다. 목표, 지표, 기준값 12.4%, 조건 셋의 상태, 진행, 최근과 최고 단어 오류율, 기준과의 차이. 뒤의 대화와 패널은 회색이고, 팝업 맨 아래 줄에 ROUTE, LAB, SESSIONS, MESSAGES." width="100%">
 </p>
-<p align="center"><sub><b>패널 하나</b> — 작업자가 붙은 lab route, 그 자리에서 펼친 프로젝트 <code>LAB</code> 표, 메시지.</sub></p>
+<p align="center"><sub><b>구획 누르기</b> — <code>[d1]</code>의 <code>LAB</code>를 누르면 Fleet의 LAB 표가 팝업으로 뜨고 나머지는 회색이 됩니다. 데모 데이터.</sub></p>
 
 <p align="center">
-  <img src="docs/fleet/panel-focus.gif" alt="세션 [9c]의 창에서 질문에 답하는 차례: 패널에 질문 둘이 기다리는 동안 키는 에이전트로 간다. Ctrl+]로 첫 질문이 창 가운데 팝업으로 뜨고, Tab으로 다음 질문, 2로 둘째 선택지, Enter로 답을 보내면 팝업이 닫히고 패널에는 답 보냄 흐린 한 줄이 남는다." width="100%">
+  <img src="docs/fleet/panel-focus.gif" alt="세션 [9c]의 창에서 질문에 답하는 차례: 두 질문 가운데 첫째가 패널에 장미색 단추로 서 있는 동안 키는 에이전트로 간다. Ctrl+]로 그 질문이 창 가운데 팝업으로 뜨고 나머지는 회색이 된다. Tab으로 다음 질문, 2로 둘째 선택지, Enter로 답을 보내면 팝업이 닫히고 패널에 초록 answer sent와 고른 답이 남는다." width="100%">
 </p>
 <p align="center"><sub><b>답하기</b> — Ctrl+] → Tab → 2 → Enter. 데모 데이터.</sub></p>
 
@@ -159,13 +161,13 @@ fleet --json       # 같은 상태를 JSON으로(스크립트용)
 스스로 엽니다. 일하는 동안 일부 보고를, 끝나면 최종 보고나 거절을 보내고, 보고가
 올 때마다 맡긴 세션이 깨어납니다. 맡긴 쪽은 새 판을 보내거나 취소할 수 있고,
 요청은 하팅이 확인한 인계일 때만 상대의 후임 세션으로 따라갑니다. 두 패널 모두
-요청이 닫힐 때까지 보여 줍니다. `→`는 내가 맡긴 일, `◂`는 내가 받은 일, `✓`는
-끝난 일입니다.
+요청이 닫힐 때까지 MESSAGES에 보여 줍니다. `→`는 내가 맡긴 일, `◂`는 내가 받은 일,
+`✓`는 끝난 일이고, 누르면 보고와 본문이 보입니다.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자에 [b2]에 맡긴 요청 둘이 있고, 하나를 펼치면 판, 전달 seen, 일 partial answer와 남은 시험 9개, 지난 시간이 보인다. 다른 하나는 끝났다. 오른쪽은 맡은 Codex 세션 [b2]: [4f]가 보낸 요청 하나와 그 세부, 일부 보고, 본문 링크." width="80%">
+  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: MESSAGES에 [b2]로 가는 화살표와 Test run, partial answer, 그 아래 [b2]의 끝난 검토와 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: MESSAGES에 [4f]에서 온 화살표와 Test run, partial answer, 그리고 [4f]에 보낸 답." width="80%">
 </p>
-<p align="center"><sub>같은 요청이 맡긴 세션(<code>[4f]</code>)과 맡은 세션(<code>[b2]</code>)의 패널에 보입니다. 데모 데이터.</sub></p>
+<p align="center"><sub>같은 요청이 맡긴 세션(<code>[4f]</code>)과 맡은 세션(<code>[b2]</code>)의 MESSAGES에 보입니다. 데모 데이터.</sub></p>
 
 짧은 메시지와 감시도 같은 방식입니다. 세션은 다른 세션에 쪽지를 보내거나, 그
 세션을 지켜보다가 끝나거나 멈추거나 사용자를 기다릴 때 한 번 깨어날 수 있습니다(깨우는

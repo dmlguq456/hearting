@@ -761,9 +761,9 @@ SHOTS = {
     "seat": (1128, 740, "A Claude Code session in project web-api, session [4f]. On the left an illustrative "
              "conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report "
              "from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and "
-             "context 46%, the title Rate limiting and what it is doing now, a route box with the owner and the execute "
-             "worker at staged 2/4, the request Test run to [b2] with a partial answer and a finished review, messages "
-             "with [b2] and [9c], and a saved decision."),
+             "context 46%, the title Rate limiting and what it is doing now; ROUTE with Rate limiting at 2/4 execute; "
+             "SESSIONS with seven other sessions, three of them running; MESSAGES with the request Test run to [b2] at a "
+             "partial answer, a finished review, and a note to [9c]; MEM with a project decision and a global lesson."),
     "overview": (1440, 810, "Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, "
                  "Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run "
                  "for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with "
@@ -786,13 +786,17 @@ SHOTS = {
                "below it the owner's raw output listing an edit, a shell command, and their results."),
     "narrow": (900, 720, "Fleet's OVERVIEW in a 100-column terminal: the same sessions, projects, and request lines in a narrower layout."),
     # The session panel of the same demo world (readme_panel.py), each in a plain window frame.
-    "panel": (390, 884, "The panel of session [d1] in project ml-train: model and context, a lab route at stage eval-asr "
-              "with its worker, the LAB table with three conditions against the baseline, and two messages."),
+    "panel": (1128, 596, "Session [d1]'s window in project ml-train with its LAB section pressed: Fleet's LAB table in "
+              "a popup in the middle of the window, with the goal, the metric and the 12.4% baseline, and three "
+              "conditions with their state, progress, latest and best word error rate, and difference from the "
+              "baseline; behind it the conversation and the panel in gray, and on the popup's bottom line ROUTE, LAB, "
+              "SESSIONS, and MESSAGES."),
     "panel-question": (930, 470, "The bottom layout in a 100-column window: the panel under the native area, with the "
-                       "session's head and the waiting question in two rows, its three choices on one."),
-    "requests": (764, 884, "Two panels: the session that asked shows its requests to [b2], one opened with revision, "
-                 "delivery, a partial answer and what is left; the session that was asked shows the same request "
-                 "with its report and a link to the body."),
+                       "session's head and the question to answer here on a rose ground, its three choices as "
+                       "numbered chips, and answer, Ctrl+] at the right."),
+    "requests": (764, 596, "Two panels side by side. Left, the session [4f] that asked: under MESSAGES, an arrow to "
+                 "[b2], Test run, partial answer, then a finished review and a note to [9c]. Right, the session [b2] "
+                 "that was asked: under MESSAGES, an arrow from [4f], Test run, partial answer, and its reply to [4f]."),
 }
 # The four pictures the README and the home page open with, in order, each with its one line.
 OPENING = (
@@ -805,10 +809,10 @@ OPENING = (
 GIF_ALT = ("Fleet walk-through in five steps: the OVERVIEW of all sessions, the ROUTES list with one route opened in "
            "place, one session's page, that session's own window with its Hearting panel, and one request's stage "
            "graph with the owner's raw output.")
-FOCUS_ALT = ("Answering a question, step by step, in session [9c]'s window: two questions wait in the panel while keys "
-             "still go to the agent; Ctrl+] opens the first in a popup in the middle of the window; Tab moves to the "
-             "next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel "
-             "keeps one dim line, answer sent.")
+FOCUS_ALT = ("Answering a question, step by step, in session [9c]'s window: the first of two questions stands in the "
+             "panel as a rose button while keys still go to the agent; Ctrl+] opens it in a popup in the middle of the "
+             "window, the rest gray; Tab moves to the next question; 2 chooses the second option; Enter sends the "
+             "answer, the popup closes, and the panel shows answer sent in green with the choice.")
 
 
 def shot(name: str, eager: bool = False) -> str:
@@ -1467,9 +1471,10 @@ def render_index(d: dict) -> str:
   other work as tracked requests. What one session&rsquo;s panel says is what Fleet says about it.</p>
   <div class="grid grid3">
     <div class="card"><span class="num">PANEL</span><h3>The panel beside each session</h3>
-      <p>Project and Git, model and context, what it is doing now, each route with its worker, requests,
-      experiments, messages, and memory. <code>Ctrl+]</code> opens a waiting question in a popup to answer;
-      <code>f</code> after it opens Fleet in the same window. <a href="{REPO_URL}/blob/main/docs/session-panel.md">Details &rarr;</a></p></div>
+      <p>Project and Git, model and context, what it is doing now, then a few rows each of questions, routes,
+      experiments, other sessions, messages, and memory; press one for its whole table in a popup.
+      <code>Ctrl+]</code> opens the question waiting here first; <code>f</code> in a popup opens Fleet in the same
+      window. <a href="{REPO_URL}/blob/main/docs/session-panel.md">Details &rarr;</a></p></div>
     <div class="card"><span class="num">FLEET</span><h3>Every session at once</h3>
       <p>Every Claude Code, Codex, and OpenCode session on the machine, and which one needs you. On a session
       page, <code>Ctrl+]</code> opens that session&rsquo;s panel. <a href="fleet.html">Fleet tour &rarr;</a></p></div>
@@ -1479,7 +1484,7 @@ def render_index(d: dict) -> str:
   </div>
   <div class="split" style="margin-top:30px">
     <figure>{focus_gif()}<figcaption>Answering a question: Ctrl+] &rarr; Tab &rarr; 2 &rarr; Enter.</figcaption></figure>
-    <figure>{shot("requests")}<figcaption>One request in the panel of the session that asked and of the
+    <figure>{shot("requests")}<figcaption>One request in the MESSAGES of the session that asked and of the
       one asked.</figcaption></figure>
   </div>
 </div></section>
@@ -1743,15 +1748,19 @@ def render_fleet(d: dict) -> str:
   same records Fleet reads, so the panel&rsquo;s head and the session&rsquo;s Fleet row agree. After <code>Ctrl+]</code>,
   <code>f</code> opens Fleet in that window; on a session page in Fleet, <code>Ctrl+]</code> opens that exact
   session&rsquo;s panel.</p>
-  <div class="split">
-    {shot("panel")}
+  <div style="margin-top:30px">{shot("panel")}</div>
+  <div class="split" style="margin-top:26px">
     <div>
       <h3>What it shows</h3>
-      <p class="t">Project and Git, model and context, the title and what the session is doing now; each route
-      with its owner and the worker running the current stage; requests sent and received; the project&rsquo;s
-      experiments (<code>LAB</code>); recent messages and saved memory; the usage windows.</p>
-      <p class="t"><b>A question waiting for you</b> shows under <code>QUESTIONS</code>. Press <code>Ctrl+]</code>
-      and it opens in a popup in the middle of the window: answer with <code>Tab</code>, <code>1&ndash;9</code>, and
+      <p class="t">Project and Git, model and context, the title and what the session is doing now; then a few
+      rows each of the questions waiting for you, this session&rsquo;s routes, the project&rsquo;s experiments
+      (<code>LAB</code>), the other sessions on the machine, messages and requests, and saved memory with its scope
+      and kind; the usage windows. Press a section and its whole Fleet table opens in a popup in the middle of the
+      window, the rest gray behind it.</p>
+    </div>
+    <div>
+      <p class="t"><b>A question you can answer here</b> reads as a rose button under <code>QUESTIONS</code>. Press
+      <code>Ctrl+]</code> and it opens in the popup: answer with <code>Tab</code>, <code>1&ndash;9</code>, and
       <code>Enter</code>, and the popup closes. In a narrow window the panel folds into a strip under the agent&rsquo;s
       screen; opened there by hand, it sits below. The conversation in these pictures is illustrative.</p>
       <p class="t"><code>hearting session shell disable</code> turns it off for new terminals.
@@ -1764,8 +1773,8 @@ def render_fleet(d: dict) -> str:
       <h3>Sessions hand each other work</h3>
       <p class="t">A session can hand another session work as a <b>request</b>: it gets a number, the other session
       opens the body itself, partial reports keep it open, and a final report closes it and wakes the session
-      that asked. Both panels list it until it closes &mdash; <code>&rarr;</code> handed out, <code>&#9666;</code>
-      handed to you, <code>&#10003;</code> finished.</p>
+      that asked. Both panels list it under <code>MESSAGES</code> until it closes &mdash; <code>&rarr;</code> handed
+      out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished.</p>
       <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet shows
       requests only as PEERS links.</p>
     </div>
@@ -1791,7 +1800,7 @@ def render_fleet(d: dict) -> str:
 <section class="sec" id="run"><div class="wrap">
   <div class="kick">Run it</div>
   <h2>Installed with Hearting. One word to start.</h2>
-  <p class="lead">Press <code>Ctrl+]</code> then <code>f</code> in any session&rsquo;s panel, or run
+  <p class="lead">Press <code>Ctrl+]</code> then <code>f</code> in any session&rsquo;s window, or run
   <code>fleet</code> in any terminal.</p>
   <div class="split" style="margin-top:30px">
     <pre class="code">fleet              # the Explorer, full screen (needs curses)

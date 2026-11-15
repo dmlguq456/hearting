@@ -10,7 +10,7 @@
 
 <p align="center"><strong>Supervise every coding agent from one seat — on Claude Code, Codex, and OpenCode.</strong></p>
 
-<p align="center">Each session gets a panel with its route, workers, and messages; Fleet shows every session and which one needs you.<br>
+<p align="center">Each session gets a panel with its questions, routes, other sessions, and messages; Fleet shows every session and which one needs you.<br>
 A capable model settles the plan, and lower-cost workers carry it out in small, checked steps.</p>
 
 <p align="center">
@@ -32,7 +32,7 @@ A capable model settles the plan, and lower-cost workers carry it out in small, 
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now, a route box with the owner and the execute worker at staged 2/4, the request Test run to [b2] with a partial answer and a finished review, messages with [b2] and [9c], and a saved decision." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; ROUTE with Rate limiting at 2/4 execute; SESSIONS with seven other sessions, three of them running; MESSAGES with the request Test run to [b2] at a partial answer, a finished review, and a note to [9c]; MEM with a project decision and a global lesson." width="100%">
 </p>
 <p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</sub></p>
 
@@ -87,27 +87,30 @@ records, so what one session's panel says is what Fleet says about it.
 ### The panel beside each session
 
 New installations open a 40-column panel on the right of every new Claude Code,
-Codex, and OpenCode terminal. From the top it shows the project and Git state,
-the model and context, the session's title and what it is doing now; each route
-with its owner and the worker running the current stage; the requests this
-session sent or received; this project's experiments (`LAB`); the questions
-waiting for you; recent messages, saved memory (`MEM`), and the usage windows.
-Press **Ctrl+]** and a waiting question opens in a popup in the middle of the
-window: answer with **Tab**, **1–9**, and **Enter**, and the popup closes and
-your keys go back to the agent; **Esc** or **Ctrl+]** closes it unanswered.
-With no question waiting, **Ctrl+]** opens the panel, and **f** then opens
-Fleet in the same window. **»** folds the panel into a strip under the agent's
-screen. `hearting session shell disable` turns the panel off for new
-terminals. Keys, settings, the narrow-window layout, and per-runtime details
-are in [docs/session-panel.md](docs/session-panel.md).
+Codex, and OpenCode terminal. Under the project and Git state, the model and
+context, and the session's title and what it is doing now, each section keeps a
+few rows: questions waiting for you, this session's routes, this project's
+experiments (`LAB`), the other sessions on the machine, messages and requests,
+and saved memory (`MEM`) with its scope and kind. Press a section and its whole
+Fleet table opens in a popup in the middle of the window, the rest gray behind
+it. A question you can answer here reads as a rose button. **Ctrl+]** always
+opens a popup, that question first: answer with **Tab**, **1–9**, and
+**Enter**, and the popup closes with `✓ answer sent`. In a popup **←/→** move
+between sections, **f** opens Fleet in the same window, **p** folds the panel
+into a strip under the agent's screen, and **Esc** or **Ctrl+]** closes it.
+While the session runs the frame stays lit and a light passes over the rule
+under the model; **⚙** → rule motion picks another motion or none.
+`hearting session shell disable` turns the panel off for new terminals. Keys,
+settings, the narrow-window layout, and per-runtime details are in
+[docs/session-panel.md](docs/session-panel.md).
 
 <p align="center">
-  <img src="docs/fleet/panel.png" alt="The panel of session [d1] in project ml-train: Git state, model Opus 5.5 high, context 38%, title Checkpoint eval, a lab route at stage eval-asr with its worker, the LAB table with three conditions and their latest word error rates against the baseline, two messages with session [e8], and usage." width="390">
+  <img src="docs/fleet/panel.png" alt="Session [d1]'s window in project ml-train with its LAB section pressed: Fleet's LAB table in a popup in the middle of the window, with the goal, the metric and the 12.4% baseline, and three conditions with their state, progress, latest and best word error rate, and difference from the baseline; behind it the conversation and the panel in gray, and on the popup's bottom line ROUTE, LAB, SESSIONS, and MESSAGES." width="100%">
 </p>
-<p align="center"><sub><b>One panel</b> — a lab route with its worker, the project's <code>LAB</code> table opened in place, and messages.</sub></p>
+<p align="center"><sub><b>A section pressed</b> — <code>[d1]</code>'s <code>LAB</code> opens Fleet's LAB table in a popup; the rest goes gray. Demo data.</sub></p>
 
 <p align="center">
-  <img src="docs/fleet/panel-focus.gif" alt="Answering a question, step by step, in session [9c]'s window: two questions wait in the panel while keys still go to the agent; Ctrl+] opens the first in a popup in the middle of the window; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel keeps one dim line, answer sent." width="100%">
+  <img src="docs/fleet/panel-focus.gif" alt="Answering a question, step by step, in session [9c]'s window: the first of two questions stands in the panel as a rose button while keys still go to the agent; Ctrl+] opens it in a popup in the middle of the window, the rest gray; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel shows answer sent in green with the choice." width="100%">
 </p>
 <p align="center"><sub><b>Answering</b> — Ctrl+] → Tab → 2 → Enter. Demo data.</sub></p>
 
@@ -163,13 +166,14 @@ and opens the body itself; it sends partial reports while the work continues
 and a final report, or a rejection, when it is done, and each report wakes the
 session that asked. The asker can send a new revision or cancel, and a request
 follows the other session to a successor only when Hearting confirms the
-handover. Both panels show the request until it closes: `→` work you handed
-out, `◂` work handed to you, `✓` finished.
+handover. Both panels show the request in MESSAGES until it closes: `→` work
+you handed out, `◂` work handed to you, `✓` finished; press it for its reports
+and body.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: its route box lists two requests to [b2], one opened in place with its revision, delivery seen, work partial answer with 9 suites left, and age; the other finished. Right, the Codex session [b2] that was asked: one request from [4f] with its details, the partial report, and a link to the body." width="80%">
+  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: under MESSAGES, an arrow to [b2], Test run, partial answer, then a finished review from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: under MESSAGES, an arrow from [4f], Test run, partial answer, and its reply to [4f]." width="80%">
 </p>
-<p align="center"><sub>The same request in the panel of the session that asked (<code>[4f]</code>) and the one asked (<code>[b2]</code>). Demo data.</sub></p>
+<p align="center"><sub>The same request in the MESSAGES of the session that asked (<code>[4f]</code>) and the one asked (<code>[b2]</code>). Demo data.</sub></p>
 
 Short messages and watching work the same way: a session can send another a
 note, or watch it and be woken once when it finishes, stops, or needs you

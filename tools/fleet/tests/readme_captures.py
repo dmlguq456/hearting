@@ -12,13 +12,16 @@ synthetic rows; no home, registry, herdr or network read; no live Fleet window i
 and the session panel of the same demo world with ``readme_panel`` (the shell backend's own
 projection, painted by ``panel-view.cjs`` under node; the conversation beside it is illustrative):
 
-    seat.png (session [4f]'s window: the conversation and its panel)  panel.png (one panel with LAB)
-    panel-question.png (the bottom layout)  requests.png (requester and receiver)
-    panel-focus.gif (Ctrl+] > Tab > 2 > Enter, the question popup over the window)
+    seat.png (session [4f]'s window: the conversation and its panel)
+    panel.png ([d1]'s window: its LAB section pressed, Fleet's LAB table in a popup, the rest gray)
+    panel-question.png (the bottom layout)  requests.png (one request in the requester's and the
+    receiver's MESSAGES)  panel-focus.gif (the question as a button > Ctrl+] > Tab > 2 > Enter: the
+    question popup over the window, then `answer sent`)
     walkthrough.gif (OVERVIEW > ROUTES > session > that session's panel > output)
 
 The README opens with seat.png, overview.png, peers.png and routes.png: one moment of one demo world,
-so the route and the request [4f]'s panel shows read the same in the three Fleet screens.
+so the route, the request and the other sessions [4f]'s panel shows read the same in the three Fleet
+screens (the panel's SESSIONS section and popups are Fleet's own table of the same world).
 One run redraws every picture; two runs write the same bytes.
 
 PNGs are palette-quantised so the README loads quickly. Unlike ``explorer_capture.py`` (evidence,
@@ -57,6 +60,10 @@ PANEL_COLS = 40
 SEAT_TALK, SEAT_ROWS = 80, 38
 # The answering GIF: the [9c] window, its panel and the question popup over both.
 FOCUS_TALK, FOCUS_ROWS = 80, 30
+# The pressed section: the [d1] window with the LAB popup (as wide as the first picture).
+POPUP_ROWS = 30
+# The request on both sides: the two panels.
+REQUEST_ROWS = 30
 
 
 def isolate():
@@ -114,35 +121,53 @@ def quantised(image):
 
 
 def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), expanded=(),
-                state=None, configuration=None, window=None):
+                state=None, configuration=None, window=None, table=None):
     """One demo session's panel, painted by the shell's own renderer (``readme_panel``):
-    ``{"rows", "popup"}``, the popup laid over ``window`` (``cols``, ``rows``) while focused."""
+    ``{"rows", "popup"}``. With ``window`` (``cols``, ``rows``) the popup the host would lay over it:
+    the question popup while ``keys`` leave the editor focused, or the ``table`` popup (``ROUTE``,
+    ``LAB``, ``SESSIONS`` or ``MESSAGES``) pressed in the panel. A side panel shows the SESSIONS
+    section from the backend's sessions reading of the same demo world, as the host reads it."""
     from tools.fleet.tests import readme_panel
     session = world.sessions[sid]
     state = state or {"working": "working", "blocked": "blocked"}.get(session.liveness, "idle")
-    payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state)
+    columns = readme_panel.popup_width(window["cols"]) if window else None
+    payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state,
+                                      popup_columns=columns)
     if "lab" in expanded:
         expanded = [key for key in expanded if key != "lab"] + [str((payload["panel"].get("lab") or {}).get("key") or "lab:")]
+    table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160, "table") - 4))
+    summary = readme_panel.popup_read(world, sid, "sessions", columns=table_cols)["summary"] if side else None
+    job_table = None
+    if table:
+        job_table = {"kind": table}
+        if table == "MESSAGES":
+            job_table["lines"] = readme_panel.unreceived_lines(world, sid)
+        else:
+            kind = {"ROUTE": "routes", "LAB": "lab", "SESSIONS": "sessions"}[table]
+            job_table["result"] = readme_panel.popup_read(world, sid, kind, columns=table_cols)
     return readme_panel.paint([{"payload": payload, "width": width, "height": height, "side": side,
                                 "state": state, "sid": sid, "harness": session.harness, "frame": 3,
-                                "keys": list(keys), "expanded": list(expanded),
-                                "configuration": configuration or {}, "window": window}])[0]
+                                "keys": list(keys), "expanded": list(expanded), "sessions": summary,
+                                "configuration": configuration or {}, "window": window, "table": job_table}])[0]
 
 
 def panel_rows(world, sid, height, **options):
     return panel_paint(world, sid, height, **options)["rows"]
 
 
-def session_window(world, sid, cols, rows, *, keys=()):
+def session_window(world, sid, cols, rows, *, keys=(), table=None):
     """A demo session's terminal: the illustrative conversation, two cells, then its panel, and the
-    question popup over both while the keys leave it open (``host.cjs`` lays it over the window)."""
+    popup over both while the keys leave the question open or a ``table`` popup stands, with
+    everything behind it in the veil's gray (``host.cjs`` lays it over the window)."""
     from tools.fleet.tests import readme_panel as panel
     talk = cols - PANEL_COLS - 2
-    painted = panel_paint(world, sid, rows, keys=keys, window={"cols": cols, "rows": rows})
+    painted = panel_paint(world, sid, rows, keys=keys, window={"cols": cols, "rows": rows}, table=table)
     grid = panel.beside(panel.cells(panel.conversation(sid, talk, rows)), panel.cells(painted["rows"]), talk)
     if painted["popup"]:
-        grid = panel.overlay(grid, panel.cells(painted["popup"]["rows"]), painted["popup"]["top"],
-                             painted["popup"]["left"])
+        shown = painted["popup"]
+        if shown.get("veil") is not None:
+            grid = panel.veiled(grid, shown["veil"])
+        grid = panel.overlay(grid, panel.cells(shown["rows"]), shown["top"], shown["left"])
     return panel.image(grid, cols, rows)
 
 
@@ -171,19 +196,23 @@ def panel_pictures(render, capture, with_gif):
     snapshot, _hosts = readme_demo.snapshot()
     world = panel.World(snapshot, readme_demo.NOW)
     pictures = {"seat.png": seat(world)}
+    # A section pressed in the panel: the LAB section of [d1] opens Fleet's LAB table in a popup in
+    # the middle of the window, everything behind it in one gray.
+    cols = SEAT_TALK + 2 + PANEL_COLS
     pictures["panel.png"] = panel.screen([[panel.window(
-        panel.image(panel.cells(panel_rows(world, panel.ML, 46, expanded=("lab",))), PANEL_COLS, 46),
-        "ml-train · claude [d1]")]])
+        session_window(world, panel.ML, cols, POPUP_ROWS, table="LAB"),
+        "ml-train · claude [d1] — the LAB section pressed")]])
     question = panel.beside(panel.cells(panel.conversation(panel.API_NOTES, 100, 9)), [], 100, gap=0)
     question += panel.cells(panel_rows(world, panel.API_NOTES, 14, width=100, side=False,
                                        configuration={"layout": "bottom"}))
     pictures["panel-question.png"] = panel.screen([[panel.window(
         panel.image(question, 100, 23), "web-api · claude [9c] — the bottom layout")]])
-    rq = "request:rq-7d21c4"
+    # One request on both sides: its MESSAGES row in the panel of the session that asked (→) and of
+    # the one asked (◂), the same title and state.
     pictures["requests.png"] = panel.screen([[
-        panel.window(panel.image(panel.cells(panel_rows(world, panel.API, 46, expanded=(rq,))), PANEL_COLS, 46),
+        panel.window(panel.image(panel.cells(panel_rows(world, panel.API, REQUEST_ROWS)), PANEL_COLS, REQUEST_ROWS),
                      "claude [4f] — asked"),
-        panel.window(panel.image(panel.cells(panel_rows(world, panel.API_REVIEW, 46, expanded=(rq,))), PANEL_COLS, 46),
+        panel.window(panel.image(panel.cells(panel_rows(world, panel.API_REVIEW, REQUEST_ROWS)), PANEL_COLS, REQUEST_ROWS),
                      "codex [b2] — asked to")]])
     if with_gif:
         # Answering: Ctrl+] opens the question in a popup over the window (host.cjs ``popupNow``),
