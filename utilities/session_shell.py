@@ -47,15 +47,17 @@ def _private_json(path: Path, limit: int):
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
                     "position": "right", "theme": "terminal", "shade": "none", "route_line": "time",
-                    "rule_motion": "on"}
+                    "rule_motion": "rule"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
               "shade": ("none", "light", "medium")}
 # What a folded route row carries besides its title, harness and context:
-# its elapsed time or its model (spec rule 7). Whether the rule under the head's metadata
-# moves with the session's state (spec E9 rule 47 (e)). Same per-key fallback.
-CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("on", "off")}
+# its elapsed time or its model (spec rule 7). How a running session moves (spec E9 rule 47,
+# 11-15): a light over the head rule under a lit frame (`rule`, the default), one arc round the
+# frame (`border`), a wave round it (`scanners`), or nothing (`off`). Same per-key fallback: the
+# `on` saved before 11-15 reads as `rule`, and the file is not rewritten for it.
+CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("rule", "border", "scanners", "off")}
 
 
 def _appearance(value):
