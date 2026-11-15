@@ -171,7 +171,8 @@ whole item from its end: the session (the state glyph and number, the project,
 model and effort, `CTX` and its gauge, 5h, 7d; short of cells the reset times
 go first, then the effort, the project, 5h, the model windows, 7d), what to do
 now (`◑답 대기 N · ` and the question's first line, cut with `…` before the wait
-goes, then its choices where cells are left, whole or as their count `· +4`;
+goes, then its choices where cells are left, whole or else the first one with its name
+cut by `…` and the rest counted (`· 1 Name… +3`), never the count alone;
 compaction imminent; a tidy notice), and the sections' groups, each its count, its dark gray
 name tag and its most pressing count (`3 ROUTE ⠏2 ✕1 · ✕ title │ 4 LAB 실패 1 │ 5 SESSIONS ◑2 │
 MESSAGES ←2`): the routes with the failed routes' titles (else the running ones') after them, the
@@ -339,7 +340,8 @@ cells the model name is cut with `…` and the effort stays whole, and narrower
 than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
-then parts it from this session's content: the thin `─` in every state; under the
+then parts it from this session's content, with or without a session title (a session
+that has none yet, any harness, keeps the rule, and no empty row follows it): the thin `─` in every state; under the
 default `rule motion` a light passes over it while the session runs (above), otherwise
 it stands still (the session's state is told by the outer frame and the head's state
 glyph). The
@@ -373,7 +375,9 @@ opens in place: a press on a head or on any row of its section opens its popup
   answers here, now, reads as one button (11-15, panel polish 1): its rows stand on
   the rose fill across the panel's inside width (`FACES.*.fill`, 52 on a dark or
   unknown face, 224 on a light one), its first row bright, its choices numbered
-  chips (` 1 label `), and under them `↵ answer · Ctrl+]` in rose at the right; a
+  chips (` 1 label `; short of cells the last chips leave for their count `+N`, and where not
+  even the first fits beside the count it shows with its name cut by `…`, its number kept,
+  the rest counted: the first choice always shows), and under them `↵ answer · Ctrl+]` in rose at the right; a
   press on any of them opens the question popup. Short of rows the action row goes
   first, then the choices; the first row stays to the last. Mono, eight colors and
   `NO_COLOR` lead those rows with a rose bar `▌` instead. Nothing else in the panel
@@ -400,9 +404,11 @@ opens in place: a press on a head or on any row of its section opens its popup
   second; past four folders the rest are an unconfirmed note. A board that cannot
   be read or worded is LAB's own unconfirmed state and keeps its watch.
 - SESSIONS: the sessions on this machine from Fleet's session table, the ones a
-  person must answer first, then the running, then the idle, this window's own
+  person must answer first (every session Fleet's table counts as waiting for an answer,
+  the `◑` gates and the `●` of a native decision alike), then the running, then the idle, this window's own
   left out of the rows and of the head's counts alike (the head and the rows count
-  the same sessions); each its state glyph, `[number]`, TITLE (in its harness's bold hue)
+  the same sessions; a count is one glyph in one color, so the waiting `●` is counted apart from
+  the idle `●`, the waiting groups first); each its state glyph, `[number]`, TITLE (in its harness's bold hue)
   and AGE. Its values come from the sessions popup's own reading (below), made
   while another session waits for the person (and once when that ends) or when
   the popup opens; with no reading yet the section is not drawn.
@@ -706,7 +712,10 @@ on a session that waits for the person (`◑`) opens its question in the questio
 editor (below); PgUp/PgDn and the wheel read a longer table on (its place,
 `3/20`, leads the keys row; ↑↓ and Tab keep the unfolded row in view, and a table longer than the rows the popup carries, or than the answer the host reads, shows the rows that fit and ends with one dim line for the rest in the entrance's words, `외 N개`); `p` folds or opens the panel (the popup closes so
 the panel is seen), `r` the messages, `w` the open work, `f` Fleet; the keys row
-names them, broken between its pieces where the popup is narrow. A standing
+names them, broken between its pieces (` · `) where the popup is narrow, never inside a word
+(the question popup's keys and the table and MESSAGES popups' keys are one rule, `keyRows`; the
+closing key `Esc/Ctrl+]` stays to the last, and short of rows the pieces before it go first from
+the end backward). A standing
 table is read again at the events that change it, never on a timer: the routes
 when this session's route rows change (the shared answer-wait cache's existing
 watch), LAB when its board's watched files change, the sessions when their

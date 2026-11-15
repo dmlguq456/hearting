@@ -127,10 +127,10 @@ const spans=r.hits.filter(h=>h.right!==119),row3=[...rows[3]].reduce((o,c)=>{for
 const at=(h)=>{let s='',seen=null;for(let x=h.left;x<=h.right;x++)if(row3[x]!==seen||cells(row3[x])<2){s+=row3[x];seen=row3[x];}return s;};
 assert.deepEqual(spans.map(h=>[h.row,h.action]),[[3,'popup:ROUTE'],[3,'popup:LAB'],[3,'popup:MESSAGES']]);
 assert(at(spans[0]).startsWith('3 ROUTE ⠏2 ✕1 · ✕ 휠')&&at(spans[1]).startsWith('2 LAB 실패')&&at(spans[2]).startsWith('MESSAGES ←2'),spans.map(at).join('|'));
-// Where cells are left the question's choices follow on its row, whole, else their count alone (11-15).
+// Where cells are left the question's choices follow on its row, whole, else the first one cut with `…` and the rest counted (11-15, small fixes).
 const choices=[P('1 ','dim'),P('아래 두 줄','loc_repo'),P(' · 2 ','dim'),P('옆 띠','loc_repo')];
 assert.equal(text(strip({brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? · 1 아래 두 줄 · 2 옆 띠');
-assert.equal(text(strip({width:56,brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? · +2');
+assert.equal(text(strip({width:56,brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? · 1 아… +1');
 assert.equal(text(strip({width:48,brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요?');
 // No question to answer here (a wait answered elsewhere): the row opens the panel as the rest do.
 assert.equal(strip({brief:()=>null}).hits[2].action,'unfold');

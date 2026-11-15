@@ -222,6 +222,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
+  // A question's choices row as one list of parts per choice (`1 `, then its words), its ` · `
+  // joints and a `+N` count left out.
+  function choiceItems(parts){
+    const items=[];
+    for(const part of parts){const s=clean(part.text);
+      if(/^(?: · )?\+\d+$/u.test(s)||s===' · ')continue;
+      if(/^\d+ $/.test(s))items.push([part]);else if(items.length)items.at(-1).push(part);}
+    return items;
+  }
   let inner=width-4;const content=[],hits=[],edge=[];
   // 11-15 (popup design A): the question the person would answer next, as its summary (the
   // shell's editor reads it whole in the popup): `count` boxes, `rows` (its first row and its
@@ -330,9 +339,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const item of items){
         const gap=out.length&&!item.choices?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
         if(used+size(head)+size(tail)<=room){out.push(...head,...tail);used+=size(head)+size(tail);continue;}
-        // The choices after the question's first line: whole, else their count, else nothing; the
-        // question's line keeps its cells (it never gives them to its choices).
-        if(item.choices){if(used+size(item.short)<=room){out.push(...item.short);used+=size(item.short);}continue;}
+        // The question's line keeps its cells (it never gives them to its choices).
+        // The choices after the question's first line: whole, else the first one cut with `…` and
+        // the rest counted (`+N`), never nothing.
+        if(item.choices){
+          const first=choiceItems(item.head)[0],left=Math.max(0,(item.total||0)-1);
+          for(const rest of [left?[text(' +'+left,'dim')]:[],[]]){
+            const space=room-used-size(item.lead)-size(rest);
+            if(first&&space>=2){out.push(...item.lead,...cut(first,space),...rest);break;}
+          }
+          continue;
+        }
         const left=room-used-size(head);
         if(tail.length&&left>=5)out.push(...head,...cut(tail,left));
         else if(left>=0&&!item.titled)out.push(...head);
@@ -383,7 +400,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
     const todo=[
       ...(model.wait?[{head:[text(clean(model.wait),'g_blocked')],tail:first.length?[text(' · ','dim'),...first]:[]}]:[]),
-      ...(first.length&&choiceRow.length?[{choices:true,head:[text(' · ','dim'),...choiceRow],short:[text(' · +'+summary.choices,'dim')]}]:[]),
+      ...(first.length&&choiceRow.length?[{choices:true,lead:[text(' · ','dim')],total:summary.choices,head:[text(' · ','dim'),...choiceRow]}]:[]),
       ...(guide?[{titled:true,head:[],tail:[text(guide,'dim')]}]:[]),
       ...(model.warning?[{head:[text('⚠ ','lvl_r')],tail:[text(clean(model.warning),'lvl_r')]}]:[]),
       ...(tidy&&!model.answerable?[{head:[text('⚠ ','lvl_y')],tail:[text(tidy,'lvl_y')]}]:[])];
@@ -684,9 +701,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
       if(model.warning)top.push(line(model.warning,'lvl_r'));
       const content=title||now||(tidy&&!asking);
-      // Spec rule 34 (c): the rule is not an empty row; it goes only once TITLE and NOW are down to one row each.
+      // Spec rule 34 (c): the rule parts the head's block from what follows it; it is not an empty row
+      // but it stands without a title too (11-15 small fixes: what the default `rule motion` moves
+      // must not wait on a title), where something stands above it.
       // Spec rule 47: it follows this session's state (above).
-      if(content){rules.add(top.length);top.push(ruleParts());}
+      if(content||top.length){rules.add(top.length);top.push(ruleParts());}
       // Spec rule 44: the title's value bold, in this session's harness color (Fleet's `hb_*`;
       // the label stays dim). No color keeps the weight, as the steward's `⚑` (rule 35 (a)).
       const own='hb_'+(['claude','codex','opencode'].includes(harness)?harness:'other');
@@ -698,8 +717,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…','lvl_y')];}
         top.push(...kept);
       }
-      // One empty row parts the head from the route box below it.
-      if(top.length){spacers.add(top.length);top.push([]);}
+      // One empty row parts the head from the route box below it (a head with no content has its rule).
+      if(content){spacers.add(top.length);top.push([]);}
     }else{
       // The bottom layout has few rows: the metadata row (or rows) first, then one
       // content row; the row break parts them (no rule).
@@ -775,16 +794,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // The choices' row as chips (` 1 label ` on the chip ground, one fill cell apart, the first under
     // the question's words); short of cells the last chips leave for their count (`+N`).
     const chips=parts=>{
-      const items=[];let more=0;
-      for(const part of parts){const s=clean(part.text),m=/^(?: · )?\+(\d+)$/u.exec(s);
-        if(m)more=Number(m[1]);
-        else if(/^\d+ $/.test(s))items.push([{...part,role:'accent'}]);
-        else if(items.length&&s!==' · ')items.at(-1).push(part.dim===true?part:{...part,role:'bright'});}
+      const items=choiceItems(parts).map(c=>c.map((part,i)=>i?(part.dim===true?part:{...part,role:'bright'}):{...part,role:'accent'}));
+      const more=Math.max(0,...parts.map(part=>{const m=/^(?: · )?\+(\d+)$/u.exec(clean(part.text));return m?Number(m[1]):0;}));
       const chip=c=>[text(' '),...c,text(' ')].map(part=>({...part,ground:'chip'}));
-      for(let k=items.length;k>=0;k--){
-        const left=items.length-k+more,row=[text(' '),...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' ')]:[]),...chip(c)]),...(left?[text(' +'+left,'dim')]:[])];
-        if(size(row)<=inner||!k)return row;
+      const count=n=>n?[text(' +'+n,'dim')]:[];
+      for(let k=items.length;k>=1;k--){
+        const row=[text(' '),...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' ')]:[]),...chip(c)]),...count(items.length-k+more)];
+        if(size(row)<=inner)return row;
       }
+      // Not even the first chip fits beside the count: it shows with its name cut (`…`), its number
+      // kept, and the rest are counted; narrower still, the count gives way before the choice.
+      if(items.length)for(const rest of [count(items.length-1+more),[]]){
+        const room=inner-1-2-size(rest);
+        if(room>=2||!rest.length)return [text(' '),...chip(cut(items[0],Math.max(1,room))),...rest];
+      }
+      return [text(' '),...count(more)];
     };
     // `↵ answer · Ctrl+]` at the right; narrow, its first word alone.
     const actionRow=()=>{
@@ -1126,6 +1150,30 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,groups,animated:animated&&!settings,blinks:blinks&&!settings,spins,motion};
 }
+// 11-15 (small fixes): key words packed into rows of `inner` cells, broken only between their pieces
+// (` · ` stands between them); a piece wider than a row breaks at its spaces, a word wider than a
+// row ends in `…`. Short of `rows`, the pieces before the last go first, from the end backward, so
+// the closing key (the last piece) stays. Every popup's key line is this one rule.
+function keyRows(pieces,inner,{rows=Infinity,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const room=Math.max(1,inner);
+  const word=w=>{if(measure(w)<=room)return w;let t='',u=0;for(const c of w){const n=measure(c);if(u+n>room-1)break;t+=c;u+=n;}return t+'…';};
+  const wrap=piece=>{const out=[];let row='';for(const w of String(piece).split(' ').filter(Boolean).map(word)){const next=row?row+' '+w:w;if(row&&measure(next)>room){out.push(row);row=w;}else row=next;}if(row)out.push(row);return out;};
+  const pack=list=>{
+    const out=[];let row='';
+    for(const piece of list){
+      if(measure(piece)>room){if(row)out.push(row);const lines=wrap(piece);out.push(...lines.slice(0,-1));row=lines.at(-1)||'';continue;}
+      const next=row?row+' · '+piece:piece;
+      if(row&&measure(next)>room){out.push(row);row=piece;}else row=next;
+    }
+    if(row)out.push(row);
+    return out;
+  }
+  const list=pieces.map(x=>String(x).trim()).filter(Boolean);
+  let out=pack(list);
+  while(out.length>rows&&list.length>1){list.splice(list.length-2,1);out=pack(list);}
+  return rows>0?out.slice(-rows):[];
+}
 // 11-15 (popup design, 공통): one frame for every popup (the questions now; the routes, LAB and
 // sessions use it as it is). It stands in the middle of the window, the native area and the panel
 // together; with the folded strip under the native area, in the middle of the rows above it (the
@@ -1237,6 +1285,6 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   }
   return out.length?out:[[text('·')]];
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
+module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST},WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
