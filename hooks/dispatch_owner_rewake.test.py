@@ -2123,15 +2123,14 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                         text, {"harness": harness, "session_id": "session-1"}, include_ref=True
                     )["transfer_ref"]
                     if harness == "claude":
-                        # Claude's existing UserPromptSubmit context carrier emits the exact
-                        # pending row; context emission is still not receiver acknowledgement.
+                        # No Claude hook carries the runner's copy of a completion (the rewake
+                        # sends the completion; the copy is for a resting session). The shell
+                        # injects it, and the prompt hook receives that prompt.
                         stream = io.StringIO()
                         steward.peer_message.emit_peer_context(
                             {"harness": harness, "session_id": "session-1"},
                             "UserPromptSubmit", stream=stream)
-                        emitted = json.loads(stream.getvalue())["hookSpecificOutput"]["additionalContext"]
-                        self.assertIn(text, emitted)
-                        text = emitted
+                        self.assertEqual(stream.getvalue(), "")
                     elif harness == "opencode":
                         # Match the plugin's existing promptAsync acceptance transition.
                         message_id = "opencode-item-" + ref
@@ -2150,6 +2149,18 @@ class CarrierOneClaimGateTest(unittest.TestCase):
 
                 native_sends = []
                 native_send_restarts = []
+                shell_injects = []
+                shell_attachment = {"harness": "claude", "sid": "session-1", "incarnation": "i1",
+                                    "host_pid": 4242, "host_start": "1", "native_pid": 4243,
+                                    "native_start": "1", "socket": "/nonexistent.sock"}
+
+                def shell_control(_binding, operation, **fields):
+                    # The resting shell's host: idle, empty input, takes the injected prompt.
+                    if operation == "status":
+                        return {"ok": True, "state": "idle", "empty": True, "epoch": 1}
+                    self.assertEqual(operation, "inject")
+                    shell_injects.append(fields["ref"])
+                    return {"ok": True}
                 def codex_native_send(_socket, *, thread_id, client_message_id, message,
                                       before_add, **_options):
                     native_sends.append((thread_id, client_message_id, message))
@@ -2204,7 +2215,21 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                                 prepared_refs[0])
                             repair_ack.assert_called_once_with(received)
                         return code
+                import session_shell
+                real_exact = session_shell.exact_binding
+                real_current_binding = steward._current_shell_binding
+
+                def shell_for(harness_name, sid):
+                    # The Claude recipient is a resting session inside a Hearting shell once
+                    # it is available; before that the shell is not there to take anything.
+                    if harness == "claude" and harness_name == "claude" and agents["result"]["agents"]:
+                        return shell_attachment, ""
+                    return None, "attachment-unavailable"
+
                 with mock.patch.object(steward.shutil, "which", return_value="/usr/bin/herdr"), \
+                        mock.patch.object(session_shell, "exact_binding", side_effect=shell_for), \
+                        mock.patch.object(steward, "_current_shell_binding", side_effect=shell_for), \
+                        mock.patch.object(session_shell, "control", side_effect=shell_control), \
                         mock.patch.object(steward.subprocess, "run", side_effect=external_observation), \
                         mock.patch.object(native_identity, "process_identity", side_effect=process_identity), \
                         mock.patch.object(pane_ownership, "current_codex_thread",
@@ -2232,6 +2257,9 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     # (no agent get, process-info or screen read).
                     self.assertEqual(set(observed_commands), {("agent", "list")})
                     self.assertEqual(prompt_call.call_args.args[0].target, harness + ":session-1")
+                    # A Claude completion copy reaches the session only through its resting
+                    # shell's host, once: the real session-shell delivery reserves and injects.
+                    self.assertEqual(shell_injects, [prepared_refs[0]] if harness == "claude" else [])
                     if harness == "codex":
                         # Without a shell attachment there is no input evidence to
                         # restart an interrupted thread; the exact queue holds it.
@@ -2336,8 +2364,35 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 # The next subcase uses a distinct notice identity.
                 self.jobs.write_text("")
 
+    def test_a_claude_completion_stays_pending_unless_a_resting_shell_takes_it(self):
+        # Outside a Hearting shell, or in a busy or typed-into one, the runner holds no
+        # lease on the completion: it stays pending for the turn's Stop and the next
+        # input, which a 30 s claim would have kept from carrying it.
+        for label, shell in (("no shell", None),
+                             ("busy shell", {"ok": True, "state": "busy", "empty": True}),
+                             ("typed input", {"ok": True, "state": "idle", "empty": False}),
+                             ("host unreachable", {"ok": False, "reason": "control-unavailable"})):
+            with self.subTest(label):
+                sent, path, store, duty = self._lost_carrier_runner(shell=shell)
+                self.assertEqual(sent, [])
+                self.assertEqual(json.loads(path.read_text())["state"], "pending")
+                self.assertEqual(store.get(duty["id"])["state"], "pending")
+                self.jobs.write_text("")
+        sent, path, store, duty = self._lost_carrier_runner(
+            shell={"ok": True, "state": "idle", "empty": True})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
+
     def _check_lost_carrier_completion(self, crash_sid="session-1", recipient_sid="session-1",
                                        live_holder=False):
+        self._lost_carrier_runner(crash_sid=crash_sid, recipient_sid=recipient_sid,
+                                  live_holder=live_holder,
+                                  shell={"ok": True, "state": "idle", "empty": True}, ack=True)
+
+    def _lost_carrier_runner(self, crash_sid="session-1", recipient_sid="session-1",
+                             live_holder=False, shell=None, ack=False):
+        """Run the runner over a completion its dead carrier left; ``shell`` is the status the
+        recipient's Hearting shell reports, ``None`` for a session outside any shell."""
         self._open_row()
         from route_identity import route_hash
         route = {"route_id": "rt-owner", "nodes": [{"id": "report"}]}
@@ -2392,7 +2447,14 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         agents = {"result": {"agents": [{"agent": "claude", "pane_id": "w1:p9",
                                         "agent_session": {"value": recipient_sid}}]}}
         holder_alive = (lambda holder: holder == list(DEAD_HOLDER)) if live_holder else rewake._holder_alive
+        import session_shell
+        attachment = {"harness": "claude", "sid": recipient_sid, "incarnation": "i1", "host_pid": 4242,
+                      "host_start": "1", "native_pid": 4243, "native_start": "1",
+                      "socket": "/nonexistent.sock"}
         with mock.patch.dict(sys.modules, {"_retained_rewake": rewake}), \
+                mock.patch.object(steward, "_current_shell_binding", return_value=(
+                    (attachment, "") if shell is not None else (None, "attachment-unavailable"))), \
+                mock.patch.object(session_shell, "control", return_value=shell or {}), \
                 mock.patch.object(rewake, "_holder_alive", side_effect=holder_alive), \
                 mock.patch.object(steward.subprocess, "run", return_value=type("Reply", (), {
                     "stdout": json.dumps(agents), "returncode": 0})()), \
@@ -2404,15 +2466,19 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             self.assertEqual(sent, [])
             path = self._close_and_materialize()
             steward._resume_registered_obligation(duty, store)
+            if not (shell or {}).get("ok") or (shell["state"], shell["empty"]) != ("idle", True):
+                return sent, path, store, duty
             self.assertEqual(len(sent), 1)
             self.assertIn("att-owner-1", sent[0])
             self.assertEqual(store.get(duty["id"])["state"], "pending")
             self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
-            # Acknowledged notices retain their original delivery identity.
-            rewake.pending_delivery.ack(self.root, "session-1", json.loads(path.read_text())["delivery_id"],
-                                         acked_by="session-sweep:session-1")
-            steward._resume_registered_obligation(duty, store)
-            self.assertEqual(len(sent), 1)
+            if ack:
+                # Acknowledged notices retain their original delivery identity.
+                rewake.pending_delivery.ack(self.root, "session-1", json.loads(path.read_text())["delivery_id"],
+                                             acked_by="session-sweep:session-1")
+                steward._resume_registered_obligation(duty, store)
+                self.assertEqual(len(sent), 1)
+        return sent, path, store, duty
 
     def test_claim_win_emits_and_transitions_to_sent_ambiguous(self):
         self._open_row()

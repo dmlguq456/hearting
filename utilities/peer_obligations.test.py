@@ -283,7 +283,14 @@ class ObligationStoreTest(unittest.TestCase):
                             (pane.removeprefix("w1:p-"), sid)), \
                         mock.patch.object(peer_steward, "_settle_claude_native_dispatch_receipt", return_value=False), \
                         mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier), \
+                        mock.patch.object(peer_steward, "_current_shell_binding", side_effect=lambda h, s: (
+                            ({"harness": h, "sid": s, "incarnation": "i1", "host_pid": 4242, "host_start": "1",
+                              "native_pid": 4243, "native_start": "1", "socket": "/nonexistent.sock"}, "")
+                            if h == "claude" else (None, "attachment-unavailable"))), \
+                        mock.patch("session_shell.control",
+                                   return_value={"ok": True, "state": "idle", "empty": True}), \
                         mock.patch("dispatch_notice_state.keep_claim", return_value=True):
+                    # A Claude target is held only for a resting shell: this one rests.
                     peer_steward._resume_registered_obligation(duties[0], self.store)
                 self.assertEqual(len(sent), 1)
                 self.assertEqual(sent[0]["to"], {"harness": target, "session_id": sid})
