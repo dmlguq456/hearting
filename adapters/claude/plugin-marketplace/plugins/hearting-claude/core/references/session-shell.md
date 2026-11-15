@@ -220,8 +220,11 @@ The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
 The panel follows the 2026-11-11 unified layout (the C3 draft the person
 chose), placed by the C6 rule: what is always there sits at the top, what
-comes and goes below it; the sections stand from the top one after another and
-the rows left over go under the last of them (2026-11-14). The top border carries Fleet's row head for this
+comes and goes below it; the sections stand from the top one after another, and
+MESSAGES and MEM keep to the panel's bottom, right above the `5h`/`7d` row, so the
+rows left over stand between the sections above them and MESSAGES (the person's own
+word, 2026-11-11, restored 2026-11-15; without MESSAGES MEM keeps to the bottom, with
+neither the rows left over are below the last section). The top border carries Fleet's row head for this
 session on the left: the state glyph (a spinner while it works or an answer is
 being typed in for the person, `●` idle, `◑` waiting on a dialog or question),
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
@@ -407,7 +410,8 @@ its row, then its head, then MESSAGES, SESSIONS, LAB and ROUTE the same; the
 question's head and first row stay to the last; 5h/7d last of all. In a 20-row
 window each section keeps one row. Rows a later step frees beyond its need go
 back to the steps before it, the most important first. A section is placed whole
-or not at all; the rows left over go under the last one.
+or not at all; the rows left over stand above MESSAGES and MEM (which keep to the
+bottom, with their press targets), or under the last section when there are none.
 Groups are divided by `│`, stages joined by `›`. Fixed words are English
 (`context`, `route`, `messages`, stage names, `5h`/`7d`, the section names
 `QUESTIONS`, `ROUTE`, `LAB`, `SESSIONS`, `MESSAGES`, `MEM` with their counts
