@@ -116,8 +116,8 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 OpenCode 터미널이 예전처럼 원래 CLI로 열리고, `hearting session shell enable`은
 패널을 다시 켭니다. `hearting session shell status`로 지금 선택을 봅니다. 실행 중인
 세션은 시작할 때 상태 그대로이고, 업데이트도 이 선택을 지킵니다. 패널은 두되 원래
-화면을 넓게 쓰고 싶으면 패널 톱니 옆 **»**로 원래 화면 아래의 띠로 접어 원래 화면에
-폭을 다 돌려주거나, **⚙**에서 폭과 위치를 바꿉니다([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding), 영어).
+화면을 넓게 쓰고 싶으면 패널 톱니 옆 **»** 단추로 원래 화면 아래의 띠로 접어 원래 화면에
+폭을 다 돌려주거나, **⚙** 설정에서 폭과 위치를 바꿉니다([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding), 영어).
 
 ## 세션끼리 일과 메시지를 어떻게 주고받나요?
 

@@ -90,20 +90,23 @@
 패널이 열립니다. 위에서부터 프로젝트와 Git 상태, 모델과 문맥, 세션 제목과 지금
 하는 일, route마다 owner와 지금 단계를 도는 작업자, 이 세션이 맡기거나 받은
 요청, 이 프로젝트의 실험(`LAB`), 사용자의 답을 기다리는 질문, 최근 메시지, 저장된
-기억(`MEM`), 사용량 창이 보입니다. **Ctrl+]**를 누르면 기다리는 질문이 창 가운데
+기억(`MEM`), 사용량 창이 보입니다. **Ctrl+]** 키를 누르면 기다리는 질문이 창 가운데
 팝업으로 뜹니다. **Tab**, **1–9**, **Enter**로 답하면 팝업이 닫히고 키가 다시
-에이전트로 갑니다. 답하지 않고 닫으려면 **Esc**나 **Ctrl+]**를 누릅니다. 기다리는
-질문이 없으면 **Ctrl+]**는 패널을 열고, 이어서 **f**를 누르면 같은 창에서 Fleet를
-엽니다. **»**는 패널을 에이전트 화면 아래 띠로 접습니다. `hearting session shell disable`은
+에이전트로 갑니다. 답하지 않고 닫으려면 **Esc**나 **Ctrl+]** 키를 누릅니다. 기다리는
+질문이 없으면 **Ctrl+]** 키는 패널을 열고, 이어서 **f**를 누르면 같은 창에서 Fleet를
+엽니다. **»** 단추는 패널을 에이전트 화면 아래 띠로 접습니다. `hearting session shell disable`은
 새 터미널부터 패널을 끕니다. 키, 설정, 좁은 창 배치, 하네스별 세부는
 [docs/session-panel.md](docs/session-panel.md)(영어)에 있습니다.
 
-<table>
-  <tr>
-    <td width="50%" valign="top"><img src="docs/fleet/panel.png" alt="ml-train 프로젝트 세션 [d1]의 패널: Git 상태, 모델 Opus 5.5 high, 문맥 38%, 제목 Checkpoint eval, eval-asr 단계의 lab route와 그 작업자, 조건 셋의 최근 단어 오류율과 기준값을 보여 주는 LAB 표, 세션 [e8]과 주고받은 메시지 둘, 사용량."><br><sub><b>패널 하나</b> — 작업자가 붙은 lab route, 그 자리에서 펼친 프로젝트 <code>LAB</code> 표, 메시지.</sub></td>
-    <td width="50%" valign="top"><img src="docs/fleet/panel-focus.gif" alt="세션 [9c]의 창에서 질문에 답하는 차례: 패널에 질문 둘이 기다리는 동안 키는 에이전트로 간다. Ctrl+]로 첫 질문이 창 가운데 팝업으로 뜨고, Tab으로 다음 질문, 2로 둘째 선택지, Enter로 답을 보내면 팝업이 닫히고 패널에는 답 보냄 흐린 한 줄이 남는다."><br><sub><b>답하기</b> — Ctrl+] → Tab → 2 → Enter. 데모 데이터.</sub></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/fleet/panel.png" alt="ml-train 프로젝트 세션 [d1]의 패널: Git 상태, 모델 Opus 5.5 high, 문맥 38%, 제목 Checkpoint eval, eval-asr 단계의 lab route와 그 작업자, 조건 셋의 최근 단어 오류율과 기준값을 보여 주는 LAB 표, 세션 [e8]과 주고받은 메시지 둘, 사용량." width="390">
+</p>
+<p align="center"><sub><b>패널 하나</b> — 작업자가 붙은 lab route, 그 자리에서 펼친 프로젝트 <code>LAB</code> 표, 메시지.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/panel-focus.gif" alt="세션 [9c]의 창에서 질문에 답하는 차례: 패널에 질문 둘이 기다리는 동안 키는 에이전트로 간다. Ctrl+]로 첫 질문이 창 가운데 팝업으로 뜨고, Tab으로 다음 질문, 2로 둘째 선택지, Enter로 답을 보내면 팝업이 닫히고 패널에는 답 보냄 흐린 한 줄이 남는다." width="100%">
+</p>
+<p align="center"><sub><b>답하기</b> — Ctrl+] → Tab → 2 → Enter. 데모 데이터.</sub></p>
 
 ### Fleet: 모든 세션을 한꺼번에
 
@@ -131,8 +134,8 @@ Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 �
   </tr>
 </table>
 
-패널과 Fleet는 서로를 엽니다. 세션 창에서 **Ctrl+]**에 이어 **f**를 누르면 그
-창에서 Fleet가 열리고, Fleet의 세션 페이지에서 **Ctrl+]**는 정확히 그 세션의
+패널과 Fleet는 서로를 엽니다. 세션 창에서 **Ctrl+]** 키에 이어 **f**를 누르면 그
+창에서 Fleet가 열리고, Fleet의 세션 페이지에서 **Ctrl+]** 키는 정확히 그 세션의
 패널을 엽니다.
 기다리는 질문에는 어느 쪽에서나 답할 수 있습니다. 좁은 터미널에서도 배치가
 유지됩니다([100열 OVERVIEW](docs/fleet/narrow.png)).

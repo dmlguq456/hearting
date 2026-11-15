@@ -101,12 +101,15 @@ screen. `hearting session shell disable` turns the panel off for new
 terminals. Keys, settings, the narrow-window layout, and per-runtime details
 are in [docs/session-panel.md](docs/session-panel.md).
 
-<table>
-  <tr>
-    <td width="50%" valign="top"><img src="docs/fleet/panel.png" alt="The panel of session [d1] in project ml-train: Git state, model Opus 5.5 high, context 38%, title Checkpoint eval, a lab route at stage eval-asr with its worker, the LAB table with three conditions and their latest word error rates against the baseline, two messages with session [e8], and usage."><br><sub><b>One panel</b> — a lab route with its worker, the project's <code>LAB</code> table opened in place, and messages.</sub></td>
-    <td width="50%" valign="top"><img src="docs/fleet/panel-focus.gif" alt="Answering a question, step by step, in session [9c]'s window: two questions wait in the panel while keys still go to the agent; Ctrl+] opens the first in a popup in the middle of the window; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel keeps one dim line, answer sent."><br><sub><b>Answering</b> — Ctrl+] → Tab → 2 → Enter. Demo data.</sub></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/fleet/panel.png" alt="The panel of session [d1] in project ml-train: Git state, model Opus 5.5 high, context 38%, title Checkpoint eval, a lab route at stage eval-asr with its worker, the LAB table with three conditions and their latest word error rates against the baseline, two messages with session [e8], and usage." width="390">
+</p>
+<p align="center"><sub><b>One panel</b> — a lab route with its worker, the project's <code>LAB</code> table opened in place, and messages.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/panel-focus.gif" alt="Answering a question, step by step, in session [9c]'s window: two questions wait in the panel while keys still go to the agent; Ctrl+] opens the first in a popup in the middle of the window; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel keeps one dim line, answer sent." width="100%">
+</p>
+<p align="center"><sub><b>Answering</b> — Ctrl+] → Tab → 2 → Enter. Demo data.</sub></p>
 
 ### Fleet: every session at once
 
