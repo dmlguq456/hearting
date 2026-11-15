@@ -1818,20 +1818,18 @@ STOP_RELEASE_SETTLE_SECONDS = pending_delivery.COURIER_RETRY_BASE_SECONDS
 def claude_hook_evidence(payload, session_id: str):
     """This session's native Claude receipts at a hook call, or ``None`` (unknown).
 
-    Reads the transcript the hook payload names through the same verified
-    reader the prompt sweep uses; nothing else (a later call, a tool run,
-    another hook's block) counts as a receipt.
+    Reads the transcript the hook payload names, checked by the file itself and
+    not by recomputing its place from the session's current folder; nothing else
+    (a later call, a tool run, another hook's block) counts as a receipt.
     """
     if not isinstance(payload, dict):
         return None
     transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
-    cwd = payload.get("cwd")
-    if not isinstance(transcript_path, str) or not isinstance(cwd, str):
+    if not isinstance(transcript_path, str):
         return None
     from dispatch_recipient_receipt import claude_transcript_evidence
     return claude_transcript_evidence(
-        transcript_path=transcript_path, session_id=session_id, cwd=cwd,
-        expected_cwd=os.getcwd(),
+        transcript_path=transcript_path, session_id=session_id,
         runtime_home=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
 
 
@@ -1845,7 +1843,7 @@ def claude_receipt_observer(payload, session_id: str):
     if not isinstance(payload, dict):
         return None
     transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
-    if not isinstance(transcript_path, str) or not isinstance(payload.get("cwd"), str):
+    if not isinstance(transcript_path, str):
         return None
     from dispatch_recipient_receipt import claude_prompt_bindings
     prompt = claude_prompt_bindings(payload.get("prompt"))
