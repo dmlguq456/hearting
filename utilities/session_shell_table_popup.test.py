@@ -278,6 +278,72 @@ class TablePopupTest(unittest.TestCase):
         self.assertFalse(shell._panel_popup(self.binding, {'kind': 'nothing', 'columns': 72})['ok'])
         self.assertFalse(shell._panel_popup(self.binding, {'kind': 'routes', 'columns': 5})['ok'])
 
+    def test_a_long_table_is_cut_to_what_fits_with_one_line_for_the_rest(self):
+        # 300 routes and 160 sessions (116 cells wide, the answer past the host's 64 KB read as one table):
+        # the rows that fit stand, the last line says how many routes or sessions are left (the entrance's
+        # `외 N개`), and the count is what the kept rows do not show. A table that fits has no such line.
+        from fleet.explorer.view_model import ExplorerViewModel
+        routes = [dict(ROUTES[0], id='rt-%016d' % n, title='합성 route %d — ' % n + '긴 제목 ' * 8, session_tag='e9') for n in range(300)]
+        sessions = [dict(SESSIONS[1], tag='s%03d' % n, title='합성 세션 %d ' % n + '긴 제목 ' * 8) for n in range(160)]
+        model = ExplorerViewModel.from_mapping({'routes': routes, 'sessions': sessions, 'repos': REPOS, 'system': {}})
+        with mock.patch.object(shell, '_popup_view_model', lambda harness, sid, kind: model), \
+                mock.patch('fleet.session_tags.assigned_tag', lambda harness, sid: TAGS.get((harness, sid))), \
+                mock.patch.dict(os.environ, {'TERM': 'xterm-256color', 'FLEET_NOW_LANG': 'ko'}):
+            for kind, total, shown_of in (('routes', 300, lambda got: len(got['routes'])),
+                                          ('sessions', 160, lambda got: len({h['action'][2] for h in got['hits'] if h['action'][0] == 'fold'}))):
+                for columns in (56, 116, 200):
+                    got = shell._panel_popup(self.binding, {'kind': kind, 'columns': columns, 'open': ''})
+                    self.assertTrue(got['ok'], (kind, columns))
+                    weight = len(json.dumps({'id': 1, **got}, ensure_ascii=False).encode())
+                    self.assertLessEqual(weight, 64 * 1024, (kind, columns))
+                    shown = shown_of(got)
+                    self.assertTrue(0 < shown < total, (kind, columns, shown))
+                    last = ''.join(run[0] for run in got['rows'][-1])
+                    self.assertEqual(last, '외 %d개' % (total - shown), (kind, columns))
+                    self.assertLessEqual(len(got['rows']), shell.POPUP_ROWS + 1)
+                    self.assertTrue(all(hit['row'] < len(got['rows']) - 1 for hit in got['hits']))
+                    # The last line is dim, as the table's own quiet words.
+                    self.assertEqual(got['styles'][got['rows'][-1][0][1]].get('dim'), True)
+        # A table that fits is Fleet's own rows, whole, with no such line.
+        small = self.popup(kind='routes', columns=112)
+        self.assertNotIn('외 ', self.text(small['rows'])[-1])
+
+    def test_a_wait_with_nothing_to_read_still_says_where_it_is_answered(self):
+        import human_wait_state
+        view = {'items': [{'id': 'S4:other', 'owner': {'harness': 'claude', 'session_id': OTHER_SID}}]}
+        bare = {'id': 'S4:other', 'answerable': False, 'questions': [], 'reason': 'no exact owner session binding', 'kind': 'wait'}
+
+        def board(harness, sid, view=None, elsewhere=None, **_kw):
+            elsewhere.append(dict(bare))
+            return []
+        with mock.patch.object(human_wait_state, 'cached_view', lambda request=False: view), \
+                mock.patch.object(human_wait_state, 'person_wait', lambda item: True), \
+                mock.patch.object(shell, 'session_questions', board), \
+                mock.patch('fleet.session_tags.assigned_tag', lambda harness, sid: TAGS.get((harness, sid))), \
+                mock.patch.dict(os.environ, {'FLEET_NOW_LANG': 'ko'}):
+            got = shell._panel_popup(self.binding, {'kind': 'questions', 'columns': 72, 'tag': '12'})
+        item = got['questions'][0]
+        self.assertEqual((item['answerable'], item['answer_state']), (False, 'answer_there'))
+        self.assertEqual(len(item['questions']), 1)
+        self.assertTrue(item['questions'][0].get('display'))
+        # In the editor it reads `그 창에서 답` and there is nothing to send.
+        script = r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const sent=[],b=create({changed(){},answer:async f=>{sent.push(f);return {state:'submitted'};},action(){}});
+b.update([],'',{labels:{},styles:{}});
+const got=JSON.parse(process.argv[2]);
+b.enterForeign({tag:'12',owner:got.owner,items:got.questions,labels:got.labels});
+const text=b.detail({budget:12,columns:72}).map(row=>(Array.isArray(row)?row:[row]).map(p=>p.text).join('')).join('\n');
+assert(text.includes('그 창에서 답'),text);
+b.input(Buffer.from('x'));b.input(Buffer.from('\r'));await new Promise(r=>setTimeout(r,20));
+assert.deepEqual(sent,[],'nothing to send');
+})().catch(e=>{console.error(e);process.exit(1);});
+"""
+        out = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/block-input.cjs'), json.dumps(got)],
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
     def test_the_editor_answers_another_sessions_question_apart_from_its_own(self):
         # The editor (block-input) keeps this session's questions while another session's stand, sends the
         # other's answer with that session as owner, once, and brings its own back when left.

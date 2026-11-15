@@ -1384,6 +1384,52 @@ def popup_rows(grid, *, colors=256, no_color=False):
     return rows[:POPUP_ROWS], styles, hits
 
 
+POPUP_ANSWER_BYTES = 60 * 1024    # what a table's answer may weigh: the host reads 64 KB of one, and an answer past it is no table
+
+
+def _popup_table(kind, rows, styles, hits, total, *, colors, no_color, **extra):
+    """A route or sessions table as the host reads it, whole when it fits and else as many of its rows as
+    fit (``POPUP_ROWS`` rows and ``POPUP_ANSWER_BYTES``), with one dim last line for the rest (`외 N개`,
+    the entrance's own words): ``total`` is how many routes or sessions the table has, and the ones its
+    kept rows show are those that have a press target there. ``routes`` (routes) lists the shown ones."""
+    from fleet.config import ui_text
+    from fleet.palette import style_components
+
+    def ident(hit):
+        action = hit["action"]
+        if kind == "routes":
+            return action[1] if action[0] == "route" and len(action) > 1 else None
+        return action[2] if action[0] == "fold" and len(action) > 2 and action[1] == "sopen:OVERVIEW" else None
+
+    def build(count):
+        kept = [hit for hit in hits if hit["row"] < count]
+        shown = list(dict.fromkeys(item for item in map(ident, kept) if item is not None))
+        out, painted = rows[:count], styles
+        left = max(0, total - len(shown))
+        if left:
+            try:
+                dim = style_components("dim", colors=colors, no_color=no_color)
+            except Exception:  # noqa: BLE001 -- an unknown key draws in the terminal's own look
+                dim = {}
+            painted = [*styles, dim]
+            out = [*out, [[ui_text("entrance.more", count=left).strip(), len(styles)]]]
+        result = {"ok": True, "kind": kind, "rows": out, "styles": painted, "hits": kept, **extra}
+        if kind == "routes":
+            result["routes"] = shown
+        return result
+
+    def weight(result):
+        return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
+    full = build(len(rows))
+    if weight(full) <= POPUP_ANSWER_BYTES:
+        return full
+    low, high = 0, len(rows)      # the most rows that fit: `low` fits, `high` does not
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if weight(build(middle)) <= POPUP_ANSWER_BYTES else (low, middle)
+    return build(low)
+
+
 def _popup_view_model(harness, sid, kind):
     """Fleet's own view model, from Fleet's own collection (what its explorer shows), read once for
     a person who opened a popup; the routes popup interprets only this session's routes."""
@@ -1477,7 +1523,9 @@ def _popup_questions(binding, request, columns, colors, no_color):
     board = session_questions(harness, sid, view=view, elsewhere=elsewhere)
     for item in elsewhere:
         if human_wait_state.person_wait(item):
-            board.append({**item, "answerable": False, "answer_state": "answer_there"})
+            # A wait with nothing to read still says where it is answered: one line, nothing to send.
+            board.append({**item, "answerable": False, "answer_state": "answer_there",
+                          **({} if item.get("questions") else {"questions": [{"id": "wait", "question": str(item.get("kind") or "wait")}]})})
     board = board[:8]
     question_presentations(board, columns + 4, own=False)
 
@@ -1524,8 +1572,10 @@ def _panel_popup(binding, request):
         from fleet.explorer import tables
         tables.draw_overview(grid, vm, SimpleNamespace(opened=opened or None, scope="-"), x=0, y=0, session_table=True)
         rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits,
-                "summary": session_summary(vm, harness, sid, colors=colors, no_color=no_color), "watch": _session_folders()}
+        repos = {str(repo.get("id", repo.get("name", "·"))) for repo in tuple(vm.repos or ())}
+        total = sum(1 for session in tuple(vm.sessions or ()) if str(session.get("repo_id", session.get("repo"))) in repos)
+        return _popup_table(kind, rows, styles, hits, total, colors=colors, no_color=no_color,
+                            summary=session_summary(vm, harness, sid, colors=colors, no_color=no_color), watch=_session_folders())
     from dataclasses import replace
     from fleet.explorer import pages
     from fleet.session_tags import assigned_tag
@@ -1552,7 +1602,9 @@ def _panel_popup(binding, request):
     while page and rows and not rows[0]:
         rows.pop(0)
         hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
-    return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page}
+    if page:
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page}
+    return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False)
 
 
 def _input_readiness(binding, request):

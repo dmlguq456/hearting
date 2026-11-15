@@ -685,7 +685,7 @@ unfolded route's page (Fleet's route page: what is to do, the verification lines
 with the route's paths, the stage frame) and again goes back to the table; Enter
 on a session that waits for the person (`◑`) opens its question in the question
 editor (below); PgUp/PgDn and the wheel read a longer table on (its place,
-`3/20`, leads the keys row); `p` folds or opens the panel (the popup closes so
+`3/20`, leads the keys row; ↑↓ and Tab keep the unfolded row in view, and a table longer than the rows the popup carries, or than the answer the host reads, shows the rows that fit and ends with one dim line for the rest in the entrance's words, `외 N개`); `p` folds or opens the panel (the popup closes so
 the panel is seen), `r` the messages, `w` the open work, `f` Fleet; the keys row
 names them, broken between its pieces where the popup is narrow. A standing
 table is read again at the events that change it, never on a timer: the routes
@@ -694,20 +694,20 @@ watch), LAB when its board's watched files change, the sessions when their
 record folders change (Claude's `sessions/`, the Hearting registry's codex and
 opencode folders: watched whole only while the sessions popup stands) or another
 session's answer waits change; one reading at a time, in its own worker (a
-person's read never takes the answer's action slot). In the sessions popup,
+person's read never takes the answer's action slot; a read past its 12 seconds ends then, an answer's does not). In the sessions popup,
 Enter on another session's `◑` row reads that session's questions into the
 question editor apart from this session's own (its number leads the title,
 `[12] › ◑ 1 QUESTIONS · 1/1 · 답 필요`); the answer goes once, for that question
 id, with that session as the exact owner the questions API binds
 (`expected_owner`; this window's own Codex attachment speaks only for its own
 questions), and a wait with no owner binding to answer it here reads `answer in
-its window` (`그 창에서 답`) with no choice. Going to that session, restarting or
+its window` (`그 창에서 답`) with no choice, a wait with no question to read at all included. The question, its number and its answer are the session Enter was pressed on. Going to that session, restarting or
 tidying it stay Fleet's (`f`). While it
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
 25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing
 it nor reaching the native: Alt+letter, Shift/Alt+Enter, Esc then a control byte, and a
-second Esc closes it and is dropped); a lone Escape,
+second Esc closes it and is dropped; a paste is the popup's and does nothing, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is
