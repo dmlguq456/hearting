@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from unittest import mock
 from types import SimpleNamespace
 from split_module_fixture import patch_split, split_patch  # noqa: E402
@@ -728,6 +729,19 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         request.assert_called_once_with(lifecycle_root=ROOT)
 
     def test_claude_native_feedback_settles_exact_receipt_without_reexposure(self):
+        self._native_feedback_settles(str(ROOT))
+
+    def test_claude_native_feedback_settles_after_moving_to_a_subfolder(self):
+        # The record stays where the session started; the hook's cwd is only where it is now.
+        self._native_feedback_settles(str(ROOT / "sub" / "dir"))
+
+    def test_claude_native_feedback_settles_after_moving_to_another_worktree(self):
+        self._native_feedback_settles(str(Path(self._tmp.name) / "other-worktree"))
+
+    def test_claude_native_feedback_settles_after_leaving_the_repository(self):
+        self._native_feedback_settles("/")
+
+    def _native_feedback_settles(self, cwd):
         import dispatch_recipient_receipt as recipient_receipt
         import claude_project_dir
         self._seed()
@@ -737,7 +751,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         PD.mark_sent_ambiguous(self.root, "sess-owner", did, claim_owner="async-rewake")
         current = PD.read(self.root, "sess-owner", did)
         marker = recipient_receipt.receipt_marker(current, "sess-owner")
-        runtime_home = Path(self._tmp.name) / "claude-home"
+        runtime_home = Path(self._tmp.name) / "claude-home" / uuid.uuid4().hex
         project = runtime_home / "projects" / claude_project_dir.encode_project_dir(str(ROOT))
         project.mkdir(parents=True)
         transcript = project / "sess-owner.jsonl"
@@ -750,7 +764,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 "<summary>Stop hook feedback</summary>" + marker +
                 "</task-notification>")},
         }) + "\n", encoding="utf-8")
-        payload = {"hook_event_name": "UserPromptSubmit", "cwd": str(ROOT),
+        payload = {"hook_event_name": "UserPromptSubmit", "cwd": cwd,
                    "transcript_path": str(transcript)}
         output = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
