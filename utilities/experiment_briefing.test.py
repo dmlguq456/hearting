@@ -104,13 +104,16 @@ class OneTable(Briefing):
             self.assertIn(line, block)                                         # every cell is Fleet's own
             for column in columns:
                 self.assertIn(cells[column][0], fleet)                         # and Fleet shows the same words
-            panel = next(item for item in view["rows"] if item["full"] == row["name"])
-            for column in ("progress", "latest", "delta", "state"):
-                self.assertEqual(panel["cells"][column]["text"], cells[column][0])   # and so does the shell panel
+            # and so does the shell panel (its three rows: CONDITION, STATE, PROGRESS, DIFF)
+            panel = next((item for item in view["rows"] if item["name"]["text"] == cells["name"][0]), None)
+            if panel is not None:
+                for column in ("progress", "delta", "state"):
+                    self.assertEqual(panel["cells"][column]["text"], cells[column][0])
+        self.assertEqual(len(view["rows"]), min(3, len(group["rows"])))
         for header in (lab_table._header(c) for c in columns):
             self.assertIn(header, fleet)
         self.assertNotIn("%@", text)                                           # the unit is on the metric line, as in Fleet
-        self.assertIn("| mix2 long | 진행 | 12/40 ep | 11.60@12 | 11.60@12 | fix 12.00% | -0.4%p |", text)
+        self.assertIn("| mix2 long | 진행 중 | 12/40 ep | 11.60@12 | 11.60@12 | fix 12.00% | -0.4%p |", text)
         english = self.table("en")
         self.assertIn("| CONDITION | STATE | PROGRESS | LATEST | BEST | BASE | DIFF | EXPECT |", english)
         self.assertEqual(os.environ["FLEET_NOW_LANG"], "Korean")                # the screen language is put back

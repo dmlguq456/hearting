@@ -144,7 +144,8 @@ const r=v.render({width:90,height:4,folded:true,model:{tag:'[e9]',wait:'◑답 �
  state:'idle',harness:'claude',questions:o=>b.detail(o),brief:()=>b.summary()});
 const rows=r.rows.map(row=>row.map(p=>p.text).join('').trimEnd());
 assert.equal(rows[2],'◑답 대기 3 · 패널을 접었을 때의 모양을 어느 안으로 구현할까요? · +4');
-assert.deepEqual(r.hits.map(h=>h.action),['unfold','unfold','question','unfold']);
+// 11-15 (popup design E): the routes row's groups open their popups, the rest of it the panel.
+assert.deepEqual(r.hits.map(h=>h.action),['unfold','unfold','question','popup:ROUTE','unfold']);
 console.log('ok');
 """, json.dumps(presented(76, 90), ensure_ascii=False))
         self.assertIn('ok', out)
@@ -346,8 +347,10 @@ const assert=require('node:assert/strict'),path=require('node:path'),v=require(p
 const styles={g_dead:{foreground:217,bold:true},dim:{dim:true}};
 const r=v.render({width:40,height:20,side:true,model:{styles,route_count:1,routes:[{id:'d',title:'FAILED',kind:'dead',paint:{glyph:{text:'✕',foreground:217,bold:true}}}]},
  state:'idle',harness:'claude',configuration:{},background:'dark'});
-const line=r.rows.flat().find(p=>p.role==='route-dead'&&p.text.startsWith('╭'));
-assert.equal(line.foreground,217,'the failed route line is its glyph\'s red on the dark face');
+// 11-15 (popup design E): no route box; the failed route's row keeps its glyph's red on the dark face.
+assert.equal(r.rows.flat().some(p=>p.role==='route-dead'),false,'no box line is drawn');
+const glyph=r.rows.flat().find(p=>p.text==='✕'&&p.role==='state:dead');
+assert.equal(glyph.foreground,217,'the failed route keeps its glyph\'s red on the dark face');
 """)
 
 

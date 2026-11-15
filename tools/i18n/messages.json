@@ -632,7 +632,7 @@
   },
   "experiment.run_state.running": {
    "en": "running",
-   "ko": "실행 중"
+   "ko": "진행 중"
   },
   "experiment.show_aliases": {
    "en": "aliases: {items}",
@@ -883,7 +883,7 @@
    "ko": "진행"
   },
   "fleet.lab.col.since": {
-   "en": "IDLE",
+   "en": "SINCE",
    "ko": "진행뒤"
   },
   "fleet.lab.col.state": {
@@ -932,7 +932,7 @@
   },
   "fleet.lab.n_running": {
    "en": "running {n}",
-   "ko": "진행 {n}"
+   "ko": "진행 중 {n}"
   },
   "fleet.lab.n_stagnant": {
    "en": "stuck {n}",
@@ -988,7 +988,7 @@
   },
   "fleet.lab.state.running": {
    "en": "running",
-   "ko": "진행"
+   "ko": "진행 중"
   },
   "fleet.lab.state.stagnant": {
    "en": "stuck",
@@ -1299,7 +1299,7 @@
    "ko": "만료"
   },
   "fleet.session_block.compact_open": {
-   "en": "reply needed",
+   "en": "answer needed",
    "ko": "답 필요"
   },
   "fleet.session_block.compact_received": {
@@ -1319,8 +1319,8 @@
    "ko": "모든 문항에 답하기 · Tab 다음"
   },
   "fleet.session_block.editor_help": {
-   "en": "Tab next · Enter send · Esc/Ctrl+] back · r peers · w work · f Fleet",
-   "ko": "Tab 다음 · Enter 보내기 · Esc/Ctrl+] 돌아가기 · r 메시지 · w 열린 일 · f Fleet"
+   "en": "←→ section · p open/fold panel · w work · f Fleet · Esc/Ctrl+] back",
+   "ko": "←→ 구획 · p 패널 펼치기/접기 · w 열린 일 · f Fleet · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.empty": {
    "en": "empty answer",
@@ -1332,7 +1332,7 @@
   },
   "fleet.session_block.help": {
    "en": "questions · ↵ route · r peers · w work · f Fleet",
-   "ko": "질문 · ↵ 단계 · r 메시지 · w 열린 일 · f Fleet"
+   "ko": "질문 · ↵ route · r 메시지 · w 열린 일 · f Fleet"
   },
   "fleet.session_block.more": {
    "en": "more · focus and ↑↓ to read",
@@ -1347,8 +1347,8 @@
    "ko": "더 있음 · 포커스 후 PgUp/PgDn 읽기"
   },
   "fleet.session_block.navigate": {
-   "en": "Tab next · Esc/Ctrl+] back",
-   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
+   "en": "Tab next · ←→ section · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · ←→ 구획 · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.open": {
    "en": "answer needed",
@@ -1375,7 +1375,7 @@
    "ko": "✓ 답 보냄"
   },
   "fleet.session_block.submitted": {
-   "en": "sending · not consumed",
+   "en": "sending",
    "ko": "보내는 중"
   },
   "fleet.session_block.text": {
@@ -1395,7 +1395,7 @@
    "ko": "미확인 · 영수증 확인"
   },
   "fleet.session_panel.answer": {
-   "en": "Your answer needed",
+   "en": "answer needed",
    "ko": "답 필요"
   },
   "fleet.session_panel.apply": {
@@ -1594,10 +1594,6 @@
    "en": "Waiting",
    "ko": "대기"
   },
-  "fleet.session_panel.no_routes": {
-   "en": "No current route",
-   "ko": "아직 라우트 없음"
-  },
   "fleet.session_panel.no_work": {
    "en": "No confirmed work yet",
    "ko": "아직 확인된 작업 없음"
@@ -1609,6 +1605,30 @@
   "fleet.session_panel.open_fleet": {
    "en": "open in Fleet",
    "ko": "Fleet에서 열기"
+  },
+  "fleet.session_panel.popup_fold": {
+   "en": "p fold panel",
+   "ko": "p 패널 접기"
+  },
+  "fleet.session_panel.popup_keys": {
+   "en": "←→ section · PgUp/PgDn · {panel} · f Fleet · Esc/Ctrl+] back",
+   "ko": "←→ 구획 · PgUp/PgDn 읽기 · {panel} · f Fleet · Esc/Ctrl+] 돌아가기"
+  },
+  "fleet.session_panel.popup_route": {
+   "en": "↑↓ route · Enter its page",
+   "ko": "↑↓ route · Enter 펼치기"
+  },
+  "fleet.session_panel.popup_route_page": {
+   "en": "Enter back to the table",
+   "ko": "Enter 표로 돌아가기"
+  },
+  "fleet.session_panel.popup_sessions": {
+   "en": "↑↓ session · Enter its question",
+   "ko": "↑↓ 세션 · Enter 그 세션의 질문"
+  },
+  "fleet.session_panel.popup_unfold": {
+   "en": "p open panel",
+   "ko": "p 패널 펼치기"
   },
   "fleet.session_panel.position": {
    "en": "Panel position",
@@ -1760,7 +1780,7 @@
   },
   "fleet.session_panel.routes": {
    "en": "Route",
-   "ko": "라우트"
+   "ko": "route"
   },
   "fleet.session_panel.save_failed": {
    "en": "Could not save · changes not applied",
@@ -3063,7 +3083,7 @@
    "ko": "문서가 너무 커서 표시할 수 없습니다."
   },
   "wait.no_question": {
-   "en": "waiting for the user's answer",
+   "en": "answer needed",
    "ko": "답 필요"
   },
   "wait.title": {

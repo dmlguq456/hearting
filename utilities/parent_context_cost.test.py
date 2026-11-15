@@ -124,7 +124,7 @@ class RouteParentScenarioTest(unittest.TestCase):
                 with self.subTest(harness=harness, prompt=prompt["prompt"]):
                     cards = [item["text"] for item in result["texts"]
                              if item["prompt"] == prompt["prompt"] and item["carrier"] == "prompt-card"]
-                    self.assertEqual(cards, ["[답변 필요] 사용자 답 대기 ×3"])
+                    self.assertEqual(cards, ["[답변 필요] 답 필요 ×3"])
 
 
 class StewardScenarioTest(unittest.TestCase):

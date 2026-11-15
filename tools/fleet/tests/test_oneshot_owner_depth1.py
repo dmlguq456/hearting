@@ -116,8 +116,9 @@ class OneShotOwnerTests(unittest.TestCase):
         script = r'''
 const v=require(process.argv[1]),m=JSON.parse(process.argv[2]);
 const out=[];for(const side of [true,false]){const r=v.render({width:side?44:120,height:side?30:8,side,model:m,
- sid:'sid-main',questions:()=>[],configuration:{},expandedKeys:['route:rt-solo']});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
+ sid:'sid-main',questions:()=>[],configuration:{}});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
 console.log(JSON.stringify(out));'''
+        rows_seen = []
         for harness in ("claude", "codex", "opencode"):
             # Wall clock: the row keeps an absolute start time and the panel ages it.
             labels, panels = shell_route_status(_snapshot(harness), include_details=True)
@@ -146,21 +147,17 @@ console.log(JSON.stringify(out));'''
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # Beside the native area a folded route reads who / context and time / what (spec
-            # rules 24, 36, 38, 43, 57): its glyph, role and harness, then its context row carrying
-            # its time (here, the context unknown, the time alone), then its title.
-            lines = side.splitlines()
-            rows = [(lines[i - 2], lines[i - 1], line) for i, line in enumerate(lines)
-                    if i > 1 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("owner" in who and "codex" in who and "5m" in ctx and "5m" not in title
-                                for who, ctx, title in rows), side)
-            # The staged route: its owner first, its live worker under it.
-            self.assertIn("owner  claude Opus 5.5 high", side)
-            self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)
-            self.assertIn("Opus 5.5 high", side)                      # the opened row
-            self.assertIn("codex Opus 5.5 high", bottom)
+            # 11-15 (popup design E): the panel's ROUTE section is one row per route, Fleet's ROUTES
+            # columns picked (state, ROUTE, PROGRESS, AGE), the same in every harness; the owner and
+            # its workers read in the routes popup (Fleet's own table).
+            for panel in (side, bottom):
+                self.assertTrue(any("Fixture solo" in row and "one-shot ●" in row and row.rstrip(" │").endswith("5m")
+                                    for row in panel.splitlines()), panel)
+                self.assertTrue(any("Fixture staged" in row and "code-execute ●" in row for row in panel.splitlines()), panel)
+            rows_seen.append([row for row in side.splitlines() if "Fixture" in row])
             self.assertNotIn("hb_", side + bottom)
             self.assertEqual(len(bottom.splitlines()), 8)             # the bottom panel does not grow
+        self.assertEqual(rows_seen[0], rows_seen[1]); self.assertEqual(rows_seen[0], rows_seen[2])
 
     def test_one_shot_summary_names_its_completion_gate_instead_of_staying_unknown(self):
         codes = lambda gate: {"codes": {"schema": "route_visibility_codes_v1", "shape": "solo",

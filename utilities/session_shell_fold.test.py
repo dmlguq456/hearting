@@ -94,7 +94,7 @@ const model={tag:'[e9]',styles,repo_side:[P('hearting','loc_repo')],selected:[P(
  quota:[P('5h ','dim'),P('12%'),P('(↻ 2h 0m)','dim'),P(' │ ','dim'),P('7d ','dim'),P('66%'),P('(↻ 5d 0h)','dim')],wait:'◑답 대기 1',
  route_label:'route 3 ⠏2 ✕1',route_count:3,route_total:3,messages_new:2,
  routes:[{title:'패널 자동 접힘 기준 60칸',kind:'working',paint:{glyph:P('⠸','g_spin')}},{title:'LAB 표 칸 정리',kind:'working',paint:{glyph:P('⠸','g_spin')}},
-  {title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕','g_dead')}}],lab:{strip:[P('!1','lvl_r'),P('LB','dim')],strip_attention:true}};
+  {title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕','g_dead')}}],lab:{count:'2',counts:[[P('실패 1','lvl_r')]],strip_attention:true}};
 // The question's summary (11-15): the strip's row of what to do carries its first line.
 const ask=(choices=[])=>()=>({count:1,label:'QUESTIONS',rows:[[P('◑ ','g_blocked'),P('접힌 모양을 어느 안으로 할까요?','loc_repo')],[P('  ','dim'),...choices]],
  one:[[P('◑ ','g_blocked'),P('접힌 모양을 어느 안으로 할까요?','loc_repo')]],line:[P('접힌 모양을 어느 안으로 할까요?','loc_repo')],choices:choices.length?2:0});
@@ -106,19 +106,27 @@ let r=strip(),rows=text(r);
 assert.deepEqual(rows.map(s=>s.trimEnd()),['─'.repeat(118)+' ▴',
  '⠸ [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━━━──── 58% │ 5h 12%(↻ 2h 0m) │ 7d 66%(↻ 5d 0h)',
  '◑답 대기 1 · 접힌 모양을 어느 안으로 할까요?',
- '3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2 │ !1 LAB']);
+ '3 ROUTE ⠏2 ✕1 · ✕ 휠 입력 시험 │ 2 LAB 실패 1 │ MESSAGES ←2']);
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 assert(rows.every(s=>cells(s)===120),rows.join('\n'));
 for(const o of [{side:true},{side:true,configuration:{position:'left'}},{harness:'codex'},{harness:'opencode'},{configuration:{layout:'bottom'}}])
  assert.deepEqual(text(strip(o)),rows,JSON.stringify(o));
-// The rule takes the messages' line color, `▴` and the labels are dim; no frame, gear, beat or moving rule:
-// only the session's glyph turns. A press on the rule or the session or routes row opens the panel;
-// the row of what to do, carrying the question, opens the question popup (11-15).
+// The rule takes the messages' line color, `▴` and the labels are dim (`ROUTE` too, as every other name
+// tag: BC-FOLD-BAND-FOLLOWUPS-1115); no frame, gear, beat or moving rule: only the session's glyph turns.
+// A press on the rule or the session row opens the panel; the row of what to do, carrying the question,
+// opens the question popup; on the routes row each group opens its popup and the rest opens the panel (11-15).
 assert.equal(r.rows[0][0].role,'messages');assert(r.rows[0].at(-1).text==='▴'&&r.rows[0].at(-1).dim);
-for(const word of ['CTX ','MESSAGES',' LAB'])assert(r.rows.flat().find(x=>x.text===word).dim===true,word);
+for(const word of ['CTX ','MESSAGES','LAB','ROUTE'])assert(r.rows.flat().find(x=>x.text===word).dim===true,word);
+assert.notEqual(r.rows.flat().find(x=>x.text==='ROUTE').foreground,styles.g_idle.foreground,'ROUTE is no longer the route-count yellow');
 assert(!/[┌┐└┘⚙⚑]/.test(rows.join(''))&&r.motion===null&&!r.rows.flat().some(x=>x.beat||x.motion),rows.join('\n'));
 assert.deepEqual([r.spins,r.animated],[[1],true]);
-assert.deepEqual(r.hits,[0,1,2,3].map(row=>({row,left:0,right:119,action:row===2?'question':'unfold'})));
+const whole=[0,1,2,3].map(row=>({row,left:0,right:119,action:row===2?'question':'unfold'}));
+assert.deepEqual(r.hits.filter(h=>h.right===119),whole);
+// Each group's own cells: `3 ROUTE ⠏2 ✕1 · ✕ 휠 입력 시험` (the count and the titles), `2 LAB 실패 1`, `MESSAGES ←2`.
+const spans=r.hits.filter(h=>h.right!==119),row3=[...rows[3]].reduce((o,c)=>{for(let i=0;i<cells(c);i++)o.push(c);return o;},[]);
+const at=(h)=>{let s='',seen=null;for(let x=h.left;x<=h.right;x++)if(row3[x]!==seen||cells(row3[x])<2){s+=row3[x];seen=row3[x];}return s;};
+assert.deepEqual(spans.map(h=>[h.row,h.action]),[[3,'popup:ROUTE'],[3,'popup:LAB'],[3,'popup:MESSAGES']]);
+assert(at(spans[0]).startsWith('3 ROUTE ⠏2 ✕1 · ✕ 휠')&&at(spans[1]).startsWith('2 LAB 실패')&&at(spans[2]).startsWith('MESSAGES ←2'),spans.map(at).join('|'));
 // Where cells are left the question's choices follow on its row, whole, else their count alone (11-15).
 const choices=[P('1 ','dim'),P('아래 두 줄','loc_repo'),P(' · 2 ','dim'),P('옆 띠','loc_repo')];
 assert.equal(text(strip({brief:ask(choices)}))[2].trimEnd(),'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요? · 1 아래 두 줄 · 2 옆 띠');
@@ -128,7 +136,7 @@ assert.equal(text(strip({width:48,brief:ask(choices)}))[2].trimEnd(),'◑답 대
 assert.equal(strip({brief:()=>null}).hits[2].action,'unfold');
 // Only failed routes' titles; none failed, the running ones'.
 const running=text(strip({},{route_label:'route 2 ⠏2',routes:model.routes.slice(0,2),route_count:2,route_total:2}))[3].trimEnd();
-assert.equal(running,'2 ROUTE ⠏2 │ ⠸ 패널 자동 접힘 기준 60칸 │ ⠸ LAB 표 칸 정리 │ MESSAGES ←2 │ !1 LAB');
+assert.equal(running,'2 ROUTE ⠏2 · ⠸ 패널 자동 접힘 기준 60칸 · ⠸ LAB 표 칸 정리 │ 2 LAB 실패 1 │ MESSAGES ←2');
 // No answer wait: what to do is compaction imminent, then a tidy notice; nothing to do, no row: the
 // routes row moves up and the last row stays empty.
 assert.equal(text(strip({},{wait:'',warning:'압축 임박',tidy_notice:'새 판 대기'}))[2].trimEnd(),'⚠ 압축 임박 │ ⚠ 새 판 대기');
@@ -137,7 +145,7 @@ assert.equal(text(strip({},{wait_guide:'1 QUESTIONS · 아래 입력창에 답'}
 assert.equal(text(strip({},{wait:'',wait_guide:'1 QUESTIONS · 아래 입력창에 답'}))[2].trimEnd(),'1 QUESTIONS · 아래 입력창에 답');
 assert(strip({},{wait:'',wait_guide:'1 QUESTIONS · 아래 입력창에 답'}).rows[2].find(x=>x.text.startsWith('1 QUESTIONS')).dim);
 const calm=text(strip({},{wait:'',messages_new:0,lab:null}));
-assert.deepEqual(calm.map(s=>s.trimEnd()).slice(2),['3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험','']);
+assert.deepEqual(calm.map(s=>s.trimEnd()).slice(2),['3 ROUTE ⠏2 ✕1 · ✕ 휠 입력 시험','']);
 // The strip's height is the host's alone: the same four rows with and without a question.
 assert.equal(calm.length,4);
 // Every harness, state and color setting keeps the shapes; idle `●`, waiting `◑`, unknown no glyph.
@@ -148,15 +156,16 @@ assert.deepEqual(text(strip({},{no_color:true})),rows);assert.deepEqual(text(str
     def test_each_strip_row_gives_way_from_its_end(self):
         # The most pressing first; short of cells whole items go from the end. The session row: the reset
         # times, the effort, the project (as draft 다), then 5h, the model windows, 7d, the model, CTX. What
-        # to do: the question's first row is cut with `…` before the wait goes. The routes row: LAB, the
-        # new messages, then the titles (a title cut with `…` while it keeps four cells), the count last.
+        # to do: the question's first row is cut with `…` before the wait goes. The routes row (11-15): the
+        # titles first (the first cut with `…` while it keeps four cells), then the groups from the last
+        # (the new messages, LAB), the count last.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
 const P=t=>({text:t});
 const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5'),P(' '),P('xhigh')],context_side:[P('━━━━━━────'),P(' 58%')],
  quota:[P('5h '),P('12%'),P('(↻ 2h 0m)'),P(' │ '),P('7d '),P('66%'),P('(↻ 5d 0h)')],wait:'◑답 대기 1',
  route_label:'route 3 ⠏2 ✕1',route_count:3,messages_new:2,routes:[{title:'a',kind:'working'},{title:'b',kind:'working'},{title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕')}}],
- lab:{strip:[P('!1'),P('LB')],strip_attention:true}};
+ lab:{count:'2',counts:[[P('실패 1')]],strip_attention:true}};
 const question=()=>({count:1,rows:[[P('◑ '),P('접힌 모양을 어느 안으로 할까요?')]],one:[[P('◑ '),P('접힌 모양을 어느 안으로 할까요?')]],line:[P('접힌 모양을 어느 안으로 할까요?')],choices:0});
 const rows=w=>v.render({width:w,height:4,folded:true,model,state:'idle',harness:'claude',brief:question}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
@@ -168,8 +177,9 @@ const session=[[90,'● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━━
 for(const [w,want] of session)assert.equal(rows(w)[1],want,String(w));
 const todo=[[45,'◑답 대기 1 · 접힌 모양을 어느 안으로 할까요?'],[40,'◑답 대기 1 · 접힌 모양을 어느 안으로 …'],[21,'◑답 대기 1 · 접힌 …'],[15,'◑답 대기 1']];
 for(const [w,want] of todo)assert.equal(rows(w)[2],want,String(w));
-const routes=[[54,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2 │ !1 LAB'],[53,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험 │ MESSAGES ←2'],
- [44,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시험'],[30,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 입력 시…'],[24,'3 ROUTE ⠏2 ✕1 │ ✕ 휠 …'],[23,'3 ROUTE ⠏2 ✕1'],[12,'3 ROUTE ⠏2…']];
+const routes=[[60,'3 ROUTE ⠏2 ✕1 · ✕ 휠 입력 시험 │ 2 LAB 실패 1 │ MESSAGES ←2'],[59,'3 ROUTE ⠏2 ✕1 · ✕ 휠 입력 시… │ 2 LAB 실패 1 │ MESSAGES ←2'],
+ [48,'3 ROUTE ⠏2 ✕1 │ 2 LAB 실패 1 │ MESSAGES ←2'],[44,'3 ROUTE ⠏2 ✕1 │ 2 LAB 실패 1 │ MESSAGES ←2'],[36,'3 ROUTE ⠏2 ✕1 │ 2 LAB 실패 1'],
+ [31,'3 ROUTE ⠏2 ✕1 │ 2 LAB 실패 1'],[24,'3 ROUTE ⠏2 ✕1 · ✕ 휠 …'],[15,'3 ROUTE ⠏2 ✕1'],[12,'3 ROUTE ⠏2…']];
 for(const [w,want] of routes)assert.equal(rows(w)[3],want,String(w));
 // No row runs past the window, at any width.
 for(let w=1;w<=200;w++)for(const row of v.render({width:w,height:4,folded:true,model,state:'working',harness:'claude',brief:question}).rows)
@@ -188,13 +198,13 @@ assert.deepEqual([60,40,24,23,16,15,12,6,3,2,1].map(d.foldRows),[4,4,4,3,3,2,2,2
 const P=t=>({text:t});
 const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5')],context_side:[P('━━── 58%')],wait:'◑답 대기 1',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]};
 const draw=(height,m={})=>v.render({width:60,height,folded:true,model:{...model,...m},state:'idle',harness:'claude',brief:()=>({count:1,rows:[[P('◑ '),P('Q?')]],one:[[P('◑ '),P('Q?')]],line:[P('Q?')],choices:0})}).rows.map(r=>r.map(x=>x.text).join('').trimEnd());
-assert.deepEqual(draw(4),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?','1 ROUTE ⠏1 │ · run']);
+assert.deepEqual(draw(4),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?','1 ROUTE ⠏1 · · run']);
 assert.deepEqual(draw(3),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','◑답 대기 1 · Q?']);
 assert.deepEqual(draw(2),['─'.repeat(58)+' ▴','◑답 대기 1 · Q?']);
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),one='◑답 대기 1 · Q?';
 assert.deepEqual(draw(1),[one+' '.repeat(59-cells(one))+'▴']);
 // Nothing to do: the session row, then the routes, take the places; the height stays.
-assert.deepEqual(draw(3,{wait:''}),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','1 ROUTE ⠏1 │ · run']);
+assert.deepEqual(draw(3,{wait:''}),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%','1 ROUTE ⠏1 · · run']);
 assert.deepEqual(draw(2,{wait:''}),['─'.repeat(58)+' ▴','● [e9] hearting │ Opus 5.5 │ CTX ━━── 58%']);
 for(const h of [1,2,3,4])assert.equal(draw(h,{wait:''}).length,h);
 """)
@@ -395,53 +405,62 @@ for(const [queued,stamp,expected] of [[false,place,['question']],[true,place,['q
 """)
 
 
-    def test_the_strip_carries_labs_attention_token_at_the_end_of_the_routes_row(self):
-        # Draft A's strip token, now in the strip under the native area: only a LAB that needs a look
-        # (`!1` failed or stuck, `?1` unconfirmed or unnamed, as the board words them) ends the routes
-        # row as `!1 LAB`; a plain count draws nothing there. It goes first when cells run short and
-        # never colors the strip's rule or the session row.
+    def test_the_strip_carries_labs_attention_at_the_routes_row_and_opens_its_popup(self):
+        # The strip under the native area (11-15, popup design E): only a LAB that needs a look (failed,
+        # stuck, unconfirmed, unnamed runs, as the board counts them) stands on the routes row as its
+        # count, its dark gray name tag and its first count (`3 LAB 실패 1`); a plain count draws nothing
+        # there. Short of cells the groups go from the last (the new messages, then LAB). It never colors
+        # the strip's rule or the session row, and a press on it opens the LAB popup.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
 const styles={dim:{dim:true},loc_repo:{foreground:252},lvl_r:{foreground:217},lvl_y:{foreground:186},g_spin:{foreground:230}};
 const T=(t,k)=>({text:t,...(styles[k]||{})});
-const token=s=>{const m=/^([!?]?)(\d+\+?)( ?LB)$/.exec(s);return {strip:[T(m[1]+m[2],m[1]==='!'?'lvl_r':m[1]==='?'?'lvl_y':'loc_repo'),T(m[3],'dim')],strip_attention:!!m[1]};};
+const lab=(word,key,attention)=>({count:'3',counts:[[T(word,key)]],strip_attention:attention});
 const strip=(model={},o={})=>v.render({width:60,height:4,folded:true,model:{tag:'[e9]',styles,route_label:'route 2 ⠏2',route_count:0,...model},state:'idle',harness:'claude',questions:()=>[],...o});
 const text=r=>r.rows.map(row=>row.map(x=>x.text).join('').trimEnd());
-for(const [s,want] of [['!1LB','2 ROUTE ⠏2 │ !1 LAB'],['?1LB','2 ROUTE ⠏2 │ ?1 LAB'],['!9+LB','2 ROUTE ⠏2 │ !9+ LAB'],['5 LB','2 ROUTE ⠏2'],['9+LB','2 ROUTE ⠏2']])
- assert.equal(text(strip({lab:token(s)}))[2],want,s);
-// The mark takes the board's color, `LAB` the label's dim.
-const row=strip({lab:token('!1LB')}).rows[2];assert(row.find(x=>x.text==='!1').foreground===217&&row.find(x=>x.text===' LAB').dim);
-// Short of cells LAB goes first.
-assert.equal(text(strip({lab:token('!1LB'),messages_new:3},{width:30}))[2],'2 ROUTE ⠏2 │ MESSAGES ←3');
-// No board, no token; the rule and the session row are the session's own whatever the board says.
+for(const [l,want] of [[lab('실패 1','lvl_r',true),'2 ROUTE ⠏2 │ 3 LAB 실패 1'],[lab('미확인 1','lvl_y',true),'2 ROUTE ⠏2 │ 3 LAB 미확인 1'],
+  [lab('진행 중 2','g_spin',false),'2 ROUTE ⠏2']])
+ assert.equal(text(strip({lab:l}))[2],want,JSON.stringify(l));
+// The count keeps the board's color, `LAB` the name tag's dim.
+const row=strip({lab:lab('실패 1','lvl_r',true)}).rows[2];assert(row.find(x=>x.text==='실패 1').foreground===217&&row.find(x=>x.text==='LAB').dim);
+// Short of cells the new messages go first, then LAB.
+assert.equal(text(strip({lab:lab('실패 1','lvl_r',true),messages_new:3},{width:40}))[2],'2 ROUTE ⠏2 │ 3 LAB 실패 1 │ MESSAGES ←3');
+assert.equal(text(strip({lab:lab('실패 1','lvl_r',true),messages_new:3},{width:30}))[2],'2 ROUTE ⠏2 │ 3 LAB 실패 1');
+assert.equal(text(strip({lab:lab('실패 1','lvl_r',true),messages_new:3},{width:20}))[2],'2 ROUTE ⠏2');
+// A press on it opens the LAB popup; on the route count, the routes popup.
+const hits=strip({lab:lab('실패 1','lvl_r',true)}).hits.filter(h=>h.row===2&&h.action!=='unfold');
+assert.deepEqual(hits.map(h=>[h.left,h.right,h.action]),[[0,9,'popup:ROUTE'],[13,24,'popup:LAB']]);
+// No board, no LAB; the rule and the session row are the session's own whatever the board says.
 assert(!text(strip({lab:null})).join('').includes('LAB'));
 for(const state of ['idle','working','blocked'])
- assert.deepEqual(strip({lab:token('!3LB')},{state,frame:2}).rows.slice(0,2),strip({},{state,frame:2}).rows.slice(0,2),state);
-for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({lab:token('?2LB')},{harness})),text(strip({lab:token('?2LB')})));
+ assert.deepEqual(strip({lab:lab('실패 3','lvl_r',true)},{state,frame:2}).rows.slice(0,2),strip({},{state,frame:2}).rows.slice(0,2),state);
+for(const harness of ['codex','opencode'])assert.deepEqual(text(strip({lab:lab('미확인 2','lvl_y',true)},{harness})),text(strip({lab:lab('미확인 2','lvl_y',true)})));
 """)
 
-    def test_a_press_on_the_lab_rows_opens_and_closes_them_where_they_were_drawn(self):
-        # Draft A: a press on the LAB rows opens the condition table in place and closes it again,
-        # by the host's own open set (as a route or a message); a press on targets drawn for another
-        # placement is dropped (review 1597 follow-up).
+    def test_a_press_on_a_section_opens_its_popup_where_it_was_drawn(self):
+        # 11-15 (popup design E): a press on a section's rows (LAB here) opens that section's popup over
+        # the window, nothing opens in place; a press on targets drawn for another placement is dropped
+        # (review 1597 follow-up).
         self.node(r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
 const code=text.slice(text.indexOf('function panelMouse('),text.indexOf('function displayReporter('))
- +text.slice(text.indexOf('function panelAction('),text.indexOf('// Scroll the route box'));
+ +text.slice(text.indexOf('function panelAction('),text.indexOf("let settingsTail=''"));
 const g={side:true,folded:false,left:false,panelColumn:90,panelCols:40},place='true:true:false:false:40:130:30:false';
-const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,routeDetail:false,routeArea:null,epoch:0,empty:true,
+const opened=[];
+const c={fleetView:null,paste:false,relay:false,dragging:false,settings:null,epoch:0,empty:true,SECTIONS:['QUESTIONS','ROUTE','LAB','SESSIONS','MESSAGES'],
   geometry:()=>g,panelColumns:()=>40,panelRow:()=>0,height:()=>30,terminal:{modes:{mouseTrackingMode:'none'}},
-  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,panelOpen:new Set(),layouts:0,queueLayout(){c.layouts++;},queueDisplay(){},
-  panelHits:[{row:16,left:2,right:37,action:'lab:grp_1'},{row:17,left:2,right:37,action:'lab:grp_1'}]};
+  layoutQueued:false,panelHitsPlacement:place,placement:()=>place,layouts:0,queueLayout(){c.layouts++;},queueDisplay(){},
+  openPopup:(name,open='')=>opened.push([name,open]),
+  panelHits:[{row:16,left:2,right:37,action:'popup:LAB'},{row:17,left:2,right:37,action:'popup:ROUTE:rt-1'}]};
 vm.createContext(c);vm.runInContext(code,c);
-assert.equal(c.panelMouse(0,101,17,false),true);assert.deepEqual([...c.panelOpen],['lab:grp_1']);
-assert.equal(c.panelMouse(0,101,18,false),true);assert.deepEqual([...c.panelOpen],[]);
-// A row with no LAB target: nothing opens.
-c.panelMouse(0,101,20,false);assert.deepEqual([...c.panelOpen],[]);
+assert.equal(c.panelMouse(0,101,17,false),true);assert.deepEqual(opened,[['LAB','']]);
+assert.equal(c.panelMouse(0,101,18,false),true);assert.deepEqual(opened,[['LAB',''],['ROUTE','rt-1']]);
+// A row with no target: nothing opens.
+c.panelMouse(0,101,20,false);assert.equal(opened.length,2);
 // Targets drawn for another placement: dropped.
-c.panelHitsPlacement='old';c.panelMouse(0,101,17,false);assert.deepEqual([...c.panelOpen],[]);
-assert.equal(c.layouts,2);
+c.panelHitsPlacement='old';c.panelMouse(0,101,17,false);assert.equal(opened.length,2);
+assert.equal(c.layouts,0);
 """)
 
 

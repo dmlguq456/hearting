@@ -117,7 +117,7 @@ function validate(seed) {
   for(const key of ['sequence','selection','epoch','nativeEpoch','submitted','lastEnter'])if(!INTEGER(seed[key]))return key;
   if(typeof seed.state!=='string')return 'state';
   if(typeof seed.cursorVisible!=='boolean'||typeof seed.expanded!=='boolean')return 'flags';
-  if(!seed.displayConfiguration||typeof seed.displayConfiguration!=='object'||!Array.isArray(seed.panelOpen))return 'display';
+  if(!seed.displayConfiguration||typeof seed.displayConfiguration!=='object'||seed.panelOpen!==undefined&&!Array.isArray(seed.panelOpen))return 'display';
   if(!Array.isArray(seed.deliveries)||seed.deliveries.length>128||!seed.deliveries.every(row=>Array.isArray(row)&&typeof row[0]==='string'
      &&['submitted','transport-submitted'].includes(row[1])))return 'deliveries';
   const t=seed.terminal;

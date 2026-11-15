@@ -3714,7 +3714,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if (event == "prompt" and item.get("source") == "S4"
                         and owner.get("seat_key") == seat.key):
                     continue
-                wait_questions.append(item.get("question") or "사용자 답 대기")
+                wait_questions.append(item.get("question") or "답 필요")
     answer_wait_lines = answer_wait_text(wait_questions)
     state_seats = [seat]
     if _native_session_key(harness, sid) and prior_seat:

@@ -160,7 +160,7 @@ class Consumers(T.Base):
             self.assertIn("+0.5%p", texts[consumer], consumer)
             self.assertIn(NEW_A, texts[consumer], consumer)                      # the control carries its new name too
             self.assertNotIn(OLD_A, bare[consumer], consumer)
-        self.assertIn(f"| {NEW_B} | 진행 | 12/40 ep | 20.50@12 | 19.50@11 |", texts["leaderboard"])  # latest and best are different values
+        self.assertIn(f"| {NEW_B} | 진행 중 | 12/40 ep | 20.50@12 | 19.50@11 |", texts["leaderboard"])  # latest and best are different values
         self.assertIn(f"run-b (= {NEW_B})", texts["card"])                          # the bare run id got its name, the id stays
         self.assertEqual(texts["question-advice"], f"run-b={NEW_B}")
 
@@ -258,7 +258,7 @@ class CrossPresentation(T.Base):
         summary = lab_table.summary(board, NOW)                                  # Fleet's header: the first group's numbers
         self.assertIn("조건 3 · 실패 1 · 정체 1", summary)
         self.assertNotIn("미확인", summary)
-        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행")
+        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행 중")
         self.assertEqual(lab_table.cells(rows["관측 끊긴 조건"], second, NOW)["state"][0], "미확인")
         second_view = session_lab.view({**board, "selected": second["id"]}, NOW)
         self.assertEqual([p[0]["text"] for p in second_view["counts"]], ["미확인 1", "이름 없음 1", "대기 1"])
@@ -268,17 +268,20 @@ class CrossPresentation(T.Base):
         for name in ("실패 조건", "정체 조건", "관측 끊긴 조건", "긴 에폭 정상"):
             self.assertIn(name, fleet)
         lines = fleet.splitlines()
-        self.assertIn("진행", next(line for line in lines if "긴 에폭 정상" in line))
+        self.assertIn("진행 중", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertNotIn("미확인", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertIn("미확인", next(line for line in lines if "관측 끊긴 조건" in line))
         view = session_lab.view(board, NOW)
         self.assertEqual([p[0]["text"] for p in view["counts"]], ["실패 1", "정체 1", "이름 없음 1", "대기 1"])
-        self.assertEqual(view["headline"]["left"][0]["text"], first["headline"]["name"])
-        for row, shown in zip(first["rows"], view["rows"]):
+        # 11-15 (popup design E): the panel's rows are the board's look-first order, its headline first,
+        # each Fleet's own cells.
+        self.assertEqual(view["rows"][0]["name"]["text"], first["headline"]["name"])
+        import experiment_board
+        for row, shown in zip(experiment_board.look_order(first["rows"], first.get("metric")), view["rows"]):
             cells = lab_table.cells(row, first, NOW)
             self.assertEqual(shown["name"]["text"], cells["name"][0])
             self.assertEqual(shown["cells"]["delta"]["text"], cells["delta"][0])
-        self.assertEqual("".join(p["text"] for p in view["strip"]), "!2LB")
+        self.assertTrue(view["strip_attention"])
         seen = self.observe(root, board)
         line, names, notified = SC._lab_summary({"lab": seen}, [])
         self.assertIn("미확인 1·이름 없음 1·실패 1·정체 1 (묶음 2개)", line)
@@ -293,11 +296,12 @@ class CrossPresentation(T.Base):
         self.assertIn(GROUP + " — 실패 조건", fallback)
         script = r"""
 const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.parse(process.argv[2]);
-const draw=(open,folded)=>v.render({width:folded?120:40,height:folded?4:60,side:!folded,fill:!folded,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},expandedKeys:open?[lab.key]:[],questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-for(const open of [false,true]){const lines=draw(open,false).join('\n');assert(lines.includes('실패 조건'),lines);assert(lines.includes('3 LAB'),lines);}
-// Folded, the strip under the native area ends its routes row with LAB's attention token (spec rule 59 (g)).
-assert(draw(false,true).some(s=>/^!2 LAB +$/.test(s)),draw(false,true).join('\n'));
-const head=draw(true,false).join('\n');assert(head.includes('3 LAB')&&head.includes('실패 1 정체 1'),head);
+const draw=folded=>v.render({width:folded?120:40,height:folded?4:60,side:!folded,fill:!folded,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+{const lines=draw(false).join('\n');assert(lines.includes('실패 조건'),lines);assert(lines.includes('3 LAB'),lines);}
+// Folded, the strip under the native area carries LAB while it needs a look: its count, name tag and
+// most pressing count (spec rule 59 (g), 11-15).
+assert(draw(true).some(s=>/^3 LAB 실패 1 +$/.test(s)),draw(true).join('\n'));
+const head=draw(false).join('\n');assert(head.includes('3 LAB')&&head.includes('실패 1 정체 1'),head);
 """
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                  json.dumps(view, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
