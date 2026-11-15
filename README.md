@@ -186,7 +186,7 @@ frame) or `scanners` (a wide wave flowing round it) instead, or `off`. A failed 
 colors only the route box's line. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
-The head's REPO row carries a **현황 ›** (`STATUS ›`) button at its right end: a press on the row
+The head's REPO row carries a **STATUS ›** button at its right end (the screen's language word): a press on the row
 opens this session's campaign status document whole in a popup (Fleet's status lines for the
 project first, markdown tables as aligned columns), dim when there is no document yet and
 absent where the project keeps no artifact root.
@@ -215,7 +215,7 @@ and scrolls in place under the wheel, its border counting what it hides. The ROU
 popup is Fleet's own table at the popup's width (a route unfolded
 with its failure reason whole, Enter for its page with its paths), drawn again when what it
 shows changes; a markdown table in a request's body or a question reads as aligned columns;
-**←/→** moves between the sections (`현황 · QUESTIONS · ROUTE · MESSAGES`) and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
+**←/→** moves between the sections (`STATUS · QUESTIONS · ROUTE · MESSAGES`) and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
 waits here, else the first section), and use **p** in any popup to fold or open
 the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
 press outside closes it; while it stands every key is its own, everything around
