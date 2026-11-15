@@ -465,8 +465,8 @@ def _settle_claude_native_dispatch_receipt(root, storage_recipient, row,
             if transcript is None:
                 continue
             evidence = claude_transcript_evidence(
-                transcript_path=transcript, session_id=session_id, cwd=cwd,
-                expected_cwd=cwd, runtime_home=runtime_home)
+                transcript_path=transcript, session_id=session_id,
+                runtime_home=runtime_home)
             if evidence is not None:
                 from dispatch_session_sweep import addressed_records
                 candidates, _count = addressed_records(

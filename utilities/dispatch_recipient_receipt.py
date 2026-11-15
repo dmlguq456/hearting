@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -274,20 +275,27 @@ def claude_prompt_bindings(prompt: Any) -> list[tuple[str, str]]:
 
 
 def claude_transcript_evidence(*, transcript_path: str | Path, session_id: str,
-                               cwd: str, expected_cwd: str,
                                runtime_home: str) -> dict[str, Any] | None:
     """Read only the verified Claude session transcript's bounded tail.
 
+    The path is the one Claude Code gave the hook; the session's current working
+    folder is not consulted (the transcript stays where the session started, even
+    after a ``cd``). The file itself proves it is this session's: a real file named
+    ``<session_id>.jsonl`` under ``<runtime_home>/projects`` once symlinks resolve.
     Only actual user feedback events are eligible. A missing, foreign, partial,
     or unreadable transcript returns unknown (``None``), which leaves normal
     delivery fallback intact.
     """
     try:
-        from claude_project_dir import resolve_session_transcript
-        resolved, _reason = resolve_session_transcript(
-            session_id, cwd, expected_cwd=expected_cwd, runtime_home=runtime_home)
+        if (not isinstance(session_id, str) or not session_id
+                or session_id in {".", ".."} or any(ch in session_id for ch in "/\\")
+                or any(ord(ch) < 32 for ch in session_id)
+                or not isinstance(runtime_home, str) or not os.path.isabs(runtime_home)):
+            return None
+        projects = (Path(runtime_home) / "projects").resolve(strict=True)
         supplied = Path(transcript_path).resolve(strict=True)
-        if resolved is None or supplied != resolved.resolve(strict=True):
+        if (supplied.name != session_id + ".jsonl" or not supplied.is_file()
+                or projects not in supplied.parents):
             return None
         size = supplied.stat().st_size
         with supplied.open("rb") as handle:
