@@ -551,8 +551,12 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
 
 
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
-                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None):
-    """One-line `[경로]` notice the acting session pastes instead of a card."""
+                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None,
+                 launches=None):
+    """One-line `[경로]` notice the acting session pastes instead of a card.
+
+    `launches` are the start's launch receipts: when the owner that started is not the
+    requested harness the card names it, and the owner advisory follows the harness that ran."""
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     ids = [node["id"] for node in route["nodes"]]
     framed = shape == "framed"
@@ -574,6 +578,10 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     import work_intent
     for line in work_intent.card_lines(route, original=intent_original, t=t):
         card += "\n" + line
+    changed = work_intent.owner_change_line(route, launches, t=t)
+    if changed:
+        card += "\n  " + changed
+    owner_harness = work_intent.launched_owner(launches).get("harness") or owner_harness
     observed = compose_observations(route, t)
     if include_decisions:
         card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))

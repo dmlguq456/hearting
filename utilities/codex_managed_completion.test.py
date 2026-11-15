@@ -2805,7 +2805,7 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
     def test_a_body_queued_with_the_previous_follow_up_wording_is_recognized_exactly(self):
         module = self.module
         member = self._create(0)
-        current = module._CURRENT_SUCCESS_FOLLOWUP_START + " Fixture current text.\nnext leg note"
+        current = module._SHIPPED_SUCCESS_FOLLOWUP_START + " Fixture current text.\nnext leg note"
         prior = module._prior_followup_text(current)
         self.assertTrue(prior.startswith(module._PRIOR_SUCCESS_FOLLOWUP))
         self.assertTrue(prior.endswith("\nnext leg note"))

@@ -105,6 +105,43 @@ class OneCount(unittest.TestCase):
         self.assertIn("◑ to answer ?", _text(vm, NavState(), 140)[-1])
 
 
+class SentAnswer(unittest.TestCase):
+    def test_a_sent_answer_is_a_dim_row_in_no_count_and_raises_no_session(self):
+        # Rule 5 (11-14): the person's answer is on its way (``answer: sent``): Fleet and the shell
+        # say the same — listed as sent while it travels, waiting on no one, counted nowhere.
+        snapshot = {
+            "sessions": [{"harness": "claude", "session_id": "sid-a", "session_tag": "a1",
+                          "cwd": "/synthetic/repo", "liveness": "idle"}],
+            "project_of": lambda _cwd: "repo",
+            "answer_waits": {"items": [
+                {"id": "S4:sent", "source": "S4", "kind": "message", "since": 900,
+                 "stale": "current", "harness": "claude", "session_id": "sid-a", "answer": "sent"},
+            ], "total": 0, "older": 0, "complete": True, "health": []},
+            "resources": [], "jobs": [],
+        }
+        vm = build_view_model(snapshot, now=1000)
+        self.assertEqual([(q["id"], q["sent"]) for q in vm.questions], [("S4:sent", True)])
+        self.assertTrue(all(not row.get("ask") for row in vm.sessions))
+        board = _text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)
+        joined = "\n".join(board)
+        self.assertIn("── ◑ to answer 0 ─", joined)
+        row = next(line for line in board if "[a1]" in line)
+        self.assertIn("✓", row)
+        self.assertIn("answer sent · ", row)
+        self.assertNotIn("◑ [a1]", row)
+        self.assertIn("◑ to answer 0", _text(vm, NavState(), 140)[-1])
+        # Beside a question still open, only that one counts and raises its session.
+        snapshot["answer_waits"]["items"].append(
+            {"id": "S4:open", "source": "S4", "kind": "message", "since": 950,
+             "stale": "current", "harness": "claude", "session_id": "sid-a"})
+        snapshot["answer_waits"]["total"] = 1
+        vm = build_view_model(snapshot, now=1000)
+        self.assertEqual(sorted((q["id"], q["sent"]) for q in vm.questions),
+                         [("S4:open", False), ("S4:sent", True)])
+        self.assertEqual([row.get("ask") for row in vm.sessions], ["answer needed"])
+        self.assertIn("── ◑ to answer 1 ─", "\n".join(_text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)))
+
+
 class EachRow(unittest.TestCase):
     def test_row_names_who_answers_what_is_asked_its_route_and_since_when(self):
         questions, _summary, vm = _board()

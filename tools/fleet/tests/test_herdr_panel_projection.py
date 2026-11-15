@@ -51,8 +51,9 @@ class HerdrPanelProjectionTest(unittest.TestCase):
         before = copy.deepcopy((self.values, self.board))
         command = self.command()
         tokens = self.tokens(command)
-        self.assertEqual((tokens["hearting_questions"], tokens["hearting_answer_needed"]), ("4", "2"))
-        self.assertIn("Q4/◑A2", command[command.index("--display-agent")+1])
+        # The sent (`submitted`) row is the panel's receipt line, in no count (rule 5, 11-14).
+        self.assertEqual((tokens["hearting_questions"], tokens["hearting_answer_needed"]), ("3", "2"))
+        self.assertIn("Q3/◑A2", command[command.index("--display-agent")+1])
         self.assertNotIn("PRIVATE", repr(command))
         self.assertEqual((self.values, self.board), before)
 

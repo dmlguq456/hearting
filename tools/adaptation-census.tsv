@@ -58,6 +58,7 @@ shared-utility-deferred	governor_identity.py
 shared-utility-deferred	harness_behavior_cases_a.py
 shared-utility-deferred	harness_behavior_cases_b.py
 shared-utility-deferred	harness_behavior_cases_c.py
+shared-utility-deferred	harness_behavior_cases_context_rearm.py
 shared-utility-deferred	harness_behavior_cases_codex_hooks.py
 shared-utility-deferred	harness_behavior_cases_d.py
 shared-utility-deferred	harness_behavior_cases_design_mcp.py
@@ -499,3 +500,4 @@ utility-deferred	artifact_journal_migration.py
 utility-deferred	artifact-journal.py
 utility-deferred	journal_finish.py
 tool-deferred	check_utility_census.test.py
+shared-utility-deferred	parent_context_fixture.py

@@ -17,7 +17,10 @@ module.exports=function({bytes,mouse,suppressed}){
       const csi=/^\x1b\[[0-?]*[ -/]*[@-~]/.exec(text);
       if(csi){bytes(data.subarray(0,csi[0].length));data=data.subarray(csi[0].length);continue;}
       if(data.length<=64&&(/^\x1b(?:\[<?[\d;]*)?$/.test(text))){pending=data;timer=setTimeout(flush,8);return;}
-      bytes(data.subarray(0,1));data=data.subarray(1);
+      // An Escape that starts none of the above goes with the bytes that follow it in this read (up to the next
+      // Escape): `ESC b`, `ESC \r`, `ESC O A` are one key, and an ESC torn off alone would read as a lone Esc.
+      const next=data.indexOf(27,1),end=next<0?data.length:next;
+      bytes(data.subarray(0,end));data=data.subarray(end);
     }
   }
   return {feed,flush,pending:()=>pending.length>0};

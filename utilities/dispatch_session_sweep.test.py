@@ -141,6 +141,30 @@ _FROZEN_DECISION_RUNTIME_V1_SUMMARY_FOLLOWUP = (
     "do not reproduce it for the person.  No harvest/restart/manual finalize. "
     "Receipt/ACK isn't execution; handled exact repeats need no ACK."
 )
+# The completion header and runtime-v1 follow-ups v4.32.4 shipped (frozen bytes).
+_FROZEN_SHIPPED_COMPLETION_DELIVERY_HEADER = (
+    "Hearting runtime delivery. Follow required_action/next-action receipt; "
+    "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
+    "Keep new failures/conflicts, unfinished work, questions; no extra "
+    "harness-scheduled calls/Monitor/dispatch-wait/polling."
+)
+_FROZEN_SHIPPED_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences, preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+    "decide, state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+    "proceeding, and point to the detailed record.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_SHIPPED_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences; preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+    "decide and state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+    "proceeding; and point to the detailed record. Keep the runtime summary below as agent context and "
+    "record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
 _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -1332,7 +1356,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
         self.assertIn("att-0000000000000000000000000000bbbb", context)
         self.assertNotIn("Harvest each attempt", context)
-        self.assertIn("Follow required_action", context)
+        self.assertIn("Act on each required_action", context)
         state = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)["state"]
         self.assertEqual(state, "acked")
 
@@ -2708,7 +2732,7 @@ try {
         owed = self.cli("deliver")
         self.assertEqual([item["delivery_id"] for item in owed["records"]], ["delivery-" + "a" * 32])
         self.assertIn("att-0000000000000000000000000000bbbb", owed["text"])
-        self.assertIn("Follow required_action", owed["text"])
+        self.assertIn("Act on each required_action", owed["text"])
         self.assertEqual(self.state(), "claimed")
         self.assertEqual(self.cli("deliver")["records"], [])      # a live claim is not handed out twice
         self.assertEqual(self.cli("release", json.dumps(owed))["count"], 1)
@@ -3400,7 +3424,7 @@ console.log(JSON.stringify({prompts, logs}));
                         mock.patch.object(route_parent_close, "row_requested", return_value=False), \
                         mock.patch.object(work_intent, "sealed_summary", return_value=sealed):
                     followup = SWEEP._followup(self.root, record)
-                    self.assertIn("First close: give the result in one or two sentences", followup)
+                    self.assertIn("Close per §0.5", followup)
                     self.assertEqual(sealed is not None, summary in followup)
                     current = SWEEP.delivery_context([(self.root, [record])])
                     self.assertEqual(current.count(followup), 1)
@@ -3417,8 +3441,19 @@ console.log(JSON.stringify({prompts, logs}));
                                        else _FROZEN_DECISION_RUNTIME_V1_FOLLOWUP)
                     decision = current.replace(followup, decision_frozen + ("\n" + sealed if sealed else ""), 1)
                     self.assertNotEqual(decision, current)
-                    self.assertIn("in-scope, reversible next step", followup)
-                    accepted_bodies = [current, previous, short, decision] + ([] if sealed else [older])
+                    shipped_frozen = (_FROZEN_SHIPPED_RUNTIME_V1_SUMMARY_FOLLOWUP if sealed
+                                      else _FROZEN_SHIPPED_RUNTIME_V1_FOLLOWUP)
+                    shipped = current.replace(followup, shipped_frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(shipped, current)
+                    # What v4.32.4 sent went out under its own completion header, for each
+                    # follow-up it or the releases before it shipped.
+                    under_shipped = [body.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
+                                                  _FROZEN_SHIPPED_COMPLETION_DELIVERY_HEADER, 1)
+                                     for body in (shipped, previous, short, decision)]
+                    self.assertTrue(all(_FROZEN_SHIPPED_COMPLETION_DELIVERY_HEADER in body
+                                        for body in under_shipped))
+                    accepted_bodies = ([current, previous, short, decision, shipped, *under_shipped]
+                                       + ([] if sealed else [older]))
                     for body in accepted_bodies:
                         messages = [{"info": {"sessionID": self.SID, "role": "user"},
                                      "parts": [{"type": "text", "text": body}]}]

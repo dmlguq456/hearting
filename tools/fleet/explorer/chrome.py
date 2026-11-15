@@ -874,7 +874,7 @@ def draw_explorer(grid: CellGrid, vm, state):
             if session.get("answer_wait_marker") == "●":
                 marker, marker_key = "●", "lvl_r_dim"
             elif session.get("answer_wait_marker") == "◑":
-                marker, marker_key = "◑", "lvl_y"
+                marker, marker_key = "◑", "lvl_r_dim"
             grid.put(hx + 1, y, marker, marker_key)
             if session_lit:
                 for col in range(width):

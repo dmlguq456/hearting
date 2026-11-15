@@ -31,6 +31,11 @@ class CatalogShape(unittest.TestCase):
                 self.assertEqual(set(PLACEHOLDER.findall(entry["en"])),
                                  set(PLACEHOLDER.findall(entry["ko"])))
 
+    def test_a_notice_part_label_is_not_the_metric_header_word(self):
+        # `지표:` heads the results table's metric line; a split notice's third part must not reuse it.
+        messages = json.loads((HERE / "messages.json").read_text(encoding="utf-8"))["messages"]
+        self.assertNotEqual(messages["resource.part.metrics"]["ko"], messages["fleet.lab.metric"]["ko"])
+
     def test_keys_are_sorted_so_merges_stay_small(self):
         messages = json.loads((HERE / "messages.json").read_text(encoding="utf-8"))["messages"]
         self.assertEqual(list(messages), sorted(messages))

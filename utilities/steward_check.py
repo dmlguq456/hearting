@@ -439,7 +439,7 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
-    work, decisions = [], []
+    open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
         headline = " ".join(str(row.get("headline") or "").split())
@@ -450,8 +450,33 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
                 continue
         except Exception:  # noqa: BLE001
             continue
-        (decisions if _is_user_decision(row, headline) else work).append(headline)
+        open_rows.append((row, headline))
+    # Work handed to a route whose worker runs now is the route's, not this session's to do:
+    # it comes back as the route's own completion. A finished route's unreceived result and
+    # a record with no running route, or one that also names another session's or a finished
+    # route, stay open work.
+    try:
+        from fleet.session_work import delegated
+        handed = {id(row) for row in delegated(
+            [row for row, _ in open_rows], lambda ids: _running_routes(ids, session_id))}
+    except Exception:  # noqa: BLE001
+        handed = set()
+    work, decisions = [], []
+    for row, headline in open_rows:
+        if _is_user_decision(row, headline):
+            decisions.append(headline)
+        elif id(row) not in handed:
+            work.append(headline)
     return work, decisions
+
+
+def _running_routes(route_ids, session_id) -> set:
+    """Which of these route ids this session launched and still have a live worker, from the
+    existing dispatch observer."""
+    import dispatch_supervision
+    import session_notice
+    return dispatch_supervision.running_route_ids(
+        session_notice._registry(None), route_ids, session_id or "")
 
 
 def _pending_count(module, harness: str, session_id) -> int:
@@ -720,6 +745,23 @@ def _signature(action: str, observation: dict) -> str:
                 tuple(observation.get("open_work") or ()),
                 tuple(observation.get("user_decisions") or ())))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _none_live(observation: dict) -> bool:
+    """Every target has ended (or never proved live): nobody is left to watch or assign to."""
+    return not any(t["liveness"] != "ended" for t in observation["targets"]
+                   if not t.get("unresolved") or t["liveness"] == "live")
+
+
+def _quiet_signature(observation: dict) -> str:
+    """What a role with no live target is quiet about: its targets alone.
+
+    The holder's own open records, decisions and queued requests reach it on their own
+    (its memory, its prompts, the courier); with nobody left to watch or to take work
+    they open no turn. A live idle target keeps the full signature: new work is for it."""
+    rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"])
+                  for t in observation["targets"])
+    return hashlib.sha256(repr(("quiet", rows)).encode("utf-8")).hexdigest()[:16]
 
 
 def _quiet(observation: dict) -> bool:
@@ -1036,8 +1078,8 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
     retained = dict(observation.get("lab_notified") or [])
     line, names, current = _lab_summary(seen, retained)
     new_lab = any(count > retained.get(rid, 0) for rid, count in current.items())
-    signature = _signature(action, seen)
     quiet = _quiet(seen)
+    signature = _quiet_signature(seen) if quiet and _none_live(seen) else _signature(action, seen)
     if action == "release-if-idle":
         text = TEXT_RELEASE_IF_IDLE
     elif action == "tidy-and-release":

@@ -1519,13 +1519,34 @@ class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(self._reconcile()["expired"], 1)
         self.assertEqual(self._state(stale), ("expired", "pending-delivery-ttl-exceeded"))
 
+    def _supervisor_state(self, attempt, *, session="sess-gone"):
+        """One readable waiting-supervisor state naming the session (schema v2)."""
+        directory = self.root / "supervisor-state"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / (attempt + ".json")).write_text(json.dumps({
+            "schema_version": 2, "parent_attempt_id": attempt,
+            "delivered_attempt_ids": [], "phase": "running-turn",
+            "resource": {"session_id": session, "delivered": [], "outbox": None},
+        }), encoding="utf-8")
+
+    def _reset_fixtures(self):
+        for path in (self.root / "pending-delivery").glob("*/*"):
+            path.unlink()
+        shutil.rmtree(self.root / "archive", ignore_errors=True)
+        shutil.rmtree(self.root / "supervisor-state", ignore_errors=True)
+        self.jobs.write_text("", encoding="utf-8")
+
     def test_anything_but_a_confirmed_absence_is_kept(self):
-        row = self.ROW.format(attempt="att-owner")
         cases = {
-            # The named owner has a live row: the dead-recipient rule decides.
-            "live-owner-row": lambda: self.jobs.write_text(row + "\n", encoding="utf-8"),
-            # The named owner's row moved to the archive: it exists.
-            "archived-owner-row": lambda: self._archive(row),
+            # A live or running owner row, or a done one whose waiting
+            # supervisor state still names the session, can still receive.
+            "open-owner-row": lambda: self.jobs.write_text(
+                self.ROW.format(attempt="att-owner").replace("\tdone\t", "\topen\t") + "\n",
+                encoding="utf-8"),
+            "done-owner-row-with-waiting-supervisor": lambda: (
+                self.jobs.write_text(self.ROW.format(attempt="att-owner") + "\n",
+                                     encoding="utf-8"),
+                self._supervisor_state("att-owner")),
             # No archive to look in, a torn archive line, an unreadable segment.
             "archive-missing": lambda: None,
             "archive-torn": lambda: self._archive(self.ROW.format(attempt="att-x"), torn=True),
@@ -1538,10 +1559,7 @@ class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
         }
         for name, arrange in cases.items():
             with self.subTest(case=name):
-                for path in (self.root / "pending-delivery").glob("*/*"):
-                    path.unlink()
-                shutil.rmtree(self.root / "archive", ignore_errors=True)
-                self.jobs.write_text("", encoding="utf-8")
+                self._reset_fixtures()
                 kept = self._notice("6", age_days=8, binding=self._owner("att-owner"))
                 unowned = self._notice("7", age_days=8)
                 arrange()
@@ -1552,6 +1570,46 @@ class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
                     else "expired"
                 self.assertEqual(self._state(unowned)[0], expect)
                 self.assertEqual(result["expired"], 1 if expect == "expired" else 0)
+
+    def test_an_owner_row_that_cannot_receive_any_more_expires(self):
+        # A terminally ended row, or a done row whose waiting supervisor is
+        # gone for good (the state is never written again), is refused by the
+        # owner-session resolution however long it waits: the notice TTL ends
+        # such a notice instead of holding it forever.
+        for name, arrange in {
+            "killed-owner-row": lambda: self.jobs.write_text(
+                self.ROW.format(attempt="att-owner").replace("\tdone\t", "\tkilled\t") + "\n",
+                encoding="utf-8"),
+            "done-owner-row": lambda: self.jobs.write_text(
+                self.ROW.format(attempt="att-owner") + "\n", encoding="utf-8"),
+            "archived-owner-row": lambda: self._archive(self.ROW.format(attempt="att-owner")),
+        }.items():
+            with self.subTest(case=name):
+                self._reset_fixtures()
+                stale = self._notice("6", age_days=8, binding=self._owner("att-owner"))
+                arrange()
+                self.assertEqual(self._reconcile()["expired"], 1)
+                self.assertEqual(self._state(stale), ("expired", "pending-delivery-ttl-exceeded"))
+
+    def test_an_attempt_parent_lineage_follows_its_own_rules(self):
+        # A live child row keeps the dead-recipient rule as the only decider;
+        # a child row only the archive holds left the live view the resolution
+        # reads, so the notice has no recipient left to find and the same TTL
+        # ends it.
+        binding = {"kind": "attempt-parent", "harness": "claude",
+                   "session_id": "sess-gone", "attempt_id": "att-owner"}
+        for name, arrange, expect in (
+            ("live-child-row", lambda: self.jobs.write_text(
+                self.ROW.format(attempt="att-owner") + "\n", encoding="utf-8"), "pending"),
+            ("archived-child-row", lambda: self._archive(self.ROW.format(attempt="att-owner")),
+             "expired"),
+        ):
+            with self.subTest(case=name):
+                self._reset_fixtures()
+                stale = self._notice("6", age_days=8, binding=binding)
+                arrange()
+                self.assertEqual(self._reconcile()["expired"], 1 if expect == "expired" else 0)
+                self.assertEqual(self._state(stale)[0], expect)
 
     def test_a_registry_the_shared_reader_calls_incomplete_is_kept(self):
         # Review e7 of PR #1545: a torn last line and invalid UTF-8 still come

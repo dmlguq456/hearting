@@ -38,7 +38,7 @@ endpoint, current-root, ambiguity and input-readiness checks apply unchanged;
 Claude's caller, inner PID/start and native SID must agree on that same pane and
 socket. Native card storage remains available without a physical pane.
 
-Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for tidying now. Each threshold is emitted once per native session ID; a jump across both emits the urgent notice once and consumes both. Compaction does not reset these notices. Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These are work-preservation notices, not a guarantee of remaining context or time before native compaction; they do not change the runtime's compaction policy.
+Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for the default tidy (same-session compaction, keeping the session number, supervisor role and pending completion notices) once the current item of work is passed on, in one short line that also says `정리만` does not reduce the context. Each threshold is emitted once while the session stays above it; a jump across both emits the urgent notice once and consumes both. When the session's latest request falls to 400,000 tokens or fewer — as after its own compaction, by session-tidy or the runtime; a small dip under 500,000 does not count — both thresholds may speak once more; a new native session ID starts the same way. A zero or unknown count changes nothing. The notice rides each harness's existing prompt boundary, which also runs for a turn woken by a runtime notice rather than a person (Claude's asyncRewake turn, Codex's queued runtime input, OpenCode's runtime prompt). Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These are work-preservation notices, not a guarantee of remaining context or time before native compaction; they do not change the runtime's compaction policy.
 
 When the work folder has an experiment catalog (`utilities/experiment_catalog.py`), the writer
 is given its group names, goals and condition names with the writing guide and calls each
@@ -263,6 +263,8 @@ line; report its `prompted=` line for handoff and do not retry an uncertain send
 `정리만` / `--no-clear` saves the card and queues the existing memory work while
 keeping the conversation uncompacted. Saving does not shrink its context, disable native
 automatic compaction or establish that compaction was avoided.
+A tidy started because of the 500K/700K notice is the default `정리` unless the
+person asked for `정리만`.
 
 A supervisor or user may run the same transfer for a session it names:
 `python3 $AGENT_HOME/utilities/session_tidy.py handoff --from <세션> --kind <하네스>`.

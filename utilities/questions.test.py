@@ -137,6 +137,28 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((code, out), (3, ""))
         self.assertIn("unknown", err)
 
+    def test_list_head_counts_waits_answered_elsewhere_and_names_blocked_owners_apart(self):
+        # 11-14: a Claude native request and a marker question wait for a person like any
+        # question; a blocked owner is listed for its parent agent and left out of the count.
+        import time
+        now = time.time()
+        owner = {"harness": "claude", "session_id": "sid-a"}
+        self.assertTrue(state.publish_cache({"observed_at": now, "complete": True, "items": [
+            {"id": "S1:claude:sid-a:1", "source": "S1", "kind": "approval", "since": now - 30,
+             "stale": False, "owner": owner, "owner_state": "live", "attribution": "exact"},
+            {"id": "S4:marker", "source": "S4", "kind": "marker", "since": now - 20,
+             "stale": False, "owner": owner, "owner_state": "live", "attribution": "exact"},
+            *({"id": "S3:att-%d" % n, "source": "S3", "kind": "decision", "since": now - 10,
+               "stale": False, "owner": owner, "owner_state": "live", "attribution": "lineage"}
+              for n in range(8)),
+        ]}))
+        with mock.patch.object(state, "read_selected_request", return_value=None):
+            code, out, _err = _run()
+        self.assertEqual(code, 0)
+        head = out.splitlines()[0]
+        self.assertIn("questions: 2 current · 0 older · 8 blocked owners for the parent agent", head)
+        self.assertNotIn("answered in their own session", out)
+
     def test_list_counts_match_the_shared_projection_and_ids_resolve_exactly(self):
         import time
         now = time.time()

@@ -1491,7 +1491,9 @@ def deterministic_progress_fingerprint(ev_in):
     """Hash only bounded, attempt-scoped progress evidence.
 
     Transcript text/mtime and speech are deliberately excluded.  Callers may
-    pass a registry transition, heartbeat, tool call, file/artifact signature,
+    pass a registry transition, heartbeat, tool call, the position of the worker's
+    newest event row (``turn``: a new turn is progress, its prose is never read),
+    file/artifact signature,
     or test result.  The normalized JSON digest is stable across processes.
     """
     scoped = {
@@ -1501,6 +1503,7 @@ def deterministic_progress_fingerprint(ev_in):
         "registry_transition": ev_in.get("registry_transition"),
         "heartbeat": ev_in.get("heartbeat"),
         "tool": ev_in.get("tool"),
+        "turn": ev_in.get("turn"),
         "file_signature": ev_in.get("file_signature"),
         "artifact_signature": ev_in.get("artifact_signature"),
         "test_result": ev_in.get("test_result"),
@@ -1508,7 +1511,7 @@ def deterministic_progress_fingerprint(ev_in):
     }
     present = {key: value for key, value in scoped.items() if value not in (None, "", {})}
     if not any(key in present for key in (
-        "registry_transition", "heartbeat", "tool", "file_signature",
+        "registry_transition", "heartbeat", "tool", "turn", "file_signature",
         "artifact_signature", "test_result", "terminal_observation",
     )):
         return ""

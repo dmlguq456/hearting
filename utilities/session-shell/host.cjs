@@ -166,8 +166,8 @@ let routeScroll=0,routeArea=null;
 // Route and message rows opened in place by a press. Display only: a press
 // here is not typing, so it moves neither the input epoch nor `empty`.
 const panelOpen=new Set();
-// Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`,
-// or `{folded:false,cols}` opened by hand at that width); `expanded` follows it and the width.
+// Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`
+// folded or `{folded:false}` opened by hand, at every width); without one `expanded` follows the width.
 let foldChoice=null;
 let displaySequence=0,nativeMcp;
 // Hand-over between host generations (plan §3.0): `succeeding` is the frozen window of the old
@@ -316,27 +316,27 @@ function readAction(extra,operation='action',own=false) {
 function emit(value) { process.stdout.write(value); }
 function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration});}
 // Spec rule 49: the panel opened or folded through the same layout path a window resize takes
-// (the native is told its new width by the PTY resize in applyLayout). An open settings editor,
-// a question being answered or the panel's edge being dragged keeps an open panel open.
-function pinned(){return expanded&&(!!settings||block.focused||dragging);}
+// (the native is told its new width by the PTY resize in applyLayout). An open settings editor or
+// the panel's edge being dragged keeps an open panel open. A question is answered in the popup
+// (11-15), which stands over the window whether the panel is open or folded.
+function pinned(){return expanded&&(!!settings||dragging);}
 function refold(){
   const next=nativeDisplay.fold({cols,choice:foldChoice,configuration:displayConfiguration,pinned:pinned(),expanded});
   foldChoice=next.choice;
   if(expanded===!next.folded)return;
   expanded=!next.folded;
-  if(!expanded)block.leave();
 }
 // #1586 review follow-up 3: when what kept the panel open ends, the judgment is the same for all
 // three: a width the person set (a drag, or the settings editor applying a new width) counts as
-// opening it by hand at this window width; otherwise (a question answered, the editor closed) the
-// width is judged once again, now.
+// opening it by hand; otherwise (a question answered, the editor closed) the width is judged once
+// again, now.
 let wasPinned=false;
 function pinLapsed(){const now=pinned(),lapsed=wasPinned&&!now;wasPinned=now;return lapsed;}
 // #1586 review follow-up 6: folding by hand closes an open settings editor first (it never
 // stands squeezed into the strip with the keys going to it).
 function foldByHand(folded){
   if(folded&&settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;}
-  foldChoice=folded?{folded:true}:{folded:false,cols};
+  foldChoice={folded};
 }
 function panelColumns(){return geometry().panelCols;}
 // The open panel's width: the projection is laid out for it while the panel is folded, so
@@ -345,36 +345,31 @@ function openColumns(){return nativeDisplay.layout({cols,rows,expanded:true,conf
 function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,panelRows:height()}).nativeRows;}
 function panelRow(){return geometry().side?0:rows-height();}
-function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
+// Spec rule 49 (c): folded, the strip's rows follow the window's rows alone (native-display's foldRows).
+function maxHeight(){if(!expanded)return nativeDisplay.foldRows(rows);return geometry().side?rows:Math.min(displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
 // The opened route page's owner output (Fleet's `attempts`), read once per opening.
 let routeRaw;
 function readRouteRaw(){
   const selected=selection,who=sid;routeRaw=undefined;
   readAction({action:'raw'},'action',true).then(r=>{if(selected===selection&&who===sid&&routeDetail===true&&r?.ok&&Array.isArray(r.attempts)){routeRaw={sid:who,attempts:r.attempts};queueDisplay();}});
 }
-// Spec rule 49 (e): the folded bottom row is the session's status line (the earlier collapsed
-// footer), with what is being delivered.
+// What is being delivered: it takes the panel's last row, open or folded.
 function deliveryNote(){return currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';}
-function foldedSegments(){
-  if(expanded||geometry().side)return [];
-  const note=deliveryNote();
-  return [...(footerSegments.length?footerSegments:[{text:footer||`${harness} · CTX ?`}]),...(note?[{text:note}]:[])];
-}
-// Correction 8 (11-13): the frame the shown state's rule motion began (running moves a light,
-// a wait breathes), so the rule follows the frame's color on the same paint.
-let ruleMotionKind='',ruleSince=0;
-function ruleMotionSince(shown){
-  const kind=shown==='blocked'?'wait':shown==='working'||shown==='submitting'?'scan':'';
-  if(kind!==ruleMotionKind){ruleMotionKind=kind;ruleSince=spinFrame();}
-  return ruleSince;
+// Correction 8 (11-13): the frame the shown state's frame motion began (running sends the arc
+// round, a wait breathes), so the motion starts with the state on the same paint.
+let motionKind='',motionBegan=0;
+function motionSince(shown){
+  const kind=shown==='blocked'?'breathe':shown==='working'||shown==='submitting'?'orbit':'';
+  if(kind!==motionKind){motionKind=kind;motionBegan=spinFrame();}
+  return motionBegan;
 }
 function panelViewNow(){
   const shown=shownState();
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:ruleMotionSince(shown),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
-    cellWidth,background:terminalBackground,folded:!expanded,segments:foldedSegments(),
-    routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
+    cellWidth,background:terminalBackground,folded:!expanded,
+    routeScroll,brief:()=>block.summary(),sent:()=>block.sent()});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   routePageCount=view.routePages;return view;
@@ -387,51 +382,98 @@ function panelViewNow(){
 // the cached rows; the blink, a color change, repaints the panel once a second.
 function spinFrame(){return Math.floor(Date.now()/100);}
 let viewGroups=[],paintedGroups=new Set(),viewSpins=[],paintedSpins=new Set(),viewAnimated=false,panelAnimated=false;
-// Spec rule 47 (d): the moving rule beside the native area turns on the same beat as the
-// spinner. Its row, painted at the current spinner frame, is written as the scratch VT would
-// write it (`serialize`'s per-cell attributes; every cell of that row is one cell wide), so a
-// native frame and the beat write the same line, and the beat sends only the cells that changed.
-let viewMotion=null,paintedMotion=null,viewBlinks=false,panelBlinks=false;
+// Spec rule 47 (d): the moving frame turns on the same beat as the spinner, beside the native area
+// and under it alike. Its line cells (the view's: row, column and glyph) are written as the
+// scratch VT would write them (`serialize`'s per-cell attributes; each is one cell wide): a whole
+// row written for any other reason carries them at the current spinner frame, and the beat sends
+// only the cells that changed, a run at a time. The panel rows are kept with those cells at one
+// fixed look (`panelKey`), so a rebuild whose rows only differ there rewrites nothing.
+let viewMotion=null,paintedMotion=null,viewBlinks=false,panelBlinks=false,panelKey=[],written=[];
+// What the terminal shows at each moving cell (`row,column` on the screen).
+const motionShown=new Map();
 // A part's foreground as SGR: a 256-color index, or `#rrggbb` (24-bit, where the terminal takes it:
-// the moving rule's breath), as the scratch VT writes them back.
+// the moving frame's breath), as the scratch VT writes them back.
 function foregroundSgr(value){
   if(Number.isInteger(value)&&value>=0&&value<=255)return '38;5;'+value;
   const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(value??''));
   return m?'38;2;'+m.slice(1).map(x=>parseInt(x,16)).join(';'):null;
 }
-function motionCells(parts){
-  const cells=[];
-  for(const part of parts){
-    const a=[0,foregroundSgr(part.foreground)||'39',
-      Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
-    if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
-    const attr=a.join(';');
-    for(const ch of String(part.text).replace(/[\x00-\x1f\x7f]/g,' '))cells.push([attr,ch]);
-  }
-  return cells;
+function cellAttr(part){
+  const a=[0,foregroundSgr(part.foreground)||'39',
+    Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
+  if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
+  return a.join(';');
 }
-function sgrRun(cells,from=0,to=cells.length){
-  let s='',previous='';
-  for(let i=from;i<to;i++){const [attr,ch]=cells[i];if(attr!==previous){s+=`\x1b[${attr}m`;previous=attr;}s+=ch;}
-  return s+'\x1b[0m';
+const TOKENS=/\x1b\[[0-9;]*m|[\s\S]/gu;
+// The glyph at each cell of a serialized row.
+function rowGlyphs(row){
+  const out=[];let col=0;
+  for(const token of String(row).match(TOKENS)||[]){if(token.startsWith('\x1b['))continue;const w=cellWidth(token);if(w>0){out[col]=token;col+=w;}}
+  return out;
 }
+// The view's moving cells that stand painted where it says (a row the host replaced, such as the
+// delivery note's, keeps none), by row in column order, with that motion's paint and next change.
+function motionPlan(motion,painted,drop){
+  if(!motion||!Array.isArray(motion.cells))return null;
+  const rows=new Map(),glyphs=new Map();
+  motion.cells.forEach((c,i)=>{
+    if(c.row===drop||typeof painted[c.row]!=='string')return;
+    if(!glyphs.has(c.row))glyphs.set(c.row,rowGlyphs(painted[c.row]));
+    if(glyphs.get(c.row)[c.col]!==c.ch)return;
+    if(!rows.has(c.row))rows.set(c.row,[]);rows.get(c.row).push({row:c.row,col:c.col,ch:c.ch,i});
+  });
+  for(const list of rows.values())list.sort((a,b)=>a.col-b.col);
+  return rows.size?{rows,at:motion.at,next:motion.next,frame:null,now:[],spliced:new Map()}:null;
+}
+// The moving cells' looks at the current spinner frame (once a frame).
 function motionNow(){
   const m=paintedMotion,frame=spinFrame();
-  if(m.frame!==frame){m.frame=frame;m.cells=motionCells(m.at(frame));m.line=sgrRun(m.cells);}
-  m.offered=m.cells;return m.line;
+  if(m.frame!==frame){m.frame=frame;m.now=m.at(frame).map(cellAttr);m.spliced=new Map();}
+  return m.now;
 }
-// The cells of the moving rule's row that differ from what the terminal shows, at their place.
-function motionSpan(y){
-  const m=paintedMotion,now=m.offered,was=m.shown,column=geometry().left?1:terminal.cols+1+geometry().gap;
-  if(!was||was.length!==now.length)return `\x1b[${y+1};${column}H\x1b[0m`+sgrRun(now);
-  const same=i=>was[i][0]===now[i][0]&&was[i][1]===now[i][1];
-  let from=0,to=now.length;
-  while(from<to&&same(from))from++;
-  while(to>from&&same(to-1))to--;
-  return from<to?`\x1b[${y+1};${column+from}H`+sgrRun(now,from,to):'';
+// A serialized row with its moving cells in the given looks; every other cell keeps its own.
+function motionSplice(row,list,look){
+  const at=new Map(list.map(c=>[c.col,c]));
+  let out='',own='',pending=false,current=null,col=0;
+  for(const token of row.match(TOKENS)||[]){
+    if(token.startsWith('\x1b[')){own=token;pending=true;continue;}
+    const c=at.get(col);
+    if(c&&token===c.ch){const attr=look(c);if(current!==attr){out+=`\x1b[${attr}m`;current=attr;}pending=false;}
+    else if(pending||current!==null){out+=own||'\x1b[0m';pending=false;current=null;}
+    out+=token;col+=cellWidth(token);
+  }
+  return pending||current!==null?out+(pending?own:'\x1b[0m'):out;
 }
+function motionRow(y,row){
+  const m=paintedMotion,list=m.rows.get(y),now=motionNow(),kept=m.spliced.get(y);
+  if(kept&&kept[0]===row)return kept[1];
+  const out=motionSplice(row,list,c=>now[c.i]);m.spliced.set(y,[row,out]);return out;
+}
+// A whole row just written: its moving cells show their current looks.
+function motionWrote(y,screen,column){
+  const list=paintedMotion?.rows.get(y);if(!list)return;
+  const now=motionNow();for(const c of list)motionShown.set(screen+','+(column+c.col),now[c.i]);
+}
+// The moving cells of a panel row that differ from what the terminal shows, a run at a time.
+function motionSpan(y,screen,column){
+  const list=paintedMotion?.rows.get(y);if(!list)return '';
+  const now=motionNow(),stale=c=>motionShown.get(screen+','+(column+c.col))!==now[c.i];
+  let out='';
+  for(let k=0;k<list.length;){
+    if(!stale(list[k])||covered(screen,column+list[k].col-1)){k++;continue;}
+    let run=`\x1b[${screen+1};${column+list[k].col}H`,current=null;
+    for(let x=list[k].col;k<list.length&&list[k].col===x&&stale(list[k])&&!covered(screen,column+x-1);k++,x++){
+      const c=list[k];if(current!==now[c.i]){run+=`\x1b[${now[c.i]}m`;current=now[c.i];}run+=c.ch;
+      motionShown.set(screen+','+(column+c.col),now[c.i]);
+    }
+    out+=run+'\x1b[0m';
+  }
+  return out;
+}
+// A row whose other cells stand as last written: its spinner glyphs and its changed moving cells.
+function cellSpan(y,screen,column){return (paintedSpins.has(y)?spinSpan(screen,panelRows[y],column):'')+motionSpan(y,screen,column);}
 // The gap beside the panel: the terminal's own background, or the native's own at its edge cell.
-// Two cells beside the open panel, one beside the folded strip (spec rule 49 (c)).
+// Two cells beside the open panel (the folded strip stands under the native area).
 function gapText(){return '\x1b[0m'+' '.repeat(geometry().gap);}
 // An inverse edge cell shows its foreground as its background (#1583 review follow-up (다)): the
 // gap takes that color, the terminal's own where that foreground is the default.
@@ -443,14 +485,15 @@ function gapOf(line,x){
   return `\x1b[0;${sgr}m${' '.repeat(geometry().gap)}\x1b[0m`;
 }
 function spun(y,row){
-  if(paintedMotion&&y===paintedMotion.row&&typeof row==='string')return motionNow();
-  if(typeof row!=='string'||!paintedSpins.has(y))return row;
-  const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);
+  if(typeof row!=='string')return row;
+  let out=row;
+  if(paintedSpins.has(y)){const spin=panelView.SPIN;out=out.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);}
+  return paintedMotion?.rows.has(y)?motionRow(y,out):out;
 }
 let beatTimer,beatPhase=-1;
 function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&panelRows.length>0;}
 // The beat wakes at the next moment something painted changes: a spinner's next frame, the
-// moving rule's next change (a waiting rule's breath: four times a breath), a blink's phase
+// moving frame's next change (the arc's next step; a breath's next shade), a blink's phase
 // change once a second (spec rule 47 (d)). A blink repaints the panel; the rest swap their own
 // cells. Nothing changing, nothing wakes.
 function armBeat(){
@@ -475,33 +518,90 @@ function spinSpan(y,row,column){
   let out='',sgr='',col=0;
   for(const token of String(row).match(/\x1b\[[0-9;]*m|[\s\S]/gu)||[]){
     if(token.startsWith('\x1b[')){sgr=token;continue;}
-    if(spin.includes(token))out+=`\x1b[${y+1};${column+col}H${sgr}${glyph}`;
+    if(spin.includes(token)&&!covered(y,column+col-1))out+=`\x1b[${y+1};${column+col}H${sgr}${glyph}`;
     col+=cellWidth(token);
   }
   return out&&out+'\x1b[0m';
 }
-// Only the changed cells of the panel rows (the spinner glyphs, the moving rule), with the cursor
-// kept where the native left it. A native frame already on its way paints them itself.
+// Only the changed cells of the panel rows (the spinner glyphs, the moving frame's cells), with
+// the cursor kept where the native left it. A native frame already on its way paints them itself.
+// A row whose other cells were not written as they stand now goes whole (the panel part).
 function spinPaint(){
   if(frameTimer||!paintedSpins.size&&!paintedMotion||succeeding)return;
-  let text='';const side=geometry().side;
-  for(const y of paintedMotion?new Set([...paintedSpins,paintedMotion.row]):paintedSpins){
+  let text='';const side=geometry().side,wrote=new Set();
+  for(const y of paintedMotion?new Set([...paintedSpins,...paintedMotion.rows.keys()]):paintedSpins){
     if(y>=panelRows.length)continue;
-    const panel=spun(y,panelRows[y]),motion=!!paintedMotion&&y===paintedMotion.row;
+    const panel=spun(y,panelRows[y]);
     if(side){
       if(nativeLast[y]===undefined)continue;
       const gap=nativeGap[y]||gapText();
       const line=geometry().left?panel+`\x1b[${panelColumns()+1}G`+gap+nativeLast[y]:nativeLast[y]+`\x1b[${terminal.cols+1}G`+gap+panel;
       if(last[y]===line)continue;
-      const column=geometry().left?1:terminal.cols+1+geometry().gap;
-      text+=last[y]===undefined?`\x1b[${y+1};${column}H\x1b[0m`+panel:motion?motionSpan(y):spinSpan(y,panelRows[y],column);
-      last[y]=line;if(motion)paintedMotion.shown=paintedMotion.offered;
+      const column=geometry().left?1:terminal.cols+1+geometry().gap,quiet=last[y]!==undefined&&written[y]===panelKey[y];
+      text+=quiet?cellSpan(y,y,column):`\x1b[${y+1};${column}H\x1b[0m`+panel;
+      if(!quiet){motionWrote(y,y,column);wrote.add(y);}
+      last[y]=line;written[y]=panelKey[y];
     }else{
       const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
-      if(last[row]===panel)continue;text+=last[row]===undefined?`\x1b[${row+1};1H`+panel:spinSpan(row,panelRows[y],1);last[row]=panel;
+      if(last[row]===panel)continue;
+      const quiet=last[row]!==undefined&&written[row]===panelKey[y];
+      text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H`+panel;
+      if(!quiet){motionWrote(y,row,1);wrote.add(row);}
+      last[row]=panel;written[row]=panelKey[y];
     }
   }
+  text+=popupOver(wrote,false);
   if(text)emit('\x1b[?2026h\x1b7'+text+'\x1b8\x1b[?2026l');
+}
+// ---- the popup (11-15): one layer over the scene ----
+// The question popup stands while the question editor has the keys (`block.focused`): Ctrl+], a
+// press on the panel's QUESTIONS rows or on the folded strip's row of what to do opens it; a new
+// question never does. It is laid over the rows the scene writes (the native's own copy and the
+// panel) in the same synchronized frame: a row written whole again takes the popup's cells again
+// after it, and the cells that turn on their own under it (a spinner, the moving frame) are left
+// alone. Closed or moved, the rows it covered are written again from the native's copy as it is
+// now. The PTY keeps its size; the frame and its rows are panel-view's `popup`.
+let popupLayer=null,popupRect=null,overlayLast=[],overlayBase=null;
+function popupShown(){return block.focused&&activated&&!relay&&!ended&&!fleetView&&!settings&&!succeeding;}
+function popupNow(){
+  if(!popupShown())return null;
+  const band=expanded?0:height(),width=panelView.popupWidth(cols),inner=Math.max(0,width-4),room=panelView.popupRoom(rows,band);
+  const label=[{text:block.summary()?.label||'QUESTIONS',dim:true}];
+  let title=label,body;
+  // A peer or work reading asked for from the popup (r, w) stands in it until the next key.
+  if(actionLines.length)body=actionLines.slice(0,room);
+  else if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
+  else body=block.detail({budget:room,columns:inner});
+  const view=panelView.popup({cols,rows,band,title,body,sections:['QUESTIONS'],current:0,model:panelModel,
+    configuration:displayConfiguration,cellWidth,background:terminalBackground});
+  // OpenCode paints its own background: every popup row starts from the terminal's own look.
+  view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f]/g,' ')}`).join('')+'\x1b[0m');
+  // The caret stands after the answer being typed (its row starts `› `), as it did in the panel.
+  const edit=part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
+  const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
+  if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
+    view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}
+  return view;
+}
+function covered(y,x){const r=popupRect;return !!r&&y>=r.top&&y<r.top+r.height&&x>=r.left&&x<r.left+r.width;}
+// Before a frame: a popup that closed or moved gives its rows back to the scene (written whole again).
+function popupBefore(){
+  if(overlayBase!==last){overlayBase=last;overlayLast=[];}
+  const l=popupLayer,rect=l?{top:l.top,left:l.left,width:l.width,height:l.height}:null;
+  if(popupRect&&JSON.stringify(popupRect)!==JSON.stringify(rect))
+    for(let y=popupRect.top;y<popupRect.top+popupRect.height;y++){last[y]=undefined;overlayLast[y]=undefined;}
+  popupRect=rect;
+}
+// After the rows: the popup's rows that changed, and those over a row just written whole.
+function popupOver(wrote,changed=true){
+  const l=popupLayer;if(!l||!popupRect||l.top!==popupRect.top||l.left!==popupRect.left||l.height!==popupRect.height)return '';
+  if(overlayBase!==last){overlayBase=last;overlayLast=[];}
+  let out='';
+  for(let i=0;i<l.strings.length;i++){
+    const y=l.top+i;if(y>=rows)break;
+    if(wrote.has(y)||changed&&overlayLast[y]!==l.strings[i]){out+=`\x1b[${y+1};${l.left+1}H`+l.strings[i];overlayLast[y]=l.strings[i];}
+  }
+  return out;
 }
 // The terminal background, only where it is already known (COLORFGBG). Nothing
 // is asked: the host answers a native's own OSC 10/11 query itself, so an
@@ -524,7 +624,7 @@ function readPageShown(){
 function height(){
   if(fleetView)return 0;
   if(geometry().side)return rows;
-  if(!expanded)return 1;
+  if(!expanded)return maxHeight();
   const content=panelContent();
   return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
 
@@ -568,6 +668,7 @@ function render() {
     // Paint the observed selected model with the same native frame, rather
     // than first emitting a known model beside an obsolete Checking row.
     if(selectedChanged)return;
+    popupBefore();const wrote=new Set();
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
@@ -586,22 +687,33 @@ function render() {
         const plain=y!==notice&&!concealed.has(y)&&!masked;
         const gap=plain?gapOf(view.buffer.active.getLine(view.buffer.active.viewportY+y),geometry().left?0:view.cols-1):gapText();
         const same=nativeLast[y]===line&&nativeGap[y]===gap;nativeLast[y]=line;nativeGap[y]=gap;
-        const panel=y<panelRows.length?spun(y,panelRows[y]):' '.repeat(panelColumns());
+        const shown=y<panelRows.length,panel=shown?spun(y,panelRows[y]):' '.repeat(panelColumns());
         line=geometry().left?panel+`\x1b[${panelColumns()+1}G`+gap+line:line+`\x1b[${view.cols+1}G`+gap+panel;
-        // The moving rule's row whose native part is unchanged: only its changed cells.
-        motion=!!paintedMotion&&y===paintedMotion.row&&y<panelRows.length;
-        if(motion&&same&&last[y]!==undefined&&last[y]!==line){text+=motionSpan(y);last[y]=line;}
+        // A row of the moving frame whose native part and other panel cells are unchanged: only
+        // its changed cells (and its spinner glyphs).
+        const column=geometry().left?1:view.cols+1+geometry().gap;
+        motion=shown&&!!paintedMotion?.rows.has(y);
+        if(motion&&same&&last[y]!==undefined&&last[y]!==line&&written[y]===panelKey[y]){text+=cellSpan(y,y,column);last[y]=line;}
+        else if(motion&&last[y]!==line)motionWrote(y,y,column);
+        written[y]=shown?panelKey[y]:undefined;
       }
-      if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
-      if(motion)paintedMotion.shown=paintedMotion.offered;
+      if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;wrote.add(y);}
     }
     if(!fleetView&&!geometry().side&&(expanded||height()>0))for(let y=0;y<panelRows.length;y++){
-      const row=rows-height()+y;
-      const cached=expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
-        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
-      if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
+      const row=rows-height()+y,first=expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude';
+      const cached=first?'\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
+      if(last[row]!==cached){
+        // A row of the moving frame whose other cells are unchanged: only its changed cells.
+        const quiet=!first&&!!paintedMotion?.rows.has(y)&&last[row]!==undefined&&written[row]===panelKey[y];
+        text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H${cached}`;
+        if(!quiet&&!first)motionWrote(y,row,1);
+        if(!quiet)wrote.add(row);
+        last[row]=cached;
+      }
+      written[row]=first?undefined:panelKey[y];
     }
-    else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
+    else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;wrote.add(rows-1);}
+    if(!fleetView)text+=popupOver(wrote);
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
     text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
@@ -655,33 +767,29 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
   page:dir=>{if(!paste&&routeArea)scrollRoutes(dir*Math.max(1,routeArea.step||1));}});
 let actionLines=[];
 function rebuildDisplay() {
+  // The popup layer first: Fleet's screen or the plain relay closes it with the rest.
+  popupLayer=relay||ended?null:popupNow();blockCursor=popupLayer?.cursor||null;
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();paintedMotion=null;panelBlinks=false;panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
+  schedule();
+  if(!height()){panelRows=[];panelKey=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();paintedMotion=null;motionShown.clear();panelBlinks=false;panelAnimated=false;displayFooter='';schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=deliveryNote();
-  let lines,edit=-1,groups=[],spins=[],animated=false,motion=null,blinks=false;
+  let lines,groups=[],spins=[],animated=false,motion=null,blinks=false;
   if(expanded){
-    const base=panelContent();groups=viewGroups;spins=viewSpins;motion=viewMotion;blinks=viewBlinks;animated=viewAnimated;
-    const detail=[];
-    if(detail.length){
-      const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
-      const at=visible.findIndex(line=>Array.isArray(line)&&line.some(part=>String(part.text).startsWith('› ')));
-      edit=at<0?-1:prefix.length+at;lines=[...prefix,...visible];
-    }else lines=base;
-    if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
+    lines=panelContent();groups=viewGroups;spins=viewSpins;motion=viewMotion;blinks=viewBlinks;animated=viewAnimated;
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else{
-    // Spec rule 49 (c), (e): folded, the strip beside the native area or the one row under it.
-    lines=panelContent();spins=viewSpins;animated=viewAnimated;
+    // Spec rule 49 (c): folded, the strip under the native area.
+    lines=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
+    if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }
-  const editParts=edit>=0?lines[edit]:[];
-  const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
-  const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
   displayLines(lines,height(),(painted,lengths,plain)=>{
-    blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
     panelRows=painted;paintedGroups=new Set(groups);paintedSpins=new Set(spins);panelAnimated=animated;
-    // What the terminal shows of the moving rule stays known while its row stays the same.
-    paintedMotion=motion?{row:motion.row,at:motion.at,next:motion.next,shown:paintedMotion&&paintedMotion.row===motion.row?paintedMotion.shown:null}:null;
+    // The moving frame's cells as painted (the delivery note's row, which replaces the last one,
+    // keeps none); what the terminal shows at them stays known (`motionShown`).
+    paintedMotion=motionPlan(motion,painted,extra?lines.length-1:-1);
+    if(!paintedMotion)motionShown.clear();
+    panelKey=painted.map((row,y)=>paintedMotion?.rows.has(y)?motionSplice(row,paintedMotion.rows.get(y),()=>'0'):row);
     panelBlinks=blinks;
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
     displayFooter=painted[0];footerLast='\0';rebuilding=false;
@@ -695,7 +803,7 @@ async function blockAction(key) {
   const selected=selection;
   const result=await source('action',{action:key});
   if(selected!==selection||!block.focused)return;
-  actionLines=(result.lines||['?']).slice(0,height()-1).map(text=>[{text,dim:true}]);
+  actionLines=(result.lines||['?']).slice(0,panelView.popupRoom(rows,expanded?0:height())).map(text=>[{text,dim:true}]);
   rebuildDisplay();
 }
 function openFleet() {
@@ -803,7 +911,7 @@ async function projection() {
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const asked=++clock;
-    const data=await source('projection',{columns:openColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
+    const data=await source('projection',{columns:openColumns(),popup_columns:panelView.popupWidth(cols),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
       ...(typeof displayValues.model==='string'&&displayValues.model?{native_model:displayValues.model}:{})});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
@@ -825,9 +933,12 @@ async function projection() {
 // the answer wait, the route count, 5h/7d and running jobs. A group the panel
 // paints counts even when its row is cut to the panel's width; only a group
 // the panel does not paint at all (short of rows, a read page, settings) keeps
-// the native rows, so no value leaves the screen.
+// the native rows, so no value leaves the screen. Spec rule 49 (c): the folded
+// strip takes that row's place while it paints its session row (the strip carries
+// no Git or job row), so a value never shows twice; the row keeps the notice.
 function claudePanelPainted(){
-  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
+  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||settings||!height())return false;
+  if(!expanded)return paintedGroups.has('head');
   const has=parts=>(Array.isArray(parts)?parts:[]).some(part=>String(part.text).trim());
   const wanted=[['head',has(panelModel.head)],['git',has(panelModel.git)],['context',has(panelModel.context)],['quota',has(panelModel.quota)],
     ['jobs',has(panelModel.jobs)],['wait',!!panelModel.wait],['route',!!panelModel.route_count]].filter(([,shown])=>shown).map(([name])=>name);
@@ -963,7 +1074,7 @@ function panelAction(action){
   epoch++;empty=false;
   if(settings?.saving)return;
   if(action==='settings'){openSettings();return;}
-  // Spec rule 49 (b), (c): the fold button folds the panel; a press on the strip or the folded row opens it.
+  // Spec rule 49 (b), (c): the fold button folds the panel; a press on the folded strip opens it.
   if(action==='fold'||action==='unfold'){foldByHand(action==='fold');applyLayout();return;}
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
@@ -972,7 +1083,7 @@ function panelAction(action){
   // A message longer than its rows reads on, from its start, on the detail pages.
   if(action.startsWith('read:message:')||action.startsWith('read:request:')){routeDetail=action.slice(5);routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
-  if(action==='question'){routeDetail=false;block.enter();}
+  if(action==='question'){actionLines=[];block.enter();}
   if(action.startsWith('setting:')&&settings){
     const [,field,operation]=action.split(':'),index=Number(field);if(index<0||index>=panelView.fields.length)return;
     settings.index=index;if(operation!=='select')settings.value=panelView.change(settings.value,panelView.fields[index],operation==='down'?-1:1);previewSettings();return;
@@ -1014,7 +1125,7 @@ function panelMouse(code,x,y,release){
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
     if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
-    // A width set by hand is the person's choice to keep the panel open at this window width.
+    // A width set by hand is the person's choice to keep the panel open.
     else{dragging=false;foldByHand(false);schedule();source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
@@ -1043,6 +1154,7 @@ mouseInput=require('./panel-mouse.cjs')({
   suppressed:()=>paste||block.pasting||settingsPaste||relay||!!fleetView,
   bytes:inputBytes,
   mouse:(code,x,y,release,raw)=>{
+    if(popupMouse(code,x,y,release))return;
     if(panelMouse(code,x,y,release))return;
     if(terminal.modes.mouseTrackingMode==='none')return;
     // A left panel moves the native area right; native sees its own columns.
@@ -1051,6 +1163,25 @@ mouseInput=require('./panel-mouse.cjs')({
     nativePointer(code,release,raw);
   }
 });
+// 11-15: while the popup stands it owns the pointer: a press outside it (on the native or the
+// panel) closes it and goes nowhere else, `✕` closes it, the wheel over it reads its question on;
+// nothing reaches a native that reads the mouse (Codex, OpenCode).
+// The release of the press that closed it is its own too.
+let popupPressed=false;
+function popupMouse(code,x,y,release){
+  if(release&&popupPressed){popupPressed=false;return true;}
+  // The drag that follows the press which closed it is its own too, up to the release.
+  if(popupPressed&&code>=32&&(code&0xc0)!==64)return true;
+  if(!release&&code<32)popupPressed=false;
+  const l=popupLayer;if(!l||!block.focused||relay||fleetView)return false;
+  const col=x-1,row=y-1,f=l.frame,inside=row>=f.top&&row<f.top+f.height&&col>=f.left&&col<f.left+f.width;
+  if((code&0xc3)===64||(code&0xc3)===65){if(!release&&inside)block.wheel((code&1)?1:-1);return true;}
+  if(release||code>=32||(code&3)!==0)return true;
+  popupPressed=true;
+  const hit=inside&&l.hits.find(h=>h.row===row&&col>=h.left&&col<=h.right);
+  if(!inside||hit&&hit.action==='popup-close'){epoch++;block.leave();queueDisplay();}
+  return true;
+}
 function nativePointer(code,release,raw){
   // A wheel report scrolls; it neither edits the composer nor clicks away
   // the question block. Like a focus report it invalidates the in-flight
@@ -1069,9 +1200,19 @@ function inputBytes(data) {
     // Mouse-opened shell editors own their visible keys even while a peer's
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
+    // 11-15: while the popup stands its editor takes every key (a read page under it keeps none);
+    // nothing typed there reaches the native. A lone Esc closes it; Ctrl+] closes it and the rest goes on.
+    if(block.focused&&!relay&&!fleetView){
+      actionLines=[];const rest=block.input(data);epoch+=data.length-rest.length;
+      data=rest;queueDisplay();continue;
+    }
     const page=!!routeDetail&&readPageShown();
     if(page&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
     if(page&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
+    // Rule 5 (11-14): a sent answer returns focus to the native input. The lone Esc a person
+    // presses right after it, to leave the popup as before, is not the native's interrupt; nor is
+    // a lone Enter (11-15), which would submit what stands in the native input.
+    if(!block.focused&&!relay&&block.answeredEscape?.(data)){data=data.subarray(1);queueDisplay();continue;}
     if(currentDelivery&&(!block.focused||relay)){
       inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
       if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
@@ -1096,10 +1237,6 @@ function inputBytes(data) {
       view.child.write('\x1b\x1bq');
       const rest=data.subarray(exit+1);if(rest.length){observeInput(rest);child.write(rest);}return;
     }
-    if(block.focused){
-      actionLines=[];const rest=block.input(data);epoch+=data.length-rest.length;
-      data=rest;queueDisplay();continue;
-    }
     const offset=data.indexOf(0x1d);
     if(offset<0){observeInput(data);child.write(data);return;}
     const prefix=data.subarray(0,offset);
@@ -1107,7 +1244,14 @@ function inputBytes(data) {
     // Escape has already reached native. Ctrl+] cannot continue an Escape/CSI
     // prefix; keeping that lone byte pending would disable focus after a modal.
     if(keyTail==='\x1b'&&!paste)keyTail='';
-    if(!paste&&!keyTail){epoch++;foldByHand(false);expanded=true;actionLines=[];routeDetail=false;routePage=0;block.enter();queueLayout();}
+    // 11-15: Ctrl+] opens the question popup over the window as it stands (open or folded panel,
+    // the native at its width); it closes it again. With no question waiting it opens the panel
+    // as before (the keyboard's way to unfold a folded one), the read keys r, w, f beside it.
+    if(!paste&&!keyTail){
+      epoch++;actionLines=[];
+      if(block.question){block.enter();queueDisplay();}
+      else{foldByHand(false);expanded=true;routeDetail=false;routePage=0;block.enter();queueLayout();}
+    }
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
   }
@@ -1412,7 +1556,7 @@ function buildSeed() {
     // The host's own turn observation (what the panel shows as the state), so the successor shows the same
     // state at its first paint and goes on reading the native's turn record; its marks keep their order.
     turn:{nativeTurn,turnMark,eventMark,clock,seenTurn,turnRecord,formSeen},
-    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
+    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
     terminal:captured.terminal,scrollback:captured.scrollback,
     outer:{cols,rows,last:Array.from(last,value=>value??null),nativeLast:Array.from(nativeLast,value=>value??null),footerLast}};
   let json=JSON.stringify(seed);
@@ -1522,7 +1666,8 @@ async function commitSuccessor(file) {
     rootNative=root;native=row;
     sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
     submitted=seed.submitted;lastEnter=seed.lastEnter;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
-    const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&(choice.folded===true||Number.isInteger(choice.cols))?{folded:choice.folded===true,...(choice.folded===true?{}:{cols:choice.cols})}:null;
+    // An earlier release's open-by-hand choice also carried its width (`{folded:false,cols}`).
+    const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&typeof choice.folded==='boolean'?{folded:choice.folded}:null;
     displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;
     for(const key of seed.panelOpen.slice(0,16))if(typeof key==='string')panelOpen.add(key);
     for(const [ref,value] of seed.deliveries)deliveries.set(ref,value);

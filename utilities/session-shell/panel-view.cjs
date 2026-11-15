@@ -12,14 +12,14 @@ const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom'
 const FACES={
   dark:{light:234,medium:235,body:253,secondary:248,title:246,frame:244,route:245,messages:242,accent:174,
     working:150,idle:186,blocked:174,dead:210,done:150,steward:[219,132],
-    // Spec rule 47: the moving rule's tones. The running light's five steps, dimmest first (the
-    // session spinner's vanilla at the top, just above the dark rule at the bottom); a waiting
-    // rule's steps of red, brightest first (the frame's waiting red) in 256 colors, and its two
-    // ends in 24-bit color.
-    scan:[243,101,144,187,230],wait:[217,210,174,167,131,95],waitRGB:[[255,175,175],[90,56,56]]},
+    // Spec rule 47: the moving frame's tones (the values with `BORDER_*` below). The running
+    // arc's shades, its head first (the session spinner's vanilla, the running frame's color)
+    // down to the one beside the neutral frame gray it fades into; a waiting frame's reds,
+    // brightest first (the frame's waiting red), in 256 colors, and its two ends in 24-bit color.
+    orbit:[230,187,144,101],breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]]},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
-    scan:[251,151,108,65,22],wait:[88,124,131,167,174,181],waitRGB:[[135,0,0],[225,190,190]]},
+    orbit:[22,65,108,151],breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]]},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -28,17 +28,17 @@ const FACES={
 const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
-// A moving rule cell's color: a light step from its face's ramp; a waiting step from its face's
-// 256-color reds, or in 24-bit color (when the terminal says it takes it) a point on the cosine
-// between its face's two ends.
-function ruleTone(part,F,colors){
-  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
+// A moving frame cell's color: an arc shade from its face's ramp (0 the head); a waiting step
+// from its face's 256-color reds, or in 24-bit color (when the terminal says it takes it) a point
+// on the cosine between its face's two ends.
+function orbitTone(part,F,colors){
+  if(part.tone==='arc')return F.orbit[Math.max(0,Math.min(F.orbit.length-1,part.level))];
   const steps=part.steps,k=part.step;
   if(colors>256&&steps>1){
-    const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.waitRGB;
+    const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.breathRGB;
     return '#'+hi.map((c,i)=>Math.round(lo[i]+(c-lo[i])*f).toString(16).padStart(2,'0')).join('');
   }
-  return F.wait[Math.max(0,Math.min(F.wait.length-1,k))];
+  return F.breath[Math.max(0,Math.min(F.breath.length-1,k))];
 }
 function appearance(rows,configuration={},{colors=256,noColor=false,background=''}={}){
   const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
@@ -77,15 +77,17 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // (Fleet's session key, the light face's deep counterpart) at full strength.
     else if(role==='frame-state')dim=false;
     // A failed route's box line: its face's failure color, at full strength.
-    else if(role==='route-dead'){if(known)foreground=F.dead;dim=false;}
+    // (On the dark face without a shade that is the glyph's and word's own red, Fleet's g_dead:
+    // 11-15 design F 9.)
+    else if(role==='route-dead'){if(known&&(shade||known==='light'))foreground=F.dead;dim=false;}
     // The steward mark's two beats on a known face: Fleet's pink, then a receding pink
     // (no dim on top, so a shade keeps the hue); the light face takes the deep pair.
     // The steward's number does not blink (spec rule 35 (a)): it keeps the lit pink.
     else if(role==='steward'&&theme!=='mono'&&known){foreground=F.steward[part.beat===true&&!bold?1:0];dim=false;}
     else if(role==='steward'&&theme==='mono')dim=false;
-    // Spec rule 47: the moving rule's cells take their step's tone on their face (an unknown face
+    // Spec rule 47: the moving frame's cells take their step's tone on their face (an unknown face
     // the dark face's), at full strength; mono never moves (no tone).
-    else if(role==='rule'&&theme!=='mono'&&part.tone){foreground=ruleTone(part,FACES[known||'dark'],colors);dim=false;}
+    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -133,66 +135,37 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
-// Spec rule 47 (the user's final values, 11-13), as rules 51 and 52 retune it: every value of the
-// moving rule in one place. The rule is the thin `─` in every state (no heavy cell anywhere on it).
-// Running, a light passes over it: RULE_PEAK cells at its middle are brightest and RULE_FADE cells
-// on each side step down one shade each (RULE_PEAK + 2 RULE_FADE cells, five shades); its middle
-// runs at one speed from fully outside one end to fully outside the other and back in RULE_SCAN
-// spinner frames (100 ms each: 26 = 2.6 s). Having left on the side it came in from, the dark rule
-// rests RULE_REST frames (10 = 1 s, the light's own turn beat included) and the light comes in
-// again on that side; at the far end it turns after one dark beat. Waiting, the whole red rule
-// breathes once every RULE_BREATHE frames (36 = 3.6 s) through RULE_WAIT_STEPS shades on a cosine
-// (24-bit color; the 256-color palette has six reds for it), each shade an equal time.
-const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,RULE_BREATHE=36,RULE_WAIT_STEPS=8,RULE_WAIT_STEPS_256=6;
-const RULE_CYCLE=RULE_SCAN+RULE_REST-1;
+// Spec rule 47 (11-14: the outer frame instead of the rule), every value of the moving frame in
+// one place (its colors are `FACES.*.orbit`/`breath`/`breathRGB`). Running, a bright arc goes
+// round the frame clockwise without rest: its head the brightest, its tail BORDER_SHADES shades
+// down into the neutral frame gray, BORDER_ARC of the frame's cells long (it grows with the
+// panel), once round every BORDER_LAP spinner frames (100 ms each: 60 = 6 s, whatever the size).
+// Waiting, the whole frame breathes red once every BORDER_BREATHE frames (48 = 4.8 s) through
+// BORDER_BREATHE_STEPS shades on a cosine (24-bit color; BORDER_BREATHE_STEPS_256 in 256 colors),
+// each shade an equal time. The head rule stays the plain thin `─` (spec rule 52).
+const BORDER_LAP=60,BORDER_ARC=1/4,BORDER_SHADES=4,BORDER_BREATHE=48,BORDER_BREATHE_STEPS=6,BORDER_BREATHE_STEPS_256=3;
 const mod=(t,n)=>((Math.trunc(t)%n)+n)%n;
-// Where the light's middle stands at a frame on an `n`-cell rule, or null while the dark rule rests.
-function scanAt(tick,n){
-  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_CYCLE);
-  if(q>=RULE_SCAN)return null;
-  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
-  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2);
-  return Math.round(lo+y*(hi-lo));
-}
-// The light's shade at cell `i` of an `n`-cell rule (5 brightest, 0 none).
-function scanLevel(tick,i,n){
-  const plateau=(RULE_PEAK-1)/2,c=scanAt(tick,n);
-  return c===null?0:Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
-}
-// The next frame after `tick` at which an `n`-cell running rule looks different: the next frame
-// while the light is inside, the light's return at the end of the rest (nothing to wake for or
-// write before it).
-function scanNext(tick,n){
-  const t=Math.trunc(tick),lit=f=>{const c=scanAt(f,n),plateau=(RULE_PEAK-1)/2,reach=RULE_FADE+plateau;return c!==null&&c+reach>=0&&c-reach<n;};
-  if(lit(t))return t+1;
-  for(let f=t+1;f<=t+RULE_CYCLE;f++)if(lit(f))return f;
-  return t+1;
-}
 // A breath's shade at a frame: 0 brightest .. steps-1 darkest, down and back up, each shade for an
 // equal stretch of the breath (2 (steps-1) stretches).
 function breathStep(tick,steps){
-  const slots=2*(steps-1),s=Math.floor(mod(tick,RULE_BREATHE)*slots/RULE_BREATHE);
+  const slots=2*(steps-1),s=Math.floor(mod(tick,BORDER_BREATHE)*slots/BORDER_BREATHE);
   return s<steps?s:slots-s;
 }
-// One cell `i` of an `n`-cell rule at spinner frame `tick`, always the thin `─` (spec rule 52):
-// running (`scan`), the light's shade (0: the dark rule); waiting (`wait`), red at the breath's
-// shade; `still` moves nothing (rule motion off, mono, NO_COLOR, eight colors): a running rule
-// stays the plain one, a waiting one stays red. Anything else is the plain rule.
-function ruleCell(kind,tick,i,n,{still=false,steps=RULE_WAIT_STEPS}={}){
-  if(kind==='wait')return still?['─','wait',0]:['─','wait',breathStep(tick,steps)];
-  if(kind==='scan'&&!still){const level=scanLevel(tick,i,n);return ['─',level?'scan':'base',level];}
-  return ['─','line',0];
-}
+// Where the arc's head stands at a frame on a frame of `cells` cells, from `start`.
+function orbitHead(tick,cells,start){return mod(start+Math.floor(Math.trunc(tick)*cells/BORDER_LAP),cells);}
+// The arc's shade at a frame cell `behind` cells back from its head (0 the head .. BORDER_SHADES-1),
+// or -1 past its tail.
+function orbitShade(behind,length){return behind<length?Math.min(BORDER_SHADES-1,Math.floor(behind*BORDER_SHADES/length)):-1;}
 function change(value,key,step){
   const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false,segments=[]}){
-  // Spec rule 49: a folded panel is the eight-cell strip beside the native area or one row under it.
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,brief,sent,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background='',folded=false}){
+  // Spec rule 49 (c): a folded panel is the strip under the native area, in every placement.
   folded=folded===true&&!settings;
-  width=Math.max(folded&&side?5:12,width);height=Math.max(folded?side?3:1:4,height);
+  width=Math.max(folded?1:12,width);height=Math.max(folded?1:4,height);
   const cfg={...defaults,...configuration};
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -201,6 +174,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
   let inner=width-4;const content=[],hits=[],edge=[];
+  // 11-15 (popup design A): the question the person would answer next, as its summary (the
+  // shell's editor reads it whole in the popup): `count` boxes, `rows` (its first row and its
+  // choices on one row, or its first two rows), `one` (its first row), `line` (its whole first
+  // line, for the folded strip), `choices` (how many).
+  const summary=(()=>{if(typeof brief!=='function')return null;try{const b=brief();return b&&b.count>0?b:null;}catch{return null;}})();
   // `groups` names the statusline groups a row paints (head, git, context, wait, jobs, route, quota).
   const contentGroups=[];
   function add(parts,action,groups){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
@@ -262,76 +240,147 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // read from the rows this paint finally shows, so a route the height dropped
   // keeps nothing turning.
   const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
+  // The session's own model: the native selection when it is shown, else Fleet's.
+  function selectedParts(){
+    const list=v=>Array.isArray(v)?v:[];
+    const nativeModel=native.model&&(native.model!==model.model_value||!list(model.selected).length);
+    // The native's own model name takes the color the backend gave it (its family's, else the
+    // harness's, as route rows); until that arrives for a new name, the harness's color.
+    const nativePart=model.native_model_part&&model.native_model_part.text===native.model?{...model.native_model_part,text:native.model}:
+      text(native.model,['claude','codex','opencode'].includes(harness)?'hb_'+harness:'loc_repo');
+    return nativeModel?[nativePart,...(native.effort?[text(' '+native.effort)]:[])]:
+      list(model.selected).length?model.selected:line(t('checking','Checking'));
+  }
   if(folded)return foldedView();
-  // Spec rule 49 (c): folded beside the native area the panel is a strip of eight cells (two
-  // borders, a blank cell inside each, four content cells), its border in this session's state
-  // color (the open panel's frame source). Inside, from the top: the state glyph (spinning
-  // while the session runs, `◑` waiting, `●` idle) with the session number (`⠸ e9`), an empty
-  // row, the route count (`2 RT`, from ten `9+RT`), the answer waits (`◑ 1`, from ten `◑ 9+`),
-  // and the unfold mark on the last row, where the open panel's fold button stands. An absent
-  // value draws no row; short of rows the empty row goes first, then the route count, the
-  // waits; the glyph row and the unfold mark stay. No steward mark, gear or moving rule: only the state glyph turns. A
-  // press anywhere on it opens the panel. Spec rule 49 (e): folded under the native area,
-  // one row: the session's status line and `▴` at its right end.
+  // Spec rule 49 (c): folded (by itself or by hand, beside or under the native area) the panel is
+  // one strip under the native area: a thin rule in the messages' line color with the unfold mark
+  // `▴` at its right end, then three rows, each the most pressing first and giving way whole item
+  // by whole item from its end:
+  //   1. the session: the state glyph and number, the project, model and effort, `CTX` and its
+  //      gauge, 5h, 7d (short of cells the reset times go first, then the effort, the project);
+  //   2. what to do now: the answer wait with its question's first row, where a wait answered
+  //      elsewhere is answered, compaction imminent, a tidy notice;
+  //   3. the routes: `N ROUTE ⠏2 ✕1`, the failed routes' titles (else the running ones'),
+  //      `MESSAGES ←N` (received since the person's last input) and LAB's attention token.
+  // Short of rows the routes row goes first, then the session row: what to do stays to the last;
+  // a row with nothing on it gives its place to the next, and rows stand from the top. Labels are
+  // dark gray upper case. No frame, gear, beat or moving rule: only the state glyph turns. A press
+  // anywhere on it opens the panel.
   function foldedView(){
     const own=LIVE[state],color=own&&own[1]!=='g_work_off'?own[1]:'dim';
-    const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
     const plain=model.no_color===true||cfg.theme==='mono';
-    const out=[],hits=[];
-    if(side){
-      // The strip's width is native-display's STRIP (8): one blank cell inside each border and
-      // four content cells between them.
-      const content=Math.max(1,width-4);
-      const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
-      const cell=parts=>{const fit=clip(parts,content);return [text(' '),...fit.parts,text(' '.repeat(Math.max(0,content-fit.used)+1))];};
-      // The glyph keeps its cell while the state is unknown, so the number does not move.
-      const glyph=own?{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}:text(' ');
-      const number=tag?[text(' '),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'}]:[];
-      const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:Number.isInteger(model.route_count)&&model.route_count>0?model.route_count:0;
-      const waiting=typeof model.wait==='string'&&model.wait.trim()?/(\d+)\s*$/.exec(model.wait):null;
-      const waits=waiting?Number(waiting[1]):typeof model.wait==='string'&&model.wait.trim()?-1:0;
-      const items=[{rank:5,parts:[glyph,...number]}];
-      // The LAB token under the route count (draft A): `5 LB`, `!1LB` (failed or stuck), `?1LB`
-      // (unconfirmed or unnamed), `9+LB`, worded by the board. Short of rows a plain count goes
-      // before the route count, a `!`/`?` after it; the answer wait stays longest. A token wider
-      // than the strip (`!9+LB`) keeps its mark and count (`!9+`). It never colors the border.
-      const labStrip=Array.isArray(model.lab?.strip)?model.lab.strip.filter(p=>p&&typeof p==='object'):[];
-      const cellsOf=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
-      if(total||waits||labStrip.length){
-        items.push({rank:0,parts:[]});
-        if(total)items.push({rank:3,parts:total>=10?[text('9+','loc_repo'),text('RT','dim')]:[text(String(total),'loc_repo'),text(' RT','dim')]});
-        if(labStrip.length)items.push({rank:model.lab.strip_attention===true?3.5:2,parts:cellsOf(labStrip)<=content?labStrip:labStrip.slice(0,1)});
-        // An answer wait whose count is unknown shows its glyph alone (spec rule 12).
-        if(waits)items.push({rank:4,parts:[text('◑','g_blocked'),...(waits<0?[]:[text(' '+(waits>=10?'9+':String(waits)),'g_blocked')])]});
+    const P=v=>Array.isArray(v)?v.filter(p=>p&&typeof p==='object'):[];
+    const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+    const room=Math.max(0,width-1);
+    const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,text('…','dim')];
+    // A row's items, most pressing first: an item is `head` (whole or not at all) and `tail` (cut
+    // with `…` where cells run short, while it keeps four cells; a `titled` item without its tail
+    // goes whole); the first item that does not fit ends the row.
+    const pack=items=>{
+      const out=[];let used=0;
+      for(const item of items){
+        const gap=out.length&&!item.choices?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
+        if(used+size(head)+size(tail)<=room){out.push(...head,...tail);used+=size(head)+size(tail);continue;}
+        // The choices after the question's first line: whole, else their count, else nothing; the
+        // question's line keeps its cells (it never gives them to its choices).
+        if(item.choices){if(used+size(item.short)<=room){out.push(...item.short);used+=size(item.short);}continue;}
+        const left=room-used-size(head);
+        if(tail.length&&left>=5)out.push(...head,...cut(tail,left));
+        else if(left>=0&&!item.titled)out.push(...head);
+        else if(!out.length)out.push(...cut([...item.head,...tail],room));
+        break;
       }
-      const room=Math.max(0,height-3);
-      while(items.length>room){let low=0;items.forEach((item,i)=>{if(item.rank<items[low].rank)low=i;});items.splice(low,1);}
-      const rule='─'.repeat(Math.max(0,width-2));
-      out.push([frameText('┌'+rule+'┐')]);
-      for(let i=0;i<height-2;i++){
-        const last=i===height-3,parts=last?[text(' '),text(cfg.position==='left'?'»':'«','dim')]:items[i]?.parts||[];
-        out.push([frameText('│'),...cell(parts),frameText('│')]);
-      }
-      out.push([frameText('└'+rule+'┘')]);
-      for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:'unfold'});
-    }else{
-      const line=(Array.isArray(segments)?segments:[]).filter(part=>part&&typeof part==='object');
-      const fit=clip(line,Math.max(0,width-2));
-      const body=fit.used<line.reduce((n,p)=>n+measure(clean(p.text)),0)?[...clip(line,Math.max(0,width-3)).parts,text('…','dim')]:fit.parts;
-      const used=body.reduce((n,p)=>n+measure(clean(p.text)),0);
-      out.push([...body,text(' '.repeat(Math.max(0,width-1-used))),text('▴','dim')]);
-      hits.push({row:0,left:0,right:width-1,action:'unfold'});
+      return out;
+    };
+    // 1. The session row.
+    const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
+    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+    const number=tag?[text('[','dim'),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
+    const lead=[...glyph,...(glyph.length&&number.length?[text(' ')]:[]),...number];
+    const project=Array.isArray(model.repo_side)?P(model.repo_side):P(model.repo).filter(p=>!/^\[[^\]]*\] ?$/.test(String(p.text)));
+    // `CTX` stands for the word `context` (a backend without `context_side` has its word taken off here, as the open panel's).
+    const unworded=parts=>{const head=parts[0],rest=String(head?.text??'').replace(/^context /,'');return !head||rest===String(head.text)?parts:rest?[{...head,text:rest},...parts.slice(1)]:parts.slice(1);};
+    const selected=selectedParts(),gauge=Array.isArray(model.context_side)?P(model.context_side):unworded(P(model.context));
+    const ctxLabel=text('CTX ','dim'),ctx=gauge.length?[ctxLabel,...gauge,...(P(model.mcp).length?[text(' │ ','dim'),...P(model.mcp)]:[])]:[];
+    const windows=[];let current=[];
+    for(const part of P(model.quota)){if(String(part.text)===' │ '){if(current.length)windows.push(current);current=[];}else current.push(part);}
+    if(current.length)windows.push(current);
+    const quotaParts=new Set(windows.flat());
+    const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
+    const bare=gs=>gs.map(g=>g.filter(part=>!/^\(↻/.test(String(part.text))));
+    const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(' │ ','dim'),...g]:g);
+    const sessionRow=()=>{
+      // Each step lets one more value go: the reset times, the effort, the project, 5h (the windows
+      // shorter than 7d), the model windows from the last, 7d, the model, the context.
+      const steps=[];let q=windows,m=selected,named=true,c=ctx;
+      const add=()=>steps.push([[...lead,...(named&&project.length?[...(lead.length?[text(' ')]:[]),...project]:[])],m,c,...q]);
+      add();q=bare(q);add();m=selected.slice(0,1);add();named=false;add();
+      q=q.filter(g=>kind(g)!=='window');add();
+      while(q.some(g=>kind(g)==='model')){const at=q.map(kind).lastIndexOf('model');q=q.filter((_,i)=>i!==at);add();}
+      q=[];add();m=[];add();c=[];add();
+      for(const groups of steps){const row=joinAll(groups);if(size(row)<=room)return row;}
+      return cut(lead,room);
+    };
+    // 2. What to do now.
+    const first=model.wait&&summary?P(summary.line).map(p=>({...p,text:clean(p.text)})).filter(p=>p.text.trim()):[];
+    // 11-15 (popup design E): where cells are left, the choices follow on the same row, whole or as
+    // their count alone (`· +4`).
+    const choiceRow=summary&&Array.isArray(summary.rows)&&summary.choices>0?P(summary.rows[1]).filter((p,i)=>i>0||String(p.text).trim()):[];
+    const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
+    // A wait answered elsewhere (#1633): where, dim, after the wait (never part of its count).
+    const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
+    const todo=[
+      ...(model.wait?[{head:[text(clean(model.wait),'g_blocked')],tail:first.length?[text(' · ','dim'),...first]:[]}]:[]),
+      ...(first.length&&choiceRow.length?[{choices:true,head:[text(' · ','dim'),...choiceRow],short:[text(' · +'+summary.choices,'dim')]}]:[]),
+      ...(guide?[{titled:true,head:[],tail:[text(guide,'dim')]}]:[]),
+      ...(model.warning?[{head:[text('⚠ ','lvl_r')],tail:[text(clean(model.warning),'lvl_r')]}]:[]),
+      ...(tidy&&!model.answerable?[{head:[text('⚠ ','lvl_y')],tail:[text(tidy,'lvl_y')]}]:[])];
+    // 3. The routes, the new messages, LAB.
+    const counted=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:counted.length;
+    const label=clean(model.route_label||'').trim().replace(/^route (\d+)/,'$1 ROUTE')||(total?total+' ROUTE':'');
+    const failed=counted.filter(r=>r&&r.kind==='dead'),running=counted.filter(r=>r&&r.kind==='working');
+    const titled=(failed.length?failed:running).filter(r=>clean(r.title).trim()).map(r=>({titled:true,
+      head:[{...(r.paint?.glyph||text(r.kind==='dead'?'✕':'·',r.kind==='dead'?'g_dead':'dim')),role:'state:'+r.kind},text(' ')],
+      tail:line(clean(r.title).trim(),'loc_repo')}));
+    const unread=Number.isInteger(model.messages_new)&&model.messages_new>0?model.messages_new:0;
+    const labMark=model.lab&&model.lab.strip_attention===true?P(model.lab.strip).slice(0,1):[];
+    const routeItems=[...(label?[{head:[text(label,'g_idle')]}]:[]),...titled,
+      ...(unread?[{head:[{...text('MESSAGES','dim'),role:'title'},text(' ←'+unread,'loc_repo')]}]:[]),
+      ...(labMark.length?[{head:[...labMark,{...text(' LAB','dim'),role:'title'}]}]:[])];
+    const rowsOf={session:sessionRow(),todo:todo.length?pack(todo):[],routes:routeItems.length?pack(routeItems):[]};
+    // What stays, by rank: what to do, the session, the routes; a row with nothing on it gives its place.
+    const strip=height>=2,count=strip?height-1:1;
+    const chosen=new Set(['todo','session','routes'].filter(name=>rowsOf[name].length).slice(0,count));
+    const order=['session','todo','routes'].filter(name=>chosen.has(name));
+    const out=[],hits=[],groups=[],named=[];
+    const pad=parts=>[...parts,text(' '.repeat(Math.max(0,width-size(parts))))];
+    const withMark=parts=>{const body=cut(parts,Math.max(0,width-2));return [...body,text(' '.repeat(Math.max(0,width-1-size(body)))),text('▴','dim')];};
+    if(strip)out.push(width>=3?[{...text('─'.repeat(width-2),'dim'),role:'messages'},text(' '),text('▴','dim')]:withMark([]));
+    for(const name of order){
+      const parts=rowsOf[name];
+      named[out.length]=name;
+      out.push(strip?pad(parts):withMark(parts));
+      if(name==='session')groups.push('head',...(parts.includes(ctxLabel)?['context']:[]),...(parts.some(part=>quotaParts.has(part))?['quota']:[]));
+      if(name==='todo'&&model.wait)groups.push('wait');
+      if(name==='routes'&&label)groups.push('route');
     }
-    const painted=appearance(out,side?cfg:{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
+    if(!strip&&!out.length)out.push(withMark([]));
+    while(out.length<height)out.push(pad([]));
+    // 11-15 (popup design E): the row of what to do opens the question popup while it carries the
+    // question; the rule with `▴` and every other row open the panel.
+    for(let i=0;i<out.length;i++)hits.push({row:i,left:0,right:width-1,action:named[i]==='todo'&&first.length?'question':'unfold'});
+    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
     const spins=out.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0);
-    return {rows:painted,hits,color,routePages:1,routeDetail,routeArea:null,groups:[],animated:spins.length>0,spins,motion:null,folded:true};
+    return {rows:painted,hits,color,routePages:1,routeDetail,routeArea:null,groups:[...new Set(groups)],animated:spins.length>0,spins,motion:null,folded:true};
   }
   // Spec rule 49 (a), (b), (e): the panel's last row inside carries the gear `⚙` (dim) at its
   // right end and, three cells left of it, the fold button: `»` beside the native area (`«`
-  // for a left panel), `▾` in the bottom layout. Their presses stay apart (the cell between
-  // them is neither's). The row stays however short rows run, so the panel can always fold;
-  // whatever shares it (5h/7d) takes the cells left of the buttons.
-  const foldMark=cfg.layout==='side'?cfg.position==='left'?'«':'»':'▾';
+  // for a left panel), `▾` under it (the bottom layout, or a panel opened by hand where it
+  // cannot stand beside). Their presses stay apart (the cell between them is neither's). The
+  // row stays however short rows run, so the panel can always fold; whatever shares it
+  // (5h/7d) takes the cells left of the buttons.
+  const foldMark=side?cfg.position==='left'?'«':'»':'▾';
   const BUTTONS=5;
   function footRow(left=[]){
     const at=content.length+1,room=Math.max(0,width-4-BUTTONS-1);
@@ -356,39 +405,30 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     if(fill)while(content.length<rows-1)add([]);
     add(footRow(left),undefined,groups);
   }
-  // Spec rule 47: the thin rule under the metadata follows this session's own state, the
-  // frame's source (not a route's): running moves a light along it, an answer or confirmation
-  // wait breathes it red, anything else is the plain rule; it stays the thin rule throughout
-  // (spec rule 52). Rule motion off, mono and NO_COLOR move nothing (a wait stays a still red
-  // rule). A moving rule's parts carry `motion`: the host repaints that one row, its changed
-  // cells only, at the frames it changes.
-  const ruleKind=settings?'':state==='blocked'?'wait':LIVE[state]?.[0]==='spin'?'scan':'';
-  const ruleColors=model.colors??256;
-  const ruleStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||ruleColors<256;
-  const ruleSteps=ruleColors>256?RULE_WAIT_STEPS:RULE_WAIT_STEPS_256;
-  const ruleWidth=inner;
-  // Correction 8 (11-13): `since` is the frame this state began (the host's). The light is
-  // already coming in on that very paint and the breath starts at its brightest, so the rule
-  // never waits out a rest or a dark turn behind the frame's color. Without it the beat runs
-  // on the clock alone.
-  const anchored=Number.isFinite(since),ruleTick=t=>!anchored?Math.trunc(t):ruleKind==='scan'?Math.trunc(t)-Math.trunc(since)+1:Math.trunc(t)-Math.trunc(since);
-  function ruleParts(tick){
-    const flag=ruleStill||!ruleKind?{}:{motion:true},out=[];
-    let run='',key='',cell=null;
-    const flush=()=>{if(!run)return;const [,tone,level]=cell;
-      out.push(tone==='line'||tone==='base'?{...text(run,'dim'),role:'messages',...flag}:
-        tone==='wait'?{...text(run,'g_blocked'),role:'rule',...(ruleStill?{}:{tone,step:level,steps:ruleSteps}),...flag}:
-        {...text(run,'g_spin'),role:'rule',tone,level,...flag});};
-    for(let i=0;i<ruleWidth;i++){const c=ruleCell(ruleKind,ruleTick(tick),i,ruleWidth,{still:ruleStill,steps:ruleSteps}),k=c.join(':');if(k!==key){flush();run='';key=k;cell=c;}run+=c[0];}
-    flush();
-    return out;
-  }
+  // Spec rule 52: the thin rule under the metadata is the plain thin `─` in every state; the
+  // session's moving state is the outer frame's (below).
+  const ruleParts=()=>[{...text('─'.repeat(inner),'dim'),role:'messages'}];
+  // Spec rule 47: the outer frame follows this session's own state (not a route's): running, a
+  // bright arc goes round it; an answer or confirmation wait breathes it red; anything else, and
+  // rule motion off, mono, NO_COLOR, eight colors or the settings screen, the still frame in the
+  // state's color. The host repaints only its changed cells, at the frames they change.
+  const borderColors=model.colors??256;
+  const borderStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||borderColors<256;
+  const moving=settings||borderStill?'':state==='blocked'?'breathe':LIVE[state]?.[0]==='spin'?'orbit':'';
+  const breathSteps=borderColors>256?BORDER_BREATHE_STEPS:BORDER_BREATHE_STEPS_256;
+  // Correction 8 (11-13): `since` is the frame this state began (the host's). The arc is already
+  // out on that very paint, its head just right of the head's words, and the breath starts at
+  // its brightest. Without it the beat runs on the clock alone.
+  const anchored=Number.isFinite(since),borderTick=t=>anchored?Math.trunc(t)-Math.trunc(since):Math.trunc(t);
   // Values the host could not refresh for a while are shown, not claimed:
   // nothing spins and the frame takes no route state (spec rule 12).
   const stale=model.stale===true;
   const live=r=>!stale&&r?.kind==='working';
   // A route's glyph: a working route spins on the frame like Fleet's route mark.
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind||'idle')};};
+  // A finished result that did not pass (its `outcome_key` is the failure's) takes the failure's mark and hue.
+  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')};};
+  // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
+  const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
   // Spec rule 21: an opened route carries what Fleet's ROUTES row unfolds, from
   // the values Fleet already read: kind and owner, each stage with its doer
@@ -439,7 +479,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Why it stopped: the worker line Fleet reads, and where it resumes.
     if(!live(r)&&(r.reason||r.state_label))items.push([text(r.reason||r.state_label,r.kind==='dead'?'g_dead':'dim')]);
     if(r.resume)items.push([text('resume ','dim'),text(r.resume,'loc_repo')]);
-    if(r.outcome)items.push([text(r.outcome,'lvl_g')]);
+    if(r.outcome)items.push([text(r.outcome,r.outcome_key||'lvl_g')]);
     return items;
   }
   // Each item laid out at the current width: the first row indented two cells,
@@ -554,14 +594,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const rule=(label)=>{const head=label.length?fitted(label):[];return [...head,text('─'.repeat(Math.max(0,inner-size(head))))];};
     const open=new Set(expandedKeys||[]);
     const routeLine=['time','model'].includes(cfg.route_line)?cfg.route_line:'time';
-    // The session's own model: the native selection when it is shown, else Fleet's.
-    const nativeModel=native.model&&(native.model!==model.model_value||!painted(model.selected).length);
-    // The native's own model name takes the color the backend gave it (its family's, else the
-    // harness's, as route rows); until that arrives for a new name, the harness's color.
-    const nativePart=model.native_model_part&&model.native_model_part.text===native.model?{...model.native_model_part,text:native.model}:
-      text(native.model,['claude','codex','opencode'].includes(harness)?'hb_'+harness:'loc_repo');
-    const selected=nativeModel?[nativePart,...(native.effort?[text(' '+native.effort)]:[])]:
-      painted(model.selected).length?model.selected:line(t('checking','Checking'));
+    const selected=selectedParts();
     // Spec rule 15: the repo row carries the project only; Git takes the row below. Spec rule
     // 29: the session number moves to the top border, so the row keeps `hearting/`.
     let head=painted(model.head),git=painted(model.git);
@@ -570,7 +603,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const jobs=painted(model.jobs),work=painted(model.work),quota=painted(model.quota),mcp=painted(model.mcp);
     // OpenCode's MCP count stays beside the model and context (its native sidebar is hidden).
     const contextParts=mcp.length?joined([painted(model.context),mcp]):painted(model.context);
-    const waitParts=model.wait?[text(model.wait,'g_blocked')]:[];
+    // A wait answered elsewhere (11-14): one dim line of where, never part of the count.
+    const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
+    const waitParts=model.wait?[text(model.wait,'g_blocked'),...(guide?[text(' · '+guide,'dim')]:[])]:guide?[text(guide,'dim')]:[];
     // Spec rule 29 (b): the session's own content, Fleet's TITLE and NOW (rule 28's value;
     // bright while the session works or waits, as Fleet's NOW cell).
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();
@@ -771,7 +806,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const content=title||now||waitParts.length||(tidy&&!asking);
       // Spec rule 34 (c): the rule is not an empty row; it goes only once TITLE and NOW are down to one row each.
       // Spec rule 47: it follows this session's state (above).
-      if(content){rules.add(top.length);top.push(ruleParts(frame));}
+      if(content){rules.add(top.length);top.push(ruleParts());}
       // Spec rule 44: the title's value bold, in this session's harness color (Fleet's `hb_*`;
       // the label stays dim). No color keeps the weight, as the steward's `⚑` (rule 35 (a)).
       const own='hb_'+(['claude','codex','opencode'].includes(harness)?harness:'other');
@@ -816,12 +851,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
     }
     const rows=height-2;
-    // Routes: the current ones the statusline counts, one row each.
-    const shown=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    // Routes: the current ones the statusline counts, one row each, then the recent results
+    // the producer keeps after them (a finished route with its outcome, at most two): the
+    // notice line under Claude's input no longer carries them (2026-11-14).
+    const countedRoutes=routes.slice(0,Math.max(0,model.route_count??routes.length));
+    const shown=countedRoutes.length?[...countedRoutes,...routes.slice(countedRoutes.length).filter(r=>r&&r.state==='done'&&r.outcome)]:countedRoutes;
     // The whole count is the producer's. Spec rule 23: every current route gets a
     // row; a count the producer did not send rows for shows only in the box's lower border.
-    const total=Number.isInteger(model.route_total)&&model.route_total>=shown.length?model.route_total:shown.length;
-    const listed=shown,unsent=shown.length?total-listed.length:0;
+    const total=Number.isInteger(model.route_total)&&model.route_total>=countedRoutes.length?model.route_total:countedRoutes.length;
+    const listed=shown,unsent=countedRoutes.length?total-countedRoutes.length:0;
     // Requests this session sent (→) or received (◂): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
@@ -864,7 +902,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const planBottom=(ow,gw)=>{
       const kinds=listed.map(kindCell),tools=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[];
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
-      const tw=columnWidth(tools),longest=columnWidth(x=>line(x.title||'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
+      const tw=columnWidth(tools),longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
       const levels=widths.kind>widths.full?[['kind',true],['full',true],['full',false],['short',false]]:[['full',true],['full',false],['short',false]];
       for(const [level,tool] of levels){
         if(!widths[level])break;
@@ -879,15 +917,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]),tw3=columnWidth(third);
         const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
         if(plan.level){
-          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(line(r.title||'·','loc_repo'),plan.title);
+          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
           const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
             ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell,...(plan.tool?[pad(plan.width-size(cell)),text(' │ '),...plan.tools(r)]:[])];
           const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
         // The title gives way first, but keeps half of what the tool or stage column would take.
-        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>line(x.title||'')),Math.max(6,avail-tw3,Math.floor(avail/2)));
-        const name=cut(line(r.title||'·','loc_repo'),titleWidth);
+        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-tw3,Math.floor(avail/2)));
+        const name=cut(titleOf(r),titleWidth);
         const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
         // The elapsed time keeps the right edge; the tool or stage gives way first, whole (spec rule 30 (d)).
@@ -902,7 +940,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const drops=routeLine==='model'?[[H,M,C],[H,M],[H],[]]:[[H,C,E],[H,E],[E],[]];
       const join=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
       const right=drops.map(join).find(values=>!values.length||inner-2-size(values)-1>=4)||[];
-      const room=inner-2-size(right)-(right.length?1:0),name=cut(line(r.title||'·','loc_repo'),Math.max(1,room));
+      const room=inner-2-size(right)-(right.length?1:0),name=cut(titleOf(r),Math.max(1,room));
       return cut([...lead,...name,pad(inner-2-size(name)-size(right)),...right],inner);
     }
     // Spec rule 32: an opened route reads like a table. Its rows hang two cells in under
@@ -1016,21 +1054,19 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(r.visibility?.next)field('NEXT',[text(r.visibility.next)]);
       if(!live(r)&&(r.reason||r.state_label))field('WHY',modelForms(r.reason||r.state_label).map(value=>[text(value,r.kind==='dead'?'g_dead':'loc_repo')]));
       if(r.resume)field('RESUME',[text(r.resume,'loc_repo')]);
-      if(r.outcome)field('OUT',[text(r.outcome,'lvl_g')]);
+      if(r.outcome)field('OUT',[text(r.outcome,r.outcome_key||'lvl_g')]);
       if(r.stage_more){push([text('+'+r.stage_more+' · Fleet','dim')]);item++;}
       if(!out.length)push([text(t('checking','Checking'))]);
       return out;
     }
-    // Spec rule 14: every group is one box of the same thin rounded line; the
-    // question box is the person's and sits at the bottom. Strength of color
-    // tells the boxes apart: question the answer-needed color, route plain,
-    // messages dim, all from the panel's own styles.
-    // Spec rule 22: each line keeps its own role, so a shade colors it without a dim on top;
-    // the question's border is rose.
+    // Spec rule 14: the route box is the one thin rounded box (11-15: the questions section has
+    // none, its count and `◑` keep the question's rose). Strength of color tells the sections
+    // apart: route plain, messages dim, all from the panel's own styles.
+    // Spec rule 22: each line keeps its own role, so a shade colors it without a dim on top.
     // Spec rule 25: a route's state stays inside the route box. A failed current route
     // turns the box line to the failure color; a running one pulses `route N` (below).
     const failedRoute=!stale&&shown.some(r=>r.kind==='dead');
-    const tone={route:failedRoute?{key:'g_dead',role:'route-dead'}:{key:'plain',role:'route'},messages:'dim',question:{key:asking?'lvl_y':'dim',role:'accent-line'}};
+    const tone={route:failedRoute?{key:'g_dead',role:'route-dead'}:{key:'plain',role:'route'},messages:'dim'};
     const L=(v,k)=>typeof k==='object'?{...text(v,k.key),role:k.role}:text(v,k);
     const box=4;
     // Box content is laid out at the box's inner width, so nothing is cut by the frame.
@@ -1308,7 +1344,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const routeRows=[],detailRows=[];
     within(()=>{
       for(const r of listed){
-        const key='route:'+r.id,title=line(r.title||'·','loc_repo'),glyph=[routeGlyph(r),text(' ')];
+        const key='route:'+r.id,title=titleOf(r),glyph=[routeGlyph(r),text(' ')];
         // Spec rule 36 (c): the title takes at most two rows, the second ending in `…`.
         let names=side?wrapAll(title,inner-2):[];
         if(names.length>2)names=[names[0],ellipsis(names[1],inner-2)];
@@ -1327,10 +1363,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     });
     // Spec rule 31: a message takes two rows: a head (the direction arrow in its color,
     // the other session's number, then dim harness, time, kind and a sent one's delivery
-    // state) and, two cells in, its first meaningful text in the body color. More body
-    // rows and more messages (from three) take rows that are left; short of rows a body
-    // keeps one row, then a message folds to the one-row form (arrow, number, bright
-    // text), then fewer messages show (the lower rule counts the rest).
+    // state) and, two cells in, its first meaningful text in the body color. Three show at
+    // most however many rows are left (the label counts the rest); more body rows take rows
+    // that are left; short of rows a body keeps one row, then a message folds to the one-row
+    // form (arrow, number, bright text), then fewer messages show.
     const messages=painted(model.messages);
     let messageCount=Math.min(3,messages.length),messageBody=1,messageOne=false,messageLimit=Infinity;
     const messageHead=m=>{
@@ -1399,25 +1435,31 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const requestHead=requestList.length?[text(side?requestList.length+' REQUEST':'request '+requestList.length,'dim')]:[];
     const routeTitle=routeHead.length||requestHead.length?[...routeHead,...(routeHead.length&&requestHead.length?[text(' │ ','dim')]:[]),...requestHead]:null;
     const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
-    // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
-    // Running jobs keep their row beside a question: its editor pages its own content.
-    const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-1),columns:inner-box});
-    const ask=[];
-    if(q.length){
-      const key=tone.question;
-      const accent=parts=>parts.flatMap(part=>{
-        const s=String(part.text??''),m=/^(\s*)([◑›])(.*)$/su.exec(s);
-        if(!m)return [part];
-        return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
-      });
-      ask.push(boxTop(accent(q[0]),key,{action:'question',ellipsis:true}));
-      for(const row of q.slice(1))ask.push(boxRow({parts:accent(row),action:'question'},key));
-      ask.push(boxBottom(key,[],'question'));
-    }
+    // 11-15 (popup design A): no box. The questions section is its label row, the count leading
+    // its name tag and a thin rule on to `›` (`3 QUESTIONS ──── ›`, as `MESSAGES +2 ───`), the
+    // answers on their way (rule 5: one dim line each), then the next question's summary: its
+    // first row (`◑ …`) and its choices on one row (`1 label (recommended) · 2 … · +2`), or its
+    // first two rows. Short of rows the summary keeps its first row. A press on any of these rows
+    // (or Ctrl+]) opens the popup where the question reads whole; nothing is answered in place.
+    const accent=parts=>parts.flatMap(part=>{
+      const s=String(part.text??''),m=/^(\s*)([◑›])(.*)$/su.exec(s);
+      if(!m)return [part];
+      return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
+    });
+    const sentRows=(typeof sent==='function'?sent()||[]:[]).map(row=>({parts:cut(row,inner),action:'question'}));
+    let briefTwo=true;
+    const questionLabel=()=>{
+      const head=[{...text(String(summary.count),'g_blocked'),role:'accent'},text(' '),{...text(summary.label||'QUESTIONS','dim'),role:'title'}];
+      const rest=inner-size(head)-2;
+      return rest>=2?[...head,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'},text(' '),text('›','dim')]:cut(head,inner);
+    };
+    const askRows=()=>summary?[{parts:questionLabel(),action:'question'},...sentRows,
+      ...(P(briefTwo?summary.rows:summary.one)).map(row=>({parts:cut(accent(P(row)),inner),action:'question'}))]:sentRows;
+    let ask=askRows();
     // Short of rows (spec rule 34 (b), which orders rules 14, 19, 23, 24, 29 (c) and 31):
-    // empty rows; the messages' extra rows (past three, and a body's rows after its first:
-    // they only ever take rows the routes leave in their full form); opened details
+    // empty rows; the messages' extra rows (a body's rows after its first: they only ever
+    // take rows the routes leave in their full form); opened details
     // shorten, then close (an opened message shortens with them); a value on several rows
     // keeps one (ending in `…`; a route title, spec rule 36 (c), too); spec rule 35 (d): the
     // empty row under the route box, then the one inside
@@ -1483,10 +1525,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Spec rule 35 (c): beside the native area one empty row parts the route box from what
     // follows it (the question box, else the messages rule); the messages' extra rows leave it.
     // The LAB section stands right under the route box and takes the same parting row after it.
-    const lower=()=>ask.length>0||keepMessages&&messages.length>0||memShown();
+    const lower=()=>askRows().length>0||keepMessages&&messages.length>0||memShown();
     const routeGap=()=>side&&keepRouteGap&&keepRoutes&&(lower()||labRows().length>0)?1:0;
     const labGap=()=>keepRouteGap&&labRows().length>0&&lower()?1:0;
-    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+labRows().length+labGap()+messageSection()+1;
+    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+askRows().length+routeBox()+routeGap()+labRows().length+labGap()+messageSection()+1;
     const budget=rows;
     const baseCount=messageCount;
     // Each step is taken only while rows are short; a later step that frees more rows than
@@ -1530,28 +1572,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     // The head alone outlasts the route box; it goes before any message.
     give(()=>keepLab,()=>{keepLab=false;},()=>{keepLab=true;});
+    // The question's summary (11-15) is three rows at most, so it pushes no section out of a 20-row
+    // window; it keeps them as the question box kept its rows (LAB takes none of them), and gives up
+    // its choices' row before the messages go. Its label row and first row stay to the last.
+    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
     give(()=>keepMessages,()=>{keepMessages=false;},()=>{keepMessages=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const kept=()=>[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab];
+    const kept=()=>[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab,briefTwo];
     for(const undo of gave.reverse()){
       const was=kept();undo();
-      if(need()>budget)[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab]=was;
+      if(need()>budget)[keepSpacers,detailCap,keepDetails,memCount,memBody,keepMem,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepWorkers,keepCtx,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota,labSub,labTable,labNotes,labOne,keepLab,briefTwo]=was;
     }
     // Rows to spare beside the native area once everything above the messages' extra rows
     // stands whole (the routes in their three-row form, details, values on all their rows,
-    // both structural empty rows): bodies take up to three rows and more messages show,
-    // never past the rows the panel has.
+    // both structural empty rows): bodies take up to three rows, never past the rows the
+    // panel has. No more than three messages show however many rows are spare.
     const memWhole=keepMem===memItems.length>0&&memCount===Math.min(2,memItems.length)&&memBody===2;
     const labWhole=!lab||keepLab&&!labOne&&labNotes&&labTable===labOpened&&labSub===labOpened;
     const whole=detailCap===detailFull&&keepDetails&&keepMulti&&memWhole&&labWhole&&keepRouteGap&&keepMetaGap&&keepRules&&keepWorkers&&keepCtx&&keepPlace&&twoRows===twoFull&&routeLimit===routeRows.length&&keepRoutes===!!routeTitle&&keepGit&&keepOptional;
     if(side&&keepMessages&&whole&&!messageOne&&messageLimit===Infinity&&messageCount===baseCount){
-      const grow=()=>{
-        let changed=false;
-        if(messageBody<3){messageBody++;if(need()>budget)messageBody--;else changed=true;}
-        if(messageCount<messages.length){messageCount++;if(need()>budget)messageCount--;else changed=true;}
-        return changed;
-      };
-      while(grow());
+      while(messageBody<3){messageBody++;if(need()>budget){messageBody--;break;}}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
@@ -1583,15 +1623,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       });
       routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
-    // Messages have no box: a label row and a lower rule, fixed at the bottom right above 5h/7d
-    // (spec rule 14, 11-11 night final layout). Spec rule 45 (b): beside the native area the
-    // label is `MESSAGES`. Spec rule 46 (a): MEM's records follow under their own label, and the
-    // one closing rule ends both. Spec rule 58: the labels stand alone (no long rule beside
-    // them), and the count of messages not shown (`+N`) follows the messages' label.
+    // Messages have no box: a label row and a lower rule (spec rule 14, 11-11 night final layout).
+    // Spec rule 45 (b): beside the native area the label is `MESSAGES`. Spec rule 46 (a): MEM's
+    // records follow under their own label, and the one closing rule ends both. Spec rule 58
+    // (11-14 night, B-가 with the label first): beside the native area each label leads its row
+    // and a thin rule in the lower rule's color runs on from it to the row's end
+    // (`MESSAGES +2 ───…`, `MEM ───…`); the bottom layout keeps the label alone. The count of
+    // messages not shown (`+N`) follows the messages' label.
     const keepMessageRows=keepMessages&&messages.length>0;
     if(keepMessageRows||memShown()){
       const key=tone.messages,hidden=keepMessageRows?hiddenMessages():0;
-      const label=(word,tail=[])=>clip([{...text(word,key),...(styles[key]||{dim:true}),role:'title'},...tail],inner).parts;
+      const label=(word,tail=[])=>{
+        const head=clip([{...text(word,key),...(styles[key]||{dim:true}),role:'title'},...tail],inner),rest=inner-head.used;
+        return side&&rest>=2?[...head.parts,text(' '),{...text('─'.repeat(rest-1),key),role:'messages'}]:head.parts;
+      };
       if(keepMessageRows){
         messageBlock.push({parts:label(side?'MESSAGES':'messages',hidden?[text(' +'+hidden,'loc_repo')]:[])});
         messageBlock.push(...visibleMessages());
@@ -1600,6 +1645,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       messageBlock.push({parts:[{...text('─'.repeat(inner),key),role:'messages'}]});
     }
     // Each section is placed whole or not at all; the empty row under the route box goes first.
+    ask=askRows();
     const tail=ask.length+messageBlock.length+1;
     let labBlock=labRows();
     let gap=routeBlock.length?routeGap():0,lgap=labBlock.length?labGap():0;
@@ -1614,8 +1660,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     if(gap&&routeBlock.length)add([]);
     for(const item of labBlock)add(item.parts,item.action);
     if(lgap&&labBlock.length)add([]);
-    // What comes and goes sits low: the question right above the messages, which keep the bottom.
-    if(fill)while(content.length<rows-tail)add([]);
+    // The sections stand from the top, one after another; the rows left over go under the last of
+    // them, right above the panel's last row (11-14 night: no long gap under the route box).
     if(content.length+tail<=budget){
       for(const item of ask)add(item.parts,item.action);
       for(const item of messageBlock)add(item.parts,item.action);
@@ -1678,29 +1724,116 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
     [[glyphPart,tagPart,harnessPart,flagPart],[glyphPart,tagPart,harnessPart],[glyphPart,tagPart],[glyphPart]].map(headParts).find(x=>cellsOf(x)<=room)||[];
   const label=clip(leftParts,room);
-  rows.push([frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used))),frameText('┐')]);
-  const frameRow=parts=>{const fitted=clip(parts,inner);return [frameText('│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),frameText('│')];};
-  for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[]));
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
-  rows.push([frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
-  const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
+  // Spec rule 47: the frame's line cells, each at its place round the frame, clockwise from the
+  // top-left corner. The head's words on the top border and the foot's on the bottom one are no
+  // line: the arc passes behind them (they keep their own colors).
+  const W=width,H=count,around=2*W+2*(H-2),arc=Math.max(1,Math.round(around*BORDER_ARC)),start=label.used+1;
+  const place=(y,x)=>y===0?x:x===W-1&&y<H-1?W-1+y:y===H-1?2*W+H-3-x:2*W+2*H-4-y;
+  // A moving frame cell at a frame: on the arc, its shade (0 the head); past its tail, the neutral
+  // frame gray; waiting, the breath's red.
+  function borderCell(at,ch,tick){
+    const local=borderTick(tick);
+    if(moving==='orbit'){
+      const k=orbitShade(mod(orbitHead(local,around,start)-at,around),arc);
+      return k<0?{...text(ch,'dim'),role:'frame'}:{...text(ch,'g_spin'),role:'orbit',tone:'arc',level:k};
+    }
+    return {...text(ch,'g_blocked'),role:'orbit',tone:'breath',step:breathStep(local,breathSteps),steps:breathSteps};
+  }
+  const border=(y,x,ch)=>moving?borderCell(place(y,x),ch,frame):frameText(ch);
+  const borderRun=(y,from,to)=>Array.from({length:Math.max(0,to-from+1)},(_,i)=>borderCell(place(y,from+i),'─',frame));
+  // Neighbouring cells of one look stand as one part.
+  const joined=parts=>parts.reduce((out,part)=>{const last=out.at(-1),{text:a,...x}=part;
+    if(last){const {text:b,...y}=last;if(JSON.stringify(x)===JSON.stringify(y)){out[out.length-1]={...last,text:b+a};return out;}}
+    out.push(part);return out;},[]);
+  rows.push(moving?joined([border(0,0,'┌'),...label.parts,...borderRun(0,label.used+1,W-2),border(0,W-1,'┐')]):
+    [frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used))),frameText('┐')]);
+  const frameRow=(parts,y)=>{const fitted=clip(parts,inner);return [border(y,0,'│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),border(y,W-1,'│')];};
+  for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[],i+1));
+  rows.push(moving?joined([border(H-1,0,'└'),border(H-1,1,'─'),...foot.parts,...borderRun(H-1,2+foot.used,W-2),border(H-1,W-1,'┘')]):
+    [frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
+  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background});
   // The rows whose spinner cells turn between paints (the host swaps only those cells).
   const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
-  const animated=rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat||part.motion));
-  // Only a blinking part needs the one-second repaint (a spinner and the rule turn on their own).
+  // Only a blinking part needs the one-second repaint (a spinner and the frame turn on their own).
   const blinks=rows.slice(0,count).some(row=>row.some(part=>part.beat));
-  // Spec rule 47 (d): the moving rule's row, that row painted at any spinner frame, and the next
-  // frame it changes at (the light: every frame while it is inside, then the end of its rest,
-  // spec rule 51 (c); a breath: its next step): the host repaints this one row then, on the
-  // beat it already keeps, its changed cells only.
-  const motionAt=settings?-1:rows.slice(0,count).findIndex(row=>row.some(part=>part.motion));
-  const motion=motionAt>=0?{row:motionAt,at:tick=>appearance([frameRow(ruleParts(tick))],cfg,{colors:model.colors??256,noColor:model.no_color===true,background})[0],
-    next:tick=>{const local=ruleTick(tick),shift=Math.trunc(tick)-local;if(ruleKind!=='wait')return scanNext(local,ruleWidth)+shift;
-      const now=breathStep(local,ruleSteps);for(let t=local+1;t<=local+RULE_BREATHE;t++)if(breathStep(t,ruleSteps)!==now)return t+shift;return local+RULE_BREATHE+shift;}}:null;
+  // Spec rule 47 (d): the moving frame's line cells (row, column and glyph, in their order round
+  // the frame), those cells painted at any spinner frame, and the next frame they change at (the
+  // arc: the next frame its head moves on, every frame on a frame of 60 cells or more; a breath:
+  // its next step). The host writes their changed cells only, on the beat it already keeps.
+  const cells=[];
+  if(moving){
+    for(let x=0;x<W;x++)if(x===0||x>label.used&&x<W-1||x===W-1)cells.push({row:0,col:x,ch:x===0?'┌':x===W-1?'┐':'─'});
+    for(let y=1;y<H-1;y++)cells.push({row:y,col:W-1,ch:'│'});
+    for(let x=W-1;x>=0;x--)if(x<=1||x>1+foot.used&&x<W-1||x===W-1)cells.push({row:H-1,col:x,ch:x===0?'└':x===W-1?'┘':'─'});
+    for(let y=H-2;y>0;y--)cells.push({row:y,col:0,ch:'│'});
+  }
+  const motion=moving?{cells,
+    at:tick=>appearance([cells.map(c=>borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+    next:tick=>{const local=borderTick(tick),shift=Math.trunc(tick)-local;
+      if(moving==='orbit'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
+      const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}}:null;
+  const animated=!!motion||rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   if(routeArea&&routeArea.bottom>count-2)routeArea=null;
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,blinks:blinks&&!settings,spins,motion};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,ruleCell,scanLevel,breathStep,
-  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,BREATHE:RULE_BREATHE,WAIT_STEPS:RULE_WAIT_STEPS,WAIT_STEPS_256:RULE_WAIT_STEPS_256}};
+// 11-15 (popup design, 공통): one frame for every popup (the questions now; the routes, LAB and
+// sessions use it as it is). It stands in the middle of the window, the native area and the panel
+// together; with the folded strip under the native area, in the middle of the rows above it (the
+// strip is never covered). A thin grey rounded line, one empty cell away from what it covers (a
+// native that paints its own background, or a wide character on the edge, ends there). The top
+// line carries the title and `✕`, the bottom line the sections (the current one bright), and the
+// row above it the keys (the content's last row). Width: text wraps at 76 cells; narrower than 80
+// cells the window less 4; narrower than 28 the whole window. Height: the content's, at most the
+// rows above the strip less 2 (the content then pages inside). Display only: the keys go to the
+// popup's owner (the host) while it stands; nothing here reads input.
+const POPUP_TEXT=76,POPUP_TABLE=116;
+function popupWidth(cols,kind='text'){
+  if(cols<28)return Math.max(4,cols);
+  if(cols<80)return cols-4;
+  return kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
+}
+// The rows the content may take inside the frame.
+function popupRoom(rows,band=0){const space=Math.max(1,rows-band);return Math.max(0,(space>=4?space-2:space)-2);}
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+  function clip(parts,limit){let out=[],used=0;for(const part of parts){let t='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;t+=c;used+=w;}if(t)out.push({...part,text:t});if(used>=limit)break;}return {parts:out,used};}
+  const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,{...text('…','dim')}];
+  const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
+  const maxH=Math.max(2,space>=4?space-2:space),list=body.slice(0,Math.max(0,maxH-2)),H=Math.min(maxH,list.length+2);
+  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-H)/2));
+  const line=v=>({...text(v,'dim'),role:'messages'});
+  // The top line: `╭─ title ──… ✕ ─╮`; a title too long ends in `…`, the `✕` stays.
+  const room=Math.max(0,W-10),name=room>=4?cut(title.map(p=>({...p,text:clean(p.text)})),room):[];
+  const head=name.length?[line('╭─ '),...name,line(' ')]:[line('╭─')];
+  const close=W>=8?[text(' ','dim'),text('✕','dim'),line(' ─╮')]:[line('╮')];
+  const top=[...head,line('─'.repeat(Math.max(0,W-size(head)-size(close)))),...close];
+  // The bottom line: the sections, the current one bright.
+  const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(s,i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
+  const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
+  const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];
+  const frame=[top];
+  for(const row of list){const fit=clip(Array.isArray(row)?row:[],inner);frame.push([line('│ '),...fit.parts,text(' '.repeat(Math.max(0,inner-fit.used))),line(' │')]);}
+  frame.push(bottom);
+  // One empty cell round the frame where the window has it.
+  const left=x>0?1:0,right=x+W<cols?1:0,above=y>0?1:0,below=y+H<space?1:0;
+  const blank=n=>({text:' '.repeat(n)});
+  const out=[];
+  if(above)out.push([blank(W+left+right)]);
+  for(const row of frame)out.push([...(left?[blank(1)]:[]),...row,...(right?[blank(1)]:[])]);
+  if(below)out.push([blank(W+left+right)]);
+  const cfg={...defaults,...configuration,shade:'none'};
+  const painted=appearance(out,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
+  // Presses, in window cells: `✕` closes, a section's name opens its popup.
+  const hits=[];
+  if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});
+  let at=x+3;for(let i=0;i<sections.length&&listed.length>2;i++){const n=measure(sections[i]);hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
+  return {rows:painted,left:x-left,top:y-above,width:W+left+right,height:out.length,frame:{left:x,top:y,width:W,height:H},inner,body:list.length,hits};
+}
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,
+  BORDER:{LAP:BORDER_LAP,ARC:BORDER_ARC,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};

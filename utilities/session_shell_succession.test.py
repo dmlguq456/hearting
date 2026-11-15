@@ -493,8 +493,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
 
     def test_a_hand_fold_carries_over_to_the_new_host(self):
         # #1586 review follow-up 7: the person's fold choice rides the hand-over seed. Folded by
-        # hand in a window wide enough to stand open, the new host keeps the strip, and a press on
-        # the strip still opens it there.
+        # hand in a window wide enough to stand open, the new host keeps the strip (under the native
+        # area: the last four of the window's 30 rows), and a press on the strip still opens it there.
         window = self.window('claude')
         first = window.wait_binding()
         self.settle(window)
@@ -507,7 +507,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.pump(.6)
         self.assertNotEqual(second['host_pid'], first['host_pid'])
         self.assertFalse(window.status(second)['expanded'])
-        window.type('\x1b[<0;127;10M\x1b[<0;127;10m'); window.pump(.4)
+        window.type('\x1b[<0;127;28M\x1b[<0;127;28m'); window.pump(.4)
         self.assertTrue(window.status(second)['expanded'])
 
     def wait_empty_then_switch(self, window, first):

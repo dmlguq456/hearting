@@ -156,7 +156,7 @@ def fleet_answer_wait_view(result):
             continue
         allowed = ("id", "source", "kind", "route_id", "node", "attempt_id", "since", "stale",
                    "session_id", "harness", "pane_id", "owner_state", "fold", "cwd",
-                   "registered_harness", "registered_session_id")
+                   "registered_harness", "registered_session_id", "answer")
         row = {key: item[key] for key in allowed if key in item}
         owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
         for key in ("harness", "session_id"):

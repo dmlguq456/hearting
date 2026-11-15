@@ -98,6 +98,14 @@
    "en": "Unverified or remaining work could not be extracted reliably; see the report",
    "ko": "미검증·남은 일을 확실히 추출하지 못함 · 보고서 확인"
   },
+  "completion.owner_changed": {
+   "en": "Owner: {actual} — differs from the request ({requested})",
+   "ko": "담당: {actual} — 요청({requested})과 다름"
+  },
+  "completion.publication": {
+   "en": "PR: {line}",
+   "ko": "PR: {line}"
+  },
   "completion.publication_pending": {
    "en": "Shared spec not published: {reason} · the cycle keeps its spec; the next start of this route retries",
    "ko": "공유 명세 게시 안 됨: {reason} · 주기의 spec은 그대로 있고, 이 route를 다시 start하면 재시도"
@@ -141,6 +149,10 @@
   "completion.unreadable": {
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
+  },
+  "completion.verdict": {
+   "en": "Verdict: {verdict}",
+   "ko": "판정: {verdict}"
   },
   "compute.device_access": {
    "en": "device access observed",
@@ -426,6 +438,10 @@
    "en": "conditions: {names}",
    "ko": "조건: {names}"
   },
+  "experiment.card.missing": {
+   "en": "no experiment catalog yet; {count} run(s) show by id only. `{command}` names a run, and the results table and its words follow (advice)",
+   "ko": "실험 정본 아직 없음; run {count}건이 id로만 보임. `{command}`로 이름을 붙이면 결과 표와 낱말이 따라온다(권고)"
+  },
   "experiment.card.more": {
    "en": ", … and {n} more",
    "ko": ", … 외 {n}개"
@@ -433,6 +449,10 @@
   "experiment.card.rule": {
    "en": "call each condition by this catalog name",
    "ko": "조건은 이 이름으로 부른다"
+  },
+  "experiment.card.table": {
+   "en": "results table (paste it as printed): {command}",
+   "ko": "결과 표(그대로 붙인다): {command}"
   },
   "experiment.direction.max": {
    "en": "higher is better",
@@ -478,49 +498,17 @@
    "en": "latest value @{epoch} is not a finite number",
    "ko": "최근 값@{epoch}이 유한한 숫자가 아님"
   },
-  "experiment.leaderboard.col.baseline": {
-   "en": "Baseline",
-   "ko": "기준"
-  },
-  "experiment.leaderboard.col.best": {
-   "en": "Best",
-   "ko": "최고"
-  },
-  "experiment.leaderboard.col.delta": {
-   "en": "Diff",
-   "ko": "차이"
-  },
   "experiment.leaderboard.col.group": {
    "en": "Group",
    "ko": "묶음"
   },
-  "experiment.leaderboard.col.latest": {
-   "en": "Latest",
-   "ko": "최근"
-  },
-  "experiment.leaderboard.col.name": {
-   "en": "Condition",
-   "ko": "조건"
-  },
-  "experiment.leaderboard.col.relative": {
-   "en": "Relative %",
-   "ko": "상대 %"
-  },
-  "experiment.leaderboard.col.run": {
-   "en": "Run",
-   "ko": "실행"
-  },
-  "experiment.leaderboard.col.state": {
-   "en": "State / reason",
-   "ko": "상태·사유"
-  },
-  "experiment.leaderboard.comparable": {
-   "en": "comparable",
-   "ko": "비교 가능"
-  },
   "experiment.leaderboard.empty": {
    "en": "no conditions to rank",
    "ko": "순위표에 올릴 조건이 없음"
+  },
+  "experiment.leaderboard.missing": {
+   "en": "no experiment catalog yet: `{command}` registers a condition and its run",
+   "ko": "실험 정본 아직 없음: `{command}`로 조건과 run을 등록한다"
   },
   "experiment.leaderboard.note": {
    "en": "Order within one group by the latest value against the target; not a final winner or a pass/fail call.",
@@ -550,6 +538,14 @@
    "en": "{name} — {goal}; {values}",
    "ko": "{name} — {goal}; {values}"
   },
+  "experiment.notice.register": {
+   "en": "name it with `{command}`; later notices and the results table use that name",
+   "ko": "`{command}`로 등록하면 이후 알림과 결과 표가 그 이름을 쓴다"
+  },
+  "experiment.notice.table": {
+   "en": "table: {command}",
+   "ko": "표: {command}"
+  },
   "experiment.notice.unregistered": {
    "en": "no catalog name for this run: register it in the experiment catalog",
    "ko": "정본 이름 없음: run을 정본에 등록"
@@ -561,6 +557,14 @@
   "experiment.observed_unknown": {
    "en": "observation time unknown",
    "ko": "관측 시각 미확인"
+  },
+  "experiment.placeholder.condition": {
+   "en": "condition",
+   "ko": "조건"
+  },
+  "experiment.placeholder.group": {
+   "en": "group",
+   "ko": "묶음"
   },
   "experiment.progress": {
    "en": "progress {reached}/{total} {unit}",
@@ -646,6 +650,10 @@
    "en": "term {term}: {meaning}",
    "ko": "용어 {term}: {meaning}"
   },
+  "experiment.tables_more": {
+   "en": "{n} more results table(s) in the report",
+   "ko": "결과 표 {n}개 더: 보고서에 있음"
+  },
   "experiment.unlinked": {
    "en": "{count} unnamed run(s): {ids} (register in the catalog)",
    "ko": "이름 없는 실행 {count}건: {ids} (정본에 등록 필요)"
@@ -721,6 +729,18 @@
   "experiment.warning.term-conflict": {
    "en": "name collides with a vocabulary term",
    "ko": "용어집의 용어와 이름이 겹침"
+  },
+  "experiment.words": {
+   "en": "terms: {items}",
+   "ko": "낱말: {items}"
+  },
+  "experiment.words.other_names": {
+   "en": "{names} → {name}",
+   "ko": "{names} → {name}"
+  },
+  "experiment.words.pp": {
+   "en": "%p percentage points",
+   "ko": "%p 퍼센트포인트"
   },
   "fleet.context.compaction_imminent": {
    "en": "compaction imminent",
@@ -1244,7 +1264,7 @@
   },
   "fleet.session_block.choose": {
    "en": "↑↓ choose · Enter send · t text",
-   "ko": "↑↓ choose · Enter send · t text"
+   "ko": "↑↓ · Enter 보내기 · t 답 입력"
   },
   "fleet.session_block.compact_answer_below": {
    "en": "answer below",
@@ -1284,11 +1304,11 @@
   },
   "fleet.session_block.compact_received": {
    "en": "sent",
-   "ko": "전송됨"
+   "ko": "보냄"
   },
   "fleet.session_block.compact_submitted": {
    "en": "sending",
-   "ko": "전송 중"
+   "ko": "보내는 중"
   },
   "fleet.session_block.compact_unknown": {
    "en": "unknown",
@@ -1322,21 +1342,25 @@
    "en": "more · PgUp/PgDn to read",
    "ko": "더 있음 · PgUp/PgDn 읽기"
   },
+  "fleet.session_block.more_page": {
+   "en": "more · focus and PgUp/PgDn to read",
+   "ko": "더 있음 · 포커스 후 PgUp/PgDn 읽기"
+  },
   "fleet.session_block.navigate": {
    "en": "Tab next · Esc/Ctrl+] back",
-   "ko": "Tab 다음 · Esc/Ctrl+] 복귀"
+   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.open": {
    "en": "answer needed",
-   "ko": "답변 필요"
+   "ko": "답 필요"
   },
   "fleet.session_block.questions": {
-   "en": "questions",
-   "ko": "질문"
+   "en": "QUESTIONS",
+   "ko": "QUESTIONS"
   },
   "fleet.session_block.received": {
    "en": "sent · not consumed",
-   "ko": "전송됨 · 소비 전"
+   "ko": "보냄 · 소비 전"
   },
   "fleet.session_block.recommended": {
    "en": "recommended",
@@ -1344,11 +1368,15 @@
   },
   "fleet.session_block.send": {
    "en": "Enter send",
-   "ko": "Enter 제출"
+   "ko": "Enter 보내기"
+  },
+  "fleet.session_block.sent": {
+   "en": "✓ answer sent",
+   "ko": "✓ 답 보냄"
   },
   "fleet.session_block.submitted": {
    "en": "sending · not consumed",
-   "ko": "전송 중 · 소비 전"
+   "ko": "보내는 중"
   },
   "fleet.session_block.text": {
    "en": "type answer",
@@ -1368,7 +1396,7 @@
   },
   "fleet.session_panel.answer": {
    "en": "Your answer needed",
-   "ko": "내 답 필요"
+   "ko": "답 필요"
   },
   "fleet.session_panel.apply": {
    "en": "Apply",
@@ -1970,6 +1998,34 @@
    "en": "Viewer: {url}",
    "ko": "뷰어: {url}"
   },
+  "owner.changed": {
+   "en": "Owner changed: requested {requested} → {actual} — {reason}",
+   "ko": "담당 변경: 요청 {requested} → {actual} — {reason}"
+  },
+  "owner.reason.limited": {
+   "en": "{harness} usage limit reached",
+   "ko": "{harness} 사용 한도 소진"
+  },
+  "owner.reason.limited_reset": {
+   "en": "{harness} usage limit reached (resets {when})",
+   "ko": "{harness} 사용 한도 소진({when} 재설정)"
+  },
+  "owner.reason.model_unavailable": {
+   "en": "{harness} model unavailable",
+   "ko": "{harness} 모델 사용 불가"
+  },
+  "owner.reason.selected": {
+   "en": "automatic selection ({source})",
+   "ko": "자동 선택({source})"
+  },
+  "owner.reason.state": {
+   "en": "{harness} unavailable ({state})",
+   "ko": "{harness} 사용 불가({state})"
+  },
+  "owner.tier_changed": {
+   "en": "tier {sealed}→{actual}",
+   "ko": "등급 {sealed}→{actual}"
+  },
   "questions.registered": {
    "en": "Waiting for your answer. Reply in Fleet or in this session.",
    "ko": "질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요."
@@ -2022,6 +2078,30 @@
    "en": "actual={actual}; planned={plan}",
    "ko": "실제={actual}; 계획={plan}"
   },
+  "resource.key.attention": {
+   "en": "attention={items}",
+   "ko": "주의={items}"
+  },
+  "resource.key.record": {
+   "en": "public run record={record}",
+   "ko": "실행 기록={record}"
+  },
+  "resource.key.row": {
+   "en": "row={row}",
+   "ko": "행={row}"
+  },
+  "resource.key.run": {
+   "en": "run={run}",
+   "ko": "실행={run}"
+  },
+  "resource.key.source": {
+   "en": "source {format}={path}",
+   "ko": "출처 {format}={path}"
+  },
+  "resource.key.status": {
+   "en": "status={status}; exit={exit}",
+   "ko": "상태={status}; 종료 코드={exit}"
+  },
   "resource.last_update": {
    "en": "last update {age} ago",
    "ko": "마지막 갱신 {age} 전"
@@ -2046,6 +2126,22 @@
    "en": "no record path",
    "ko": "기록 경로 없음"
   },
+  "resource.part.chunk": {
+   "en": "part {index}/{total}",
+   "ko": "조각 {index}/{total}"
+  },
+  "resource.part.metrics": {
+   "en": "metrics",
+   "ko": "수치"
+  },
+  "resource.part.record": {
+   "en": "record",
+   "ko": "기록"
+  },
+  "resource.part.run": {
+   "en": "run",
+   "ko": "실행"
+  },
   "resource.progress": {
    "en": "progress {reached}/{total} {unit}",
    "ko": "진행 {reached}/{total} {unit}"
@@ -2061,6 +2157,26 @@
   "resource.progress_word_folder": {
    "en": "folder",
    "ko": "폴더"
+  },
+  "resource.source_unavailable": {
+   "en": "source metrics unavailable",
+   "ko": "지표 출처 없음"
+  },
+  "resource.stagnant": {
+   "en": "no observed increase for {duration} since {anchor}",
+   "ko": "{anchor} 뒤 {duration} 동안 오름 없음"
+  },
+  "resource.stagnant.first_observation": {
+   "en": "first comparable observation",
+   "ko": "처음 비교 가능한 관측"
+  },
+  "resource.stagnant.last_increase": {
+   "en": "last actual increase",
+   "ko": "마지막 실제 증가"
+  },
+  "resource.stagnation_unknown": {
+   "en": "progress stagnation=unknown",
+   "ko": "정체 여부=미확인"
   },
   "resource.trend.flat": {
    "en": "flat",
@@ -2948,11 +3064,11 @@
   },
   "wait.no_question": {
    "en": "waiting for the user's answer",
-   "ko": "사용자 답 대기"
+   "ko": "답 필요"
   },
   "wait.title": {
    "en": "◑ answer needed",
-   "ko": "◑답변 필요"
+   "ko": "◑답 필요"
   }
  }
 }

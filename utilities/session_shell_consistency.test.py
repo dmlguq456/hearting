@@ -88,29 +88,23 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
         sys.path.insert(0, str(ROOT))
         from tools.fleet.session_panel import notice_line
         text = lambda parts: ''.join(t for t, _ in parts)
-        now = 10_000.0
         calm = {'ctx_pct': 40, 'quota_windows': [('5h', 30, None), ('7d', 50, None)]}
-        display = {'human': {'at': now - 300, 'text': 'x'},
-                   'received': [{'at': now - 60, 'sender': '[e7]', 'text': '#1445 병합 가능'}]}
         ask = [{'answerable': True, 'request_state': 'open'}, {'answerable': False}]
         blocked = [{'state': 'attention', 'state_label': 'Needs attention', 'title': 'shell'}]
-        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': now - 10}]
-        self.assertEqual(notice_line(calm, [], [], {}, now), [], 'nothing means an empty line')
-        self.assertIn("1 │ Ctrl+]", text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask, display, now)))
-        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [], display, now)))
-        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [], display, now)))
-        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [], display, now)))
+        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': 10_000.0}]
+        self.assertEqual(notice_line(calm, [], []), [], 'nothing means an empty line')
+        self.assertIn("1 │ Ctrl+]", text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask)))
+        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [])))
+        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [])))
+        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [])))
         # The common reader's blocked route waits on a person: Fleet's ◑ "answer needed".
         waiting = [{'state': 'blocked', 'state_label': '?', 'title': 'review approval'}]
         from tools.fleet.session_panel import ui_text
-        self.assertEqual(text(notice_line(calm, waiting, [], {}, now)),
+        self.assertEqual(text(notice_line(calm, waiting, [])),
                          '◑ ' + ui_text('fleet.session_block.open') + ' · review approval')
-        self.assertEqual(notice_line(calm, [{**waiting[0], 'state': 'working'}], [], {}, now), [], 'a working route is calm')
-        self.assertIn('PASS', text(notice_line(calm, done, [], display, now)), 'newest news first')
-        self.assertIn('[e7] · #1445', text(notice_line(calm, [], [], display, now)))
-        later = {**display, 'human': {'at': now - 5, 'text': 'next'}}
-        self.assertEqual(notice_line(calm, done, [], later, now), [], 'the next input retires news')
-        self.assertEqual(notice_line(calm, done, [], display, now + 3600), [], 'and so does time')
+        self.assertEqual(notice_line(calm, [{**waiting[0], 'state': 'working'}], []), [], 'a working route is calm')
+        # 2026-11-14: news is no item to do; the ROUTE box and MESSAGES carry it.
+        self.assertEqual(notice_line(calm, done, []), [], 'a route result stays off the line')
 
     def test_structured_route_codes_never_promote_report_prose_or_no_response(self):
         import sys
@@ -175,8 +169,9 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
  assert.equal(block.waitingForReceipt,false);
  block.input(Buffer.from('\r'));assert.equal(block.waitingForReceipt,false,'in-flight API is not a receipt');
  finish({ok:true,state:'submitted'});await new Promise(resolve=>setImmediate(resolve));
- assert.equal(block.waitingForReceipt,true);
- block.update([item,{...item,id:'new'}]);block.input(Buffer.from('\t'));
+ // Rule 5 (11-14): a sent answer returns the person to the native input, so it holds no delivery.
+ assert.equal(block.focused,false);assert.equal(block.waitingForReceipt,false);
+ block.update([item,{...item,id:'new'}]);block.enter();
  assert.equal(block.waitingForReceipt,false,'another editable question');
  block.input(Buffer.from('tkept'));block.update([{...item,id:'new',revision:'two'}]);
  assert.equal(block.waitingForReceipt,false,'stale draft remains protected');
@@ -218,7 +213,9 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
    routes:state==='start'?[]:[{title:'Current task',state:'working',stages:[{name:'inline',state:'active'}],visibility:{summary:'solo · test? · review? · CI?'}}]};
  const question=['question','focus','draft','restored'].includes(state);
  const args={width,height,side,model,native:{model:'fixture',effort:''},focused:['focus','draft'].includes(state),
-   questions:()=>question?[[{text:'Choose the destination'}],[{text:'1 Current project'}],[{text:state==='draft'?'› My draft':'Ctrl+] answer'}]]:[]};
+   // 11-15: the panel shows the question's summary; the editor (a draft too) reads in the popup.
+   brief:()=>question?{count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Choose the destination'}],[{text:'  '},{text:'1 Current project'}]],
+     one:[[{text:'◑ '},{text:'Choose the destination'}]],line:[{text:'Choose the destination'}],choices:1}:null};
  const all=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
  // Spec rule 29: the top border names the harness (Fleet's session-row head); every other row is the same.
  all.forEach((rows,i)=>assert(rows[0].includes(['claude','codex','opencode'][i]),state+' top border names its harness'));
@@ -227,7 +224,7 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
- if(question){assert(text.includes('─ Choose the destination ')&&text.includes('│ │ 1 Current project'),state+' question box title and inner padding');}
+ if(question){assert(text.includes('│ 1 QUESTIONS ─')&&text.includes('│ ◑ Choose the destination')&&text.includes('│   1 Current project'),state+' question summary under its label');}
  // Spec E9 rule 45: beside the native area the count leads its upper-case word.
  if(state!=='start')assert(text.includes(side?'1 ROUTE':'route 1')&&text.includes('Current task'),state+' route row missing');
  else assert(!/route/i.test(text),state+' a known-empty route list draws no box');

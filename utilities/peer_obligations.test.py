@@ -283,7 +283,14 @@ class ObligationStoreTest(unittest.TestCase):
                             (pane.removeprefix("w1:p-"), sid)), \
                         mock.patch.object(peer_steward, "_settle_claude_native_dispatch_receipt", return_value=False), \
                         mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier), \
+                        mock.patch.object(peer_steward, "_current_shell_binding", side_effect=lambda h, s: (
+                            ({"harness": h, "sid": s, "incarnation": "i1", "host_pid": 4242, "host_start": "1",
+                              "native_pid": 4243, "native_start": "1", "socket": "/nonexistent.sock"}, "")
+                            if h == "claude" else (None, "attachment-unavailable"))), \
+                        mock.patch("session_shell.control",
+                                   return_value={"ok": True, "state": "idle", "empty": True}), \
                         mock.patch("dispatch_notice_state.keep_claim", return_value=True):
+                    # A Claude target is held only for a resting shell: this one rests.
                     peer_steward._resume_registered_obligation(duties[0], self.store)
                 self.assertEqual(len(sent), 1)
                 self.assertEqual(sent[0]["to"], {"harness": target, "session_id": sid})
@@ -3858,6 +3865,26 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             answer = resolve_recipient(question, metadata={"session_id": "gone", "harness": "claude",
                 "attempt_id": "att-never-registered"}, jobs=self.jobs, session="gone", harness="claude")
             self.assertEqual((answer.state, answer.reason), ("unreadable", "handover-unreadable:notice-attempt-unavailable"))
+
+    def test_an_ended_owners_notice_is_refused_not_re_resolved_to_its_parent(self):
+        # The owner and its parent are different sessions. The producer gives the
+        # parent its own copy, so an owner that cannot receive its copy gets
+        # nothing re-resolved to the parent: the answer is a refusal.
+        from dispatch_seat_handover import record_recipient_binding
+        for index, status in enumerate(("killed", "cancelled", "failed", "done")):
+            with self.subTest(status=status):
+                parent_sid, owner_sid = "sup-" + status, "own-" + status
+                meta = self.parent_row(parent_sid, index=60 + index)
+                self._end_attempt(meta, status)
+                parent, = self.notices(sid=parent_sid, label="parent-" + status, lineage={
+                    "kind": "attempt-parent", "harness": "claude", "session_id": parent_sid,
+                    "attempt_id": meta["attempt_id"]})
+                owner, = self.notices(sid=owner_sid, label="owner-" + status, lineage={
+                    "kind": "owner-session", "harness": "claude", "session_id": owner_sid,
+                    "attempt_id": meta["attempt_id"]})
+                self.assertEqual(record_recipient_binding(parent, parent_sid, harness="claude", jobs=self.jobs),
+                                 ("claude", parent_sid))
+                self.assertIsNone(record_recipient_binding(owner, owner_sid, harness="claude", jobs=self.jobs))
 
     def test_owner_session_keeps_exact_native_consumer_after_tidy(self):
         import dispatch_completion_join as join

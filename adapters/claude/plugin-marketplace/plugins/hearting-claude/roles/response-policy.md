@@ -108,7 +108,11 @@ Each clause is one contract line plus the signal that it was violated.
   read it and follow it rather than improvising a substitute; if it must change,
   expose the change before committing. When reporting a condition, make the
   existing label state the applied target, operation, and value; do not rely on
-  an ambiguous nickname or add a repeated definition line. *Violation signal:*
+  an ambiguous nickname or add a repeated definition line. To compare
+  experiment results, paste the table `hearting run experiment_catalog
+  leaderboard` prints as printed, in a worker report too; a table made by hand
+  uses the catalog's names, units and ↑/↓. Without a catalog, the `register`
+  advice in its notices and start context is how one begins. *Violation signal:*
   an ad-hoc replacement for a rule that is already written down somewhere, or a
   report label that hides which operation ran.
 

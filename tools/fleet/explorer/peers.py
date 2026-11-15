@@ -24,7 +24,7 @@ def _extra_lines(session, questions):
     # A live question record's `tag` is the question id; its session is `session_tag`
     # (only a legacy fixture row keyed the session by `tag`). An older wait is folded
     # away everywhere else, so it does not raise the card's line either.
-    question = next((item for item in questions if not item.get("older")
+    question = next((item for item in questions if not item.get("older") and not item.get("sent")
                      and str(item.get("session_tag") if "session_tag" in item
                              else item.get("tag")) == tag), None)
     if question is not None or session.get("ask"):

@@ -414,7 +414,7 @@ class StoppedRunsStayVisible(T.Base):
                 self.assertEqual(B.age_seconds(row, NOW + sec, "last_progress_at"), sec)
                 self.assertEqual(observed["progress_tracker"]["first_observed_at"], NOW)
                 self.assertIn("진행 12/60 epoch", text)
-                self.assertNotIn("stagnation=unknown", text)
+                self.assertNotIn("정체 여부=미확인", text)
                 self.assertNotIn("observation-stale", row["anomalies"])   # the observer is watching it
         self.assertEqual(seen[600][0]["status"], "running")
         self.assertEqual(seen[1800][0]["status"], "running")              # inside the two-hour window
@@ -425,7 +425,7 @@ class StoppedRunsStayVisible(T.Base):
             self.assertIn("stagnant", row["anomalies"])
             notices = [item for item in observed["outbox"] if item["kind"] == "attention"]
             self.assertEqual(len(notices), 1)                              # said once, still standing at 9000 s
-            self.assertIn("no observed increase for 2h00m", notices[0]["text"])
+            self.assertIn("2h00m 동안 오름 없음", notices[0]["text"])          # the notice's words in the declared language
 
     def test_a_declared_progress_source_that_can_no_longer_be_read_is_not_vouched_for(self):
         progress_file = self.base / "progress.json"

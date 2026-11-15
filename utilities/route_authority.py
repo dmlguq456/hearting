@@ -3164,10 +3164,17 @@ _TAIL_BLANK = r"(?:\n[ \t]*)*"
 _TAIL_LINE = _TAIL_EDGE + r"[^\n]+"
 _TAIL_FENCE_BODY = r"(?:" + _TAIL_EDGE + r"[^\n]*\n)*?"
 _TAIL_FENCE = r"[ \t]*```[^\n]*\n" + _TAIL_FENCE_BODY + r"[ \t]*```"
+# A PASS may carry a memo on the verdict line (`PASS (…)`, `PASS — …`, `PASS: …`, `PASS - …`):
+# it is a PASS plus a remark, as `blocker: none (…)` is. FAIL and BLOCKED take none, and a word
+# that merely starts with PASS (`PASSED`, `PASS-ish`) is not a PASS.
+_VERDICT_FIELD = (
+    r"verdict: (?P<verdict>PASS|FAIL|BLOCKED)"
+    r"(?:(?<=PASS)(?P<verdict_note>[ \t]*[(（—–:][^\n]*\S|[ \t]+-[ \t]+[^\n]*\S))?\n"
+)
 HANDOFF_RE = re.compile(
     r"(?:\A|\n)artifact: (?P<artifact>[^\n]+)\n"
-    r"verdict: (?P<verdict>PASS|FAIL|BLOCKED)\n"
-    r"blocker: (?P<blocker>[^\n]+)"
+    + _VERDICT_FIELD
+    + r"blocker: (?P<blocker>[^\n]+)"
     + r"(?:" + _TAIL_GAP
     + r"(?:" + _TAIL_FENCE + r"(?:" + _TAIL_GAP + _TAIL_LINE + r"(?:" + _TAIL_GAP + _TAIL_LINE + r")?)?"
     + r"|" + _TAIL_LINE + r"(?:" + _TAIL_GAP + _TAIL_LINE + r")?"
@@ -3178,22 +3185,81 @@ HANDOFF_RE = re.compile(
 )
 
 
-_PASS_NOTE_RE = re.compile(r"none\s*\((?P<note>.+)\)\s*")
+# A finished judgment a worker wrote as its verdict word instead of PASS/FAIL/BLOCKED
+# (a review asking for fixes, holding, or able to merge). The three-line envelope
+# around it is otherwise exact, so it is read as the verdict it names and the word
+# is kept as the disposition: a review that asked for fixes is a finished review,
+# not a broken contract. Only these closed forms count; anything else stays invalid.
+# `보류`/`hold` is also how unfinished work says "stopped", so a FAIL-side word is read
+# only with proof of a finished review: the named report opens on a closed negative
+# review verdict (`최종 판정: 수정 후 병합 — head …`) and the blocker is `none`. Without
+# it the envelope stays invalid, which asks for attention as before.
+_DISPOSITION_VERDICTS = (
+    ("FAIL", ("수정 후 병합", "changes requested", "보류", "hold")),
+    ("PASS", ("병합 가능", "mergeable")),
+)
+_DISPOSITION_HANDOFF_RE = re.compile(HANDOFF_RE.pattern.replace(
+    _VERDICT_FIELD, r"verdict: (?P<verdict>[^\n]{1,160})\n", 1))
+assert _DISPOSITION_HANDOFF_RE.pattern != HANDOFF_RE.pattern
+
+
+def _disposition_verdict(word: str) -> str | None:
+    for verdict, forms in _DISPOSITION_VERDICTS:
+        for form in forms:
+            pattern = r"\s*".join(re.escape(part) for part in form.split())
+            if re.fullmatch(r"\*{0,2}" + pattern + r"\*{0,2}(?:\s*[—–:(（-].*)?", word.strip(), re.I):
+                return verdict
+    return None
+
+
+def handoff_search(text) -> dict | None:
+    """The final handoff's fields (``HANDOFF_RE``), or ``None``.
+
+    A closed disposition word in the verdict line (``_DISPOSITION_VERDICTS``) reads
+    as the verdict it names, a FAIL-side word only with a finished review behind it
+    (``_finished_review``); the word itself is returned as ``disposition``.
+    """
+    if not isinstance(text, str):
+        return None
+    match = HANDOFF_RE.search(text.strip())
+    if match:
+        return match.groupdict()
+    loose = _DISPOSITION_HANDOFF_RE.search(text.strip())
+    verdict = _disposition_verdict(loose["verdict"]) if loose else None
+    if verdict is None or (verdict == "FAIL" and not _finished_review(loose["artifact"], loose["blocker"])):
+        return None
+    return {**loose.groupdict(), "verdict": verdict, "disposition": loose["verdict"].strip()}
+
+
+def _finished_review(artifact: str, blocker: str) -> bool:
+    """A FAIL-side disposition's proof: nothing blocks, and the report it names opens on
+    a closed negative review verdict (``codex_dispatch_terminal.closed_review_kind``)."""
+    if pass_blocker_note(blocker) is None:
+        return False
+    try:
+        from codex_dispatch_terminal import closed_review_kind
+        return closed_review_kind(Path(artifact.strip())) in {"fix", "hold"}
+    except (ImportError, OSError, ValueError):
+        return False
+
+
+_PASS_NOTE_RE = re.compile(
+    r"none(?:\s*\((?P<paren>.+)\)|\s*[—–:]\s*(?P<tail>\S.*?)|\s+-\s+(?P<hyphen>\S.*?))\s*")
 
 
 def pass_blocker_note(blocker) -> str | None:
-    """What a PASS envelope's `blocker: none (...)` adds: "" for a bare `none`, the
-    parenthesized note for `none (...)`, None for any other blocker text. The note
-    is kept as a remark; it never changes the verdict (RA-8)."""
+    """What a PASS envelope's `blocker: none ...` adds: "" for a bare `none`, the note for
+    `none (...)`, `none — ...`, `none: ...` and `none - ...`, None for any other blocker text.
+    The note is kept as a remark; it never changes the verdict (RA-8)."""
     if blocker == "none":
         return ""
     match = _PASS_NOTE_RE.fullmatch(blocker) if isinstance(blocker, str) else None
-    return match.group("note").strip() if match else None
+    return next(value for value in match.group("paren", "tail", "hyphen") if value is not None).strip() if match else None
 
 
 def pass_blocker_violation(verdict, blocker) -> str | None:
-    """A PASS envelope's blocker is `none`, optionally with a note in parentheses;
-    any other blocker text breaks the contract."""
+    """A PASS envelope's blocker is `none`, optionally followed by a note; any other blocker
+    text breaks the contract."""
     if verdict == "PASS" and pass_blocker_note(blocker) is None:
         return "pass-blocker-not-none"
     return None

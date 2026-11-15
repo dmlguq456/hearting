@@ -200,8 +200,12 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   Code wakes an idle session for an `asyncRewake` hook only on exit code 2 and
   holds exit-0 output until the next user interaction (corrected 2026-08-29;
   success still carries its structured notification on stdout). The
-  SessionStart/UserPromptSubmit sweep re-delivers any SD-111 pending record at
-  the next prompt as the durable backstop. Registered Claude
+  `PostToolUse` carries no completion; the turn's `Stop` carries any the transcript
+  does not show received, and the SessionStart/UserPromptSubmit sweep re-delivers any
+  SD-111 pending record at the next prompt as the durable backstop (the one way a turn
+  Esc cut or an API error ended is made up). The runner holds a completion only for a Hearting
+  shell resting with an empty input, which injects it; anywhere else the record stays
+  pending for `Stop` and the next prompt. Registered Claude
   owners keep one `--input-format stream-json` process for the route and submit
   each non-terminal joined receipt immediately. When the current rows and exact
   sealed markers prove every declared terminal node complete, the supervisor
@@ -445,6 +449,20 @@ definition whose model is main-session-only in that config is not projected. The
 hook still decides unpinned spawns and denies main-only models. Keep your own
 agents under other names.
 
+A registered worker's config home (`tools/profile/build-home.py`) gets the
+`light`, `balanced` and `deep` definitions as regular files under its
+`agents/`, rendered by the same renderer from the `models.conf` the user's home
+selects, so a worker that names one of them runs that tier (a main-session-only
+model gets no file). `general-purpose` and `memory-scout` are not placed: a
+worker spawn that names no agent keeps the built-in, and the spawn hook still
+sends such a spawn from a worker to `light` (see above). A definition that cannot
+be placed (an existing file, link or folder on its path, an unwritable `agents/`)
+is skipped without touching what is there; the worker still starts. A profile declaration's
+`expose.agents` picks a subset of the three. Measured with
+`utilities/harness_behavior_scenarios.py --scenario subagent-model`: the worker
+session's start record lists the three, and each named spawn asks for its
+definition's model.
+
 An explicit eligible per-invocation model or eligible agent-definition pin is
 preserved. A config-declared interactive-main-only model, explicit `inherit`,
 fork inheritance, or a missing eligibility policy returns a typed PreToolUse
@@ -452,17 +470,26 @@ deny before spawn. Malformed or non-Agent payloads remain silent because they
 do not identify an actionable native-worker launch.
 
 Rejected realization — global `CLAUDE_CODE_SUBAGENT_MODEL` env: the official
-subagent model precedence is env > per-invocation `model` param > definition
-frontmatter > session model (official subagents doc, "Choose a model"; since
-v2.1.196 an `inherit` value is treated as unset). The env level is therefore a
-hard override that would kill the `memory-scout` frontmatter pin and per-call
-escalation. The PreToolUse injection sits at the per-invocation level instead
-and yields to frontmatter pins through its own skip logic.
+subagent model precedence is per-invocation `model` param > definition
+frontmatter > `CLAUDE_CODE_SUBAGENT_MODEL` > session model (official subagents
+doc, "Choose a model", rechecked 2026-11-15 against the docs and an installed
+2.1.325). Before v2.1.251 the env var overrode the other two; since then it is
+only a default for subagents nothing else names, and it forces a model only
+together with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (v2.1.257+), which also drops
+definition pins and per-call models. A frontmatter `inherit` value is treated as
+unset (v2.1.196). The original rejection reason (the env hard-overrides the
+`memory-scout` pin) therefore no longer holds for the plain variable. The
+rejection stands anyway: one global model cannot give each call its own tier, and
+the PreToolUse injection sits at the per-invocation level, yielding to
+frontmatter pins through its own skip logic.
 
-Runtime limits: Claude Code exposes no global subagent
-reasoning-effort knob and the Agent tool input has no effort field, so this
-realization controls the model tier only; per-agent effort remains a
-custom-agent frontmatter concern. `CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias>`
+Runtime limits: the Agent tool input has an optional per-invocation `effort`
+field (v2.1.292+; not for forks; it overrides the definition's `effort`, and
+`CLAUDE_CODE_EFFORT_LEVEL` overrides both), and a global default exists too
+(`CLAUDE_CODE_SUBAGENT_EFFORT`, seen in the installed 2.1.325). Both were
+rechecked 2026-11-15. This hook still controls the model tier only; it injects
+no effort, and a definition pin remains how a named type fixes its effort.
+`CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias>`
 forces a different injected model at runtime; `inherit` and main-only aliases
 are rejected without touching config.
 

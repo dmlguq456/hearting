@@ -93,6 +93,14 @@ symlink, a differing one is written as an activation-owned regular file, and an 
 whose model is main-session-only in that config gets no file. Keep your own agents
 under other names.
 
+Registered workers reach the `light`, `balanced` and `deep` agents by name. A V2
+worker's shared service owns config, so it reads the agents the user's home
+already holds (measured on OpenCode 2.0.32 with `subagent-model`: each named
+spawn asked for its file's model). A V1 worker reads only its own config home,
+so `tools/profile/build-home.py` writes the three there as regular files from
+the same renderer and selected `models.conf` (structural test only; no V1
+binary was run). `general-purpose` is not added to a V1 worker home.
+
 Sub-agent role default (PG-13, limit). OpenCode gives a subagent with no
 configured model the parent session's model, and its `subagent` tool takes no
 model (https://opencode.ai/docs/agents/, https://opencode.ai/docs/tools/).
@@ -343,7 +351,7 @@ Diagnostics that V1 sent to `app.log` go to a capped per-service file,
 **Session shell panel.** In a shell window OpenCode gets the same right (left
 or bottom by choice) HEARTING panel as Claude and Codex, folding into the same
 eight-cell strip that widens the native area (by hand, or by itself where the
-open panel would leave under 80 native columns; spec E9 rule 49): same
+open panel would leave under 60 native columns; spec E9 rule 49): same
 renderer, settings (layout, position, width, theme, shade) and content order. OpenCode's own sidebar is
 hidden there through its documented CLI settings: `session.sidebar` is `auto`
 ("Shows the sidebar when space permits") or `hide` ("always hides it"), and
@@ -393,9 +401,9 @@ from history, and only the existing 120 s claim lease, once expired, makes it de
 again. After `CARRIER_UNOBSERVED_SEND_LIMIT` (2) such sends of the same record in a row the
 carrier opens no further turn for it (log `resend_limit_reached`, then
 `resend-limit-deferred`): the record stays owed, and the session's next natural turn
-carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
-it in that turn's context, a completed tool of a running turn appends it to the result,
-and either acks it there. A natural turn that comes while the limited send's claim is
+carries it (Claude's `Stop` and `UserPromptSubmit` carry what its rewake did not deliver in the
+same way: one send, one supplement): a user prompt puts it in that turn's context, a completed
+tool of a running turn appends it to the result, and either acks it there. A natural turn that comes while the limited send's claim is
 still live takes that exact claim over (the shared `settle` revalidates owner, lease and
 recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
 limit again; nothing is dropped. Measured with the history read forced empty: before the
