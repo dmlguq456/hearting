@@ -74,8 +74,14 @@ PROMPTS_AFTER = {1: "P1", 3: "P2", 5: "P3", 7: "P4", 9: "P5"}
 # the rewake's lease and starts the next turn. "q-typed": a person types during the turn,
 # Claude takes the typed prompt first and the notification's own turn after. "q-quoted": a
 # background agent's notification quotes it while it waits, then the turn ends.
+# Three more orders have no rewake that arrived in the queue: "q-unarmed" (no rewake was armed,
+# a tool call and the turn's end follow; the turn's Stop must carry it), "q-esc" (the queue
+# hands the notification back on Esc, the turn is cut and no Stop runs; the next typed prompt
+# carries it) and "q-error" (no rewake, the turn ends on an API error and no Stop runs; the next
+# typed prompt carries it). The last two end with a typed prompt by definition.
 QUEUE_ORDERS = (("normal", "q-absorbed"), ("normal", "q-dropped"), ("normal", "q-turn-end"),
-                ("normal", "q-typed"), ("normal", "q-quoted"))
+                ("normal", "q-typed"), ("normal", "q-quoted"), ("normal", "q-unarmed"),
+                ("normal", "q-esc"), ("normal", "q-error"))
 CLAIM_LEASE_GAP_NS = 31 * 1_000_000_000
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 MARKER = re.compile(r"HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]+) [0-9a-f]{64}")
@@ -133,6 +139,7 @@ class Scenario:
         self.items: list[dict] = []
         self.transcript_events: list[dict] = []
         self.carried: list[dict] = []  # one row per text that reached the model
+        self.turn = 0  # the running turn's prompt id, as Claude Code gives every hook of one prompt
 
     # -- setup -----------------------------------------------------------------
     def rows(self) -> list[str]:
@@ -156,7 +163,7 @@ class Scenario:
         for index, (kind, pattern) in enumerate(self.completions):
             attempt = f"att-scc-{self.harness}-{index:02d}" + "0" * 16
             route = {"capability": "autopilot-code", "capability_mode": "dev",
-                     "work_request": {"text": f"합성 과제 {index}: 부모 세션 문맥 측정용 작업을 끝낸다."},
+                     "work_request": {"text": f"합성 과제 {index}: PR #{4100 + index}의 부모 세션 문맥 측정용 작업을 끝낸다."},
                      "artifact_root": str(self.reports), "cwd": str(self.repo)}
             route["route_hash"] = route_identity.route_hash(route)
             route["route_id"] = route_identity.route_id_from_hash(route["route_hash"])
@@ -261,7 +268,8 @@ class Scenario:
 
     def payload(self, event: str, **extra) -> dict:
         return {"session_id": PARENT_SID, "transcript_path": str(self.transcript_path()),
-                "cwd": str(self.repo), "hook_event_name": event, "prompt_id": "prompt-fixture", **extra}
+                "cwd": str(self.repo), "hook_event_name": event, "prompt_id": f"prompt-fixture-{self.turn}",
+                **extra}
 
 
 # --------------------------------------------------------------------------
@@ -340,12 +348,18 @@ def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
                 "type": "hook_additional_context", "hookEvent": "UserPromptSubmit", "content": [text]}})
         return text
 
-    def tool_boundary() -> str:
-        payload = scenario.payload("PostToolUse", tool_name="Bash")
+    def tool_boundary(item=None) -> str:
+        # The model's next tool names the completion it just read, as a turn that acts on it does.
+        command = f"dispatch-harvest.py --attempt {item['attempt']}" if item else "true"
+        payload = scenario.payload("PostToolUse", tool_name="Bash", tool_input={"command": command})
+        if hasattr(pmr, "note_turn_tool"):
+            pmr.note_turn_tool(payload)
         pmr.settle_stop_records(payload)
         parameters = inspect.signature(pmr.tool_boundary_records).parameters
         kwargs = {"payload": payload} if "payload" in parameters else {}
-        if "defer_queued" in parameters:
+        if "completions" in parameters:
+            kwargs["completions"] = False  # a tool boundary carries no completion
+        elif "defer_queued" in parameters:
             kwargs["defer_queued"] = True
         text, batches = pmr.tool_boundary_records(PARENT_SID, time.monotonic() + 6, **kwargs)
         pmr.settle_tool_boundary_records(PARENT_SID, batches, bool(text))
@@ -375,6 +389,7 @@ def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
 
     def typed_prompt(label: str):
         prompt = f"{label}: 사람 입력 — 지금까지 끝난 것을 짧게 알려 줘."
+        scenario.turn += 1
         context = prompt_hook(prompt, typed=True)
         scenario.transcript({"type": "user", "message": {"content": prompt}})
         scenario.carry("prompt-hook", context, prompt=label)
@@ -384,6 +399,7 @@ def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
     with mock.patch("time.monotonic_ns", side_effect=lambda: scenario.clock[0]):
         for index, item in enumerate(scenario.items):
             scenario.materialize(item)
+            scenario.turn += 1
             pattern = item["pattern"]
             if pattern == "prompt":
                 # No rewake is armed (its window lapsed); the next typed prompt carries it.
@@ -402,7 +418,7 @@ def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
                                      "producer": "session-task"}, "promptSource": "system",
                                      "turnOrigin": "task_notification", "message": {"content": note}})
                 scenario.advance(5 * 1_000_000_000)
-                scenario.carry("tool-boundary", tool_boundary())
+                scenario.carry("tool-boundary", tool_boundary(item))
                 scenario.carry("stop", stop(), extra_turn=True)
             elif pattern.startswith("q-"):
                 item["carried_from"] = len(scenario.carried)
@@ -410,13 +426,14 @@ def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
                 if follows:
                     # Claude takes the notification into a turn of its own; its prompt hooks run with it.
                     note, body = follows
+                    scenario.turn += 1
                     scenario.transcript({"type": "queue-operation", "operation": "dequeue"})
                     scenario.carry("rewake", body, wake=True)
                     scenario.carry("prompt-hook(wake)", prompt_hook(note, typed=False))
                     scenario.transcript({"type": "user", "origin": {"kind": "task-notification",
                                          "producer": "session-task"}, "promptSource": "system",
                                          "turnOrigin": "task_notification", "message": {"content": note}})
-                    scenario.carry("tool-boundary", tool_boundary())
+                    scenario.carry("tool-boundary", tool_boundary(item))
                     scenario.carry("stop", stop(), extra_turn=True)
                 item["carried_to"] = len(scenario.carried)
             else:  # mid: a tool call longer than the rewake's claim lease
@@ -425,14 +442,14 @@ def _claude(scenario: Scenario, prompts=PROMPTS_AFTER) -> None:
                 note = scenario.notification(body)
                 scenario.transcript({"type": "queue-operation", "operation": "enqueue", "content": note})
                 scenario.advance(CLAIM_LEASE_GAP_NS)
-                scenario.carry("tool-boundary", tool_boundary())
+                scenario.carry("tool-boundary", tool_boundary(item))
                 scenario.transcript({"type": "queue-operation", "operation": "remove", "content": note,
                                      "reason": "absorbed_mid_turn"})
                 scenario.transcript({"type": "attachment", "attachment": {
                     "type": "queued_command", "commandMode": "task-notification", "prompt": note,
                     "origin": {"kind": "task-notification", "producer": "session-task"}}})
                 scenario.advance(5 * 1_000_000_000)
-                scenario.carry("tool-boundary", tool_boundary())
+                scenario.carry("tool-boundary", tool_boundary(item))
                 scenario.carry("stop", stop(), extra_turn=True)
             if index in prompts:
                 typed_prompt(prompts[index])
@@ -443,22 +460,40 @@ def _claude_queue_order(scenario, item, rewake_emit, prompt_hook, tool_boundary,
     ``(note, rewake text)`` when that turn follows, else ``None``. The rewake's text is
     counted only where the queue puts it in front of the model."""
     pattern = item["pattern"]
+    typed_next = "사람 입력(다음 차례): 지금까지 끝난 것을 알려 줘."
+    if pattern in {"q-unarmed", "q-error"}:
+        # No rewake reached the queue: a tool call, then the turn ends (a Stop, or an API
+        # error that runs none and leaves the next typed prompt to carry it).
+        scenario.advance(CLAIM_LEASE_GAP_NS)
+        scenario.carry("tool-boundary", tool_boundary(item))
+        if pattern == "q-unarmed":
+            scenario.carry("stop", stop(), extra_turn=True)
+        else:
+            scenario.turn += 1
+            scenario.carry("prompt-hook", prompt_hook(typed_next, typed=True), prompt="typed")
+        return None
     body = rewake_emit(item)
     note = scenario.notification(body)
     scenario.transcript({"type": "queue-operation", "operation": "enqueue", "content": note})
     scenario.advance(CLAIM_LEASE_GAP_NS)
-    if pattern == "q-absorbed":
-        scenario.carry("tool-boundary", tool_boundary())
+    if pattern == "q-esc":
+        # Esc hands the queued notification back and cuts the turn: no Stop runs.
+        scenario.carry("tool-boundary", tool_boundary(item))
+        scenario.transcript({"type": "queue-operation", "operation": "popAll", "content": note})
+        scenario.turn += 1
+        scenario.carry("prompt-hook", prompt_hook(typed_next, typed=True), prompt="typed")
+    elif pattern == "q-absorbed":
+        scenario.carry("tool-boundary", tool_boundary(item))
         scenario.transcript({"type": "queue-operation", "operation": "remove", "content": note,
                              "reason": "absorbed_mid_turn"})
         scenario.transcript({"type": "attachment", "attachment": {
             "type": "queued_command", "commandMode": "task-notification", "prompt": note,
             "origin": {"kind": "task-notification", "producer": "session-task"}}})
         scenario.carry("rewake", body)
-        scenario.carry("tool-boundary", tool_boundary())
+        scenario.carry("tool-boundary", tool_boundary(item))
         scenario.carry("stop", stop(), extra_turn=True)
     elif pattern == "q-dropped":
-        scenario.carry("tool-boundary", tool_boundary())
+        scenario.carry("tool-boundary", tool_boundary(item))
         scenario.transcript({"type": "queue-operation", "operation": "remove", "reason": "dropped_by_hook"})
         scenario.carry("stop", stop(), extra_turn=True)
     elif pattern == "q-turn-end":
@@ -469,6 +504,7 @@ def _claude_queue_order(scenario, item, rewake_emit, prompt_hook, tool_boundary,
         scenario.transcript({"type": "queue-operation", "operation": "enqueue", "content": typed})
         scenario.carry("stop", stop(), extra_turn=True)
         scenario.transcript({"type": "queue-operation", "operation": "dequeue"})
+        scenario.turn += 1
         scenario.carry("prompt-hook", prompt_hook(typed, typed=True), prompt="typed")
         scenario.transcript({"type": "user", "message": {"content": typed}})
         scenario.carry("stop", stop(), extra_turn=True)
@@ -481,7 +517,7 @@ def _claude_queue_order(scenario, item, rewake_emit, prompt_hook, tool_boundary,
         scenario.transcript({"type": "attachment", "attachment": {
             "type": "queued_command", "commandMode": "task-notification", "prompt": quoted,
             "origin": {"kind": "task-notification", "producer": "session-task"}}})
-        scenario.carry("tool-boundary", tool_boundary())
+        scenario.carry("tool-boundary", tool_boundary(item))
         scenario.carry("stop", stop(), extra_turn=True)
     return None
 

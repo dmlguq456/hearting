@@ -5864,6 +5864,15 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
         if fresh_row is None:
             return
         row = fresh_row
+        if recipient_harness == "claude" and not notice_id and row.status == "done":
+            # A Claude completion is injected only through a resting shell. Anywhere
+            # else the record stays pending: holding it under this 30 s claim would
+            # keep the turn's Stop and the next input from carrying it.
+            import session_shell
+            shell, _reason = _current_shell_binding("claude", recipient_sid)
+            status = session_shell.control(shell, "status") if shell is not None else {}
+            if not (status.get("ok") and status.get("state") == "idle" and status.get("empty")):
+                return
         owner = "retained-rewake:" + duty["id"]
         if record and record.get("state") in {"claimed", "sent-ambiguous"}:
             pending.reclaim(jobs.parent, storage_recipient, delivery_id,

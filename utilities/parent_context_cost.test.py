@@ -201,22 +201,15 @@ class ClaudeReceiptEvidenceTest(unittest.TestCase):
         return {"type": "queue-operation", "sessionId": self.SID, "operation": operation,
                 **({"content": self.note(f"delivery-{name}")} if name else {}), **extra}
 
-    def test_a_notification_still_in_the_queue_is_queued_not_received(self):
-        # Only what the queue's record names counts: `dequeue` names no item (Claude takes
-        # by priority), so nothing enqueued before it is still counted as waiting.
-        events = [self.queue("enqueue", name) for name in ("a", "b", "c")]
-        events += [self.queue("dequeue"), self.queue("remove", "c", reason="absorbed_mid_turn"),
-                   self.queue("enqueue", "d"), self.queue("enqueue", "e"), self.queue("popOne", "e")]
+    def test_claudes_own_queue_records_are_never_read_as_state(self):
+        # `queue-operation` is not documented: a notification counts only where the model
+        # reads it (a user event, an absorbed `queued_command`), never by what the queue holds.
+        events = [self.queue("enqueue", name) for name in ("a", "b")]
+        events += [self.queue("dequeue"), self.queue("remove", reason="dropped_by_hook"),
+                   self.queue("popAll", "b")]
         evidence = receipt.claude_feedback_evidence(events, self.SID)
-        self.assertEqual(evidence["bindings"], [])
-        self.assertEqual(evidence["queued"], [("delivery-d", "a" * 64)])
-
-    def test_a_content_less_removal_ends_what_the_queue_was_holding(self):
-        # Claude Code 2.1.325 writes a hook's drop as `remove` with no content.
-        events = [self.queue("enqueue", "d"), self.queue("remove", reason="dropped_by_hook")]
-        self.assertEqual(receipt.claude_feedback_evidence(events, self.SID)["queued"], [])
-        self.assertEqual(receipt.claude_feedback_evidence(events[:1], self.SID)["queued"],
-                         [("delivery-d", "a" * 64)])
+        self.assertEqual((evidence["bindings"], evidence["legacy_texts"]), ([], []))
+        self.assertNotIn("queued", evidence)
 
     def quoted(self, delivery_id):
         # A background agent's completion whose result quotes a Hearting notice it read.
@@ -237,9 +230,6 @@ class ClaudeReceiptEvidenceTest(unittest.TestCase):
             with self.subTest(event=event["type"]):
                 evidence = receipt.claude_feedback_evidence([event], self.SID)
                 self.assertEqual((evidence["bindings"], evidence["legacy_texts"]), ([], []))
-        queued = {"type": "queue-operation", "sessionId": self.SID, "operation": "enqueue",
-                  "content": self.quoted("delivery-q")}
-        self.assertEqual(receipt.claude_feedback_evidence([queued], self.SID)["queued"], [])
         self.assertEqual(receipt.claude_prompt_bindings(self.quoted("delivery-q")), [])
         # Top-level notifications still count, each one, up to the first that is not one.
         joined = self.note("delivery-1") + "\n" + self.note("delivery-2") + "\n" + self.quoted("delivery-3")
@@ -255,7 +245,7 @@ class ClaudeReceiptEvidenceTest(unittest.TestCase):
 
 
 class NoLostDeliveryTest(unittest.TestCase):
-    """A boundary that leaves a delivery to Claude's own queue never drops it."""
+    """A tool boundary carries no completion, and neither it nor the turn's Stop loses one."""
 
     SID = "ses-queued"
 
@@ -282,58 +272,97 @@ class NoLostDeliveryTest(unittest.TestCase):
         pending.mark_sent_ambiguous(self.root, self.SID, self.delivery, claim_owner="claude-async-rewake:1:1")
         time.sleep(0.01)  # the rewake's claim lease is over
 
-    def evidence(self, queued):
+    def evidence(self, received):
         record = pending.read(self.root, self.SID, self.delivery)
         binding = (self.delivery, receipt.binding_digest(record, self.SID))
         return {"harness": "claude", "session_id": self.SID, "source": "claude-transcript",
-                "bindings": [], "legacy_texts": [], "queued": [binding] if queued else []}
+                "bindings": [binding] if received else [], "legacy_texts": []}
 
-    def sweep(self, *, queued, defer):
+    def sweep(self, *, received, defer, seen=None):
         with mock.patch.object(sweep, "record_jobs", return_value=self.jobs):
             records, _count = sweep.sweep_deliver(self.root, "claude-parent-runtime", self.SID,
-                                                  native_evidence=self.evidence(queued),
-                                                  defer_native_queued=defer)
+                                                  native_evidence=self.evidence(received),
+                                                  defer_completions=defer, received_out=seen)
         sweep.release_claims(self.SID, [(self.root, records)], "claude-parent-runtime", reason="test")
         return [record["delivery_id"] for record in records]
 
-    def test_a_tool_boundary_leaves_a_notice_in_claudes_queue_to_that_queue(self):
-        self.assertEqual(self.sweep(queued=True, defer=True), [])
+    def test_a_tool_boundary_leaves_a_completion_to_the_rewake(self):
+        self.assertEqual(self.sweep(received=False, defer=True), [])
         self.assertEqual(pending.read(self.root, self.SID, self.delivery)["state"], "sent-ambiguous")
 
-    def test_the_next_prompt_still_carries_a_queued_notice_the_queue_may_have_lost(self):
-        self.assertEqual(self.sweep(queued=True, defer=False), [self.delivery])
+    def test_the_turns_stop_and_the_next_prompt_still_carry_it(self):
+        # Whatever the queue did with the rewake's notification, nothing but the model's own
+        # transcript receipt ends the duty.
+        self.assertEqual(self.sweep(received=False, defer=False), [self.delivery])
 
-    def test_without_a_queued_copy_the_tool_boundary_carries_it_as_before(self):
-        self.assertEqual(self.sweep(queued=False, defer=True), [self.delivery])
+    def test_a_completion_the_transcript_shows_received_is_settled_and_counted_at_a_tool_boundary(self):
+        seen = []
+        self.assertEqual(self.sweep(received=True, defer=True, seen=seen), [])
+        self.assertEqual([record["delivery_id"] for record in seen], [self.delivery])
+        self.assertEqual(pending.read(self.root, self.SID, self.delivery)["state"], "acked")
+
+    def test_only_a_completion_is_left_to_the_rewake(self):
+        base = {"receipt": {"kind": "notice"}}
+        for record, completion in (
+                ({"receipt": {"children": [{"required_action": "advance-completed"}]}}, True),
+                ({"receipt": {"kind": "notice"}}, False), ({"receipt": {"kind": "supervision"}}, False),
+                ({"receipt": {"kind": "human-gate"}}, False),
+                ({"receipt": {"children": [{"required_action": "human-gate:frame-review"}]}}, False)):
+            with self.subTest(receipt=record["receipt"]):
+                self.assertIs(sweep.is_completion_record(record), completion)
 
 
 class QueueOrderTest(unittest.TestCase):
-    """A notice a tool boundary leaves to Claude's queue reaches the model even when that
-    queue drops it, before the turn ends and without a person (the measured orders)."""
+    """A completion reaches the model whatever Claude's queue does with the rewake's notification:
+    before the turn ends and without a person, or, when the turn is cut (Esc, an API error),
+    with the next typed prompt (the measured orders)."""
+
+    NEXT_INPUT = {"q-esc", "q-error"}
 
     @classmethod
     def setUpClass(cls):
         cls.orders = {row["order"]: row for row in _measured()["claude"]["queue_orders"]}
 
-    def test_a_notice_the_queue_drops_without_content_still_reaches_the_model(self):
+    def test_every_order_is_measured(self):
+        self.assertEqual(set(self.orders), {order for _kind, order in fixture.QUEUE_ORDERS})
+
+    def test_a_completion_the_queue_drops_without_content_still_reaches_the_model(self):
         row = self.orders["q-dropped"]
         self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
 
-    def test_a_notice_quoted_by_another_notification_still_reaches_the_model(self):
+    def test_a_completion_quoted_by_another_notification_still_reaches_the_model(self):
         row = self.orders["q-quoted"]
-        self.assertEqual((row["times"], row["without_person"]), (1, True))
+        self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
 
-    def test_a_notice_the_queue_absorbs_reaches_the_model_once(self):
+    def test_a_completion_the_queue_absorbs_reaches_the_model_once(self):
         self.assertEqual(self.orders["q-absorbed"]["carriers"], ["rewake"])
 
-    def test_every_order_reaches_the_model_without_a_person_at_most_twice(self):
-        # Twice is the price of never leaving one to a queue that may lose it: a notice still
-        # queued when the turn ends is shown by Stop and again by the turn the queue starts.
-        self.assertEqual(set(self.orders), {order for _kind, order in fixture.QUEUE_ORDERS})
+    def test_a_rewake_that_was_never_armed_is_made_up_by_the_turns_stop(self):
+        row = self.orders["q-unarmed"]
+        self.assertEqual((row["times"], row["without_person"], row["carriers"]), (1, True, ["stop"]))
+
+    def test_a_cut_turn_leaves_it_to_the_next_typed_prompt(self):
+        for name in sorted(self.NEXT_INPUT):
+            with self.subTest(order=name):
+                row = self.orders[name]
+                self.assertEqual((row["times"], row["without_person"], row["carriers"]),
+                                 (1, False, ["prompt-hook"]))
+
+    def test_no_tool_boundary_carries_a_completion_in_any_order(self):
         for name, row in self.orders.items():
             with self.subTest(order=name):
-                self.assertTrue(row["without_person"])
+                self.assertNotIn("tool-boundary", row["carriers"])
+
+    def test_every_order_reaches_the_model_without_a_person_at_most_twice(self):
+        # Twice is the price of never leaving one to a queue that may lose it: a completion
+        # still queued when the turn ends is shown by Stop and again by the turn the queue starts.
+        for name, row in self.orders.items():
+            with self.subTest(order=name):
+                if name not in self.NEXT_INPUT:
+                    self.assertTrue(row["without_person"])
                 self.assertIn(row["times"], (1, 2))
+        self.assertEqual({name for name, row in self.orders.items() if row["times"] == 2},
+                         {"q-turn-end", "q-typed"})
 
 
 class DispositionHandoffTest(unittest.TestCase):
@@ -386,6 +415,71 @@ class DispositionHandoffTest(unittest.TestCase):
         self.assertEqual(classify(self.handoff("병합 가능", "P1 남음")).note, "dead-contract")
         self.assertEqual(classify(self.handoff("끝남")).note, "dead-contract")
         self.assertEqual(classify("artifact: /r\nverdict: 수정 후 병합").note, "dead-contract")
+
+
+class PassWithMemoHandoffTest(unittest.TestCase):
+    """A PASS that carries a memo (after `verdict: PASS` or after `blocker: none`) is a normal
+    completion; a real blockage, a failing or held verdict and a handoff that cannot be read still
+    ask for attention. Reports and values are synthetic."""
+
+    REVIEW = "최종 판정: 수정 후 병합 — head 8cbccb3\n\n## 필수 지적\n- P1 하나\n"
+
+    def setUp(self):
+        import dispatch_supervisor_terminal
+        self.terminal = dispatch_supervisor_terminal
+        self.tmp = tempfile.TemporaryDirectory(prefix="scc-memo-")
+        self.addCleanup(self.tmp.cleanup)
+        self.report = Path(self.tmp.name) / "report.md"
+        self.report.write_text(self.REVIEW, encoding="utf-8")
+
+    def classify(self, verdict, blocker):
+        text = f"artifact: {self.report}\nverdict: {verdict}\nblocker: {blocker}"
+        return self.terminal.classify_session_result(
+            {"subtype": "success", "is_error": False, "result": text}, 0, runtime="claude")
+
+    def test_the_two_real_shapes_are_normal_completions(self):
+        for label, verdict, blocker in (
+                ("blocker note after a dash", "PASS", "none — 최종 판정: 수정 후 병합 — head 8cbccb3 (필수 지적 2건: ① a, ② b)"),
+                ("verdict note in parentheses", "PASS (최종 판정: 병합 가능 — head d79893e)", "none"),
+                ("blocker note after a colon", "PASS", "none: 필수 지적 2건"),
+                ("blocker note in parentheses", "PASS", "none (필수 지적 2건)"),
+                ("verdict note after a dash", "PASS — 병합 가능", "none"),
+                ("verdict note after a hyphen", "PASS - 병합 가능", "none"),
+                ("both notes", "PASS (병합 가능)", "none — 필수 지적 없음")):
+            with self.subTest(label):
+                outcome = self.classify(verdict, blocker)
+                self.assertEqual((outcome.note, outcome.failure_class), ("completed-supervisor", "pass"))
+                found = route_authority.handoff_search(f"artifact: {self.report}\nverdict: {verdict}\nblocker: {blocker}")
+                self.assertEqual(found["verdict"], "PASS")
+        self.assertEqual(route_authority.pass_blocker_note("none — a note"), "a note")
+        self.assertEqual(route_authority.pass_blocker_note("none: a note"), "a note")
+
+    def test_a_real_blockage_still_asks_for_attention(self):
+        for label, verdict, blocker in (
+                ("blocker text", "PASS", "필수 지적 2건"),
+                ("blocker starting with none", "PASS", "none, but G1 was skipped"),
+                ("blocker naming something else", "PASS", "nonexistent (x)"),
+                ("blocker with an empty note", "PASS", "none —"),
+                ("not PASS", "not PASS", "none"),
+                ("FAIL naming PASS", "FAIL (was PASS)", "none"),
+                ("BLOCKED with a note", "BLOCKED (PASS pending)", "none"),
+                ("PASSED", "PASSED", "none"),
+                ("PASS-like word", "PASS-ish", "none"),
+                ("empty verdict note", "PASS (", "none"),
+                ("no verdict word", "완료 (PASS)", "none")):
+            with self.subTest(label):
+                outcome = self.classify(verdict, blocker)
+                self.assertEqual((outcome.note, outcome.failure_class), ("dead-contract", "contract"))
+        for verdict, note in (("FAIL", "dead-worker-fail"), ("BLOCKED", "dead-worker-blocked"),
+                              ("보류 (PASS 아님)", "dead-worker-fail")):
+            with self.subTest(verdict):
+                self.assertEqual(self.classify(verdict, "none — see report").note, note)
+        self.assertEqual(self.classify("PASS", "none").note, "completed-supervisor")
+        for text in ("artifact: /r\nverdict: PASS (ok)", "verdict: PASS (ok)\nblocker: none"):
+            with self.subTest(text):
+                self.assertEqual(self.terminal.classify_session_result(
+                    {"subtype": "success", "is_error": False, "result": text}, 0, runtime="claude").note,
+                    "dead-contract")
 
 
 class UnfinishedOwnerVerdictTest(unittest.TestCase):
@@ -457,8 +551,9 @@ class SummaryContentTest(unittest.TestCase):
         text = ("# 보고\n\n**최종 판정: 수정 후 병합 — head 0123456789ab**\n\n## 해결하지 못한 것\n- P1\n\n"
                 "- PR #1640 · head `0123456789abcdef0123` · CI 15/15 통과 · GitHub mergeable `MERGEABLE`\n")
         self.assertEqual(work_intent.report_verdict(text), "수정 후 병합 — head 0123456789ab")
-        self.assertEqual(work_intent.report_publication(text),
+        self.assertEqual(work_intent.report_publication(text, "PR #1640 검토"),
                          "#1640 · head 0123456789ab · CI 15/15 통과 · MERGEABLE")
+        self.assertEqual(work_intent.report_publication(text), "")
         self.assertEqual(work_intent.report_verdict("## 바꾼 것\n- x\n"), "")
         self.assertEqual(work_intent.report_publication("PR #12 opened\n"), "")
         self.assertEqual(work_intent.report_sections(text)["remaining"], ["P1", text.splitlines()[-1][2:]])
@@ -487,70 +582,107 @@ class SummaryContentTest(unittest.TestCase):
         self.assertEqual(work_intent.report_publication(own), "#1637 · head 350a5b428243 · CI 15/15 통과 · MERGEABLE")
         self.assertEqual((work_intent.report_publication(report), work_intent.report_pr_urls(report)), ("", []))
 
-    def test_a_closed_review_verdict_still_keeps_the_other_pr_out(self):
-        # A review's first line is the closed `최종 판정: … — head <hex>` and cannot name a PR.
-        evidence = ("- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- https://github.com/o/r/pull/1636\n"
-                    "- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n")
-        closed = "최종 판정: 병합 가능 — head 350a5b4\n\n"
-        own = "#1637 · head 350a5b428243 · CI 15/15 통과"
-        # No PR in the verdict line: the head it names picks this work's PR line.
-        report = closed + "# 검토\n\n## 근거\n" + evidence
-        self.assertEqual(work_intent.report_publication(report), own)
+    def summary(self, report, request="x", capability="review"):
         with tempfile.TemporaryDirectory(prefix="scc-summary-") as temporary:
             path = Path(temporary) / "report.md"
             path.write_text(report, encoding="utf-8")
-            summary = work_intent.completion_summary(
-                {"capability": "review", "work_request": {"text": "x"}}, str(path))
-        self.assertIn("\nPR: #1637 · head 350a5b428243", summary)
-        self.assertNotIn("PR: #1636", summary)
-        # The title names this work's PR: it wins, and the other PR's link goes too.
-        titled = closed + "# 검토 — PR #1637\n\n## 근거\n" + evidence
-        self.assertEqual(work_intent.report_publication(titled), own)
+            return work_intent.completion_summary(
+                {"capability": capability, "work_request": {"text": request}}, str(path))
+
+    @staticmethod
+    def carried(summary):
+        """The summary's `PR:` lines and the PR links on its artifact line."""
+        lines = summary.splitlines()
+        return ([line for line in lines if line.startswith("PR:")],
+                re.findall(r"pull/\d+", " ".join(line for line in lines if line.startswith(("Artifact", "산출물")))))
+
+    EVIDENCE = ("- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- https://github.com/o/r/pull/1636\n"
+                "- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n")
+    CLOSED = "최종 판정: 병합 가능 — head 350a5b4\n\n"
+    OWN = "#1637 · head 350a5b428243 · CI 15/15 통과"
+
+    def test_the_pr_is_the_one_the_verdict_line_or_title_names_else_the_one_the_request_names(self):
+        # A closed review verdict cannot name a PR and this report has no title: no PR is guessed
+        # from the evidence, though the PR line's head equals the verdict's.
+        report = self.CLOSED + "## 근거\n" + self.EVIDENCE
+        self.assertEqual((work_intent.report_publication(report), work_intent.report_pr_urls(report)), ("", []))
+        self.assertEqual(self.carried(self.summary(report)), ([], []))
+        # The title names this work's PR: it wins over the request, and the other PR's link goes too.
+        titled = self.CLOSED + "# 검토 — PR #1637\n\n## 근거\n" + self.EVIDENCE
+        self.assertEqual(work_intent.report_publication(titled), self.OWN)
+        self.assertEqual(work_intent.report_publication(titled, "PR #1636 검토"), self.OWN)
         self.assertEqual(work_intent.report_pr_urls(titled), [])
-        self.assertEqual(work_intent.report_publication(
-            closed + "# 검토 — PR #1637\n\n## 근거\n- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n"), "")
-        # A title naming a PR beats a head that matches no line.
-        self.assertEqual(work_intent.report_publication(
-            "최종 판정: 병합 가능 — head 9999999\n\n# 검토 — PR #1637\n" + evidence), own)
-        # No PR in the verdict line or title, no head either: the first PR line, as before.
-        self.assertTrue(work_intent.report_publication("# 검토\n\n" + evidence).startswith("#1636"))
-
-    def test_a_merge_makes_the_verdict_head_and_the_pr_line_head_differ_for_the_same_pr(self):
-        # The verdict line and the PR line each name the commit the other calls "head" (a merge).
-        base = "- PR #1637 · head {line} · CI 15/15 통과 · MERGEABLE\n"
-        forms = {
-            "verdict has my commit, line has the merge and names mine": (
-                "최종 판정: 완료 — head 2b1d684\n\n"
-                + base.format(line="7002da8af (내 commit 2b1d684fb + main 병합 7002da8af)")),
-            "verdict has the merge, line has mine and names the merge": (
-                "최종 판정: 완료 — head 7002da8\n\n"
-                + base.format(line="2b1d684fb (+ main 병합 commit 7002da8af)")),
-            "verdict names both, line has mine": (
-                "최종 판정: 완료 — head 7002da8 (내 commit 2b1d684 + 병합)\n\n" + base.format(line="2b1d684fb")),
-        }
-        for label, report in forms.items():
-            with self.subTest(label):
-                self.assertTrue(work_intent.report_publication(report).startswith("#1637 · head "), label)
-        # A line sharing no commit with the verdict line is still another PR's.
-        other = "- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n"
-        report = forms["verdict has my commit, line has the merge and names mine"]
-        self.assertTrue(work_intent.report_publication(
-            report.replace("\n\n", "\n\n" + other, 1)).startswith("#1637 · head "))
-
-    def test_a_pr_link_the_pr_lines_rule_out_is_not_carried_either(self):
-        other = "- base main = PR #1636 (https://github.com/o/r/pull/1636) merge, head 54922faf6 (CI 15/15)\n"
-        closed = "최종 판정: 병합 가능 — head 350a5b4\n\n## 근거\n"
-        # The only PR named is on a line whose head is not the verdict's: no link at all.
-        for tail in ("- 대상 head 350a5b428243 · CI 15/15\n",
-                     "- https://github.com/o/r/pull/1636\n- 대상: 브랜치 x, head 350a5b428243 · CI 15/15\n"):
-            with self.subTest(tail):
-                self.assertEqual(work_intent.report_pr_urls(closed + other + tail), [])
-        # The same PR also named on a line with the verdict's head keeps its link.
-        kept = closed + other + "- PR #1636 · head 350a5b428243 · CI 15/15\n"
-        self.assertEqual(work_intent.report_pr_urls(kept), ["https://github.com/o/r/pull/1636"])
-        # A link on a line that states no head is kept, as before.
-        self.assertEqual(work_intent.report_pr_urls(closed + "- https://github.com/o/r/pull/1636\n"),
+        self.assertEqual(self.carried(self.summary(titled)), (["PR: " + self.OWN], []))
+        # No PR in the verdict line or title: the one PR the request names, once the report has
+        # a line for that number.
+        self.assertEqual(work_intent.report_publication(report, "PR #1637 head 350a5b4 를 검토"), self.OWN)
+        self.assertEqual(self.carried(self.summary(report, "PR #1637 검토")), (["PR: " + self.OWN], []))
+        self.assertEqual(work_intent.report_pr_urls(report, request="PR #1636 검토"),
                          ["https://github.com/o/r/pull/1636"])
+        for request in ("x", "", None, "PR #1636과 PR #1637 비교", "https://github.com/o/r/pull/1636 와 PR 1637"):
+            with self.subTest(request=request):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+
+    def test_a_request_pr_the_report_never_names_is_not_carried(self):
+        report = self.CLOSED + "## 근거\n- base main = PR #1636 merge, head 54922faf6 (CI 15/15)\n- 대상 head 350a5b428243 · CI 15/15\n"
+        self.assertEqual((work_intent.report_publication(report, "PR #1637 검토"),
+                          work_intent.report_pr_urls(report, request="PR #1637 검토")), ("", []))
+        self.assertEqual(self.carried(self.summary(report, "PR #1637 검토")), ([], []))
+
+    def test_a_pr_the_request_body_names_for_reference_is_not_this_works(self):
+        # Only the request's first line (its title) says which PR this work is about; a body that
+        # mentions another PR as a reference carries no PR line or link.
+        report = self.CLOSED + "## 근거\n" + self.EVIDENCE.replace("- 대상: PR #1637 head 350a5b428243 · CI 15/15 통과\n", "")
+        report += "- PR #1636 · head 54922faf6 · CI 15/15 통과\n"
+        for request in ("# 겹치는 파일 정리\n\nPR #1636과 겹치는 파일을 정리한다", "# 후속 정리\n\n앞 PR #1636의 후속 정리",
+                        "\n\n# 정리\n본문 https://github.com/o/r/pull/1636"):
+            with self.subTest(request=request):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+                self.assertEqual(self.carried(self.summary(report, request)), ([], []))
+        # The title naming the PR still carries it (and a blank first line is skipped).
+        for request in ("# 검토 — PR #1636\n\nPR #1637과 비교", "\n# 검토 — PR #1636\n본문"):
+            self.assertTrue(work_intent.report_publication(report, request).startswith("#1636 · head 54922faf6 · CI 15/15"))
+
+    def test_no_other_pr_is_carried_whatever_its_head(self):
+        # R3's synthetic shapes: another PR's line or link is never carried, with or without a
+        # head that matches the verdict's, a merge's second head, a fenced example or a section
+        # heading naming it.
+        other = "- base main = PR #1636 (https://github.com/o/r/pull/1636) merge, head 54922faf6 (CI 15/15)\n"
+        merge = "최종 판정: 완료 — head 7002da8\n\n- PR #1636 · head 2b1d684fb · CI 15/15 통과\n"
+        for label, report, request in (
+                ("other PR with its link", self.CLOSED + "## 근거\n" + other + "- 대상 head 350a5b428243 · CI 15/15\n", "PR #1637 검토"),
+                ("other PR link, target line has no PR", self.CLOSED + "## 근거\n- https://github.com/o/r/pull/1636\n- 대상: head 350a5b428243 · CI 15/15\n", "PR #1637 검토"),
+                ("a merge's second head", merge, "PR #1637 검토"),
+                ("a fenced title", self.CLOSED + "```text\n# PR #1636 예시\n```\n## 근거\n" + other, "PR #1637 검토"),
+                ("a code line", self.CLOSED + "    # PR #1636 예시\n" + other, "PR #1637 검토"),
+                ("a section heading", self.CLOSED + "## PR #1636과 겹치는 파일\n" + other, "PR #1637 검토"),
+                ("a request naming two", self.CLOSED + other, "PR #1636 · PR #1637")):
+            with self.subTest(label):
+                self.assertEqual((work_intent.report_publication(report, request), work_intent.report_pr_urls(report, request=request)),
+                                 ("", []))
+
+    def test_the_head_is_not_compared_when_the_pr_is_known(self):
+        # A merge makes the verdict's head and the PR line's head differ; the PR is known, so both read.
+        for line in ("7002da8af (내 commit 2b1d684fb + main 병합 7002da8af)", "2b1d684fb (+ main 병합 commit 7002da8af)", "2b1d684fb"):
+            with self.subTest(line):
+                report = "최종 판정: 완료 — PR #1637, head 7002da8\n\n- PR #1637 · head " + line + " · CI 15/15 통과\n"
+                self.assertTrue(work_intent.report_publication(report).startswith("#1637 · head "))
+        self.assertEqual(work_intent.report_pr_urls("최종 판정: 완료 — PR #1637\n\n- https://github.com/o/r/pull/1637\n"),
+                         ["https://github.com/o/r/pull/1637"])
+
+    def test_a_wide_table_row_is_never_the_verification(self):
+        # A proposal's results table: its first cell may start with a heading word, its other cells are data.
+        report = ("# 제안서\n\n## 실제 수\n\n| 일 | Claude | Codex | OpenCode |\n|---|---|---|---|\n"
+                  "| 스크립트(python) | 17% · 18% | 12% · 12% | 15% · 16% |\n| 시험·점검 | 12% · 16% | 6% · 5% | 14% · 14% |\n")
+        self.assertEqual(work_intent.report_sections(report), {})
+        text = self.summary(report)
+        self.assertIn(work_intent.ui_translator()("completion.unreadable"), text.splitlines())
+        self.assertFalse([line for line in text.splitlines() if line.startswith(("Checks:", "검증:"))])
+        # A two-cell `| label | value |` row is still a field.
+        self.assertEqual(work_intent.report_sections("| 남은 것 | 저장 오류를 고치지 못함 |\n"),
+                         {"remaining": ["저장 오류를 고치지 못함"]})
 
     def test_the_check_counts_survive_a_long_prose_line(self):
         prose = "검증은 격리 HOME과 사설 tmux에서 loopback 모델로 세 하네스 각각 돌렸고 보고서 기록에 남김 — " * 3

@@ -123,7 +123,13 @@ class NativeContextReceiptTest(_BaseTest):
             )
         return text, ref
 
-    def _seed_registered_message(self, *, runtime=False):
+    # The runner's peer-body copy of a registered completion is not carried by a hook (the
+    # rewake sends the completion, Stop and the next prompt carry what it missed); a copy of
+    # anything else the runner retains (here a gate notice) still is, and its ACK is what the
+    # exact-receipt tests below guard.
+    GATE = "human-gate:frame-review"
+
+    def _seed_registered_message(self, *, runtime=False, action="inspect-done-failure"):
         sid = "sid-native-obligation"
         attempt_id = "att-native-context-owner"
         delivery_id = "delivery-native-context"
@@ -149,7 +155,7 @@ class NativeContextReceiptTest(_BaseTest):
             "parent_attempt_id": "att-native-context-parent",
             "job_registry": str(self.jobs_path), "delivery_classification": "attention",
             "children": [{"attempt_id": attempt_id, "status": "done", "readiness": "ready",
-                          "reason": "fixture", "required_action": "inspect-done-failure",
+                          "reason": "fixture", "required_action": action,
                           "harness": "claude", "delivery_classification": "attention"}],
         }
         receipt_digest = pending_delivery._canonical_receipt_digest(receipt)
@@ -194,7 +200,7 @@ class NativeContextReceiptTest(_BaseTest):
         return self._run("prompt", {"session_id": sid, "cwd": str(self.tmp_root), "prompt": ""})
 
     def test_native_hook_receipt_completes_exact_registered_obligation_once(self):
-        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message()
+        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(action=self.GATE)
         with mock.patch.dict(os.environ, self.env, clear=True):
             origin = peer_message.prompt_origin(text, "claude", sid)
             self.assertEqual(origin["kind"], "runtime-completion")
@@ -234,7 +240,7 @@ class NativeContextReceiptTest(_BaseTest):
         self.assertEqual([row for row in self._all_records() if row.get("transfer_ref") == ref], records)
 
     def test_subagent_post_tool_leaves_parent_message_pending_until_main_prompt(self):
-        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message()
+        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(action=self.GATE)
         post = self._run("post-tool", {
             "session_id": sid, "cwd": str(self.tmp_root), "tool_name": "Bash",
             "agent_id": "agent-child-123", "agent_type": "Explore",
@@ -284,8 +290,33 @@ class NativeContextReceiptTest(_BaseTest):
         self.assertEqual(records[0]["body_sha256"],
                          hashlib.sha256(b"[steer] recorded from subagent").hexdigest())
 
-    def test_runtime_completion_keeps_runtime_identity_through_native_receipt_and_ack(self):
+    def test_a_hook_never_carries_the_runners_copy_of_a_completion(self):
+        # The runner holds a completion only while a resting shell is injecting its copy
+        # (anywhere else it leaves the record pending for Stop). The injected prompt is the
+        # one send: no hook carries the copy meanwhile, and the prompt's receipt acks it.
         text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(runtime=True)
+        for mode, payload in (("prompt", {"prompt": ""}), ("post-tool", {"tool_name": "Bash"})):
+            with self.subTest(mode=mode):
+                out = self._run(mode, {"session_id": sid, "cwd": str(self.tmp_root), **payload})
+                self.assertEqual((out.returncode, out.stdout), (0, b""), out.stderr)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(peer_message._read_pending(ref)["state"], "pending")
+            self.assertTrue(peer_message._runtime_completion_copy(peer_message._read_pending(ref)))
+            self.assertEqual(peer_message.receive_peer_message(
+                text, {"harness": "claude", "session_id": sid}), 0)
+            self.assertEqual(pending_delivery.read(root, sid, delivery_id)["state"], "acked")
+
+    def test_the_runners_copy_of_anything_but_a_completion_is_still_carried(self):
+        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(
+            runtime=True, action=self.GATE)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertFalse(peer_message._runtime_completion_copy(peer_message._read_pending(ref)))
+        first = self._run("post-tool", {"session_id": sid, "cwd": str(self.tmp_root), "tool_name": "Bash"})
+        self.assertEqual(json.loads(first.stdout)["hookSpecificOutput"]["additionalContext"], text)
+
+    def test_runtime_completion_keeps_runtime_identity_through_native_receipt_and_ack(self):
+        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(
+            runtime=True, action=self.GATE)
         self.assertIn("(runtime-from:", text)
         self.assertNotIn("(peer-from:", text)
         first = self._prompt(sid)
@@ -509,10 +540,15 @@ class PostToolTest(_BaseTest):
 
 
 class StopFollowThroughTest(_BaseTest):
-    """PG-44: Claude's Stop gives Codex's one follow-through pass, same rule and state."""
+    """PG-44: Claude's Stop gives Codex's one follow-through pass, same rule and state.
+
+    A completion reaches the model through the asyncRewake and Claude's own queue, so the
+    transcript is what shows it was received; a tool boundary carries no completion.
+    """
 
     SID = "4f1c2b8e-0000-4000-8000-00000000f044"
     ATTEMPT = "att-" + "e" * 32
+    DELIVERY = "delivery-" + "e" * 32
 
     def _completion(self):
         parent = "att-" + "f" * 32
@@ -524,11 +560,43 @@ class StopFollowThroughTest(_BaseTest):
                                  "delivery_classification": "attention"}]}
         pending_delivery.create(
             root=self.tmp_root, recipient_kind="claude-parent-runtime", recipient_key=self.SID,
-            delivery_id="delivery-" + "e" * 32, session_generation="",
-            session_generation_supported="0", attempt_ids=[self.ATTEMPT],
-            parent_attempt_id=parent, route_id="rt-fixture", route_node="execute",
-            receipt=receipt, receipt_digest=pending_delivery._canonical_receipt_digest(receipt),
+            delivery_id=self.DELIVERY, session_generation="", session_generation_supported="0",
+            attempt_ids=[self.ATTEMPT], parent_attempt_id=parent, route_id="rt-fixture",
+            route_node="execute", receipt=receipt, receipt_digest=pending_delivery._canonical_receipt_digest(receipt),
             row_revisions={self.ATTEMPT: "deadbeef"})
+
+    def _rewake_delivered(self):
+        """The transcript Claude Code writes when the rewake's notification reaches the model."""
+        from claude_project_dir import encode_project_dir
+        from dispatch_recipient_receipt import receipt_marker
+        owner = "claude-async-rewake:1:1"
+        pending_delivery.claim(self.tmp_root, self.SID, self.DELIVERY, claim_owner=owner,
+                               lease_seconds=0.001)
+        pending_delivery.mark_sent_ambiguous(self.tmp_root, self.SID, self.DELIVERY, claim_owner=owner)
+        marker = receipt_marker(pending_delivery.read(self.tmp_root, self.SID, self.DELIVERY), self.SID)
+        note = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n"
+                "<system-reminder>\nStop hook blocking error from command \"PostToolUse:Bash\": body\n"
+                + marker + "\n</system-reminder>")
+        path = (Path(self.env["CLAUDE_CONFIG_DIR"]) / "projects"
+                / encode_project_dir(str(self.tmp_root)) / (self.SID + ".jsonl"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "type": "user", "sessionId": self.SID, "origin": {"kind": "task-notification",
+            "producer": "session-task"}, "promptSource": "system", "turnOrigin": "task_notification",
+            "message": {"content": note}}) + "\n", encoding="utf-8")
+        self.transcript = str(path)
+
+    transcript = None
+
+    def _run(self, mode, payload):
+        if self.transcript:
+            payload = {"transcript_path": self.transcript, "cwd": str(self.tmp_root), **payload}
+        return subprocess.run(
+            [sys.executable, str(_HOOK), mode], input=json.dumps(payload).encode("utf-8"),
+            capture_output=True, env=self.env, timeout=10, cwd=str(self.tmp_root))
+
+    def _state(self):
+        return pending_delivery.read(self.tmp_root, self.SID, self.DELIVERY)["state"]
 
     def _tool(self, command, prompt_id="prompt-1", **extra):
         proc = self._run("post-tool", {"session_id": self.SID, "prompt_id": prompt_id,
@@ -545,7 +613,10 @@ class StopFollowThroughTest(_BaseTest):
 
     def test_an_owed_action_ignored_by_an_unrelated_tool_continues_once(self):
         self._completion()
-        self.assertIn(self.ATTEMPT, self._tool("register && complete"))
+        self._rewake_delivered()
+        # Received through the rewake: a tool boundary carries nothing and counts it.
+        self.assertEqual(self._tool("register && complete"), "")
+        self.assertEqual(self._state(), "acked")
         self._tool("ls -1 /")
         first = self._stop()
         self.assertEqual(len(first), 1)
@@ -556,22 +627,42 @@ class StopFollowThroughTest(_BaseTest):
 
     def test_a_tool_naming_the_attempt_meets_the_action(self):
         self._completion()
+        self._rewake_delivered()
         self._tool("register && complete")
         self._tool("harvest --attempt " + self.ATTEMPT)
         self.assertEqual(self._stop(), [])
 
+    def test_the_tool_that_first_shows_the_receipt_may_be_the_one_that_acted(self):
+        # The hook sees the transcript after the model has already used the next tool.
+        self._completion()
+        self._rewake_delivered()
+        self.assertEqual(self._tool("harvest --attempt " + self.ATTEMPT), "")
+        self.assertEqual(self._stop(), [])
+
     def test_a_new_prompt_and_a_missing_prompt_id_start_without_owed_actions(self):
         self._completion()
+        self._rewake_delivered()
         self._tool("register && complete")
         self.assertEqual(self._stop(prompt_id="prompt-2"), [])
         self.assertEqual(self._stop(prompt_id=""), [])
 
     def test_a_subagent_tool_and_stop_are_not_the_main_turn(self):
         self._completion()
+        self._rewake_delivered()
         self._tool("register && complete")
         self._tool("harvest --attempt " + self.ATTEMPT, agent_id="sub-1")
         self.assertEqual(self._stop(agent_id="sub-1"), [])
         self.assertEqual(len(self._stop()), 1)
+
+    def test_a_completion_no_rewake_delivered_is_carried_by_the_turns_stop_not_a_tool(self):
+        # Never armed, lost by the queue, or the hook died: the transcript shows nothing.
+        self._completion()
+        self.assertEqual(self._tool("register && complete"), "")
+        self.assertNotEqual(self._state(), "acked")
+        first = self._stop()
+        self.assertEqual(len(first), 1)
+        self.assertTrue(first[0]["reason"].startswith("[hearting] Arrived before this turn ended:"))
+        self.assertIn(self.ATTEMPT, first[0]["reason"])
 
 
 class ToolBoundaryNoticeTest(_BaseTest):
@@ -605,7 +696,9 @@ class ToolBoundaryNoticeTest(_BaseTest):
                                         "hook_event_name": "PostToolUse"})
         self.assertNotIn(b"TOOL_BOUNDARY_NOTICE_TOKEN", again.stdout)
 
-    def test_a_completion_closed_during_the_tool_reaches_the_same_turn(self):
+    def test_a_completion_closed_during_the_tool_reaches_the_turn_at_its_stop(self):
+        # PG-43 holds by another road: the rewake sends it, and when it did not, the turn's
+        # Stop does, before the turn ends. A tool boundary never carries a completion.
         attempt, parent = "att-" + "c" * 32, "att-" + "d" * 32
         receipt = {"schema_version": 2, "state": "delivered", "parent_attempt_id": parent,
                    "job_registry": str(self.jobs_path), "delivery_classification": "attention",
@@ -623,11 +716,13 @@ class ToolBoundaryNoticeTest(_BaseTest):
             row_revisions={attempt: "deadbeef"})
         proc = self._run("post-tool", {"session_id": self.SID, "tool_name": "Bash",
                                        "hook_event_name": "PostToolUse"})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        output = json.loads(proc.stdout.decode().strip().splitlines()[-1])
-        self.assertIn(attempt, output["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual(pending_delivery.read(self.tmp_root, self.SID, delivery_id)["state"],
-                         "acked")
+        self.assertEqual((proc.returncode, proc.stdout), (0, b""), proc.stderr)
+        self.assertNotEqual(pending_delivery.read(self.tmp_root, self.SID, delivery_id)["state"], "acked")
+        stop = self._run("stop", {"session_id": self.SID, "hook_event_name": "Stop"})
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        block = json.loads(stop.stdout.decode().strip().splitlines()[-1])
+        self.assertEqual(block["decision"], "block")
+        self.assertIn(attempt, block["reason"])
 
     def test_a_subagent_tool_leaves_the_notice_for_the_main_conversation(self):
         record = self._notice(key="subagent")
