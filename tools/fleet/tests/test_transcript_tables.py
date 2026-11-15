@@ -8,6 +8,8 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from collections import Counter
 from pathlib import Path
+import time
+import unicodedata
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -127,6 +129,38 @@ class TableTest(unittest.TestCase):
         for width in range(20, 117):
             for row in transcript.doc_rows(doc, width):
                 self.assertLessEqual(cell_width(text(row)), width, (width, text(row)))
+
+
+class SafetyTest(unittest.TestCase):
+    NASTY = "a\x1b[2Jb\x1b]0;t\x07c\x00d\x08e\x85f\x9bg\u202eh\u2066i\u2069j\u200dk"
+
+    def test_no_control_character_or_direction_override_survives_in_prose_list_heading_fence_or_cell(self):
+        nasty = self.NASTY
+        lines = ["# " + nasty, nasty, "- " + nasty, "```", nasty, "```", "| h " + nasty + " |", "|--|", "| c " + nasty + " |"]
+        for width in (12, 30, 80):
+            for line in drawn(lines, width):
+                self.assertEqual([c for c in line if unicodedata.category(c) == "Cc" or c in "\u202e\u2066\u2069"], [], line)
+                self.assertLessEqual(cell_width(line), width, line)
+        joined = "".join(drawn(lines, 80))
+        self.assertIn("\u200d", joined)                    # the emoji joiner is kept
+        self.assertEqual(transcript.clean("x\ty\nz"), "x\ty\nz")  # tab and newline are not control characters here
+
+    def test_a_long_run_of_open_brackets_is_not_quadratic(self):
+        self.assertEqual(transcript._unlink("[a [b](u)"), "[a b")        # the words hold no ``[``
+        self.assertEqual(transcript._unlink("see [a](u) and ![b](v)"), "see a and b")
+        for line in ("[" * 32000, "[](" * 10000, "[a" * 16000):
+            start = time.process_time()
+            rows = transcript.doc_rows([line], 80)
+            self.assertTrue(rows)
+            self.assertLess(time.process_time() - start, 1.5, line[:3])      # generous: it took 2.7 s before
+
+    def test_a_table_indented_four_spaces_is_code_and_stands_as_written(self):
+        lines = ["    | a | b |", "    |---|---|", "    | 1 | 2 |"]
+        self.assertEqual([line.strip() for line in drawn(lines, 40)], ["| a | b |", "|---|---|", "| 1 | 2 |"])
+        for indent in ("", " ", "   "):
+            rows = drawn([indent + "| a | b |", indent + "|---|---|", indent + "| 1 | 2 |"], 40)
+            self.assertFalse([row for row in rows if "|--" in row], rows)          # up to three spaces: still a table
+        self.assertEqual(drawn(["    | a | b |", "|---|---|"], 40)[0].strip(), "| a | b |")
 
 
 class CardSpansTest(unittest.TestCase):

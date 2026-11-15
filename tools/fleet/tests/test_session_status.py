@@ -10,6 +10,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import json
 from pathlib import Path
 import tempfile
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -153,6 +154,40 @@ class ChoiceTest(StatusTest):
             self.assertEqual(self.read(self.route(1, "alpha"))["title"], "STATUS alpha · 1h ago")
 
 
+    def test_a_route_record_that_is_a_link_out_of_the_root_picks_no_campaign(self):
+        self.campaign("alpha", age=3 * 3600)
+        self.campaign("beta", age=600)
+        record = {"route_id": rid(1), "campaign_key": "alpha"}
+        with tempfile.TemporaryDirectory(prefix="ss") as outside:
+            elsewhere = Path(outside) / "rec.json"
+            elsewhere.write_text(json.dumps(record), encoding="utf-8")
+            (self.root / ".runtime" / "routes" / (rid(1) + ".json")).symlink_to(elsewhere)
+            self.assertEqual(self.read(rid(1))["campaign"], "beta")         # Fleet's document, not alpha's
+            # the same record, kept in a folder that is itself a link out of the root
+            (self.root / ".runtime" / "routes" / (rid(1) + ".json")).unlink()
+            (self.root / ".runtime" / "routes").rmdir()
+            (Path(outside) / (rid(1) + ".json")).write_text(json.dumps(record), encoding="utf-8")
+            (self.root / ".runtime" / "routes").symlink_to(outside)
+            session_status.clear_cache()
+            project_status.clear_cache()
+            self.assertEqual(self.read(rid(1))["campaign"], "beta")
+
+    def test_an_oversize_route_record_picks_no_campaign(self):
+        self.campaign("alpha", age=3 * 3600)
+        self.campaign("beta", age=600)
+        record = {"route_id": rid(1), "campaign_key": "alpha", "pad": "x" * 70000}
+        (self.root / ".runtime" / "routes" / (rid(1) + ".json")).write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(self.read(rid(1))["campaign"], "beta")
+
+
+NASTY = ("\x1b[2J \x1b]0;title\x07 \x1b]52;c;QUJD\x07 nul\x00 bel\x07 bs\x08 next\x85 csi\x9b31m "
+         "rlo\u202e flip\u2066 end\u2069 fam\U0001F468\u200d\U0001F469")
+
+
+def unsafe(line):
+    return [char for char in line if unicodedata.category(char) == "Cc" or char in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"]
+
+
 class PopupTest(StatusTest):
     def status(self):
         return {"campaigns": [{"campaign": "alpha", "line": "알파 작업 중.", "doc_age": "1h ago"}], "next": "둘"}
@@ -206,6 +241,42 @@ class PopupTest(StatusTest):
         self.campaign("alpha")
         rows = session_status.popup_rows(self.read(self.route(1, "alpha")), self.status(), 60)
         self.assertNotIn("… 64 KiB", [text(row) for row in rows])
+
+    def test_no_control_character_or_direction_override_reaches_any_row(self):
+        body = ("# 제목 " + NASTY + "\n\n" + NASTY + " 산문\n- 목록 " + NASTY + "\n\n```\n코드 " + NASTY + "\n```\n\n"
+                "| 항목 " + NASTY + " | 상태 |\n|:--|--:|\n| 칸 " + NASTY + " | b |\n")
+        self.campaign("alpha", body=body)
+        view = self.read(self.route(1, "alpha"))
+        status = {"campaigns": [{"campaign": "al" + NASTY, "line": "줄 " + NASTY, "doc_age": "1h ago"}], "next": "다음 " + NASTY}
+        for width in (20, 40, 80):
+            rows = session_status.popup_rows(view, status, width)
+            self.assertTrue([line for line in map(text, rows) if "제목" in line or "칸" in line])
+            for row in rows:
+                self.assertEqual(unsafe(text(row)), [], (width, text(row)))
+                self.assertLessEqual(cell_width(text(row)), width, (width, text(row)))
+        self.assertIn("\u200d", "".join(text(row) for row in session_status.popup_rows(view, status, 80)))  # the emoji joiner stays
+        # and the place a missing document would stand
+        self.campaign("gamma", doc=False)
+        slotted = dict(self.read(self.route(2, "gamma")), slot="campaigns/g" + NASTY + "/현황.md")
+        for row in session_status.popup_rows(dict(slotted, has_doc=False, path=""), status, 60):
+            self.assertEqual(unsafe(text(row)), [])
+            self.assertLessEqual(cell_width(text(row)), 60)
+
+    def test_a_document_Fleet_does_not_know_has_no_no_document_line_above_it(self):
+        body = "# 큰 문서\n" + "".join("줄 %05d 가나다라마바사\n" % n for n in range(6000))
+        self.campaign("alpha", body=body)                     # over 64 KiB: Fleet's project line does not list it
+        view = self.read(self.route(1, "alpha"))
+        self.assertTrue(view["has_doc"])
+        for status in ({}, None):
+            lines = [text(row) for row in session_status.popup_rows(view, status, 80)]
+            self.assertNotIn("현황 문서 없음.", [line.strip() for line in lines])
+            self.assertEqual(lines[0], "큰 문서")
+        # Fleet's own page still says it when it holds nothing
+        from tools.fleet.explorer import pages
+        from tools.fleet.explorer.grid import CellGrid
+        grid = CellGrid(60, 4)
+        pages.repo_status_lines(grid, 0, 60, 0, {})
+        self.assertIn("현황 문서 없음.", "".join(char for char, _key, _tint in grid.cells[0]))
 
     def test_widths_from_20_to_116_never_overflow(self):
         self.campaign("alpha", body=DOC.format(name="alpha") + TABLE + "```\n" + "x" * 300 + "\n```\n")

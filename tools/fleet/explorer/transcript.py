@@ -97,7 +97,7 @@ def card_rows(lines, width, spans=None):
 # stands as written, one row per line, cut with ``…``; a GFM table (a ``|`` line followed by a delimiter
 # row of the same cell count) is ``table_rows``. Fleet's own screens still draw tables as cards.
 
-_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_LINK = re.compile(r"!?\[([^\][]*)\]\([^)]*\)")      # no ``[`` in the words: a run of ``[`` is not a quadratic scan
 _CODE = re.compile(r"(`[^`]+`)")
 _DELIM_CELL = re.compile(r"^:?-+:?$")
 _GAP = 2                # columns two cells apart, no vertical line (Fleet's LAB table)
@@ -111,8 +111,17 @@ def _unlink(text):
                    for index, part in enumerate(_CODE.split(text)))
 
 
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")     # C0 (not tab, newline), DEL, C1: ESC, BEL, NUL, 0x9b ...
+_BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")           # text-direction overrides (U+200D, the emoji joiner, stays)
+
+
+def clean(text):
+    """Text safe to hand to a terminal: control characters become a space, direction overrides go."""
+    return _BIDI.sub("", _CONTROL.sub(" ", str(text)))
+
+
 def _plain(text):
-    return str(text).replace("\t", "    ").replace("\r", "")
+    return clean(str(text).replace("\t", "    ").replace("\r", ""))
 
 
 def split_cells(line):
@@ -285,6 +294,11 @@ def table_rows(header, aligns, body, width):
     return out
 
 
+def _indented(line):
+    """Four spaces or more: GFM's code block, so a ``|`` line there is not a table's."""
+    return len(line) - len(line.lstrip(" ")) >= 4
+
+
 def doc_rows(lines, width):
     """A document's lines drawn at ``width`` cells: ``(text, key)`` rows, none wider than ``width``."""
     width = max(1, int(width))
@@ -317,7 +331,7 @@ def doc_rows(lines, width):
             fence = marker.group(1)
             index += 1
             continue
-        if "|" in text and index + 1 < len(lines):
+        if "|" in text and index + 1 < len(lines) and not _indented(line) and not _indented(lines[index + 1]):
             header = split_cells(line)
             aligns = table_aligns(lines[index + 1], len(header))
             if aligns:

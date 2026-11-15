@@ -75,6 +75,7 @@ def _campaign_folders(root, route_ids, now):
     A route whose record cannot be read, names no campaign, or whose campaign is not open (closed, or
     not yet in the ``campaigns/`` list) adds none: the session does not know that campaign."""
     try:
+        import artifact_campaign_documents as documents
         import route_autoclose
     except Exception:  # noqa: BLE001 -- no resolver: the session knows no campaign
         return []
@@ -84,8 +85,11 @@ def _campaign_folders(root, route_ids, now):
             record = None
             key = _KEYS.get((root, route_id))
             if key is None:
-                path = Path(root) / ".runtime" / "routes" / (route_id + ".json")
-                record = json.loads(path.read_text(encoding="utf-8"))
+                raw, _info, coverage = documents.read_document(      # no link is followed, 64 KiB at most
+                    Path(root) / ".runtime" / "routes", route_id + ".json")
+                if coverage != "complete":
+                    continue
+                record = json.loads(raw.decode("utf-8"))
                 if not isinstance(record, dict) or record.get("route_id") != route_id:
                     continue
                 key = route_autoclose.campaign_key_of(record) or ""
@@ -247,14 +251,29 @@ def popup_rows(view, status, width):
     ``status`` is the project's Fleet status (``live._repo_status``'s ``status`` for its repo; ``None``
     or empty when Fleet holds none).  Without a document: Fleet's ``fleet.repo.no_status`` word, and the
     place the document would stand when a campaign is known."""
-    width = max(1, int(width))
-    status = status if isinstance(status, Mapping) else {}
+    return [[(transcript.clean(text), key) for text, key in row]
+            for row in _popup_rows(view, _clean_all(status) if isinstance(status, Mapping) else {}, max(1, int(width)))]
+
+
+def _clean_all(value):
+    """Every string inside ``value`` (Fleet's status, which carries words from the document) made terminal-safe."""
+    if isinstance(value, str):
+        return transcript.clean(value)
+    if isinstance(value, Mapping):
+        return {key: _clean_all(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_all(item) for item in value]
+    return value
+
+
+def _popup_rows(view, status, width):
     if not view.get("has_doc"):
         none = ui_text("fleet.repo.no_status")
-        place = [(" · " + view["slot"], "dim")] if view.get("slot") else []
+        place = [(" · " + transcript.clean(view["slot"]), "dim")] if view.get("slot") else []
         row = transcript._cut([(none, "dim")] + place, width)
         return (_fleet_lines(status, width) + [[], row]) if status else [row]
-    rows = _fleet_lines(status, width) + [[]]
+    # With a document, Fleet's "no status" word is left out when Fleet holds none (it may not know a large document)
+    rows = (_fleet_lines(status, width) + [[]]) if status else []
     lines, cut = read_text(view["path"])
     if lines is None:
         return rows + [[("?", "dim")]]
