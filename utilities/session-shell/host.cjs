@@ -295,7 +295,8 @@ function readAction(extra,operation='action',own=false) {
       [path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
     if(!own){actionWorker=worker;queueProjection();}
     const finish=value=>{if(!settled){settled=true;clearTimeout(timer);resolve(value);}};
-    const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
+    // A read that outlives its 12 seconds ends then (a person's answer is left to finish: it holds the one slot).
+    const timer=setTimeout(()=>{finish({ok:false,reason:'action-unavailable'});if(operation!=='answer')try{worker.kill('SIGKILL');}catch{}},12000);
     worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
     worker.stdin.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
     worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();checkRelease();}finish({ok:false,reason:'action-unavailable'});});
@@ -662,12 +663,21 @@ function askTable(){
   readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room},'popup',true).then(result=>{
     if(table!==t||selected!==selection)return;
     if(!result?.ok){t.error=!t.loaded;queueDisplay();return;}
-    t.rows=tableParts(result);t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;
+    t.rows=tableParts(result);t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;followOpen(t);
     if(Array.isArray(result.routes))t.routes=result.routes;
     if(t.kind==='ROUTE'&&t.page&&result.page!==true)t.page=false;
     if(t.kind==='SESSIONS')noteSessions(result);
     queueDisplay();
   }).finally(()=>{tableAsking=false;if(tableAgain)askTable();});
+}
+// ↑↓ Tab move the unfolded row; the reading's place follows it (the row at the top when it is out of view),
+// once the table is read again with the row unfolded.
+function followOpen(t){
+  if(!t.follow||!t.open||!t.space)return;t.follow=false;
+  const mine=t.kind==='ROUTE'?h=>h.action[0]==='route'&&h.action[1]===t.open:h=>h.action[0]==='fold'&&h.action[2]===t.open;
+  const rows=(t.hits||[]).filter(mine).map(h=>h.row);if(!rows.length)return;
+  const row=Math.min(...rows),space=t.space;
+  if(row<t.scroll||row>=t.scroll+space)t.scroll=row;
 }
 // The sessions section's values come from the same reading as the sessions popup (Fleet's session
 // table): read once the session is known, when another session's answer waits change (the
@@ -697,12 +707,12 @@ function askForeign(tag){
 }
 // Opening a popup (a press on its section, Ctrl+], ←→ inside one). The keys are its own from now on.
 function openPopup(name,open=''){
-  epoch++;empty=false;actionLines=[];
+  epoch++;empty=false;actionLines=[];resetTableInput();
   if(name==='QUESTIONS'){table=null;popupWatch=[];if(block.foreign)block.leave();block.enter();queueDisplay();return;}
   const was=table;
   // The routes popup opens with the pressed route unfolded, else the most pressing one (the panel's first).
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
-  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table')};
+  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table')};
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
   else{
@@ -718,6 +728,7 @@ function rankedRoutes(){
   return routes.map((r,i)=>[r,i]).sort((a,b)=>rank(a[0])-rank(b[0])||a[1]-b[1]).map(([r])=>r);
 }
 function closePopup(){
+  resetTableInput();
   if(table){table=null;if(popupWatch.length){popupWatch=[];queueProjection();}}
   if(block.focused)block.leave();
   actionLines=[];queueDisplay();
@@ -733,12 +744,12 @@ function moveRow(delta){
   const t=table;if(!t)return;
   if(t.kind==='ROUTE'&&!t.page&&t.routes.length){
     const at=t.routes.indexOf(t.open),next=at<0?(delta>0?0:t.routes.length-1):Math.max(0,Math.min(t.routes.length-1,at+delta));
-    if(t.routes[next]!==t.open){t.open=t.routes[next];askTable();}return;
+    if(t.routes[next]!==t.open){t.open=t.routes[next];t.follow=true;askTable();}return;
   }
   if(t.kind==='SESSIONS'){
     const tags=[...new Set((t.hits||[]).filter(h=>h.action[0]==='fold'&&h.action[1]==='sopen:OVERVIEW').map(h=>h.action[2]))];
     if(tags.length){const at=tags.indexOf(t.open),next=at<0?(delta>0?0:tags.length-1):Math.max(0,Math.min(tags.length-1,at+delta));
-      if(tags[next]!==t.open){t.open=tags[next];askTable();}return;}
+      if(tags[next]!==t.open){t.open=tags[next];t.follow=true;askTable();}return;}
   }
   t.scroll=Math.max(0,t.scroll+delta);queueDisplay();
 }
@@ -749,11 +760,12 @@ async function enterRow(){
   if(t.kind==='SESSIONS'&&t.open){
     const own=sessionsSummary?.rows?.find(row=>row&&row.own)?.tag;
     if(t.open===own){openPopup('QUESTIONS');return;}
-    const result=await askForeign(t.open);
+    // The session Enter was pressed on, whatever a key moves the unfolded row to while it is read.
+    const tag=t.open,result=await askForeign(tag);
     if(table!==t)return;
     if(!result||!Array.isArray(result.questions)||!result.questions.length)return;
     table=null;popupWatch=[];
-    block.enterForeign({tag:t.open,owner:result.owner,items:result.questions,labels:result.labels});
+    block.enterForeign({tag,owner:result.owner,items:result.questions,labels:result.labels});
     queueDisplay();
   }
 }
@@ -1371,8 +1383,8 @@ function popupMouse(code,x,y,release){
   const target=table&&(l.tableHits||[]).find(h=>h.row===row&&col>=h.left&&col<=h.right);
   if(target){
     const [verb,second,third]=target.action;
-    if(table.kind==='ROUTE'&&verb==='route'&&second){if(table.open===second)enterRow();else{table.open=second;table.page=false;askTable();}}
-    else if(table.kind==='SESSIONS'&&verb==='fold'&&third){if(table.open===third)enterRow();else{table.open=third;askTable();}}
+    if(table.kind==='ROUTE'&&verb==='route'&&second){if(table.open===second)enterRow();else{table.open=second;table.page=false;table.follow=true;askTable();}}
+    else if(table.kind==='SESSIONS'&&verb==='fold'&&third){if(table.open===third)enterRow();else{table.open=third;table.follow=true;askTable();}}
   }
   return true;
 }
@@ -1456,12 +1468,28 @@ function inputBytes(data) {
 // Fleet. Every other
 // key, a paste and an Alt+letter are the popup's and do nothing. Returns what follows a closing key.
 let tableTail='',tableEscape,tablePaste=false;
+const PASTE_ESCAPE_MS=250;
+// The popup's input state (a paste under way, a key's front, the Esc being waited on) is the popup's: it
+// ends with it, closed or opened again, as the question editor's `leave()` ends its parser.
+function resetTableInput(){clearTimeout(tableEscape);tableEscape=undefined;tableTail='';tablePaste=false;}
 function tableInput(data){
   clearTimeout(tableEscape);
   let text=tableTail+data.toString('latin1');tableTail='';
   while(text.length){
     if(!table)return Buffer.from(text,'latin1');
-    if(tablePaste){const end=text.indexOf('\x1b[201~');if(end<0){text='';break;}text=text.slice(end+6);tablePaste=false;continue;}
+    if(tablePaste){
+      // A paste is the popup's and does nothing; its end mark may arrive split anywhere (`ESC` | `[201~` …
+      // `ESC[20` | `1~`), so the front of it is kept for the next read. A Ctrl+] inside it still closes (a
+      // paste that never ends must not hold the popup); the rest of that read is the paste's, dropped.
+      const end=text.indexOf('\x1b[201~'),stop=text.indexOf('\x1d');
+      if(stop>=0&&(end<0||stop<end)){closePopup();return Buffer.alloc(0);}
+      if(end>=0){text=text.slice(end+6);tablePaste=false;continue;}
+      let keep=0;for(let k=5;k>0&&!keep;k--)if(text.endsWith('\x1b[201~'.slice(0,k)))keep=k;
+      if(keep){tableTail=text.slice(-keep);
+        // A lone Esc left at the end of a paste is the person's Esc if no rest of the end mark follows it.
+        if(keep===1)tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){closePopup();block.escaped();}},PASTE_ESCAPE_MS);}
+      text='';break;
+    }
     if(text.startsWith('\x1b[200~')){tablePaste=true;text=text.slice(6);continue;}
     if(text[0]==='\x1d'){closePopup();return Buffer.from(text.slice(1),'latin1');}
     if(text[0]==='\x1b'){

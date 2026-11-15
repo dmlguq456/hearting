@@ -38,7 +38,7 @@ function fixture(delivery){
   layoutQueued:false,panelHitsPlacement:'shown',placement:()=>'shown',foldByHand(){},
   source:(op,value)=>{saved.push({op,value});return Promise.resolve({ok:true,settings:value.settings});},
   settingsInput(){saved.push({op:'settings-input'});},
-  tableInput(data){tableKeys.push(Buffer.from(data));return Buffer.alloc(0);},
+  tableInput(data){tableKeys.push(Buffer.from(data));return Buffer.alloc(0);},resetTableInput(){},
   inputOwner:{hold:b=>held.push(Buffer.from(b))},child:{write:b=>native.push(Buffer.from(b))},process:{stdin:{pause(){}}},
   block:{leave(){focused=false;},enter(){focused=true;},get focused(){return focused;},input(data){edited.push(Buffer.from(data));return Buffer.alloc(0);}}};
  vm.createContext(context);vm.runInContext(functions+'\nthis.mouse=panelMouse;this.bytes=inputBytes;',context);

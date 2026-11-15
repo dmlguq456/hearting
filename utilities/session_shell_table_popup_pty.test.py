@@ -87,6 +87,7 @@ def tag(harness,sid):return {{OWN:'e9',OTHER:'12'}}.get(sid)
 session_tags.assigned_tag=tag
 def vm(harness,sid,kind):
     from fleet.explorer.view_model import ExplorerViewModel
+    while os.path.exists({vm!r}+'.hang'):time.sleep(0.2)
     return ExplorerViewModel.from_mapping(json.load(open({vm!r})))
 m._popup_view_model=vm
 def board(cwd,now=None):
@@ -167,7 +168,9 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   // ↓ until the waiting session [12] unfolds; Enter opens its question in the question popup.
   for(let i=0;i<6&&!unfolded(await screen()).includes('[12]');i++)await key('\x1b[B',500);
   s=await until(s=>unfolded(s).includes('[12]'),'the waiting session unfolded');frames.sessions_open=s;
-  await key('\r',300);s=await until(s=>!!box(s)&&box(s).title.includes('[12]'),'the other session\'s question');frames.foreign=s;
+  // (↓ comes in the same read as Enter, while the question is being read: the question opened, its number
+  // and its answer are the session Enter was pressed on, not the one ↓ moved to.)
+  await key('\r\x1b[B',300);s=await until(s=>!!box(s)&&box(s).title.includes('[12]'),'the other session\'s question');frames.foreign=s;
   checks.foreign_title=box(s).title;
   await key('2',150);await key('\r',600);s=await until(s=>!box(s),'the answer sent and the popup closed');frames.answered=s;
   // Nothing of it reached the native: its draft stands, never submitted.
@@ -224,6 +227,63 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
     checks.esc[kind]=r;
   }
   await sleep(1200);await key('\x1b',300);await key('Q',300);checks.esc_after_a_second=await draft();
+  // The popup's input state is the popup's. A paste's end mark (`ESC[201~`) may arrive split at any of its
+  // five joints: the keys live (→ moves the section, Esc closes) and the pasted text goes nowhere (no `p r w f`,
+  // no Enter of it reaches the native). A paste that never ends, and a key's front, end with the popup: Esc,
+  // Ctrl+] and a press outside close it, and the next popup is normal.
+  await key('z',300);  // (the `ESC Q` the native took above leaves the host's key reader mid-key; a letter ends it)
+  const base=await draft();checks.paste={base};
+  const END='\x1b[201~',kept=async()=>(await draft())===base&&!raw.includes('NATIVE_ESC_');
+  for(const cut of [1,2,3,4,5]){
+    await open('ROUTE');
+    await key('\x1b[200~prwf hello\rworld\x1b[A'+END.slice(0,cut),150);await key(END.slice(cut),150);
+    await key('\x1b[C',300);s=await screen();
+    const r={moved:!!box(s)&&box(s).title.includes('LAB'),draft:await kept()};
+    await key('\x1b',300);s=await screen();r.closed=!box(s);checks.paste['split'+cut]=r;
+  }
+  // Never ended: the three ways out, each then a normal popup (→ moves it, Esc closes it).
+  const fresh=async name=>{await open('ROUTE');await key('\x1b[C',300);const t=await screen();const ok=!!box(t)&&box(t).title.includes('LAB');
+    await key('\x1b',300);return ok&&!box(await screen());};
+  for(const way of ['ctrl','esc','press','tail']){
+    await open('ROUTE');
+    await key(way==='tail'?'\x1b[200~abc\x1b[2':'\x1b[200~abc prwf',200);
+    if(way==='ctrl')await key('\x1d',300);
+    else if(way==='esc')await key('\x1b',500);
+    else if(way==='press')await press(2,1,300);
+    else await key('\x1d',300);
+    s=await screen();const r={closed:!box(s)};
+    r.next=await fresh();r.draft=await kept();checks.paste['never_'+way]=r;
+  }
+  // A paste's front and a key's front, left standing when the popup closes by Esc, are gone with it: the
+  // next popup's `01~` and → are keys of its own.
+  await open('ROUTE');await key('\x1b[200~abc\x1b[',200);await key('\x1b',500);s=await screen();
+  checks.paste.front_closed=!box(s);await open('ROUTE');await key('01~',200);await key('\x1b[C',300);s=await screen();
+  checks.paste.front_next=!!box(s)&&box(s).title.includes('LAB');await key('\x1b',300);checks.paste.front_draft=await kept();
+  // ↑↓ follow: a popup longer than its rows keeps the unfolded row in view, up and down (60×16).
+  await resize(60,16);await key('\x1d',400);await until(s=>!!box(s),'a popup at 60×16');await key('\x1b[C',400);
+  s=await until(popupHas('ROUTE'),'the routes popup at 60×16');await until(s=>unfolded(s)!=='','the unfolded route in view');
+  const place=s=>{const m=(box(s)?box(s).rows.join('\n'):'').match(/(\d+)\/(\d+) · /);return m?[+m[1],+m[2]]:null;};
+  checks.follow={down:[],up:[],place:[]};
+  for(let i=0;i<14;i++){await key('\x1b[B',350);s=await screen();checks.follow.down.push(unfolded(s)!=='');checks.follow.place.push(place(s));}
+  for(let i=0;i<14;i++){await key('\x1b[A',350);s=await screen();checks.follow.up.push(unfolded(s)!=='');checks.follow.place.push(place(s));}
+  await key('\x1b[C',300);await key('\x1b[C',300);s=await until(popupHas('TITLE'),'the sessions popup at 60×16');checks.follow.sessions=[];
+  for(let i=0;i<4;i++){await key('\x1b[B',400);s=await screen();checks.follow.sessions.push(unfolded(s)!=='');}
+  await key('\x1b',300);await resize(160,40);
+  // Children: the popup opened and closed 100 times leaves no read behind, and a read that hangs ends at 12 s.
+  const reads=()=>{const kids=new Map();for(const id of fs.readdirSync('/proc').filter(n=>/^\d+$/.test(n))){try{
+    const st=fs.readFileSync('/proc/'+id+'/stat','utf8'),after=st.slice(st.lastIndexOf(')')+2).split(' ');
+    kids.set(+id,{ppid:+after[1],cmd:fs.readFileSync('/proc/'+id+'/cmdline','utf8')});}catch{}}
+    const live=new Set([child.pid]);for(let again=true;again;){again=false;for(const [id,k] of kids)if(!live.has(id)&&live.has(k.ppid)){live.add(id);again=true;}}
+    return [...live].filter(id=>kids.get(id)&&kids.get(id).cmd.includes(cfg.backend)).length;};
+  const idle=reads();checks.children={idle};
+  for(let i=0;i<100;i++){child.write('\x1d');await sleep(25);child.write('\x1b[C');await sleep(25);child.write('\x1d');await sleep(25);}
+  await sleep(2500);checks.children.after_100=reads();
+  if(cfg.harness==='claude'){
+    fs.writeFileSync(cfg.vm+'.hang','');await key('\x1d',400);await key('\x1b[C',500);
+    checks.children.hanging=reads();await sleep(13500);checks.children.ended=reads();
+    s=await screen();checks.children.stood=!!box(s);
+    fs.unlinkSync(cfg.vm+'.hang');await key('\x1b',300);
+  }
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
 finally{try{child.write('\x1b');child.write('\x15quit\r');}catch{}await sleep(300);try{child.kill();}catch{}}
@@ -398,6 +458,25 @@ class SessionShellTablePopupTest(unittest.TestCase):
                                                    'after_second': 'draft9'}, kind)
         # A second after the close, a lone Esc and a letter are the native's again.
         self.assertEqual(checks['esc_after_a_second'], 'draft9^[Q')
+        # A paste's end mark split at any joint leaves the keys alive; the pasted text goes nowhere.
+        paste = checks['paste']
+        for cut in range(1, 6):
+            self.assertEqual(paste['split%d' % cut], {'moved': True, 'draft': True, 'closed': True}, 'split at %d' % cut)
+        for way in ('ctrl', 'esc', 'press', 'tail'):
+            self.assertEqual(paste['never_' + way], {'closed': True, 'next': True, 'draft': True}, way)
+        self.assertTrue(paste['front_closed'] and paste['front_next'] and paste['front_draft'], paste)
+        # ↑↓ keep the unfolded row in view; its place reads `i/N` with i inside N.
+        follow = checks['follow']
+        self.assertTrue(all(follow['down']) and all(follow['up']) and all(follow['sessions']), follow)
+        self.assertTrue(all(place and 1 <= place[0] <= place[1] for place in follow['place']), follow)
+        self.assertGreater(len({place[0] for place in follow['place']}), 3, follow)
+        # No read is left behind by 100 openings; a read that hangs (Claude's run) is ended at its 12 seconds.
+        children = checks['children']
+        self.assertEqual(children['after_100'], children['idle'], children)
+        if harness == 'claude':
+            self.assertGreater(children['hanging'], children['idle'], children)
+            self.assertEqual(children['ended'], children['idle'], children)
+            self.assertTrue(children['stood'], children)
         return result
 
     def test_claude(self):
