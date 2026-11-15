@@ -157,7 +157,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','border-motion-bottom','native-bg'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','border-motion-bottom','rule-motion','native-bg'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -520,6 +520,40 @@ function existing(file){return new Promise((resolve,reject)=>{
    await sleep(300);await flush();const i1=read();const idleChunks=await watch(600);const i2=read();
    Object.assign(borderMotion,{i1,i2,idle_chunks:idleChunks});
  }
+ const ruleMotion={};
+ if(cfg.scenario==='rule-motion'){
+   // 11-15 (panel polish 4): under the default `rule motion` (`rule`), while the session runs the outer
+   // frame stands lit and still and the head rule's light moves on the spinner's beat; only its changed
+   // cells go out; through the light's rest nothing is written for the rule's row.
+   const now=Date.now()/1000;
+   fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
+   {const began=Date.now();while(Date.now()-began<5000&&!Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(y)?.translateToString()||'').some(l=>l.includes('RULE_MOTION_TITLE'))){await new Promise(r=>sideTerm.write('',r));await new Promise(r=>setTimeout(r,20));}}
+   await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
+   const opened=Date.now();
+   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
+   // The rule's row (`at`: that row however it stands) and the frame's right column, as colors.
+   const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
+     const m=line.slice(140).match(/^│ (─{36}) │$/);
+     const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
+     if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),colors};}return null;};
+   const frame=()=>Array.from({length:sideTerm.rows},(_,y)=>{const c=sideTerm.buffer.active.getLine(y)?.getCell(179);return c?(c.isFgDefault()?'d':c.getFgColor())+(c.isDim()?'d':''):'';}).join(',');
+   let first=null;const began=Date.now();
+   while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
+   const litAfter=Date.now()-opened,frames=[frame()];
+   let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
+   await new Promise(r=>setTimeout(r,950));await flush();const second=first&&rule(first.y);frames.push(frame());
+   await new Promise(r=>setTimeout(r,1000));sub.dispose();await flush();frames.push(frame());
+   const dark=()=>{const r=first&&rule(first.y);return !!r&&r.colors.split(',').every(c=>c.endsWith('d'));};
+   let restAt=0;const looking=Date.now();
+   while(!restAt&&Date.now()-looking<6000){await flush();if(dark()){await new Promise(r=>setTimeout(r,250));await flush();if(dark())restAt=Date.now();}else await new Promise(r=>setTimeout(r,20));}
+   const rest=[];const restSub=child.onData(t=>rest.push(t));
+   await new Promise(r=>setTimeout(r,500));restSub.dispose();await flush();
+   const resting=first&&rule(first.y);
+   let back=null;const waiting=Date.now();
+   while(Date.now()-waiting<1500&&!(back=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
+   Object.assign(ruleMotion,{first,second,bytes,writes,rest,frames,rest_seen:!!restAt,lit_after_ms:litAfter,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
+   await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
+ }
  const nativeBg={};
  if(cfg.scenario==='native-bg'){
    // A native that paints its own background to its last column (OpenCode does): the two cells
@@ -538,7 +572,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({native_bg:nativeBg,border_motion:borderMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
+ console.log(JSON.stringify({native_bg:nativeBg,border_motion:borderMotion,rule_motion:ruleMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -663,7 +697,7 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','native-bg'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','rule-motion','native-bg'}:
             config.update(columns=180,rows=40)
         if scenario=='border-motion-bottom':config.update(columns=120,rows=30)  # the bottom layout (policy below)
         if scenario=='fleet-modal':
@@ -678,9 +712,11 @@ class SessionShellPTYTest(unittest.TestCase):
         env=dict(self.env,LOOP_CONFIG=str(configfile))
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
+        # (11-15: the moving frame is the `border` value's; `rule-motion` keeps the default.)
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','native-bg'}
-                          else '{"enabled":true,"layout":"bottom"}' if scenario in {'border-motion-bottom'} else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {}),
+                                      **({'rule_motion':'border'} if scenario=='border-motion' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','rule-motion','native-bg'}
+                          else '{"enabled":true,"layout":"bottom","rule_motion":"border"}' if scenario in {'border-motion-bottom'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -901,6 +937,35 @@ class SessionShellPTYTest(unittest.TestCase):
         top=min(result[k]['top'] for k in ('first','second','third'))
         for chunk in self.beats(result['chunks']):
             self.assertTrue(all(row>top for row,_ in self.written_cells(chunk)),chunk)
+
+    def test_the_head_rule_moves_under_a_lit_still_frame_by_default(self):
+        # 11-15 (panel polish 4): the default `rule motion` (`rule`): a running session's outer frame
+        # stands lit and still (one color down every row, the same on every reading), and the head
+        # rule carries the moving light on the beat the spinner already keeps; each beat sends only the
+        # rule's changed cells, so a beat stays small, and the native half stays put. Through the
+        # light's rest nothing is written to the rule's row; then the light comes back in.
+        result=self.run_loop('rule-motion')['rule_motion']
+        print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes'],
+                          'rest_writes':len(result['rest']),'rest_bytes':[len(c.encode()) for c in result['rest']]}))
+        first,second=result['first'],result['second']
+        self.assertIsNotNone(first);self.assertIsNotNone(second)
+        self.assertNotEqual(first['colors'],second['colors'])
+        self.assertEqual(first['native'],second['native'])
+        self.assertGreaterEqual(result['writes'],15)
+        self.assertLess(result['bytes']/result['writes'],400,result)
+        # The frame: lit (187, never dim) and still on every reading.
+        frames=result['frames'];self.assertEqual(len(set(frames)),1,frames)
+        column=[c for c in frames[0].split(',')[1:39]];self.assertTrue(column and all(c=='187' for c in column),frames[0])
+        self.assertLess(result['lit_after_ms'],300,result)
+        self.assertTrue(result['rest_seen'],result)
+        y=result['rest_row'];self.assertIsNotNone(y,result)
+        self.assertTrue(all(c.endswith('d') for c in result['resting'].split(',')),result['resting'])
+        self.assertTrue(result['rest'],result)
+        for chunk in result['rest']:
+            self.assertNotIn('\x1b[%d;'%(y+1),chunk,result['rest'])
+            self.assertLess(len(chunk.encode()),96,chunk)
+        self.assertIsNotNone(result['back'],result)
+        self.assertTrue(any(not c.endswith('d') for c in result['back'].split(',')),result['back'])
 
     def test_the_gap_beside_the_panel_takes_the_natives_own_background(self):
         # A native that paints its whole area (OpenCode) reaches the panel's frame: the two cells

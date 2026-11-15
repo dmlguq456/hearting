@@ -54,14 +54,23 @@ def delegated(rows, running_routes):
 
 
 def recent_memory(cwd, limit=2):
-    """Spec E9 rules 37 (b), 46 (c): this repo's newest saved memory records from the journal
-    Fleet reads (``memory.by_repo``'s grouping), ``limit`` at most, newest first, and the journal
-    path to watch; ``([], [])`` without a cwd. A supersede names its replacement in the snippet;
-    the replacement's headline is asked for, and the replacement's own add right beside it
-    names the same record, so it is shown once; the retired record's own older add is not shown."""
+    """Spec E9 rules 37 (b), 46 (c): this repo's and the global newest saved memory records
+    (11-15, panel polish 5: both, newest first) from the journal Fleet reads (``memory.by_repo``'s
+    grouping and the global group of the same read), ``limit`` at most, and the journal path to
+    watch; ``([], [])`` without a cwd. A supersede names its replacement in the snippet; the
+    replacement's headline is asked for, and the replacement's own add right beside it names the
+    same record, so it is shown once; the retired record's own older add is not shown. A global
+    record written from this repo is in both groups and is shown once."""
     if not cwd:
         return [], []
-    rows, path = memory.recent_saved(project_of(cwd))
+    own, path = memory.recent_saved(project_of(cwd))
+    everywhere, _path = memory.recent_saved_global()
+    rows, listed = [], set()
+    for row in sorted(own + everywhere, key=lambda row: str(row.get("ts") or ""), reverse=True):
+        mark = (row.get("id"), row.get("action"), row.get("ts"))
+        if mark not in listed:
+            listed.add(mark)
+            rows.append(row)
     out, seen = [], set()
     for row in rows:
         snippet = str(row.get("snippet") or "")

@@ -448,7 +448,10 @@ for(const [state,want] of [['working',230],['submitting',230],['blocked',217],['
  const v=paint({state,cfg:{rule_motion:'off'}}),frame=v.rows.flatMap(r=>[r[0],r.at(-1)]);
  assert(frame.every(x=>(x.foreground??undefined)===want&&(want===undefined?x.dim===true:x.dim!==true)),state+' '+JSON.stringify(frame[0]));
  assert(!v.rows.flat().some(x=>x.text==='╭'&&x.foreground===217),state+' no route failure here');
- const moving=paint({state,frame:0,since:0}).rows.flatMap(r=>[r[0],r.at(-1)]),lines=paint({state,frame:0,since:0}).rows.flat().filter(x=>['frame','frame-state','orbit'].includes(x.role)&&/^[─┌┐└┘│]+$/.test(x.text));
+ // (11-15: the arc is the `border` value's; under the default `rule` a running frame stands lit, one step below.)
+ const moving=paint({state,frame:0,since:0,cfg:{rule_motion:'border'}}).rows.flatMap(r=>[r[0],r.at(-1)]),lines=paint({state,frame:0,since:0,cfg:{rule_motion:'border'}}).rows.flat().filter(x=>['frame','frame-state','orbit'].includes(x.role)&&/^[─┌┐└┘│]+$/.test(x.text));
+ const lit=paint({state,frame:0,since:0}).rows.flat().filter(x=>!x.rule&&['frame','frame-state','orbit'].includes(x.role)&&/^[─┌┐└┘│]+$/.test(x.text));
+ if(want===230)assert(lit.every(x=>x.role==='orbit'&&x.foreground===view.FACES.dark.orbit[1]&&x.dim!==true),state+' lit');
  if(want===217)assert(lines.every(x=>x.foreground===217&&x.dim!==true),state+' '+JSON.stringify(moving[0]));
  else if(want)assert(lines.every(x=>x.role==='frame'&&x.dim===true||x.role==='orbit'&&view.FACES.dark.orbit.includes(x.foreground))&&lines.some(x=>x.foreground===want),state);
  else assert.deepEqual(moving,frame,state);
@@ -693,8 +696,9 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
         self.node(script, "panel-view.cjs")
 
     def test_rule_motion_setting_saves_through_the_existing_path_and_falls_back_alone(self):
-        # Spec E9 rule 47 (e): `rule motion` (on by default, or off), saved like `route line`; an
-        # unknown value falls back to `on` alone and never disables the shell.
+        # Spec E9 rule 47 (e), 11-15 (panel polish 4): `rule motion` (`rule` by default, `border`,
+        # `scanners` or `off`), saved like `route line`; an unknown value, and the `on` saved before
+        # 11-15, read as `rule` alone (the file is not rewritten for it) and never disable the shell.
         with tempfile.TemporaryDirectory() as directory:
             env = {"XDG_CONFIG_HOME": directory}
             path = shell.policy_path(env)
@@ -702,12 +706,18 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             path.write_text(json.dumps({"enabled": True, "rule_motion": "sometimes", "route_line": "model"}))
             path.chmod(0o600)
             self.assertTrue(shell.policy(env)[0])
-            self.assertEqual((shell.display_policy(env)["rule_motion"], shell.display_policy(env)["route_line"]), ("on", "model"))
+            self.assertEqual((shell.display_policy(env)["rule_motion"], shell.display_policy(env)["route_line"]), ("rule", "model"))
+            old = json.dumps({"enabled": True, "rule_motion": "on"})
+            path.write_text(old)
+            self.assertEqual(shell.display_policy(env)["rule_motion"], "rule")
+            self.assertEqual(path.read_text(), old)
             path.write_text(json.dumps({"enabled": True}))
-            self.assertEqual(shell.DISPLAY_DEFAULTS["rule_motion"], "on")
-            desired = {**shell.DISPLAY_DEFAULTS, "rule_motion": "off"}
-            self.assertEqual(shell.save_display_policy(desired, env)["rule_motion"], "off")
-            self.assertEqual(shell.display_policy(env)["rule_motion"], "off")
+            self.assertEqual(shell.DISPLAY_DEFAULTS["rule_motion"], "rule")
+            self.assertEqual(shell.CHOICES["rule_motion"], ("rule", "border", "scanners", "off"))
+            for value in ("border", "scanners", "off"):
+                desired = {**shell.DISPLAY_DEFAULTS, "rule_motion": value}
+                self.assertEqual(shell.save_display_policy(desired, env)["rule_motion"], value)
+                self.assertEqual(shell.display_policy(env)["rule_motion"], value)
             self.assertIs(json.loads(path.read_text())["enabled"], True)
             with self.assertRaises(ValueError):
                 shell.save_display_policy({**desired, "rule_motion": "fast"}, env)
@@ -1047,7 +1057,7 @@ assert(text(bare)[1].includes('wt 12')&&!text(bare).join('').includes('GIT')&&ba
 // Spec E9 rule 46 (e): an older backend's one MEM row (painted pieces only) stands in the MEM
 // section under the messages, one row (11-15), its age at the right and its type left out; the head has no MEM row.
 const title=r50.findIndex(s=>s.startsWith('│ TITLE')),mem=r50.findIndex(s=>/^│ MEM ─+ │$/.test(s)),msg=r50.findIndex(s=>s.startsWith('│ MESSAGES'));
-assert(title>0&&!r50.slice(0,msg).some(s=>s.includes('MEM'))&&mem>msg&&r50[mem+1].startsWith('│ ◆ ')&&!r50[mem+1].includes('decision')
+assert(title>0&&!r50.slice(0,msg).some(s=>s.includes('MEM'))&&mem>msg&&r50[mem+1].startsWith('│ · ')&&!r50[mem+1].includes('decision')
  &&r50[mem+1].includes('…')&&/ 3m │$/.test(r50[mem+1])&&mem+2===r50.length-2&&!r50.join('').includes('지어낸 기억'),r50.join('\n'));
 // No row, no MEM.
 assert(!text(paint([oneShot],40,50,{model:{memory:[]}})).join('').includes('MEM'));
@@ -1202,17 +1212,17 @@ for(const height of [50,70,90]){
  assert(v.hits.some(h=>h.row===m&&h.action==='popup:MESSAGES')&&v.hits.some(h=>h.row===m+1&&h.action==='popup:MESSAGES'),JSON.stringify(v.hits));
 }
 // MEM under MESSAGES: its last row right above 5h/7d, the blank rows above MESSAGES.
-{const rows=tall(50,{model:{memory_items:[{kind:'decision',age:'3m',text:'MEM_ONE'},{kind:'fact',age:'1h',text:'MEM_TWO'}]}}),
+{const rows=tall(50,{model:{memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'},{tier:'durable',kind:'fact',age:'1h',text:'MEM_TWO'}]}}),
  m=rows.findIndex(s=>s.startsWith('│ MESSAGES')),e=rows.findIndex(s=>/^│ MEM ─+ │$/.test(s)),s=rows.findIndex(s=>s.includes('ROUTE_')||/^│ 2 ROUTE /.test(s));
  assert(m>0&&e>m&&/MEM_TWO/.test(rows[e+2])&&e+3===rows.length-2&&blank(rows[m-1]),rows.join('\n'));}
 // No MESSAGES: MEM keeps to the bottom. Neither: the sections stand from the top, the blank rows are below.
-{const mem=tall(50,{model:{messages:[],memory_items:[{kind:'decision',age:'3m',text:'MEM_ONE'}]}}),e=mem.findIndex(s=>/^│ MEM ─+ │$/.test(s));
+{const mem=tall(50,{model:{messages:[],memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'}]}}),e=mem.findIndex(s=>/^│ MEM ─+ │$/.test(s));
  assert(e>0&&e+2===mem.length-2&&blank(mem[e-1]),mem.join('\n'));
  const none=tall(50,{model:{messages:[]}}),r=none.findIndex(s=>/^│ 2 ROUTE /.test(s));
  assert(r>0&&none.slice(r+3,-2).every(blank)&&!none.some(s=>/MEM|MESSAGES/.test(s)),none.join('\n'));}
 // No overlap and no overflow at any height 5-60 and width 12-60, beside the native area and below it: the rows
 // stay within the height, each as wide as the panel, and a press target stands on a row of its own section.
-const mem=[{kind:'decision',age:'3m',text:'MEM_ONE'},{kind:'fact',age:'1h',text:'MEM_TWO'}];
+const mem=[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'},{tier:'durable',kind:'fact',age:'1h',text:'MEM_TWO'}];
 const wide=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
 for(const side of [true,false])for(let height=5;height<=60;height+=side?1:5)for(let width=12;width<=60;width+=4){
  const v=view.render({width,height,side,fill:side,model:{...head,routes:[oneShot,staged],route_count:2,memory_items:mem},state:'idle',configuration:{},questions:()=>[]});
@@ -1276,7 +1286,7 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
   {glyph:[p('●')],tag:[p('['),p('e7'),p(']')],title:[p('#1640 검토')],age:[p('1h')]},
   {glyph:[p('●')],tag:[p('['),p('52'),p(']')],title:[p('넷째 다른 세션')],age:[p('2h')]}]},
  messages:[{way:'←',who:'[e7]',text:'CI 초록, 병합해도 됩니다'},{way:'→',who:'[73]',text:'설치 확인 부탁'},{way:'←',who:'[12]',text:'답 기다립니다'},{way:'←',who:'[52]',text:'정리 끝'}],
- memory_items:[{kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'},{kind:'fact',age:'1h',text:'팝업은 Fleet 표'}],
+ memory_items:[{tier:'durable',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'},{tier:'durable',kind:'fact',age:'1h',text:'팝업은 Fleet 표'}],
  quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
 const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
@@ -1338,7 +1348,7 @@ const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-
 const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],selected:[p('Opus 5.5'),p(' xhigh')],context_side:[p('━━─── '),p('46%')],
  session_title:'질문·route 팝업',now:'그리는 중',wait:'◑답 대기 3',wait_guide:'1 QUESTIONS · 입력창에 답',route_label:'route 1',route_count:1,route_total:1,
  routes:[{id:'a',title:'질문 팝업 구현',kind:'working',state:'working',shape:'one-shot-owner',stages:[],elapsed:'23m',paint:{glyph:p('⠏')}}],
- memory_items:[{kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
+ memory_items:[{tier:'durable',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
 const brief=()=>({count:3,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
 const paint=(height,width)=>pv.render({width,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
@@ -1360,6 +1370,154 @@ assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\
 """
         self.node(script, "panel-view.cjs")
 
+    def test_the_question_to_answer_here_reads_as_one_button(self):
+        # 11-15 (panel polish 1): in the open panel's QUESTIONS section the question a press answers
+        # here, now, stands on the rose fill across the inside width: its first row bright, its
+        # choices numbered chips, `↵ 답하기 · Ctrl+]` in rose at the right under them; a press on any
+        # of its rows opens the question popup. The head row keeps the form of every other head. A
+        # wait answered elsewhere and the answers on their way are never painted; nothing else in
+        # the panel is. Short of rows the action row goes first, then the choices, the first row to
+        # the last (heights 5-60 × widths 12-60, no row past the panel, none wider). The folded
+        # strip's row of what to do takes the same fill. Mono, eight colors and NO_COLOR lead the
+        # rows with a rose bar instead. The fill is one value per face (52 dark, 224 light).
+        script = r"""
+const assert=require('node:assert/strict'),pv=require(process.argv[1]);
+const p=(text,extra={})=>({text,...extra});
+const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
+const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150}};
+const model={tag:'[e9]',repo:[p('hearting/')],selected:[p('Opus 5.5')],context_side:[p('━━─── '),p('46%')],wait:'◑답 대기 1',styles,
+ labels:{answer_action:'↵ 답하기 · Ctrl+]'},session_title:'패널 손질',now:'그리는 중',route_label:'route 1',route_count:1,route_total:1,
+ routes:[{id:'a',title:'휠 입력 시험',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'3m',paint:{glyph:p('✕')}}],
+ messages:[{way:'←',who:'[73]',text:'설치 확인 끝났습니다'}],memory_items:[{tier:'durable',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],
+ quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
+const choice=(answerable=true)=>({count:1,label:'QUESTIONS',answerable,
+ rows:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요? 지금 둘 중 하나',{foreground:253})],
+  [p('  ',styles.dim),p('1 ',styles.dim),p('파일',{foreground:253}),p(' · ',styles.dim),p('2 ',styles.dim),p('표준 출력',{foreground:253}),p(' (추천)',styles.dim),
+   p(' · ',styles.dim),p('3 ',styles.dim),p('둘 다',{foreground:253})]],
+ one:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})]],line:[p('로그를 어느 쪽에 남길까요?',{foreground:253})],choices:3});
+const there={...choice(false),rows:[[p('◑ '),p('다른 세션의 질문')],[p('  '),p('그 창에서 답',styles.dim)]],choices:0};
+const sent=()=>[[p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('2 표준 출력',{foreground:253})]];
+const paint=(o={})=>pv.render({width:o.width||44,height:o.height||30,side:o.folded?false:true,fill:!o.folded,folded:!!o.folded,
+ model:{...model,...(o.model||{})},state:'idle',sid:'s',harness:'claude',frame:0,brief:()=>o.q,sent:o.sent||(()=>[]),configuration:o.cfg||{},background:o.background||''});
+const str=r=>r.map(x=>x.text).join('');
+const inside=r=>r.slice(2,-2);
+const grounds=v=>v.rows.map(r=>r.some(x=>x.background!==undefined));
+// (a) 256 colors: the head, then three painted rows; their every inside cell on the fill or a chip.
+{const v=paint({q:choice(),sent}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ 1 QUESTIONS ─+ › │$/.test(r));
+ assert(head>0,rows.join('\n'));assert.equal(rows[head+1],'│ ✓ 답 보냄 · 2 표준 출력                  │');
+ const at=[head+2,head+3,head+4],painted=grounds(v);
+ assert.deepEqual(painted.map((x,i)=>x?i:-1).filter(i=>i>=0),at,rows.join('\n'));
+ for(const i of at){const parts=inside(v.rows[i]);
+  assert.equal(parts.reduce((n,x)=>n+cells(x.text),0),40,rows[i]);
+  assert(parts.every(x=>x.background===52||x.background===235),rows[i]+JSON.stringify(parts));}
+ // The first row: `◑` rose, the words bright.
+ const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
+ assert(first.find(x=>x.text==='◑').foreground===174&&first.filter(x=>/로그/.test(x.text)).every(x=>x.foreground===255),JSON.stringify(first));
+ // The choices: numbered chips on the chip ground, one fill cell apart, the first under the words.
+ const chips=[];let cur='';for(const x of inside(v.rows[at[1]])){if(x.background===235)cur+=x.text;else if(cur){chips.push(cur);cur='';}}if(cur)chips.push(cur);
+ assert.deepEqual(chips,[' 1 파일 ',' 2 표준 출력 (추천) ',' 3 둘 다 '],rows[at[1]]);assert(rows[at[1]].startsWith('│   1 파일 '),rows[at[1]]);
+ // The action at the right, in rose.
+ assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │'),rows[at[2]]);
+ assert(inside(v.rows[at[2]]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[at[2]]));
+ // A press on any painted row (and the head) opens the question popup.
+ for(const i of [head,...at])assert(v.hits.some(h=>h.row===i&&h.action==='question'),String(i));
+ // The sent line keeps its own colors, unpainted.
+ assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150);}
+// (b) A wait answered elsewhere, the sent line alone, no question: nothing painted, no action row.
+for(const q of [there,null]){const v=paint({q,sent});assert(!grounds(v).some(Boolean),JSON.stringify(q));assert(!v.rows.map(str).join('').includes('↵'));}
+// (c) Mono, eight colors, NO_COLOR: no ground anywhere, a rose bar leading each of the three rows.
+for(const [cfg,m] of [[{theme:'mono'},{}],[{},{colors:8}],[{},{no_color:true}]]){
+ const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);assert(!grounds(v).some(Boolean),JSON.stringify(cfg));
+ const bars=rows.filter(r=>r.startsWith('│ ▌ '));assert.equal(bars.length,3,rows.join('\n'));
+ assert(bars[0].startsWith('│ ▌ ◑ 로그를')&&bars[1].includes('1 파일 · 2 표준 출력')&&bars[2].endsWith('↵ 답하기 · Ctrl+] │'),bars.join('\n'));}
+// (d) A light face and a shade keep the fill (the shade never covers it).
+{const v=paint({q:choice(),cfg:{theme:'light'}}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
+ assert(inside(r).every(x=>x.background===224)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===232),JSON.stringify(r));}
+{const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
+ assert(inside(r).every(x=>x.background===52),JSON.stringify(r));}
+// (e) Short of rows: the action row goes first, then the choices; the first row stays to the last.
+// Every height 5-60 at every width 12-60 keeps its rows within the panel, each as wide.
+const kinds=new Set();
+for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
+ const v=paint({q:choice(),height:h,width:w,sent}),rows=v.rows.map(str),label=h+'x'+w+'\n'+rows.join('\n');
+ assert(rows.length<=h&&rows.every(r=>cells(r)===w),label);
+ const painted=grounds(v).map((x,i)=>x?i:-1).filter(i=>i>=0),head=rows.findIndex(r=>/^│ 1 QUESTIONS/.test(r)||/^│ 1 Q/.test(r));
+ if(w>=20)assert(painted.length>=1,label);
+ if(!painted.length)continue;
+ // One block, right under the head or the sent line, inside the frame.
+ assert(painted.every((y,i)=>!i||y===painted[i-1]+1)&&painted[0]>0&&painted.at(-1)<rows.length-2,label);
+ if(head>=0)assert(painted[0]===head+1||painted[0]===head+2,label);
+ const action=rows[painted.at(-1)].includes('↵'),n=painted.length;
+ assert(n===1&&!action||n===2&&!action||n===3&&action,label);
+ kinds.add(n);
+}
+assert.deepEqual([...kinds].sort(),[1,2,3]);
+// (f) The folded strip: its row of what to do on the fill across the whole width while it carries the
+// question to answer here; a wait answered elsewhere leaves it plain; without color, the rose bar.
+{const v=paint({q:choice(),folded:true,width:60,height:4}),i=v.rows.findIndex(r=>str(r).startsWith('◑답 대기 1'));
+ assert(i>0&&v.rows[i].every(x=>x.background===52)&&v.rows[i].reduce((n,x)=>n+cells(x.text),0)===60,JSON.stringify(v.rows[i]));
+ assert(grounds(v).filter(Boolean).length===1);assert(v.hits.some(h=>h.row===i&&h.action==='question'));}
+{const v=paint({q:there,folded:true,width:60,height:4});assert(!grounds(v).some(Boolean));}
+{const v=paint({q:choice(),folded:true,width:60,height:4,model:{colors:8}}),r=v.rows.map(str).find(r=>r.includes('◑답 대기'));
+ assert(r.startsWith('▌ ◑답 대기 1 · 로그를')&&!grounds(v).some(Boolean),r);}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_the_veil_is_one_gray_per_face_and_none_where_no_hue_is_shown(self):
+        # 11-15 (panel polish 3): the gray the host veils everything behind a standing popup with: 239 on
+        # a dark or unknown face, 250 on a light one; none in mono, eight colors or NO_COLOR, where the
+        # popup's frame line is bright (not dim) instead.
+        script = r"""
+const assert=require('node:assert/strict'),pv=require(process.argv[1]);
+assert.equal(pv.veil({},{colors:256}),239);assert.equal(pv.veil({},{colors:1<<24,background:'dark'}),239);
+assert.equal(pv.veil({theme:'light'},{colors:256}),250);assert.equal(pv.veil({},{colors:256,background:'light'}),250);
+for(const [cfg,o] of [[{theme:'mono'},{colors:256}],[{},{colors:8}],[{},{colors:256,noColor:true}]])assert.equal(pv.veil(cfg,o),null,JSON.stringify([cfg,o]));
+const styles={dim:{foreground:-1,dim:true}};
+const lines=v=>v.rows.flat().filter(x=>/^[╭╮╰╯│─ ]+$/.test(x.text)&&/[╭╮╰╯│─]/.test(x.text));
+const frame=(model,cfg={})=>lines(pv.popup({cols:100,rows:30,title:[{text:'T'}],body:[[{text:'x'}]],sections:['QUESTIONS'],model:{styles,...model},configuration:cfg}));
+assert(frame({colors:256}).every(x=>x.dim===false&&x.foreground===undefined||x.dim===true||x.role==='messages'));
+assert(frame({colors:256}).some(x=>x.dim===true));
+for(const [m,cfg] of [[{colors:8},{}],[{colors:256,no_color:true},{}],[{colors:256},{theme:'mono'}]])
+ assert(frame(m,cfg).every(x=>x.dim!==true),JSON.stringify([m,cfg]));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_a_mem_row_says_durable_or_working_its_scope_and_its_kind(self):
+        # 11-15 (panel polish 5, spec rule 46): a MEM row says three things, as the memory system
+        # records them: `◆` durable or `◇` working (`·` for a record that names no tier), then dim its
+        # scope (`project`, `global`) and its kind. This repository's records and the global ones stand
+        # together (the backend's order, newest first; two rows). Short of cells the headline is cut
+        # first, then the kind word leaves, then the scope word; the mark and the age stay. Mono and
+        # NO_COLOR keep the two marks apart by shape. MESSAGES and MEM keep to the panel's bottom.
+        script = self.FIXTURE + r"""
+const items=[{tier:'durable',scope:'project',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'},
+ {tier:'working',scope:'global',kind:'lesson',age:'2h',text:'스피너 끊김을 고친 법'}];
+const drawMem=(o={})=>view.render({width:o.width||44,height:o.height||40,side:true,fill:true,model:{...head,routes:[],route_count:0,memory_items:o.items||items,...(o.model||{})},
+ state:'idle',configuration:o.cfg||{},questions:()=>[]});
+const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const memRows=v=>{const rows=plain(v),i=rows.findIndex(s=>/^│ MEM ─+ │$/.test(s));return rows.slice(i+1,i+3);};
+let [a,b]=memRows(drawMem({width:52}));
+assert(/^│ ◆ project decision 패널 접힘은 아래 두 줄 +10m │$/.test(a),a);assert(/^│ ◇ global lesson 스피너 끊김을 고친 법 +2h │$/.test(b),b);
+// Its words: the mark, the scope and the kind dim, the headline in the body color.
+{const row=drawMem({width:52}).rows[plain(drawMem({width:52})).findIndex(s=>s.startsWith('│ ◆ project'))];
+ for(const w of ['◆ ','project ','decision '])assert(row.find(p=>p.text===w).dim===true,w);assert(row.find(p=>p.text.startsWith('패널')).dim!==true);}
+// Short of cells: the headline is cut first, then the kind leaves, then the scope; the mark and the age stay.
+const stage=r=>/^│ [◆◇] (project|global) (decision|lesson) /.test(r)?2:/^│ [◆◇] (project|global) /.test(r)?1:0;
+const seen=[];
+for(let w=60;w>=14;w--){const [x,y]=memRows(drawMem({width:w}));
+ for(const [r,mark,age] of [[x,'◆','10m'],[y,'◇','2h']]){assert(r.startsWith('│ '+mark+' ')&&new RegExp(' '+age+' │$').test(r),w+' '+r);assert.equal(cells(r),w);}
+ const st=stage(x);if(seen.length)assert(st<=seen.at(-1),w+' '+x);seen.push(st);
+ if(st<2&&w<60)assert(memRows(drawMem({width:w+1}))[0].includes('…')||stage(memRows(drawMem({width:w+1}))[0])>st,w);}
+assert(seen.includes(2)&&seen.includes(1)&&seen.includes(0),JSON.stringify(seen));
+// A record naming no tier or scope says only what it names.
+[a]=memRows(drawMem({items:[{kind:'fact',age:'5m',text:'only a kind'}]}));assert(/^│ · fact only a kind +5m │$/.test(a),a);
+// Mono and NO_COLOR: the two marks stay apart by shape.
+for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const [x,y]=memRows(drawMem(o));assert(x.startsWith('│ ◆ ')&&y.startsWith('│ ◇ '),JSON.stringify(o));}
+// MEM keeps to the panel's bottom, right above the last row.
+{const rows=plain(drawMem());assert(/^│ ◇ global/.test(rows.at(-3)),rows.join('\n'));}
+"""
+        self.node(script, "panel-view.cjs")
+
     def test_mem_stands_under_the_messages_and_gives_way_first(self):
         # Spec E9 rule 46, 11-15: MEM leaves the head for its own section under the messages (its head
         # first and a thin rule on from it, as the messages' `MESSAGES`, no `›`: it opens no popup), two
@@ -1369,8 +1527,8 @@ assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const cellsOfRows=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
-const items=[{kind:'decision',age:'3m',text:'panel labels in dark grey, and the count leads its word so it reads as a count'},
- {kind:'lesson',age:'2h',text:'one fix per review finding'}];
+const items=[{tier:'durable',kind:'decision',age:'3m',text:'panel labels in dark grey, and the count leads its word so it reads as a count'},
+ {tier:'durable',kind:'lesson',age:'2h',text:'one fix per review finding'}];
 const routes=[oneShot,staged,{...oneShot,id:'c'}];
 const at=(o={})=>view.render({width:o.width||40,height:o.height||70,side:true,fill:true,model:{...head,routes,route_count:routes.length,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},questions:()=>[]});
@@ -1400,7 +1558,7 @@ rows=plain(at({model:{memory_items:items.slice(1)}}));
 const one=section(rows,'MEM');assert(one&&one.length===1&&one[0].startsWith('│ ◆ lesson one fix per review find'),rows.join('\n'));
 assert(!plain(at({model:{memory_items:[]}})).join('').includes('MEM'));
 // An age missing: the row keeps what is known; a record without a kind reads the same.
-assert(plain(at({model:{memory_items:[{kind:'',age:'5m',text:'only an age'}]}})).some(s=>/^│ ◆ only an age +5m │$/.test(s)));
+assert(plain(at({model:{memory_items:[{tier:'durable',kind:'',age:'5m',text:'only an age'}]}})).some(s=>/^│ ◆ only an age +5m │$/.test(s)));
 // No messages: MEM alone under its head.
 rows=plain(at({model:{messages:[]}}));assert(!rows.join('').includes('MESSAGES')&&section(rows,'MEM').length===2,rows.join('\n'));
 // Narrower than 30 cells inside: the same section.
@@ -1494,7 +1652,7 @@ assert(rows.some(s=>/^│ 큰 학습률 +진행 +\? +\+0\.4 dB │$/.test(s)),ro
         # LAB, ROUTE); later MEM goes, then each section's rows and head in the same order. The
         # question keeps its head and first row, the fold and settings row stay.
         script = self.FIXTURE + self.LAB + r"""
-const items=[{kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{kind:'lesson',age:'2h',text:'one fix per review finding'}];
+const items=[{tier:'durable',kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{tier:'durable',kind:'lesson',age:'2h',text:'one fix per review finding'}];
 const sessions={count:3,counts:[[T('◑1')],[T('●2')]],rows:[1,2,3].map(i=>({glyph:[T('●')],tag:[T('['),T('7'+i),T(']')],title:[T('다른 세션 '+i)],age:[T(i+'m')]}))};
 const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
 const labDraw=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged,oneShot],route_count:3,memory_items:items,sessions,lab:lab(),...(o.model||{})},
@@ -1578,7 +1736,9 @@ for(const open of [[],['lab:grp_1']])for(const folded of [false,true]){
 """
         self.node(script, "panel-view.cjs")
 
-    def test_the_outer_frame_carries_the_sessions_moving_state(self):
+    def test_the_border_value_sends_one_arc_round_the_frame(self):
+        # 11-15 (panel polish 4): what was the default until 11-15 is now the setting `rule motion`'s
+        # `border` value, unchanged (#1639):
         # Spec E9 rule 47 (11-14: the outer frame instead of the head rule), rules 51, 52 and 25 as
         # it retunes them. Running (and while an answer is typed in), a bright arc goes round the
         # outer frame clockwise without rest: its head the brightest (the running frame's vanilla),
@@ -1595,9 +1755,9 @@ const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},
  tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}};
 const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'claude',
  model:{...head,tag:'[e9]',routes:[],route_count:0,messages:[],styles,...(o.model||{})},state:o.state,frame:o.frame||0,since:o.since,
- configuration:o.cfg||{},background:o.background||'',questions:()=>[],...(o.extra||{})});
+ configuration:{rule_motion:'border',...(o.cfg||{})},background:o.background||'',questions:()=>[],...(o.extra||{})});
 const text=r=>r.map(p=>p.text).join('');
-assert.deepEqual(view.BORDER,{LAP:60,ARC:1/4,SHADES:4,BREATHE:48,BREATHE_STEPS:6,BREATHE_STEPS_256:3});
+assert.deepEqual(view.BORDER,{LIT:1,ARC:1/4,LAP:60,SHADES:4,BREATHE:48,BREATHE_STEPS:6,BREATHE_STEPS_256:3});
 assert.deepEqual(view.FACES.dark.orbit,[230,187,144,101]);assert.deepEqual(view.FACES.light.orbit,[22,65,108,151]);
 assert.deepEqual(view.FACES.dark.breath,[217,210,174]);assert.deepEqual(view.FACES.light.breath,[88,124,131]);
 // Every cell of a painted panel, by row and column, with the part it stands in.
@@ -1731,12 +1891,138 @@ for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','code
 // (j) Short of rows (the rule goes, spec rule 34 (c)) the frame keeps moving; the bottom layout moves alike.
 for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v.motion&&v.motion.cells.length===2*40+2*(h-2)-text(v.rows[0]).indexOf(' ─'),String(h));}
 {const b=run({side:false,width:100,height:14,state:'working',frame:7});assert(b.motion&&b.motion.cells.some(c=>c.row===b.rows.length-1)&&b.motion.cells.some(c=>c.col===99));}
-// The setting: on by default, `rule_motion` beside `route_line`, `on`/`off`.
-assert.equal(view.defaults.rule_motion,'on');assert.deepEqual(view.options.rule_motion,['on','off']);
-assert.equal(view.change(view.defaults,'rule_motion',1).rule_motion,'off');
-const i=view.fields.indexOf('rule_motion');assert(i>view.fields.indexOf('route_line'));
-const settings=view.render({width:40,height:24,side:true,model:{labels:{rule_motion:'rule motion'}},settings:{index:i,value:{...view.defaults}},questions:()=>[]});
-assert(text(settings.rows.flat()).includes('rule motion  ‹ on ›')&&settings.hits.some(h=>h.action==='setting:'+i+':up'));
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_the_rule_motion_setting_picks_how_a_running_session_moves(self):
+        # 11-15 (panel polish 4, spec rules 25, 47, 51, 52): the setting `rule motion` has four values.
+        # `rule` (the default): running, the outer frame stands still and lit one step below the
+        # brightest (187) and a light passes over the head rule (#1639's predecessor, the user's
+        # 11-13 values): its middle five cells brightest and four on each side one shade down each,
+        # out past one end and back in 26 frames (2.6 s), then the dark rule rests 10 frames (1 s) and
+        # the light comes in again on that side; through the rest the host neither wakes nor writes.
+        # `scanners`: a wide wave flows round the frame, no edge anywhere (two neighbouring cells one
+        # shade apart at most), three waves (fewer on a short frame), one place rising and falling once
+        # every 56 frames, its darkest never the still gray. `border`: the arc (its own test). `off`:
+        # nothing moves. Waiting, the whole frame breathes red under every value but `off`, the rule
+        # stays plain; idle, the still frame. The `on` saved before 11-15 reads as `rule`. The values
+        # to tune stand at the top of panel-view.cjs.
+        script = self.FIXTURE + r"""
+const fs=require('node:fs');
+const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},g_dead:{foreground:210}};
+const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'claude',
+ model:{...head,tag:'[e9]',routes:[],route_count:0,messages:[],styles,...(o.model||{})},state:o.state,frame:o.frame||0,since:o.since,
+ configuration:{...(o.motion?{rule_motion:o.motion}:{}),...(o.cfg||{})},background:o.background||'',questions:()=>[],...(o.extra||{})});
+const text=r=>r.map(p=>p.text).join('');
+// The values to tune, at the top of the file.
+const top=fs.readFileSync(process.argv[1],'utf8').split('const defaults=')[0];
+assert(top.includes('const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,BORDER_LIT=1;'),top);
+assert(top.includes('const WAVE_COUNT=3,WAVE_LAP=56,WAVE_STEPS=10,WAVE_FLOOR=0.3,WAVE_MIN=24;'),top);
+assert.deepEqual(view.RULE,{PEAK:5,FADE:4,SCAN:26,REST:10});assert.deepEqual(view.WAVE,{COUNT:3,LAP:56,STEPS:10,FLOOR:0.3,MIN:24});
+assert.deepEqual(view.FACES.dark.scan,[243,101,144,187,230]);
+// The setting: `rule` by default, four values beside `route_line`; the settings screen picks them.
+assert.equal(view.defaults.rule_motion,'rule');assert.deepEqual(view.options.rule_motion,['rule','border','scanners','off']);
+assert.deepEqual(['rule','border','scanners','off'].map(v=>view.change({...view.defaults,rule_motion:v},'rule_motion',1).rule_motion),['border','scanners','off','rule']);
+{const i=view.fields.indexOf('rule_motion');assert(i>view.fields.indexOf('route_line'));
+ const settings=view.render({width:40,height:24,side:true,model:{labels:{rule_motion:'rule motion'}},settings:{index:i,value:{...view.defaults}},questions:()=>[]});
+ assert(text(settings.rows.flat()).includes('rule motion  ‹ rule ›')&&settings.hits.some(h=>h.action==='setting:'+i+':up'));}
+// Every cell of a painted panel, the frame's line cells clockwise, the head rule's row.
+const grid=v=>v.rows.map(r=>{const out=[];for(const p of r)for(const ch of p.text){out.push({ch,p});if(cells(ch)>1)out.push(null);}return out;});
+const around=v=>{const g=grid(v),W=g[0].length,H=g.length,out=[];for(let x=0;x<W;x++)out.push(g[0][x]);for(let y=1;y<H-1;y++)out.push(g[y][W-1]);
+ for(let x=W-1;x>=0;x--)out.push(g[H-1][x]);for(let y=H-2;y>0;y--)out.push(g[y][0]);return out.map(c=>c&&'┌┐└┘─│'.includes(c.ch)?c:null);};
+const ring=v=>around(v).filter(Boolean);
+const ruleAt=v=>v.rows.findIndex((r,i)=>i>0&&r.some(p=>p.rule));
+const ruleCells=v=>v.rows[ruleAt(v)].slice(2,-2).flatMap(p=>[...p.text].map(ch=>({ch,p})));
+const plainRule=v=>{const parts=v.rows[ruleAt(v)].slice(2,-2);return parts.length===1&&parts[0].text==='─'.repeat(36)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].tone;};
+// (a) `rule`, the default: the frame lit and still, the light over the rule.
+const ramp=view.FACES.dark.scan,CYCLE=26+10-1;
+const shades=frame=>{const v=run({state:'working',frame}),cs=ruleCells(v);assert(cs.length===36&&cs.every(c=>c.ch==='─'));
+ return cs.map(c=>c.p.tone==='scan'?ramp.indexOf(c.p.foreground)+1:0);};
+for(let f=0;f<2*CYCLE;f++){
+ const v=run({state:'working',frame:f}),frame=ring(v);
+ assert(frame.every(c=>c.p.role==='orbit'&&c.p.tone==='arc'&&c.p.level===1&&c.p.foreground===187&&c.p.dim!==true),f+' '+JSON.stringify(frame[3]));
+ const sh=shades(f),lit=sh.map((x,i)=>x?i:-1).filter(i=>i>=0);
+ for(let i=1;i<36;i++)assert(Math.abs(sh[i]-sh[i-1])<=1,f+' '+sh.join(''));
+ if(lit.length&&lit[0]>0&&lit.at(-1)<35)assert.deepEqual(sh.slice(lit[0],lit.at(-1)+1),[1,2,3,4,5,5,5,5,5,4,3,2,1],f+' '+sh.join(''));
+}
+const dark=f=>shades(f).every(x=>x===0);
+assert(dark(0)&&dark(13)&&dark(CYCLE)&&!dark(12)&&!dark(14),'the rule is dark at the turns, one dark beat at the far end');
+assert(shades(1)[0]>0&&shades(25)[0]>0&&shades(12)[35]>0,'out and back in on the same side');
+const darkRun=from=>{let n=0;while(dark(from+n))n++;return n;};
+assert.equal(darkRun(26),10);assert.equal(darkRun(13),1);
+for(const f of [0,5,13,20,26,30])assert.deepEqual(shades(f),shades(f+CYCLE),'one rest per round trip '+f);
+// The light comes in on the paint that shows the turn (one frame on).
+for(const since of [0,7,1000])assert.deepEqual(ruleCells(run({state:'working',frame:since,since})).map(c=>c.p.tone==='scan'?c.p.foreground:0),
+ ruleCells(run({state:'working',frame:1})).map(c=>c.p.tone==='scan'?c.p.foreground:0),String(since));
+// The host's cells: the rule's 36 cells only, painted as at that frame; through the rest no wake.
+{const v=run({state:'working',frame:3}),y=ruleAt(v);
+ assert(v.animated&&v.motion&&v.motion.cells.length===36&&v.motion.cells.every((c,i)=>c.row===y&&c.col===2+i&&c.ch==='─'));
+ for(const f of [3,17,30,40]){const at=v.motion.at(f),painted=ruleCells(run({state:'working',frame:f}));at.forEach((p,i)=>assert.equal(p.foreground??null,painted[i].p.foreground??null,f+' '+i));}
+ assert.equal(v.motion.next(3),4);assert.equal(v.motion.next(25),26);
+ for(let f=26;f<=CYCLE;f++)assert.equal(v.motion.next(f),CYCLE+1,String(f));}
+// Between two frames only the spinner's row and the rule's row change.
+{const a=run({state:'working',frame:5}),b=run({state:'working',frame:6});
+ assert.deepEqual(a.rows.map((r,i)=>JSON.stringify(r)===JSON.stringify(b.rows[i])?-1:i).filter(i=>i>=0),[0,ruleAt(a)]);}
+// The old `on` reads as `rule`; a hand-edited unknown value too.
+for(const v of ['on','spin'])for(const [state,f] of [['working',5],['blocked',9],['idle',3]])
+ assert.deepEqual(run({state,frame:f,motion:v}).rows,run({state,frame:f}).rows,v+' '+state);
+// (b) `scanners`: the wave. Each line cell's shade index: 24-bit colors in their order of brightness; 256 the ramp.
+const waveShade=(c,colors)=>{assert(c.p.role==='orbit'&&c.p.tone==='wave'&&c.p.dim!==true,JSON.stringify(c.p));return c.p.level;};
+for(const [o,P,n] of [[{},156,3],[{width:60},196,3],[{side:false,width:100,height:14},224,3],[{side:false,width:30,height:4},64,2],[{side:false,width:20,height:4},44,1]]){
+ for(const colors of [256,1<<24]){
+  const seq=[];
+  for(let f=0;f<56;f++){const v=run({...o,state:'working',frame:f,motion:'scanners',model:{colors}}),all=around(v),cs=ring(v);
+   // Each place's level (null behind the head's words), in thousandths.
+   const at=all.map(c=>c?Math.round(waveShade(c,colors)*1000):null),q=at.filter(x=>x!==null);
+   const pairs=at.map((x,i)=>[x,at[(i+1)%at.length]]).filter(([a,b])=>a!==null&&b!==null),unit=Math.min(...pairs.map(([a,b])=>Math.abs(a-b)).filter(d=>d>0));
+   // No edge: two neighbouring cells (round the corners too) one shade apart at most.
+   pairs.forEach(([a,b],i)=>assert(Math.abs(a-b)<=unit+1,JSON.stringify([o,colors,f,i,a,b,unit])));
+   // Every line cell is lit: none is the still frame gray.
+   assert(cs.every(c=>c.p.role!=='frame'));
+   if(f===0){const full=at.map((x,i)=>x??null),top=Math.max(...q);
+    // The crests: runs of the brightest level round the whole ring (the words' cells read as their neighbour's).
+    const filled=full.map((x,i)=>{let k=i;while(full[k]===null)k=(k+full.length-1)%full.length;return full[k];});
+    const crests=filled.filter((x,i)=>x===top&&filled[(i+filled.length-1)%filled.length]!==top).length;assert.equal(crests,n,JSON.stringify([o,colors]));
+    const colorsSeen=new Set(cs.map(c=>c.p.foreground));
+    if(colors>256&&P>=99)assert(colorsSeen.size>=8,JSON.stringify([o,[...colorsSeen]]));
+    if(colors===256)assert([...colorsSeen].every(x=>[230,187,144,101].includes(x)),JSON.stringify([...colorsSeen]));}
+   seq.push(at);}
+  // One period: frame 56 is frame 0; each place rises and falls once (one crest run in 56 frames).
+  {const looks=f=>ring(run({...o,state:'working',frame:f,motion:'scanners',model:{colors}})).map(c=>c.p.foreground);assert.deepEqual(looks(56),looks(0));assert.deepEqual(looks(56+17),looks(17));}
+  const L=seq[0].length;for(const i of [L-1,L-10,Math.floor(L/2)]){const s=seq.map(q=>q[i]),top=Math.max(...s);assert.equal(s.filter((x,k)=>x===top&&s[(k+55)%56]!==top).length,1,JSON.stringify([o,colors,i,s]));}
+ }
+}
+{const v=run({state:'working',frame:4,motion:'scanners'});assert(v.motion&&v.motion.cells.length===ring(v).length&&v.motion.next(4)===5);assert(plainRule(v));
+ const t=view.render({width:40,height:40,side:true,model:{...head,styles,colors:1<<24},state:'working',frame:4,configuration:{rule_motion:'scanners'},questions:()=>[]});
+ // The darkest point in 24-bit color is above the still frame's gray (#808080 on the dark face).
+ const lows=ring(t).map(c=>c.p.foreground).filter(x=>/^#/.test(x)).map(x=>parseInt(x.slice(1,3),16));assert(Math.min(...lows)>0x80,JSON.stringify(lows.slice(0,5)));}
+// (c) Waiting: the breath over the whole frame under every value but `off`, the rule plain; idle: still.
+for(const motion of ['rule','border','scanners']){
+ const w=run({state:'blocked',frame:0,since:0,motion});
+ assert(ring(w).every(c=>c.p.role==='orbit'&&c.p.tone==='breath'),motion);assert(plainRule(w),motion);assert(w.motion&&w.motion.cells.length===ring(w).length);
+ assert(ring(run({state:'blocked',frame:24,since:0,motion})).every(c=>c.p.foreground!==ring(w)[0].p.foreground),motion+' breathes');
+ for(const state of ['idle','unknown',undefined]){const v=run({state,frame:7,motion});
+  assert(ring(v).every(c=>c.p.role==='frame'&&c.p.dim===true),motion+' '+state);assert(plainRule(v));assert.equal(v.motion,null);
+  assert.deepEqual(v.rows,run({state,frame:31,motion}).rows);}
+}
+// (d) `off`, mono, NO_COLOR, eight colors, the settings screen: nothing moves under any value.
+for(const motion of ['rule','border','scanners','off'])for(const [cfg,model] of [[{},{}],[{theme:'mono'},{}],[{},{no_color:true}],[{},{colors:8}]]){
+ if(motion!=='off'&&!cfg.theme&&!model.no_color&&!model.colors)continue;
+ for(const state of ['working','blocked']){const a=run({state,frame:7,motion,cfg,model}),b=run({state,frame:37,motion,cfg,model});
+  assert.equal(a.motion,null,JSON.stringify([motion,cfg,model,state]));assert.deepEqual(a.rows,b.rows);assert(plainRule(a));
+  assert(!a.rows.flat().some(p=>p.role==='orbit'||p.tone),JSON.stringify([motion,cfg,model,state]));}}
+// (e) A route failure never colors the frame or the rule.
+{const dead={id:'x',title:'failed',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'1m',paint:{glyph:{text:'✕'}}};
+ for(const motion of ['rule','scanners'])for(const state of ['working','blocked','idle']){
+  const a=run({state,frame:9,motion}),b=run({state,frame:9,motion,model:{routes:[dead],route_count:1,route_label:'route 1 ✕1'}});
+  assert.deepEqual(ring(b).map(c=>[c.p.foreground,c.p.tone]),ring(a).map(c=>[c.p.foreground,c.p.tone]),motion+' '+state);
+  assert.deepEqual(ruleCells(b).map(c=>c.p.foreground??null),ruleCells(a).map(c=>c.p.foreground??null),motion+' '+state);}}
+// (f) Claude, Codex and OpenCode draw the same frame and rule on the same frame.
+for(const motion of ['rule','scanners'])for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f,motion}));
+ for(const v of all.slice(1))assert.deepEqual(v.rows.slice(1,-1).map(r=>r.slice(1,-1)),all[0].rows.slice(1,-1).map(r=>r.slice(1,-1)),motion+' '+state);}
+// (g) A light face: the lit frame and the light take the face's ramps.
+{const v=run({state:'working',frame:8,cfg:{theme:'light'}});assert(ring(v).every(c=>c.p.foreground===view.FACES.light.orbit[1]));
+ assert(ruleCells(v).filter(c=>c.p.tone==='scan').every(c=>view.FACES.light.scan.includes(c.p.foreground)));}
 """
         self.node(script, "panel-view.cjs")
 

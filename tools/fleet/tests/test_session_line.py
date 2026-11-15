@@ -467,8 +467,15 @@ class CommonSessionLineTest(unittest.TestCase):
         recent = [{**row, "type": "user-correction"}, {**row, "ts": "2026-11-12T08:00:00", "type": "completion", "headline": ""},
                   {**row, "type": "decision"}]
         self.assertEqual(session_panel.session_memory_items({"memory_recent": recent}, now),
-                         [{"kind": "correction", "age": "3m", "text": "route rows read who first"},
-                          {"kind": "done", "age": "2h 3m", "text": "body line"}])
+                         [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""},
+                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": ""}])
+        # 11-15 (panel polish 5): the record's own tier and scope names; any other value is none.
+        named = [{**row, "tier": "durable", "scope": "project"}, {**row, "tier": "working", "scope": "global"},
+                 {**row, "tier": "permanent", "scope": "repo"}]
+        self.assertEqual([(item["tier"], item["scope"]) for item in session_panel.session_memory_items({"memory_recent": named}, now)],
+                         [("durable", "project"), ("working", "global")])
+        self.assertEqual([(item["tier"], item["scope"]) for item in session_panel.session_memory_items({"memory_recent": named[2:]}, now)],
+                         [("", "")])
         self.assertEqual([session_panel.memory_kind(kind) for kind in ("decision", "lesson", "feedback", "fact", "an-unlisted-type")],
                          ["decision", "lesson", "feedback", "fact", "an-unlisted…"])
         self.assertEqual(session_panel.session_memory_items({"memory_recent": [{**row, "headline": "", "snippet": "superseded_by=x"}]}, now), [])

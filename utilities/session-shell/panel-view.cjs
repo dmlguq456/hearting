@@ -1,7 +1,23 @@
 'use strict';
 // Geometry and paint only. The existing question controller owns drafts/effects.
+// 11-15 (panel polish 4, spec rule 47): how the open panel shows that this session runs, picked by
+// the setting `rule motion` (`rule`, the default; `border`; `scanners`; `off`), and the values to tune.
+// `rule`: the outer frame stands still and lit at step BORDER_LIT of `FACES.*.orbit` (0 the brightest;
+// the still idle frame is the plain gray), and a light passes over the head rule: RULE_PEAK brightest
+// cells in its middle and RULE_FADE cells on each side one shade down each, out past one end and back
+// in RULE_SCAN spinner frames (100 ms each: 26 = 2.6 s), then the dark rule rests RULE_REST frames
+// (10 = 1 s) and the light comes in again on the same side.
+const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,BORDER_LIT=1;
+// `scanners`: a wide wave flows round the frame clockwise, no edge anywhere: WAVE_COUNT waves share
+// the frame (fewer where one would be narrower than WAVE_MIN cells), one place rises and falls once
+// every WAVE_LAP frames (56 = 5.6 s), in WAVE_STEPS shades in 24-bit color (the face's four in 256
+// colors; fewer on a narrow wave, so two neighbouring cells never differ by more than one), its
+// darkest WAVE_FLOOR of the way from the still frame's gray to the brightest (never out).
+const WAVE_COUNT=3,WAVE_LAP=56,WAVE_STEPS=10,WAVE_FLOOR=0.3,WAVE_MIN=24;
+// `border` (#1639): one bright arc, BORDER_ARC of the frame long, round once every BORDER_LAP frames.
+const BORDER_ARC=1/4,BORDER_LAP=60;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
-  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'on'};
+  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
 // step deeper). `terminal` is the terminal's own background with the shared
 // palette; `light` declares a light terminal; `mono` drops hue and keeps weight,
@@ -12,14 +28,23 @@ const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom'
 const FACES={
   dark:{light:234,medium:235,body:253,secondary:248,title:246,frame:244,route:245,messages:242,accent:174,
     working:150,idle:186,blocked:174,dead:210,done:150,steward:[219,132],
-    // Spec rule 47: the moving frame's tones (the values with `BORDER_*` below). The running
-    // arc's shades, its head first (the session spinner's vanilla, the running frame's color)
-    // down to the one beside the neutral frame gray it fades into; a waiting frame's reds,
-    // brightest first (the frame's waiting red), in 256 colors, and its two ends in 24-bit color.
-    orbit:[230,187,144,101],breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]]},
+    // Spec rule 47: the moving frame's tones (the values at the top). The running frame's shades,
+    // brightest first (the session spinner's vanilla, the running frame's color) down to the one
+    // beside the neutral frame gray (`border`'s arc, `rule`'s lit frame, `scanners`' wave in 256
+    // colors); the wave's two ends in 24-bit color (the still frame's gray, the brightest); the head
+    // rule's light, dimmest first; a waiting frame's reds, brightest first (the frame's waiting
+    // red), in 256 colors, and its two ends in 24-bit color.
+    orbit:[230,187,144,101],waveRGB:[[128,128,128],[255,255,215]],scan:[243,101,144,187,230],
+    breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]],
+    // 11-15 (panel polish 1): a question to answer here stands on `fill` (the waiting red's dark
+    // end; bright text on it 12:1), its choices on `chip`, its first row in `bright`. Polish 3: while
+    // a popup stands, everything outside it reads in `veil` alone.
+    fill:52,chip:235,bright:255,veil:239},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
-    orbit:[22,65,108,151],breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]]},
+    orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[251,151,108,65,22],
+    breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
+    fill:224,chip:255,bright:232,veil:250},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -28,15 +53,20 @@ const FACES={
 const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
-// A moving frame cell's color: an arc shade from its face's ramp (0 the head); a waiting step
-// from its face's 256-color reds, or in 24-bit color (when the terminal says it takes it) a point
-// on the cosine between its face's two ends.
+// A moving frame cell's color: an arc or lit-frame shade from its face's ramp (0 the brightest); a wave
+// at `level` (0..1) between its face's two ends in 24-bit color, else on its ramp (the dimmest first);
+// the head rule's light step (1 the dimmest .. 5); a waiting step from its face's 256-color reds, or in
+// 24-bit color (when the terminal says it takes it) a point on the cosine between its face's two ends.
+const mix=(a,b,f)=>'#'+a.map((c,i)=>Math.round(c+(b[i]-c)*f).toString(16).padStart(2,'0')).join('');
 function orbitTone(part,F,colors){
   if(part.tone==='arc')return F.orbit[Math.max(0,Math.min(F.orbit.length-1,part.level))];
+  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
+  if(part.tone==='wave'){const [lo,hi]=F.waveRGB,q=Math.max(0,Math.min(1,part.level));
+    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):F.orbit[Math.round((1-q)*(F.orbit.length-1))];}
   const steps=part.steps,k=part.step;
   if(colors>256&&steps>1){
     const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.breathRGB;
-    return '#'+hi.map((c,i)=>Math.round(lo[i]+(c-lo[i])*f).toString(16).padStart(2,'0')).join('');
+    return mix(lo,hi,f);
   }
   return F.breath[Math.max(0,Math.min(F.breath.length-1,k))];
 }
@@ -67,6 +97,8 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // The question's border, `◑` and `›` are rose; mono keeps them by weight.
     // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
     if(role==='accent'||role==='accent-line'){if(theme!=='mono')foreground=F.accent;else if(role==='accent')bold=true;dim=false;}
+    // 11-15 (panel polish 1): the words of a question to answer here, bright on its fill.
+    else if(role==='bright'&&theme!=='mono'){foreground=F.bright;dim=false;}
     // A state glyph takes its face's state color, at full strength.
     else if(role.startsWith('state:')&&theme!=='mono'&&(shade||known==='light')&&F[role.slice(6)]){foreground=F[role.slice(6)];dim=false;}
     // The session's own state keeps Fleet's session keys (running g_spin, idle
@@ -92,16 +124,19 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
     else if(LINES.has(role)&&known&&theme!=='mono'){foreground=F[role];dim=false;}
+    // 11-15 (panel polish 1): a part on a question's fill or chip takes that ground on every face (an
+    // unknown face the dark one's), over a shade too; mono and eight colors draw a bar instead.
+    const ground=part.ground&&theme!=='mono'&&Number.isInteger(F[part.ground])?{background:F[part.ground]}:{};
     if(shade){
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
       else if(role==='title'){foreground=F.title;dim=false;}
       else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
-      return {...part,foreground,dim,bold,background:F[shade]};
+      return {...part,foreground,dim,bold,background:F[shade],...ground};
     }
     // A declared light terminal: secondary text takes its color instead of a dim default.
     if(theme==='light'&&foreground===null&&dim){foreground=F.secondary;dim=false;}
-    return {...part,foreground,dim,bold};
+    return {...part,foreground,dim,bold,...ground};
   }));
 }
 // A combining mark or joined emoji stays with the character it belongs to.
@@ -114,7 +149,7 @@ const graphemes=s=>SEGMENTER&&JOINS.test(s)?Array.from(SEGMENTER.segment(s),x=>x
 const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion'];
 const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
-  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['on','off']};
+  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['rule','border','scanners','off']};
 const APPEARANCE_KEYS=['position','theme','shade'];
 // The session's own state, as Fleet's session row judges and draws it
 // (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
@@ -123,15 +158,12 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
-// Spec rule 47 (11-14: the outer frame instead of the rule), every value of the moving frame in
-// one place (its colors are `FACES.*.orbit`/`breath`/`breathRGB`). Running, a bright arc goes
-// round the frame clockwise without rest: its head the brightest, its tail BORDER_SHADES shades
-// down into the neutral frame gray, BORDER_ARC of the frame's cells long (it grows with the
-// panel), once round every BORDER_LAP spinner frames (100 ms each: 60 = 6 s, whatever the size).
-// Waiting, the whole frame breathes red once every BORDER_BREATHE frames (48 = 4.8 s) through
-// BORDER_BREATHE_STEPS shades on a cosine (24-bit color; BORDER_BREATHE_STEPS_256 in 256 colors),
-// each shade an equal time. The head rule stays the plain thin `─` (spec rule 52).
-const BORDER_LAP=60,BORDER_ARC=1/4,BORDER_SHADES=4,BORDER_BREATHE=48,BORDER_BREATHE_STEPS=6,BORDER_BREATHE_STEPS_256=3;
+// Spec rule 47 (11-14: the outer frame; 11-15 panel polish 4: the setting picks the frame's or the
+// rule's motion, the values at the top), every value of the moving frame in one place. Waiting,
+// whatever the setting (but `off`), the whole frame breathes red once every BORDER_BREATHE frames
+// (48 = 4.8 s) through BORDER_BREATHE_STEPS shades on a cosine (24-bit color; BORDER_BREATHE_STEPS_256
+// in 256 colors), each shade an equal time; the head rule stays the plain thin `─` then (spec rule 52).
+const BORDER_SHADES=4,BORDER_BREATHE=48,BORDER_BREATHE_STEPS=6,BORDER_BREATHE_STEPS_256=3;
 const mod=(t,n)=>((Math.trunc(t)%n)+n)%n;
 // A breath's shade at a frame: 0 brightest .. steps-1 darkest, down and back up, each shade for an
 // equal stretch of the breath (2 (steps-1) stretches).
@@ -139,11 +171,40 @@ function breathStep(tick,steps){
   const slots=2*(steps-1),s=Math.floor(mod(tick,BORDER_BREATHE)*slots/BORDER_BREATHE);
   return s<steps?s:slots-s;
 }
-// Where the arc's head stands at a frame on a frame of `cells` cells, from `start`.
+// `border`: where the arc's head stands at a frame on a frame of `cells` cells, from `start`, and its
+// shade at a cell `behind` cells back from its head (0 the head .. BORDER_SHADES-1), or -1 past its tail.
 function orbitHead(tick,cells,start){return mod(start+Math.floor(Math.trunc(tick)*cells/BORDER_LAP),cells);}
-// The arc's shade at a frame cell `behind` cells back from its head (0 the head .. BORDER_SHADES-1),
-// or -1 past its tail.
 function orbitShade(behind,length){return behind<length?Math.min(BORDER_SHADES-1,Math.floor(behind*BORDER_SHADES/length)):-1;}
+// `scanners`: how many waves a frame of `cells` cells carries, the shades a wave of that width keeps
+// (one shade at most between neighbouring cells: the brightness climbs at most 1.3π/width a cell), and
+// a cell's level (0..1, in those shades) at a frame: (½ + ½ cos 2π(place/cells · waves − frame/WAVE_LAP))^1.3.
+function waves(cells){return Math.max(1,Math.min(WAVE_COUNT,Math.floor(cells/WAVE_MIN)));}
+function waveSteps(cells,most){return Math.max(1,Math.min(most,Math.floor(cells/waves(cells)/(1.3*Math.PI))));}
+function waveLevel(at,tick,cells,steps){
+  const u=.5+.5*Math.cos(2*Math.PI*(at/cells*waves(cells)-Math.trunc(tick)/WAVE_LAP));
+  return Math.round(Math.pow(u,1.3)*steps)/steps;
+}
+// `rule`: the light over an `n`-cell head rule: where its middle stands at a frame (null while the
+// dark rule rests), its shade at cell `i` (5 the brightest, 0 none), and the next frame it looks
+// different at (the next frame while the light is inside; its return at the end of the rest).
+const RULE_CYCLE=RULE_SCAN+RULE_REST-1;
+function scanAt(tick,n){
+  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_CYCLE);
+  if(q>=RULE_SCAN)return null;
+  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
+  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2);
+  return Math.round(lo+y*(hi-lo));
+}
+function scanLevel(tick,i,n){
+  const plateau=(RULE_PEAK-1)/2,c=scanAt(tick,n);
+  return c===null?0:Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+}
+function scanNext(tick,n){
+  const t=Math.trunc(tick),lit=f=>{const c=scanAt(f,n),reach=RULE_FADE+(RULE_PEAK-1)/2;return c!==null&&c+reach>=0&&c-reach<n;};
+  if(lit(t))return t+1;
+  for(let f=t+1;f<=t+RULE_CYCLE;f++)if(lit(f))return f;
+  return t+1;
+}
 function change(value,key,step){
   const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
@@ -264,7 +325,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // A row's items, most pressing first: an item is `head` (whole or not at all) and `tail` (cut
     // with `…` where cells run short, while it keeps four cells; a `titled` item without its tail
     // goes whole); the first item that does not fit ends the row.
-    const pack=items=>{
+    const pack=(items,room=Math.max(0,width-1))=>{
       const out=[];let used=0;
       for(const item of items){
         const gap=out.length&&!item.choices?[text(' │ ','dim')]:[],head=[...gap,...item.head],tail=item.tail||[];
@@ -370,7 +431,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const g of fixed){if(out.length)put([bar()]);put(g.parts,g.action);}
       return {parts:out,spans};
     })();
-    const rowsOf={session:sessionRow(),todo:todo.length?pack(todo):[],routes:routeRow.parts};
+    // 11-15 (panel polish 1): while the row of what to do carries a question to answer here it stands
+    // on that question's fill, the strip's whole width (mono, eight colors and NO_COLOR: the rose bar).
+    const here=first.length>0&&summary.answerable===true;
+    const grounded=(model.colors??256)>=256&&model.no_color!==true&&cfg.theme!=='mono';
+    const todoRow=()=>!todo.length?[]:here&&!grounded?[{...text('▌','g_blocked'),role:'accent'},text(' '),...pack(todo,Math.max(0,width-3))]:pack(todo);
+    const rowsOf={session:sessionRow(),todo:todoRow(),routes:routeRow.parts};
     // What stays, by rank: what to do, the session, the routes; a row with nothing on it gives its place.
     const strip=height>=2,count=strip?height-1:1;
     const chosen=new Set(['todo','session','routes'].filter(name=>rowsOf[name].length).slice(0,count));
@@ -382,7 +448,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const name of order){
       const parts=rowsOf[name];
       named[out.length]=name;
-      out.push(strip?pad(parts):withMark(parts));
+      const row=strip?pad(parts):withMark(parts);
+      out.push(name==='todo'&&here&&grounded?row.map(part=>({...part,ground:'fill'})):row);
       if(name==='session')groups.push('head',...(parts.includes(ctxLabel)?['context']:[]),...(parts.some(part=>quotaParts.has(part))?['quota']:[]));
       if(name==='todo'&&model.wait)groups.push('wait');
       if(name==='routes'&&label)groups.push('route');
@@ -432,19 +499,30 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   }
   // Spec rule 52: the thin rule under the metadata is the plain thin `─` in every state; the
   // session's moving state is the outer frame's (below).
-  const ruleParts=()=>[{...text('─'.repeat(inner),'dim'),role:'messages'}];
-  // Spec rule 47: the outer frame follows this session's own state (not a route's): running, a
-  // bright arc goes round it; an answer or confirmation wait breathes it red; anything else, and
-  // rule motion off, mono, NO_COLOR, eight colors or the settings screen, the still frame in the
-  // state's color. The host repaints only its changed cells, at the frames they change.
+  // Spec rule 47 (11-15 panel polish 4): this session's own state (not a route's) moves the frame or
+  // the head rule, by the setting `rule motion` (`on`, saved before 11-15, reads as `rule`). Running:
+  // `rule` keeps the frame still and lit and passes a light over the head rule, `border` sends one arc
+  // round the frame, `scanners` a wave. An answer or confirmation wait breathes the whole frame red
+  // under every setting but `off`. Anything else, and `off`, mono, NO_COLOR, eight colors or the
+  // settings screen: the still frame in the state's color and the plain rule. The host repaints only
+  // the changed cells, at the frames they change.
   const borderColors=model.colors??256;
-  const borderStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||borderColors<256;
-  const moving=settings||borderStill?'':state==='blocked'?'breathe':LIVE[state]?.[0]==='spin'?'orbit':'';
+  const motionSetting=OPTIONS.rule_motion.includes(cfg.rule_motion)?cfg.rule_motion:'rule';
+  const borderStill=motionSetting==='off'||model.no_color===true||cfg.theme==='mono'||borderColors<256;
+  const running=!settings&&!borderStill&&LIVE[state]?.[0]==='spin';
+  const moving=settings||borderStill?'':state==='blocked'?'breathe':running&&motionSetting!=='rule'?motionSetting:'';
+  const ruleMoving=running&&motionSetting==='rule';
   const breathSteps=borderColors>256?BORDER_BREATHE_STEPS:BORDER_BREATHE_STEPS_256;
-  // Correction 8 (11-13): `since` is the frame this state began (the host's). The arc is already
-  // out on that very paint, its head just right of the head's words, and the breath starts at
-  // its brightest. Without it the beat runs on the clock alone.
+  // Correction 8 (11-13): `since` is the frame this state began (the host's). The motion is already
+  // out on that very paint (the arc's head just right of the head's words, the rule's light coming
+  // in) and the breath starts at its brightest. Without it the beat runs on the clock alone.
   const anchored=Number.isFinite(since),borderTick=t=>anchored?Math.trunc(t)-Math.trunc(since):Math.trunc(t);
+  const ruleTick=t=>borderTick(t)+(anchored?1:0);
+  // Spec rule 52: the thin rule under the metadata; under `rule` while the session runs, its cells
+  // carry the light (`rule` marks them, so the host gets them as the moving cells).
+  const ruleLook=(i,tick)=>{const level=scanLevel(ruleTick(tick),i,inner);
+    return level?{...text('─','g_spin'),role:'orbit',tone:'scan',level,rule:true}:{...text('─','dim'),role:'messages',rule:true};};
+  const ruleParts=()=>ruleMoving?Array.from({length:inner},(_,i)=>ruleLook(i,frame)):[{...text('─'.repeat(inner),'dim'),role:'messages',rule:true}];
   // Values the host could not refresh for a while are shown, not claimed:
   // nothing spins and the frame takes no route state (spec rule 12).
   const stale=model.stale===true;
@@ -546,14 +624,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
-    // Spec rule 46: this repository's newest saved memory records (two at most) stand in their
-    // own section under the messages, each `◆ kind · age` over its headline. An older backend
+    // Spec rule 46: the newest saved memory records (this repository's and the global ones, two at
+    // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
     // without its kind (rule 46 (e)); the head carries no MEM row either way.
     const memItems=(()=>{
       if(!side)return [];
       if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,2)
-        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim()}));
+        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim()}));
       const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
       return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
     })();
@@ -680,9 +758,49 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const sentRows=(typeof sent==='function'?sent()||[]:[]).map(row=>cut(row,inner));
     const questionCount=waitCount||(summary?String(summary.count):'');
     const asked=!!(summary||sentRows.length||model.wait||guide);
-    let briefTwo=true,keepGuide=true,keepSent=true;
+    let briefTwo=true,keepGuide=true,keepSent=true,keepAction=true;
+    // 11-15 (panel polish 1): the question to answer here, now, reads as one button: its rows stand
+    // on the rose fill across the panel's inside width (its first row bright, its choices numbered
+    // chips) over `↵ answer · Ctrl+]` in rose at the right. Short of rows the action row goes first,
+    // then the choices; the first row stays to the last. Mono, eight colors and NO_COLOR lead each
+    // row with a rose bar `▌` instead. A wait answered elsewhere and the answers on their way are
+    // never painted: what is painted is what a press answers now.
+    const here=!!summary&&summary.answerable===true;
+    const grounded=(model.colors??256)>=256&&model.no_color!==true&&cfg.theme!=='mono';
+    const bar=()=>({...text('▌','g_blocked'),role:'accent'});
+    const button=row=>{
+      if(!grounded)return [bar(),text(' '),...cut(row,Math.max(0,inner-2))];
+      const fit=cut(row,inner);return [...fit,pad(inner-size(fit))].map(part=>({...part,ground:part.ground||'fill'}));
+    };
+    // The choices' row as chips (` 1 label ` on the chip ground, one fill cell apart, the first under
+    // the question's words); short of cells the last chips leave for their count (`+N`).
+    const chips=parts=>{
+      const items=[];let more=0;
+      for(const part of parts){const s=clean(part.text),m=/^(?: · )?\+(\d+)$/u.exec(s);
+        if(m)more=Number(m[1]);
+        else if(/^\d+ $/.test(s))items.push([{...part,role:'accent'}]);
+        else if(items.length&&s!==' · ')items.at(-1).push(part.dim===true?part:{...part,role:'bright'});}
+      const chip=c=>[text(' '),...c,text(' ')].map(part=>({...part,ground:'chip'}));
+      for(let k=items.length;k>=0;k--){
+        const left=items.length-k+more,row=[text(' '),...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' ')]:[]),...chip(c)]),...(left?[text(' +'+left,'dim')]:[])];
+        if(size(row)<=inner||!k)return row;
+      }
+    };
+    // `↵ answer · Ctrl+]` at the right; narrow, its first word alone.
+    const actionRow=()=>{
+      const room=grounded?inner:Math.max(0,inner-2),words=t('answer_action','↵ answer · Ctrl+]'),first=words.split(' · ')[0];
+      const shown=measure(words)<=room?words:first,a=[{...text(shown,'g_blocked'),role:'accent'}];
+      return [pad(room-size(a)),...a];
+    };
+    const summaryRows=()=>{
+      const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(P(row)));
+      if(!here)return list.map(row=>cut(row,inner));
+      const out=list.map((row,i)=>!i?row.map(part=>part.role==='accent'?part:{...part,role:'bright'}):i===1&&summary.choices>0&&grounded?chips(row):row);
+      if(keepAction&&briefTwo)out.push(actionRow());
+      return out.map(button);
+    };
     const questionRows=()=>[...(keepSent?sentRows:[]),
-      ...(summary?P(briefTwo?summary.rows:summary.one).map(row=>cut(accent(P(row)),inner)):[]),
+      ...(summary?summaryRows():[]),
       ...(guide&&keepGuide?[cut([text(guide,'dim')],inner)]:[])];
     // ROUTE: the current routes the statusline counts and the recent results the producer keeps
     // after them, the failed first, then the running, the waiting, the finished (`✕` → `⠏` → `●`
@@ -801,15 +919,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const messageHead=n=>{const hidden=messageTotal-Math.min(n,messageTotal);return sectionHead([],side?'MESSAGES':'messages',hidden>0?[text('+'+hidden,'loc_repo')]:[]);};
     // The requests first, then the newest messages (in their order, the newest last).
     const messageRows=n=>{const req=requestList.slice(0,n).map(requestLine),left=n-req.length;return [...req,...(left>0?messages.slice(-left).map(messageLine):[])];};
-    // MEM (spec rule 46): this repository's newest saved memory records, two at most, one row each
-    // (`◆ headline` and its age at the right). No popup: its head has no `›`.
-    // `◆ kind headline   age`: the kind word (dim, as base's kind row) stands before the headline; short
-    // of cells the headline is cut first, and then the kind word leaves (the age stays).
+    // MEM (spec rule 46; 11-15 panel polish 5): the newest saved memory records of this repository and
+    // the global ones together, newest first, two at most, one row each: `◆` durable or `◇` working
+    // (`·` for a record that names no tier), then, dim, its scope and its kind as the memory system
+    // names them (`◆ project decision headline   10m`, `◇ global lesson …   2h`), the age at the right.
+    // Short of cells the headline is cut first, then the kind word leaves, then the scope word (the
+    // mark and the age stay). No popup: its head has no `›`.
     const memRow=m=>{
       const age=m.age?[text(m.age,'dim')]:[],tail=age.length?size(age)+1:0;
-      for(const lead of [...(m.kind?[[text('◆ ','dim'),text(m.kind+' ','dim')]]:[]),[text('◆ ','dim')]]){
-        const room=inner-size(lead)-tail;
-        if(room>=4||lead.length===1){const n=cut([text(m.text,'loc_repo')],Math.max(1,room));
+      const mark=text((m.tier==='durable'?'◆':m.tier==='working'?'◇':'·')+' ','dim'),words=[m.scope,m.kind].filter(Boolean);
+      for(let k=words.length;k>=0;k--){
+        const lead=[mark,...words.slice(0,k).map(w=>text(w+' ','dim'))],room=inner-size(lead)-tail;
+        if(room>=4||!k){const n=cut([text(m.text,'loc_repo')],Math.max(1,room));
           return room>=4?[...lead,...n,pad(room-size(n)),...(age.length?[text(' '),...age]:[])]:cut([...lead,text(m.text,'loc_repo')],inner);}
       }
       return [];
@@ -843,7 +964,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     for(const down of [2,1])for(const name of [...lowest,'QUESTIONS']){
-      if(name==='QUESTIONS'){if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
+      if(name==='QUESTIONS'){if(down===2)give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
+        if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
       give(()=>kept[name]&&take[name]>down,()=>{take[name]--;},()=>{take[name]++;});
     }
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
@@ -856,11 +978,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept]);
+    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction]);
     for(const undo of gave.reverse()){
       const was=choices();undo();
       if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);keepAction=v[12];}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
@@ -915,7 +1037,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // terminal's dim on an unknown face). Route failures and results stay on their own
   // rows' marks; the question box keeps its rose.
   const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
-  const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
+  // Under `rule` the running frame's line stands lit and still (BORDER_LIT of the face's ramp).
+  const frameText=v=>ruleMoving&&/^[─│┌┐└┘]+$/.test(v)?{...text(v,'g_spin'),role:'orbit',tone:'arc',level:BORDER_LIT}:
+    {...text(v,color),role:color==='dim'?'frame':'frame-state'};
   // Spec rule 29, 35 (a): a steward's `⚑` alone blinks in Fleet's steward pink
   // (`tag_steward` ↔ `tag_steward_dim`) on the panel's one beat, idle or not; without
   // color, bold ↔ plain. Its number keeps the steward color without blinking, as on
@@ -943,17 +1067,19 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   // Spec rule 47: the frame's line cells, each at its place round the frame, clockwise from the
   // top-left corner. The head's words on the top border and the foot's on the bottom one are no
-  // line: the arc passes behind them (they keep their own colors).
+  // line: the scanners pass behind them (they keep their own colors).
   const W=width,H=count,around=2*W+2*(H-2),arc=Math.max(1,Math.round(around*BORDER_ARC)),start=label.used+1;
+  const waveShades=waveSteps(around,borderColors>256?WAVE_STEPS:FACES.dark.orbit.length-1);
   const place=(y,x)=>y===0?x:x===W-1&&y<H-1?W-1+y:y===H-1?2*W+H-3-x:2*W+2*H-4-y;
-  // A moving frame cell at a frame: on the arc, its shade (0 the head); past its tail, the neutral
-  // frame gray; waiting, the breath's red.
+  // A moving frame cell at a frame: on the arc, its shade (0 the head), past its tail the neutral frame
+  // gray; on the wave, its level; waiting, the breath's red.
   function borderCell(at,ch,tick){
     const local=borderTick(tick);
-    if(moving==='orbit'){
+    if(moving==='border'){
       const k=orbitShade(mod(orbitHead(local,around,start)-at,around),arc);
       return k<0?{...text(ch,'dim'),role:'frame'}:{...text(ch,'g_spin'),role:'orbit',tone:'arc',level:k};
     }
+    if(moving==='scanners')return {...text(ch,'g_spin'),role:'orbit',tone:'wave',level:waveLevel(at,local,around,waveShades)};
     return {...text(ch,'g_blocked'),role:'orbit',tone:'breath',step:breathStep(local,breathSteps),steps:breathSteps};
   }
   const border=(y,x,ch)=>moving?borderCell(place(y,x),ch,frame):frameText(ch);
@@ -975,7 +1101,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const blinks=rows.slice(0,count).some(row=>row.some(part=>part.beat));
   // Spec rule 47 (d): the moving frame's line cells (row, column and glyph, in their order round
   // the frame), those cells painted at any spinner frame, and the next frame they change at (the
-  // arc: the next frame its head moves on, every frame on a frame of 60 cells or more; a breath:
+  // scanners: the next frame they move on, every frame on a frame of 60 cells or more; a breath:
   // its next step). The host writes their changed cells only, on the beat it already keeps.
   const cells=[];
   if(moving){
@@ -983,11 +1109,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(let y=1;y<H-1;y++)cells.push({row:y,col:W-1,ch:'│'});
     for(let x=W-1;x>=0;x--)if(x<=1||x>1+foot.used&&x<W-1||x===W-1)cells.push({row:H-1,col:x,ch:x===0?'└':x===W-1?'┘':'─'});
     for(let y=H-2;y>0;y--)cells.push({row:y,col:0,ch:'│'});
+  }else if(ruleMoving){
+    // `rule`: the head rule's cells (where the rule stands; a panel short of rows that drops it moves nothing).
+    const y=rows.findIndex((r,i)=>i>0&&i<count-1&&r.some(part=>part.rule));
+    if(y>0)for(let x=0;x<inner;x++)cells.push({row:y,col:2+x,ch:'─',rule:x});
   }
-  const motion=moving?{cells,
-    at:tick=>appearance([cells.map(c=>borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+  const motion=cells.length?{cells,
+    at:tick=>appearance([cells.map(c=>c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
     next:tick=>{const local=borderTick(tick),shift=Math.trunc(tick)-local;
-      if(moving==='orbit'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
+      if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
+      if(moving==='scanners')return Math.trunc(tick)+1;
+      if(moving==='border'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
       const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}}:null;
   const animated=!!motion||rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
@@ -1024,7 +1156,10 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
   const maxH=popupHeight(space),shut=maxH>3,list=body.slice(0,Math.max(0,shut?maxH-2:maxH-1)),H=Math.min(maxH,list.length+(shut?2:1));
   const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-H)/2));
-  const line=v=>({...text(v,'dim'),role:'messages'});
+  // 11-15 (panel polish 3): where nothing behind it is veiled (mono, eight colors, NO_COLOR) the
+  // frame's line is bright instead of the messages' gray.
+  const bright=veil(configuration,{colors:model.colors??256,noColor:model.no_color===true,background})===null;
+  const line=v=>bright?{text:v}:{...text(v,'dim'),role:'messages'};
   // The top line: `╭─ title ──… ✕ ─╮`; a title too long ends in `…`, the `✕` stays.
   const room=Math.max(0,W-10),name=room>=4?cut(title.map(p=>({...p,text:clean(p.text)})),room):[];
   const head=name.length?[line('╭─ '),...name,line(' ')]:[line('╭─')];
@@ -1051,6 +1186,14 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});
   let at=x+3;for(let i=0;i<sections.length&&shut&&listed.length>2;i++){const n=measure(sections[i]);hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
   return {rows:painted,left:x-left,top:y-above,width:W+left+right,height:out.length,frame:{left:x,top:y,width:W,height:H},inner,body:list.length,hits};
+}
+// 11-15 (panel polish 3): while a popup stands, the one gray everything behind it reads in (the
+// native's rows, the panel, the strip; no other color, no background): its face's `veil` (an
+// unknown face the dark one's). Null where the panel shows no hue (mono, eight colors, NO_COLOR):
+// nothing is veiled there and the popup's frame is bright instead.
+function veil(configuration={},{colors=256,noColor=false,background=''}={}){
+  const theme={...defaults,...configuration}.theme;
+  return noColor||!(colors>=256)||theme==='mono'?null:FACES[face(theme,background)||'dark'].veil;
 }
 // 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
 // (their numbers, reports and body) and the recent messages, the newest first, each its head (the
@@ -1094,5 +1237,6 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   }
   return out.length?out:[[text('·')]];
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,
-  BORDER:{LAP:BORDER_LAP,ARC:BORDER_ARC,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
+  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST},WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
+  BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};

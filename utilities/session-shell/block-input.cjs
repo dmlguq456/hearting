@@ -209,8 +209,9 @@ module.exports=function({changed,answer,action,section}) {
       return number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...words]:[span('  ',''),...words];
     });
   }
-  // Rule 5: one dim line per answer on its way, `✓ answer sent · <what was sent>` (the
-  // name-tag grey); the panel draws it where the question box stood, never boxed. The answer
+  // Rule 5: one line per answer on its way, `✓ answer sent · <what was sent>` (11-15 panel polish
+  // 2: `✓ answer sent` in the passing green of a route's `✓`, the `·` dim, what was sent in plain
+  // text); the panel draws it where the question box stood, never boxed or filled. The answer
   // record's `sent` (secrets already hidden) comes first: when another place's claim won, it is
   // what was sent, not this panel's pick (review 1633, follow-up 3).
   function sentLines(){
@@ -234,7 +235,7 @@ module.exports=function({changed,answer,action,section}) {
         }
       }
       const said=shown.join(', ').replace(/\s+/g,' ').trim();
-      return [span(text('sent','✓ answer sent')+(said?' · '+said:''),'dim')];
+      return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[])];
     });
   }
   async function submit(){
@@ -348,18 +349,20 @@ module.exports=function({changed,answer,action,section}) {
   // 11-15 (popup design A): the panel's summary of the question Ctrl+] opens on (the one shown,
   // else the first answerable one): how many there are, its two-row and one-row forms and its
   // whole first line, from the backend's rows at the panel's width. The popup reads it whole.
+  // `answerable` (panel polish 1): it is one a press answers here, now (the panel paints it so).
   function summary(){
     // The panel's summary is this session's own question, whatever the popup shows.
     if(foreign){const listed=flatOf(own||[]);if(!listed.length)return null;const row=listed.find(r=>!stale&&r.item.answerable===true&&!state(r.item).state)||listed[0];
       const view=row.question.display||{},fallback=[[span('◑ ','g_blocked'),span(row.question.question||'?','loc_repo')]];
-      return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),line:view.brief_line||fallback[0].slice(1),choices:choices(row).length};}
+      return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),line:view.brief_line||fallback[0].slice(1),choices:choices(row).length,
+        answerable:!stale&&row.item.answerable===true&&!state(row.item).state};}
     const listed=flat();if(!listed.length)return null;
     let row=current();
     if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}
     const view=(row||listed[0]).question.display||{};
     const fallback=[[span('◑ ','g_blocked'),span((row||listed[0]).question.question||'?','loc_repo')]];
     return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),
-      line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length};
+      line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length,answerable:active(row||listed[0])};
   }
   return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
     get question(){return foreign?flatOf(own||[]).length>0:!!current();},get foreign(){return foreign;},

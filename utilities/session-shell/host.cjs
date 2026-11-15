@@ -478,9 +478,9 @@ function spun(y,row){
   return paintedMotion?.rows.has(y)?motionRow(y,out):out;
 }
 let beatTimer,beatPhase=-1;
-function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&panelRows.length>0;}
+function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&panelRows.length>0&&veilTone()===null;}
 // The beat wakes at the next moment something painted changes: a spinner's next frame, the
-// moving frame's next change (the arc's next step; a breath's next shade), a blink's phase
+// moving frame's next change (the scanners' next step; a breath's next shade), a blink's phase
 // change once a second (spec rule 47 (d)). A blink repaints the panel; the rest swap their own
 // cells. Nothing changing, nothing wakes.
 function armBeat(){
@@ -514,7 +514,7 @@ function spinSpan(y,row,column){
 // the cursor kept where the native left it. A native frame already on its way paints them itself.
 // A row whose other cells were not written as they stand now goes whole (the panel part).
 function spinPaint(){
-  if(frameTimer||!paintedSpins.size&&!paintedMotion||succeeding)return;
+  if(frameTimer||!paintedSpins.size&&!paintedMotion||succeeding||veiledFrame!==null||veilTone()!==null)return;
   let text='';const side=geometry().side,wrote=new Set();
   for(const y of paintedMotion?new Set([...paintedSpins,...paintedMotion.rows.keys()]):paintedSpins){
     if(y>=panelRows.length)continue;
@@ -770,6 +770,22 @@ async function enterRow(){
   }
 }
 function covered(y,x){const r=popupRect;return !!r&&y>=r.top&&y<r.top+r.height&&x>=r.left&&x<r.left+r.width;}
+// 11-15 (panel polish 3): while a popup stands, everything outside it (the native's rows, the panel,
+// the strip) reads in one gray, no other color and no background, so the popup stands out; nothing
+// in the panel turns meanwhile (the moving frame is a still gray line). The rows are the ones the
+// scene writes anyway, each SGR in them replaced by the gray, so output under it keeps coming veiled
+// at the frames it would have come at. Lifting or laying the veil writes every row whole once. Mono,
+// eight colors and NO_COLOR veil nothing (the popup's frame is bright there instead).
+let veiledFrame=null;
+function veilTone(){return popupLayer&&!fleetView&&!relay?panelView.veil(displayConfiguration,{colors:panelModel.colors??256,noColor:panelModel.no_color===true,background:terminalBackground}):null;}
+// A serialized row in the veil: every SGR is the gray (a concealed cell stays concealed).
+function veilRow(row,tone){
+  return String(row).replace(/\x1b\[([0-9;]*)m/g,(_,list)=>{
+    const p=list.split(';');let hidden=false;
+    for(let i=0;i<p.length;i++){if(p[i]==='38'||p[i]==='48')i+=p[i+1]==='2'?4:2;else if(p[i]==='8')hidden=true;}
+    return `\x1b[0;38;5;${tone}${hidden?';8':''}m`;
+  });
+}
 // Before a frame: a popup that closed or moved gives its rows back to the scene (written whole again).
 function popupBefore(){
   if(overlayBase!==last){overlayBase=last;overlayLast=[];}
@@ -846,6 +862,9 @@ function render() {
     // Paint the observed selected model with the same native frame, rather
     // than first emitting a known model beside an obsolete Checking row.
     if(selectedChanged)return;
+    // Laying or lifting the veil writes every row whole (the cells the beat would swap included).
+    const tone=veilTone();
+    if(tone!==veiledFrame){veiledFrame=tone;last=[];written=[];motionShown.clear();}
     popupBefore();const wrote=new Set();
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
@@ -870,25 +889,26 @@ function render() {
         // A row of the moving frame whose native part and other panel cells are unchanged: only
         // its changed cells (and its spinner glyphs).
         const column=geometry().left?1:view.cols+1+geometry().gap;
-        motion=shown&&!!paintedMotion?.rows.has(y);
+        motion=shown&&!tone&&!!paintedMotion?.rows.has(y);
         if(motion&&same&&last[y]!==undefined&&last[y]!==line&&written[y]===panelKey[y]){text+=cellSpan(y,y,column);last[y]=line;}
         else if(motion&&last[y]!==line)motionWrote(y,y,column);
-        written[y]=shown?panelKey[y]:undefined;
+        written[y]=shown&&!tone?panelKey[y]:undefined;
       }
+      if(tone)line=veilRow(line,tone);
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;wrote.add(y);}
     }
     if(!fleetView&&!geometry().side&&(expanded||height()>0))for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y,first=expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude';
-      const cached=first?'\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
+      const own=first?'\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]),cached=tone?veilRow(own,tone):own;
       if(last[row]!==cached){
         // A row of the moving frame whose other cells are unchanged: only its changed cells.
-        const quiet=!first&&!!paintedMotion?.rows.has(y)&&last[row]!==undefined&&written[row]===panelKey[y];
+        const quiet=!first&&!tone&&!!paintedMotion?.rows.has(y)&&last[row]!==undefined&&written[row]===panelKey[y];
         text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H${cached}`;
-        if(!quiet&&!first)motionWrote(y,row,1);
+        if(!quiet&&!first&&!tone)motionWrote(y,row,1);
         if(!quiet)wrote.add(row);
         last[row]=cached;
       }
-      written[row]=first?undefined:panelKey[y];
+      written[row]=first||tone?undefined:panelKey[y];
     }
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;wrote.add(rows-1);}
     if(!fleetView)text+=popupOver(wrote);

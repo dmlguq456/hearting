@@ -312,6 +312,50 @@ const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
                               text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
+    def test_the_sent_line_takes_the_passing_green_and_the_summary_says_it_is_answered_here(self):
+        # 11-15 (panel polish 2): `✓ answer sent` in the passing green a route's `✓` takes (`lvl_g`),
+        # the `·` dim, what was sent in plain text (a secret `•••`), whichever place sent it; the line
+        # still goes when its session has the answer. Polish 1: the summary says whether a press
+        # answers its question here, now (the panel paints only that one).
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const styles={dim:{foreground:-1,dim:true},lvl_g:{foreground:150,dim:false},loc_repo:{foreground:253,dim:false},g_blocked:{foreground:217,dim:false}};
+const look=b=>b.sent().map(r=>r.map(x=>[x.text,x.foreground??null,!!x.dim]));
+(async()=>{
+ const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',choices:['Alpha','Beta']}]};
+ const there={id:'t',revision:'r',answerable:false,answer_state:'answer_there',questions:[{id:'q',question:'THERE?',choices:['One']}]};
+ const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([a],'',{styles,labels:{sent:'✓ 답 보냄'}});
+ assert.equal(b.summary().answerable,true);
+ b.enter();b.input(Buffer.from('2\r'));await tick();
+ assert.deepEqual(look(b),[[['✓ 답 보냄',150,false],[' · ',-1,true],['Beta',253,false]]]);
+ assert.equal(b.summary(),null);
+ // Sent from elsewhere (another session's popup, Fleet): the same line from the record's words.
+ const f=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ f.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}],'',{styles,labels:{sent:'✓ 답 보냄'}});
+ assert.deepEqual(look(f),[[['✓ 답 보냄',150,false],[' · ',-1,true],['Alpha',253,false]]]);
+ f.update([{...a,answerable:false,request_state:'received'}]);assert.deepEqual(look(f),[]);
+ // A secret stays hidden, in the same colors.
+ const s=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}],'',{styles,labels:{sent:'✓ 답 보냄'}});
+ s.enter();s.input(Buffer.from('tFAKE_SECRET\r'));await tick();
+ assert.deepEqual(look(s),[[['✓ 답 보냄',150,false],[' · ',-1,true],['•••',253,false]]]);
+ // A wait answered elsewhere is summarized but never one a press answers here; beside an open one,
+ // the open one is summarized.
+ const w=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ w.update([there],'',{styles});assert.equal(w.summary().answerable,false);
+ w.update([there,a],'',{styles});assert.equal(w.summary().answerable,true);
+ // The panel's own summary while another session's question stands in the editor.
+ w.enterForeign({tag:'12',owner:{harness:'codex',session_id:'x'},items:[{...a,id:'f'}]});
+ assert.equal(w.summary().answerable,true);
+ console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
     def test_a_sent_answer_leaves_the_panel_count_and_the_notice_line_in_each_harness(self):
         # Rule 5 (11-14), the panel's half: what the shared cache gives for a sent answer (listed,
         # marked, out of the session index) is no wait in the panel's head, folded strip or notice

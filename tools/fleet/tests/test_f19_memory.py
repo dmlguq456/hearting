@@ -541,6 +541,36 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertEqual(session_work.recent_memory("/home/demo/repo"), ([], [str(self.journal)]))
         self.assertEqual(session_work.recent_memory(""), ([], []))
 
+    def test_recent_memory_lists_this_repos_and_the_global_records_together(self):
+        # 11-15 (panel polish 5): the MEM section reads this repository's records and the global
+        # ones (scope global, written from any project) together, newest first, from the one journal
+        # read; each row carries the tier and scope the journal records. A global record written
+        # from this repository is listed once; another project's own records stay out.
+        _write_lines(self.journal, [
+            _event("2026-11-15T08:00:00", "add", tier="durable", rtype="decision", snippet="own", cwd="/home/demo/repo", id="rec-own"),
+            _event("2026-11-15T09:00:00", "add", tier="working", rtype="lesson", snippet="global elsewhere",
+                   cwd="/home/demo/other", id="rec-g", scope="global"),
+            _event("2026-11-15T09:30:00", "add", tier="durable", rtype="fact", snippet="other project", cwd="/home/demo/other", id="rec-o"),
+            _event("2026-11-15T10:00:00", "add", tier="durable", rtype="lesson", snippet="global here",
+                   cwd="/home/demo/repo", id="rec-gh", scope="global"),
+        ])
+        from fleet import session_work
+        memcol._latest_cache.clear()
+        reads = mock.Mock(wraps=memcol._read_saved_journal)
+        with mock.patch.object(memcol, "_read_saved_journal", reads):
+            rows, paths = session_work.recent_memory("/home/demo/repo", 3)
+            two, _paths = session_work.recent_memory("/home/demo/repo")
+        self.assertEqual(reads.call_count, 1)
+        self.assertEqual(paths, [str(self.journal)])
+        self.assertEqual([(row["id"], row["tier"], row["scope"], row["type"]) for row in rows],
+                         [("rec-gh", "durable", "global", "lesson"), ("rec-g", "working", "global", "lesson"),
+                          ("rec-own", "durable", "project", "decision")])
+        self.assertEqual([row["id"] for row in two], ["rec-gh", "rec-g"])
+        # The other project sees its own and the global ones; the global group alone, from the same read.
+        self.assertEqual([row["id"] for row in session_work.recent_memory("/home/demo/other", 3)[0]], ["rec-gh", "rec-o", "rec-g"])
+        self.assertEqual([row["id"] for row in memcol.recent_saved_global()[0]], ["rec-gh", "rec-g"])
+        self.assertEqual(reads.call_count, 1)
+
     def test_latest_saved_asks_each_cwds_repository_once_per_read(self):
         # The journal is shared by every repository and every panel reads it again on any
         # write; a cwd's key walks the directories up to `.git` (a stat each, slow on NFS),
