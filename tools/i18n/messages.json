@@ -1594,10 +1594,6 @@
    "en": "Waiting",
    "ko": "대기"
   },
-  "fleet.session_panel.no_routes": {
-   "en": "No current route",
-   "ko": "아직 라우트 없음"
-  },
   "fleet.session_panel.no_work": {
    "en": "No confirmed work yet",
    "ko": "아직 확인된 작업 없음"

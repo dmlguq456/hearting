@@ -1239,7 +1239,7 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
  lab:{count:'4',counts:[[p('실패 1')],[p('대기 1')]],goal:[p('SI-SDR 13 dB')],rows:[
   {name:p('긴 문맥'),cells:{state:p('실패'),progress:p('9/60 ep'),delta:p('-2.20 dB')}},{name:p('큰 학습률'),cells:{state:p('진행 중'),progress:p('36/60 ep'),delta:p('+0.5 dB')}},
   {name:p('작은 배치'),cells:{state:p('진행 중'),progress:p('?'),delta:p('-0.6 dB')}},{name:p('기준 모델'),cells:{state:p('대기'),progress:p('40/40 ep'),delta:p('·')}}]},
- sessions:{count:5,counts:[[p('◑2')],[p('⠏1')],[p('●2')]],rows:[
+ sessions:{count:4,counts:[[p('◑1')],[p('⠏1')],[p('●2')]],rows:[
   {glyph:[p('◑')],tag:[p('['),p('e9'),p(']')],title:[p('own')],age:[p('1m')],own:true},
   {glyph:[p('◑')],tag:[p('['),p('12'),p(']')],title:[p('분리 모델 학습 비교')],age:[p('41m')]},
   {glyph:[p('⠏')],tag:[p('['),p('73'),p(']')],title:[p('v4.32.7 설치 확인')],age:[p('12m')]},
@@ -1251,7 +1251,7 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
 const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
 const paint=height=>pv.render({width:44,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
-const HEADS=[['QUESTIONS',/^│ 3 QUESTIONS ─+ › │$/],['ROUTE',/^│ 4 ROUTE ⠏2 ✕1 ─+ › │$/],['LAB',/^│ 4 LAB ─+ 실패 1 대기 1 › │$/],['SESSIONS',/^│ 5 SESSIONS ◑2 ⠏1 ●2 ─+ › │$/],
+const HEADS=[['QUESTIONS',/^│ 3 QUESTIONS ─+ › │$/],['ROUTE',/^│ 4 ROUTE ⠏2 ✕1 ─+ › │$/],['LAB',/^│ 4 LAB ─+ 실패 1 대기 1 › │$/],['SESSIONS',/^│ 4 SESSIONS ◑1 ⠏1 ●2 ─+ › │$/],
  ['MESSAGES',/^│ MESSAGES \+\d+ ─+ › │$/],['MEM',/^│ MEM ─+ │$/]];
 // The rows under each head, up to the next head (MEM: its `◆` rows).
 const sections=rows=>{const at=HEADS.map(([name,re])=>[name,rows.findIndex(s=>re.test(s))]);
@@ -1285,13 +1285,49 @@ for(const [height,rowsOf] of [[40,{QUESTIONS:2,ROUTE:3,LAB:3,SESSIONS:3,MESSAGES
 """
         self.node(script, "panel-view.cjs")
 
+    def test_a_low_panel_keeps_the_questions_head_and_first_row_from_five_rows(self):
+        # PR #1648 review B: at 5 to 9 rows the panel kept only REPO/MODEL/CTX/TITLE/NOW and the question
+        # went. QUESTIONS keeps its head and first row to the last (spec rule 34 (b)); the structural rows
+        # above it (TITLE, NOW, ...) give their rows up first. Every height 5-60 at every width 12-60 keeps
+        # its rows within the height, each as wide as the panel, and 5-9 rows (from width 20) show the question.
+        script = r"""
+const assert=require('node:assert/strict'),pv=require(process.argv[1]);
+const p=(text,extra={})=>({text,...extra});
+const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
+const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],selected:[p('Opus 5.5'),p(' xhigh')],context_side:[p('━━─── '),p('46%')],
+ session_title:'질문·route 팝업',now:'그리는 중',wait:'◑답 대기 3',wait_guide:'1 QUESTIONS · 입력창에 답',route_label:'route 1',route_count:1,route_total:1,
+ routes:[{id:'a',title:'질문 팝업 구현',kind:'working',state:'working',shape:'one-shot-owner',stages:[],elapsed:'23m',paint:{glyph:p('⠏')}}],
+ memory_items:[{kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
+const brief=()=>({count:3,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
+ one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
+const paint=(height,width)=>pv.render({width,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
+for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
+ const v=paint(h,w),rows=v.rows.map(r=>r.map(x=>x.text).join('')),label=h+'x'+w+'\n'+rows.join('\n');
+ assert(rows.length<=h&&rows.every(r=>cells(r)===w),label);
+ if(w>=20&&h<=9){
+  const head=rows.findIndex(r=>/^│ 3 QUESTIONS/.test(r));
+  assert(head>=0&&/^│ ◑ /.test(rows[head+1]),label);
+  // The press on the head or its row still opens the question popup.
+  assert(v.hits.some(x=>x.row===head&&x.action==='question')&&v.hits.some(x=>x.row===head+1&&x.action==='question'),label+JSON.stringify(v.hits));
+ }
+}
+// 5 rows: the head and first row between the borders and the fold row; 6 rows: REPO stands above them.
+let rows=paint(5,44).rows.map(r=>r.map(x=>x.text).join(''));
+assert(/^│ 3 QUESTIONS/.test(rows[1])&&/^│ ◑ /.test(rows[2])&&rows[3].endsWith('»   ⚙ │'),rows.join('\n'));
+rows=paint(6,44).rows.map(r=>r.map(x=>x.text).join(''));
+assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\n'));
+"""
+        self.node(script, "panel-view.cjs")
+
     def test_mem_stands_under_the_messages_and_gives_way_first(self):
         # Spec E9 rule 46, 11-15: MEM leaves the head for its own section under the messages (its head
         # first and a thin rule on from it, as the messages' `MESSAGES`, no `›`: it opens no popup), two
-        # records at most, one row each (`◆ headline   age`; the kind row is gone); short of rows MEM
+        # records at most, one row each (`◆ kind headline   age`: the kind word stands in the row, there is no kind row; short of
+        # cells the headline is cut first and then the kind word goes, the age stays); short of rows MEM
         # steps down to one record and then goes before any of the messages does.
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const cellsOfRows=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
 const items=[{kind:'decision',age:'3m',text:'panel labels in dark grey, and the count leads its word so it reads as a count'},
  {kind:'lesson',age:'2h',text:'one fix per review finding'}];
 const routes=[oneShot,staged,{...oneShot,id:'c'}];
@@ -1302,25 +1338,32 @@ const section=(rows,word)=>{const i=rows.findIndex(s=>new RegExp('^│ '+word+'(
 let v=at(),rows=plain(v);
 const msg=rows.findIndex(s=>s.startsWith('│ MESSAGES')),mem=rows.findIndex(s=>/^│ MEM ─+ │$/.test(s));
 assert(msg>0&&mem>msg&&!rows.slice(0,msg).some(s=>s.includes('MEM')),rows.join('\n'));
-// Two records, one row each: the headline cut with `…`, its age at the right; no kind word, no second row.
-assert(/^│ ◆ panel labels in dark grey.*… +3m │$/.test(rows[mem+1])&&/^│ ◆ one fix per review finding +2h │$/.test(rows[mem+2])
- &&!rows.join('').includes('decision')&&!rows.join('').includes('lesson')&&!/^│ ◆ /.test(rows[mem+3]),rows.join('\n'));
+// Two records, one row each: the kind word after `◆`, the headline cut with `…`, its age at the right; no second row.
+assert(/^│ ◆ decision panel labels in dark.*… +3m │$/.test(rows[mem+1])&&/^│ ◆ lesson one fix per review find… +2h │$/.test(rows[mem+2])
+ &&!/^│ ◆ /.test(rows[mem+3]),rows.join('\n'));
+// The kind word is dim as base's kind row was; short of cells the headline is cut first, then the kind word goes and the age stays.
+assert(v.rows[mem+2].filter(p=>p.text==='lesson ').every(p=>p.dim===true)&&v.rows[mem+2].some(p=>p.text==='lesson '),JSON.stringify(v.rows[mem+2]));
+for(const [w,re] of [[30,/^│ ◆ decision panel.*… +3m │$/],[22,/^│ ◆ decision .*… +3m │$/],[20,/^│ ◆ (?!decision).*… +3m │$/],[16,/^│ ◆ (?!decision).*… +3m │$/]]){
+ // The kind word stays while the headline keeps four cells; short of that it goes first and the age stays.
+ const r=plain(at({width:w})),m=r.findIndex(s=>/^│ MEM ─+ │$/.test(s));
+ assert(re.test(r[m+1])&&r.every(s=>cellsOfRows(s)===w),w+'\n'+r.join('\n'));
+}
 // The head row's `◆` and age dim, the headline in the body color; the title as the messages' (dim, its word the title role).
-assert(v.rows[mem+2].filter(p=>p.text==='one fix per review finding').every(p=>p.dim!==true)&&v.rows[mem+2].filter(p=>p.text==='2h'||p.text==='◆ ').every(p=>p.dim===true),JSON.stringify(v.rows[mem+2]));
+assert(v.rows[mem+2].filter(p=>p.text.startsWith('one fix per review find')).length===1&&v.rows[mem+2].filter(p=>p.text.startsWith('one fix per review find')).every(p=>p.dim!==true)&&v.rows[mem+2].filter(p=>p.text==='2h'||p.text==='◆ ').every(p=>p.dim===true),JSON.stringify(v.rows[mem+2]));
 const title=v.rows[mem].find(p=>p.text==='MEM'),mtitle=v.rows[msg].find(p=>p.text==='MESSAGES');
 assert(title.role==='title'&&title.dim===true&&mtitle.role==='title'&&mtitle.dim===true);
 // MEM opens no popup: no hit on its rows, no `›` on its head.
 assert(!v.hits.some(h=>h.row>=mem&&h.row<=mem+2&&h.action!=='fold'&&h.action!=='settings'),JSON.stringify(v.hits));
 // One record, none.
 rows=plain(at({model:{memory_items:items.slice(1)}}));
-const one=section(rows,'MEM');assert(one&&one.length===1&&one[0].startsWith('│ ◆ one fix per review finding'),rows.join('\n'));
+const one=section(rows,'MEM');assert(one&&one.length===1&&one[0].startsWith('│ ◆ lesson one fix per review find'),rows.join('\n'));
 assert(!plain(at({model:{memory_items:[]}})).join('').includes('MEM'));
 // An age missing: the row keeps what is known; a record without a kind reads the same.
 assert(plain(at({model:{memory_items:[{kind:'',age:'5m',text:'only an age'}]}})).some(s=>/^│ ◆ only an age +5m │$/.test(s)));
 // No messages: MEM alone under its head.
 rows=plain(at({model:{messages:[]}}));assert(!rows.join('').includes('MESSAGES')&&section(rows,'MEM').length===2,rows.join('\n'));
 // Narrower than 30 cells inside: the same section.
-rows=plain(at({width:32}));assert(section(rows,'MEM')?.[0].startsWith('│ ◆ panel labels'),rows.join('\n'));
+rows=plain(at({width:32}));assert(section(rows,'MEM')?.[0].startsWith('│ ◆ decision panel labels'),rows.join('\n'));
 // Short of rows (11-15: every section down to two rows and then one, the lowest first; then MEM goes
 // whole, its records and then its head, before any message row or the MESSAGES head goes).
 const memRows=rows=>rows.filter(s=>/^│ ◆ /.test(s)).length,memHead=rows=>rows.some(s=>/^│ MEM ─+ │$/.test(s));

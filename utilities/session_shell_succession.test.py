@@ -96,6 +96,9 @@ while True:
 PRELOAD = r"""
 const Module=require('node:module'),fs=require('node:fs'),load=Module._load,dir=process.env.SUCC_DIR;
 if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
+ // The backend as it is, but for the one seam a popup's reading would otherwise cross: Fleet's
+ // collection of this machine's processes and terminals (a synthetic, empty view model instead).
+ process.env.HEARTING_SHELL_PYTHON=dir+'/backend.py';
  const mode=()=>{try{return fs.readFileSync(dir+'/fault','utf8').trim();}catch{return '';}};
  const from=name=>new Error().stack.includes(name);
  if(process.env.HEARTING_SHELL_SUCCESSOR==='1'){
@@ -135,6 +138,22 @@ if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
    return terminal;}})};
   return value;};
 }
+"""
+
+# The popups' backend: `session_shell.py backend` with Fleet's machine collection replaced by a synthetic
+# view model, so an open popup here reads no real session or process.
+BACKEND = r"""#!{python}
+import os,sys
+if sys.argv[2:]!=['backend']:os.execv({python!r},[{python!r},*sys.argv[1:]])
+here=os.path.dirname(os.path.abspath(sys.argv[1]))
+sys.path[:0]=[here,os.path.join(here,'..','tools')]
+import session_shell as m
+def vm(harness,sid,kind):
+    from fleet.explorer.view_model import ExplorerViewModel
+    open(os.path.join(os.environ['SUCC_DIR'],'popup-vm'),'a').write(kind+'\n')
+    return ExplorerViewModel.from_mapping({{'routes':[],'sessions':[],'repos':[],'system':{{}}}})
+m._popup_view_model=vm
+raise SystemExit(m._backend())
 """
 
 VT = r"""
@@ -209,6 +228,7 @@ class Window:
         native = self.root/'native.py'; native.write_text(NATIVE)
         (self.root/'fault.cjs').write_text(PRELOAD)
         (self.root/'vt.cjs').write_text(VT); (self.root/'unit.cjs').write_text(UNIT)
+        backend = self.root/'backend.py'; backend.write_text(BACKEND.format(python=sys.executable)); backend.chmod(0o700)
         self.exit_fifo = self.root/'exit'; os.mkfifo(self.exit_fifo, 0o600)
         env = dict(case.env, LOOP_NATIVE_EXIT=str(self.exit_fifo), SUCC_HARNESS=harness, SUCC_DIR=str(self.root),
                    SUCC_PID=str(self.root/'native.json'), SUCC_READ=str(self.root/'native-read'),
@@ -688,6 +708,11 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 point = (line.index('1 ROUTE')+2, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
         window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('╰─ ')
+        # The popup read the synthetic view model: nothing here collects this machine's sessions.
+        end = time.monotonic()+15
+        while not (window.root/'popup-vm').exists() and time.monotonic() < end:
+            window.pump(.1)
+        self.assertIn('routes', (window.root/'popup-vm').read_text() if (window.root/'popup-vm').exists() else '')
 
     def test_an_open_popup_defers_the_hand_over_until_it_is_closed(self):
         window = self.window()

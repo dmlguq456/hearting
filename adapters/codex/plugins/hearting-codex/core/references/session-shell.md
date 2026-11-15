@@ -378,7 +378,8 @@ opens in place: a press on a head or on any row of its section opens its popup
   be read or worded is LAB's own unconfirmed state and keeps its watch.
 - SESSIONS: the sessions on this machine from Fleet's session table, the ones a
   person must answer first, then the running, then the idle, this window's own
-  left out; each its state glyph, `[number]`, TITLE (in its harness's bold hue)
+  left out of the rows and of the head's counts alike (the head and the rows count
+  the same sessions); each its state glyph, `[number]`, TITLE (in its harness's bold hue)
   and AGE. Its values come from the sessions popup's own reading (below), made
   while another session waits for the person (and once when that ends) or when
   the popup opens; with no reading yet the section is not drawn.
@@ -785,11 +786,11 @@ item by priority from existing values: an answer this session owes, then
 compaction imminent, then a context or usage reading at Fleet's red level, then
 a failed, blocked or attention-needing route. News and release lines are not on
 it: a received peer report stands in MESSAGES, a finished route's result in the
-ROUTE box (the producer's recent results follow the current routes), and a
+ROUTE rows (the producer's recent results follow the current routes), and a
 waiting release or a switch without scrollback in the panel's tidy-notice slot.
 A finished result's row leads its title with the result word (`FAIL · title`),
 takes Fleet's failure mark `✕` and color when the result did not pass, and leaves
-the box after the person's next input or ten minutes, the bound the notice row's
+the rows after the person's next input or ten minutes, the bound the notice row's
 news used.
 It reuses Fleet's glyphs and colors and adds no collection, setting or judgment.
 A hidden (Fleet over the window), focused or not-yet-bound panel and a lost display host show

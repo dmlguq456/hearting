@@ -720,7 +720,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
     effort = _effort_text(values.get("effort"))
     model_line += [(" · " + (effort or "?"), _eff_key(values.get("effort"), False) if effort else "dim")]
     labels = {name: ui_text("fleet.session_panel." + name) for name in (
-        "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
+        "settings", "settings_title", "checking", "work", "no_work", "routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
         "narrow", "auxiliary", "height", "side", "bottom", "compact", "summary",
         "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",

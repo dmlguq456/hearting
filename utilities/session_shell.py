@@ -1416,7 +1416,8 @@ def session_summary(vm, harness, sid, *, colors=256, no_color=False):
     """The sessions section's values from Fleet's session table (popup design D): the count, each
     state's count and the rows, the person's waits first, then the running, then the idle; each row
     Fleet's own cells (its state glyph and key, `[number]`, the title in its harness's bold hue, the
-    age), painted. ``own`` marks this window's own session (the panel leaves it out of its rows)."""
+    age), painted. ``own`` marks this window's own session: the panel leaves it out of its rows, and
+    out of the count and the state counts too, so the head and the rows count the same sessions."""
     from fleet.explorer.tables import session_marker
     from fleet.palette import style_components
     from fleet.session_tags import assigned_tag
@@ -1427,8 +1428,9 @@ def session_summary(vm, harness, sid, *, colors=256, no_color=False):
     rows, counts = [], {}
     for session in tuple(getattr(vm, "sessions", ()) or ()):
         glyph, key = session_marker(session)
-        counts.setdefault(glyph, [0, key])[0] += 1
         tag = _plain(session.get("tag") or "·", 16)
+        if tag != own:
+            counts.setdefault(glyph, [0, key])[0] += 1
         title_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0), "opencode": ("l", 1, 0)}.get(
             str(session.get("harness") or ""), "unknown")
         rows.append({"glyph": [paint(glyph, key)],
@@ -1437,7 +1439,7 @@ def session_summary(vm, harness, sid, *, colors=256, no_color=False):
                      "age": [paint(_plain(session.get("age") or "", 12), "dim")] if session.get("age") else [],
                      "own": tag == own, "rank": {"◑": 0, "⠏": 1}.get(glyph, 2)})
     rows.sort(key=lambda row: row.pop("rank"))
-    return {"count": len(rows),
+    return {"count": sum(1 for row in rows if not row["own"]),
             "counts": [[paint(glyph + str(counts[glyph][0]), counts[glyph][1])]
                        for glyph in ("◑", "⠏", "●", "✕", "✓") if glyph in counts],
             "rows": rows[:12]}
@@ -1532,13 +1534,17 @@ def _panel_popup(binding, request):
     ids = [str(route.get("id") or "") for route in routes]
     page = request.get("page") is True and opened in ids
     if page:
-        # Fleet's route page at the popup's height (its stage frame takes what the screen leaves),
-        # under the three rows Fleet's own page head takes (dropped below).
+        # Fleet's route page with every line of it (the popup reads a longer page on with PgUp/PgDn,
+        # so no line is folded into `+N more`): the grid is as tall as the window's rows and the
+        # visibility lines together; its stage frame takes what the window's rows leave, never less
+        # than a 36-row window leaves (a lower window reads the page on instead).
         room = request.get("rows") if type(request.get("rows")) is int and 6 <= request["rows"] <= 200 else 30
-        grid = CellGrid(columns, room + 3)
+        room = max(room, 30)
+        route = next(item for item in routes if str(item.get("id")) == opened)
+        grid = CellGrid(columns, room + 3 + sum(pages._route_visibility_rows(route.get("visibility"), 0, columns - 1)))
         subset = replace(vm, routes=routes)
         pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
-                          pages._SubsetState(None, "route:" + opened, opened, True))
+                          pages._SubsetState(None, "route:" + opened, opened, True), whole=True)
     elif routes:
         pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, opened=opened, no_repo_group=True)
     rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)

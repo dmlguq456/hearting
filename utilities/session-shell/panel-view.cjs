@@ -420,9 +420,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // The last row placed; beside the native area it stands on the panel's last row inside.
   // Rows past the panel's own give way to it: the head's last rows first (the first head row
   // stays, and a box below keeps both its borders), then whatever runs past the end.
-  function lastRow(left,groups,head=0){
+  function lastRow(left,groups,head=0,floor=1){
     const rows=height-2;
-    for(let over=content.length-(rows-1);over>0&&head>1;over--){
+    for(let over=content.length-(rows-1);over>0&&head>floor;over--){
       const at=--head;content.splice(at,1);contentGroups.splice(at,1);
       for(let i=hits.length-1;i>=0;i--){if(hits[i].row===at+1)hits.splice(i,1);else if(hits[i].row>at+1)hits[i].row--;}
     }
@@ -803,8 +803,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const messageRows=n=>{const req=requestList.slice(0,n).map(requestLine),left=n-req.length;return [...req,...(left>0?messages.slice(-left).map(messageLine):[])];};
     // MEM (spec rule 46): this repository's newest saved memory records, two at most, one row each
     // (`◆ headline` and its age at the right). No popup: its head has no `›`.
-    const memRow=m=>{const age=m.age?[text(m.age,'dim')]:[],lead=[text('◆ ','dim')],room=inner-size(lead)-(age.length?size(age)+1:0),
-      n=cut([text(m.text,'loc_repo')],Math.max(1,room));return room>=4?[...lead,...n,pad(room-size(n)),...(age.length?[text(' '),...age]:[])]:cut([...lead,text(m.text,'loc_repo')],inner);};
+    // `◆ kind headline   age`: the kind word (dim, as base's kind row) stands before the headline; short
+    // of cells the headline is cut first, and then the kind word leaves (the age stays).
+    const memRow=m=>{
+      const age=m.age?[text(m.age,'dim')]:[],tail=age.length?size(age)+1:0;
+      for(const lead of [...(m.kind?[[text('◆ ','dim'),text(m.kind+' ','dim')]]:[]),[text('◆ ','dim')]]){
+        const room=inner-size(lead)-tail;
+        if(room>=4||lead.length===1){const n=cut([text(m.text,'loc_repo')],Math.max(1,room));
+          return room>=4?[...lead,...n,pad(room-size(n)),...(age.length?[text(' '),...age]:[])]:cut([...lead,text(m.text,'loc_repo')],inner);}
+      }
+      return [];
+    };
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
@@ -861,7 +870,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the rows left over go under the last of them, right above the panel's last row.
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
-      if(content.length+sectionSize(s)>budget-1)break;
+      // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
+      if(s.name!=='QUESTIONS'&&content.length+sectionSize(s)>budget-1)break;
       add(s.head(),s.action,s.groups);
       // A route's or a session's own row opens the popup with it unfolded.
       sectionRows(s).forEach((row,i)=>add(row,s.name==='ROUTE'&&ranked[i]?'popup:ROUTE:'+ranked[i].id:
@@ -886,7 +896,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       tries.push([]);
       return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
     })();
-    lastRow(keepQuota?quotaRow:[],keepQuota&&quota.length?['quota']:[],order.length);
+    lastRow(keepQuota?quotaRow:[],keepQuota&&quota.length?['quota']:[],order.length,kept.QUESTIONS?0:1);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17, 29 (a): the top border carries Fleet's session-row head on the

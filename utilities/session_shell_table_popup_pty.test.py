@@ -364,7 +364,7 @@ class SessionShellTablePopupTest(unittest.TestCase):
         text = lambda name: '\n'.join(frames[name])  # noqa: E731
         # The panel: each section its head and rows (11-15, design E).
         panel = text('closed')
-        for head in ('1 QUESTIONS', '2 ROUTE ⠏1 ✕1', 'LAB', '3 SESSIONS ◑1'):
+        for head in ('1 QUESTIONS', '2 ROUTE ⠏1 ✕1', 'LAB', '2 SESSIONS ◑1'):
             self.assertIn(head, panel)
         self.assertIn('◑ [12] 분리 모델 학습 비교', panel)
         self.assertNotIn('[e9] 이 창', panel)  # this window's own session is no row of its own section

@@ -32,6 +32,14 @@ def stages(*pairs):
     return [{'name': name, 'st': state} for name, state in pairs]
 
 
+VISIBILITY = {'lines': [
+    ['route', 'solo · default · autopilot-code quick', 'info'], ['owner', 'no owner attempt in the dispatch registry', 'dim'],
+    ['stages', '·', 'dim'], ['review', 'no independent reviewer stage in this route', 'dim'],
+    ['CI', 'no CI result in the route outcome', 'dim'], ['gate', 'unproven', 'mixed'],
+    ['test', 'synthetic check one', 'good'], ['test', 'synthetic check two', 'good'],
+    ['unverified', 'a check the route could not run', 'mixed'], ['blocked', 'a reason that keeps going until the end', 'bad'],
+    ['path', 'route /syn/art/route.json', 'dim'], ['path', 'evidence one-shot /syn/art/evidence.md', 'dim'],
+    ['path', 'report /syn/art/report.md', 'dim'], ['next', 'wait · one-shot', 'info']]}
 ROUTES = [
     {'id': 'rt-aaaaaaaaaaaaaaa1', 'session_tag': 'e9', 'repo': 'hearting', 'title': '질문 팝업 구현 — 창 가운데 팝업, 패널 안 요약, 답 직후 Esc·Enter 막기',
      'state': 'working', 'harness': 'claude', 'model': 'Opus 5.5', 'effort': 'xhigh', 'owner_gauge': [38, 0.2], 'age': '23m',
@@ -41,7 +49,7 @@ ROUTES = [
      'worker': ['worker', [['claude Sonnet 5.5 high', 'soft']], [['running', 'g_spin']]], 'worker_stage': 'execute', 'activity': 'running'},
     {'id': 'rt-aaaaaaaaaaaaaaa2', 'session_tag': 'e9', 'repo': 'hearting', 'title': '휠 입력 시험', 'state': 'dead', 'harness': 'opencode',
      'model': 'glm-5', 'effort': 'high', 'owner_gauge': [12, 0.128], 'age': '54m', 'capability': 'autopilot-code', 'mode': 'debug',
-     'intensity': 'quick', 'stages': stages(('one-shot', 'failed')), 'resume': '같은 start에 --prompt-file',
+     'intensity': 'quick', 'stages': stages(('one-shot', 'failed')), 'visibility': VISIBILITY, 'resume': '같은 start에 --prompt-file',
      'worker': ['owner', [['BLOCKED: 사설 PTY를 열지 못함 — runtime_dir에 node-pty 빌드가 없어 휠 시험을 돌리지 못했다', 'lvl_r']],
                 [['dead', 'g_dead']]], 'worker_stage': 'one-shot'},
     {'id': 'rt-bbbbbbbbbbbbbbb3', 'session_tag': '12', 'repo': 'speech-lab', 'title': '다른 세션의 route', 'state': 'working',
@@ -148,13 +156,28 @@ class TablePopupTest(unittest.TestCase):
         self.assertTrue(got['page'])
         want_rows, want_styles, _hits = self.fleet(lambda grid: pages._route_page(
             grid, replace(view_model(), routes=mine), 'rt-aaaaaaaaaaaaaaa2', 0, 81, grid.rows,
-            pages._SubsetState(None, 'route:rt-aaaaaaaaaaaaaaa2', 'rt-aaaaaaaaaaaaaaa2', True)), 82, rows=23)
+            pages._SubsetState(None, 'route:rt-aaaaaaaaaaaaaaa2', 'rt-aaaaaaaaaaaaaaa2', True), whole=True), 82, rows=30 + 3 + sum(pages._route_visibility_rows(VISIBILITY, 0, 81)))
         while want_rows and not want_rows[0]:
             want_rows.pop(0)
         self.assertEqual((got['rows'], got['styles']), (want_rows, want_styles))
-        self.assertLessEqual(len(got['rows']), 23)
         # A route not this session's has no page: the table stands.
         self.assertFalse(self.popup(kind='routes', columns=82, open='rt-bbbbbbbbbbbbbbb3', page=True)['page'])
+
+    def test_the_route_page_has_every_line_at_any_window_height_to_read_on(self):
+        # PR #1648 review B: a low window folded the page's artifact paths and `next` into `+N more`, which
+        # the popup could not unfold. The page is as long as its lines (the popup reads it on with PgUp/PgDn
+        # and the wheel, as it reads any table), so every line stands, whatever the window's height.
+        for window in range(16, 61):
+            for columns in (52, 82, 112):
+                got = self.popup(kind='routes', columns=columns, open='rt-aaaaaaaaaaaaaaa2', page=True, rows=window - 6)
+                self.assertTrue(got['page'])
+                whole = ''.join(self.text(got['rows'])).replace(' ', '')
+                for label, text, _tone in VISIBILITY['lines']:
+                    self.assertIn((label + ':' + text).replace(' ', ''), whole, (window, columns, label))
+                self.assertNotRegex(whole, r'\+\d+more', (window, columns))
+        # The page is longer than a low window: the host's table reads it on and says where it stands.
+        low = self.popup(kind='routes', columns=82, open='rt-aaaaaaaaaaaaaaa2', page=True, rows=10)
+        self.assertGreater(len(low['rows']), 13)
 
     def test_the_lab_popup_is_fleets_lab_table(self):
         from fleet import session_lab
@@ -183,10 +206,12 @@ class TablePopupTest(unittest.TestCase):
         from fleet.palette import style_components
         with mock.patch('fleet.session_tags.assigned_tag', lambda harness, sid: TAGS.get((harness, sid))):
             summary = shell.session_summary(view_model(), 'claude', OWN_SID)
-        self.assertEqual(summary['count'], 4)
+        # The head's count and state counts are of the other sessions, as the rows are (this window's own is left out of both).
+        self.assertEqual(summary['count'], 3)
         self.assertEqual([''.join(p['text'] for p in row['tag']) for row in summary['rows']], ['[12]', '[e9]', '[73]', '[e7]'])
         self.assertEqual([row['own'] for row in summary['rows']], [False, True, False, False])
-        self.assertEqual([c[0]['text'] for c in summary['counts']], ['◑1', '⠏2', '●1'])
+        self.assertEqual([c[0]['text'] for c in summary['counts']], ['◑1', '⠏1', '●1'])
+        self.assertEqual(summary['count'], sum(int(c[0]['text'][1:]) for c in summary['counts']))
         # Each glyph in Fleet's own key and color.
         for row, session in zip(summary['rows'], [SESSIONS[3], SESSIONS[0], SESSIONS[1], SESSIONS[2]]):
             glyph, key = session_marker(session)

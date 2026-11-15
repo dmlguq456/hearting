@@ -380,7 +380,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
                          harness)
 
 
-def _route_page(grid, vm, ident, x, right, bottom, state):
+def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
     route = next((item for item in vm.routes if str(item.get("id")) == ident), None)
     if route is None:
         return
@@ -395,7 +395,7 @@ def _route_page(grid, vm, ident, x, right, bottom, state):
             grid.put(x + 16, y, clip(", ".join(values[:4]) or "·", right - x - 19),
                      "soft" if values else "dim", limit=right)
             y += 1
-    y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom)
+    y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
     y = _draw_route_subset(grid, vm, (route,), x, y, bottom, opened=ident, no_repo_group=True,
                            view_key="route:" + ident, state=state)
     draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
@@ -413,21 +413,27 @@ class _RowCounter:
         return x + sum(cell_width(char) for char in str(text))
 
 
-def _route_visibility_lines(grid, visibility, x, right, y, bottom):
-    """How the route was chosen, what was verified and what comes next (display only)."""
+def _route_visibility_rows(visibility, x, right):
+    """The rows each of a route's visibility lines takes at the value column (a long value wraps)."""
     lines = tuple((visibility or {}).get("lines") or ()) if isinstance(visibility, Mapping) else ()
-    room = max(0, bottom - y - 16)      # leave the route row and its stage frame their rows
+    return [_put_wrapped(_RowCounter(), x + 16, 0, [(str(line[1]), "soft")], right, x + 16)[1] + 1
+            for line in lines]
+
+
+def _route_visibility_lines(grid, visibility, x, right, y, bottom, whole=False):
+    """How the route was chosen, what was verified and what comes next (display only). ``whole``
+    (a reader that scrolls, the shell popup) leaves no line folded into `+N more`."""
+    lines = tuple((visibility or {}).get("lines") or ()) if isinstance(visibility, Mapping) else ()
+    room = float("inf") if whole else max(0, bottom - y - 16)      # leave the route row and its stage frame their rows
     if not lines or room < 2:
         return y
     # A long value wraps, so count rows (not lines) against the room the route frame leaves.
     shown, used = [], 0
-    for line in lines:
-        _, last = _put_wrapped(_RowCounter(), x + 16, 0,
-                               [(str(line[1]), "soft")], right, x + 16)
-        if used + last + 1 > room:
+    for line, rows in zip(lines, _route_visibility_rows(visibility, x, right)):
+        if used + rows > room:
             break
         shown.append(line)
-        used += last + 1
+        used += rows
     for label, text, tone in shown:
         grid.put(x + 3, y, clip(str(label) + ":", 12), "dim", limit=right)
         # A long value (a path, a reason) goes on under itself at the value column, whole.
