@@ -1,4 +1,5 @@
 """Overview and list-view tables for the immutable explorer projection."""
+import re
 from collections.abc import Mapping
 from .live import current_route_counts, route_marker_state, unknown_kind, unknown_route_kind
 from .grid import CellGrid
@@ -319,14 +320,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
             restart_inline = False
             if session.get("restart") == "stopped":
                 restart_text = ui_text("fleet.resume.stopped")
-            status = session.get("state")
-            marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
-                                  "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
-                                      status, ("●", "idle"))
-            if session.get("answer_wait_marker") == "●":
-                marker, marker_key = "●", "blocked"
-            elif session.get("answer_wait_marker") == "◑":
-                marker, marker_key = "◑", "blocked"
+            marker, marker_key = session_marker(session)
             grid.put(x + IND + 1, y, marker, marker_key)
             tag_x = x + IND + 3
             age_text = str(session.get("age") or "")
@@ -1522,6 +1516,46 @@ _VIEW_NAMES = ("OVERVIEW", "PEERS", "ROUTES", "QUESTIONS", "HISTORY", "COMPUTE",
                "SYSTEM")
 
 
+def _split_reason(segments, room):
+    """``(head, rest)``: the part of a reason text that fits ``room`` cells (cut at a space when
+    it can), and the remainder as segments for the rows below."""
+    room = max(0, room)
+    head, rest, used = [], [], 0
+    for index, (text, style) in enumerate(segments):
+        text = str(text)
+        if _seg_width(text) <= room - used:
+            head.append((text, style))
+            used += _seg_width(text)
+            continue
+        fit = ""
+        for char in text:
+            if used + _seg_width(fit + char) > room:
+                break
+            fit += char
+        if " " in fit and fit != text:
+            fit = fit[:fit.rindex(" ")]
+        if fit:
+            head.append((fit, style))
+        remainder = text[len(fit):].lstrip()
+        if remainder:
+            rest.append((remainder, style))
+        rest.extend((str(t), k) for t, k in segments[index + 1:])
+        break
+    return head, rest
+
+
+def session_marker(session):
+    """The session row's state glyph and its color key."""
+    marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
+                          "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
+                              session.get("state"), ("●", "idle"))
+    if session.get("answer_wait_marker") == "●":
+        marker, marker_key = "●", "blocked"
+    elif session.get("answer_wait_marker") == "◑":
+        marker, marker_key = "◑", "blocked"
+    return marker, marker_key
+
+
 def draw_routes(grid, vm, state, x=34, y=3):
     routes = tuple(vm.routes or ())
     use = max(0, grid.cols - x - 2)
@@ -1704,11 +1738,15 @@ def draw_routes(grid, vm, state, x=34, y=3):
                      limit=x + cols["own"] - gap)
             cursor = x + cols["own"]
             segments = tuple(worker[1] if len(worker) > 1 else ())
+            reason_rest = []
             if label != "resource" and segments:
                 harness, model, effort = _model_cell_facts(segments)
                 if harness:
                     # The session row's MODEL cell words; a narrow table keeps harness and effort.
                     segments = model_cell_parts(harness, None if cols["narrow"] else model, effort)
+                else:
+                    # A reason text (not a model) is whole: what this cell cannot hold goes on below.
+                    segments, reason_rest = _split_reason(segments, worker_owner_limit - cursor)
             for index, (text, style) in enumerate(segments):
                 # The harness word (always first) recedes; a model in its harness's hue keeps
                 # the weight every family-coloured model name has here.
@@ -1745,6 +1783,15 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 grid.put(x + use - 6, y, "open ▸", "accent")
             _tint_row(grid, y, x - 1, right, 236)
             y += 1
+            if reason_rest:
+                grid.fill(x - 1, right, y, " ", tint=236)
+                grid.add_hit(y, x, right, action)
+                # By word, so a line breaks between words and cuts one only when it is too long.
+                words = [(word, style) for text, style in reason_rest
+                         for word in re.findall(r"\S+\s*", str(text))]
+                _, y = _put_wrapped(grid, route_start + 2, y, words, right, route_start + 2, next_row)
+                _tint_row(grid, y, x - 1, right, 236)
+                y += 1
             for index, worker_context in enumerate(worker_contexts):
                 if body_context is not None and index == context_index and inline_context:
                     continue

@@ -686,6 +686,8 @@ def detail_lines(desc):
                   "bad" if _gate_code(verification) == "failed" else "info"))
     if verification.get("result"):
         lines.append(("result", verification["result"], "info"))
+    for link in desc.get("links") or ():
+        lines.append(("path", "%s %s" % (link["label"], link["path"]), "dim"))
     nxt = desc.get("next") or {}
     lines.append(("next", nxt.get("text") or "·",
                   "good" if nxt.get("kind") == "closed" else
@@ -791,7 +793,7 @@ def codes(desc):
     }
 
 
-def bounded(desc, max_lines=14):
+def bounded(desc, max_lines=20):
     """A compact, string-only projection for another display surface (session shell).
 
     The sentences (``summary``/``card``/``next``/``owner``/``lines``) are the English fallback;

@@ -7,6 +7,7 @@ control call checks current process births and the connected peer again.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import contextlib
 import json
 import os
@@ -1147,8 +1148,6 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
         panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
         panel["tidy_upgrade"] = upgrade_note == "pending"
-    # An open route page has no notice slot: it shows the same words on its own page row.
-    panel["upgrade_waiting"] = ui_text("session_shell.upgrade_pending") if upgrade_note == "pending" else ""
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
@@ -1175,7 +1174,16 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         for worker in row.get("workers_live") or ():
             worker["paint"] = route_paint(worker)
     # The repo's open work, as the earlier panel's tail row read it.
-    panel["work"] = styled([("◌ ", "dim"), (str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
+    # (`◌` is Fleet's stale route alone: the open work's line has no glyph, popup design F 10.)
+    panel["work"] = styled([(str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
+    # 11-15 (popup design D): another session's answer waits, as the shared observation holds them:
+    # when they change, the sessions section and a standing sessions popup are read again (the host
+    # reads them from Fleet's session table, apart from this projection).
+    others = sorted("%s:%s:%s:%s" % (owner.get("harness"), owner.get("session_id"), item.get("id"), item.get("answer") or "")
+                    for item in view.get("items", ()) if isinstance(item, dict)
+                    for owner in (item.get("owner") or {},)
+                    if (owner.get("harness"), owner.get("session_id")) != (harness, sid) and human_wait_state.person_wait(item))
+    panel["sessions_key"] = hashlib.sha256("\n".join(others).encode()).hexdigest()[:16] if others else ""
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
@@ -1261,61 +1269,7 @@ def _block_action(binding, request):
         from fleet.session_work import observe as work
         value, _ = observe(binding["harness"], binding["native_pid"], binding["native_start"], binding["sid"])
         rows, _ = work(value.get("cwd"))
-        return {"ok": True, "lines": [_plain(row.get("headline")) for row in rows[:32]] or ["◌ ·"]}
-    if key == "raw":
-        # The route page's owner output, read once when the person opens the page,
-        # through the same reader Fleet uses when its route page is opened.
-        # Only the routes the page shows (the panel's own rows), each through the
-        # current owner Fleet's route row names; a row without one is not guessed.
-        import human_wait_state
-        from fleet.explorer.focus import read_attempts, read_owner_raw
-        from fleet.explorer.output import OutputReader
-        view = human_wait_state.cached_view(request=False) or {}
-        shown = (view.get("route_panels") or {}).get(binding["harness"] + "\0" + binding["sid"])
-        routes = []
-        for row in shown[:8] if isinstance(shown, list) else ():
-            route = row.get("id") if isinstance(row, dict) else None
-            owner = row.get("owner_attempt") if isinstance(row, dict) else None
-            if (isinstance(route, str) and re.fullmatch(r"rt-[0-9a-f]{16}", route)
-                    and isinstance(owner, str) and owner):
-                routes.append((route, owner))
-        rows = read_attempts(None, binding["sid"]) if routes else []
-        reader, attempts, budget = OutputReader(), [], 40000
-        for route, owner in routes[:4]:
-            raw = read_owner_raw(route, owner, rows, {}, reader)
-            lines = []
-            for text in reversed((raw or {}).get("lines") or ()):
-                text = _plain(text, 240)
-                if not text or len(lines) >= 30 or budget - len(text.encode()) < 0:
-                    continue
-                budget -= len(text.encode())
-                lines.append(text)
-            if lines:
-                attempts.append({"route": route, "att": _plain(raw.get("att"), 64), "lines": lines[::-1]})
-        return {"ok": True, "attempts": attempts}
-    if key == "\r":
-        import subprocess
-        from fleet.explorer.focus import session_entries
-        routes = []
-        for _line, _fields, meta in reversed(session_entries(None, binding["sid"])):
-            route = meta.get("owner_route_id") or meta.get("route_id")
-            if route and route not in routes:
-                routes.append(route)
-        lines = []
-        for route in routes[:2]:
-            if not re.fullmatch(r"rt-[0-9a-f]{16}", route):
-                continue
-            run = subprocess.run([sys.executable, str(Path(__file__).with_name("workflow-supervisor.py")),
-                "status", "--route", route, "--json"], capture_output=True, text=True, timeout=10)
-            try:
-                value = json.loads(run.stdout)
-                lines.append(_plain(value.get("capability") or "route") + " · "
-                             + _plain(value.get("derived_workflow_state") or value.get("workflow_state") or "?"))
-                for name, node in (value.get("nodes") or {}).items():
-                    lines.append("  " + _plain(name) + " · " + _plain(node.get("state") or "?"))
-            except ValueError:
-                lines.append("?")
-        return {"ok": True, "lines": lines or ["·"]}
+        return {"ok": True, "lines": [_plain(row.get("headline")) for row in rows[:32]] or ["·"]}
     return {"ok": False, "reason": "unknown-action"}
 
 
@@ -1326,8 +1280,21 @@ def _block_answer(binding, request):
     import questions
     import human_wait_state
     from types import SimpleNamespace
-    if binding.get("harness") == "codex" and not answer_attachment_current(binding):
+    # 11-15 (popup design D): a question of another session, opened from the sessions popup, is
+    # answered with that session as the exact owner the questions API binds it to; this window's
+    # own attachment (Codex's) speaks only for its own session's questions.
+    owner = request.get("owner")
+    other = None
+    if owner is not None:
+        if (not isinstance(owner, dict) or set(owner) != {"harness", "session_id"}
+                or owner.get("harness") not in ("claude", "codex", "opencode")
+                or not isinstance(owner.get("session_id"), str) or not _SID.fullmatch(owner["session_id"])):
+            return {"ok": False, "reason": "question-changed"}
+        if (owner["harness"], owner["session_id"]) != (binding["harness"], binding["sid"]):
+            other = dict(owner)
+    if other is None and binding.get("harness") == "codex" and not answer_attachment_current(binding):
         return {"ok": False, "reason": "current-session-unverified"}
+    expected = other or {"harness": binding["harness"], "session_id": binding["sid"]}
     wanted = request.get("question_id")
     revision = request.get("revision")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
@@ -1336,8 +1303,8 @@ def _block_answer(binding, request):
         return {"ok": False, "reason": "question-changed"}
     board = human_wait_state.cached_view(request=False)
     item, error = questions._find(board or {}, wanted)
-    if error or (item.get("owner") or {}).get("harness") != binding["harness"] or (
-            item.get("owner") or {}).get("session_id") != binding["sid"] or item.get("stale"):
+    if error or (item.get("owner") or {}).get("harness") != expected["harness"] or (
+            item.get("owner") or {}).get("session_id") != expected["session_id"] or item.get("stale"):
         return {"ok": False, "reason": "question-changed"}
     answers = request.get("answers")
     decision = request.get("decision")
@@ -1346,9 +1313,8 @@ def _block_answer(binding, request):
     out = io.StringIO()
     args = SimpleNamespace(id=wanted, choice=[], text=None, text_file=None,
                            decision=decision, answers_file=None, json=True,
-                           expected_revision=revision,
-                           expected_owner={"harness": binding["harness"], "session_id": binding["sid"]})
-    if binding["harness"] == "codex":
+                           expected_revision=revision, expected_owner=dict(expected))
+    if other is None and binding["harness"] == "codex":
         args.answer_attachment = dict(binding)
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         if answers is not None:
@@ -1360,6 +1326,285 @@ def _block_answer(binding, request):
     except ValueError:
         return {"ok": False, "reason": _plain(out.getvalue()) or "answer-unavailable"}
     return {"ok": code == 0, **result}
+
+
+# 11-15 (popup design B, C, D): the route, LAB and sessions popups are Fleet's own tables, drawn by
+# Fleet's own functions into a grid of the popup's width; nothing here draws a table of its own.
+POPUP_KINDS = frozenset({"routes", "lab", "sessions", "questions"})
+POPUP_ROWS = 160     # rows a table popup carries at most (the popup pages them with PgUp/PgDn)
+
+
+def _paint_mode():
+    """The colors the panel paints with: ``(colors, no_color)``, as the projection reads them."""
+    no_color = "NO_COLOR" in os.environ
+    colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        colors = 1 << 24
+    return colors, no_color
+
+
+def popup_rows(grid, *, colors=256, no_color=False):
+    """``(rows, styles, hits)``: a Fleet grid's cells as runs ``[text, style index]`` (Fleet's row
+    tints are not drawn: the panel has no shade), trailing blanks and empty rows dropped, and its
+    press targets."""
+    from fleet.palette import style_components
+    styles, index = [], {}
+
+    def style(key):
+        if key not in index:
+            try:
+                value = style_components(key, colors=colors, no_color=no_color) if key else {}
+            except Exception:  # noqa: BLE001 -- an unknown key draws in the terminal's own look
+                value = {}
+            index[key] = len(styles)
+            styles.append(value)
+        return index[key]
+    rows = []
+    for cells in grid.cells:
+        runs, current, text = [], None, ""
+        for char, key, _tint in cells:
+            if char == "":
+                continue
+            if key != current and text:
+                runs.append([text, current])
+                text = ""
+            current = key
+            text += char
+        if text:
+            runs.append([text, current])
+        while runs and not runs[-1][0].strip():
+            runs.pop()
+        if runs and not runs[-1][1]:
+            runs[-1][0] = runs[-1][0].rstrip()
+        rows.append([[text, style(key)] for text, key in runs])
+    while rows and not rows[-1]:
+        rows.pop()
+    hits = [{"row": hit.y, "left": hit.x0, "right": hit.x1, "action": [str(part) for part in hit.action]}
+            for hit in getattr(grid, "hits", ()) if hit.y < min(len(rows), POPUP_ROWS)]
+    return rows[:POPUP_ROWS], styles, hits
+
+
+POPUP_ANSWER_BYTES = 60 * 1024    # what a table's answer may weigh: the host reads 64 KB of one, and an answer past it is no table
+
+
+def _popup_table(kind, rows, styles, hits, total, *, colors, no_color, **extra):
+    """A route or sessions table as the host reads it, whole when it fits and else as many of its rows as
+    fit (``POPUP_ROWS`` rows and ``POPUP_ANSWER_BYTES``), with one dim last line for the rest (`외 N개`,
+    the entrance's own words): ``total`` is how many routes or sessions the table has, and the ones its
+    kept rows show are those that have a press target there. ``routes`` (routes) lists the shown ones."""
+    from fleet.config import ui_text
+    from fleet.palette import style_components
+
+    def ident(hit):
+        action = hit["action"]
+        if kind == "routes":
+            return action[1] if action[0] == "route" and len(action) > 1 else None
+        return action[2] if action[0] == "fold" and len(action) > 2 and action[1] == "sopen:OVERVIEW" else None
+
+    def build(count):
+        kept = [hit for hit in hits if hit["row"] < count]
+        shown = list(dict.fromkeys(item for item in map(ident, kept) if item is not None))
+        out, painted = rows[:count], styles
+        left = max(0, total - len(shown))
+        if left:
+            try:
+                dim = style_components("dim", colors=colors, no_color=no_color)
+            except Exception:  # noqa: BLE001 -- an unknown key draws in the terminal's own look
+                dim = {}
+            painted = [*styles, dim]
+            out = [*out, [[ui_text("entrance.more", count=left).strip(), len(styles)]]]
+        result = {"ok": True, "kind": kind, "rows": out, "styles": painted, "hits": kept, **extra}
+        if kind == "routes":
+            result["routes"] = shown
+        return result
+
+    def weight(result):
+        return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
+    full = build(len(rows))
+    if weight(full) <= POPUP_ANSWER_BYTES:
+        return full
+    low, high = 0, len(rows)      # the most rows that fit: `low` fits, `high` does not
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if weight(build(middle)) <= POPUP_ANSWER_BYTES else (low, middle)
+    return build(low)
+
+
+def _popup_view_model(harness, sid, kind):
+    """Fleet's own view model, from Fleet's own collection (what its explorer shows), read once for
+    a person who opened a popup; the routes popup interprets only this session's routes."""
+    from fleet.collectors import collect_all
+    from fleet.refresh import as_snapshot
+    from fleet.explorer import live
+    snapshot = as_snapshot(collect_all(usage="cache-only", include_report_verification=False,
+                                       route_sessions=[(harness, sid)] if kind == "routes" else None))
+    return live.build_view_model(snapshot)
+
+
+def _session_folders():
+    """The folders each harness's session records live in (watched whole while the sessions popup stands)."""
+    from fleet import session_registry
+    out = []
+    try:
+        from fleet.collectors import claude as claude_collector
+        out.append(os.fspath(Path(claude_collector._home()) / "sessions") + os.sep)
+    except Exception:  # noqa: BLE001
+        pass
+    for harness in ("codex", "opencode"):
+        try:
+            out.append(os.fspath(session_registry._dir_for(harness)) + os.sep)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def session_summary(vm, harness, sid, *, colors=256, no_color=False):
+    """The sessions section's values from Fleet's session table (popup design D): the count, each
+    state's count and the rows, the person's waits first, then the running, then the idle; each row
+    Fleet's own cells (its state glyph and key, `[number]`, the title in its harness's bold hue, the
+    age), painted. ``own`` marks this window's own session: the panel leaves it out of its rows, and
+    out of the count and the state counts too, so the head and the rows count the same sessions."""
+    from fleet.explorer.tables import session_marker
+    from fleet.palette import style_components
+    from fleet.session_tags import assigned_tag
+    own = str(assigned_tag(harness, sid) or "")
+
+    def paint(text, key):
+        return {"text": text, **style_components(key, colors=colors, no_color=no_color)}
+    rows, counts = [], {}
+    for session in tuple(getattr(vm, "sessions", ()) or ()):
+        glyph, key = session_marker(session)
+        tag = _plain(session.get("tag") or "·", 16)
+        if tag != own:
+            counts.setdefault(glyph, [0, key])[0] += 1
+        title_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0), "opencode": ("l", 1, 0)}.get(
+            str(session.get("harness") or ""), "unknown")
+        rows.append({"glyph": [paint(glyph, key)],
+                     "tag": [paint("[", "dim"), paint(tag, "steward" if session.get("steward") else "soft"), paint("]", "dim")],
+                     "title": [paint(_plain(session.get("title") or "·", 160), title_key)],
+                     "age": [paint(_plain(session.get("age") or "", 12), "dim")] if session.get("age") else [],
+                     "own": tag == own, "rank": {"◑": 0, "⠏": 1}.get(glyph, 2)})
+    rows.sort(key=lambda row: row.pop("rank"))
+    return {"count": sum(1 for row in rows if not row["own"]),
+            "counts": [[paint(glyph + str(counts[glyph][0]), counts[glyph][1])]
+                       for glyph in ("◑", "⠏", "●", "✕", "✓") if glyph in counts],
+            "rows": rows[:12]}
+
+
+def _other_session(view, tag):
+    """The ``(harness, sid)`` whose shared number is ``tag``, among the sessions that own a wait."""
+    from fleet.session_tags import assigned_tag
+    for item in (view or {}).get("items", ()):
+        owner = item.get("owner") or {}
+        harness, sid = owner.get("harness"), owner.get("session_id")
+        if harness in ("claude", "codex", "opencode") and isinstance(sid, str) and _SID.fullmatch(sid) \
+                and str(assigned_tag(harness, sid)) == tag:
+            return harness, sid
+    return None
+
+
+def _popup_questions(binding, request, columns, colors, no_color):
+    """Another session's questions (the sessions popup's `◑` row), worded for the question popup's
+    editor as this window's own are; a wait that has no owner binding to answer it here reads with
+    the word for where it is answered (`그 창에서 답`)."""
+    import human_wait_state
+    from fleet.session_block import question_presentations
+    from fleet.palette import style_components
+    from fleet.config import ui_text
+    tag = request.get("tag")
+    if not isinstance(tag, str) or not re.fullmatch(r"[^\s\]\[]{1,16}", tag):
+        return {"ok": False, "reason": "invalid-popup"}
+    view = human_wait_state.cached_view(request=False) or {}
+    found = _other_session(view, tag)
+    if found is None or found == (binding["harness"], binding["sid"]):
+        return {"ok": True, "kind": "questions", "tag": tag, "questions": [], "owner": None}
+    harness, sid = found
+    elsewhere = []
+    board = session_questions(harness, sid, view=view, elsewhere=elsewhere)
+    for item in elsewhere:
+        if human_wait_state.person_wait(item):
+            # A wait with nothing to read still says where it is answered: one line, nothing to send.
+            board.append({**item, "answerable": False, "answer_state": "answer_there",
+                          **({} if item.get("questions") else {"questions": [{"id": "wait", "question": str(item.get("kind") or "wait")}]})})
+    board = board[:8]
+    question_presentations(board, columns + 4, own=False)
+
+    def styled(parts):
+        return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
+    for item in board:
+        for question in item.get("questions") or ():
+            question["display"] = {key: ([styled(line) for line in value] if key not in ("head", "brief_line") else styled(value))
+                                   for key, value in question["display"].items()}
+    return {"ok": True, "kind": "questions", "tag": tag, "questions": board,
+            "owner": {"harness": harness, "session_id": sid},
+            "labels": {"answer_there": ui_text("fleet.session_block." + ("compact_" if columns < 60 else "") + "answer_there")}}
+
+
+def _panel_popup(binding, request):
+    """One popup's content, read when the person opens it and again at the watch events it names."""
+    registry_root()
+    from types import SimpleNamespace
+    from fleet.explorer.grid import CellGrid
+    kind = request.get("kind")
+    columns = request.get("columns")
+    if kind not in POPUP_KINDS or type(columns) is not int or not 20 <= columns <= 200:
+        return {"ok": False, "reason": "invalid-popup"}
+    colors, no_color = _paint_mode()
+    harness, sid = binding["harness"], binding["sid"]
+    if kind == "questions":
+        return _popup_questions(binding, request, columns, colors, no_color)
+    opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""
+    watch = []
+    if kind == "lab":
+        from fleet import session_lab
+        from fleet.explorer import lab_table
+        from fleet.session_view import observe
+        value, _paths = observe(harness, binding["native_pid"], binding["native_start"], sid)
+        board, watch = session_lab.read(value.get("cwd"))
+        grid = CellGrid(columns, POPUP_ROWS + 8)
+        if isinstance(board, dict) and board.get("visible"):
+            lab_table.draw_lab(grid, board, 0, columns, 0)
+        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "watch": list(watch)[:16]}
+    vm = _popup_view_model(harness, sid, kind)
+    grid = CellGrid(columns, POPUP_ROWS + 8)
+    if kind == "sessions":
+        from fleet.explorer import tables
+        tables.draw_overview(grid, vm, SimpleNamespace(opened=opened or None, scope="-"), x=0, y=0, session_table=True)
+        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+        repos = {str(repo.get("id", repo.get("name", "·"))) for repo in tuple(vm.repos or ())}
+        total = sum(1 for session in tuple(vm.sessions or ()) if str(session.get("repo_id", session.get("repo"))) in repos)
+        return _popup_table(kind, rows, styles, hits, total, colors=colors, no_color=no_color,
+                            summary=session_summary(vm, harness, sid, colors=colors, no_color=no_color), watch=_session_folders())
+    from dataclasses import replace
+    from fleet.explorer import pages
+    from fleet.session_tags import assigned_tag
+    tag = str(assigned_tag(harness, sid))
+    routes = tuple(route for route in tuple(getattr(vm, "routes", ()) or ()) if str(route.get("session_tag")) == tag)
+    ids = [str(route.get("id") or "") for route in routes]
+    page = request.get("page") is True and opened in ids
+    if page:
+        # Fleet's route page with every line of it (the popup reads a longer page on with PgUp/PgDn,
+        # so no line is folded into `+N more`): the grid is as tall as the window's rows and the
+        # visibility lines together; its stage frame takes what the window's rows leave, never less
+        # than a 36-row window leaves (a lower window reads the page on instead).
+        room = request.get("rows") if type(request.get("rows")) is int and 6 <= request["rows"] <= 200 else 30
+        room = max(room, 30)
+        route = next(item for item in routes if str(item.get("id")) == opened)
+        grid = CellGrid(columns, room + 3 + sum(pages._route_visibility_rows(route.get("visibility"), 0, columns - 1)))
+        subset = replace(vm, routes=routes)
+        pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
+                          pages._SubsetState(None, "route:" + opened, opened, True), whole=True)
+    elif routes:
+        pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, opened=opened, no_repo_group=True)
+    rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+    # The route page starts under Fleet's page head: its empty rows above the content go.
+    while page and rows and not rows[0]:
+        rows.pop(0)
+        hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
+    if page:
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page}
+    return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False)
 
 
 def _input_readiness(binding, request):
@@ -1483,6 +1728,8 @@ def _backend_operation(request: dict) -> dict:
             native_model=request.get("native_model"))}
     if op == "answer":
         return _block_answer(binding, request)
+    if op == "popup":
+        return _panel_popup(binding, request)
     if op == "action":
         return _block_action(binding, request)
     if op == "readiness":

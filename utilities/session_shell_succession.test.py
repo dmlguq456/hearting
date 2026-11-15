@@ -96,6 +96,9 @@ while True:
 PRELOAD = r"""
 const Module=require('node:module'),fs=require('node:fs'),load=Module._load,dir=process.env.SUCC_DIR;
 if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
+ // The backend as it is, but for the one seam a popup's reading would otherwise cross: Fleet's
+ // collection of this machine's processes and terminals (a synthetic, empty view model instead).
+ process.env.HEARTING_SHELL_PYTHON=dir+'/backend.py';
  const mode=()=>{try{return fs.readFileSync(dir+'/fault','utf8').trim();}catch{return '';}};
  const from=name=>new Error().stack.includes(name);
  if(process.env.HEARTING_SHELL_SUCCESSOR==='1'){
@@ -135,6 +138,22 @@ if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
    return terminal;}})};
   return value;};
 }
+"""
+
+# The popups' backend: `session_shell.py backend` with Fleet's machine collection replaced by a synthetic
+# view model, so an open popup here reads no real session or process.
+BACKEND = r"""#!{python}
+import os,sys
+if sys.argv[2:]!=['backend']:os.execv({python!r},[{python!r},*sys.argv[1:]])
+here=os.path.dirname(os.path.abspath(sys.argv[1]))
+sys.path[:0]=[here,os.path.join(here,'..','tools')]
+import session_shell as m
+def vm(harness,sid,kind):
+    from fleet.explorer.view_model import ExplorerViewModel
+    open(os.path.join(os.environ['SUCC_DIR'],'popup-vm'),'a').write(kind+'\n')
+    return ExplorerViewModel.from_mapping({{'routes':[],'sessions':[],'repos':[],'system':{{}}}})
+m._popup_view_model=vm
+raise SystemExit(m._backend())
 """
 
 VT = r"""
@@ -209,6 +228,7 @@ class Window:
         native = self.root/'native.py'; native.write_text(NATIVE)
         (self.root/'fault.cjs').write_text(PRELOAD)
         (self.root/'vt.cjs').write_text(VT); (self.root/'unit.cjs').write_text(UNIT)
+        backend = self.root/'backend.py'; backend.write_text(BACKEND.format(python=sys.executable)); backend.chmod(0o700)
         self.exit_fifo = self.root/'exit'; os.mkfifo(self.exit_fifo, 0o600)
         env = dict(case.env, LOOP_NATIVE_EXIT=str(self.exit_fifo), SUCC_HARNESS=harness, SUCC_DIR=str(self.root),
                    SUCC_PID=str(self.root/'native.json'), SUCC_READ=str(self.root/'native-read'),
@@ -681,14 +701,20 @@ class SessionShellSuccessionTest(unittest.TestCase):
         cache.with_suffix('.new').write_text(json.dumps(value)); cache.with_suffix('.new').chmod(0o600)
         os.replace(cache.with_suffix('.new'), cache)
         window.until('ROUTE_PAGE'); window.pump(.5)
+        # 11-15 (popup design E): a press on the ROUTE section opens the routes popup over the window.
         point = None
         for y, line in enumerate(window.screen()['lines']):
-            if '╭─ 1 ROUTE' in line:
-                point = (line.index('╭─ 1')+4, y+1)
+            if '1 ROUTE ' in line and '─' in line:
+                point = (line.index('1 ROUTE')+2, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
-        window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('PgUp/PgDn')
+        window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('╰─ ')
+        # The popup read the synthetic view model: nothing here collects this machine's sessions.
+        end = time.monotonic()+15
+        while not (window.root/'popup-vm').exists() and time.monotonic() < end:
+            window.pump(.1)
+        self.assertIn('routes', (window.root/'popup-vm').read_text() if (window.root/'popup-vm').exists() else '')
 
-    def test_an_open_read_page_defers_the_hand_over_until_it_is_closed(self):
+    def test_an_open_popup_defers_the_hand_over_until_it_is_closed(self):
         window = self.window()
         first = window.wait_binding(); self.settle(window)
         self.open_read_page(window)
@@ -696,25 +722,19 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.point('rel-b'); window.pump(2.0)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])
-        # The page has no notice slot: its head says a new release waits, one row under the page counter.
-        wait = re.compile(r'New release waiting|새 판 대기')
-        end = time.monotonic()+8
-        while time.monotonic() < end and not any(wait.search(row) for row in window.screen()['lines']):
-            window.pump(.3)
-        rows = window.screen()['lines']
-        counter = [index for index, row in enumerate(rows) if 'PgUp/PgDn' in row]
-        self.assertEqual([index for index, row in enumerate(rows) if wait.search(row)], [counter[0]+1], rows)
-        window.type(b'\x1b')  # closes the page; nothing else happens
+        # The popup stands over the window: the panel under it keeps its notice slot (a new release waits).
+        self.assertTrue(any('✕ ─╮' in row for row in window.screen()['lines']), window.screen()['lines'])
+        window.type(b'\x1b')  # closes the popup; nothing else happens
         self.switched(window, first['host_pid'])
         self.assert_keeps_native(window, native)
 
-    def test_an_opencode_plugin_reload_keeps_an_open_read_page_and_the_hand_over_waits_for_its_close(self):
+    def test_an_opencode_plugin_reload_keeps_an_open_popup_and_the_hand_over_waits_for_its_close(self):
         window = self.window('opencode')
         first = window.wait_binding(); self.settle(window)
         self.open_read_page(window)
         native = process_row(window.native_pid())
         os.kill(native['pid'], signal.SIGUSR1); window.pump(1.0)
-        window.until('PgUp/PgDn')
+        window.until('╰─ ')
         window.point('rel-b'); window.pump(2.5)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])

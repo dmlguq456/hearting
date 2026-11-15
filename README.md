@@ -175,24 +175,32 @@ own statusline is one row under the input. While the panel, or its folded strip,
 shows the status area, that row is a notice row that stays empty unless you must
 act now: an answer you owe, compaction about to happen, a red context or usage
 reading, or a failed or blocked route. News stays in the panel: messages in
-MESSAGES, a finished route's result in the ROUTE box. With the panel hidden the
+MESSAGES, a finished route's result in ROUTE. With the panel hidden the
 row shows the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
 state's color the moment the native screen changes (running, waiting; idle stays
-neutral); a failed route colors only its own route box. Below the model and
+neutral); a failed route or experiment colors only its own row. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
-Below the route and any question, the panel always shows the rest of the
-statusline: folder, title, branch and Git state, usage and running jobs, then
-messages, as rows allow. Each section stands right under the one before it, and
-spare rows stay at the bottom; beside the native area `MESSAGES` and `MEM` each
-lead a thin rule across the panel. Click a route for its stages and
-result. The panel shows a question as two rows under `3 QUESTIONS ─ ›` (its
-first line and its choices on one line); press those rows or **Ctrl+]** and the
-whole question opens in a popup in the middle of the window: answer it there,
-inspect peers/work, or open Fleet with **f** (with no question waiting,
-**Ctrl+]** opens the panel when it is folded). Escape, **Ctrl+]**, its `✕` or a
+Under the head (folder, branch and Git state, model and context, title and now,
+running jobs) the panel is a few rows per section, each a press away from a
+popup in the middle of the window that shows the whole thing, so nothing has to
+be opened outside the terminal: `3 QUESTIONS` (the next question's first line
+and its choices), `4 ROUTE ⠏2 ✕1` (three routes, failed first), `4 LAB failed 1`
+(three experiment conditions, the one to look at first), `5 SESSIONS ◑2 ⠏1`
+(three other sessions on this machine, the ones waiting for you first),
+`MESSAGES +3` (three messages and requests) and `MEM` (two saved memories), each
+head `N NAME counts ─── ›`. A 40-row window keeps two or three rows per section,
+a 20-row one one each, and lower windows let MEM go first. The ROUTE, LAB and
+SESSIONS popups are Fleet's own tables at the popup's width (a route unfolded
+with its failure reason whole, Enter for its page with its paths; the LAB
+table; the session table), drawn again when what they show changes; **←/→**
+moves between the sections, **↑/↓** through routes or sessions, and **Enter** on
+a session waiting for you (`◑`) answers its question right there, once, as that
+session's answer. Press a section, or **Ctrl+]** (the question popup when one
+waits here, else the first section), and use **p** in any popup to fold or open
+the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
 press outside closes it; while it stands every key is its own, and ordinary keys
 stay native once it is closed. Use **Tab** to move between questions, **1–9** to choose,
 **t** for text (including pasted text), and **Enter** after every form field is
@@ -223,14 +231,14 @@ The default is a 40-column side panel. **»** beside the gear (**▾** under the
 native area) folds it into a strip under the native area, which gets the whole
 width back: a thin rule with **▴**, then three rows: the session (state,
 number, project, model, context, 5h and 7d), what to do now (an answer you owe
-with the question's first line, compaction about to happen), and the routes
-(their count, the failed or running titles, new messages, an experiment board
-that needs a look). Each row drops whole items from its end when narrow. The
-strip keeps its height whatever it shows (a short window gets fewer rows: three
-from 24 rows, two from 16, else one, with what to do kept longest); a press on
-it opens the panel again, and a press on the row of what to do (or **Ctrl+]**)
-opens the question in a popup above the strip (with no question waiting,
-**Ctrl+]** opens the panel). Where the open panel would leave the
+with the question's first line, compaction about to happen), and the sections
+(`4 ROUTE ⠏2 ✕1 · ✕ title │ 4 LAB failed 1 │ 5 SESSIONS ◑2 │ MESSAGES ←2`, the Git
+branch on the session row where it fits). Each row drops whole items from its end
+when narrow. The strip keeps its height whatever it shows (a short window gets
+fewer rows: three from 24 rows, two from 16, else one, with what to do kept
+longest); a press on its rule or session row opens the panel again, the row of what
+to do opens the question popup, and each section group opens its popup above the
+strip; with the keyboard, **Ctrl+]** then **p** opens the panel. Where the open panel would leave the
 native area under 60 columns (a 40-column panel in a terminal under 102
 columns) it folds by itself into the same strip and opens again with room; a
 choice made by hand holds at every width (a panel opened by hand in a window

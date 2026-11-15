@@ -179,18 +179,6 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
         result = subprocess.run(['node', '-e', script, str(ROOT/'utilities/session-shell/block-input.cjs')], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_route_evidence_wraps_between_tokens_not_inside_a_head_or_word(self):
-        script = r'''
-const assert=require('node:assert/strict'),v=require(process.argv[1]);
-const value='CI 1234567 SUCCESS [same head]';
-const model={routes:[{title:'Review',state:'working',visibility:{lines:[['CI',value,'info']]}}]};
-const rows=v.render({width:32,height:20,side:true,routeDetail:true,model,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-for(const token of ['1234567','SUCCESS','[same','head]'])assert(rows.some(row=>row.includes(token)),token+' split across rows');
-'''
-        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],
-                                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_compact_native_owned_fields_and_long_head_presentation_are_explicit(self):
         import sys
         sys.path.insert(0, str(ROOT))

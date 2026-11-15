@@ -1,8 +1,12 @@
 'use strict';
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
-module.exports=function({changed,answer,action,page}) {
+module.exports=function({changed,answer,action,section}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
+  // 11-15 (popup design D): another session's questions, opened from the sessions popup, stand in
+  // the editor apart from this session's own (`own`, kept and updated meanwhile): they are answered
+  // with that session as their owner, and leaving brings this session's own back.
+  let foreign=null,own=null,ownUpdate=null;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
   let labels={},styles={},help='';
   const entries=new Map();
@@ -20,7 +24,9 @@ module.exports=function({changed,answer,action,page}) {
     if(['received','applied'].includes(remote)||['received','applied'].includes(local))return 'done';
     return remote==='submitted'||local==='submitted'?'sent':null;
   };
-  const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
+  const flatOf=list=>list.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
+  const flat=()=>flatOf(items);
+  const mine=()=>foreign?own:items;
   const current=()=>frozen||flat()[index];
   const text=(name,fallback)=>labels[name]||fallback;
   const span=(value,style='dim')=>({text:String(value),...(styles[style]||{dim:style==='dim'})});
@@ -49,6 +55,11 @@ module.exports=function({changed,answer,action,page}) {
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
+    // This session's own list while another session's stands: kept for when it is left.
+    if(foreign){ownUpdate=rows;own=Array.isArray(rows)?rows.slice(0,8).filter(item=>!['received','applied'].includes(item.request_state)):[];changed();return;}
+    apply(rows);
+  }
+  function apply(rows){
     const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
@@ -88,7 +99,20 @@ module.exports=function({changed,answer,action,page}) {
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
-  function leave(){focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){
+    focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;
+    if(foreign){foreign=null;items=[];index=0;frozen=undefined;stale=false;const rows=ownUpdate;ownUpdate=null;own=null;apply(rows||[]);return;}
+    release();index=Math.min(index,Math.max(0,flat().length-1));changed();
+  }
+  function enterForeign({tag,owner,items:rows,labels:words}){
+    if(!foreign){own=items;ownUpdate=items;}
+    foreign=Object.freeze({tag:String(tag),owner:Object.freeze({...owner})});if(words)labels={...labels,...words};
+    items=[];index=0;frozen=undefined;stale=false;apply(rows);
+    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
+    const open=flat().findIndex(r=>active(r));if(open>=0)index=open;
+    changed();
+  }
+  function updateForeign(rows){if(foreign)apply(rows);}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
@@ -116,7 +140,7 @@ module.exports=function({changed,answer,action,page}) {
     return result;
   }
   function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
-  function references(){return items.slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
+  function references(){return (mine()||[]).slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
   function preview({budget=10,columns=100}={}) {
     const row=current();if(!row)return focused?[[span(help||text('navigate','Tab next · Esc/Ctrl+] back'))]]:[];
     const local=state(row.item),id=row.question.id,view=row.question.display;
@@ -190,6 +214,7 @@ module.exports=function({changed,answer,action,page}) {
   // record's `sent` (secrets already hidden) comes first: when another place's claim won, it is
   // what was sent, not this panel's pick (review 1633, follow-up 3).
   function sentLines(){
+    const items=mine()||[];
     const label=(item,question,v)=>{
       const listed=item.answer_kind==='decision'?[]:question.choices||[];
       const choice=listed.find(c=>value(c)===v);
@@ -228,7 +253,8 @@ module.exports=function({changed,answer,action,page}) {
     busy=true;local.sending=true;local.notice='';changed();
     let sent=false;const started=moves;
     try{
-      const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
+      const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values}),
+        ...(foreign?{owner:{...foreign.owner}}:{})});
       if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;}
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}
@@ -251,7 +277,7 @@ module.exports=function({changed,answer,action,page}) {
     if(c==='\x1d'||c==='\x1b'){leave();return;}
     if(c==='\t'){move(1);return;}
     if(c==='\r'||c==='\n'){
-      if(!row){action('\r');return;}
+      if(!row)return;
       if(changeArmed){changeArmed=false;local.notice='';changed();return;}
       // Enter sends the highlighted choice, the same value its number key picks.
       if(choosing(row)&&cursorOf(row)>=0){
@@ -260,7 +286,7 @@ module.exports=function({changed,answer,action,page}) {
       }
       submit();return;
     }
-    if(!row){if('rwf'.includes(c))action(c);return;}
+    if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
     if(c==='\x7f'||c==='\b'){local.drafts[id]=[...(local.drafts[id]||'')].slice(0,-1).join('');return;}
     if(local.typing[id]){if(c>=' '&&Buffer.byteLength((local.drafts[id]||'')+c)<=4096)local.drafts[id]=(local.drafts[id]||'')+c;return;}
@@ -268,7 +294,7 @@ module.exports=function({changed,answer,action,page}) {
     if(/^[1-9]$/.test(c)&&choices(row).length){
       const choice=choices(row)[Number(c)-1];if(choice!==undefined){local.answers[id]=[value(choice)];local.cursor[id]=Number(c)-1;local.notice='';follow=true;}return;
     }
-    if('rwf'.includes(c)&&choices(row).length){action(c);return;}
+    if('rwfp'.includes(c)&&choices(row).length){action(c);return;}
     if(!choices(row).length&&c>=' '){local.typing[id]=true;local.drafts[id]=c;}
   }
   function input(data){
@@ -297,10 +323,9 @@ module.exports=function({changed,answer,action,page}) {
           if(!pasting){
             const up=escape==='\x1b[A'||escape==='\x1bOA',down=escape==='\x1b[B'||escape==='\x1bOB',row=current();
             if(escape==='\x1b[Z')move(-1);
+            // ←→ move to the next section's popup (11-15), as in every popup.
+            else if((escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD')&&section)section(escape.endsWith('C')?1:-1);
             else if((up||down)&&choosing(row)){const local=state(row.item),n=choices(row).length;const at=cursorOf(row);local.cursor[row.question.id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));scroll=0;follow=true;}
-            // With no question to read, PgUp/PgDn page the route box: the same
-            // parse, so a key split across reads pages it as a whole one does.
-            else if(!row&&page&&(escape==='\x1b[5~'||escape==='\x1b[6~'))page(escape==='\x1b[5~'?-1:1);
             else if(up||escape==='\x1b[5~'){scroll-=escape.includes('5')?4:1;follow=false;}else if(down||escape==='\x1b[6~'){scroll+=escape.includes('6')?4:1;follow=false;}
           }
           escape='';
@@ -324,6 +349,10 @@ module.exports=function({changed,answer,action,page}) {
   // else the first answerable one): how many there are, its two-row and one-row forms and its
   // whole first line, from the backend's rows at the panel's width. The popup reads it whole.
   function summary(){
+    // The panel's summary is this session's own question, whatever the popup shows.
+    if(foreign){const listed=flatOf(own||[]);if(!listed.length)return null;const row=listed.find(r=>!stale&&r.item.answerable===true&&!state(r.item).state)||listed[0];
+      const view=row.question.display||{},fallback=[[span('◑ ','g_blocked'),span(row.question.question||'?','loc_repo')]];
+      return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),line:view.brief_line||fallback[0].slice(1),choices:choices(row).length};}
     const listed=flat();if(!listed.length)return null;
     let row=current();
     if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}
@@ -332,8 +361,9 @@ module.exports=function({changed,answer,action,page}) {
     return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),
       line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length};
   }
-  return {answeredEscape,get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
-    get question(){return !!current();},enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+  return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
+    get question(){return foreign?flatOf(own||[]).length>0:!!current();},get foreign(){return foreign;},
+    enter,leave,update,input,detail:preview,summary,sent:sentLines,references,enterForeign,updateForeign,
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
     wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};
 };

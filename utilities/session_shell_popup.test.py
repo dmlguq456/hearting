@@ -129,11 +129,13 @@ const synchronized=()=>{const at=raw.indexOf('╭─ ');if(at<0)return false;con
   return open>shut&&raw.indexOf('\x1b[?2026l',at)>at;};
 (async()=>{try{
   if(cfg.scenario==='empty'){
-    // No question waits: a folded panel opens again by Ctrl+] alone, and the read keys stand.
+    // No question waits: Ctrl+] opens a popup all the same, whose keys name `p` (the panel's fold):
+    // a folded panel opens by the keyboard alone; `r` is the messages' popup.
     await until(has('READY_'+cfg.harness),'the native');
     await resize(90,24);await sleep(500);frames.folded=await screen();
-    await key('\x1d',500);frames.opened=await screen();
-    await key('r',400);frames.read=await screen();
+    await key('\x1d',500);frames.popup=await screen();
+    await key('p',600);frames.opened=await screen();
+    await key('\x1d',400);await key('r',600);frames.read=await screen();
     await key('\x1b',300);frames.closed=await screen();
     fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
   }
@@ -362,13 +364,18 @@ class SessionShellPopupTest(unittest.TestCase):
 
     def no_question(self, harness):
         frames = self.popup(harness, 'empty')['frames']
-        # Folded at 90 columns, with no question waiting Ctrl+] opens the panel again (the keyboard's
-        # only way to unfold it); the read keys stand in the popup; the panel stays open after it.
-        folded, opened = '\n'.join(frames['folded']), '\n'.join(frames['opened'])
+        # Folded at 90 columns, with no question waiting Ctrl+] opens a popup whose keys name `p`; `p`
+        # opens the panel (the keyboard's way to unfold it, 11-15) and closes the popup; `r` is the
+        # messages' popup; the panel stays open after it.
+        folded, popup, opened = ('\n'.join(frames[name]) for name in ('folded', 'popup', 'opened'))
         self.assertNotIn('REPO', folded)
+        self.assertIn('p 패널 펼치기', popup)
+        self.assertNotIn('REPO', popup)
         self.assertIn('REPO', opened)
-        self.assertIn('r 메시지 · w 열린 일', opened)
-        self.assertIn('✉', '\n'.join(frames['read']))
+        self.assertNotIn('╭─ ', opened)
+        read = '\n'.join(frames['read'])
+        self.assertIn('✉', read)
+        self.assertIn('MESSAGES', read)
         self.assertIn('REPO', '\n'.join(frames['closed']))
 
     def test_claude(self):

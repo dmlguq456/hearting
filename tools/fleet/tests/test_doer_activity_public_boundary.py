@@ -192,12 +192,16 @@ class DoerActivityPublicBoundaryTest(unittest.TestCase):
                                                               "since": 1794445200.0})
         self.assertEqual(jobs["codex-wrapped:export_then"].exec_tool, {"name": "make"})
         painted = self._painted
-        self.assertIn("after Edit · src/app.py", painted["claude:edit_body"]["40"].replace("\n", ""))
-        self.assertIn(">_ cat · notes.txt", painted["claude:pipe_tail"]["80"])
+        # 11-15 (popup design E): the panel's ROUTE section is one row per route (its doer's tool reads
+        # in the routes popup, Fleet's own band, the `fleet` surface below): the row was really drawn.
+        # (Beside the native area the count leads, `1 ROUTE`; under it, at 80 columns, `route 1`.)
+        for width, head in (("40", "1 ROUTE"), ("80", "route 1")):
+            self.assertIn(head, painted["claude:edit_body"][width])
+            self.assertIn("Synthetic task", painted["claude:pipe_tail"][width])
         # The folded places were really drawn too.
         _public, fleet, _feed, _route = self._surfaces(jobs["claude:edit_body"])
         self.assertIn("● Edit src/app.py", fleet)
-        self.assertIn(">_ cat", painted["claude:pipe_tail"]["52-folded"])
+        self.assertIn("1 ROUTE", painted["claude:pipe_tail"]["52-folded"])
 
     def test_short_lowercase_marker_reaches_no_public_surface(self):
         lower_b64 = base64.b64encode(LOWER_MARK.encode()).decode()
@@ -250,7 +254,7 @@ const fs=require('fs'),view=require(process.argv[1]),routes=JSON.parse(fs.readFi
 const out={};for(const [key,route] of Object.entries(routes)){out[key]={};for(const width of [40,80,'52-folded']){
  const w=parseInt(width),folded=String(width).endsWith('folded');
  const x=view.render({width:w,height:40,side:folded||w<80,model:{routes:[route],route_count:1,messages:[]},sid:'s',
-  configuration:{},expandedKeys:folded?[]:['route:r'],questions:()=>[]});
+  configuration:{},questions:()=>[]});
  out[key][width]=x.rows.map(r=>r.map(p=>p.text).join('')).join('\n');}}
 process.stdout.write(JSON.stringify(out));"""
         result = subprocess.run(
