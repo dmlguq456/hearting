@@ -39,6 +39,13 @@ def event(kind):
          'token':os.environ['HEARTING_SHELL_TOKEN'],'seq':time.monotonic_ns()//1000}
     with socket.socket(socket.AF_UNIX) as c:
         c.settimeout(5);c.connect(os.environ['HEARTING_SHELL_SOCKET']);c.sendall((json.dumps(req)+'\n').encode());c.recv(8192)
+if harness=='opencode':
+    # The TUI's own selection record (the plugin writes it): without it the observation of an OpenCode
+    # session is empty (an identity it cannot prove), so no title, model or git stands in its panel.
+    raw=open('/proc/self/stat').read();born=raw.rsplit(') ',1)[1].split()[19]
+    folder=os.path.join(os.environ.get('XDG_STATE_HOME') or os.path.join(os.environ['HOME'],'.local','state'),'hearting','tui-identity')
+    os.makedirs(folder,exist_ok=True)
+    open(os.path.join(folder,'%d-%s.json'%(os.getpid(),born)),'w').write(json.dumps({'schema':'hearting-tui-selection-v1','pid':os.getpid(),'start':born,'sessionID':sid}))
 tty.setraw(0)
 event('start')
 pending='';said='READY_'+harness;later=[];seen=[];colored=False
@@ -364,12 +371,6 @@ class SessionShellPopupTest(unittest.TestCase):
         value.update(observed_at=time.time())
         value['route_panels'][key] = []; value['route_status'][key] = ''; value['route_sessions'][key] = time.time() + 3600
         target.write_text(json.dumps(value)); target.chmod(0o600)
-        if scenario == 'veil' and harness == 'opencode':
-            # (This fixture's OpenCode panel shows no title, so no head rule stands: its veil run moves the
-            # frame's wave instead, `rule motion` `scanners`; Claude and Codex keep the default `rule`.)
-            policy = Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME']) / '.config') / 'hearting/session-shell.json'
-            kept = policy.read_bytes(); self.addCleanup(policy.write_bytes, kept)
-            policy.write_text(json.dumps({**json.loads(kept), 'rule_motion': 'scanners'}))
         if scenario in ('veil', 'plain'):
             # A session title, so the head rule stands (the default `rule motion` moves a light over it).
             sys.path.insert(0, str(ROOT / 'tools'))
