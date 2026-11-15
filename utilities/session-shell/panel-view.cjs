@@ -1,14 +1,23 @@
 'use strict';
 // Geometry and paint only. The existing question controller owns drafts/effects.
-// 11-15 (panel polish 4, spec rule 47): the running frame's scanners, the four values to tune. How
-// many lights go round the outer frame together (evenly spaced, clockwise; fewer where the frame is
-// too short to keep a dark stretch at least one light long between them), each light's half width
-// in cells (its whole is 2·half+1 cells, its middle the brightest, fading to both sides), the spinner
-// frames one lap takes (100 ms each: 60 = 6 s, whatever the size) and the ramp step its middle
-// starts at (0 the brightest of `FACES.*.orbit`, 1 one step down). Their colors are `FACES.*.orbit`.
-const BORDER_SCANNERS=3,BORDER_HALF=5,BORDER_LAP=60,BORDER_PEAK=0;
+// 11-15 (panel polish 4, spec rule 47): how the open panel shows that this session runs, picked by
+// the setting `rule motion` (`rule`, the default; `border`; `scanners`; `off`), and the values to tune.
+// `rule`: the outer frame stands still and lit at step BORDER_LIT of `FACES.*.orbit` (0 the brightest;
+// the still idle frame is the plain gray), and a light passes over the head rule: RULE_PEAK brightest
+// cells in its middle and RULE_FADE cells on each side one shade down each, out past one end and back
+// in RULE_SCAN spinner frames (100 ms each: 26 = 2.6 s), then the dark rule rests RULE_REST frames
+// (10 = 1 s) and the light comes in again on the same side.
+const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,BORDER_LIT=1;
+// `scanners`: a wide wave flows round the frame clockwise, no edge anywhere: WAVE_COUNT waves share
+// the frame (fewer where one would be narrower than WAVE_MIN cells), one place rises and falls once
+// every WAVE_LAP frames (56 = 5.6 s), in WAVE_STEPS shades in 24-bit color (the face's four in 256
+// colors; fewer on a narrow wave, so two neighbouring cells never differ by more than one), its
+// darkest WAVE_FLOOR of the way from the still frame's gray to the brightest (never out).
+const WAVE_COUNT=3,WAVE_LAP=56,WAVE_STEPS=10,WAVE_FLOOR=0.3,WAVE_MIN=24;
+// `border` (#1639): one bright arc, BORDER_ARC of the frame long, round once every BORDER_LAP frames.
+const BORDER_ARC=1/4,BORDER_LAP=60;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
-  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'on'};
+  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
 // step deeper). `terminal` is the terminal's own background with the shared
 // palette; `light` declares a light terminal; `mono` drops hue and keeps weight,
@@ -19,18 +28,22 @@ const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom'
 const FACES={
   dark:{light:234,medium:235,body:253,secondary:248,title:246,frame:244,route:245,messages:242,accent:174,
     working:150,idle:186,blocked:174,dead:210,done:150,steward:[219,132],
-    // Spec rule 47: the moving frame's tones (the values with `BORDER_*` below). A running
-    // scanner's shades, its middle first (the session spinner's vanilla, the running frame's color)
-    // down to the one beside the neutral frame gray it fades into; a waiting frame's reds,
-    // brightest first (the frame's waiting red), in 256 colors, and its two ends in 24-bit color.
-    orbit:[230,187,144,101],breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]],
+    // Spec rule 47: the moving frame's tones (the values at the top). The running frame's shades,
+    // brightest first (the session spinner's vanilla, the running frame's color) down to the one
+    // beside the neutral frame gray (`border`'s arc, `rule`'s lit frame, `scanners`' wave in 256
+    // colors); the wave's two ends in 24-bit color (the still frame's gray, the brightest); the head
+    // rule's light, dimmest first; a waiting frame's reds, brightest first (the frame's waiting
+    // red), in 256 colors, and its two ends in 24-bit color.
+    orbit:[230,187,144,101],waveRGB:[[128,128,128],[255,255,215]],scan:[243,101,144,187,230],
+    breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]],
     // 11-15 (panel polish 1): a question to answer here stands on `fill` (the waiting red's dark
     // end; bright text on it 12:1), its choices on `chip`, its first row in `bright`. Polish 3: while
     // a popup stands, everything outside it reads in `veil` alone.
     fill:52,chip:235,bright:255,veil:239},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
-    orbit:[22,65,108,151],breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
+    orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[251,151,108,65,22],
+    breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
     fill:224,chip:255,bright:232,veil:250},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
@@ -40,15 +53,20 @@ const FACES={
 const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
-// A moving frame cell's color: a scanner's shade from its face's ramp (0 the brightest); a waiting step
-// from its face's 256-color reds, or in 24-bit color (when the terminal says it takes it) a point
-// on the cosine between its face's two ends.
+// A moving frame cell's color: an arc or lit-frame shade from its face's ramp (0 the brightest); a wave
+// at `level` (0..1) between its face's two ends in 24-bit color, else on its ramp (the dimmest first);
+// the head rule's light step (1 the dimmest .. 5); a waiting step from its face's 256-color reds, or in
+// 24-bit color (when the terminal says it takes it) a point on the cosine between its face's two ends.
+const mix=(a,b,f)=>'#'+a.map((c,i)=>Math.round(c+(b[i]-c)*f).toString(16).padStart(2,'0')).join('');
 function orbitTone(part,F,colors){
   if(part.tone==='arc')return F.orbit[Math.max(0,Math.min(F.orbit.length-1,part.level))];
+  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
+  if(part.tone==='wave'){const [lo,hi]=F.waveRGB,q=Math.max(0,Math.min(1,part.level));
+    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):F.orbit[Math.round((1-q)*(F.orbit.length-1))];}
   const steps=part.steps,k=part.step;
   if(colors>256&&steps>1){
     const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.breathRGB;
-    return '#'+hi.map((c,i)=>Math.round(lo[i]+(c-lo[i])*f).toString(16).padStart(2,'0')).join('');
+    return mix(lo,hi,f);
   }
   return F.breath[Math.max(0,Math.min(F.breath.length-1,k))];
 }
@@ -131,7 +149,7 @@ const graphemes=s=>SEGMENTER&&JOINS.test(s)?Array.from(SEGMENTER.segment(s),x=>x
 const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion'];
 const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
-  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['on','off']};
+  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['rule','border','scanners','off']};
 const APPEARANCE_KEYS=['position','theme','shade'];
 // The session's own state, as Fleet's session row judges and draws it
 // (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
@@ -140,14 +158,11 @@ const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // the state is told by glyph and color alone (no `running`/`idle`/`waiting` word); the
 // three glyphs differ in shape, so mono and NO_COLOR still tell them apart.
 const LIVE={working:['spin','g_spin'],submitting:['spin','g_spin'],idle:['●','g_work_off'],blocked:['◑','g_blocked']};
-// Spec rule 47 (11-14: the outer frame instead of the rule; 11-15 panel polish 4: scanners instead
-// of one arc), every value of the moving frame in one place (the scanners' four at the top, the
-// colors `FACES.*.orbit`/`breath`/`breathRGB`). Running, BORDER_SCANNERS short lights go round the
-// frame clockwise together without rest, evenly spaced, each its brightest in its middle and fading
-// alike to both sides through the ramp's BORDER_SHADES shades into the neutral frame gray. Waiting,
-// the whole frame breathes red once every BORDER_BREATHE frames (48 = 4.8 s) through
-// BORDER_BREATHE_STEPS shades on a cosine (24-bit color; BORDER_BREATHE_STEPS_256 in 256 colors),
-// each shade an equal time. The head rule stays the plain thin `─` (spec rule 52).
+// Spec rule 47 (11-14: the outer frame; 11-15 panel polish 4: the setting picks the frame's or the
+// rule's motion, the values at the top), every value of the moving frame in one place. Waiting,
+// whatever the setting (but `off`), the whole frame breathes red once every BORDER_BREATHE frames
+// (48 = 4.8 s) through BORDER_BREATHE_STEPS shades on a cosine (24-bit color; BORDER_BREATHE_STEPS_256
+// in 256 colors), each shade an equal time; the head rule stays the plain thin `─` then (spec rule 52).
 const BORDER_SHADES=4,BORDER_BREATHE=48,BORDER_BREATHE_STEPS=6,BORDER_BREATHE_STEPS_256=3;
 const mod=(t,n)=>((Math.trunc(t)%n)+n)%n;
 // A breath's shade at a frame: 0 brightest .. steps-1 darkest, down and back up, each shade for an
@@ -156,17 +171,40 @@ function breathStep(tick,steps){
   const slots=2*(steps-1),s=Math.floor(mod(tick,BORDER_BREATHE)*slots/BORDER_BREATHE);
   return s<steps?s:slots-s;
 }
-// Where the first scanner's middle stands at a frame on a frame of `cells` cells, from `start`.
+// `border`: where the arc's head stands at a frame on a frame of `cells` cells, from `start`, and its
+// shade at a cell `behind` cells back from its head (0 the head .. BORDER_SHADES-1), or -1 past its tail.
 function orbitHead(tick,cells,start){return mod(start+Math.floor(Math.trunc(tick)*cells/BORDER_LAP),cells);}
-// The scanners a frame of `cells` cells carries, as their middles' places from the first: BORDER_SCANNERS,
-// fewer where the dark stretch between two would be shorter than one light (one at least).
-function scanners(cells){
-  const whole=2*BORDER_HALF+1,n=Math.max(1,Math.min(BORDER_SCANNERS,Math.floor(cells/(2*whole))));
-  return Array.from({length:n},(_,k)=>Math.round(k*cells/n));
+function orbitShade(behind,length){return behind<length?Math.min(BORDER_SHADES-1,Math.floor(behind*BORDER_SHADES/length)):-1;}
+// `scanners`: how many waves a frame of `cells` cells carries, the shades a wave of that width keeps
+// (one shade at most between neighbouring cells: the brightness climbs at most 1.3π/width a cell), and
+// a cell's level (0..1, in those shades) at a frame: (½ + ½ cos 2π(place/cells · waves − frame/WAVE_LAP))^1.3.
+function waves(cells){return Math.max(1,Math.min(WAVE_COUNT,Math.floor(cells/WAVE_MIN)));}
+function waveSteps(cells,most){return Math.max(1,Math.min(most,Math.floor(cells/waves(cells)/(1.3*Math.PI))));}
+function waveLevel(at,tick,cells,steps){
+  const u=.5+.5*Math.cos(2*Math.PI*(at/cells*waves(cells)-Math.trunc(tick)/WAVE_LAP));
+  return Math.round(Math.pow(u,1.3)*steps)/steps;
 }
-// A frame cell's shade `away` cells from the nearest scanner's middle (BORDER_PEAK in the middle ..
-// BORDER_SHADES-1 at its two ends), or -1 past them.
-function scanShade(away){return away>BORDER_HALF?-1:Math.min(BORDER_SHADES-1,BORDER_PEAK+Math.floor(away*(BORDER_SHADES-BORDER_PEAK)/(BORDER_HALF+1)));}
+// `rule`: the light over an `n`-cell head rule: where its middle stands at a frame (null while the
+// dark rule rests), its shade at cell `i` (5 the brightest, 0 none), and the next frame it looks
+// different at (the next frame while the light is inside; its return at the end of the rest).
+const RULE_CYCLE=RULE_SCAN+RULE_REST-1;
+function scanAt(tick,n){
+  const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_CYCLE);
+  if(q>=RULE_SCAN)return null;
+  // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
+  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2);
+  return Math.round(lo+y*(hi-lo));
+}
+function scanLevel(tick,i,n){
+  const plateau=(RULE_PEAK-1)/2,c=scanAt(tick,n);
+  return c===null?0:Math.max(0,RULE_FADE+1-Math.max(0,Math.abs(i-c)-plateau));
+}
+function scanNext(tick,n){
+  const t=Math.trunc(tick),lit=f=>{const c=scanAt(f,n),reach=RULE_FADE+(RULE_PEAK-1)/2;return c!==null&&c+reach>=0&&c-reach<n;};
+  if(lit(t))return t+1;
+  for(let f=t+1;f<=t+RULE_CYCLE;f++)if(lit(f))return f;
+  return t+1;
+}
 function change(value,key,step){
   const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
@@ -461,19 +499,30 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   }
   // Spec rule 52: the thin rule under the metadata is the plain thin `─` in every state; the
   // session's moving state is the outer frame's (below).
-  const ruleParts=()=>[{...text('─'.repeat(inner),'dim'),role:'messages'}];
-  // Spec rule 47: the outer frame follows this session's own state (not a route's): running, a
-  // few scanners go round it; an answer or confirmation wait breathes it red; anything else, and
-  // rule motion off, mono, NO_COLOR, eight colors or the settings screen, the still frame in the
-  // state's color. The host repaints only its changed cells, at the frames they change.
+  // Spec rule 47 (11-15 panel polish 4): this session's own state (not a route's) moves the frame or
+  // the head rule, by the setting `rule motion` (`on`, saved before 11-15, reads as `rule`). Running:
+  // `rule` keeps the frame still and lit and passes a light over the head rule, `border` sends one arc
+  // round the frame, `scanners` a wave. An answer or confirmation wait breathes the whole frame red
+  // under every setting but `off`. Anything else, and `off`, mono, NO_COLOR, eight colors or the
+  // settings screen: the still frame in the state's color and the plain rule. The host repaints only
+  // the changed cells, at the frames they change.
   const borderColors=model.colors??256;
-  const borderStill=cfg.rule_motion==='off'||model.no_color===true||cfg.theme==='mono'||borderColors<256;
-  const moving=settings||borderStill?'':state==='blocked'?'breathe':LIVE[state]?.[0]==='spin'?'orbit':'';
+  const motionSetting=OPTIONS.rule_motion.includes(cfg.rule_motion)?cfg.rule_motion:'rule';
+  const borderStill=motionSetting==='off'||model.no_color===true||cfg.theme==='mono'||borderColors<256;
+  const running=!settings&&!borderStill&&LIVE[state]?.[0]==='spin';
+  const moving=settings||borderStill?'':state==='blocked'?'breathe':running&&motionSetting!=='rule'?motionSetting:'';
+  const ruleMoving=running&&motionSetting==='rule';
   const breathSteps=borderColors>256?BORDER_BREATHE_STEPS:BORDER_BREATHE_STEPS_256;
-  // Correction 8 (11-13): `since` is the frame this state began (the host's). The scanners are
-  // already out on that very paint, the first one whole just right of the head's words, and the
-  // breath starts at its brightest. Without it the beat runs on the clock alone.
+  // Correction 8 (11-13): `since` is the frame this state began (the host's). The motion is already
+  // out on that very paint (the arc's head just right of the head's words, the rule's light coming
+  // in) and the breath starts at its brightest. Without it the beat runs on the clock alone.
   const anchored=Number.isFinite(since),borderTick=t=>anchored?Math.trunc(t)-Math.trunc(since):Math.trunc(t);
+  const ruleTick=t=>borderTick(t)+(anchored?1:0);
+  // Spec rule 52: the thin rule under the metadata; under `rule` while the session runs, its cells
+  // carry the light (`rule` marks them, so the host gets them as the moving cells).
+  const ruleLook=(i,tick)=>{const level=scanLevel(ruleTick(tick),i,inner);
+    return level?{...text('─','g_spin'),role:'orbit',tone:'scan',level,rule:true}:{...text('─','dim'),role:'messages',rule:true};};
+  const ruleParts=()=>ruleMoving?Array.from({length:inner},(_,i)=>ruleLook(i,frame)):[{...text('─'.repeat(inner),'dim'),role:'messages',rule:true}];
   // Values the host could not refresh for a while are shown, not claimed:
   // nothing spins and the frame takes no route state (spec rule 12).
   const stale=model.stale===true;
@@ -575,14 +624,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
-    // Spec rule 46: this repository's newest saved memory records (two at most) stand in their
-    // own section under the messages, each `◆ kind · age` over its headline. An older backend
+    // Spec rule 46: the newest saved memory records (this repository's and the global ones, two at
+    // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
     // without its kind (rule 46 (e)); the head carries no MEM row either way.
     const memItems=(()=>{
       if(!side)return [];
       if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,2)
-        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim()}));
+        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim()}));
       const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
       return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
     })();
@@ -870,15 +919,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const messageHead=n=>{const hidden=messageTotal-Math.min(n,messageTotal);return sectionHead([],side?'MESSAGES':'messages',hidden>0?[text('+'+hidden,'loc_repo')]:[]);};
     // The requests first, then the newest messages (in their order, the newest last).
     const messageRows=n=>{const req=requestList.slice(0,n).map(requestLine),left=n-req.length;return [...req,...(left>0?messages.slice(-left).map(messageLine):[])];};
-    // MEM (spec rule 46): this repository's newest saved memory records, two at most, one row each
-    // (`◆ headline` and its age at the right). No popup: its head has no `›`.
-    // `◆ kind headline   age`: the kind word (dim, as base's kind row) stands before the headline; short
-    // of cells the headline is cut first, and then the kind word leaves (the age stays).
+    // MEM (spec rule 46; 11-15 panel polish 5): the newest saved memory records of this repository and
+    // the global ones together, newest first, two at most, one row each: `◆` durable or `◇` working
+    // (`·` for a record that names no tier), then, dim, its scope and its kind as the memory system
+    // names them (`◆ project decision headline   10m`, `◇ global lesson …   2h`), the age at the right.
+    // Short of cells the headline is cut first, then the kind word leaves, then the scope word (the
+    // mark and the age stay). No popup: its head has no `›`.
     const memRow=m=>{
       const age=m.age?[text(m.age,'dim')]:[],tail=age.length?size(age)+1:0;
-      for(const lead of [...(m.kind?[[text('◆ ','dim'),text(m.kind+' ','dim')]]:[]),[text('◆ ','dim')]]){
-        const room=inner-size(lead)-tail;
-        if(room>=4||lead.length===1){const n=cut([text(m.text,'loc_repo')],Math.max(1,room));
+      const mark=text((m.tier==='durable'?'◆':m.tier==='working'?'◇':'·')+' ','dim'),words=[m.scope,m.kind].filter(Boolean);
+      for(let k=words.length;k>=0;k--){
+        const lead=[mark,...words.slice(0,k).map(w=>text(w+' ','dim'))],room=inner-size(lead)-tail;
+        if(room>=4||!k){const n=cut([text(m.text,'loc_repo')],Math.max(1,room));
           return room>=4?[...lead,...n,pad(room-size(n)),...(age.length?[text(' '),...age]:[])]:cut([...lead,text(m.text,'loc_repo')],inner);}
       }
       return [];
@@ -985,7 +1037,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // terminal's dim on an unknown face). Route failures and results stay on their own
   // rows' marks; the question box keeps its rose.
   const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
-  const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
+  // Under `rule` the running frame's line stands lit and still (BORDER_LIT of the face's ramp).
+  const frameText=v=>ruleMoving&&/^[─│┌┐└┘]+$/.test(v)?{...text(v,'g_spin'),role:'orbit',tone:'arc',level:BORDER_LIT}:
+    {...text(v,color),role:color==='dim'?'frame':'frame-state'};
   // Spec rule 29, 35 (a): a steward's `⚑` alone blinks in Fleet's steward pink
   // (`tag_steward` ↔ `tag_steward_dim`) on the panel's one beat, idle or not; without
   // color, bold ↔ plain. Its number keeps the steward color without blinking, as on
@@ -1014,19 +1068,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // Spec rule 47: the frame's line cells, each at its place round the frame, clockwise from the
   // top-left corner. The head's words on the top border and the foot's on the bottom one are no
   // line: the scanners pass behind them (they keep their own colors).
-  // The first scanner starts whole, its back end right of the head's words.
-  const W=width,H=count,around=2*W+2*(H-2),lights=scanners(around),start=label.used+1+BORDER_HALF;
+  const W=width,H=count,around=2*W+2*(H-2),arc=Math.max(1,Math.round(around*BORDER_ARC)),start=label.used+1;
+  const waveShades=waveSteps(around,borderColors>256?WAVE_STEPS:FACES.dark.orbit.length-1);
   const place=(y,x)=>y===0?x:x===W-1&&y<H-1?W-1+y:y===H-1?2*W+H-3-x:2*W+2*H-4-y;
-  // A moving frame cell at a frame: on a scanner, its shade by how far it is from the nearest one's
-  // middle; past them, the neutral frame gray; waiting, the breath's red.
+  // A moving frame cell at a frame: on the arc, its shade (0 the head), past its tail the neutral frame
+  // gray; on the wave, its level; waiting, the breath's red.
   function borderCell(at,ch,tick){
     const local=borderTick(tick);
-    if(moving==='orbit'){
-      const head=orbitHead(local,around,start);let away=around;
-      for(const o of lights){const d=mod(at-head-o,around);away=Math.min(away,d,around-d);}
-      const k=scanShade(away);
+    if(moving==='border'){
+      const k=orbitShade(mod(orbitHead(local,around,start)-at,around),arc);
       return k<0?{...text(ch,'dim'),role:'frame'}:{...text(ch,'g_spin'),role:'orbit',tone:'arc',level:k};
     }
+    if(moving==='scanners')return {...text(ch,'g_spin'),role:'orbit',tone:'wave',level:waveLevel(at,local,around,waveShades)};
     return {...text(ch,'g_blocked'),role:'orbit',tone:'breath',step:breathStep(local,breathSteps),steps:breathSteps};
   }
   const border=(y,x,ch)=>moving?borderCell(place(y,x),ch,frame):frameText(ch);
@@ -1056,11 +1109,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(let y=1;y<H-1;y++)cells.push({row:y,col:W-1,ch:'│'});
     for(let x=W-1;x>=0;x--)if(x<=1||x>1+foot.used&&x<W-1||x===W-1)cells.push({row:H-1,col:x,ch:x===0?'└':x===W-1?'┘':'─'});
     for(let y=H-2;y>0;y--)cells.push({row:y,col:0,ch:'│'});
+  }else if(ruleMoving){
+    // `rule`: the head rule's cells (where the rule stands; a panel short of rows that drops it moves nothing).
+    const y=rows.findIndex((r,i)=>i>0&&i<count-1&&r.some(part=>part.rule));
+    if(y>0)for(let x=0;x<inner;x++)cells.push({row:y,col:2+x,ch:'─',rule:x});
   }
-  const motion=moving?{cells,
-    at:tick=>appearance([cells.map(c=>borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+  const motion=cells.length?{cells,
+    at:tick=>appearance([cells.map(c=>c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
     next:tick=>{const local=borderTick(tick),shift=Math.trunc(tick)-local;
-      if(moving==='orbit'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
+      if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
+      if(moving==='scanners')return Math.trunc(tick)+1;
+      if(moving==='border'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
       const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}}:null;
   const animated=!!motion||rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
@@ -1179,4 +1238,5 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   return out.length?out:[[text('·')]];
 }
 module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
-  BORDER:{SCANNERS:BORDER_SCANNERS,HALF:BORDER_HALF,LAP:BORDER_LAP,PEAK:BORDER_PEAK,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
+  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST},WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
+  BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};

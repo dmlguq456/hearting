@@ -169,7 +169,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     await key('paint\r',300);await key('busy\r',600);
     let s=await until(has('RED_TEXT'),'the colored row');
     checks.red_before=await lookAt('RED_TEXT');checks.blue_before=await lookAt('BLUE_BG');
-    const moving=new Set();for(let i=0;i<6;i++){moving.add(frameLooks());await sleep(150);}checks.moving_before=moving.size;
+    const moving=new Set();for(let i=0;i<14;i++){moving.add(frameLooks());await sleep(150);}checks.moving_before=moving.size;
     // Output of every kind while it stands: sampled every 40 ms for 1.6 s.
     await key('show\r',100);await key('\x1d',150);s=await until(s=>!!box(s),'the popup');
     checks.bright_open=(await bright()).length;checks.bright_sample=JSON.stringify((await bright()).slice(0,3));
@@ -186,7 +186,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     await key('\x1b',300);s=await until(s=>!box(s),'closed');frames.closed=s;
     const after=looks();checks.gray_left=after.flat().filter(c=>c&&c.fg===VEIL).length;
     checks.poke_after=await lookAt('POKE');
-    const turning=new Set();for(let i=0;i<6;i++){turning.add(frameLooks());await sleep(150);}checks.moving_after=turning.size;
+    const turning=new Set();for(let i=0;i<14;i++){turning.add(frameLooks());await sleep(150);}checks.moving_after=turning.size;
     // While it stands the window changes: narrower, folded by itself, open again; the panel under the
     // native (opened by hand where it cannot stand beside) and back beside it.
     await key('\x1d',250);await until(s=>!!box(s),'the popup again');
@@ -364,6 +364,20 @@ class SessionShellPopupTest(unittest.TestCase):
         value.update(observed_at=time.time())
         value['route_panels'][key] = []; value['route_status'][key] = ''; value['route_sessions'][key] = time.time() + 3600
         target.write_text(json.dumps(value)); target.chmod(0o600)
+        if scenario == 'veil' and harness == 'opencode':
+            # (This fixture's OpenCode panel shows no title, so no head rule stands: its veil run moves the
+            # frame's wave instead, `rule motion` `scanners`; Claude and Codex keep the default `rule`.)
+            policy = Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME']) / '.config') / 'hearting/session-shell.json'
+            kept = policy.read_bytes(); self.addCleanup(policy.write_bytes, kept)
+            policy.write_text(json.dumps({**json.loads(kept), 'rule_motion': 'scanners'}))
+        if scenario in ('veil', 'plain'):
+            # A session title, so the head rule stands (the default `rule motion` moves a light over it).
+            sys.path.insert(0, str(ROOT / 'tools'))
+            from fleet import titles
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                title = Path(titles.sidecar_path(sid, harness))
+            title.parent.mkdir(parents=True, exist_ok=True)
+            title.write_text(json.dumps({'title': 'VEIL_TITLE', 'title_ts': time.time(), 'ts': time.time(), 'source': 'test'}))
         questions = case / 'questions.json'; answers = case / 'answers.jsonl'
         questions.write_text(json.dumps([] if scenario == 'empty' else [
             {'id': 'popup-choice', 'revision': 'a' * 64, 'answerable': True, 'questions': [
@@ -464,7 +478,7 @@ class SessionShellPopupTest(unittest.TestCase):
     def veil(self, harness):
         # 11-15 (panel polish 3): while a popup stands, everything outside it (the native, the panel,
         # the strip) reads in one dark gray (256-color 239) without any other color, weight or ground;
-        # the moving frame stands still meanwhile. Output of every kind under it (lines one at a
+        # what moves stands still meanwhile (under the default `rule motion`, the head rule's light). Output of every kind under it (lines one at a
         # time, a scroll, the alternate screen in and out, a poked inverse cell) never shows a bright
         # piece; nothing tells the native (no size change, no input). Closed, the screen as it is
         # now in its own colors, nothing gray left and the frame turning again. The window narrower,

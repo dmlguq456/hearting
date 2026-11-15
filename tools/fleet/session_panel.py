@@ -619,9 +619,15 @@ def memory_kind(kind):
     return word if len(word) <= 12 else word[:11] + "…"
 
 
+# 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
+MEMORY_TIERS = ("durable", "working")
+MEMORY_SCOPES = ("project", "global")
+
+
 def session_memory_items(values, now=None):
     """Spec E9 rule 46: the MEM section's records, two at most, newest first: each its short type
-    word, its age and its headline (else the start of its snippet). Nothing without a record or a
+    word, its age and its headline (else the start of its snippet), and (11-15) its tier and scope
+    as the record carries them (none where it carries neither name). Nothing without a record or a
     text; a body is never carried."""
     items = []
     for row in values.get("memory_recent") or ():
@@ -629,7 +635,9 @@ def session_memory_items(values, now=None):
             continue
         text, age, kind = _memory_values(row, now)
         if text:
-            items.append({"kind": memory_kind(kind), "age": age, "text": text})
+            items.append({"kind": memory_kind(kind), "age": age, "text": text,
+                          "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
+                          "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else ""})
         if len(items) >= 2:
             break
     return items

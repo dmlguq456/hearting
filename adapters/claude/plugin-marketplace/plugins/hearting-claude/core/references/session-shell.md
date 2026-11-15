@@ -268,25 +268,33 @@ outer frame takes the state's color in the same paint: running and waiting
 Fleet's session keys, idle and an unknown state the neutral frame gray (the
 terminal's dim on an unknown face), no hue in `mono`; it stands still that way
 with `rule motion` off, in `mono`, under `NO_COLOR`, in eight colors and on the
-settings screen. Otherwise the open panel's outer frame moves with this
-session's own state (not a route's), beside the native area and under it alike
-(the folded strip has no frame: only its state glyph turns). While the session runs (an answer
-being typed in included) three short scanners go round it clockwise together without rest,
-evenly spaced: each eleven cells whole, its middle the running color (the session spinner's
-vanilla) and fading alike to both sides through four shades (230 → 187 → 144 → 101) into the
-neutral frame gray, once round every six seconds whatever the size; a frame too short for
-three keeps fewer, so the dark stretch between two is never shorter than one scanner; the
-cells of the head's words are passed behind. The scanners start with the state: on the very
-paint that shows the session running the first stands whole right after the head's
-words. While an answer or a confirmation waits the whole frame breathes red,
-never blinking, once every 4.8 seconds on a cosine through six shades in 24-bit
-color (when `COLORTERM` says the terminal takes it) or three in 256 colors, one
-shade at a time, each for an equal stretch, starting at the frame's waiting red;
-the steward `⚑` keeps its own blink. Idle and an unknown state keep the still
-neutral frame. Every value is a constant in one place in `panel-view.cjs`: the four a person
-tunes stand at its top (`BORDER_SCANNERS` 3, `BORDER_HALF` 5, `BORDER_LAP` 60 frames,
-`BORDER_PEAK` 0, the brightest shade), the breath and its shade count with the other
-`BORDER_*`, the colors in `FACES.*.orbit`, `breath`, `breathRGB`. A route's state stays on its own row's
+settings screen. Otherwise this session's own state (not a route's) moves the open panel, beside the
+native area and under it alike (the folded strip has no frame: only its state glyph turns), as the
+setting `rule motion` picks (11-15). While the session runs (an answer being typed in included):
+`rule` (the default) keeps the outer frame still and lit one step below the running color (187;
+`BORDER_LIT`) and passes a light over the thin head rule: its middle five cells brightest and four
+on each side one shade down each, out past one end and back in 2.6 seconds, then the dark rule
+rests one second and the light comes in again on the same side (a panel whose head rule gave way
+for rows, and the bottom layout, which has none, move nothing but the glyph); `border` sends one
+bright arc round the frame clockwise, its head the running color and its tail four shades down
+into the neutral frame gray, a quarter of the frame long, once round every six seconds (the cells
+of the head's words are passed behind); `scanners` lets a wide wave flow round the frame clockwise,
+no edge anywhere: three waves share the frame (fewer where one would be narrower than 24 cells), a
+place rises and falls once every 5.6 seconds, ten shades in 24-bit color (the four of the running
+ramp in 256 colors; fewer on a narrow wave, so neighbouring cells differ by one shade at most), its
+darkest never the still gray; `off` moves nothing. The motion starts with the state: on the very
+paint that shows the session running the arc's head stands right after the head's words and the
+rule's light is coming in. While an answer or a confirmation waits the whole frame breathes red
+under every value but `off`, never blinking, once every 4.8 seconds on a cosine through six shades
+in 24-bit color (when `COLORTERM` says the terminal takes it) or three in 256 colors, one shade at a
+time, each for an equal stretch, starting at the frame's waiting red, and the head rule stays the
+plain thin rule; the steward `⚑` keeps its own blink. Idle and an unknown state keep the still
+neutral frame under every value. Every value is a constant in one place in `panel-view.cjs`; those
+a person tunes stand at its top (the rule's light `RULE_PEAK` 5, `RULE_FADE` 4, `RULE_SCAN` 26
+frames, `RULE_REST` 10 frames, the lit frame `BORDER_LIT` 1; the wave `WAVE_COUNT` 3, `WAVE_LAP` 56
+frames, `WAVE_STEPS` 10, `WAVE_FLOOR` 0.3, `WAVE_MIN` 24; the arc `BORDER_ARC` 1/4, `BORDER_LAP` 60
+frames), the breath and its shade count with the other `BORDER_*`, the colors in `FACES.*.orbit`,
+`scan`, `waveRGB`, `breath`, `breathRGB`. A route's state stays on its own row's
 glyph (a failed one Fleet's failure red) and a running one pulses the ROUTE head's count;
 the question's count and `◑` keep their rose. An experiment's failure never colors the frame.
 `HEARTING` names the settings screen alone. What runs shares Fleet's one beat
@@ -331,9 +339,10 @@ cells the model name is cut with `…` and the effort stays whole, and narrower
 than 30 cells inside they go with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area one thin rule (the messages rules' color)
-then parts it from this session's content: the plain thin `─` in every state,
-standing still (the session's state is told by the outer frame and the head's
-state glyph). The
+then parts it from this session's content: the thin `─` in every state; under the
+default `rule motion` a light passes over it while the session runs (above), otherwise
+it stands still (the session's state is told by the outer frame and the head's state
+glyph). The
 content: `TITLE` and `NOW` (Fleet's words, dim,
 in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,
@@ -404,10 +413,15 @@ opens in place: a press on a head or on any row of its section opens its popup
   session stays 15 minutes after it closed, or until its last answer or cancel
   notice has been seen (at most 7 days), and then only `show` lists it; a request
   whose message is not confirmed yet stays with `not confirmed`.
-- MEM: this repository's newest saved memory records, two at most, from the
-  journal Fleet reads (the newest `add`/`supersede` rows of its project), one row
-  each: `◆` and the stored headline (else the start of its snippet), its age at
-  the right; no section without a journal row.
+- MEM: the newest saved memory records of this repository and the global ones
+  together (11-15), newest first, two at most, from the journal Fleet reads (the
+  newest `add`/`supersede` rows of its project, and the global ones of the same
+  read), one row each saying what the record is as the memory system records it:
+  `◆` durable or `◇` working (`·` for a record naming no tier), then dim its scope
+  (`project`, `global`) and its kind, the stored headline (else the start of its
+  snippet), its age at the right. Short of cells the headline is cut first, then
+  the kind leaves, then the scope (the mark and the age stay); no section without
+  a journal row.
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate (LAB's `?` is Fleet's
@@ -557,8 +571,9 @@ the only place Hearting reads it.
 The header's settings change only Hearting's existing session-shell policy:
 side/bottom layout, panel position (right, the default, or left), side width,
 narrow-window behavior, auxiliary detail, theme, shade, `route line`
-(`time`, the default, or `model`) and `rule motion` (`on`, the default, or
-`off`: the outer frame stays still in the state's color). One placement rule
+(`time`, the default, or `model`) and `rule motion` (`rule`, the default, `border`,
+`scanners` or `off`, above; the `on` saved before 11-15 reads as `rule`, and the file is
+not rewritten for it). One placement rule
 serves every harness. Themes are `terminal` (the default: the shared palette),
 `light` (a light terminal: the reviewed deep hues) and `mono` (no hue; weight,
 glyphs and words remain). Shade is `none` (the default), `light` or `medium`:

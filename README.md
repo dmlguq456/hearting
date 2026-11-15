@@ -179,9 +179,11 @@ MESSAGES, a finished route's result in ROUTE. With the panel hidden the
 row shows the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
-state's color the moment the native screen changes (running: three short lights,
-brightest in the middle, go round it together once every six seconds; waiting: it
-breathes red; idle stays neutral); a failed route or experiment colors only its own row. Below the model and
+state's color the moment the native screen changes (running: the frame stands lit and
+a light passes over the rule under the model and context, then rests a second; waiting: it
+breathes red; idle stays neutral). **Settings → rule motion** picks `border` (one arc round the
+frame) or `scanners` (a wide wave flowing round it) instead, or `off`. A failed route or
+experiment colors only its own row. Below the model and
 context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
 Under the head (folder, branch and Git state, model and context, title and now,
@@ -191,7 +193,8 @@ be opened outside the terminal: `3 QUESTIONS` (the next question's first line
 and its choices), `4 ROUTE ⠏2 ✕1` (three routes, failed first), `4 LAB failed 1`
 (three experiment conditions, the one to look at first), `5 SESSIONS ◑2 ⠏1`
 (three other sessions on this machine, the ones waiting for you first),
-`MESSAGES +3` (three messages and requests) and `MEM` (two saved memories), each
+`MESSAGES +3` (three messages and requests) and `MEM` (the two newest saved memories of
+this repository and global ones, each `◆` durable or `◇` working, then its scope and kind), each
 head `N NAME counts ─── ›`. The question you can answer here now reads as a button:
 its rows stand on a dark rose fill across the panel, its choices are numbered chips,
 and `↵ answer · Ctrl+]` stands under them (a rose bar at the left in mono, eight

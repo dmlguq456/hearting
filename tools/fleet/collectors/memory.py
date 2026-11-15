@@ -496,6 +496,10 @@ SAVED_ACTIONS = ("add", "supersede")
 # Rows kept per project: the panel shows two records, and a supersede with the add of its
 # replacement names one record twice, so a few more stay to find the second.
 SAVED_KEEP = 6
+# 11-15 (panel polish 5): the global records (`scope` global, written from any project) keep their
+# own group in the same read, under a key no project's grouping key can be.
+GLOBAL_SAVED = "\0global"
+SAVED_FIELDS = ("ts", "action", "type", "tier", "scope", "snippet", "id")
 
 
 def _read_saved_journal(path):
@@ -522,7 +526,8 @@ def _saved_rows(repo):
     newest first (``SAVED_KEEP`` at most), with the journal path. Read-only; the journal is read
     again only when its size or modification time changed, so a panel projection with an
     unchanged journal reads nothing but its stat. Bodies are never carried: each row's id, time,
-    type and its bounded snippet. The journal is shared by every repository and each panel reads
+    type, tier and scope (as the journal records them) and its bounded snippet; ``GLOBAL_SAVED``
+    names the global records' own group. The journal is shared by every repository and each panel reads
     it again on any write, so a re-read asks each cwd's grouping key once (a key walks the
     directories up to `.git`). Rows of one time keep the journal's order (the later one first)."""
     path = _write_events_path()
@@ -544,10 +549,12 @@ def _saved_rows(repo):
                 key = keys[cwd]
             else:
                 key = _repo_key(event)
-            if key:
-                kept = newest.setdefault(key, [])
-                kept.append((str(event.get("ts") or ""), order,
-                             {name: event.get(name) for name in ("ts", "action", "type", "snippet", "id")}))
+            row = (str(event.get("ts") or ""), order, {name: event.get(name) for name in SAVED_FIELDS})
+            for group in (key, GLOBAL_SAVED if event.get("scope") == "global" else None):
+                if not group:
+                    continue
+                kept = newest.setdefault(group, [])
+                kept.append(row)
                 if len(kept) > 2 * SAVED_KEEP:
                     kept[:] = sorted(kept, key=newer, reverse=True)[:SAVED_KEEP]
         _latest_cache.update(stamp=stamp, rows={key: [row for *_order, row in sorted(kept, key=newer, reverse=True)[:SAVED_KEEP]]
@@ -566,6 +573,12 @@ def recent_saved(repo):
     """Spec E9 rule 46 (c): the newest saved journal rows of one project, newest first, from the
     same read as ``latest_saved`` (no other file, no other pass), with the journal path."""
     return _saved_rows(repo)
+
+
+def recent_saved_global():
+    """11-15 (panel polish 5): the newest saved global journal rows (``scope`` global, from any
+    project), newest first, from the same read as ``recent_saved``, with the journal path."""
+    return _saved_rows(GLOBAL_SAVED)
 
 
 def collect(now=None, *, include_summary=True, include_backlog=False):
