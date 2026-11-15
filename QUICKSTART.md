@@ -79,9 +79,10 @@ the expected change is one line:
 
 While the agent works, the panel's `NOW` row says what it is doing, and a
 request that needs a route shows in the panel's route box with the worker
-running its current stage. If the agent asks you something, the question gets
-its own box in the panel: press **Ctrl+]** to focus the panel, then **Tab**,
-**1–9**, and **Enter** to answer, and **Ctrl+]** again to return to typing.
+running its current stage. If the agent asks you something, the question shows
+under `QUESTIONS` in the panel: press **Ctrl+]** and it opens in a popup in the
+middle of the window; answer with **Tab**, **1–9**, and **Enter**, and the popup
+closes and your keys go back to the agent (**Esc** closes it unanswered).
 
 Open a second session in another terminal, on any runtime. In either one press
 **Ctrl+]** and then **f**: Fleet opens in that window and shows both sessions,

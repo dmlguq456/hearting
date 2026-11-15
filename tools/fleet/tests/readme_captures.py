@@ -6,16 +6,20 @@
 Draws the Fleet screens with the cell renderer and ``readme_demo.snapshot()`` (English, neutral,
 synthetic rows; no home, registry, herdr or network read; no live Fleet window is opened):
 
-    overview.png  routes.png  questions.png  session.png  resources.png  output.png
-    narrow.png (OVERVIEW at 100 columns)
+    overview.png  peers.png  routes.png (one route opened in place)  questions.png  session.png
+    resources.png  output.png  narrow.png (OVERVIEW at 100 columns)
 
 and the session panel of the same demo world with ``readme_panel`` (the shell backend's own
 projection, painted by ``panel-view.cjs`` under node; the conversation beside it is illustrative):
 
-    seat.png (a session with its panel above Fleet's OVERVIEW)  panel.png (one panel with LAB)
-    panel-question.png (the bottom layout, question first)  requests.png (requester and receiver)
-    panel-focus.gif (Ctrl+] > Tab > 1 > Enter > Ctrl+])
+    seat.png (session [4f]'s window: the conversation and its panel)  panel.png (one panel with LAB)
+    panel-question.png (the bottom layout)  requests.png (requester and receiver)
+    panel-focus.gif (Ctrl+] > Tab > 2 > Enter, the question popup over the window)
     walkthrough.gif (OVERVIEW > ROUTES > session > that session's panel > output)
+
+The README opens with seat.png, overview.png, peers.png and routes.png: one moment of one demo world,
+so the route and the request [4f]'s panel shows read the same in the three Fleet screens.
+One run redraws every picture; two runs write the same bytes.
 
 PNGs are palette-quantised so the README loads quickly. Unlike ``explorer_capture.py`` (evidence,
 kept outside the repo) these are published assets, so the default output is ``docs/fleet``.
@@ -33,10 +37,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
 
-# name -> (view, scope, cols, rows, with raw output)
+# name -> (view, scope, cols, rows, with raw output, the route opened in place: "code", "lab" or None)
+# Each Fleet screen is tall enough for its whole list: nothing below it is cut off.
 SCREENS = {
     "overview": ("OVERVIEW", "-", 160, 45, False),
-    "routes": ("ROUTES", "-", 160, 40, False),
+    "peers": ("PEERS", "-", 160, 45, False),
+    "routes": ("ROUTES", "-", 160, 50, False, "code"),
     "questions": ("QUESTIONS", "-", 160, 40, False),
     "session": ("OVERVIEW", "session:d1", 160, 40, False),
     "resources": ("COMPUTE", "-", 160, 40, False),
@@ -47,8 +53,10 @@ WALK = ("overview", "routes", "session", "panel", "output")   # "panel": the ses
 COLOURS = 96
 FRAME_MS = 2600
 PANEL_COLS = 40
-# The first picture: the [4f] window (conversation columns + two + the panel) over Fleet's top rows.
-SEAT_TALK, SEAT_ROWS, SEAT_FLEET_ROWS = 80, 38, 12
+# The first picture: the [4f] window (conversation columns + two + the panel).
+SEAT_TALK, SEAT_ROWS = 80, 38
+# The answering GIF: the [9c] window, its panel and the question popup over both.
+FOCUS_TALK, FOCUS_ROWS = 80, 30
 
 
 def isolate():
@@ -78,11 +86,12 @@ def frames(render, wanted, rows_override=None):
     lab = readme_demo.route_id(snapshot, "lab")
     result = {}
     for name in wanted:
-        view, scope, cols, rows, raw = SCREENS[name]
+        view, scope, cols, rows, raw, opened = (*SCREENS[name], None)[:6]
         rows = rows_override or rows
         scope = scope.replace("LAB", lab or "")
         title = scope.split(":", 1)[-1] if scope != "-" else view
-        state = NavState(view=view, scope=scope, title=title)
+        folds = (("ropen:" + view, readme_demo.route_id(snapshot, opened)),) if opened else ()
+        state = NavState(view=view, scope=scope, title=title, folds=folds)
         result[name] = readme_demo.frame(render, snapshot, state, cols, rows,
                                          (lab, "a3f9c21d") if raw else None)
     return result
@@ -104,9 +113,10 @@ def quantised(image):
     return image.quantize(colors=COLOURS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
 
 
-def panel_rows(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), expanded=(),
-               state=None, configuration=None):
-    """One demo session's panel, painted by the shell's own renderer (``readme_panel``)."""
+def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), expanded=(),
+                state=None, configuration=None, window=None):
+    """One demo session's panel, painted by the shell's own renderer (``readme_panel``):
+    ``{"rows", "popup"}``, the popup laid over ``window`` (``cols``, ``rows``) while focused."""
     from tools.fleet.tests import readme_panel
     session = world.sessions[sid]
     state = state or {"working": "working", "blocked": "blocked"}.get(session.liveness, "idle")
@@ -116,31 +126,42 @@ def panel_rows(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), expa
     return readme_panel.paint([{"payload": payload, "width": width, "height": height, "side": side,
                                 "state": state, "sid": sid, "harness": session.harness, "frame": 3,
                                 "keys": list(keys), "expanded": list(expanded),
-                                "configuration": configuration or {}}])[0]
+                                "configuration": configuration or {}, "window": window}])[0]
 
 
-def session_window(world, sid, cols, rows):
-    """A demo session's terminal: the illustrative conversation, two cells, then its panel."""
+def panel_rows(world, sid, height, **options):
+    return panel_paint(world, sid, height, **options)["rows"]
+
+
+def session_window(world, sid, cols, rows, *, keys=()):
+    """A demo session's terminal: the illustrative conversation, two cells, then its panel, and the
+    question popup over both while the keys leave it open (``host.cjs`` lays it over the window)."""
     from tools.fleet.tests import readme_panel as panel
     talk = cols - PANEL_COLS - 2
-    grid = panel.beside(panel.cells(panel.conversation(sid, talk, rows)),
-                        panel.cells(panel_rows(world, sid, rows)), talk)
+    painted = panel_paint(world, sid, rows, keys=keys, window={"cols": cols, "rows": rows})
+    grid = panel.beside(panel.cells(panel.conversation(sid, talk, rows)), panel.cells(painted["rows"]), talk)
+    if painted["popup"]:
+        grid = panel.overlay(grid, panel.cells(painted["popup"]["rows"]), painted["popup"]["top"],
+                             painted["popup"]["left"])
     return panel.image(grid, cols, rows)
 
 
-def seat(render, capture, world):
-    """P1: the ``[4f]`` window with its panel, and Fleet's OVERVIEW top rows under it."""
+def answered(questions, sid, question_id, value):
+    """The demo answer-wait board a moment after ``value`` was sent to one question."""
+    import copy
+    board = copy.deepcopy(questions)
+    for item in board.get(sid, ()):
+        if item["id"] == question_id:
+            item.update(request_state="submitted", answerable=False, sent=[value])
+    return board
+
+
+def seat(world):
+    """The README's first picture: the ``[4f]`` window, its conversation and its whole panel."""
     from tools.fleet.tests import readme_panel as panel
     cols = SEAT_TALK + 2 + PANEL_COLS
-    top = panel.window(session_window(world, panel.API, cols, SEAT_ROWS),
-                       "web-api · claude [4f] — conversation (illustrative) and the Hearting panel")
-    SCREENS["_seat"] = ("OVERVIEW", "-", cols, 45, False)
-    try:
-        fleet = image_of(render, capture, frames(render, ["_seat"])["_seat"])[0]
-    finally:
-        SCREENS.pop("_seat", None)
-    fleet = fleet.crop((0, 0, fleet.size[0], SEAT_FLEET_ROWS * capture.CELL_H))
-    return panel.screen([[top], [panel.window(fleet, "fleet — every session on this machine")]])
+    return panel.screen([[panel.window(session_window(world, panel.API, cols, SEAT_ROWS),
+                                       "web-api · claude [4f] — conversation (illustrative) and the Hearting panel")]])
 
 
 def panel_pictures(render, capture, with_gif):
@@ -149,7 +170,7 @@ def panel_pictures(render, capture, with_gif):
     from tools.fleet.tests import readme_panel as panel
     snapshot, _hosts = readme_demo.snapshot()
     world = panel.World(snapshot, readme_demo.NOW)
-    pictures = {"seat.png": seat(render, capture, world)}
+    pictures = {"seat.png": seat(world)}
     pictures["panel.png"] = panel.screen([[panel.window(
         panel.image(panel.cells(panel_rows(world, panel.ML, 46, expanded=("lab",))), PANEL_COLS, 46),
         "ml-train · claude [d1]")]])
@@ -157,7 +178,7 @@ def panel_pictures(render, capture, with_gif):
     question += panel.cells(panel_rows(world, panel.API_NOTES, 14, width=100, side=False,
                                        configuration={"layout": "bottom"}))
     pictures["panel-question.png"] = panel.screen([[panel.window(
-        panel.image(question, 100, 23), "web-api · claude [9c] — a narrow window: the panel below, question first")]])
+        panel.image(question, 100, 23), "web-api · claude [9c] — the bottom layout")]])
     rq = "request:rq-7d21c4"
     pictures["requests.png"] = panel.screen([[
         panel.window(panel.image(panel.cells(panel_rows(world, panel.API, 46, expanded=(rq,))), PANEL_COLS, 46),
@@ -165,20 +186,32 @@ def panel_pictures(render, capture, with_gif):
         panel.window(panel.image(panel.cells(panel_rows(world, panel.API_REVIEW, 46, expanded=(rq,))), PANEL_COLS, 46),
                      "codex [b2] — asked to")]])
     if with_gif:
-        steps = ((), ("enter",), ("enter", "\t"), ("enter", "\t", "2"), ("enter", "\t", "2", "\r"),
-                 ("enter", "\t", "2", "\r", "\x1d"))
-        words = (("", "keys still go to the agent"),
-                 ("Ctrl+]", "focus the panel"), ("Tab", "the next question"),
-                 ("2", "choose the second option"), ("Enter", "send the answer"),
-                 ("Ctrl+]", "back to the agent"))
+        # Answering: Ctrl+] opens the question in a popup over the window (host.cjs ``popupNow``),
+        # Tab reads the next one, 2 chooses, Enter sends it: the popup closes, the panel keeps a dim
+        # receipt line, and the keys are the agent's again.
+        from PIL import Image
+        cols = FOCUS_TALK + 2 + PANEL_COLS
+        steps = (((), "", "a question waits; keys still go to the agent"),
+                 (("enter",), "Ctrl+]", "the question opens in a popup"),
+                 (("enter", "\t"), "Tab", "the next question"),
+                 (("enter", "\t", "2"), "2", "choose the second option"),
+                 (None, "Enter", "send it; the popup closes and keys go back to the agent"))
         frames_ = []
-        for keys, (key, text) in zip(steps, words):
-            rows = panel_rows(world, panel.API_NOTES, 30, keys=keys)
-            body = panel.image(panel.cells(rows), PANEL_COLS, 30)
-            from PIL import Image
+        for keys, key, text in steps:
+            if keys is None:
+                # The moment after Enter: the backend reports the answer on its way (``submitted``,
+                # what was sent), so the panel's count and its dim receipt line agree.
+                kept = world.questions
+                world.questions = answered(kept, panel.API_NOTES, "q-demo-scope", "Public and internal")
+                try:
+                    body = session_window(world, panel.API_NOTES, cols, FOCUS_ROWS)
+                finally:
+                    world.questions = kept
+            else:
+                body = session_window(world, panel.API_NOTES, cols, FOCUS_ROWS, keys=keys)
             framed = Image.new("RGB", (body.size[0], body.size[1] + 2 * capture.CELL_H), capture.BACKGROUND)
             framed.paste(body, (0, 0))
-            framed.paste(panel.caption(text, PANEL_COLS, key=key), (0, body.size[1]))
+            framed.paste(panel.caption(text, cols, key=key), (0, body.size[1]))
             frames_.append(panel.screen([[panel.window(framed, "web-api · claude [9c]")]]))
         pictures["panel-focus.gif"] = frames_
     return pictures, world

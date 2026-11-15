@@ -116,8 +116,8 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 OpenCode 터미널이 예전처럼 원래 CLI로 열리고, `hearting session shell enable`은
 패널을 다시 켭니다. `hearting session shell status`로 지금 선택을 봅니다. 실행 중인
 세션은 시작할 때 상태 그대로이고, 업데이트도 이 선택을 지킵니다. 패널은 두되 원래
-화면을 넓게 쓰고 싶으면 패널 톱니 옆 **»**로 좁은 띠로 접거나, **⚙**에서 폭과
-위치를 바꿉니다([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding), 영어).
+화면을 넓게 쓰고 싶으면 패널 톱니 옆 **»**로 원래 화면 아래의 띠로 접어 원래 화면에
+폭을 다 돌려주거나, **⚙**에서 폭과 위치를 바꿉니다([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding), 영어).
 
 ## 세션끼리 일과 메시지를 어떻게 주고받나요?
 
@@ -132,8 +132,9 @@ herdr나 tmux가 필요하지 않습니다.
 패널이 있는 터미널에서는 어느 하네스든 쉬고 있는 세션에 바로 닿습니다. Codex는
 자체 thread queue로 어디서든 바로 닿습니다. 패널이 없는 터미널에서는 쉬고 있는
 Claude Code 세션에는 그 세션의 다음 턴에, OpenCode에는 다음 idle이나 도구
-callback에 닿고, 그동안 요청은 열린 채 목록에 남습니다. Fleet는 아직 요청 목록을
-보여 주지 않고, Fleet에서 요청을 보낼 수도 아직 없습니다. 자세한 내용은
+callback에 닿고, 그동안 요청은 열린 채 목록에 남습니다. Fleet는 요청을 PEERS의
+연결(보냄, 보고)로만 보여 주고, 요청 목록은 아직 없으며, Fleet에서 요청을 보낼 수도
+아직 없습니다. 자세한 내용은
 [docs/session-panel.md](docs/session-panel.md#requests-and-messages)(영어)에 있습니다.
 
 ## 언어 설정이 모든 문구를 번역하나요?

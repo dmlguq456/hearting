@@ -322,7 +322,7 @@
   .scr li { position: relative; padding-left: 18px; font-size: 15px; color: var(--text-2); }
   .scr li::before { content: ""; position: absolute; left: 3px; top: 10px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
   .scr li b { color: var(--text); font-weight: 620; }
-  .views { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .views { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   .views .card { padding: 18px 20px; }
   .views h3 { font-family: var(--font-mono); font-size: 14px; letter-spacing: .04em; color: var(--accent); }
   .views p { font-size: 14.5px; margin-top: 7px; }
@@ -704,12 +704,22 @@
     <a href="#quickstart">what you need first</a></p>
 
   <figure class="hero-shot">
-    <a class="shot" href="fleet/seat.png" target="_blank" rel="noopener"><img src="fleet/seat.png" width="1128" height="996" alt="Top: a Claude Code session in project web-api, session [4f], with an illustrative conversation on the left and the Hearting panel on the right: project and Git state, model and context, title and what it is doing now, a route box with the owner and the execute worker, two requests to [b2], messages, and a saved decision. Bottom: Fleet&#x27;s OVERVIEW with the same [4f] row, the Codex session [b2] working, and [9c] waiting for an answer." /></a>
-    <figcaption>Session [4f] with its panel, and Fleet below: the panel&rsquo;s head and Fleet&rsquo;s [4f] row
-    show the same values. The panel and Fleet are drawn by Hearting&rsquo;s own renderers from synthetic demo
-    data; the conversation on the left is illustrative.
-    <a href="fleet.html">Take the Fleet tour &rarr;</a></figcaption>
+    <a class="shot" href="fleet/seat.png" target="_blank" rel="noopener"><img src="fleet/seat.png" width="1128" height="740" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now, a route box with the owner and the execute worker at staged 2/4, the request Test run to [b2] with a partial answer and a finished review, messages with [b2] and [9c], and a saved decision." /></a>
+    <figcaption>Session [4f] at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</figcaption>
   </figure>
+  <figure class="hero-shot">
+    <a class="shot" href="fleet/overview.png" target="_blank" rel="noopener"><img src="fleet/overview.png" width="1440" height="810" alt="Fleet&#x27;s OVERVIEW at the same moment: eight sessions in four projects across Claude Code, Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with their stage lines, staged 2/4 execute and staged 2/4 eval-asr." loading="lazy" /></a>
+    <figcaption>Fleet&rsquo;s OVERVIEW at the same moment: every session on the machine, by project.</figcaption>
+  </figure>
+  <figure class="hero-shot">
+    <a class="shot" href="fleet/peers.png" target="_blank" rel="noopener"><img src="fleet/peers.png" width="1440" height="810" alt="Fleet&#x27;s PEERS: one card per session, grouped by project, with each owner&#x27;s route and stage marks; below, the links: [b2] reported a partial answer to request rq-7d21c4 two minutes ago, [4f] sent that request, Test run, sixteen minutes ago, [4f] wrote to [9c], and [d1] and [e8] exchanged notes about the data loader." loading="lazy" /></a>
+    <figcaption>PEERS: which session asked, answered, or wrote to which, and when.</figcaption>
+  </figure>
+  <figure class="hero-shot">
+    <a class="shot" href="fleet/routes.png" target="_blank" rel="noopener"><img src="fleet/routes.png" width="1440" height="900" alt="Fleet&#x27;s ROUTES with the web-api route opened in place: Rate limiting, staged 2/4 with execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, execute running, test and report pending, each with who runs it, when, its gate, and its output; under it the ml-train route at eval-asr." loading="lazy" /></a>
+    <figcaption>ROUTES, with [4f]&rsquo;s route opened in place: its stages and who runs each.</figcaption>
+  </figure>
+  <p class="fine" style="text-align:center"><a href="fleet.html">Take the Fleet tour &rarr;</a></p>
 </div></section>
 
 <section class="sec" id="why"><div class="wrap">
@@ -745,8 +755,8 @@
   <div class="grid grid3">
     <div class="card"><span class="num">PANEL</span><h3>The panel beside each session</h3>
       <p>Project and Git, model and context, what it is doing now, each route with its worker, requests,
-      experiments, messages, and memory. <code>Ctrl+]</code> answers a waiting question; <code>f</code> opens Fleet
-      in the same window. <a href="https://github.com/dmlguq456/hearting/blob/main/docs/session-panel.md">Details &rarr;</a></p></div>
+      experiments, messages, and memory. <code>Ctrl+]</code> opens a waiting question in a popup to answer;
+      <code>f</code> after it opens Fleet in the same window. <a href="https://github.com/dmlguq456/hearting/blob/main/docs/session-panel.md">Details &rarr;</a></p></div>
     <div class="card"><span class="num">FLEET</span><h3>Every session at once</h3>
       <p>Every Claude Code, Codex, and OpenCode session on the machine, and which one needs you. On a session
       page, <code>Ctrl+]</code> opens that session&rsquo;s panel. <a href="fleet.html">Fleet tour &rarr;</a></p></div>
@@ -755,8 +765,7 @@
       or tmux needed. <a href="fleet.html#panel">See it &rarr;</a></p></div>
   </div>
   <div class="split" style="margin-top:30px">
-    <figure><div class="shot"><img src="fleet/panel-focus.gif" width="390" height="632" alt="Answering in the panel, step by step: a question waits while keys still go to the agent; Ctrl+] focuses the panel; Tab moves to the next question; 2 chooses the second option; Enter sends the answer; Ctrl+] returns to the agent." loading="lazy" /></div><figcaption>Answering in the panel: Ctrl+] &rarr; Tab &rarr; 2 &rarr; Enter &rarr;
-      Ctrl+].</figcaption></figure>
+    <figure><div class="shot"><img src="fleet/panel-focus.gif" width="1128" height="632" alt="Answering a question, step by step, in session [9c]&#x27;s window: two questions wait in the panel while keys still go to the agent; Ctrl+] opens the first in a popup in the middle of the window; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel keeps one dim line, answer sent." loading="lazy" /></div><figcaption>Answering a question: Ctrl+] &rarr; Tab &rarr; 2 &rarr; Enter.</figcaption></figure>
     <figure><a class="shot" href="fleet/requests.png" target="_blank" rel="noopener"><img src="fleet/requests.png" width="764" height="884" alt="Two panels: the session that asked shows its requests to [b2], one opened with revision, delivery, a partial answer and what is left; the session that was asked shows the same request with its report and a link to the body." loading="lazy" /></a><figcaption>One request in the panel of the session that asked and of the
       one asked.</figcaption></figure>
   </div>

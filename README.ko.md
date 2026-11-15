@@ -35,9 +35,24 @@
 > 명령, 경로, 설정 키와 식별자는 영문 원문을 기준으로 합니다.
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="위: web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 프로젝트와 Git 상태, 모델과 문맥, 제목과 지금 하는 일, owner와 execute 작업자가 든 route 상자, [b2]에 맡긴 요청 둘, 메시지, 저장된 결정 하나. 아래: Fleet OVERVIEW에 같은 [4f] 행(Opus 5.5 xhigh, 46%), 일하는 Codex 세션 [b2], 답을 기다리는 [9c]." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, owner와 execute 작업자가 든 staged 2/4 route 상자, [b2]에 맡긴 요청 Test run(일부 답)과 끝난 검토, [b2]·[9c]와 주고받은 메시지, 저장된 결정 하나." width="100%">
 </p>
-<p align="center"><sub>세션 <code>[4f]</code>와 그 패널, 아래는 Fleet입니다. 패널 머리와 Fleet의 <code>[4f]</code> 행이 같은 값을 보여 줍니다. 패널과 Fleet는 하팅 자체 렌더러가 합성 데모 데이터로 그렸고, 왼쪽 대화는 예시입니다.</sub></p>
+<p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. 데모 데이터이며 대화는 예시입니다.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/overview.png" alt="같은 순간의 Fleet OVERVIEW: Claude Code, Codex, OpenCode에 걸친 네 프로젝트의 세션 여덟. 세션 [4f]는 Rate limiting을 46%에서 돌리고, Codex 세션 [b2]는 [4f]를 위한 Test run에서 40개 중 31개 통과, [9c]는 답을 기다린다. 아래에는 열린 route 둘과 단계 줄 staged 2/4 execute, staged 2/4 eval-asr." width="100%">
+</p>
+<p align="center"><sub>같은 순간의 Fleet OVERVIEW: 이 기계의 모든 세션을 프로젝트별로 봅니다.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/peers.png" alt="Fleet PEERS: 프로젝트별로 묶은 세션 카드와 owner의 route, 단계 표시. 아래 연결 목록: [b2]가 2분 전 요청 rq-7d21c4에 일부 답을 보고했고, [4f]가 16분 전 그 요청 Test run을 보냈으며, [4f]가 [9c]에 메모를 보냈고, [d1]과 [e8]이 데이터 로더 이야기를 주고받았다." width="100%">
+</p>
+<p align="center"><sub>PEERS: 어느 세션이 어느 세션에 묻고 답하고 글을 보냈는지, 언제인지 봅니다.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/routes.png" alt="web-api route를 그 자리에서 펼친 Fleet ROUTES: Rate limiting, staged 2/4로 execute가 돌고, owner는 Opus 5.5 xhigh, execute 작업자는 Sonnet 5.5. 단계 상자 plan 끝남, execute 도는 중, test와 report 대기, 상자마다 맡은 쪽, 시각, 관문, 산출 위치. 그 아래 eval-asr의 ml-train route." width="100%">
+</p>
+<p align="center"><sub>ROUTES에서 <code>[4f]</code>의 route를 그 자리에서 펼친 모습: 단계마다 누가 맡았는지 봅니다.</sub></p>
 
 ## 왜 하팅인가
 
@@ -74,17 +89,19 @@
 새 설치에서는 새로 여는 Claude Code, Codex, OpenCode 터미널마다 오른쪽에 40칸
 패널이 열립니다. 위에서부터 프로젝트와 Git 상태, 모델과 문맥, 세션 제목과 지금
 하는 일, route마다 owner와 지금 단계를 도는 작업자, 이 세션이 맡기거나 받은
-요청, 이 프로젝트의 실험(`LAB`), 최근 메시지, 저장된 기억(`MEM`), 사용량 창이
-보입니다. 사용자의 답을 기다리는 질문은 따로 상자에 뜹니다. **Ctrl+]**로 패널에
-들어가 **Tab**, **1–9**, **Enter**로 답하거나, **f**로 같은 창에서 Fleet를 엽니다.
-**Ctrl+]**를 다시 누르면 입력으로 돌아갑니다. `hearting session shell disable`은
+요청, 이 프로젝트의 실험(`LAB`), 사용자의 답을 기다리는 질문, 최근 메시지, 저장된
+기억(`MEM`), 사용량 창이 보입니다. **Ctrl+]**를 누르면 기다리는 질문이 창 가운데
+팝업으로 뜹니다. **Tab**, **1–9**, **Enter**로 답하면 팝업이 닫히고 키가 다시
+에이전트로 갑니다. 답하지 않고 닫으려면 **Esc**나 **Ctrl+]**를 누릅니다. 기다리는
+질문이 없으면 **Ctrl+]**는 패널을 열고, 이어서 **f**를 누르면 같은 창에서 Fleet를
+엽니다. **»**는 패널을 에이전트 화면 아래 띠로 접습니다. `hearting session shell disable`은
 새 터미널부터 패널을 끕니다. 키, 설정, 좁은 창 배치, 하네스별 세부는
 [docs/session-panel.md](docs/session-panel.md)(영어)에 있습니다.
 
 <table>
   <tr>
     <td width="50%" valign="top"><img src="docs/fleet/panel.png" alt="ml-train 프로젝트 세션 [d1]의 패널: Git 상태, 모델 Opus 5.5 high, 문맥 38%, 제목 Checkpoint eval, eval-asr 단계의 lab route와 그 작업자, 조건 셋의 최근 단어 오류율과 기준값을 보여 주는 LAB 표, 세션 [e8]과 주고받은 메시지 둘, 사용량."><br><sub><b>패널 하나</b> — 작업자가 붙은 lab route, 그 자리에서 펼친 프로젝트 <code>LAB</code> 표, 메시지.</sub></td>
-    <td width="50%" valign="top"><img src="docs/fleet/panel-focus.gif" alt="패널에서 답하는 차례: 질문이 기다리는 동안 키는 에이전트로 간다. Ctrl+]로 패널에 들어가고, Tab으로 다음 질문, 2로 둘째 선택지, Enter로 답을 보내고, Ctrl+]로 에이전트로 돌아온다."><br><sub><b>답하기</b> — Ctrl+] → Tab → 2 → Enter → Ctrl+]. 데모 데이터.</sub></td>
+    <td width="50%" valign="top"><img src="docs/fleet/panel-focus.gif" alt="세션 [9c]의 창에서 질문에 답하는 차례: 패널에 질문 둘이 기다리는 동안 키는 에이전트로 간다. Ctrl+]로 첫 질문이 창 가운데 팝업으로 뜨고, Tab으로 다음 질문, 2로 둘째 선택지, Enter로 답을 보내면 팝업이 닫히고 패널에는 답 보냄 흐린 한 줄이 남는다."><br><sub><b>답하기</b> — Ctrl+] → Tab → 2 → Enter. 데모 데이터.</sub></td>
   </tr>
 </table>
 
@@ -92,12 +109,8 @@
 
 Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 그 세션들에서
 분사한 모든 작업자를 터미널 화면 하나로 보여 줍니다. 각각이 도는지, 멈췄는지,
-사용자를 기다리는지가 보입니다.
-
-<p align="center">
-  <img src="docs/fleet/walkthrough.gif" alt="Fleet 다섯 단계 둘러보기: 모든 세션의 OVERVIEW, 열린 요청 목록 ROUTES, 한 세션의 페이지, 그 세션 자신의 창과 하팅 패널, 한 요청의 단계 그림과 owner 원문 출력." width="100%">
-</p>
-<p align="center"><sub>OVERVIEW → ROUTES → 세션 페이지 → 그 세션의 패널 → 요청의 원문 출력. 데모 데이터이며, 패널 옆 대화는 예시입니다.</sub></p>
+사용자를 기다리는지가 보입니다. OVERVIEW, PEERS, ROUTES는 이 문서 맨 위의
+그림입니다.
 
 | 화면 | 알려 주는 것 |
 |---|---|
@@ -105,21 +118,22 @@ Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 �
 | **ROUTES** | 요청마다 지금 하는 쪽과 지금 위치(`one-shot`, 단계마다 작업자를 띄우면 `staged 3/7 execute ●`)와 그 아래에서 도는 작업자. |
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 모든 에이전트와 언제부터인지, 어떻게 답하는지. 하네스가 답 경로를 주면 Fleet에서 바로 답하고, 아니면 해당 세션으로 안내합니다. |
 | **RESOURCES** | 이 기계와 설정한 호스트의 CPU, 메모리, GPU별 사용량과 각 GPU 프로세스를 가진 세션. |
-| **그 밖의 화면** | PEERS(어떤 세션이 어떤 세션을 지켜보거나 조정하는지), HISTORY, MEMORY, MODELS · SYSTEM. 프로젝트를 고르면 현황, 남은 일, route, 결과, 그 프로젝트의 `LAB` 표가 나옵니다. |
+| **PEERS** | 어느 세션이 다른 세션에 일을 맡겼는지, 보고했는지, 메시지를 보냈는지, 지켜보는지와 그 시각. |
+| **그 밖의 화면** | HISTORY, MEMORY, MODELS · SYSTEM. 프로젝트를 고르면 현황, 남은 일, route, 결과, 그 프로젝트의 `LAB` 표가 나옵니다. |
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/fleet/routes.png" alt="ROUTES: 열린 요청 둘. execute 단계의 코드 요청과 eval-asr 작업자가 도는 실험 요청, 작업자의 모델과 경과 시간."><br><sub><b>ROUTES</b> — 요청마다 단계 줄과 그 단계를 도는 작업자.</sub></td>
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: Claude Code 세션이 7분째 기다리는 결정 하나와 언제부터인지, 답하는 법. Codex 세션의 오래된 승인 대기 하나. 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 언제부터인지, 어떻게 답하는지.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 route, OpenCode 세션 [e8]과의 연결 둘, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 상태, 문맥, 지금 하는 일, route, 연결된 세션, GPU.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 요청, 조정하는 OpenCode 세션, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 상태, 문맥, 지금 하는 일, route, 연결된 세션, GPU.</sub></td>
-    <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: 호스트 둘의 GPU별 사용률과 메모리, 각 GPU 프로세스를 돌리는 세션과 명령, CPU와 메모리 사용량."><br><sub><b>RESOURCES</b> — GPU별 사용량과 각 프로세스 뒤의 세션과 명령.</sub></td>
+    <td colspan="2" align="center"><img src="docs/fleet/resources.png" width="50%" alt="RESOURCES: 호스트 둘의 GPU별 사용률과 메모리, 각 GPU 프로세스를 돌리는 세션과 명령, CPU와 메모리 사용량."><br><sub><b>RESOURCES</b> — GPU별 사용량과 각 프로세스 뒤의 세션과 명령.</sub></td>
   </tr>
 </table>
 
-패널과 Fleet는 서로를 엽니다. 패널에 들어간 상태에서 **f**는 그 창에서 Fleet를
-열고, Fleet의 세션 페이지에서 **Ctrl+]**는 정확히 그 세션의 패널을 엽니다.
+패널과 Fleet는 서로를 엽니다. 세션 창에서 **Ctrl+]**에 이어 **f**를 누르면 그
+창에서 Fleet가 열리고, Fleet의 세션 페이지에서 **Ctrl+]**는 정확히 그 세션의
+패널을 엽니다.
 기다리는 질문에는 어느 쪽에서나 답할 수 있습니다. 좁은 터미널에서도 배치가
 유지됩니다([100열 OVERVIEW](docs/fleet/narrow.png)).
 
@@ -155,8 +169,8 @@ fleet --json       # 같은 상태를 JSON으로(스크립트용)
 방식은 하네스마다 다릅니다 — 아래 표).
 이 가운데 어느 것도 herdr나 tmux가 필요하지 않고, 하팅 자체 기록으로 돕니다. 쉬고
 있는 세션에 얼마나 빨리 닿는지는 하네스마다 다릅니다([하네스와
-모델](#하네스와-모델)). Fleet는 아직 세션 간 요청 목록을 보여 주지 않고, Fleet에서 요청을
-보낼 수도 아직 없습니다. 스크립트에서는 `hearting run peer-steward request`,
+모델](#하네스와-모델)). Fleet는 요청을 PEERS의 연결(보냄, 보고)로만 보여 주고, 세션 간
+요청 목록은 아직 없으며, Fleet에서 요청을 보낼 수도 아직 없습니다. 스크립트에서는 `hearting run peer-steward request`,
 `report`, `show`를 씁니다([core/OPERATIONS.md](core/OPERATIONS.md)의 “Peer requests”).
 
 ### 화면을 믿을 수 있는 이유

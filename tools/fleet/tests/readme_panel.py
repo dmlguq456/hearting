@@ -45,11 +45,15 @@ def _iso(epoch):
 
 
 def _received(now):
-    """What each demo session's own prompt record kept: peer messages it received."""
+    """What each demo session's own prompt record kept: peer messages it received (the same
+    exchanges, at the same minutes, as ``readme_demo``'s peer records Fleet's PEERS reads)."""
     return {
         API: [{"source": "peer", "sender": "Codex [b2]", "sender_harness": "codex",
                "sender_session_id": API_REVIEW, "kind": "reply", "at": _ago(now, 19),
                "text": "Pagination review done: 2 findings, both in cursor.py; details in the report."}],
+        API_NOTES: [{"source": "peer", "sender": "Claude [4f]", "sender_harness": "claude",
+                     "sender_session_id": API, "kind": "steer", "at": _ago(now, 8),
+                     "text": "The release notes can wait for the limiter; I will ping you."}],
         ML: [{"source": "peer", "sender": "OpenCode [e8]", "sender_harness": "opencode",
               "sender_session_id": "readme-oc-ml", "kind": "reply", "at": _ago(now, 6),
               "text": "8 loader workers is the knee: 1.9x over 4, flat after that."}],
@@ -63,6 +67,10 @@ def _sent(now):
                "summary": "The release notes can wait for the limiter; I will ping you.",
                "at": _ago(now, 8), "message_id": "m-demo-1", "kind": "steer",
                "status": "received", "refs": []}],
+        API_REVIEW: [{"to": {"harness": "claude", "session_id": API, "name": "web-api-4f"},
+                      "summary": "Pagination review done: 2 findings, both in cursor.py; details in the report.",
+                      "at": _ago(now, 19), "message_id": "m-demo-3", "kind": "reply",
+                      "status": "received", "refs": []}],
         ML: [{"to": {"harness": "opencode", "session_id": "readme-oc-ml", "name": "ml-train-e8"},
               "summary": "Profile 4, 8 and 16 loader workers and tell me where it flattens.",
               "at": _ago(now, 14), "message_id": "m-demo-2", "kind": "steer",
@@ -81,7 +89,7 @@ def _requests(now):
     four_f = {"harness": "claude", "session_id": API, "name": "web-api-4f"}
     b2 = {"harness": "codex", "session_id": API_REVIEW, "name": "web-api-b2"}
     tests = _request(
-        "rq-7d21c4", "API tests on feat/rate-limit", "partial", four_f, b2, _ago(now, 2),
+        "rq-7d21c4", "Test run", "partial", four_f, b2, _ago(now, 2),
         [{"n": 1, "label": "", "state": "current", "transfer_ref": "t-demo-1"}],
         [{"n": 1, "kind": "partial", "revision": 1, "at": _ago(now, 2), "transfer_ref": "t-demo-2",
           "result": "31 of 40 suites pass; 9 still running", "remaining": "9 suites"}],
@@ -261,7 +269,7 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working"):
         mock.patch.object(session_shell, "_request_views",
                           lambda h, s, n, errors=None: (json.loads(json.dumps(world.requests.get(s, []))), [])),
         mock.patch.object(session_shell, "session_questions",
-                          lambda h, s, view=None, retained=(): json.loads(json.dumps(world.questions.get(s, [])))),
+                          lambda h, s, view=None, retained=(), elsewhere=None: json.loads(json.dumps(world.questions.get(s, [])))),
         mock.patch.object(session_lab, "read", lab_read),
         mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
     ]
@@ -278,16 +286,22 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working"):
 
 
 # Paints one or more panel frames with the real renderer and question editor; prints the rows.
+# The panel is rendered as ``host.cjs`` renders it (``panelViewNow``: the editor's summary and sent
+# lines); with ``window`` set and the editor focused, the question popup is laid out over that
+# window as ``host.cjs`` ``popupNow`` lays it (panel-view's ``popup`` with the editor's rows).
 _NODE = r"""
 const fs=require('node:fs');
 const [viewPath,blockPath]=process.argv.slice(1);
 const view=require(viewPath),create=require(blockPath);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
+  dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
 (async()=>{
   const jobs=JSON.parse(fs.readFileSync(0,'utf8')),out=[];
   for(const job of jobs){
-    const p=job.payload,sent=[];
-    const block=create({changed(){},answer:async v=>{sent.push(v);return {state:'received'};},action(){},page(){}});
+    const p=job.payload;
+    // An answer is on its way once sent (`submitted`): the panel keeps its dim receipt line.
+    const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){},page(){}});
     block.update(p.questions||[],p.help||'',p.block||{});
     for(const key of job.keys||[]){
       if(key==='enter')block.enter();else if(key==='leave')block.leave();else block.input(Buffer.from(key));
@@ -297,9 +311,19 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
     const r=view.render({width:job.width,height:job.height,side:job.side,fill:job.side,model,
       native:p.native_display||{},state:job.state,sid:job.sid,harness:job.harness,frame:job.frame||0,since:job.since,
       sections:p.block,configuration:job.configuration||{},expandedKeys:job.expanded||[],focused:block.focused,
-      cwd:'',background:'dark',questions:o=>block.detail(o)});
-    out.push(r.rows.map(row=>row.map(part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
-      dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true}))));
+      cwd:'',background:'dark',folded:job.folded===true,brief:()=>block.summary(),sent:()=>block.sent()});
+    let popup=null;
+    if(job.window&&block.focused){
+      const {cols,rows}=job.window,width=view.popupWidth(cols),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
+      const label=[{text:block.summary()?.label||'QUESTIONS',dim:true}];
+      let title=label,body;
+      if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
+      else body=block.detail({budget:room,columns:inner});
+      const shown=view.popup({cols,rows,band:0,title,body,sections:['QUESTIONS'],current:0,model,
+        configuration:job.configuration||{},background:'dark'});
+      popup={left:shown.left,top:shown.top,rows:shown.rows.map(row=>row.map(plain))};
+    }
+    out.push({rows:r.rows.map(row=>row.map(plain)),popup});
   }
   process.stdout.write(JSON.stringify(out));
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
@@ -307,7 +331,8 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
 
 def paint(jobs):
-    """Rows of parts for each job (``payload``, ``width``, ``height``, ``side``, ``state`` …)."""
+    """``{"rows", "popup"}`` for each job (``payload``, ``width``, ``height``, ``side``, ``state`` …):
+    the panel's rows of parts, and the question popup laid over ``window`` while focused (else None)."""
     result = subprocess.run(["node", "-e", _NODE, str(PANEL_VIEW), str(BLOCK_INPUT)],
                             input=json.dumps(jobs), capture_output=True, text=True, timeout=60)
     if result.returncode:
@@ -521,3 +546,37 @@ def beside(left, right, cols_left, gap=2):
         row += [(" ", None, None, False, False, False, 1)] * max(0, cols_left + gap - used)
         out.append(row + (list(right[index]) if index < len(right) else []))
     return out
+
+
+def overlay(grid, layer, top, left):
+    """``grid`` (``cells()`` rows) with ``layer`` (``cells()`` rows) laid over it from cell
+    ``(top, left)``, the way the host writes the popup over the scene's rows."""
+    def columns(row):
+        out = []
+        for cell in row:
+            out.append(cell)
+            out.extend([None] * (cell[-1] - 1))
+        return out
+    blank = (" ", None, None, False, False, False, 1)
+    out = [columns(row) for row in grid]
+    for index, row in enumerate(layer):
+        y = top + index
+        if not 0 <= y < len(out):
+            continue
+        line = out[y]
+        x = left
+        for cell in row:
+            end = x + cell[-1]
+            line.extend([blank] * max(0, end - len(line)))
+            # A wide glyph the layer cuts in half gives its other half back as a blank.
+            if line[x] is None:
+                start = x
+                while start > 0 and line[start] is None:
+                    start -= 1
+                line[start] = blank
+            if end < len(line) and line[end] is None:
+                line[end] = blank
+            line[x:end] = [cell] + [None] * (cell[-1] - 1)
+            x = end
+    return [[cell for cell in line if cell is not None] for line in out]
+

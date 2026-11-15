@@ -38,20 +38,21 @@ native session. Herdr, cmux, and tmux remain optional.
 
 The default is a 40-column panel on the right of the native area. Its top
 border names the session the way Fleet's row does: the state glyph, the
-session number (`[4f]`), the runtime, and `⚑` for a steward. The frame takes
-that state's color the moment the native screen changes (running, waiting;
-idle stays neutral). From the top:
+session number (`[4f]`), the runtime, and `⚑` for a steward. The frame shows
+that state the moment the native screen changes: while the session runs a
+bright arc goes round it, while an answer waits the whole frame breathes red,
+and idle stays neutral. From the top:
 
 | Rows | What they say |
 |---|---|
 | `REPO`, `GIT` | The repository and its linked-worktree count (`web-api · wt 1`); the branch, then `✓` when it is level with its upstream or `↑N`/`↓N`, then any merge or rebase warning |
 | `MODEL`, `CTX` | The model and effort, and the context gauge and percent |
-| `TITLE`, `NOW` | Fleet's title for the session and what it is doing now, under a thin rule that moves while the session runs and breathes red while an answer waits |
-| `N ROUTE` box | Each current route on its own folded row: Fleet's route mark, title, runtime, context, and elapsed time (or the model, with `route line` set to `model`). The owner comes first, and the worker running the current stage sits in its own box under it. Press a row to open it in place: model, effort, gauge, `plan ✓ › execute ● › review`, `>_ tool`, `+N agent` |
+| `TITLE`, `NOW` | Fleet's title for the session and what it is doing now, under a thin, still rule |
+| `N ROUTE` box | Each current route on its own folded row: Fleet's route mark, title, runtime, context, and elapsed time (or the model, with `route line` set to `model`). The owner comes first, and the worker running the current stage sits in its own box under it. Press a row to open it in place: model, effort, gauge, `plan ✓ › execute ● › review`, `>_ tool`, `+N agent`. A finished route stays with its result (`✓`, or the failure mark and `FAIL · title`) until your next input or ten minutes |
 | `M REQUEST` | Requests this session sent (`→`) or received (`◂`), and finished ones (`✓`); see [Requests and messages](#requests-and-messages) |
 | `LAB` | This project's experiment board; see [The LAB section](#the-lab-section) |
-| Question box | A question waiting for you, its choices, and how to answer |
-| `MESSAGES` | Recent messages, each on two rows: `← [b2] codex · 11:41 · reply` and the start of its text; a sent one shows its delivery (`delivered`) |
+| `N QUESTIONS` | The questions waiting for you: the label row (`2 QUESTIONS ─── ›`), one dim line per answer on its way (`✓ answer sent · Public only`), and the next question in two rows (its first line, then its choices on one row). A press on them, or **Ctrl+]**, opens the question in a popup |
+| `MESSAGES` | Recent messages, each on two rows: `← [b2] codex · 11:41 · reply` and the start of its text; a sent one shows its delivery (`delivered`). Beside the native area three at most, the rest counted (`MESSAGES +2`) |
 | `MEM` | This repository's newest saved memory records, two at most (`◆ decision · 3m` and its headline) |
 | Last row | The usage windows (`5h 18% │ 7d 40%`), the fold button `»`, and the gear `⚙` |
 
@@ -63,20 +64,25 @@ takes no route state. A value that cannot be read stays `?`.
 
 ## Keys and mouse
 
-Ordinary keys stay with the native CLI until you focus the panel.
+Ordinary keys stay with the native CLI. A question is answered in a popup in
+the middle of the window (the native area and the panel together); it never
+opens by itself. While it stands every key and press is its own, and **Esc**,
+**Ctrl+]**, its `✕`, or a press outside it closes it.
 
 | Key | What it does |
 |---|---|
-| **Ctrl+]** | Focus the panel; press again (or **Escape**) to return to native typing |
-| **Tab** | Move between waiting questions |
-| **1–9**, **↑/↓** | Choose an option (focused ↑/↓ scrolls long question content) |
+| **Ctrl+]** | With a question waiting: open it in the popup; again (or **Esc**) closes it. With none: open the panel, unfolding a folded one |
+| **Tab** | Move to the next waiting question |
+| **1–9**, **↑/↓** | Choose an option (**PgUp/PgDn** read a long question) |
 | **t** | Answer in text, including pasted text |
-| **Enter** | Send, once every form field is answered |
-| **f** | Open Fleet in the same window; **Ctrl+]** closes it and returns |
+| **Enter** | Send, once every form field is answered: the popup closes and keys go back to the native CLI |
+| **f** | After **Ctrl+]**: open Fleet in the same window; **Ctrl+]** closes it and returns |
 | **PgUp/PgDn** | Scroll the route box while no question is shown |
-| Click | Open a route, a request, a message, or the `LAB` table in place; the wheel scrolls the route box |
+| Click | Open a route, a request, a message, or the `LAB` table in place; a press on the questions rows opens the popup; the wheel scrolls the route box |
 
-Choices and drafts survive moving between questions. A transport receipt is
+Choices and drafts survive moving between questions. Once an answer is sent,
+the panel keeps one dim line, `✓ answer sent · <choice>`, until the session has
+it. A transport receipt is
 shown separately from proved consumption, and expired or cancelled questions
 cannot be submitted. A question that has to be answered somewhere else says
 where instead of offering choices: `answer below` (in the native input),
@@ -85,21 +91,28 @@ panel opens Fleet except **f**. In Fleet, **Ctrl+]** on a session page opens
 that exact session's panel.
 
 <p align="center">
-  <img src="fleet/panel-question.png" alt="A narrow window with the panel open below the native area. Its head shows session [9c], Sonnet 5.5, context 33%, two answers waiting, the title Release notes 2.4 and NOW Choose a layout; below it the question box with three numbered choices, the first recommended, and the hint Ctrl+] · answer needed." width="90%">
+  <img src="fleet/panel-question.png" alt="The bottom layout in a 100-column window: the panel under the native area. Its head shows session [9c], Sonnet 5.5, context 33%, two answers waiting, the title Release notes 2.4 and NOW Choose a layout; under it the QUESTIONS label, the first question, and its three choices on one row, the first recommended." width="90%">
 </p>
-<p align="center"><sub>The bottom layout, opened in a narrow window: the question comes first. The conversation is illustrative; demo data.</sub></p>
+<p align="center"><sub>The bottom layout: the waiting question in two rows, which <b>Ctrl+]</b> or a press opens in the popup. The conversation is illustrative; demo data.</sub></p>
 
 ## Narrow windows and folding
 
-**»** beside the gear folds the side panel into an eight-cell strip (state,
-session number, route count, `LB` for experiments, answer waits) and gives the
-native area the freed columns; a press on the strip opens it again. Where the
-open panel would leave the native area under 80 columns (a 40-column panel in
-a terminal under 122 columns) it folds by itself and opens again with room; a
-choice made by hand wins at that width. In the bottom layout (when `layout` is set to bottom,
-or when you open the panel in a window too narrow to hold it beside the native
-area) the panel sits under the native area, the question comes first, and
-**▾** / **▴** fold it to one status row.
+**»** beside the gear (**▾** when the panel is under the native area) folds it
+into a strip under the native area, which gets the whole width back: a thin
+rule with **▴**, then three rows: the session (state, number, project, model,
+context, 5h and 7d), what to do now (an answer you owe with the question's
+first line, compaction about to happen), and the routes (their count, the
+failed or running titles, new messages, an experiment board that needs a
+look). Each row drops whole items from its end when narrow. The strip keeps its
+height whatever it shows (a short window gets fewer rows: three from 24 rows,
+two from 16, else one, with what to do kept longest). A press on it opens the
+panel again; a press on the row of what to do, or **Ctrl+]**, opens the
+question in a popup above the strip. Where the open panel would leave the
+native area under 60 columns (a 40-column panel in a terminal under 102
+columns) it folds by itself and opens again with room; a choice made by hand
+holds at every width. In the bottom layout (when `layout` is set to bottom, or
+when you open the panel by hand in a window too narrow to hold it beside the
+native area, until the window widens) the panel sits under the native area.
 
 ## Settings
 
@@ -134,7 +147,7 @@ follows the other session to a successor only when Hearting's lineage confirms
 the handover.
 
 In the panel, every open request has a row in the route box's border group
-(`2 REQUEST`): `→ [b2] API tests · partial answer`. Opened, it shows the
+(`2 REQUEST`): `→ [b2] Test run · partial answer`. Opened, it shows the
 parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`), `WORK`
 (`open`, `partial answer`, `final answer`, `rejected`, `cancelled`, with what is
 left), `LAST`, `REPORTS`, and `+ body ›`. A closed request this session sent
@@ -166,8 +179,8 @@ How an idle session is reached differs by runtime
   a command to wait on (`bounded-wait` with a `join`) instead of promising a
   wake.
 
-Fleet does not list requests yet, and you cannot send a request or message from
-Fleet yet.
+Fleet shows a request only as a PEERS link (sent, reported); it has no request
+list yet, and you cannot send a request or message from Fleet yet.
 
 ## The LAB section
 
@@ -186,10 +199,13 @@ it without polling.
 
 ## Per runtime
 
-- **Claude Code.** The panel shows the same status area as Codex and OpenCode.
-  While the panel shows it, Claude's own statusline row below becomes a notice
-  row that stays empty unless you owe an answer, a warning applies, or news
-  just arrived; the full statusline returns whenever the panel is hidden.
+- **Claude Code.** The panel shows the same status area as Codex and OpenCode,
+  and Claude's own statusline is one row under the input. While the panel, or
+  its folded strip, shows the status area, that row is a notice row that stays
+  empty unless you must act now: an answer you owe, compaction about to
+  happen, a red context or usage reading, or a failed or blocked route. News
+  stays in the panel: messages in `MESSAGES`, a finished route's result in the
+  route box. With the panel hidden the row shows the status line itself.
 - **Codex.** A wrapped Codex keeps its native shared-daemon startup. The shell
   hides the footer's thread ID (it stays on the inner screen for
   identification; a Codex window without the shell still shows it), and the

@@ -32,9 +32,24 @@ A capable model settles the plan, and lower-cost workers carry it out in small, 
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="Top: a Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model and context, title and what it is doing now, a route box with the owner and the execute worker, two requests to [b2], messages, and a saved decision. Bottom: Fleet's OVERVIEW with the same [4f] row (Opus 5.5 xhigh, 46%), the Codex session [b2] working, and [9c] waiting for an answer." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now, a route box with the owner and the execute worker at staged 2/4, the request Test run to [b2] with a partial answer and a finished review, messages with [b2] and [9c], and a saved decision." width="100%">
 </p>
-<p align="center"><sub>Session <code>[4f]</code> with its panel, and Fleet below: the panel's head and Fleet's <code>[4f]</code> row show the same values. The panel and Fleet are drawn by Hearting's own renderers from synthetic demo data; the conversation on the left is illustrative.</sub></p>
+<p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/overview.png" alt="Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with their stage lines, staged 2/4 execute and staged 2/4 eval-asr." width="100%">
+</p>
+<p align="center"><sub>Fleet's OVERVIEW at the same moment: every session on the machine, by project.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/peers.png" alt="Fleet's PEERS: one card per session, grouped by project, with each owner's route and stage marks; below, the links: [b2] reported a partial answer to request rq-7d21c4 two minutes ago, [4f] sent that request, Test run, sixteen minutes ago, [4f] wrote to [9c], and [d1] and [e8] exchanged notes about the data loader." width="100%">
+</p>
+<p align="center"><sub>PEERS: which session asked, answered, or wrote to which, and when.</sub></p>
+
+<p align="center">
+  <img src="docs/fleet/routes.png" alt="Fleet's ROUTES with the web-api route opened in place: Rate limiting, staged 2/4 with execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, execute running, test and report pending, each with who runs it, when, its gate, and its output; under it the ml-train route at eval-asr." width="100%">
+</p>
+<p align="center"><sub>ROUTES, with <code>[4f]</code>'s route opened in place: its stages and who runs each.</sub></p>
 
 ## Why Hearting
 
@@ -75,18 +90,21 @@ New installations open a 40-column panel on the right of every new Claude Code,
 Codex, and OpenCode terminal. From the top it shows the project and Git state,
 the model and context, the session's title and what it is doing now; each route
 with its owner and the worker running the current stage; the requests this
-session sent or received; this project's experiments (`LAB`); recent messages,
-saved memory (`MEM`), and the usage windows. A question waiting for you gets its
-own box. Press **Ctrl+]** to focus the panel: answer with **Tab**, **1–9**, and
-**Enter**, or press **f** to open Fleet in the same window; **Ctrl+]** again
-returns to typing. `hearting session shell disable` turns the panel off for new
+session sent or received; this project's experiments (`LAB`); the questions
+waiting for you; recent messages, saved memory (`MEM`), and the usage windows.
+Press **Ctrl+]** and a waiting question opens in a popup in the middle of the
+window: answer with **Tab**, **1–9**, and **Enter**, and the popup closes and
+your keys go back to the agent; **Esc** or **Ctrl+]** closes it unanswered.
+With no question waiting, **Ctrl+]** opens the panel, and **f** then opens
+Fleet in the same window. **»** folds the panel into a strip under the agent's
+screen. `hearting session shell disable` turns the panel off for new
 terminals. Keys, settings, the narrow-window layout, and per-runtime details
 are in [docs/session-panel.md](docs/session-panel.md).
 
 <table>
   <tr>
     <td width="50%" valign="top"><img src="docs/fleet/panel.png" alt="The panel of session [d1] in project ml-train: Git state, model Opus 5.5 high, context 38%, title Checkpoint eval, a lab route at stage eval-asr with its worker, the LAB table with three conditions and their latest word error rates against the baseline, two messages with session [e8], and usage."><br><sub><b>One panel</b> — a lab route with its worker, the project's <code>LAB</code> table opened in place, and messages.</sub></td>
-    <td width="50%" valign="top"><img src="docs/fleet/panel-focus.gif" alt="Answering in the panel, step by step: a question waits while keys still go to the agent; Ctrl+] focuses the panel; Tab moves to the next question; 2 chooses the second option; Enter sends the answer; Ctrl+] returns to the agent."><br><sub><b>Answering</b> — Ctrl+] → Tab → 2 → Enter → Ctrl+]. Demo data.</sub></td>
+    <td width="50%" valign="top"><img src="docs/fleet/panel-focus.gif" alt="Answering a question, step by step, in session [9c]'s window: two questions wait in the panel while keys still go to the agent; Ctrl+] opens the first in a popup in the middle of the window; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel keeps one dim line, answer sent."><br><sub><b>Answering</b> — Ctrl+] → Tab → 2 → Enter. Demo data.</sub></td>
   </tr>
 </table>
 
@@ -94,12 +112,8 @@ are in [docs/session-panel.md](docs/session-panel.md).
 
 Fleet is one terminal view of every Claude Code, Codex, and OpenCode session on
 the machine and every worker Hearting dispatched from them: whether each one is
-running, stuck, or waiting for you.
-
-<p align="center">
-  <img src="docs/fleet/walkthrough.gif" alt="Fleet walk-through in five steps: the OVERVIEW of all sessions, the ROUTES list of open requests, one session's page, that session's own window with its Hearting panel, and one request's stage graph with the owner's raw output." width="100%">
-</p>
-<p align="center"><sub>OVERVIEW → ROUTES → a session page → that session's own panel → a request's raw output. Demo data; the conversation beside a panel is illustrative.</sub></p>
+running, stuck, or waiting for you. OVERVIEW, PEERS, and ROUTES are the
+pictures at the top of this page.
 
 | Screen | What it tells you |
 |---|---|
@@ -107,22 +121,22 @@ running, stuck, or waiting for you.
 | **ROUTES** | Each request: who does it now and where it stands (`one-shot`, or `staged 3/7 execute ●` for one worker per stage), with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval, since when, and how to answer. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
-| **Others** | PEERS (which sessions watch or steer which), HISTORY, MEMORY, MODELS · SYSTEM. Select a project for its status, open work, routes, results, and its `LAB` table. |
+| **PEERS** | Which session asked another for work, reported back, sent a message, or watches another, and when. |
+| **Others** | HISTORY, MEMORY, MODELS · SYSTEM. Select a project for its status, open work, routes, results, and its `LAB` table. |
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/fleet/routes.png" alt="ROUTES: two open requests, a code route in its execute stage and a lab route running its eval-asr worker, each with the worker's model and elapsed time."><br><sub><b>ROUTES</b> — each request's stage line and the worker running it.</sub></td>
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and how to answer it; one older approval wait from a Codex session; and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, since when, and how to answer it.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, its two links with the OpenCode session [e8], and the GPU it holds."><br><sub><b>Session page</b> — state, context, current activity, route, peers, and GPU.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the OpenCode session it steers, and the GPU it holds."><br><sub><b>Session page</b> — state, context, current activity, route, peers, and GPU.</sub></td>
-    <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU process, and CPU and memory use."><br><sub><b>RESOURCES</b> — per-GPU use and the session and command behind each process.</sub></td>
+    <td colspan="2" align="center"><img src="docs/fleet/resources.png" width="50%" alt="RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU process, and CPU and memory use."><br><sub><b>RESOURCES</b> — per-GPU use and the session and command behind each process.</sub></td>
   </tr>
 </table>
 
-The panel and Fleet open each other: **f** in a focused panel opens Fleet in
-that window, and **Ctrl+]** on a session page in Fleet opens that exact
-session's panel. A waiting question can be answered from either side. The
+The panel and Fleet open each other: **Ctrl+]** and then **f** in a session's
+window opens Fleet there, and **Ctrl+]** on a session page in Fleet opens that
+exact session's panel. A waiting question can be answered from either side. The
 layout holds in narrow terminals too ([100-column OVERVIEW](docs/fleet/narrow.png)).
 
 ```bash
@@ -159,7 +173,8 @@ note, or watch it and be woken once when it finishes, stops, or needs you
 (the wake differs by runtime — see the table below).
 None of this needs herdr or tmux; it runs on Hearting's own records. How fast
 an idle session is reached differs by runtime (see
-[Runtimes and models](#runtimes-and-models)). Fleet does not list session-to-session requests yet,
+[Runtimes and models](#runtimes-and-models)). Fleet shows a request only as a
+PEERS link (sent, reported); it has no list of session-to-session requests yet,
 and you cannot send one from Fleet yet. For scripts, the commands are
 `hearting run peer-steward request`, `report`, and `show`
 ([core/OPERATIONS.md](core/OPERATIONS.md), “Peer requests”).
