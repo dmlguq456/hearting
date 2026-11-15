@@ -1939,8 +1939,10 @@ try {
   // 2.0.32 order: execute.before, then create.before with no OPENCODE_SESSION_ID.
   const main = await shellEnv("ses_main", "echo main")
   assert.equal(main.AGENT_PARENT_COMPLETION_CARRIER, "opencode-turn:ses_main")
+  assert.equal(main.AGENT_STEWARD_WATCH_WAKE, "opencode")  // only a plugin that can wake says it
   const worker = await shellEnv("ses_worker", "echo worker")
   assert.equal(worker.AGENT_PARENT_COMPLETION_CARRIER, "")
+  assert.equal(worker.AGENT_STEWARD_WATCH_WAKE, "")
   await hooks.get("tool.execute.before")({ tool: "shell", sessionID: "ses_main",
                                            input: { command: "echo shared" } })
   await hooks.get("tool.execute.before")({ tool: "shell", sessionID: "ses_other",

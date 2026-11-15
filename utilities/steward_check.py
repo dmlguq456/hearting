@@ -439,7 +439,7 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
-    work, decisions = [], []
+    open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
         headline = " ".join(str(row.get("headline") or "").split())
@@ -450,8 +450,33 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
                 continue
         except Exception:  # noqa: BLE001
             continue
-        (decisions if _is_user_decision(row, headline) else work).append(headline)
+        open_rows.append((row, headline))
+    # Work handed to a route whose worker runs now is the route's, not this session's to do:
+    # it comes back as the route's own completion. A finished route's unreceived result and
+    # a record with no running route, or one that also names another session's or a finished
+    # route, stay open work.
+    try:
+        from fleet.session_work import delegated
+        handed = {id(row) for row in delegated(
+            [row for row, _ in open_rows], lambda ids: _running_routes(ids, session_id))}
+    except Exception:  # noqa: BLE001
+        handed = set()
+    work, decisions = [], []
+    for row, headline in open_rows:
+        if _is_user_decision(row, headline):
+            decisions.append(headline)
+        elif id(row) not in handed:
+            work.append(headline)
     return work, decisions
+
+
+def _running_routes(route_ids, session_id) -> set:
+    """Which of these route ids this session launched and still have a live worker, from the
+    existing dispatch observer."""
+    import dispatch_supervision
+    import session_notice
+    return dispatch_supervision.running_route_ids(
+        session_notice._registry(None), route_ids, session_id or "")
 
 
 def _pending_count(module, harness: str, session_id) -> int:

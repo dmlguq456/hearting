@@ -1880,7 +1880,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
             ("r3", "feedback", '["backlog"]', "백로그는 기억에 항목별로 쓰고 정본 문서를 만들지 않는다"),
             ("r4", "unresolved-obligation", "[]", "사용자 결정 대기 묶음: D-5"))
 
-    def real_open_work(self, project="proj", env=()):
+    def real_open_work(self, project="proj", env=(), rows=None):
         """``_open_work`` through the real ``session_work.observe`` on a synthetic store."""
         import datetime
         import sqlite3
@@ -1893,7 +1893,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
                     " type TEXT, tags TEXT, links TEXT, artifact_refs TEXT, headline TEXT,"
                     " updated TEXT, created TEXT, status TEXT)")
         today = datetime.date.today().isoformat()
-        for rid, rtype, tags, headline in self.ROWS:
+        for rid, rtype, tags, headline in rows or self.ROWS:
             con.execute("INSERT INTO records VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                         (rid, rid, "project", str(repo), rtype, tags, "[]", "[]", headline,
                          today, today, "active"))
@@ -1907,6 +1907,50 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         with mock.patch.dict(os.environ, {"MEM_STORE": str(store), **dict(env)}), \
                 mock.patch.object(SC, "_collector", return_value=collector):
             return SC._open_work(HARNESS, SID)
+
+    ROUTE_RUNNING, ROUTE_FINISHED = "rt-" + "a" * 16, "rt-" + "b" * 16
+    HANDED_ROWS = (
+        ("w1", "unresolved-obligation", "[]", f"[진행 중] 검토를 {ROUTE_RUNNING}에 맡김"),
+        ("w2", "unresolved-obligation", "[]", f"완료를 받지 못한 일 {ROUTE_FINISHED}"),
+        ("w3", "unresolved-obligation", "[]", "주인 없이 열린 일"),
+        ("w4", "unresolved-obligation", "[]", f"사용자 결정 대기: {ROUTE_RUNNING} 병합"))
+    ROUTE_OTHER = "rt-" + "c" * 16
+    MIXED_ROWS = (
+        ("m1", "unresolved-obligation", "[]", f"다른 세션 route {ROUTE_OTHER} 검토에서 나온 후속"),
+        ("m2", "unresolved-obligation", "[]",
+         f"{ROUTE_FINISHED} 결과 받지 못함 — 받아서 정리, 그리고 {ROUTE_RUNNING}은 진행 중"),
+        ("m3", "unresolved-obligation", "[]", f"{ROUTE_RUNNING}과 같은 일을 맡은 {ROUTE_RUNNING}"))
+
+    def test_work_handed_to_a_running_route_is_not_the_sessions_remaining_work(self):
+        """2026-11-14: "work remains" counted work already handed to a route whose worker ran."""
+        asked = []
+
+        def live(ids, session_id):
+            asked.append((set(ids), session_id))
+            return {self.ROUTE_RUNNING} & set(ids)
+        with mock.patch.object(SC, "_running_routes", live):
+            work, decisions = self.real_open_work(rows=self.HANDED_ROWS)
+        self.assertEqual(sorted(work), sorted([f"완료를 받지 못한 일 {self.ROUTE_FINISHED}", "주인 없이 열린 일"]))
+        self.assertEqual(decisions, [f"사용자 결정 대기: {self.ROUTE_RUNNING} 병합"])  # a person's decision stays
+        self.assertEqual(asked, [({self.ROUTE_RUNNING, self.ROUTE_FINISHED}, SID)])
+
+    def test_a_record_stays_open_unless_every_route_it_names_is_this_sessions_running_route(self):
+        """RV-PR1645-1115: another session's route, or a record that also names a finished route,
+        is still this session's work; only a record naming running routes alone is handed off."""
+        with mock.patch.object(SC, "_running_routes",
+                               lambda ids, sid: {self.ROUTE_RUNNING} & set(ids)):
+            work, _ = self.real_open_work(rows=self.MIXED_ROWS)
+        self.assertEqual(sorted(work), sorted(row[3] for row in self.MIXED_ROWS[:2]))
+
+    def test_the_same_work_counts_again_once_its_routes_worker_is_gone(self):
+        with mock.patch.object(SC, "_running_routes", lambda ids, sid: set()):
+            work, _ = self.real_open_work(rows=self.HANDED_ROWS)
+        self.assertEqual(len(work), 3)
+
+    def test_an_unreadable_dispatch_observer_never_hides_work(self):
+        with mock.patch.object(SC, "_running_routes", side_effect=OSError("no registry")):
+            work, _ = self.real_open_work(rows=self.HANDED_ROWS)
+        self.assertEqual(len(work), 3)
 
     def test_parity_register_rows_are_not_steward_work(self):
         """PR #1443 review P1: register rows stay on the Fleet screen, not in every check."""

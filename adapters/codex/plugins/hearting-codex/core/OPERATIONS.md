@@ -340,8 +340,12 @@ recorded namespace, helper census, and runtime/command lineage prove that no
 work process remains; a surviving carrier does not prove execution, and an
 incomplete or reused identity remains unknown. The existing watchdog's
 two-window observation (300 seconds per window by default) may likewise create
-an `attempt-stalled` advisory when no comparable tool, declared-file, or result
-progress occurs; the same advisory may identify an exact terminal result whose
+an `attempt-stalled` advisory when no comparable progress occurs. Progress is a tool,
+declared-file, or result event, a new turn row of a live worker's own runtime (its
+prose is not read), a Claude subagent transcript that grows while the worker waits on it, or one
+tool command that started after the last event and still runs, for at most as long as one
+command may (the 50-minute headless command ceiling); a command that outlives it is quiet
+and the advisory names its program; the same advisory may identify an exact terminal result whose
 existing route settlement or completion marker remains pending. Normal long
 commands, verification leases, explicit human waits, and uncertain process or
 progress evidence are not declared stalled.

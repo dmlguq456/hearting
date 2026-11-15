@@ -148,6 +148,10 @@ def _prepare_watch_notice(watch_id, arm, receipt):
     steward = (arm or {}).get("steward") or {}
     steward_seat = (arm or {}).get("steward_seat") or {}
     harness, sid = steward.get("harness"), steward.get("session_id")
+    if (arm or {}).get("wake") == "opencode":
+        # The OpenCode plugin carries the receipt itself from the undelivered sweep; a queued
+        # self-notice would hide that receipt from the sweep and nothing would deliver it.
+        return None
     if (harness not in {"claude", "codex", "opencode"}
             or not peer_message.usable_session_id(sid)
             or steward_seat.get("kind") not in {"pane", "native"}

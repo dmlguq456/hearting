@@ -120,6 +120,15 @@ def is_human_gate_record(record: object) -> bool:
     )
 
 
+def is_completion_record(record: object) -> bool:
+    """True for an attempt completion: not a notice, supervision alert or gate."""
+
+    if not isinstance(record, dict) or is_human_gate_record(record):
+        return False
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    return receipt.get("kind") not in {"supervision", "notice", "human-gate"}
+
+
 def _bounded_receipt_text(record: dict) -> str:
     """One bounded line per pending record for `additionalContext`; never the
     receipt body, transcript, or artifact contents (SD-111 receipt policy).
@@ -703,7 +712,7 @@ def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
     notice_context=None, deadline_ns: int | None = None, read_context=None,
-    select=None, defer_native_queued: bool = False,
+    select=None, defer_completions: bool = False, received_out: list | None = None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -721,10 +730,11 @@ def sweep_deliver(
     ``select``, when given, is a predicate on an addressed record: a record it
     rejects is not claimed here and stays with its existing carriers.
 
-    ``defer_native_queued`` (a Claude tool boundary): a record whose exact receipt
-    Claude's own prompt queue provably still holds (``natively_queued``) is left to
-    that queue, which attaches it to this turn or starts the next one. Only until
-    the turn ends: Stop and the next prompt's sweep carry it if the queue lost it.
+    ``defer_completions`` (a Claude tool boundary): a registered completion is settled
+    when the transcript already shows it received, but never claimed or carried here.
+    The asyncRewake sends it; the turn's Stop and the next prompt carry what it did
+    not deliver. ``received_out`` collects the records the receipt observer showed
+    received, so the caller can count them for the turn's follow-through (PG-44).
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """
@@ -848,10 +858,10 @@ def sweep_deliver(
         delivery_id = current["delivery_id"]
         observed_evidence.clear()
         if settle_observed(current)["received"]:
+            if received_out is not None:
+                received_out.append(current)
             continue
-        if defer_native_queued and harness == "claude" and any(
-                natively_queued(current, storage_key, evidence)
-                for evidence in observed_evidence.values()):
+        if defer_completions and is_completion_record(current):
             continue
         if not currently_addressed(current, storage_key):
             continue
@@ -1859,18 +1869,6 @@ def claude_receipt_observer(payload, session_id: str):
         return cache["evidence"]
 
     return observe
-
-
-def natively_queued(record: dict, storage_key: str, evidence) -> bool:
-    """Whether Claude's own prompt queue holds this exact delivery right now."""
-    if not isinstance(evidence, dict) or not evidence.get("queued"):
-        return False
-    try:
-        from dispatch_recipient_receipt import binding_digest
-        binding = (record.get("delivery_id"), binding_digest(record, storage_key))
-    except Exception:  # noqa: BLE001 - unproven is not queued
-        return False
-    return binding in {tuple(item) for item in evidence["queued"]}
 
 
 def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:

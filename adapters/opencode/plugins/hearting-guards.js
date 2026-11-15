@@ -1430,6 +1430,7 @@ async function setupOpenCodeV2(ctx) {
       if (v2WorkerSessions.has(sessionID)) {
         for (const key of inheritedIdentityEnv) env[key] = ""
         env[CARRIER_ENV] = ""
+        env[WATCH_WAKE_ENV] = ""
         env[ROOT_SESSION_ENV] = ""
         if (sessionID) env.OPENCODE_SESSION_ID = sessionID
         return
@@ -2013,6 +2014,9 @@ function commitDeferred(helper, command, pending) {
 // a runtime that has this carrier from one that predates it. Fail-open: a carrier
 // problem never blocks or throws into a turn.
 const CARRIER_ENV = "AGENT_PARENT_COMPLETION_CARRIER"
+// Said only by a plugin that can wake an idle session with its steward watch receipts: an
+// older plugin puts CARRIER_ENV on its commands too, but has no such wake.
+const WATCH_WAKE_ENV = "AGENT_STEWARD_WATCH_WAKE"
 const CARRIER_KIND = "opencode-turn"
 const CARRIER_INTERVAL_MS = 5000
 const CARRIER_ROOTS_RETRY_MS = 60000
@@ -2031,6 +2035,84 @@ const v2ForeignSessions = new WeakMap()
 function v2ForeignSession(ctx, sid) { return !!v2ForeignSessions.get(ctx)?.has(sid) }
 function knownChildSession(sid) {
   return !!(sid && (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID))
+}
+
+// Steward watch receipts (Codex's `codex_turn_carrier` WATCH_HEADER meaning). A session that
+// armed `peer-steward watch` with `wake=opencode` ends its turn; when the watch writes its
+// receipt, this plugin (not the model) finds it and starts the idle session's next turn with
+// it through promptAsync, then acknowledges it with the same exact-recipient ACK once the sent
+// text shows in the session's native history (an accepted prompt alone is not receipt: it
+// may never be stored, and then the receipt stays and is sent again, WATCH_SEND_LIMIT times
+// at most per receipt, whether or not the ACK itself succeeds). Only the
+// helper's own bounded read decides what is undelivered; the file look here just keeps an idle
+// tick from spawning anything when this session has no receipt waiting. Fail-open.
+const WATCH_HEADER = "[peer-steward] undelivered watch receipts:"
+const WATCH_SEND_LIMIT = 2
+const WATCH_MAX_ROWS = 5
+const WATCH_MAX_NAMES = 256
+
+function stewardCommand(args, sid, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let out = ""
+    let child
+    let finished = false
+    const target = resolveRuntimeTarget(path.join("utilities", "peer-steward.py"))
+    const finish = (value) => { if (finished) return; finished = true; clearTimeout(timer); resolve(value) }
+    const timer = setTimeout(() => { try { child?.kill("SIGKILL") } catch {} finish(null) }, timeoutMs)
+    if (!existsSync(target.helper)) { finish(null); return }
+    try {
+      child = spawn("python3", [target.helper, ...args], {
+        cwd: target.root, stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, AGENT_HOME: target.root, OPENCODE_SESSION_ID: sid,
+          AGENT_DISPATCH_CALLER_HARNESS: "opencode" },
+      })
+    } catch { finish(null); return }
+    child.on("error", () => finish(null))
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("close", (code) => finish(code === 0 ? out : null))
+  })
+}
+
+// Does this session's own steward watch hold a receipt nobody acknowledged? A bounded look at
+// the watch files under the known state roots; the helper confirms before anything is sent.
+function watchReceiptWaiting(roots, sid) {
+  for (const base of roots || []) {
+    let names = []
+    try { names = readdirSync(path.join(base, "peer-watches")) } catch { continue }
+    const acked = new Set(names.filter(name => name.endsWith(".ack.json")))
+    let looked = 0
+    for (const name of names) {
+      if (!name.endsWith(".receipt.json")) continue
+      const id = name.slice(0, -".receipt.json".length)
+      if (acked.has(`${id}.ack.json`)) continue
+      if (++looked > WATCH_MAX_NAMES) break
+      try {
+        const arm = JSON.parse(readFileSync(path.join(base, "peer-watches", `${id}.json`), "utf8"))
+        if (arm?.steward?.session_id === sid && arm?.steward?.harness === "opencode") return true
+      } catch {}
+    }
+  }
+  return false
+}
+
+// Is this exact text one of the session's own user messages in its native history?
+function userTextShown(messages, sid, text) {
+  if (!Array.isArray(messages)) return false
+  return messages.some((row) => {
+    if (row?.info?.sessionID !== sid || row?.info?.role !== "user") return false
+    const content = row?.message && typeof row.message === "object" ? row.message.content : row?.parts
+    const body = typeof content === "string" ? content
+      : Array.isArray(content) ? content.filter(item => item && (item.type === "text" || item.type === "input_text")
+        && typeof item.text === "string").map(item => item.text).join("\n") : ""
+    return body === text
+  })
+}
+
+function watchReceiptLine(row) {
+  const agent = row?.agent && typeof row.agent === "object" ? row.agent : {}
+  return `state=${row?.receipt_state || row?.state || "unknown"} agent=${agent.harness || "-"} `
+    + `session_id=${agent.session_id || "-"} name=${agent.name || row?.target || "-"} `
+    + `pane=${agent.pane || "-"} watch_id=${row?.watch_id || "-"} receipt=${row?.receipt || "-"}`
 }
 
 // One bounded sweep step; any failure is null. Ordinary steps are asynchronous;
@@ -2126,13 +2208,69 @@ function createCompletionCarrier(ctx) {
   }
 
   // A cheap look at this session's own records, so an idle tick spawns nothing.
-  async function owed(sid) {
+  async function loadRoots(sid) {
     // Known roots are kept; none known yet (no state root, or the lookup failed) is asked again later.
     if (!roots?.length && Date.now() - rootsAt >= CARRIER_ROOTS_RETRY_MS) {
       rootsAt = Date.now()
       roots = (await command("roots", sid)) || []
       log("roots", sid, roots.length ? "resolved" : "unavailable", { roots })
     }
+  }
+
+  // Watch receipts waiting for this idle session: send them once as its next turn, then ACK.
+  const watchSent = new Map()
+  // Sessions whose completion carrier opened a turn; the timer's watch pass leaves those to it.
+  const opened = new Set()
+  async function watchWake(sid) {
+    if (!sid || busy.has(sid) || !available() || knownChildSession(sid)) return
+    if (["busy", "retry", "blocked", "working"].includes(status.get(sid))) return
+    await loadRoots(sid)
+    if (!watchReceiptWaiting(roots, sid)) return
+    busy.add(sid)
+    let timeout
+    try {
+      const listed = await stewardCommand(["status", "--undelivered", "--json"], sid)
+      let rows = []
+      try { rows = JSON.parse(listed || "null")?.watches || [] } catch {}
+      rows = rows.filter(row => row && typeof row.watch_id === "string"
+        && /^[0-9a-f]{16}$/.test(row.watch_id) && (watchSent.get(row.watch_id) || 0) < WATCH_SEND_LIMIT)
+        .slice(0, WATCH_MAX_ROWS)
+      if (!rows.length) { log("skip", sid, "no-undelivered-watch"); return }
+      // Read at the last moment: a turn the user started meanwhile carries it instead.
+      if (["busy", "retry", "blocked", "working"].includes(status.get(sid))) return
+      const text = [WATCH_HEADER, ...rows.map(watchReceiptLine)].join("\n")
+      for (const row of rows) watchSent.set(row.watch_id, (watchSent.get(row.watch_id) || 0) + 1)
+      let taken = false
+      let promptReason = "not-accepted"
+      try {
+        const result = await Promise.race([
+          ctx.client.session.promptAsync({ path: { id: sid }, body: { parts: [{ type: "text", text }] } }),
+          new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("carrier-timeout")), 5000) }),
+        ])
+        taken = Boolean(result) && result.error == null && result.response?.ok !== false
+        promptReason = taken ? "accepted" : "not-accepted"
+      } catch (error) { promptReason = error?.message === "carrier-timeout" ? "timeout" : "error" }
+      log("watch-prompt", sid, promptReason, { watches: rows.map(row => row.watch_id) })
+      if (!taken) return
+      // OpenCode 2 accepts the prompt before its user message is stored: look again briefly,
+      // as the completion carrier does, before taking it as never stored.
+      let shown = false
+      for (let look = 0; look < 7 && !shown; look++) {
+        if (look) await new Promise((resolve) => setTimeout(resolve, 500))
+        shown = userTextShown(await compactMessages(ctx, sid), sid, text)
+      }
+      if (!shown) { log("watch-prompt", sid, "sent-unobserved", { watches: rows.map(row => row.watch_id) }); return }
+      for (const row of rows) {
+        const acked = await stewardCommand(["ack", row.watch_id, "--carrier", CARRIER_KIND], sid)
+        // Only a recorded ACK ends the send count's use; a refused one keeps counting, so a
+        // receipt that cannot be acknowledged opens no more than WATCH_SEND_LIMIT turns.
+        if (/\back=(created|already)\b/.test(acked || "")) watchSent.delete(row.watch_id)
+      }
+    } finally { clearTimeout(timeout); busy.delete(sid) }
+  }
+
+  async function owed(sid) {
+    await loadRoots(sid)
     if (!sid) return false
     const now = Date.now()
     const current = await command("recipients", sid)
@@ -2327,6 +2465,7 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, "final-admission-withheld-released")
         return
       }
+      opened.add(sid)
       let taken = false
       let promptReason = "not-accepted"
       let httpStatus
@@ -2422,7 +2561,13 @@ function createCompletionCarrier(ctx) {
             // OpenCode 2: every plugin instance of the shared service sees every
             // session; one known to be another directory's or a child spawns nothing.
             if (v2 && v2ForeignSession(ctx, id)) continue
-            deliver(id).catch(() => {})
+            // The watch pass runs after the completion carrier has settled (deliver holds `busy`
+            // until then, so a pass started beside it would always turn back), and not at all
+            // when the carrier just opened this session's turn.
+            opened.delete(id)
+            deliver(id).catch(() => {}).finally(() => {
+              if (status.get(id) === "idle" && !opened.has(id)) watchWake(id).catch(() => {})
+            })
             if (status.get(id) === "idle") idlePeers.push(id)
           }
           if (!v2) {
@@ -2480,7 +2625,13 @@ function createCompletionCarrier(ctx) {
     },
     status(sid, type) { if (sid && type) status.set(sid, type) },
     // A finished turn also looks past its own records (a seat handover stores them elsewhere).
-    async idle(sid) { if (!sid) return; status.set(sid, "idle"); if (sessions.has(sid)) await deliver(sid, false) },
+    async idle(sid) {
+      if (!sid) return
+      status.set(sid, "idle")
+      if (!sessions.has(sid)) return
+      await deliver(sid, false)
+      await watchWake(sid)
+    },
     forget(sid) { sessions.delete(sid); status.delete(sid); forgetDeferred(sid, [...deferredIds(sid)]) },
     dispose(silent = false) { if (!silent) log("dispose", "", "context-disposed", { sessions: [...sessions] }); if (timer) clearInterval(timer); timer = null; sessions.clear() },
   }
@@ -3776,6 +3927,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const rootSid = sid ? await rootSessionId(ctx, sid) : ""
     output.env[ROOT_SESSION_ENV] = rootSid && rootSid !== sid ? rootSid : ""
     output.env[CARRIER_ENV] = completionCarrier.env(sid) || ""
+    output.env[WATCH_WAKE_ENV] = output.env[CARRIER_ENV] ? "opencode" : ""
   },
   // The two kept write gates (hooks/core-write-guard.py): installed release copies
   // and the shared checkout seen from a linked worktree. Anything else is allowed.
