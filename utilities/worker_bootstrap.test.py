@@ -216,7 +216,15 @@ class WorkerBootstrapTest(unittest.TestCase):
             prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
                                                "AGENT_RUNTIME_DIR": str(explicit)})
             self.assertIn(f"- runtime_dir: {explicit}", prompt)
-            self.assertIn("checkpoints under runtime_dir", prompt)
+            # No separate raw_data_dir: the old runtime line, letter for letter.
+            self.assertIn("- Put environments, caches, external checkouts, and checkpoints under runtime_dir; "
+                          "keep reports and provenance in artifacts.\n", prompt)
+            prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
+                                               "AGENT_RUNTIME_DIR": str(explicit),
+                                               "AGENT_RAW_DATA_DIR": "/raw/proj"})
+            self.assertIn("- Put environments, caches, external checkouts under runtime_dir; "
+                          "checkpoints and raw results under raw_data_dir (/raw/proj); "
+                          "reports and summaries in artifacts.\n", prompt)
 
     def test_runtime_root_survives_a_launcher_preparing_it_mid_write(self):
         # Two starts prepare one new root. The second ran while the first had

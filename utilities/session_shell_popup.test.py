@@ -159,8 +159,11 @@ const VEIL=239;
 const looks=()=>{const out=[];for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y),row=[];
   for(let x=0;x<cols;x++){const c=line?.getCell(x);row.push(!c?null:{ch:c.getChars(),fg:c.isFgDefault()?-1:c.getFgColor(),bg:c.isBgDefault()?-1:c.getBgColor(),
     bold:!!c.isBold(),dim:!!c.isDim(),inverse:!!c.isInverse()});}out.push(row);}return out;};
-const layer=s=>{const top=s.findIndex(l=>l.includes('╭')&&l.includes('╮'));if(top<0)return null;let bottom=top;while(bottom+1<s.length&&!s[bottom].includes('╯'))bottom++;
-  const c=cells(top),left=c.indexOf('╭'),right=c.indexOf('╮');return {top:top-1,bottom:bottom+1,left:left-1,right:right+1};};
+// (11-16: the panel's QUESTIONS box is a `╭ … ╮` line too, so the popup's top line is the one that carries its `✕`.)
+// (Its bottom line is the one whose `╰` stands in its left column: a panel box's `╯` can stand on a row it covers.)
+const layer=s=>{const top=s.findIndex(l=>l.includes('╭─ ')&&l.includes('✕ ─╮'));if(top<0)return null;
+  const c=cells(top),left=c.indexOf('╭'),right=c.indexOf('╮');let bottom=top;while(bottom+1<s.length&&cells(bottom)[left]!=='╰')bottom++;
+  return {top:top-1,bottom:bottom+1,left:left-1,right:right+1};};
 const bright=async()=>{const s=await screen(),l=layer(s),all=looks(),bad=[];
   all.forEach((row,y)=>row.forEach((c,x)=>{if(!c||l&&y>=l.top&&y<=l.bottom&&x>=l.left&&x<=l.right)return;
     const blank=!c.ch.trim();
@@ -201,7 +204,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     for(const [c,r,name] of [[120,30,'side'],[90,24,'strip'],[160,40,'open']]){await resize(c,r);s=await until(s=>!!box(s),'the popup at '+name);
       sizes[name]=(await bright()).length;frames['veil_'+name]=s;}
     await key('\x1b',300);await resize(80,24);await until(has('◑답 대기'),'the strip at 80');
-    await key('\x1d',250);await key('p',600);s=await until(s=>s.some(l=>l.includes('QUESTIONS ─')),'the panel under the native');
+    await key('\x1d',250);await key('p',600);s=await until(s=>s.some(l=>/QUESTIONS [─›]/.test(l)),'the panel under the native');
     await key('\x1d',300);s=await until(s=>!!box(s),'the popup over the panel under the native');sizes.bottom=(await bright()).length;frames.veil_bottom=s;
     await resize(160,40);s=await until(s=>!!box(s),'the popup beside again');sizes.beside=(await bright()).length;
     checks.sizes=sizes;await key('\x1b',300);await until(s=>!box(s),'closed after the sizes');
@@ -239,7 +242,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   s=await until(s=>!box(s),'the popup closing on Esc');
   frames.output_closed=s;checks.later_after_close=s.filter(l=>/LATER_\d\d/.test(l)).length;
   // A press on the panel's QUESTIONS rows opens it; keys stay in it; Tab moves to 2/2.
-  const label=await at('2 QUESTIONS ─');
+  const label=await at('2 QUESTIONS ›');  // (11-16: the box's top line carries the name)
   await press(label.x+2,label.y);
   s=await until(s=>!!box(s),'the popup by a press on QUESTIONS');
   frames.pressed=s;
@@ -432,14 +435,16 @@ class SessionShellPopupTest(unittest.TestCase):
 
     def check(self, harness):
         result = self.popup(harness); frames, checks = result['frames'], result['checks']
-        # Closed: the panel's questions section is its label row and the summary, no editor box.
+        # Closed: the panel's questions section is a thin box (11-16) with its name in the top line and the summary
+        # inside, no editor box.
         panel = '\n'.join(frames['closed'])
-        self.assertIn('2 QUESTIONS ─', panel)
-        self.assertIn('◑ 패널을 접었을 때의 모양을 어느 안…', panel)
+        self.assertIn('╭─ 2 QUESTIONS › ─', panel)
+        self.assertIn('│ │ ◑ 패널을 접었을 때의 모양을 어', panel)
+        self.assertNotIn('……', panel)
         # 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"): the question to answer here reads in red letters: its
         # choices one row of words (`1 label`, `+N` for the rest), `↵ 답하기 · Ctrl+]` under them at the right.
-        self.assertRegex(panel, r'│   1 아래 두 줄 \(다\) \(추천\) · \+3 ')
-        self.assertIn('↵ 답하기 · Ctrl+] │', panel)
+        self.assertRegex(panel, r'│ │   1 아래 두 줄 \(다\) \(추천\) · \+3 ')
+        self.assertIn('↵ 답하기 · Ctrl+] │ │', panel)
         self.assertNotIn('╭─ ◑', panel)
         # Drawn in one synchronized frame; the native's output under it leaves it whole; closed,
         # the native as it is now shows where it stood.

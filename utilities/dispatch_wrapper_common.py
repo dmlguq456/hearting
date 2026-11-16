@@ -210,6 +210,22 @@ def prepare_runtime_root(artifact_root: str, environ=None, *, repository_kind=No
     return worker_bootstrap.prepare_runtime_dir(candidate)
 
 
+def prepare_raw_data_root(artifact_root: str, runtime_dir: str, environ=None, *, source_root=None) -> str:
+    """The launch's raw_data_dir: this project's folder below the user's raw
+    data root, else exactly ``runtime_dir`` (never a gate or a question)."""
+    import worker_bootstrap
+    values = os.environ if environ is None else environ
+    candidate = worker_bootstrap.raw_data_dir_candidate(
+        artifact_root, runtime_dir, values, source_root=source_root)
+    return worker_bootstrap.prepare_raw_data_dir(candidate, runtime_dir)
+
+
+def raw_data_grant(args) -> str:
+    """The raw_data_dir a launch grants beside its runtime_dir, or "" when it is that dir."""
+    raw = getattr(args, "raw_data_dir", "") or ""
+    return raw if raw and raw != (getattr(args, "runtime_dir", "") or "") else ""
+
+
 def is_report_bundle_publish_stage(route_file: str | None, route_node: str | None) -> bool:
     if not route_file or route_node != "publish":
         return False

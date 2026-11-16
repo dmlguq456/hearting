@@ -29,8 +29,9 @@ class RouteBoxTest(unittest.TestCase):
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const pv=require(path.join(process.argv[1],'panel-view.cjs')),golden=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 const txt=r=>r.map(p=>p.text).join('');
-// The route box: its top line `│ ╭` to its bottom line `│ ╰`.
-const boxOf=v=>{const rows=v.rows.map(txt),a=rows.findIndex(s=>/^│ ╭/.test(s));if(a<0)return null;const b=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));return {a,b};};
+// The route box: its top line `│ ╭─ N ROUTE` (`route N` under the native area) to its bottom line `│ ╰`.
+// (11-16: the QUESTIONS section is a thin box too, above it: the route box is the one whose top line names the route.)
+const boxOf=v=>{const rows=v.rows.map(txt),a=rows.findIndex(s=>/^│ ╭─ (?:\d+ ROUTE|route)/.test(s));if(a<0)return null;const b=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));return {a,b};};
 const P=t=>({text:t}),D=t=>({text:t,dim:true});
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 """
@@ -158,8 +159,9 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
  assert(v.hits.every(h=>h.row>0&&h.row<rows.length-1&&h.left>=0&&h.right<w),label);
  assert(/⚙   ▾ │$/.test(rows.at(-2)),label);
  if(height>=10&&w>=28){assert(rows.some(r=>/QUESTIONS/.test(r)),'the question head stays\n'+label);assert(rows.some(r=>r.includes('route 상자를')),'its first row stays\n'+label);}
- const tops=rows.filter(r=>/^│ ╭/.test(r)).length,bottoms=rows.filter(r=>/^│ ╰/.test(r)).length;
- assert(tops===bottoms&&tops<=1,label);
+ // (11-16: the QUESTIONS section is a thin box too: at most one box of its own, and the route box one of its own.)
+ const tops=rows.filter(r=>/^│ ╭/.test(r)).length,bottoms=rows.filter(r=>/^│ ╰/.test(r)).length,routeTops=rows.filter(r=>/^│ ╭─ (?:\d+ ROUTE|route)/.test(r)).length;
+ assert(tops===bottoms&&routeTops<=1&&tops-routeTops<=1,label);
  const b=boxOf(v);
  if(b){boxes++;
   // Inside the box every row is the box's own (its side lines), and a press there opens a popup of its routes or requests.

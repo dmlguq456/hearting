@@ -69,7 +69,9 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False,
     sess = Session(harness, pid, cwd=cwd, session_id=sid)
     sess.proc_start = proc_start
     sess._fast_first = True
-    paths = [titles.sidecar_path(sid, harness), usage_cache._path(harness),
+    # (11-16: the panel's USAGE section shows the other harnesses' usage too, so a change to any
+    # of the three records redraws it.)
+    paths = [titles.sidecar_path(sid, harness), *(usage_cache._path(name) for name in ("claude", "codex", "opencode")),
              context_policy.policy_path(harness, pid=pid, proc_start=proc_start)]
     transcript = None
     callback = None
@@ -175,7 +177,7 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False,
         return {}, []
     values = {name: getattr(sess, name) for name in ("cwd", "model", "effort", "ctx_pct",
                                                      "active_context_tokens", "context_window_tokens",
-                                                     "compaction_pressure")}
+                                                     "compaction_pressure", "cost")}
     name_path = session_handle._session_name_registry_path(harness, sid)
     if name_path:
         paths.append(name_path)

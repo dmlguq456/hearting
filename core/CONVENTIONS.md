@@ -607,8 +607,8 @@ it does not imply a capability folder. Source scopes resolve in the route
 worktree. Explicit CLI paths retain their argument meaning, and route-free
 invocations keep the standalone defaults below.
 
-Execution environments, package/model caches, external checkouts and training
-checkpoints belong in the project runtime home, an explicitly selected
+Execution environments, package/model caches and external checkouts belong in
+the project runtime home, an explicitly selected
 dedicated absolute runtime directory outside the source, artifact, and
 artifact-parent project roots, or the generated non-Git runtime below. Git and
 unknown-kind launches retain the
@@ -624,9 +624,20 @@ through `artifact-root.sh` makes linked worktrees share the primary checkout's
 artifact identity. Launch preparation creates the selected location lazily
 with its own `.gitignore` containing `*`; if the optional location cannot
 safely be prepared, the launch omits its runtime hint and permission and
-continues. This is not a write gate. Keep small reports, configs and provenance
-in artifacts; checkpoint records may point to runtime files with path, SHA256
-and byte size. Use job-scoped cache variables when isolation is needed. Dataset
+continues. This is not a write gate.
+
+Raw experiment data (training checkpoints, per-sample outputs, raw results, array
+or audio dumps) belongs in `raw_data_dir` (`AGENT_RAW_DATA_DIR`), outside the
+cycle: `<raw_data_root>/<project>/`, from the one top-level line
+`raw_data_root: <absolute path>` in the user's `compute-hosts.yaml`, where
+`<project>` names the directory holding the resolved artifact root. Without a
+visible, writable root outside home, project and source, it is the runtime
+location itself, so checkpoint paths stay unchanged. Below it, checkpoints use
+`experiments/<slug>/runs/<run>/ckpt/` and cycle data `campaigns/<campaign>/<cycle>/<path below artifacts>`; launches create
+and grant only the project folder. A route node's declared output stays at its
+declared path. Keep reports, tables, figures, summary numbers, configs and
+provenance in artifacts; records point to raw files with path, SHA256 and byte
+size. Use job-scoped cache variables when isolation is needed. Dataset
 bulk copies should generally be referenced by path and hash, without automatic
 classification or copying.
 

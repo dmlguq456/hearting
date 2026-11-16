@@ -2,11 +2,16 @@
 
 This is the portable capability contract for `autopilot-lab`. It defines runtime-neutral meaning and adapter obligations. It is not a Claude Skill file.
 
-Write new training checkpoints under `$AGENT_RUNTIME_DIR/experiments/<slug>/runs/<run>/ckpt/`.
+Write raw experiment data under `$AGENT_RAW_DATA_DIR`, outside artifacts (it is the
+runtime dir when no data folder is set, so paths stay unchanged): new training
+checkpoints in `experiments/<slug>/runs/<run>/ckpt/`; per-sample outputs, raw results
+and array or audio dumps in `campaigns/<campaign>/<cycle>/<path below artifacts>`.
 Keep `run.json.ckpt_path` as the compatible pointer; once a checkpoint exists,
 record optional `ckpt_sha256` and `ckpt_byte_size` and verify the digest at
 handoff and parent evaluation. While training is running, the expected path is
-valid without a hash or size. Keep configs, logs and reports in artifacts.
+valid without a hash or size. Keep configs, logs, reports, tables, figures and
+summary numbers in artifacts; `run.json` records the raw paths.
+A route's declared output (e.g. `eval-run`'s `raw-results/**`) stays at its declared path.
 
 ## Contract
 <!-- GENERATED: harness-manifest.json -->
@@ -134,7 +139,7 @@ hearting run capability-route compose --prompt-file <task> \
   --intensity strong --graph metrics,diagnose,report,independent-verify --explain
 ```
 
-Reuse the existing `raw-results/**` and `run.json`; omit already completed
+Reuse the existing raw results (`raw-results/**` or the paths `run.json` records) and `run.json`; omit already completed
 aggregation when its metrics are sufficient. At standard or lower, the default
 graph is `metrics,diagnose,report`. Selected inputs, report provenance and
 completion contracts still apply.
@@ -149,7 +154,8 @@ Both strong graphs retain the two-way verification and automatic owner close.
 
 Bound a single CPU inference by its sample, checkpoint, count and output paths
 in the eval spec and approved task. Run it through `eval-run`, whose write scope
-already covers `run.json`, `raw-results/**` and `logs/**`; it retains the registry
+already covers `run.json`, its declared `raw-results/**` and `logs/**` (other raw
+output goes under `raw_data_dir`); it retains the registry
 resource class, hash-bound smoke/config requirements and supervised continuation.
 The `metrics` stage, including `metrics:qa/ml-debug`, writes only `metrics.jsonl`
 and `summary-stats.json`. It cannot create the new raw results.

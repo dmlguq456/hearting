@@ -419,8 +419,9 @@ def claude_native_statusline(callback, environ):
     # One row on every callback (2026-11-14): Claude keeps as many rows under its
     # input as this output has, so the common line at the native width, shortened
     # by its own narrow-width rule, with the running jobs at its end. While the
-    # visible panel paints these values, the shell blanks exactly this recorded row
-    # (its notice row); hidden or folded, the row is already there.
+    # panel or its folded strip paints these values, the shell writes its one line (spec
+    # rule 60) over exactly this recorded row; where the panel is not painted (Fleet over
+    # the window, the settings screen, a window not yet bound) the row stays as Claude draws it.
     rows = [clip_segments(line_segments(values, columns, reported_only=True, jobs=True), columns)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
     return statusline_ansi(rows, colors=colors, no_color="NO_COLOR" in environ)
