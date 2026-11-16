@@ -1001,10 +1001,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return out;
     };
     // A note on the right of a border (the route box's hidden counts) shows whole or not at all.
-    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=null}={})=>{
+    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[]}={})=>{
       const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
-      // A shorter form of the title (the route box's `REQUEST`) stands where the whole one does not fit.
-      if(alt&&size(label)>room-size(tail)-3)label=alt;
+      // A shorter form of the title (the route box's `REQUEST`, then its route count alone, never a count without its
+      // name) stands where the whole one does not fit.
+      const fits=form=>form&&form.length&&size(form)<=room-size(tail)-3;
+      if(!fits(label)){const form=alt.find(fits);if(form)label=form;else if(alt.length)label=alt.filter(x=>x&&x.length).at(-1)||label;}
       const name=label.length&&room-size(tail)>=4?titled(label,room-size(tail)-3,ellipsis):[];
       const head=name.length?[L('─ ',key),...name,L(' ',key)]:[];
       return {parts:[L('╭',key),...head,L('─'.repeat(Math.max(0,room-size(head)-size(tail))),key),...tail,L('╮',key)],action};
@@ -1260,6 +1262,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const requestShort=requestList.length?[text(requestTag(t('peer_request_short','REQUEST')),'dim')]:[];
     const titleOfBox=tag=>routeHead.length||tag.length?[...routeHead,...(routeHead.length&&tag.length?[text(' │ ','dim')]:[]),...tag]:null;
     const routeTitle=titleOfBox(requestHead),routeTitleShort=requestHead.length?titleOfBox(requestShort):null;
+    const routeTitleAlt=requestHead.length?[routeTitleShort,...(routeHead.length?[routeHead]:[])]:[];
     const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'popup:ROUTE'}]:[];
     // The route box's own steps short of rows (below): its title's second rows (`keepMulti`), the
     // context rows (and the workers' box) fold into the first rows, the workers go, the kind rows go,
@@ -1323,7 +1326,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const inView=sorted.slice(routeOffset,routeOffset+routeLimit);
       const above=routeOffset,below=routeRows.length-routeOffset-inView.length+unsent;
       const hiddenNote=n=>[text(n,'loc_repo')];
-      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleShort}),groups:['route']}];
+      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt}),groups:['route']}];
       let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
         if(routeRule()&&item.request&&before&&!before.request)block.push({parts:[L('├',key),L('─'.repeat(Math.max(0,inner-2)),key),L('┤',key)]});

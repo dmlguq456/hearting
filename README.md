@@ -199,11 +199,9 @@ popup in the middle of the window that shows the whole thing, so nothing has to
 be opened outside the terminal: `3 QUESTIONS` (the next question's first line
 and its choices), the route box (`╭─ 4 ROUTE │ 2 PEER REQUEST ─╮`: every route, who works on it
 now with its role, harness, model and effort, its `CTX` gauge with the time after it, its
-title, its kind and where it stands, its live workers in a smaller box under it, then, under
-a thin rule, the peer requests this session sent or received, each read the same way: the other
-session's number, harness, model and effort, its title and its status; a received one stays
-15 minutes after it is answered),
-`MESSAGES +3` (up to five messages between this session and others, each its head — who, harness, time, kind — and its first line; a notice a session sends to itself is left out) and `MEM` (up to five of the newest saved memories of
+title, its kind and where it stands, its live workers in a smaller box under it, then the
+requests this session sent or received),
+`MESSAGES +3` (up to five messages, each its head — who, harness, time, kind — and its first line) and `MEM` (up to five of the newest saved memories of
 this repository and global ones, each a dim head — `◆` durable or `◇` working, its scope, kind and age — over its headline), each
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
 routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
