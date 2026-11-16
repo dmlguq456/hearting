@@ -1225,14 +1225,25 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
-    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8)
+    # A message to this session itself (a tidy notice to its own seat) is no message between two sessions.
+    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8, own=(harness, sid))
     panel["messages_new"] = messages_since_input(panel["messages"], display)
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).
     request_errors = []
     request_views, request_paths = _request_views(harness, sid, time.time(), request_errors)
     watched.extend(request_paths)
-    panel["requests"] = request_rows(request_views, time.time(), assigned_tag) if request_views else []
+    # 11-16: the other session's model and effort as far as the values Fleet's shared producer already read
+    # for the session displays (``session_doers`` in the cache this projection reads above) know them.
+    doers = view.get("session_doers") if isinstance(view.get("session_doers"), dict) else {}
+
+    def doer_of(other_harness, other_sid):
+        found = doers.get(str(other_harness) + "\0" + str(other_sid))
+        return found if isinstance(found, dict) else None
+    panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of) if request_views else []
+    for request in panel["requests"]:
+        # Painted as a route's doer is: the same harness, model and effort keys.
+        request["paint"] = route_paint(request)
     # 11-15: a request body's markdown tables read aligned in the MESSAGES popup (its rows two cells in,
     # at the popup's width); its other lines stay the strings the popup wraps as before.
     from fleet.explorer.transcript import table_parts

@@ -393,8 +393,10 @@ state, a thin rule, and `›` (`3 QUESTIONS ──── ›`,
 `MESSAGES +3 ──── ›`; `MEM ────` has no popup and no `›`; under the native area
 `messages` keeps its word). The routes stand in the one thin rounded box, as
 v4.36.4 drew it (restored 11-15: the person had asked for the routes to open a
-popup, not for the box to go), its title in its top line (`╭─ 4 ROUTE │ 2 REQUEST ─╮`,
-under the native area `route 4 │ request 2`). Nothing opens in place: a press on a
+popup, not for the box to go), its title in its top line (`╭─ 4 ROUTE │ 2 PEER REQUEST ─╮`,
+under the native area `route 4 │ peer request 2`; 11-16, the person: "PEER REQUEST라고 할까?": the
+word list's `PEER REQUEST`, its `REQUEST` only where the whole title does not fit, before any word
+of it goes). Nothing opens in place: a press on a
 head or on any row of its section opens its popup (any row of a route, its workers'
 box too, the routes popup with that route unfolded; the box's top line the routes
 popup; a request row the MESSAGES popup).
@@ -432,7 +434,10 @@ popup; a request row the MESSAGES popup).
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
   this session sent (→) or received (◂, `✓` closed) with their status and age, every
-  one of them a row (no `+N more`); laid out at the box's inner width. Beside the
+  one of them shown (no `+N more`); laid out at the box's inner width. Where routes and
+  requests both stand, one thin rule of the box's own line (`├────┤`) parts them (11-16, the
+  person: "블록 안에서 구분선을 하나 긋고"); short of rows it goes before any content row, and a
+  box that scrolls draws none. Beside the
   native area a folded route reads who / context and time / what / which kind. Who:
   the glyph, the doer's recorded role as a dim label in one column (`owner`, `frame`
   for a frame or frame-alternative leg, `worker` for a stage worker; empty when the
@@ -462,12 +467,26 @@ popup; a request row the MESSAGES popup).
   Fleet's kind word (`code`, `lab`, `frame`), then `one-shot` and what it is on now
   (`Edit host.cjs 3m`), or `staged 3/7` with the current stage and its mark, or with no
   stage running the next stage and what it waits for (`code · staged 3/7 · execute ●`).
-  A request row: its mark, the other session, the title and the status (`· open`,
-  `· partial answer`, …), then how long ago; short of cells the age goes, then the
-  title is cut with `…`, the other session and the status stay. Every open request is
-  listed; a closed one sent by this session stays 15 minutes after it closed, or until
-  its last answer or cancel notice has been seen (at most 7 days), and then only `show`
-  lists it; a request whose message is not confirmed yet stays with `not confirmed`. The
+  A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
+  route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
+  closed), the other session's Fleet number, then that session's harness, model and effort in
+  a route row's colors (`◂ [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
+  session values Fleet's shared producer already read for the session displays know them, so
+  `[6c] claude` where they are unknown, and a session that is gone keeps its name alone), with
+  the age at the right edge where a route keeps its time; two cells in, the title (`…` where it
+  goes on) where a route's title stands; then the status, dim, where a route's kind row stands
+  (`open`, `partial answer`, a sent one not yet seen `sent`/`delivered`, a rejected or cancelled
+  one in the failure color). Short of rows the status joins the title's row when the kind rows
+  go (`title · open`), and the request takes the one-row form when every route does: mark,
+  number, harness, model, effort, title, ` · ` status, the age at the right edge. Short of
+  cells the age goes first, then the effort, then the model; then the title is cut with `…`
+  (past that the harness goes, then the title); the other session and the status stay. Under
+  the native area and in the MESSAGES popup's head a request takes that one-row form (one
+  drawing, `requestForms`). Every open request is listed; a closed one stays 15 minutes after
+  it closed, sent or received (11-16, the person: "패널에 요청 받은 기록이 안뜨네?": the receiving
+  window shows it answered, `✓`, dim); a sent one also until its last answer or cancel notice
+  has been seen (at most 7 days), and then only `show` lists it; a request whose message is
+  not confirmed yet stays with `not confirmed`. The
   bottom layout keeps one row per route: title, harness·model·effort, context, then the
   kind (`code · staged 3/7 execute ●`, a failed one `staged 2/3 execute ✕`), then the
   open tool, and the elapsed time at the right edge (short of cells the kind word goes,
@@ -481,7 +500,11 @@ popup; a request row the MESSAGES popup).
   person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in
   its direction's color, the other session's number, then dim harness, time, kind and a sent one's
   delivery state; short of cells kind, harness and time go first) and, two cells in, the text's first
-  line in the body color (`…` where it goes on); five at most (`MESSAGES_MAX`), `+N` counts the rest. The requests stand once, in the route box (above); the
+  line in the body color (`…` where it goes on); five at most (`MESSAGES_MAX`), `+N` counts the rest. A message whose
+  other end is this session itself (a session-tidy notice to its own seat; 11-16, the person: "메시지에 스스로 보내는
+  메시지가 잡히는건 좀 불필요하지 않나?") is no message between two sessions: the MESSAGES rows, their popup, the folded
+  strip's count and Fleet's session page leave it out (`peer_message_rows`, the one place they read them; Fleet's links
+  already need two different ends), and the tidy line still says it. The requests stand once, in the route box (above); the
   popup reads both whole, the requests first (a request's numbers, reports and
   sealed body; a markdown table in the body drawn as aligned columns by Fleet's one table rule,
   `transcript.table_parts`, its other lines wrapped as before). A received message comes as one line

@@ -392,9 +392,14 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     head = section_parts("ROUTES", len(routes)) if routes else (
         [] if requests else section_parts("ROUTES", detail="none"))
     if requests:
-        # ``2 ROUTES │ 1 REQUEST``: the requests this session sent or received, counted as the
-        # shell panel counts them (the same request rows), beside the routes.
-        head += ([(" │ ", "dim")] if head else []) + section_parts("REQUEST", len(requests))
+        # ``2 ROUTES │ 1 PEER REQUEST``: the requests this session sent or received, counted as the
+        # shell panel counts them (the same request rows), beside the routes; the shell panel's word
+        # (11-16), its shorter ``REQUEST`` only where the whole head does not fit.
+        joint = [(" │ ", "dim")] if head else []
+        tag = joint + section_parts(ui_text("fleet.session_panel.peer_request"), len(requests))
+        if sum(cell_width(text) for text, _key in head + tag) + 2 > right - x:
+            tag = joint + section_parts(ui_text("fleet.session_panel.peer_request_short"), len(requests))
+        head += tag
     y = section_rule(grid, x, right, y + 1, head)
     if routes:
         end = _draw_route_subset(grid, vm, routes, x, y, bottom, view_key=tag, state=state)
