@@ -287,8 +287,12 @@ def popup_rows(view, status, width):
     ``status`` is the project's Fleet status (``live._repo_status``'s ``status`` for its repo; ``None``
     or empty when Fleet holds none).  Without a document: Fleet's ``fleet.repo.no_status`` word, and the
     place the document would stand when a campaign is known.  The two parts are also read apart
-    (``popup_head_rows``, ``popup_doc_rows``): the document needs nothing of Fleet's collection."""
-    return popup_head_rows(status, width) + popup_doc_rows(view, width)
+    (``popup_head_rows``, ``popup_doc_rows``): the document needs nothing of Fleet's collection.  A
+    document that cannot be read is one dim ``?`` here; the shell's popup reads it apart and answers
+    that failure instead (``None`` from ``popup_doc_rows``), so it is neither drawn as an empty status
+    nor kept for the next opening."""
+    rows = popup_doc_rows(view, width)
+    return popup_head_rows(status, width) + ([[("?", "dim")]] if rows is None else rows)
 
 
 def popup_head_rows(status, width):
@@ -299,8 +303,14 @@ def popup_head_rows(status, width):
 
 
 def popup_doc_rows(view, width):
-    """The document's rows at ``width`` cells (``popup_rows`` without Fleet's lines above them)."""
-    return [[(transcript.clean(text), key) for text, key in row] for row in _doc_rows(view, max(1, int(width)))]
+    """The document's rows at ``width`` cells (``popup_rows`` without Fleet's lines above them).
+
+    ``None`` when the document cannot be read (``read_text`` gave nothing): the caller answers the
+    failure rather than drawing a row that looks like a document, and remembers nothing."""
+    rows = _doc_rows(view, max(1, int(width)))
+    if rows is None:
+        return None
+    return [[(transcript.clean(text), key) for text, key in row] for row in rows]
 
 
 def _clean_all(value):
@@ -315,13 +325,14 @@ def _clean_all(value):
 
 
 def _doc_rows(view, width):
+    """The document's rows at ``width``; ``None`` when it cannot be read (no row to mistake for one)."""
     if not view.get("has_doc"):
         none = ui_text("fleet.repo.no_status")
         place = [(" · " + transcript.clean(view["slot"]), "dim")] if view.get("slot") else []
         return [transcript._cut([(none, "dim")] + place, width)]
     lines, cut = read_text(view["path"])
     if lines is None:
-        return [[("?", "dim")]]
+        return None
     rows = transcript.doc_rows(lines, width)
     if cut:
         rows.append([("… 64 KiB", "dim")])

@@ -694,21 +694,28 @@ function tableParts(result){
     ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
 }
 // One reading at a time for the table standing; a reason to read again while one is under way is
-// taken up when it ends (the content as it is then).
+// taken up when it ends (the content as it is then). The status popup's Fleet part is a reading of its
+// own: the document lets the table's place go when it ends, so a popup opened again while Fleet is out
+// stands at once; Fleet's lines are read one at a time and fill the popup standing when they arrive
+// (its width and generation as asked), and are not kept when either changed.
+let fleetAsking=false,fleetAgain=false,fleetWidth=0,fleetGeneration=0;
 function askTable(){
   const t=table;if(!t||!POPUP_KIND[t.kind])return;
   if(tableAsking){tableAgain=true;return;}
   tableAsking=true;tableAgain=false;
-  const selected=selection,columns=Math.max(20,Math.min(200,panelView.popupWidth(cols,'table')-4));
+  const selected=selection,width=t.width,columns=Math.max(20,Math.min(200,width-4));
   const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
-  const generation=statusGeneration,status=t.kind==='STATUS';
+  const status=t.kind==='STATUS';
   const ask=extra=>readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room,
     ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{})},'popup',true);
   const stale=()=>table!==t||selected!==selection;
+  let loaded=false;
   ask(status?{part:'doc'}:{}).then(result=>{
     if(stale())return;
+    // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
+    if(t.width!==width){tableAgain=true;return;}
     if(!result?.ok){t.error=!t.loaded;queueDisplay();return;}
-    t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;
+    t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
     if(status){
       // The document first (it waits on nothing of Fleet's); Fleet's lines come after and stand above it.
       t.title=typeof result.title==='string'?result.title:'';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
@@ -716,18 +723,37 @@ function askTable(){
     if(Array.isArray(result.routes))t.routes=result.routes;
     if(t.kind==='ROUTE'&&t.page&&result.page!==true)t.page=false;
     queueDisplay();
-    if(!status)return;
-    return ask({part:'fleet'}).then(more=>{
-      // A failed or late Fleet part leaves the document as it stands; it is not kept, so the next opening reads again.
-      if(stale()||!more?.ok)return;
-      const head=tableParts(more),before=(t.head||[]).length;
-      t.head=head;t.rows=[...head,...t.doc];
-      // What the person was reading stays where it is when lines come in above it.
-      if(t.scroll>0)t.scroll=Math.max(0,t.scroll+head.length-before);
-      statusPopup={rows:t.rows,head:t.head,doc:t.doc,title:t.title,width:t.width,generation};
-      queueDisplay();
-    });
-  }).finally(()=>{tableAsking=false;if(tableAgain)askTable();});
+  }).finally(()=>{
+    tableAsking=false;
+    if(tableAgain)askTable();
+    else if(status&&loaded)askFleet();
+  });
+}
+function askFleet(){
+  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!Array.isArray(t.doc))return;
+  const width=t.width,generation=statusGeneration;
+  if(fleetAsking){
+    // The one under way answers this popup too when it was asked at its width and generation; else once more after it.
+    if(fleetWidth!==width||fleetGeneration!==generation)fleetAgain=true;
+    return;
+  }
+  fleetAsking=true;fleetAgain=false;fleetWidth=width;fleetGeneration=generation;
+  const columns=Math.max(20,Math.min(200,width-4));
+  const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
+  readAction({kind:POPUP_KIND.STATUS,columns,open:t.open||'',page:false,rows:room,cwd:process.cwd(),
+    routes:statusRoutes(),status:statusHeld(),part:'fleet'},'popup',true).then(more=>{
+    const cur=table;
+    // A failed or late Fleet part leaves the document as it stands; it is not kept, so the next opening reads again.
+    if(!more?.ok||!cur||cur.kind!=='STATUS'||!cur.loaded||!Array.isArray(cur.doc))return;
+    // Rows laid out at another width, or read before the value changed, are not this popup's.
+    if(cur.width!==width||statusGeneration!==generation)return;
+    const head=tableParts(more),before=(cur.head||[]).length;
+    cur.head=head;cur.rows=[...head,...cur.doc];
+    // What the person was reading stays where it is when lines come in above it.
+    if(cur.scroll>0)cur.scroll=Math.max(0,cur.scroll+head.length-before);
+    statusPopup={rows:cur.rows,head:cur.head,doc:cur.doc,title:cur.title,width,generation};
+    queueDisplay();
+  }).finally(()=>{fleetAsking=false;if(fleetAgain){fleetAgain=false;askFleet();}});
 }
 // ↑↓ Tab move the unfolded row; the reading's place follows it (the row at the top when it is out of view),
 // once the table is read again with the row unfolded.
@@ -1052,8 +1078,12 @@ function applyLayout() {
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
   refold();wasPinned=pinned();
   child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
-  // A table popup is Fleet's table at the popup's width: read again at the new one.
-  if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,'table')){table.width=panelView.popupWidth(cols,'table');askTable();}
+  // A table popup is Fleet's table at the popup's width: read again at the new one. Rows laid out at the
+  // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
+  // alone until the new read.
+  if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,'table')){table.width=panelView.popupWidth(cols,'table');
+    if(table.kind==='STATUS'&&table.loaded&&Array.isArray(table.doc)){table.head=[];table.rows=[...table.doc];}
+    askTable();}
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 // A redraw waits 25 ms to gather the events that come with it. A change seen only in a folder

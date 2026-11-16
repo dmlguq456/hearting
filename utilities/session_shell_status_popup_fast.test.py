@@ -5,9 +5,13 @@ collection before it drew one row; the host cut such a read at 12 s. Now:
 
 1. The document's rows come first, from the value the button already read (`session_status.held`, a path only
    when it names a status document inside the folder's own artifact root), with no wait on Fleet. Fleet's
-   lines come after and stand above them; what the person was reading keeps its place.
+   lines come after and stand above them; what the person was reading keeps its place. Fleet's part holds no
+   place of the table's: a popup opened again (or moved away and back) while it is out stands at once, and
+   its rows fill the popup standing when they arrive, at the width and generation they were asked for; rows
+   of another width are not kept as this one's.
 2. A read that is late shows the reading mark; one that failed or ran out its time shows Fleet's own word
-   (`fleet.output.unreadable`), dim; the next opening reads again. A Fleet part that fails leaves the document.
+   (`fleet.output.unreadable`), dim; the next opening reads again. A document that cannot be read answers
+   that failure (not a `?` taken for a document) and keeps nothing. A Fleet part that fails leaves the document.
 3. The button's first read failing is asked again at the next projection event, one worker at a time.
 4. A hundred paints read nothing.
 
@@ -155,6 +159,16 @@ class BackendTest(unittest.TestCase):
         self.assertTrue(doc['ok'])
         self.assertIn('NEWEST_DOC_LINE', self.text(doc))
 
+    def test_a_document_that_cannot_be_read_answers_failure(self):
+        """``read_text`` giving nothing (an I/O error, a changed document): the doc part says so; no `?` row."""
+        value = self.button()
+        with mock.patch.object(self.status, 'read_text', return_value=(None, False)):
+            result, _ = self.popup(status=value, part='doc')
+        self.assertEqual(result, {'ok': False, 'reason': 'doc-unreadable'})
+        again, _ = self.popup(status=value, part='doc')       # not kept: the next opening reads it
+        self.assertTrue(again['ok'])
+        self.assertIn('NEWEST_DOC_LINE', self.text(again))
+
     def test_the_parts_make_the_whole(self):
         value = self.button()
         whole, _ = self.popup(status=value)
@@ -245,7 +259,7 @@ def read(cwd,routes=(),now=None):
 session_status.read=read
 real_text=session_status.read_text
 def text(path):
-    if flag('doc-fail'):raise RuntimeError('document unreadable')
+    if flag('doc-fail'):return (None, False)
     return real_text(path)
 session_status.read_text=text
 raise SystemExit(m._backend())
@@ -303,6 +317,14 @@ const checks={};
     let r=await until(popupHas('NEWEST_DOC_LINE'),'the document in the popup');
     checks.doc_ms=Date.now()-began;checks.fleet_early=popupHas('FLEET_STATUS_LINE')(r.s);
     checks.popup_reads=count('read-start')-r0;
+    // Closed and opened again while Fleet's collection is still out: the document stands under a second
+    // (the document part lets the table's place go when it ends) and the collection is not asked again.
+    const r2=count('read-start');
+    await until(()=>count('vm')>=v0+1,'Fleet\'s collection started');      // its start is in the log before the count
+    const v3=count('vm');await close();
+    const reopened=Date.now();await opened();
+    await until(popupHas('NEWEST_DOC_LINE'),'the document on reopening');checks.reopen_doc_ms=Date.now()-reopened;
+    checks.reopen_doc_reads=count('read-start')-r2;checks.reopen_doc_vm=count('vm')-v3;
     // Reading on while Fleet's part is out: the line at the top stays when Fleet's lines come in above it.
     await key('\x1b[6~',300);r=await until(s=>!!place(s),'the place');
     const topBefore=body(await screen())[0],placeBefore=place(await screen());
@@ -339,11 +361,16 @@ const checks={};
   if(cfg.scenario==='crash'){
     // The button's first read dies (a worker that exits): no button, then the next projection event asks again.
     control('read-delay',1.2);control('read-crash');
-    await until(has('READY_'+cfg.harness),'the panel');await sleep(2500);
+    await until(has('READY_'+cfg.harness),'the panel');
+    // The first read's own end in the log (its worker exits right after it), not a fixed wait.
+    await until(()=>count('read-end')>=1,'the first read ended');
     checks.button_after_crash=has('현황 ›')(await screen());checks.reads_failed=count('read-end');
     // Events while a read is under way: it asks again once it ends, never beside it.
+    const started=count('read-start'),ended=count('read-end');
     for(const title of ['표 하나','표 둘','표 셋']){await rename(title);await until(has(title),'the route renamed '+title);await sleep(250);}
-    await sleep(2500);
+    // One of those events asked again, and that read ends in the log: wait for it, not a fixed wait.
+    await until(()=>count('read-start')>started||count('read-end')>ended,'the events asked again');
+    await until(()=>count('read-end')>=count('read-start'),'the read after the events ended');
     checks.reads_failing=count('read-start');
     const events=log().filter(e=>e[0]==='read-start'||e[0]==='read-end').sort((a,b)=>a[2]-b[2]);
     let live=0,most=0;for(const e of events){live+=e[0]==='read-start'?1:-1;most=Math.max(most,live);}
@@ -351,7 +378,30 @@ const checks={};
     // The disk answers again: the next event gives the button.
     drop('read-crash');drop('read-delay');await rename('表 넷');
     await until(has('현황 ›'),'the button after the read works again');checks.button_after=true;
+    // That read's end is in the log before the quiet stretch is counted (no read is left under way).
+    await until(()=>count('read-end')>=count('read-start'),'the button read ended');
     const r0=count('read-start');await sleep(800);checks.reads_when_quiet=count('read-start')-r0;
+  }
+  if(cfg.scenario==='width'){
+    // Fleet's lines are slow and the window narrows while they are out: rows laid out at the old width are
+    // not kept as the new width's; the popup opened again stands with its document, then the new width's lines.
+    control('read-delay',0);control('vm-delay',3);
+    await until(has('현황 ›'),'the button');await sleep(300);
+    await opened();await until(popupHas('NEWEST_DOC_LINE'),'the document');
+    const v0=count('vm');
+    cols=110;term.resize(cols,rows);child.resize(cols,rows);await sleep(300);
+    // The old width's collection comes back and is not this width's: the popup asks once more for the new width.
+    await until(()=>count('vm')>=v0+2,'the new width asked',15000);
+    await close();
+    const began=Date.now();await opened();
+    await until(popupHas('NEWEST_DOC_LINE'),'the document on reopening');await sleep(600);
+    checks.width_doc_ms=Date.now()-began;
+    checks.width_old_lines=popupHas('W01')(await screen());     // the old width's rows must not stand
+    await until(popupHas('W01'),'the new width\'s lines',15000);checks.width_new_lines=true;
+    const v1=count('vm');await close();await opened();
+    await until(popupHas('W01'),'the rows read last at this width');
+    checks.width_reopen_vm=count('vm')-v1;
+    await close();
   }
   fs.writeFileSync(cfg.result,JSON.stringify({checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
@@ -418,8 +468,10 @@ class PtyTest(unittest.TestCase):
         value['route_status'][key] = 'route 1 ⠏1'; value['route_sessions'][key] = time.time() + 3600
         target.write_text(json.dumps(value)); target.chmod(0o600)
         vm = case / 'vm.json'
+        # The width case's line is long enough to be clipped at the popup's width: its tail tells the width it was read at.
+        line = ' '.join('W%02d' % n for n in range(1, 41)) if scenario == 'width' else 'FLEET_STATUS_LINE'
         vm.write_text(json.dumps({'repos': [{'id': 'proj', 'name': 'proj', 'status': {
-            'routes': 1, 'questions': 0, 'campaigns': [{'campaign': 'camp-000', 'line': 'FLEET_STATUS_LINE'}], 'next': '다음 일'}}],
+            'routes': 1, 'questions': 0, 'campaigns': [{'campaign': 'camp-000', 'line': line}], 'next': '다음 일'}}],
             'system': {}, 'routes': [], 'sessions': [{'tag': 'e1', 'repo_id': 'proj', 'harness': 'claude', 'state': 'idle',
                                                       'title': '이 창'}]}, ensure_ascii=False))
         backend = case / 'backend'
@@ -454,6 +506,10 @@ class PtyTest(unittest.TestCase):
         self.assertFalse(checks['fleet_early'], checks)
         self.assertEqual(checks['popup_reads'], 0, checks)
         self.assertEqual(checks['vm_started'], 1, checks)
+        # Closed and opened again while Fleet's collection was still out: the document stood under a second,
+        # and that collection was not asked again.
+        self.assertLess(checks['reopen_doc_ms'], 1000, checks)
+        self.assertEqual((checks['reopen_doc_reads'], checks['reopen_doc_vm']), (0, 0), checks)
         # Fleet's lines come in above it, and the line being read stays at the top of the popup.
         self.assertGreater(checks['fleet_ms'], 3000, checks)
         self.assertEqual(checks['top_before'], checks['top_after'], checks)
@@ -468,6 +524,16 @@ class PtyTest(unittest.TestCase):
         # The document's read failed: Fleet's word, dim, in the popup; the next opening reads it.
         self.assertTrue(any(self.unreadable in row for row in checks['unread_frame']), checks['unread_frame'])
         self.assertTrue(checks['after_unread'])
+
+    def test_a_late_fleet_part_of_another_width_is_not_kept(self):
+        checks = self.run_case('width')
+        print(json.dumps({'event': 'status-popup-fast-width', 'campaigns': CAMPAIGNS,
+                          'doc_ms': checks['width_doc_ms'], 'old_lines': checks['width_old_lines']}), flush=True)
+        # Opened again at the new width before its own lines are in: the old width's rows do not stand.
+        self.assertFalse(checks['width_old_lines'], checks)
+        self.assertTrue(checks['width_new_lines'], checks)
+        # The lines read at this width are kept: opened again, no collection.
+        self.assertEqual(checks['width_reopen_vm'], 0, checks)
 
     def test_a_failed_first_read_is_asked_again_one_worker_at_a_time(self):
         checks = self.run_case('crash')

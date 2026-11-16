@@ -1459,7 +1459,9 @@ def _status_popup(binding, request, columns, colors, no_color):
     document at the popup's width, with no wait on Fleet's collection (the value the button already read comes
     with the request: ``session_status.held``, and only a request without one reads it); ``fleet`` is Fleet's
     status lines for this project (``session_status.popup_head_rows``), which the host puts above the document
-    when they arrive. Without ``part``: both, as one answer."""
+    when they arrive. A document that cannot be read answers ``ok: False`` (the host draws its own dim word and
+    keeps nothing, so the next opening reads it again) and Fleet's part is not asked. Without ``part``: both, as
+    one answer."""
     named = _status_request(request)
     if named is None:
         return {"ok": False, "reason": "invalid-status"}
@@ -1488,7 +1490,10 @@ def _status_popup(binding, request, columns, colors, no_color):
                 return {"ok": False, "reason": "no-fleet"}
         rows = session_status.popup_head_rows(status, columns)
     if part != "fleet":
-        rows = rows + session_status.popup_doc_rows(view, columns)
+        doc = session_status.popup_doc_rows(view, columns)
+        if doc is None:
+            return {"ok": False, "reason": "doc-unreadable"}
+        rows = rows + doc
     styles, index = [], {}
 
     def style(key):
