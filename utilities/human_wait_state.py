@@ -562,8 +562,11 @@ def _prune_selected(overlay, needed=1):
 
 
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
-                     recommended=None, secret=False, cwd=None, incarnation=None):
-    """Register one explicit question on the caller's current prompt, without waiting."""
+                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
+    """Register one explicit question on the caller's current prompt, without waiting.
+
+    A new question replaces this session's earlier waiting one. `replace=False` leaves a
+    different open question in place and refuses instead (`question-open-elsewhere`)."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -604,6 +607,9 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
         if tidy.read_prompt_seq(seat) != sequence:
             raise ValueError("question-prompt-changed")
         prior = _read(_signal_path(value))
+        if (not replace and prior and prior.get("id") != item_id and prior.get("mode") == "message"
+                and prior.get("lifecycle") == "open"):
+            raise ValueError("question-open-elsewhere")
         if prior and prior.get("id") == item_id:
             value = prior
         envelope = _message_envelope(value)
@@ -4144,12 +4150,41 @@ def _workflow_gate_submit(envelope, portable, action_id):
         if verified["state"] != "applied":
             return "unknown", {"reason": verified.get("reason") or
                                 "workflow-release-source-transition-unconfirmed"}
+        if mode == "frame-interview":
+            _frame_answer_notice(item, binding["route_path"], jobs, receipt)
         return "applied", receipt
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "unknown", {"reason": "workflow-release-command-ambiguous:" + type(exc).__name__}
     finally:
         if temp_dir is not None:
             temp_dir.cleanup()
+
+
+def _frame_answer_notice(item, route_path, jobs, receipt):
+    """The board answered a frame interview and release started no owner: tell the session that opened the route.
+
+    That session ended its turn at the question; the answer arrives on the board, not in
+    its conversation. It gets one ordinary notice (the path a question's answer takes)
+    carrying `resume_command`, which renders the intent and starts the owner. Nothing is sent
+    when release already continued an owner. Best effort: the gate is already released."""
+    try:
+        continued = receipt.get("owner_continuation")
+        if isinstance(continued, dict) and continued.get("state") != "not-started":
+            return None
+        owner = item.get("owner") or {}
+        harness, session_id = owner.get("harness"), owner.get("session_id")
+        if not harness or not session_id:
+            return None
+        import session_notice
+        from parent_next_directive import resume_command
+        resume = resume_command(route_path, jobs, agent_home=Path(__file__).resolve().parents[1])
+        return session_notice.notify(
+            harness, session_id, key="frame-answer:" + item["id"], subject="Frame question answered",
+            text=f"The person answered the frame question on the board. Run this to continue; "
+                 f"it renders the intent and starts the owner: {resume}",
+            required_action="run-resume-command", jobs=jobs)
+    except Exception:  # noqa: BLE001 -- the release stands; the person can still tell the session
+        return None
 
 
 def _workflow_owner_submit(envelope, portable, action_id):

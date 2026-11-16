@@ -116,7 +116,7 @@ adapter row unverified/unsupported.
 The exact-batch sidecar checks consumed and pending messages before sending;
 ambiguous sends may repeat. Only an exact Hearting item may restart an interrupted
 parent. The TUI owns questions and approvals; headless owners keep their separate
-supervisor. Default mode asks via waiting `request_user_input` (`default_mode_request_user_input`); it submits empty at 120 s (countdown from 60 s; typing cancels). Empty is no decision: restate at turn end (Fleet keeps `answer needed`); `_async`: fallback.
+supervisor. A question to the person is a Hearting question (`hearting run questions ask`); if the model calls `request_user_input` anyway, `PreToolUse` registers it the same way and refuses the call (`pretooluse-question-redirect.py`), and a registration failure lets the native tool run: it submits empty at 120 s (countdown from 60 s; typing cancels), and empty is no decision: restate at turn end (Fleet keeps `answer needed`).
 Arbitrary detached shell output still does not auto-resume. For non-dispatch
 long-running work, obey `preflight.sh loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
 instead of ending with a detached completion promise. The native queue never
@@ -187,19 +187,25 @@ read-only unless the user explicitly opts into a separately validated feature.
 | autopilot routing | Codex exposes `autopilot-*` as native Skills/plugin entries and can select matching Skills from descriptions, but the adapter does not emulate Claude slash-command routing. `prompt-signal` emits the portable routing contract and Codex-native entrypoint surface; for spec-backed work, rely on spec-read/capability gates plus the relevant Skill or explicit dispatch wrapper |
 | subagent delegation | Codex supports native subagent workflows, but they are explicit or main-dispatched. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents before claiming delegation parity. Use prompt-directed subagents or `preflight.sh dispatch`; do not treat UI/status state as an automatic delegation trigger |
 
-Native Codex owns question timing. Runtime activation enables
+A question to the person goes to the Hearting question board: `PreToolUse` on
+`request_user_input` and `request_user_input_async` registers it and refuses the native call
+(`utilities/native_question_redirect.py`, the same behavior as Claude and OpenCode). The
+native tool below is only the fall-through when registration fails or the caller is a worker.
+The old `PostToolUse(request_user_input)` frame-answer bridge stays in `hooks.json` as a no-op
+so the other entries keep their place and their current-hash hook trust.
+Native Codex owns the timing of the native question box. Runtime activation enables
 `features.default_mode_request_user_input` in interactive `$CODEX_HOME/config.toml`
 when the existing feature table can be safely extended; explicit false and
 unsupported feature forms are preserved and reported as a config conflict, while
 the harness identity block is still merged.
-Worker homes override the feature to false. In Default mode use the waiting
-`request_user_input`: its countdown is hidden for 60 seconds, then visibly
-counts down for 60 seconds before submitting an empty answer. Typing or pasting
-cancels the countdown and the box waits for submit. Empty answers never satisfy
-a human decision gate; restate an open question at turn end and keep Fleet's
-ledger based `answer needed` indication active until a real answer is recorded.
-Use `request_user_input_async` only in an interactive session when the waiting
-tool is unavailable; a registered worker has no reader for either tool. Do not
+Worker homes override the feature to false. When the native box does appear (the
+fall-through above), the waiting `request_user_input` hides its countdown for 60
+seconds, then visibly counts down for 60 seconds before submitting an empty answer;
+typing or pasting cancels the countdown and the box waits for submit. Empty answers
+never satisfy a human decision gate; restate an open question at turn end and keep
+Fleet's ledger based `answer needed` indication active until a real answer is
+recorded. `request_user_input_async` is the box Codex offers when the waiting tool is
+unavailable; a registered worker has no reader for either tool. Do not
 open repeated boxes or switch to Plan mode. The normal frame start
 receipt keeps `human_wait.question_block` and the existing interview artifact;
 empty/timeout/accepted responses return the same pending question without

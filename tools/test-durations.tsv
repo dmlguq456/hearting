@@ -580,7 +580,6 @@ utilities/foreground_terminal.test.py	0.52
 utilities/foreground_terminal_outcome.test.py	19.33
 utilities/frame_interview.test.py	0.24
 utilities/frame_launch_binding.test.py	22.86
-utilities/frame_native_answer.test.py	0.37
 utilities/frame_revision.test.py	15.62
 utilities/framed_route.test.py	24.56
 utilities/framed_start.test.py	189.62
