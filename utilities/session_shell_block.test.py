@@ -236,6 +236,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
 const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
+let now=Date.now();Date.now=()=>now;
 (async()=>{
  const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'FIRST_Q',choices:['Alpha','Beta']}]};
  const n={id:'n',revision:'r',answerable:true,questions:[{id:'q',question:'NEXT_Q',choices:['One']}]};
@@ -256,8 +257,10 @@ const shown=b=>JSON.stringify(b.detail({budget:8,columns:40}));
  b.update([{...a,answerable:false,request_state:'submitted',sent:['Beta']},n]);
  assert.deepEqual(lines(b),['✓ answer sent · Beta']);assert(!shown(b).includes('FIRST_Q'));
  assert.deepEqual(b.references().map(x=>x.id),['a','n']);
- // Its session has it: the line goes and the panel stops asking for it.
+ // Its session has it: the line stays for 10 minutes, then goes and the panel stops asking for it.
  b.update([{...a,answerable:false,request_state:'received'},n]);
+ assert.deepEqual(lines(b),['✓ answer sent · Beta']);assert.deepEqual(b.references().map(x=>x.id),['a','n']);
+ now+=10*60*1000+1000;b.update([{...a,answerable:false,request_state:'received'},n]);
  assert.deepEqual(lines(b),[]);assert.deepEqual(b.references().map(x=>x.id),['n']);
  // Sent from elsewhere (Fleet, the CLI): the backend's own words for it.
  const f=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
@@ -315,13 +318,14 @@ const lines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
     def test_the_sent_line_takes_the_passing_green_and_the_summary_says_it_is_answered_here(self):
         # 11-15 (panel polish 2): `✓ answer sent` in the passing green a route's `✓` takes (`lvl_g`),
         # the `·` dim, what was sent in plain text (a secret `•••`), whichever place sent it; the line
-        # still goes when its session has the answer. Polish 1: the summary says whether a press
+        # stays 10 minutes when its session has the answer, then goes. Polish 1: the summary says whether a press
         # answers its question here, now (the panel paints only that one).
         code=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const styles={dim:{foreground:-1,dim:true},lvl_g:{foreground:150,dim:false},loc_repo:{foreground:253,dim:false},g_blocked:{foreground:217,dim:false}};
 const look=b=>b.sent().map(r=>r.map(x=>[x.text,x.foreground??null,!!x.dim]));
+let now=Date.now();Date.now=()=>now;
 (async()=>{
  const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',choices:['Alpha','Beta']}]};
  const there={id:'t',revision:'r',answerable:false,answer_state:'answer_there',questions:[{id:'q',question:'THERE?',choices:['One']}]};
@@ -335,7 +339,9 @@ const look=b=>b.sent().map(r=>r.map(x=>[x.text,x.foreground??null,!!x.dim]));
  const f=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  f.update([{...a,answerable:false,request_state:'submitted',sent:['Alpha']}],'',{styles,labels:{sent:'✓ 답 보냄'}});
  assert.deepEqual(look(f),[[['✓ 답 보냄',150,false],[' · ',-1,true],['Alpha',253,false]]]);
- f.update([{...a,answerable:false,request_state:'received'}]);assert.deepEqual(look(f),[]);
+ f.update([{...a,answerable:false,request_state:'received',sent:['Alpha']}],'',{styles,labels:{sent:'✓ 답 보냄'}});
+ assert.deepEqual(look(f),[[['✓ 답 보냄',150,false],[' · ',-1,true],['Alpha',253,false]]]);
+ now+=10*60*1000+1000;f.update([{...a,answerable:false,request_state:'received',sent:['Alpha']}],'',{styles,labels:{sent:'✓ 답 보냄'}});assert.deepEqual(look(f),[]);
  // A secret stays hidden, in the same colors.
  const s=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}],'',{styles,labels:{sent:'✓ 답 보냄'}});

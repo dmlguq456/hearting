@@ -462,18 +462,20 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(session_panel.session_memory({"memory_latest": {**row, "headline": ""}}, now)[-1], ("body line", "loc_repo"))
         self.assertEqual(session_panel.session_memory({"memory_latest": {**row, "headline": "", "snippet": "superseded_by=x"}}, now), [])
         self.assertEqual(session_panel.session_memory({}, now), [])
-        # 46 (b), (c): the MEM section's records, two at most: the type's short word, the age and
+        # 46 (b), (c): the MEM section's records, five at most (11-16): the type's short word, the age and
         # the headline (else the snippet's start); a row without a text is left out.
         recent = [{**row, "type": "user-correction"}, {**row, "ts": "2026-11-12T08:00:00", "type": "completion", "headline": ""},
                   {**row, "type": "decision"}]
         self.assertEqual(session_panel.session_memory_items({"memory_recent": recent}, now),
                          [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""},
-                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": ""}])
+                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": ""},
+                          {"kind": "decision", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""}])
+        self.assertEqual(len(session_panel.session_memory_items({"memory_recent": recent * 3}, now)), 5)
         # 11-15 (panel polish 5): the record's own tier and scope names; any other value is none.
         named = [{**row, "tier": "durable", "scope": "project"}, {**row, "tier": "working", "scope": "global"},
                  {**row, "tier": "permanent", "scope": "repo"}]
         self.assertEqual([(item["tier"], item["scope"]) for item in session_panel.session_memory_items({"memory_recent": named}, now)],
-                         [("durable", "project"), ("working", "global")])
+                         [("durable", "project"), ("working", "global"), ("", "")])
         self.assertEqual([(item["tier"], item["scope"]) for item in session_panel.session_memory_items({"memory_recent": named[2:]}, now)],
                          [("", "")])
         self.assertEqual([session_panel.memory_kind(kind) for kind in ("decision", "lesson", "feedback", "fact", "an-unlisted-type")],

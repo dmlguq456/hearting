@@ -1,1 +1,0 @@
-../../../hooks/local-evidence-inject.sh

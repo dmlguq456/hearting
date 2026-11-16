@@ -308,9 +308,9 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('geometry-left\r').toString('base64')});await waitFor(/GEOMETRY_geometry-left_138x40/);
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const row=y=>sideTerm.buffer.active.getLine(y).translateToString(true);
-   // Spec rule 49 (a): the gear stands on the panel's last row inside, the fold button `«` of a left panel before it.
+   // Spec rule 49 (a): the gear stands on the panel's last row inside, the fold button `▾` at its right end, in a left panel too.
    if(!row(0).startsWith('┌')||row(0).slice(0,40).includes('⚙')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
-   if(!/«   ⚙ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
+   if(!/⚙   ▾ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
    if(/⚙/.test(row(38).slice(42)))throw Error('panel painted twice');
    // #1586 review follow-up 7, spec rule 49 (c): folded, a left panel's strip stands under the native
@@ -340,8 +340,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    await resize(105,24);await geometry('geometry2c','63x24');
    await resize(80,24);await geometry('geometry2d','80x23');
    await resize(180,40);await geometry('geometry3','138x40');
-   // The fold button `»` (the last row inside, three cells left of the gear) folds by hand; a hand fold stays folded when wider.
-   await press(174,39);await geometry('geometry4','180x39');
+   // The fold button `▾` (the last row inside, three cells right of the gear) folds by hand; a hand fold stays folded when wider.
+   await press(178,39);await geometry('geometry4','180x39');
    await resize(200,40);await geometry('geometry5','200x39');
    // Any cell of the strip (the window's last row, 11-15) opens it.
    await press(198,40);await geometry('geometry6','158x40');
@@ -358,7 +358,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    // #1586 review follow-up 6: folding by hand while the settings editor is open closes the
    // editor first; the strip stands and the keys reach the native.
    const pinnedFold=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
-   raw='';await press(178,39);await waitFor(/rule motion/);
+   raw='';await press(174,39);await waitFor(/rule motion/);
    await rpc(pinnedFold.socket,{...pinnedFold,op:'panel',expanded:false});await new Promise(r=>setTimeout(r,150));
    await geometry('geometry11','180x39');
    const after=await rpc(pinnedFold.socket,{...pinnedFold,op:'status'});
@@ -368,7 +368,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    // hand (as a drag does): applying a wider panel that would fold keeps it open, at the next
    // window width too.
    await resize(106,40);await geometry('geometry13','64x40');
-   raw='';await press(104,39);await waitFor(/rule motion/);
+   raw='';await press(100,39);await waitFor(/rule motion/);
    await rpc(cfg.inlet,{batch:Buffer.from('\t\t++++++\r').toString('base64')});await new Promise(r=>setTimeout(r,300));
    await geometry('geometry14','58x40');
    await resize(107,40);await geometry('geometry15','59x40');

@@ -250,9 +250,7 @@ def understanding_draft(request: str) -> str:
 
 NATIVE_ANSWERS_NAME = "answers.native.json"
 NATIVE_PARTIAL_NAME = "answers.native.partial.json"   # never read as answers: the rows of an unfinished interview
-NATIVE_PARTIAL_SCHEMA = "frame_interview_native_partial_v1"
 UNDERSTANDING_SLOT = "_understanding"                  # question ids match [a-z][a-z0-9-]{0,31}, so no clash
-MAX_NATIVE_PARTIAL_BYTES = MAX_INTERVIEW_BYTES + MAX_ANSWERS_BYTES
 _RECOMMENDED = re.compile(r"\s*[(（](?:권장|recommended)[)）]\s*$", re.I)
 
 

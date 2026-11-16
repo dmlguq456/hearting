@@ -142,7 +142,7 @@ class StewardColumnTests(unittest.TestCase):
         vm = _model()
         text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"),
                               180, 60).text_rows())
-        watch_rows = [line for line in text.splitlines() if "watch ⚑" in line]
+        watch_rows = [line for line in text.splitlines() if "steward ⚑" in line]
         self.assertEqual(len(watch_rows), 3)
         for tag in ("t1", "t2", "x1"):
             self.assertTrue(any("[" + tag + "]" in line for line in watch_rows), tag)
@@ -153,7 +153,7 @@ class StewardColumnTests(unittest.TestCase):
         vm = _model(ended=True)
         text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), 180, 60).text_rows())
         self.assertNotIn("[gone]", text)
-        self.assertTrue(any("sid-gone"[:8] in line and "watch ⚑" in line
+        self.assertTrue(any("sid-gone"[:8] in line and "steward ⚑" in line
                             for line in text.splitlines()))
         self.assertIn("⚑ watch 3 · ended 1", text)
 
@@ -165,7 +165,7 @@ class StewardColumnTests(unittest.TestCase):
         boxes = _card_boxes(frame)
         self.assertGreater(boxes["x1"][0], boxes["s1"][0])
         text = "\n".join(frame.text_rows())
-        self.assertTrue(any("[s1]" in line and "[x1]" in line and "watch ⚑" in line
+        self.assertTrue(any("[s1]" in line and "[x1]" in line and "steward ⚑" in line
                             for line in text.splitlines()))
 
     def test_a_chained_steward_is_one_column_without_a_duplicate_card(self):
@@ -191,7 +191,7 @@ class StewardColumnTests(unittest.TestCase):
                 text = "\n".join(frame.text_rows())
                 self.assertEqual(text.count("⚑ watch 3"), 1)
                 self.assertNotIn("⚑ watch 1", text)
-                watch_rows = [line for line in text.splitlines() if "watch ⚑" in line]
+                watch_rows = [line for line in text.splitlines() if "steward ⚑" in line]
                 self.assertEqual(len(watch_rows), 3)
                 for tag in ("s2", "t2", "x1"):
                     self.assertTrue(any("[" + tag + "]" in line for line in watch_rows), tag)
@@ -266,7 +266,7 @@ class StewardColumnTests(unittest.TestCase):
         boxes = _card_boxes(frame)
         self.assertGreater(boxes["x1"][0], boxes["s1"][0])
         text = "\n".join(frame.text_rows())
-        self.assertTrue(any("[s1]" in line and "[x1]" in line and "watch ⚑" in line
+        self.assertTrue(any("[s1]" in line and "[x1]" in line and "steward ⚑" in line
                             for line in text.splitlines()))
         self.assertEqual(text.count("⚑ watch 3"), 1)
         self.assertIn("repo-b/", text)
@@ -301,7 +301,7 @@ class StewardColumnTests(unittest.TestCase):
         self.assertEqual([dict(entry) for entry in vm.peer_edges["watches"]],
                          [{"repo": "repo-a", "text": "watch 1 · ended 1"}])
         text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), 180, 60).text_rows())
-        self.assertTrue(any("[50]" in line and "[7a]" in line and "watch ⚑" in line
+        self.assertTrue(any("[50]" in line and "[7a]" in line and "steward ⚑" in line
                             for line in text.splitlines()))
         self.assertIn("⚑ watch 1 · ended 1", text)
 

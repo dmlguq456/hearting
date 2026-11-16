@@ -1,1 +1,0 @@
-../../../hooks/frame-native-answer.py

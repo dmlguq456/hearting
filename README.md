@@ -152,7 +152,7 @@ working, idle, or waiting for you. Below it, one screen per question:
 | **ROUTES** | Each request: who does it now, its kind and where it stands — `one-shot`, or `staged 3/7 execute ●` for one worker per stage — with the workers running under it; open it for its stages. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
-| **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
+| **Others** | PEERS (the sessions linked by messages, requests, supervision or a handover, and the newest link of each kind), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
 
 NOW is what the session is doing now (`·` when nothing is observed). Expand the row for LAST INPUT and RECEIVED: LAST INPUT uses `› 1m · …` for your last confirmed input, `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record, and `› ·` means no human input was recorded.
 
@@ -198,18 +198,19 @@ and its choices), the route box (`╭─ 4 ROUTE │ 2 REQUEST ─╮`: every ro
 now with its role, harness, model and effort, its `CTX` gauge with the time after it, its
 title, its kind and where it stands, its live workers in a smaller box under it, then the
 requests this session sent or received),
-`MESSAGES +3` (three messages) and `MEM` (the two newest saved memories of
-this repository and global ones, each `◆` durable or `◇` working, then its scope and kind), each
+`MESSAGES +3` (up to five messages, each its head — who, harness, time, kind — and its first line) and `MEM` (up to five of the newest saved memories of
+this repository and global ones, each a dim head — `◆` durable or `◇` working, its scope, kind and age — over its headline), each
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
 routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can
 answer here now reads in rose letters, on no fill: its first line, its choices as text
 (`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors, bold in
 mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
-While an answer waits those red letters, and the folded strip's `◑to answer N`, go slowly between
-two reds on the waiting frame's breath (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
-question is one line, `✓ answer sent` in the passing green and what you chose
-after it. Short of rows the other sections step down to one row first, then the route
+While an answer waits those red letters, and the folded strip's `◑to answer N`, blink between
+two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
+question is one line for ten minutes, `✓ answer sent` in the passing green and what you chose
+after it. A tidy result that ended well reads as one dim line; only a notice that leaves you something to do
+keeps the `⚠` caution look. Short of rows the other sections step down to one row first, then the route
 box folds its routes (context into the first row, then the kind row, then one row each)
 and scrolls in place under the wheel, its border counting what it hides. The ROUTE
 popup is Fleet's own table at the popup's width (a route unfolded
@@ -248,8 +249,8 @@ look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
 the previous view, and Defaults previews the defaults. Drag the side boundary
 to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
-The default is a 40-column side panel. **»** beside the gear (**▾** under the
-native area) folds it into a strip under the native area, which gets the whole
+The default is a 40-column side panel. **▾** at the right end of its last row, right of the gear,
+folds it into a strip under the native area (whose **▴** opens it from the same corner), which gets the whole
 width back: one row at any window height, `● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━──── 58% │
 5h 12% │ 7d 66% │ ◑to answer 1 │ 3 ROUTE ⠏2 ✕1 │ MESSAGES ← [e7] → [73]` with **▴** at its right
 end (the wait only while you owe an answer, compaction about to happen or a tidy notice in its
@@ -281,7 +282,7 @@ notices do not guarantee remaining time before native compaction.
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and how to answer it; one older approval wait from a Codex session listed under it; and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, since when, how to answer it, and what you answered today.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the OpenCode session it steers, and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, route, peers, and GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the message it sent the OpenCode session it is linked with, and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, routes and requests, messages and linked sessions, and GPU, in the session panel's words.</sub></td>
     <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU process, and CPU and memory use."><br><sub><b>RESOURCES</b> — per-GPU use on each host and the session and command behind each process.</sub></td>
   </tr>
 </table>

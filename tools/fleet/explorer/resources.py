@@ -315,8 +315,8 @@ def draw_system(grid: CellGrid, vm, state=None, x=34, y=3):
     collectors = tuple(data.get("collectors") or ())
     runtimes = tuple(data.get("runtimes") or ())
     def section(title, meta=""):
-        cursor = grid.put(x, y, "── ", "line")
-        cursor = grid.put(cursor, y, title, "head")
+        # The shell panel's section head form: the name in dim upper case, the rule to the edge.
+        cursor = grid.put(x, y, title.upper(), "label")
         if meta:
             cursor = grid.put(cursor, y, "  " + meta, "dim")
         grid.put(cursor, y, " ", "branch_s")
