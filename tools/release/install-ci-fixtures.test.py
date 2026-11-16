@@ -26,6 +26,7 @@ class FixtureInstallTest(unittest.TestCase):
             for name, body in {
                 "sudo": '#!/bin/sh\nexec "$@"\n',
                 "timeout": '#!/bin/sh\nshift\nexec "$@"\n',
+                "sleep": '#!/bin/sh\necho "$1" >> "$SLEEPS"\n',
                 "apt-get": f'''#!{sys.executable}
 import json, os, pathlib, sys
 args = sys.argv[1:]
@@ -37,7 +38,9 @@ with path.open("a") as f:
 mode = os.environ["MODE"]
 if mode != "fresh" and not prior:
     sys.exit(124)
-if mode == "update-fails" and "update" in args:
+if mode == "outage-once" and len(prior) < 3:
+    sys.exit(100)
+if mode == "update-fails" and ("update" in args or sources is None):
     sys.exit(100)
 if mode == "install-fails" and "install" in args:
     sys.exit(100)
@@ -57,9 +60,11 @@ if "install" in args and mode != "missing-tool":
                 p.write_text("#!/bin/sh\nexit 0\n")
                 p.chmod(0o755)
             result = subprocess.run(["/bin/bash", str(SCRIPT), *packages],
-                env=dict(os.environ, PATH=str(bin_dir), CALLS=str(calls), MODE=mode),
+                env=dict(os.environ, PATH=str(bin_dir), CALLS=str(calls), MODE=mode,
+                         SLEEPS=str(root / "sleeps.txt")),
                 capture_output=True, text=True)
             records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            self.sleeps = (root / "sleeps.txt").read_text().split() if (root / "sleeps.txt").exists() else []
             return result, records
 
     def test_existing_tools_need_no_package_operation(self):
@@ -91,11 +96,28 @@ if "install" in args and mode != "missing-tool":
             self.assertNotIn("trusted=yes", call["sources"])
 
     def test_fallback_failure_cannot_hide_a_missing_fixture(self):
-        for mode, count in (("update-fails", 2), ("install-fails", 3), ("missing-tool", 3)):
+        # A failing fallback is tried again twice more (three rounds in all), each round the
+        # same direct install plus official-source update and install; a tool that is still
+        # missing after a "successful" install is not an install failure and is not retried.
+        for mode, count in (("update-fails", 6), ("install-fails", 9), ("missing-tool", 3)):
             with self.subTest(mode=mode):
                 result, calls = self.run_install(mode=mode)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(len(calls), count)
+
+    def test_a_short_outage_is_waited_out_in_the_step(self):
+        # The first round fails (the 2026-11-11 name-resolution outage: the direct install, then
+        # the official-source update), the second round works: one backoff, no failure.
+        result, calls = self.run_install(mode="outage-once")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(self.sleeps, ["15"])
+
+    def test_a_lasting_outage_still_fails_after_bounded_backoff(self):
+        result, calls = self.run_install(mode="install-fails")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.sleeps, ["15", "30"])
+        self.assertIn("after 3 rounds", result.stderr)
 
     def test_namespace_fixture_uses_the_same_retry(self):
         result, calls = self.run_install(mode="stalled", packages=("bubblewrap",))

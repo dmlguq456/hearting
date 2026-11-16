@@ -162,6 +162,12 @@ jobs:
         if: steps.scope.outputs.full_tests == 'true'
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          # The built-in read-only token of this job (`contents: read`; no new
+          # secret). An unauthenticated call is rate-limited per runner address
+          # and the shared pool's addresses are often spent: the 403s of
+          # 11-08..11-16 came back in 20 ms each, so retrying them for 8 s
+          # could not help.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           work="$(mktemp -d "${RUNNER_TEMP}/hearting-codex-cli.XXXXXX")"
@@ -171,10 +177,14 @@ jobs:
           # The browser download endpoint can return 504 before its CDN redirect.
           curl --fail --location --silent --show-error \
             --header 'Accept: application/octet-stream' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
             --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 300 \
             --connect-timeout 20 --max-time 240 \
             --output "$archive" \
             https://api.github.com/repos/openai/codex/releases/assets/645227929
+          # The token is for this one download: the downloaded CLI and the tests
+          # below run without it.
+          unset GH_TOKEN
           printf '%s  %s\n' \
             beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4 \
             "$archive" | sha256sum --check --strict

@@ -1,0 +1,274 @@
+# The session panel and Fleet, in detail
+
+The [README](../README.md#one-seat-for-every-session) shows what the panel and
+Fleet are for. This page collects the keys, layouts, settings, and per-runtime
+details behind them. The canonical contract is
+[core/references/session-shell.md](../core/references/session-shell.md); peer
+requests are specified in [core/OPERATIONS.md](../core/OPERATIONS.md)
+(“Peer requests”).
+
+- [Turning it on and off](#turning-it-on-and-off)
+- [What the panel shows](#what-the-panel-shows)
+- [Keys and mouse](#keys-and-mouse)
+- [Narrow windows and folding](#narrow-windows-and-folding)
+- [Settings](#settings)
+- [Requests and messages](#requests-and-messages)
+- [Per runtime](#per-runtime)
+- [Fleet details](#fleet-details)
+
+## Turning it on and off
+
+New installations enable a common status area and a Hearting work panel for
+new Claude Code, Codex, and OpenCode terminals. Updates preserve existing
+choices, including older installations without a shell policy.
+
+```bash
+hearting session shell status    # the current choice
+hearting session shell disable   # new terminals launch the native CLI as before
+hearting session shell enable    # turn it on again
+```
+
+Existing sessions keep running either way; installation affects new wrapped
+terminals, and running hosts are not replaced. Noninteractive commands and an
+unavailable shell runtime run the original CLI without starting a second
+native session. Herdr, cmux, and tmux remain optional.
+
+## What the panel shows
+
+The default is a 40-column panel on the right of the native area. Its top
+border names the session the way Fleet's row does: the state glyph, the
+session number (`[4f]`), the runtime, and `⚑` for a steward. The frame shows
+that state the moment the native screen changes: while the session runs it
+stands lit and a light passes over the rule under the model and context, while
+an answer waits the whole frame breathes red, and idle stays neutral (another
+motion, or none, under [Settings](#settings)). From the top:
+
+| Rows | What they say |
+|---|---|
+| `REPO`, `GIT` | The repository and its linked-worktree count (`web-api · wt 1`); the branch, then `✓` when it is level with its upstream or `↑N`/`↓N`, then any merge or rebase warning. The **STATUS ›** button at the right end of the REPO row (the screen's language word) opens this session's campaign status document whole in a popup: Fleet's status lines for the project first, markdown tables as aligned columns. It is dim when there is no document yet and absent where the project keeps no artifact root |
+| `MODEL`, `CTX` | The model and effort, and the context gauge and percent |
+| `TITLE`, `NOW` | Fleet's title for the session and what it is doing now, under a thin rule |
+| `N QUESTIONS` | The questions waiting for you, in one thin rounded box. The line is rose where this window has a question to answer, dim where only an answer on its way or a wait answered elsewhere stands. Inside, in the body color: the first line, the choices as text (`1 label · 2 label`), and `↵ answer · Ctrl+]` at the right. An answer on its way reads `✓ answer sent · Public only` for ten minutes, the first words green. Nothing else in the panel is red but that border and a wait answered elsewhere's `◑` and count; in mono, eight colors, or `NO_COLOR` the border's weight tells the two apart |
+| `N ROUTE │ N PEER REQUEST` | The route box (`REQUEST` where the whole title does not fit). Every route: who works on it now (role, runtime, model, effort), its `CTX` gauge with the time after it, its title, its kind and where it stands (`code · staged 2/4 · execute ●`), its live workers in a smaller box under it; then, under one thin rule when both stand and rows allow, the requests this session sent (`→`) or received (`◂`, `✓` closed): the first row names the other session (`[6c] claude Opus 5.5 xhigh`, its age at the right), then the title, then the status. A failed route colors only its own line. A finished route stays with its result until your next input or ten minutes |
+| `MESSAGES +N` | Up to five messages, each its head (who, runtime, time, kind) and its first line; see [Requests and messages](#requests-and-messages) |
+| `MEM` | Up to five of the newest saved memory records of this repository and global ones, each a dim head (`◆` durable or `◇` working, its scope, kind, and age) over its headline |
+| `USAGE` | One row each for Claude, Codex, and OpenCode with the 5h, 7d, and model windows each reports, from the usage records Fleet already keeps; nothing is fetched. A harness with none reported reads `?` |
+| Last row | The gear `⚙` and the fold button `▾` |
+
+Each section head reads `N NAME counts ─── ›` (the route box carries its name
+in its top line); `MEM` and `USAGE` open nothing. Experiments and the
+machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. A
+40-row window keeps two or three rows per section; short of rows the other
+sections step down to one row first, then the route box folds its routes
+(context into the first row, then the kind row, then one row each) and scrolls
+in place under the wheel, its border counting what it hides. A press on a
+section's head or rows opens its popup (below); a press on any row of a route
+opens the routes popup with that route unfolded, a request's row the MESSAGES
+popup. Values the host could not refresh for a while are shown, not claimed:
+nothing spins, and the frame takes no route state. A value that cannot be read
+stays `?`.
+
+The window's last line under the native screen is the shell's one line in
+every harness: the working folder at the left and `hearting v<release>` at the
+right (a newer release waiting takes its place). OpenCode's cost moves into its
+panel. While an answer waits, the question box's border and the folded strip's
+`◑to answer N` blink between two clearly different reds once a second, on
+Fleet's own beat (still with rule motion `off`; not in mono or `NO_COLOR`).
+
+## Keys and mouse
+
+Ordinary keys stay with the native CLI. A section opens in a popup in the
+middle of the window (the native area and the panel together), never by
+itself: the question editor for QUESTIONS, Fleet's own table at the popup's
+width for ROUTE (a route unfolded with its failure reason whole, Enter for its
+page with its paths), the status document for STATUS, and the requests and
+messages whole for MESSAGES. While it stands every key and press is its own,
+everything behind it reads in one dark gray (the native's output keeps
+arriving, still gray, and the native is never told) while the popup stands on
+its own lighter ground with bright words; in the question popup the chosen
+choice stands on its own blue ground (reversed in mono, eight colors, or
+`NO_COLOR`). **Esc**, **Ctrl+]**, its `✕`, or a press outside it closes it.
+
+| Key | What it does |
+|---|---|
+| **Ctrl+]** | Open a popup: the question you can answer here, else the first section with something in it; again (or **Esc**) closes it |
+| **←/→** | Move to the next or previous section (`STATUS · QUESTIONS · ROUTE · MESSAGES`, its name on the popup's bottom line) |
+| **Tab**, **1–9**, **t** | In a question: the next waiting question, an option (**↑/↓** too; **PgUp/PgDn** read a long question), an answer in text, including pasted text; **p**, **f**, **r**, **w** below work while you choose and are letters while you type |
+| **Enter** | In a question: send, once every form field is answered; the popup closes and keys go back to the native CLI. In ROUTE: the unfolded route's page, and again back to the table |
+| **↑/↓** | In ROUTE: unfold the next route; elsewhere read on (**PgUp/PgDn** a page) |
+| **p** | Fold the panel into the strip, or open a folded one (the popup closes) |
+| **f** | Open Fleet in the same window; **Ctrl+]** closes it and returns |
+| **r**, **w** | The MESSAGES popup; this repository's open work |
+| Click | A section's head or rows open its popup; a name on the popup's bottom line moves there; the wheel reads a long table on |
+
+Choices and drafts survive moving between questions. Once an answer is sent,
+the panel keeps one line, `✓ answer sent · <choice>`, until the session has
+it. A transport receipt is
+shown separately from proved consumption, and expired or cancelled questions
+cannot be submitted. In a question, **↑/↓** scroll long content and an explicit
+count marks the hidden lines; a question section with nothing in it is not
+drawn. A question that has to be answered somewhere else says
+where instead of offering choices: `answer below` (in the native input),
+`answer in its window`, or `answer in the parent`. Only **f** opens Fleet. In
+Fleet, **Ctrl+]** on a session page opens that exact session's panel.
+
+<p align="center">
+  <img src="fleet/panel-question.png" alt="The bottom layout in a 100-column window: the panel under the native area. Its head shows session [9c], Sonnet 5.5, context 33%, the title Release notes 2.4 and NOW Choose a layout; under it the 2 QUESTIONS box with a rose border, the first question, its three choices as text, the first recommended, and answer, Ctrl+] at the right; then messages and the usage of the three agents." width="90%">
+</p>
+<p align="center"><sub>The bottom layout: the question to answer here in a rose-bordered box, which <b>Ctrl+]</b> or a press opens in the popup. The conversation is illustrative; demo data.</sub></p>
+
+## Narrow windows and folding
+
+**▾** at the right end of the last row, right of the gear (**▾** also when the
+panel is under the native area), folds the panel into a strip under the native
+area, whose **▴** opens it again from the same corner; the native area gets
+the whole width back. The strip is one row at any window height:
+`● [4f] web-api │ Opus 5.5 xhigh │ CTX ━━━━──── 46% │ 5h 12% │ 7d 66% │ ◑to answer 1 │ 3 ROUTE ⠏2 ✕1 │ MESSAGES ← [b2] → [9c]`
+with **▴** at its right end. The wait shows only while you owe an answer; compaction about to
+happen or a tidy notice takes its place; the Git branch follows the project
+where it fits. Narrow, whole values go: reset times, branch, effort, 7d, 5h,
+the model, the message sessions (their count stays), MESSAGES, the project, a
+window at Fleet's red level (it outlasts the other windows), the context bar
+(its percent stays), the route counts, and at 30 cells the session number; the
+state, wait, `N ROUTE`, and **▴** stay. A press on the wait opens the question
+popup, on the routes or MESSAGES their popup above the strip, anywhere else
+opens the panel again; from the keyboard, **Ctrl+]** then **p**. Where the open
+panel would leave the native area under 60 columns (a 40-column panel in a
+terminal under 102 columns) it folds by itself into the same strip and opens
+again with room; a choice made by hand holds at every width. In the bottom
+layout (when `layout` is set to bottom, or when you open the panel by hand in a
+window too narrow to hold it beside the native area, until the window widens)
+the panel sits under the native area.
+
+## Settings
+
+**⚙** (the gear at the right end of the panel's last row, left of the fold button) previews placement,
+panel position (right or left), width, narrow-window behavior, bottom height,
+auxiliary detail, route line, rule motion (`rule`, the default: the lit frame
+and the light over the rule; `border`: one arc round the frame; `scanners`: a
+wide wave round it; `off`), theme (terminal, light terminal, or monochrome),
+and shade (none, light, or medium). Use the value arrows or keyboard arrows, then Apply; Cancel
+restores the previous view, and Defaults previews the defaults. Drag the side
+boundary to resize and save it. Only Hearting's own `session-shell.json` is
+saved, with a byte-for-byte backup; native model and permission settings are
+untouched. Existing explicit layout choices are retained.
+
+## Requests and messages
+
+A **request** is work handed from one session to another, with a number,
+revisions, and reports. You ask in your own words (“Ask session [b2] to re-run
+the tests and report back”); the agent runs the commands:
+
+```bash
+hearting run peer-steward request <session> --body-file <file>   # new request; --rev <label> supersedes, <rq-id> --cancel withdraws
+hearting run peer-steward report [<rq-id>] --partial --result "<line>"   # or --reject "<why>", or a final report without --partial
+hearting run peer-steward show [<rq-id>]                         # the sealed body; no id: this session's open requests
+```
+
+The line that reaches the other conversation names the request; the body
+stays sealed, and the receiving model opens it with `show`. Delivery and work
+are separate: a receipt does not change a request's state; only a final or
+reject report, or the requester's cancel, closes it, and a partial report keeps
+it open. A report is not approval, release, or a user answer. A request
+follows the other session to a successor only when Hearting's lineage confirms
+the handover.
+
+In the panel, every open request has rows in the route box, after the routes and a thin rule:
+`→ [b2] codex gpt-5.5 high   2m`, its title, then `partial answer`; a request row opens the MESSAGES popup. The
+popup shows it whole, requests first: the
+parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`), `WORK`
+(`open`, `partial answer`, `final answer`, `rejected`, `cancelled`, with what is
+left), `LAST`, `REPORTS`, and the body. A closed request stays 15 minutes after it closed, sent or received (`✓` answered, `✕` rejected or cancelled); a sent one
+stays longer until its last answer has been seen.
+
+<p align="center">
+  <img src="fleet/requests.png" alt="Two panels: in its route box, under a thin rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; in its PEER REQUEST box, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
+</p>
+
+**Messages** are short notes, sent with
+`hearting run peer-steward prompt <session> --body-file <file>`; reply text
+addressed to another session in a conversation reaches nobody. **Watching**
+(`hearting run peer-steward watch <session>`) wakes the watcher once when the
+watched session finishes, stops, or needs a person. None of these needs herdr
+or tmux.
+
+How an idle session is reached differs by runtime
+([core/ADAPTATION.md](../core/ADAPTATION.md), PG-58 and PG-59):
+
+- In a terminal with the panel, the shell injects a waiting message, request
+  line, or report into an idle Claude Code, Codex, or OpenCode session when its
+  input is empty and no form is open. With text typed or a menu open it waits,
+  and the sender sees `awaiting delivery` with the reason.
+- Codex takes them through its own thread queue, with or without the panel.
+- Outside the panel's terminal, Claude Code takes them at its next callback
+  (an idle session at your next prompt), and OpenCode at its next idle or tool
+  callback. Neither is woken at once; the request stays open and listed on
+  both sides.
+- A watch wakes Claude Code everywhere it was measured. Codex is woken where
+  Hearting has proven its terminal; otherwise, and on OpenCode, `watch` prints
+  a command to wait on (`bounded-wait` with a `join`) instead of promising a
+  wake.
+
+Fleet lists a session's requests on its session page and shows the newest as a PEERS
+link; it has no list of every request across sessions, and you cannot send a request or
+message from Fleet yet.
+
+## Per runtime
+
+- **Claude Code.** The panel shows the same status area as Codex and OpenCode,
+  and the row under the input is the shell's one line there too (the working
+  folder and `hearting v<release>`). What you must do now stands in the panel
+  or its folded strip: an answer you owe in the question box and the strip's
+  `◑to answer N`, compaction about to happen in the panel's top and the strip's
+  `⚠`, a red usage reading in `USAGE` and on the strip (on a narrow strip the
+  other windows go first and the red one stays), a failed or blocked route in
+  the route box and the strip's `✕N`. News stays in the panel: messages in
+  `MESSAGES`, a finished route's result in the route box. Where the panel is
+  not painted (Fleet over the window, the settings screen, a window not yet
+  bound), Claude's own statusline shows the status line itself, keeping what
+  is urgent first on a narrow screen.
+- **Codex.** A wrapped Codex keeps its native shared-daemon startup. The shell
+  hides the footer's thread ID (it stays on the inner screen for
+  identification; a Codex window without the shell still shows it), and the
+  rest of that row can yield duplicate paint to the common area. Custom,
+  clipped, or uncertain rows remain visible. Codex context keeps the latest
+  server-reported usage; a separate `compaction imminent` label appears only
+  when the exact session's current native diagnostic supports it, and
+  unavailable or stale diagnostic data stays unknown. The 500K/700K
+  preservation notices do not guarantee remaining time before native
+  compaction.
+- **OpenCode.** It uses the same panel and settings. Its own sidebar is hidden
+  in the shell window (OpenCode's toggle still opens it), with Context in its
+  footer and its MCP server count in the panel; its cost stands after the
+  context in the panel.
+
+Where independent telemetry cannot provide a value, the native context display
+remains as a fallback. Answers keep the existing queue and consumption
+receipts; an unproved native target stays pending.
+
+## Fleet details
+
+- **NOW and the expanded row.** NOW is what the session is doing now (`·`
+  when nothing is observed). Expand a row in OVERVIEW for LAST INPUT and
+  RECEIVED: `› 1m · …` is your last confirmed input, `› ?` means the text
+  cannot be confirmed (including older inputs whose first line was not kept,
+  or sessions with no readable input record), and `› ·` means no human input
+  was recorded. Received peer and runtime messages show their first lines
+  without notification wrappers.
+- **The project page.** Select a project in the session list for its campaign status
+  (up to three campaign summaries), backlog and work in progress, open
+  requests and stages, completed results, recent small work records, its
+  `LAB` table (the experiment board, which the panel does not draw), and its
+  sessions. Open work uses the same records as MEMORY;
+  saving a memory does not count as completing a task.
+- **Pages and raw output.** Select a session or a request to open its page,
+  and from there its raw output: tool calls and results in order, without
+  opening the runtime itself.
+- **Commands.** `fleet --once` and `fleet --json` need no `curses`, so they
+  also work on Windows under Git Bash; `fleet-monitor` is the earlier
+  group/process view. Session titles follow your language; set
+  `title_language` in `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json` to
+  override it.
+- **First screen.** A newly started window draws its first screen as soon as
+  the session list is read and marks the cells still loading `details wait`;
+  the rest fills in as it is read.

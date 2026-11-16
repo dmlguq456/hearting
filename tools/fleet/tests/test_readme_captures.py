@@ -66,7 +66,7 @@ class ReadmeDemoRows(unittest.TestCase):
         time.tzset()
 
     def test_every_screen_draws_at_its_size_in_english(self):
-        for name, (_view, _scope, cols, rows, _raw) in self.readme_captures.SCREENS.items():
+        for name, (_view, _scope, cols, rows, *_rest) in self.readme_captures.SCREENS.items():
             with self.subTest(screen=name):
                 frame = self.frames[name]
                 self.assertEqual((frame.cols, frame.rows), (cols, rows))
@@ -90,10 +90,19 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertRegex(text["overview"], r"staged \d+/\d+ execute ●")
         self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
-        # The session page's MESSAGES (one sent message) and the session it is linked with.
+        # The session page's MESSAGES (the note it sent [e8]) and the session it is linked with.
         self.assertIn("MESSAGES", text["session"])
-        self.assertIn("Try four data-loader workers", text["session"])
+        self.assertIn("Profile 4, 8 and 16 loader workers", text["session"])
         self.assertRegex(text["session"], r"PEERS  \[\w+\]")
+        # The README's opening pictures: one moment, the request and the route [4f]'s panel shows,
+        # each Fleet list whole (nothing cut off below it).
+        # PEERS lists the newest link of each kind: the request [4f] sent [b2] stands as a PEER REQUEST link.
+        self.assertRegex(text["peers"], r"\[4f\] claude +→ +\[b2\] codex +PEER REQUEST")
+        self.assertIn("Test run for [4f]", text["overview"])
+        self.assertRegex(text["routes"], r"Rate limiting +staged 2/4 execute ●")
+        self.assertIn("leg 1 · code dev", text["routes"])
+        for name in ("overview", "peers", "routes"):
+            self.assertNotIn("more below", text[name], name)
         self.assertIn("owner raw", text["output"])
         self.assertIn("1,200 clips", text["output"])
 
@@ -124,7 +133,7 @@ class PublishedFiles(unittest.TestCase):
 
     def test_images_exist_with_the_drawn_size_and_a_small_file(self):
         from tools.fleet.tests import readme_captures
-        for name, (_view, _scope, cols, rows, _raw) in readme_captures.SCREENS.items():
+        for name, (_view, _scope, cols, rows, *_rest) in readme_captures.SCREENS.items():
             with self.subTest(image=name):
                 path = DOCS / "fleet" / f"{name}.png"
                 self.assertEqual(png_size(path), (cols * CELL_W, rows * CELL_H))
