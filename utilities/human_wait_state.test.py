@@ -3999,6 +3999,7 @@ class MessageCompletionTests(unittest.TestCase):
             for text in ("질문 전송 중이라고 뜨고 바로 안가네..", "1", "C"):
                 context = self.prompt(signal, text)
                 self.assertEqual(self.source(signal)["lifecycle"], "open")
+                # The line judges this very input ("not recorded as the answer"): every typed prompt.
                 self.assertIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
             self.f.peer.receive_peer_message(wire, recipient)
             completion = self.source(signal)["completion"]

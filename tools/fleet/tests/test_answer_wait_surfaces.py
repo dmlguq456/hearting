@@ -525,7 +525,7 @@ try {
             with self.subTest(lang=lang), mock.patch.dict("os.environ", {"FLEET_NOW_LANG": lang}):
                 rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
                 text = "\n".join(rows)
-                self.assertIn(f"── {word} ?", text)
+                self.assertIn(f"│ {word} ?", text)
                 self.assertNotIn(f"{word} 0", text)
                 self.assertIn(f"{word} ? ·", rows[-1])
 
@@ -3239,6 +3239,51 @@ class FleetS2WorkflowResponseTests(unittest.TestCase):
             ledger.journal(), "frame-review")
         self.assertEqual((resolution["status"], resolution["epoch"]), ("proceed", 1))
         self.assertEqual(result["result"]["request_id"], result["action_id"])
+
+    def _frame_answer_notice(self, envelope):
+        """The one notice a board answer to this frame interview leaves for the session that opened the route."""
+        import dispatch_pending_delivery as pending
+        import hashlib
+        import session_notice
+        key = "frame-answer:" + envelope["selected_id"]
+        delivery = "delivery-" + hashlib.sha256(f"{session_notice.KIND}\0{key}".encode()).hexdigest()
+        return pending.read(self.jobs.parent, "parent-session", delivery)
+
+    def test_a_board_answer_that_starts_no_owner_tells_the_session_that_opened_the_route(self):
+        """Frame answer -> gate released -> one notice carrying resume_command (the session ended its turn)."""
+        from fleet.explorer.runtime import ExplorerRuntime
+
+        ledger = self._open_gate()
+        self._write_owner("done")          # no live or parked owner: release continues nothing
+        self._observe()
+        state, envelope, _ = self._read_in_ui(self._row(self._view_model(self.latest_result), "S2"))
+        state, effect = self._question_response(envelope)
+        self.assertIsNone(self._frame_answer_notice(envelope))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": ""}):
+            result = ExplorerRuntime.execute_question_action(effect)
+        self.assertEqual(result["state"], "applied", result)
+        self.assertNotIn("owner_continuation", result["result"])
+        record = self._frame_answer_notice(envelope)
+        self.assertIsNotNone(record)
+        receipt = record["receipt"]
+        self.assertEqual(receipt["required_action"], "run-resume-command")
+        self.assertIn("capability-route.py start --route", receipt["text"])
+        self.assertIn(self.route["route_id"] if "rt-" in self.route_file.name else str(self.route_file), receipt["text"])
+        again = ExplorerRuntime.execute_question_action(effect)
+        self.assertEqual(again["state"], "applied", again)
+        self.assertEqual(self._frame_answer_notice(envelope)["delivery_id"], record["delivery_id"])  # still the one
+
+    def test_a_board_answer_that_continues_the_owner_sends_no_notice(self):
+        from fleet.explorer.runtime import ExplorerRuntime
+
+        self._open_gate()                  # the owner is live: release reports `owner-live`
+        state, envelope, _ = self._read_in_ui(self._row(self._view_model(self.latest_result), "S2"))
+        state, effect = self._question_response(envelope)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": ""}):
+            result = ExplorerRuntime.execute_question_action(effect)
+        self.assertEqual(result["state"], "applied", result)
+        self.assertEqual(result["result"]["owner_continuation"]["state"], "owner-live")
+        self.assertIsNone(self._frame_answer_notice(envelope))
 
     def test_empty_and_defer_leave_the_current_gate_blocked(self):
         from fleet.explorer.frame import draw

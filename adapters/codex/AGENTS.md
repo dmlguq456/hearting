@@ -151,10 +151,9 @@ Portable behavior contract = `roles/response-policy.md`.
   Before claiming a tool works, run its check; exit 69 means unavailable, so
   use the reported fallback and never borrow a Claude-native tool to claim
   Codex parity.
-- Register ordinary questions with `hearting run questions ask`; use the
-  shared response policy. Ask structured exceptions, including the §0.4 card, with
-  `request_user_input`. It submits empty after 120 s; an empty answer is no
-  decision, so restate the question at turn end.
+- Every question to the person, including the §0.4 card (choices 진행(권장) /
+  수정 / 중단), is registered with `hearting run questions ask`; use the shared
+  response policy. A plain-text card is the fallback.
 - Completion arrives through Codex's native queue for this thread. Detached
   shell output does not wake you; for other long-running work follow
   `preflight.sh loop-info runtime-watch`.

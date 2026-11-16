@@ -3657,7 +3657,8 @@ class GateCarrierTest(unittest.TestCase):
         gate = {"receipt": {"children": [{"required_action": "human-gate:frame-review"}]}}
         text = rewake.gate_wake_message(self._launch(), [notice, "actual gate"],
                                          human_gate=is_human_gate_record(gate))
-        self.assertIn("AskUserQuestion", text)
+        self.assertIn("question board", text)
+        self.assertNotIn("AskUserQuestion", text)
         self.assertIn(notice, text)
 
     def setUp(self) -> None:
@@ -4021,7 +4022,8 @@ class GateCarrierTest(unittest.TestCase):
         self.assertIn("or has paused at the gate", text)
         self.assertIn("human-gate:frame-review", text)
         self.assertIn("await-release", text)
-        self.assertIn("AskUserQuestion", text)
+        self.assertIn("question board", text)
+        self.assertNotIn("AskUserQuestion", text)
         self.assertNotIn("harvest --jobs", text)
         # review round 1, M6: the in-wait wake is speculative, so the record is
         # left `sent-ambiguous` -- the next-prompt sweep can still deliver it if

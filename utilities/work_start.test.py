@@ -2571,9 +2571,8 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(asked["human_wait"], {"state": "pending", "fallback": "ordinary-conversation",
                                               "question_block": expected})
         self.assertNotIn("Confirm this understanding", asked["human_wait"]["question_block"])
-        self.assertIn("understanding sentence verbatim as the first question", asked["next_step"])
-        self.assertIn("in the same native question call when the tool accepts them all", asked["next_step"])
-        self.assertIn("the runtime combines the calls", asked["next_step"])
+        self.assertIn("already on the Hearting question board", asked["next_step"])
+        self.assertIn("do not ask it again through another tool", asked["next_step"])
         self.assertNotRegex(asked["next_step"], r"\b(at most|up to|no more than|maximum)\s+\d")
         registered = Path(asked["interview_file"])
         original = registered.read_bytes()
@@ -2886,27 +2885,54 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.question_file.write_text(json.dumps(question))
         return question
 
-    def test_the_persons_native_reply_is_recorded_and_the_next_start_takes_it(self):
+    def test_a_legacy_native_reply_record_is_still_taken_by_the_next_start(self):
+        # The harness hooks no longer write `answers.native.json` (a registered frame question is
+        # answered on the question board), but a record an earlier session left is still read.
+        import frame_interview as FI
         question = self.scope_question()
         self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
-        shown = lambda scope_answer, restatement="예": [
+        interview = json.loads(Path(self.step()["interview_file"]).read_text())
+        answers = FI.answers_from_native(interview, [
             {"question": "제가 이해한 내용: " + question["understanding"], "options": ["예 (권장)", "아니오(고쳐 말하기)"],
-             "answer": restatement},
+             "answer": "예"},
             {"question": question["questions"][0]["question"], "options": ["Both (recommended)", "Approval only"],
-             "answer": scope_answer}]
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, shown("Both", restatement="아니오(고쳐 말하기)")))
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, shown("")))          # nothing picked
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, [{"question": "unrelated", "answer": "x"}]))
-        recorded = W.record_native_answer(self.route, self.jobs, shown("Approval only (keep the wording)"))
-        answers = json.loads(recorded.read_text())
-        self.assertEqual((answers["actor_kind"], answers["understanding_confirmed"]), ("user", True))
-        self.assertEqual(answers["answers"]["q-scope"], {"choice": "none", "note": "Approval only (keep the wording)"})
-        recorded = W.record_native_answer(self.route, self.jobs, shown("Approval only"))     # the latest reply
-        self.assertEqual(json.loads(recorded.read_text())["answers"]["q-scope"], {"choice": 1, "note": ""})
+             "answer": "Approval only"}])
+        (Path(self.step()["interview_file"]).parent / FI.NATIVE_ANSWERS_NAME).write_text(json.dumps(answers))
         released = self.step()                                     # a bare resume: no answers file to write
         self.assertEqual(released["state"], "released", released)
         self.assertEqual(self.calls, ["gate", "release"])
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, shown("Both")))     # answered: nothing waits
+        self.assertEqual(answers["answers"]["q-scope"], {"choice": 1, "note": ""})
+
+    def test_a_frame_question_answered_on_the_board_reaches_the_frame(self):
+        # The registered interview is a Hearting question (human_wait_state lists the understanding
+        # sentence, then each registered question); the picked labels become the answers file that
+        # releases the gate, with no native-tool reply or hook in between.
+        import frame_interview as FI
+        self.scope_question()
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        interview = json.loads(Path(self.step()["interview_file"]).read_text())
+        asked = [{"question": interview["understanding"], "options": ["I understand the restatement"],
+                  "answer": "I understand the restatement"}]
+        for item in interview["questions"]:
+            asked.append({"question": item["question"], "options": [o["label"] for o in item["options"]],
+                          "answer": item["options"][1]["label"]})
+        answers = FI.answers_from_native(interview, asked)
+        self.assertEqual(FI.validate_answers(interview, answers), [])
+        board = self.base / "board-answers.json"
+        board.write_text(json.dumps(answers))
+        released = self.step(answers=board)
+        self.assertEqual(released["state"], "released", released)
+        self.assertEqual(self.calls, ["gate", "release"])
+        self.assertEqual(self.resolution()["answers"]["answers"]["q-scope"]["choice"], 1)
+
+    def test_the_pending_question_points_at_the_board_and_names_no_native_tool(self):
+        self.scope_question()
+        pending = self.step(interview=self.question_file)
+        self.assertEqual(pending["state"], "needs-question")
+        text = pending["next_step"]
+        self.assertIn("Hearting question board", text)
+        for name in ("AskUserQuestion", "request_user_input", "native question", "native box", "harness hook"):
+            self.assertNotIn(name, text)
 
     def test_a_typed_correction_is_the_restatements_answer(self):
         question = self.scope_question()
@@ -2918,115 +2944,6 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
             {"question": question["questions"][0]["question"], "options": [], "answer": "Both"}])
         self.assertEqual((answers["understanding_confirmed"], answers["correction"]), (False, "Only the approval step."))
         self.assertEqual(FI.validate_answers(interview, answers), [])
-
-    # -- one interview answered over several native calls --------------------------------------------
-
-    def four_questions(self):
-        names = ("one", "two", "three", "four")
-        question = {**self.question, "questions": [{
-            "id": f"q-{name}", "topic": f"Choice {name}", "question": f"Which way for part {name}?", "kind": "choice",
-            "options": [{"label": f"Left {name}", "means": "Take the left way."},
-                        {"label": f"Right {name}", "means": "Take the right way."}],
-            "recommended": 0, "why": "Only you can weigh this part."} for name in names]}
-        self.question_file.write_text(json.dumps(question))
-        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
-        return question
-
-    def native_call(self, harness, question, names, *, restatement="예", answers=None):
-        """The `asked` rows one real adapter reads from a native call showing these parts."""
-        import frame_native_answer as N
-        shown = []
-        if restatement is not None:
-            shown.append({"id": "restate", "question": "제가 이해한 내용: " + question["understanding"],
-                          "options": ["예 (권장)", "아니오(고쳐 말하기)"], "answer": restatement})
-        for name in names:
-            right = (answers or {}).get(name, f"Right {name}")
-            shown.append({"id": f"q-{name}", "question": f"Which way for part {name}?",
-                          "options": [f"Left {name}", f"Right {name}"], "answer": right})
-        tool_questions = [{"id": row["id"], "question": row["question"], "options": [{"label": label} for label in row["options"]]}
-                          for row in shown]
-        if harness == "claude":
-            payload = {"tool_name": "AskUserQuestion", "session_id": "s", "tool_input": {"questions": tool_questions},
-                       "tool_response": {"answers": {row["question"]: row["answer"] for row in shown}}}
-        elif harness == "codex":
-            payload = {"tool_name": "request_user_input", "session_id": "s", "tool_input": {"questions": tool_questions},
-                       "tool_response": json.dumps({"answers": {row["id"]: {"answers": [row["answer"]]} for row in shown}})}
-        else:
-            payload = {"tool": "question", "sessionID": "s", "args": {"questions": tool_questions},
-                       "answers": [[row["answer"]] for row in shown]}
-        return N.asked_from(harness, payload)[1]
-
-    def reference_answers(self, question):
-        """The bytes one call showing everything writes; the file is removed again."""
-        recorded = W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three", "four")))
-        data = recorded.read_bytes()
-        recorded.unlink()
-        return data
-
-    def test_a_split_native_reply_writes_the_same_answers_file_as_one_call(self):
-        question = self.four_questions()
-        reference = self.reference_answers(question)
-        directory = Path(self.resolution()["artifact"]).parent
-        native, partial = directory / "answers.native.json", directory / "answers.native.partial.json"
-        shapes = {"claude": (("one", "two", "three"), ("four",)), "codex": (("one", "two"), ("three", "four")),
-                  "opencode": (("one",), ("two", "three", "four"))}
-        for harness, (first, second) in shapes.items():
-            with self.subTest(harness=harness):
-                kept = W.record_native_answer(self.route, self.jobs, self.native_call(harness, question, first))
-                self.assertEqual(kept, partial)
-                self.assertFalse(native.exists())
-                self.assertEqual(W.native_answer_candidate(
-                    self.route, self.jobs, self.native_call(harness, question, second, restatement=None))[0], native)
-                kept = W.record_native_answer(self.route, self.jobs, self.native_call(harness, question, second, restatement=None))
-                self.assertEqual(kept, native)
-                self.assertEqual(native.read_bytes(), reference)
-                self.assertFalse(partial.exists())
-                native.unlink()
-
-    def test_the_gate_stays_pending_until_the_last_question_is_answered(self):
-        question = self.four_questions()
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three")))
-        waiting = self.step()
-        self.assertEqual((waiting["state"], waiting["required_action"]), ("needs-question", "wait-for-user-answer"))
-        self.assertEqual(self.resolution()["status"], "blocked")
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("four",), restatement=None))
-        released = self.step()
-        self.assertEqual(released["state"], "released", released)
-        self.assertEqual(self.calls, ["gate", "release"])
-        self.assertFalse((Path(released["interview_file"]).parent / "answers.native.partial.json").exists())
-
-    def test_a_later_native_answer_to_the_same_question_wins(self):
-        question = self.four_questions()
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one",), answers={"one": "Left one"}))
-        kept = W.record_native_answer(self.route, self.jobs, self.native_call(
-            "codex", question, ("one", "two", "three", "four"), restatement=None, answers={"one": "Right one"}))
-        self.assertEqual(json.loads(kept.read_text())["answers"]["q-one"], {"choice": 1, "note": ""})
-
-    def test_a_partial_from_another_round_or_interview_is_ignored(self):
-        question = self.four_questions()
-        partial = Path(self.resolution()["artifact"]).parent / "answers.native.partial.json"
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three")))
-        saved = json.loads(partial.read_text())
-        for key, value in (("interview_sha256", "0" * 64), ("round", saved["round"] + 1),
-                           ("route_id", "rt-foreign"), ("schema", "other")):
-            with self.subTest(key=key):
-                partial.write_text(json.dumps({**saved, key: value}))
-                kept = W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("four",), restatement=None))
-                self.assertEqual(kept, partial)                     # still incomplete: the stale rows were not used
-                self.assertEqual(sorted(json.loads(partial.read_text())["slots"]), ["q-four"])
-        partial.write_text(json.dumps({**saved, "interview_sha256": "0" * 64}))
-        kept = W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three", "four")))
-        self.assertEqual(kept.name, "answers.native.json")           # a complete single call is unaffected
-
-    def test_a_rejected_call_keeps_nothing(self):
-        question = self.four_questions()
-        partial = Path(self.resolution()["artifact"]).parent / "answers.native.partial.json"
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, self.native_call(
-            "claude", question, ("one", "two", "three"), restatement="아니오(고쳐 말하기)")))
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, self.native_call(
-            "claude", question, ("one", "two"), answers={"two": ""})))
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, [{"question": "unrelated", "answer": "x"}]))
-        self.assertFalse(partial.exists())
 
     def answers_for_scope(self):
         path = self.base / "scope-answers.json"

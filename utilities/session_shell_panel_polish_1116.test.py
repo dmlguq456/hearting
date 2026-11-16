@@ -182,6 +182,31 @@ const sentLines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
 """)
 
+    def test_a_sent_answer_line_leaves_when_the_clock_goes_back(self):
+        # A sent moment ahead of now is no age at all: the line leaves rather than standing for the gap.
+        self.node(r"""
+const create=require(path.join(shell,'block-input.cjs'));
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const sentLines=b=>b.sent().map(r=>r.map(x=>x.text).join(''));
+(async()=>{
+  const real=Date.now;let now=real.call(Date);Date.now=()=>now;
+  const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'FIRST_Q',choices:['Alpha','Beta']}]};
+  const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+  b.update([a]);b.enter();b.input(Buffer.from('\x1b[B\r'));await tick();
+  assert.deepEqual(sentLines(b),['✓ answer sent · Beta']);
+  b.update([{...a,answerable:false,request_state:'received'}]);
+  assert.deepEqual(sentLines(b),['✓ answer sent · Beta']);
+  // The clock goes an hour back: the sent moment is ahead of now, so the line has no age to keep it.
+  now-=60*60*1000;
+  assert.deepEqual(sentLines(b),[]);
+  b.update([{...a,answerable:false,request_state:'applied'}]);
+  assert.deepEqual(sentLines(b),[]);
+  // Forward again past the hold: it stays gone (the entry kept no line to bring back).
+  now+=70*60*1000;assert.deepEqual(sentLines(b),[]);
+  Date.now=real;console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+""")
+
     # 3 ---------------------------------------------------------------------------------------------------------
     def test_the_wait_blinks_on_fleets_beat_between_two_clearly_different_reds(self):
         out = self.node(r"""
