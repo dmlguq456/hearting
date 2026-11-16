@@ -145,7 +145,7 @@ running, stuck, or waiting for you.
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and how to answer it; one older approval wait from a Codex session; and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, since when, and how to answer it.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the message it sent the OpenCode session [e8], and the GPU it holds."><br><sub><b>Session page</b> — state, context, current activity, route, messages, and GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the message it sent the OpenCode session [e8], and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, routes and requests, messages and linked sessions, and GPU, in the session panel's words.</sub></td>
     <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU process, and CPU and memory use."><br><sub><b>RESOURCES</b> — per-GPU use and the session and command behind each process.</sub></td>
   </tr>
 </table>

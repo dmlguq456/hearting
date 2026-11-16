@@ -139,7 +139,7 @@ Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 �
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: Claude Code 세션이 7분째 기다리는 결정 하나와 언제부터인지, 답하는 법. Codex 세션의 오래된 승인 대기 하나. 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 언제부터인지, 어떻게 답하는지.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 route, OpenCode 세션 [e8]에 보낸 메시지, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 상태, 문맥, 지금 하는 일, route, 메시지, GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 route, OpenCode 세션 [e8]에 보낸 메시지, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 한 세션의 상태, 문맥, 지금 하는 일, route와 요청, 메시지와 이어진 세션, GPU — 패널과 같은 낱말로.</sub></td>
     <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: 호스트 둘의 GPU별 사용률과 메모리, 각 GPU 프로세스를 돌리는 세션과 명령, CPU와 메모리 사용량."><br><sub><b>RESOURCES</b> — GPU별 사용량과 각 프로세스 뒤의 세션과 명령.</sub></td>
   </tr>
 </table>

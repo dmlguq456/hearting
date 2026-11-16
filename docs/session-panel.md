@@ -105,7 +105,9 @@ Choices and drafts survive moving between questions. Once an answer is sent,
 the panel keeps one line, `✓ answer sent · <choice>`, until the session has
 it. A transport receipt is
 shown separately from proved consumption, and expired or cancelled questions
-cannot be submitted. A question that has to be answered somewhere else says
+cannot be submitted. In a question, **↑/↓** scroll long content and an explicit
+count marks the hidden lines; a question section with nothing in it is not
+drawn. A question that has to be answered somewhere else says
 where instead of offering choices: `answer below` (in the native input),
 `answer in its window`, or `answer in the parent`. Only **f** opens Fleet. In
 Fleet, **Ctrl+]** on a session page opens that exact session's panel.
