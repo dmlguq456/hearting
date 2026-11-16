@@ -4,6 +4,7 @@ from .config import ui_text
 from .session_line import route_text, status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
 from .session_handle import sanitize_title
 from .token_budget import compaction_imminent
+from .render_stages import route_stage_key
 
 
 def state_label(value):
@@ -356,6 +357,11 @@ def route_row(row, now=None, *, cells=None):
                     worker[name] = value
             if _number(item.get("since")) is not None:
                 worker["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+            # The worker's stage name in the color Fleet gives that stage of this route (matched by its name).
+            keys = {sanitize_title(str(node.get("name") or ""))[:64]: route_stage_key(i, node.get("st"))
+                    for i, node in enumerate(n for n in (row.get("stages") or ())[:16] if isinstance(n, dict))}
+            if worker["stage"] in keys:
+                worker["stage_key"] = keys[worker["stage"]]
             shown["workers_live"].append(worker)
     # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
     tool = sanitize_title(str(row.get("tool") or ""))[:48]
@@ -716,7 +722,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
             if isinstance(node, dict):
                 stage = {"name": clean(node.get("name")), "state": state_label(node.get("st")),
                          "current": node.get("st") in {"active", "running", "working"},
-                         "mark": stage_mark(node.get("st"))}
+                         "mark": stage_mark(node.get("st")),
+                         # 11-16 (spec E9 rule 43): the name's color is Fleet's (`route_stage_key`), by its place in the route.
+                         "key": route_stage_key(len(stages), node.get("st"))}
                 stage.update(stage_doer(node))
                 stages.append(stage)
         worker = row.get("worker") or []

@@ -33,6 +33,7 @@ const str=r=>r.map(x=>x.text).join('');
 const styles={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:150},lvl_y:{foreground:186},lvl_r:{foreground:217,bold:true},
   g_blocked:{foreground:217},g_spin:{foreground:230},g_work:{foreground:150,bold:true},g_work_off:{foreground:150,dim:true},g_idle:{foreground:186},
   g_dead:{foreground:217,bold:true},hb_claude:{foreground:116},hb_codex:{foreground:176},hb_opencode:{foreground:147}};
+for(const [i,c] of [147,116,150,186,176].entries()){styles['stg'+i+'_on']={foreground:c,bold:true};styles['stg'+i+'_off']={foreground:c,dim:true};}
 const t=(text,key='dim')=>({text,...(styles[key]||{dim:key==='dim'})});
 const USAGE=[
  {harness:'claude',parts:[t('5h '),t('12%','lvl_g'),t('(↻ 2h)'),t(' │ '),t('7d '),t('66%','lvl_y'),t('(↻ 5d)'),t(' │ '),t('fable ','dim'),t('3%','lvl_g')]},
@@ -76,7 +77,7 @@ assert.match(L[a+2].trimEnd(),/^codex +5h 30%\(↻ 1h\) │ 7d 8%\(↻ 6d\)$/,L[
 assert.match(L[a+3],/^opencode +\? +⚙ +▾$/,L[a+3]);        // none reported: `?` dim; the last row keeps the buttons
 assert.equal(L.length-2,a+3,'the last row is the harness row');
 // Looks: the name dim, the section name as MESSAGES' and MEM's (dim, title role), the line in the messages' line role.
-const row=v.rows[a+1];assert.equal(row.find(p=>p.text.startsWith('claude')).dim,true);
+const row=v.rows[a+1];assert.equal(row.find(p=>p.text.startsWith('claude')).role,'harness-name');
 const head=v.rows[a+1-1];assert(head.some(p=>p.role==='title'&&p.text==='USAGE'),JSON.stringify(head));
 assert(head.some(p=>p.role==='messages'&&/^─+$/.test(p.text)));
 const q=v.rows[a+3].find(p=>p.text==='?');assert.equal(q.dim,true);
@@ -194,7 +195,11 @@ assert.equal(resolved.foreground,view.FACES.dark.accent);
 assert(top.some(p=>p.role==='accent'&&p.text==='1'));assert(top.some(p=>p.role==='title'&&p.text==='QUESTIONS'));
 for(let y=a;y<=b;y++)assert(v.hits.some(h=>h.row===y&&h.action==='question'&&h.left===2&&h.right===47),'row '+y);
 // The letters inside keep their red and their order; no ground is painted.
-const first=v.rows[a+1].find(p=>p.text.startsWith('MESSAGES'));assert.equal(first.role,'accent');assert(!first.blink);
+// 11-16: the border alone is red; the question's words and its `◑` are the body color (253), not blinking.
+const first=v.rows[a+1].find(p=>p.text.startsWith('MESSAGES'));assert.equal(first.foreground,253);assert(!first.role&&!first.blink&&first.dim===false);
+assert.equal(v.rows[a+1].find(p=>p.text==='◑').foreground,253);
+assert(v.rows[a+2].filter(p=>/건/.test(p.text)).every(p=>p.foreground===253));
+assert(v.rows[a+2].filter(p=>/^\d $/.test(p.text)).every(p=>p.foreground===253));
 assert(v.rows.flat().every(p=>p.background===undefined));
 """)
 
@@ -421,6 +426,107 @@ const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
 assert(/작은 수정/.test(box)&&/code · 직접/.test(box),box);
 """)
 
+
+    # 6 (corrected 11-16 12:57) ---------------------------------------------------------------------------------
+    def test_only_the_box_line_is_red_and_the_words_inside_are_the_body_color(self):
+        self.node(r"""
+const F=view.FACES;
+for(const [opt,body,rose] of [[{},F.dark.body===253?253:253,F.dark.accent],[{light:true,theme:'light'},237,F.light.accent]]){
+  const v=draw({...opt,background:opt.light?'light':'dark'}),L=inside(v),a=L.findIndex(l=>/^╭─ 1 QUESTIONS/.test(l));
+  const top=v.rows[a];
+  const painted=p=>view.appearance([[p]],{theme:opt.theme||'terminal'},{colors:256,background:opt.light?'light':'dark'})[0][0];
+  // The border: every line cell the rose (both faces).
+  assert(top.filter(p=>/[╭─╮]/.test(p.text)&&p.role==='accent-line').every(p=>painted(p).foreground===rose));
+  // The words and the choices' row in the box: the body color and nothing else red.
+  const pick=y=>v.rows[y].filter(p=>p.text.trim()&&!/^[│ ]+$/.test(p.text));
+  const words=pick(a+1).concat(pick(a+2).filter(p=>!/ · |\(추천\)/.test(p.text)));
+  assert(words.length>=4);
+  for(const p of words)assert.equal(painted(p).foreground,body,JSON.stringify(p));
+  // The rose is left on `↵ answer · Ctrl+]` (as it was; only the words became the body color) and on the count in the label.
+  assert(pick(a+3).every(p=>p.role==='accent'),JSON.stringify(pick(a+3)));
+}
+// Folded back to the plain section the letters are red again; the folded strip's `◑답 대기 N` is rose and blinks as before.
+const plain=draw({height:20}),L=inside(plain),i=L.findIndex(l=>/^◑ MESSAGES/.test(l));
+assert(i>0&&plain.rows[i].find(p=>p.text.startsWith('MESSAGES')).role==='accent');
+const strip=view.render({width:140,height:3,side:false,folded:true,model:model(),state:'working',harness:'claude',frame:1,brief,sent:()=>[],cellWidth:cells,configuration:{}});
+assert(strip.rows[0].find(p=>p.text.startsWith('◑'))&&strip.rows[0].find(p=>p.text.startsWith('◑')).role==='accent');
+// A question answered elsewhere keeps its `◑` and count in the rose.
+const elsewhere=()=>({count:1,answerable:false,choices:0,label:'QUESTIONS',rows:[[t('◑ ','g_blocked'),t('다른 곳','loc_repo')]],one:[[t('◑ ','g_blocked'),t('다른 곳','loc_repo')]]});
+const e=draw({brief:elsewhere}),k=inside(e).findIndex(l=>/^╭─ 1 QUESTIONS/.test(l));
+assert.equal(e.rows[k+1].find(p=>p.text==='◑').role,'accent');
+// mono / eight colors / NO_COLOR: no color on the letters, the weight of the border tells.
+for(const o of [{theme:'mono'},{model:{colors:8}}]){
+  const m=draw(o),y=inside(m).findIndex(l=>/^╭─ 1 QUESTIONS/.test(l));
+  assert(m.rows[y+1].filter(p=>/MESSAGES/.test(p.text)).every(p=>p.bold!==true&&p.role!=='accent'),JSON.stringify(o));
+}
+""")
+
+    # 2 (corrected 11-16 12:57) ---------------------------------------------------------------------------------
+    def test_the_usage_rows_name_each_harness_in_its_hue_one_step_down(self):
+        self.node(r"""
+const F=view.FACES,hb={claude:116,codex:176,opencode:147};
+const L=(n)=>{const c=[0,95,135,175,215,255],m=n-16,rgb=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]].map(x=>x/255).map(x=>x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4);
+  const y=0.2126*rgb[0]+0.7152*rgb[1]+0.0722*rgb[2];return 116*Math.cbrt(y)-16;};
+const none=[{harness:'claude',parts:USAGE[0].parts},{harness:'codex',parts:[]},{harness:'opencode',parts:[]}];
+const nameOf=(v,name)=>v.rows.flat().find(p=>p.role==='harness-name'&&p.text===name);
+for(const [opt,table,face] of [[{},{claude:66,codex:133,opencode:104},'dark'],[{light:true,theme:'light'},{claude:30,codex:96,opencode:68},'light']]){
+  assert.deepEqual(F[face].harnessName,table);
+  for(const usage of [USAGE,none]){
+    const v=draw({...opt,background:face,usage});
+    for(const n of ['claude','codex','opencode']){const p=nameOf(v,n);assert(p,n);assert.equal(p.role,'harness-name');assert.equal(p.foreground,table[n],`${face} ${n}`);assert.equal(p.dim,false);}
+  }
+}
+// One step down from the Fleet hue the head's own name uses (hb_*): a lower L* on the dark face, and a quieter value than the numbers.
+for(const n of ['claude','codex','opencode'])assert(L(F.dark.harnessName[n])<L(hb[n])-8,n);
+// The same hue family: claude cyan, codex magenta, opencode blue (the head's names).
+const hueOf=n=>{const c=[0,95,135,175,215,255],m=n-16,[r,g,b]=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]];return r>g&&b>g&&Math.abs(r-b)<=40?'m':g>=r&&b>=r&&Math.abs(g-b)<=40?'c':b>r&&b>g?'l':'?';};
+assert.deepEqual(['claude','codex','opencode'].map(n=>hueOf(F.dark.harnessName[n])),['c','m','l']);
+// Mono, eight colors: no color; NO_COLOR: the style the rows were given (no hue).
+for(const o of [{theme:'mono'},{model:{colors:8}},{model:{no_color:true}}]){
+  const p=nameOf(draw(o),'codex');assert(p&&!Number.isInteger(p.foreground),JSON.stringify([o,p]));
+}
+""")
+
+    # 12 --------------------------------------------------------------------------------------------------------
+    def test_an_expanded_stage_names_wears_the_color_fleet_gives_that_stage(self):
+        self.node(r"""
+const stages=[['plan','✓','stg0_off'],['plan-check','✓','stg1_off'],['execute','●','stg2_on'],['impl-review','','stg3_off'],['test','','stg4_off'],['report','','stg0_off']]
+  .map(([name,mark,key])=>({name,mark,key,current:mark==='●'}));
+const worker={glyph:'⠏',kind:'working',role:'worker',stage:'execute',stage_key:'stg2_on',tool:'Edit',target:'/a/b/panel-view.cjs',elapsed:'3m',
+  paint:{glyph:t('⠏','g_spin'),harness:t('claude','hb_claude'),model_text:t('Sonnet 5.5','hb_claude'),effort:t('high','dim'),ctx:t('40%','lvl_g'),gauge5:[t('━━','lvl_g'),t('───'),t(' 40%')]}};
+const route={id:'rt-s',title:'패널 손질',kind:'working',state:'working',shape:'staged',kind_word:'code',elapsed:'42m',role:'owner',stages,
+  paint:{glyph:t('⠏','g_spin'),harness:t('codex','hb_codex'),model_text:t('GPT 5.5','hb_codex'),effort:t('xhigh','dim'),ctx:t('52%','lvl_g'),gauge5:[t('━━━','lvl_g'),t('──'),t(' 52%')]},
+  owner_paint:{glyph:t('⠏','g_spin'),harness:t('codex','hb_codex'),model_text:t('GPT 5.5','hb_codex'),effort:t('xhigh','dim'),ctx:t('52%','lvl_g'),gauge5:[t('━━━','lvl_g'),t('──'),t(' 52%')]},
+  workers_live:[worker]};
+const opt={routes:[route],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1},question:false};
+const v=draw({...opt,height:60});
+const L=lines(v);
+const place=v.rows.find(r=>/^\│?\s*code · staged 3\/6/.test(str(r).replace(/^│ │ /,'').replace(/^│ /,'')));
+// The worker's stage row in the worker box: the name in the color Fleet gives the stage `execute` (its 3rd, running: index 2, lit).
+const row=v.rows.find(r=>/│ +execute · Edit/.test(str(r)));assert(row,L.join('\n'));
+const name=row.find(p=>p.text==='execute');assert.equal(name.foreground,150);assert.equal(name.bold,true,'lit like Fleet\'s running stage');
+assert.equal(row.find(p=>p.text.includes('Edit')).foreground,253);
+// The kind row names the current stage in the same color; a finished/waiting stage would be dimmed.
+const kind=v.rows.find(r=>/code · staged 3\/6/.test(str(r)));assert(kind,L.join('\n'));
+const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true);
+// Other states by Fleet's rule: a finished stage dim of its hue, a failed one the failure red, a waiting one dim.
+const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
+const failed=draw({...opt,height:60,routes:[{...route,stages:other,workers_live:[{...worker,stage_key:'lvl_r'}]}]});
+const f=failed.rows.find(r=>/│ +execute · Edit/.test(str(r))).find(p=>p.text==='execute');assert.equal(f.foreground,217);assert.equal(f.bold,true);
+const done=draw({...opt,height:60,routes:[{...route,workers_live:[{...worker,stage:'plan',stage_key:'stg0_off'}]}]});
+const d=done.rows.find(r=>/│ +plan · Edit/.test(str(r))).find(p=>p.text==='plan');assert.equal(d.foreground,147);assert.equal(d.dim,true);
+// No key sent (an older backend): the body color as before.
+const old=draw({...opt,height:60,routes:[{...route,workers_live:[{...worker,stage_key:undefined}],stages:stages.map(s=>({...s,key:undefined}))}]});
+assert.equal(old.rows.find(r=>/│ +execute · Edit/.test(str(r))).find(p=>p.text==='execute').foreground,253);
+// Mono, eight colors and NO_COLOR read as before: the body color, no weight.
+for(const o of [{theme:'mono'},{model:{...opt.model,colors:8}},{model:{...opt.model,no_color:true}}]){
+  const m=draw({...opt,...o,model:{...opt.model,...(o.model||{})},height:60}),nm=m.rows.find(r=>/│ +execute · Edit/.test(str(r))).find(p=>p.text==='execute');
+  assert(nm&&!(nm.foreground&&nm.foreground!==253)&&nm.bold!==true&&nm.dim!==true,JSON.stringify([o,nm]));
+}
+// The folded one-row form (a bottom-layout row) keeps its name color.
+const one=draw({...opt,side:false,width:100,height:14}),oneRow=one.rows.find(r=>/staged/.test(str(r)));assert(oneRow,lines(one).join('\n'));
+assert(oneRow.filter(p=>p.text==='execute').every(p=>p.foreground===253||p.foreground===undefined||p.foreground===null),JSON.stringify(oneRow));
+""")
 
 if __name__ == "__main__":
     unittest.main()

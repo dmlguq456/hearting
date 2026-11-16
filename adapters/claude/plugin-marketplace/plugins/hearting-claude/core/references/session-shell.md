@@ -413,17 +413,20 @@ popup; a request row the MESSAGES popup).
   the next question's summary (its first row `◑ …` and its choices on one row
   `1 label (recommended) · 2 … · +2`, or its first two rows) and, for a wait
   answered elsewhere, where (`1 QUESTIONS · answer below`). The question a press
-  answers here, now, reads in rose letters (11-15, the person changed rules 22 and 25's
-  question button: "그냥 질문은 글자 자체를 붉은 색으로"): its words and its choices row in
-  the question's rose (`accent`, 174 on a dark or unknown face, 131 on a light one), never
-  dimmed and no weight added, on no ground of their own (no fill, no chip, no bar); the
+  answers here, now, was drawn in rose letters from 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"); on 11-16 the person
+  took that back ("G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로 해"): the red is the box's line alone
+  (`accent`, 174 on a dark or unknown face, 131 on a light one), and its words, its `◑` and its choices row
+  inside the box are the body color (253 / 237), never dimmed and no weight added, on no ground of their own
+  (no fill, no chip, no bar); `↵ answer · Ctrl+]` keeps its rose at the right, the dim parts (the ` · `, the count, a
+  recommendation's mark, the answers sent, the guide line) their dim. Folded back to the plain section (short of
+  rows) the letters are red and blink as in 11-15. The
   choices row is text, `1 label · 2 label` (the ` · ` and the count `+N` dim; short of cells
   the last choices leave for their count, and where not even the first fits beside the count
   it shows with its name cut by `…`, its number kept, the rest counted: the first choice always
   shows), and under them `↵ answer · Ctrl+]` in rose at the right; a press on any of them opens
   the question popup. Short of rows the action row goes first, then the choices; the first row
-  stays to the last. Eight colors read the letters in red, mono and `NO_COLOR` in bold (the
-  `accent` rule). Nothing else is red but a wait answered elsewhere's `◑` and the guide line's
+  stays to the last. Eight colors, mono and `NO_COLOR` tell a question to answer here from the rest by the box
+  line's weight. Nothing else is red but the box's line, a wait answered elsewhere's `◑` and the guide line's
   count (11-15: what waits blinks, above): not an answer on its way, not the guide line's words or
   `질문 변경됨`.
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
@@ -450,7 +453,11 @@ popup; a request row the MESSAGES popup).
   the owner's `CTX` and title, its right line where the route's rows end): each
   worker's first row (its mark, `worker`, harness, model, effort) in the box's top line
   (`╭─ ⠸ worker claude Sonnet 5.5 ─╮`, a later worker's in the line between, `├─ … ─┤`),
-  then its `CTX` row (its own time after its percent) and its stage, open tool and
+  then its `CTX` row (its own time after its percent) and its stage (11-16, the person: "staged stage 펼쳤을떄 stage 이름은 좀
+  눈에 띄게 ... fleet 처럼": the name in the color Fleet gives that stage of its route, the backend's `stage_key` from
+  `render_stages.route_stage_key`, the one table both screens use: stage `i` is `stg{i % 5}`, lit while it runs, dimmed
+  once done or while it waits, the failure red when failed, the warning yellow on attention; the kind row's current
+  stage the same; the folded one-row forms and mono, eight colors and `NO_COLOR` keep the body color), open tool and
   target. A fourth row says which kind of route it is and where it stands, dim:
   Fleet's kind word (`code`, `lab`, `frame`), then `one-shot` and what it is on now
   (`Edit host.cjs 3m`), or `staged 3/7` with the current stage and its mark, or with no
@@ -495,7 +502,8 @@ popup; a request row the MESSAGES popup).
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
   USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
   opens nothing; the thin rule that parted MEM from the last row became it), then one row per harness in Fleet's header
-  order (Claude, Codex, OpenCode): the harness's name dim, then the windows that harness reports as the last row showed
+  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 66, codex 133, opencode
+  104 on a dark or unknown face, 30, 96, 68 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
   them (`5h 12%(↻ 2h) │ 7d 66%`, Fleet's level colors; a window not reported is left out; a harness with none reported reads a
   dim `?`). The values are the usage records Fleet already keeps (`~/.local/state/agent-fleet/usage/<harness>.json`, read
   by `usage_cache`; this window's own harness keeps the values its panel observed, a Claude callback included); nothing is

@@ -375,6 +375,23 @@ def _projection_route_seq(entity):
             for node in _collapse_parallel_nodes(nodes)]
 
 
+def route_stage_key(index, state, *, bright=True):
+    """The style key Fleet names a route stage with (``_route_stage_segs``), the one table for every screen.
+
+    ``index`` is the stage's place in its route's sequence (its color is ``index % 5``, as
+    ``_dispatch_stage_color_index`` gives a running worker); ``state`` the route reader's own
+    word. A failed stage is Fleet's failure red, one that needs attention or is recovering its
+    warning yellow; a stage running now is its hue lit (``bright`` False: the off beat of the
+    blink); a finished or waiting stage is the same hue dimmed.
+    """
+    if state in ("failed", "dead"):
+        return "lvl_r"
+    if state in ("attention", "degraded", "reconciling", "recovering"):
+        return "lvl_y"
+    lit = state in ("active", "running", "working") and bright
+    return "stg%d_%s" % (index % 5, "on" if lit else "off")
+
+
 _LEGACY_STAGE_COLOR_INDEX = {
     "code-plan": 0,
     "code-execute": 1,

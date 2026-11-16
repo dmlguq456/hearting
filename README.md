@@ -205,8 +205,8 @@ routes popup with that route unfolded, a request's row the MESSAGES popup. Exper
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can
 answer here now stands in a thin rounded box with a rose border, on no fill (`╭─ 3 QUESTIONS › ──╮`; a dim border where only
 an answer on its way or a wait answered elsewhere stands): its first line, its choices as text
-(`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors; the border's weight tells the two apart
-in mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
+(`1 label · 2 label`) in the body color, and `↵ answer · Ctrl+]` under them (the border's weight tells the two apart
+in eight colors, mono or `NO_COLOR`); nothing else in the panel is red but that border and a wait answered elsewhere's `◑` and count.
 While an answer waits that box's border, and the folded strip's `◑to answer N`, blink between
 two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`).
 The panel ends with `USAGE`: one row each for Claude, Codex and OpenCode with the 5h, 7d and model windows each reports

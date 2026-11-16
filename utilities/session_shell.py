@@ -1028,7 +1028,9 @@ def _observe_session(observe, harness, sid, pid, start):
 # the steward mark's two beats); the rest arrive already styled.
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
-                    "hb_claude", "hb_codex", "hb_opencode", "hb_other")
+                    "hb_claude", "hb_codex", "hb_opencode", "hb_other",
+                    # Fleet's stage colors (`render_stages.route_stage_key`): a running stage lit, the others dimmed.
+                    *("stg%d_%s" % (i, on) for i in range(5) for on in ("on", "off")))
 
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,

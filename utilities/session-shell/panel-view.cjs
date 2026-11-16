@@ -65,12 +65,18 @@ const FACES={
     // question's red letters in QUESTIONS, `◑답 대기 N` on the folded strip) goes between these two reds,
     // the lit one first, on Fleet's one-second beat (WAIT_BLINK). 11-16 ("점멸은 안하는데"): 174 and 131 were
     // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
-    waitBlink:[217,95]},
+    waitBlink:[217,95],
+    // 11-16 (the person: "usage에서 하네스 이름도 어둡게 원래 테마 컬러를 넣어주고"): the harness names of the USAGE rows, each in
+    // its Fleet hue (`hb_*`: claude cyan, codex magenta, opencode blue) one step down (L* 53.5, 52.3, 59.3; the lit hues
+    // 116, 176, 147 are L* 81, 67, 74), so a name reads as a label and never louder than its numbers.
+    harnessName:{claude:66,codex:133,opencode:104}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
-    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153,waitBlink:[88,167]},
+    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153,waitBlink:[88,167],
+    // (The light face: the deep hues 23, 60, 25 (L* 36, 42, 40) one step lighter: L* 50.8, 45.7, 56.7.)
+    harnessName:{claude:30,codex:96,opencode:68}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -143,6 +149,7 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     else if(role==='steward'&&theme==='mono')dim=false;
     // Spec rule 47: the moving frame's cells take their step's tone on their face (an unknown face
     // the dark face's), at full strength; mono never moves (no tone).
+    else if(role==='harness-name'&&theme!=='mono'){foreground=F.harnessName[part.harness]??foreground;dim=false;}
     else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
@@ -815,11 +822,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // line are never red: what is red is what a press answers now.
     const here=!!summary&&summary.answerable===true;
     const red=part=>({...part,...(styles.g_blocked||{}),role:'accent',dim:false,bold:part.bold===true||model.no_color===true});
+    // 11-16 (the person: "G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로 해"): inside the box the red is the border's alone, the
+    // question's words, its choices and its `◑` are in the body color (folded back to the plain section they are red as before).
+    const body=part=>({...part,...(styles.loc_repo||{}),role:'',dim:false,bold:part.bold===true});
+    const ink=part=>boxedQuestions()?body(part):red(part);
     // The choices as one row of words: the first one always shows (short of cells its name is cut with
     // `…`, its number kept, the rest counted `+N`; narrower still the count gives way first).
     const choiceLine=parts=>{
       const lead=parts.length&&!clean(parts[0].text).trim()?[parts[0]]:[];
-      const items=choiceItems(parts).map(c=>c.map(part=>part.dim===true&&!/^\d+ $/.test(clean(part.text))?part:red(part)));
+      const items=choiceItems(parts).map(c=>c.map(part=>part.dim===true&&!/^\d+ $/.test(clean(part.text))?part:ink(part)));
       const more=Math.max(0,...parts.map(part=>{const m=/^(?: · )?\+(\d+)$/u.exec(clean(part.text));return m?Number(m[1]):0;}));
       const count=n=>n?[text(' · +'+n,'dim')]:[];
       for(let k=items.length;k>=1;k--){
@@ -846,7 +857,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const summaryRows=()=>{
       const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(recut(P(row))));
       if(!here)return list.map(row=>cut(row,inner).map(blinking));
-      const out=list.map((row,i)=>i===1&&summary.choices>0?choiceLine(row):cut(row.map(part=>part.role==='accent'||!clean(part.text).trim()?part:red(part)),inner));
+      const out=list.map((row,i)=>i===1&&summary.choices>0?choiceLine(row):cut(row.map(part=>!clean(part.text).trim()?part:part.role==='accent'&&!boxedQuestions()?part:ink(part)),inner));
       if(keepAction&&briefTwo)out.push(actionRow());
       // 11-16 (the person: the box's border blinks, not the letters inside it): the letters of a question answered here
       // stand still while the box carries the blink; folded back to the plain section they blink as before.
@@ -882,6 +893,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the older `execute ✕ 2/3` step text (that stays for a record that names no kind).
     const shaped=r=>{const shape=String(r.shape||'');return shape==='one-shot-owner'||!!shape&&shape!=='unknown'&&(!/^staged/.test(shape)||Array.isArray(r.stages)&&r.stages.length>0);};
     const third=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:r.step&&!shaped(r)?[text(r.step)]:[];
+    // 11-16 (the person: "staged stage 펼쳤을떄 stage 이름은 좀 눈에 띄게 ... fleet 처럼"): a stage's name in the expanded rows
+    // (a live worker's stage row, the kind row's stage) wears the color Fleet gives that stage of its route (the backend's
+    // `key`/`stage_key`: Fleet's `route_stage_key`, one table for both screens); mono, eight colors and NO_COLOR read as before.
+    const stageInk=key=>key&&model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256?key:'loc_repo';
     const markOf=stage=>stage.mark==='●'?pulse('●'):stage.mark==='✓'?text('✓','lvl_g'):stage.mark==='✕'?text('✕','g_dead'):text('·','dim');
     // Spec rule 34 (d): the bottom layout's route row names its kind too, in the words and
     // values of the side layout's third row and Fleet's ROUTES (`one-shot`, `staged 3/7
@@ -1128,7 +1143,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-7);
       const c=ctxTimed(p,E,room-3);
       if(c)body.push([text('   '),...c]);
-      const stage=w.stage?[text(w.stage,'loc_repo')]:[],tool=w.tool?[text(w.tool,'loc_repo')]:[];
+      const stage=w.stage?[text(w.stage,stageInk(w.stage_key))]:[],tool=w.tool?[text(w.tool,'loc_repo')]:[];
       const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3;
       for(const t of [[...tool,...(w.target?[text(' '+w.target,'loc_repo')]:[])],[...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool,[]]){
         const row=[...stage,...(stage.length&&t.length?[text(' · ','dim')]:[]),...t];
@@ -1174,15 +1189,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const at=current>=0?current:next>=0?next:stages.length-1;
         word='staged '+(at+1)+'/'+stages.length;
         if(current>=0){
-          pieces.push([[text(stages[current].name||'·','loc_repo'),text(' '),markOf(stages[current])]]);
+          pieces.push([[text(stages[current].name||'·',stageInk(stages[current].key)),text(' '),markOf(stages[current])]]);
           if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([[text('owner '+r.owner_model,'dim')]]);
         }else{
-          pieces.push([[text(stages[at].name||'·','loc_repo')]]);
+          pieces.push([[text(stages[at].name||'·',stageInk(stages[at].key))]]);
           if(r.visibility?.next)pieces.push([[text(r.visibility.next,'dim')]]);
         }
       }else if(shape&&shape!=='unknown'){
         word=shape;
-        if(current>=0)pieces.push([[text(stages[current].name||'·','loc_repo'),text(' '),markOf(stages[current])]]);
+        if(current>=0)pieces.push([[text(stages[current].name||'·',stageInk(stages[current].key)),text(' '),markOf(stages[current])]]);
       }else if(!kind)return null;
       const lead=[text('  '),...(kind?[text(kind,'dim')]:[]),...(kind&&word?[text(' · ','dim')]:[]),...(word?[text(word,'dim')]:[])];
       // Spec rule 43 (g): the workers gone for rows, the kind row ends with their count (it
@@ -1417,7 +1432,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const parts=painted(u.parts).filter(p=>p&&typeof p==='object'),groups=[];let current=[],sep=null;
       for(const part of parts){if(String(part.text)===' │ '){sep=sep||part;if(current.length)groups.push(current);current=[];}else current.push(part);}
       if(current.length)groups.push(current);
-      const name=usageName(u),lead=pad=>[text(name,'dim'),text(' '.repeat(Math.max(1,pad)))];
+      const name=usageName(u),mark=text(name,'dim'),lead=pad=>[{...mark,role:'harness-name',harness:u.harness},text(' '.repeat(Math.max(1,pad)))];
       const tries=[];
       if(!groups.length)tries.push([text('?','dim')]);
       else{
@@ -1433,7 +1448,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const row=[...lead(pad),...body];
         if(size(row)<=room)return {row,values:true};
       }
-      return {row:cut([text(name,'dim')],room),values:false};
+      return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
     // The last row beside the buttons: that harness's row when its values fit there.

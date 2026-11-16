@@ -138,7 +138,7 @@ for(const first of firsts)for(const n of [1,2,5]){
   const row=v.rows[at+1],line=lines[at+1],boxed=/^│ │ /.test(line),text=boxed?line.slice(6,-4):line.slice(4,-2);
   assert(/^1 /.test(text),'the first choice, its number kept\n'+tag);
   assert(row.every(x=>x.background===undefined),'no ground of its own\n'+tag);
-  assert(row.filter(x=>/[^\s·+\d│]/.test(x.text)).every(x=>x.foreground===174&&x.dim!==true),'its words in the answer wait\'s red\n'+tag);
+  assert(row.filter(x=>/[^\s·+\d│]/.test(x.text)).every(x=>x.foreground===(boxed?253:174)&&x.dim!==true),'its words in the body color inside the box (11-16), the answer wait\'s red in the plain section\n'+tag);
   const first1=[...first].slice(0,1).join('');
   if(w>=(boxed?20:16))assert(text.includes(first1)||first.length<1,'its name starts\n'+tag);
   assert(text.includes(first)||text.includes('…'),'whole or cut with …\n'+tag);

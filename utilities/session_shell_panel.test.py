@@ -1781,13 +1781,15 @@ const red=x=>x.foreground===174&&x.dim!==true;
  assert(head>0,rows.join('\n'));assert(/^│ │ ✓ 답 보냄 · 2 표준 출력 +│ │$/.test(rows[head+1])&&/^│ ╰─+╯ │$/.test(rows[head+5]),rows.join('\n'));
  assert(!grounds(v).some(Boolean),rows.join('\n'));
  const at=[head+2,head+3,head+4];
- // The first row: `◑` and the words in red, no weight added.
+ // The first row: `◑` and the words in the body color (11-16, the person: "질문 바운더리만 붉게 하고, 내용은 흰색으로"), no weight added.
  const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
- assert(first.filter(x=>x.text.trim()).every(x=>red(x)&&x.bold!==true),JSON.stringify(first));
- // The choices: one row of words, the numbers and names red, the ` · ` and `(추천)` dim.
+ const bodyInk=x=>x.foreground===253&&x.dim!==true&&x.bold!==true&&x.role!=='accent';
+ assert(first.filter(x=>x.text.trim()).every(bodyInk),JSON.stringify(first));
+ // The choices: one row of words, the numbers and names in the body color, the ` · ` and `(추천)` dim.
  assert(rows[at[1]].startsWith('│ │   1 파일 · 2 표준 출력 (추천) · 3 둘 다'),rows[at[1]]);
  const ch=inside(v.rows[at[1]]);
- assert(ch.filter(x=>/파일|표준 출력|둘 다|^\d $/.test(x.text)).every(red)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
+ assert(ch.filter(x=>/파일|표준 출력|둘 다|^\d $/.test(x.text)).every(bodyInk)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
+ assert(ch.filter(x=>x.text===' (추천)').every(x=>x.dim===true),JSON.stringify(ch));
  // The action at the right, in rose.
  assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │ │'),rows[at[2]]);
  assert(inside(v.rows[at[2]]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[at[2]]));
@@ -1811,15 +1813,16 @@ for(const q of [there,null]){const v=paint({q,sent}),rows=v.rows.map(str);
  assert(line.length&&line.every(x=>x.dim===true&&x.role==='messages'&&x.blink!==true),JSON.stringify(q)+JSON.stringify(line));
  assert(!v.rows.flat().some(x=>x.role==='accent-line'),JSON.stringify(q));}
 // (c) Eight colors: the words in the terminal's red; mono and NO_COLOR: by weight; no bar, no ground.
-for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold===true],[{},{colors:8,styles:{...styles,g_blocked:{foreground:1}}},x=>x.foreground===1],[{},{no_color:true},x=>x.bold===true]]){
+// (11-16: inside the box the letters are the body color, never red or bold; the box's line carries the weight.)
+for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold!==true&&x.foreground==null],[{},{colors:8,styles:{...styles,g_blocked:{foreground:1}}},x=>x.foreground!==1&&x.bold!==true],[{},{no_color:true},x=>x.bold!==true]]){
  const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);
  assert(!grounds(v).some(Boolean)&&!rows.join('').includes('▌'),JSON.stringify(cfg)+'\n'+rows.join('\n'));
  const r=v.rows.find(r=>str(r).includes('◑ 로그를'));assert(inside(r).filter(x=>/로그/.test(x.text)).every(look),JSON.stringify([cfg,m,r]));}
 // (d) A light face: the deep rose; a shade keeps the panel's own ground under the red words.
 {const v=paint({q:choice(),cfg:{theme:'light'}}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
- assert(inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===131)&&!grounds(v).some(Boolean),JSON.stringify(r));}
+ assert(inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===237)&&!grounds(v).some(Boolean),JSON.stringify(r));}
 {const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
- assert(inside(r).every(x=>x.background===235)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===174),JSON.stringify(r));}
+ assert(inside(r).every(x=>x.background===235)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===253),JSON.stringify(r));}
 // (e0) Short of rows (20): the plain section, no box lines; its red letters blink again as before.
 {const v=paint({q:choice(),height:20,sent}),rows=v.rows.map(str),at=rows.findIndex(r=>r.includes('◑ 로그를'));
  assert(rows.some(r=>/^│ 1 QUESTIONS ─+ › │$/.test(r))&&!rows.some(r=>/╭─ 1 QUESTIONS/.test(r))&&at>0,rows.join('\n'));
