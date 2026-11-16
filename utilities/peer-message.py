@@ -4047,6 +4047,26 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
         return guidance
 
 
+def receiver_guidance_once(text="", recipient=None, *, cwd=None):
+    """``receiver_guidance`` without repeating the text the session already holds.
+
+    The ordinary guidance is one fixed string, so every peer message used to re-inject it.
+    An identical text right after the one delivered is left out; a changed text (another
+    request or handoff) and the first turn after a compaction or clear (``context_repeat``)
+    deliver again. OpenCode's system-prompt context lasts for one request only, so its
+    per-turn repeat stays the carrier there."""
+    guidance = receiver_guidance(text, recipient, cwd=cwd)
+    if not guidance or not isinstance(recipient, dict) or recipient.get("harness") == "opencode":
+        return guidance
+    try:
+        import context_repeat
+        return context_repeat.fresh_once(
+            str(recipient.get("harness") or ""), str(recipient.get("session_id") or ""),
+            "peer-guidance", guidance)
+    except Exception:
+        return guidance
+
+
 def _ack_watch_refs(pending, recipient, carrier):
     for watch_ref in (pending or {}).get("refs") or ():
         if not isinstance(watch_ref, str) or not watch_ref.startswith("peer-watch:"):

@@ -94,25 +94,13 @@ runtime path, and any Claude-specific preview/screenshot/console wiring.
 
 Claude `UserPromptSubmit` first runs the portable `mem-recall-inject.sh` bridge.
 It emits `hookSpecificOutput.additionalContext` only for bounded active
-current-project/global capsule headline-and-ID candidates (maximum six and
-1,200 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
+current-project/global capsule headline-and-ID candidates (maximum three and
+600 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
 a same-turn recall-opportunity receipt on a successful probe, including a valid
 zero-hit probe. Main-session material mutation requires that receipt; the
 explicit `recall-gate` path recovers a missing or failed hook. Registered
 workers stay silent. Candidate relevance and full-record adoption remain model
 judgments.
-
-`SessionStart` runs the portable `local-evidence-inject.sh` presence probe for
-the session cwd: research/documents/analysis bucket counts plus at most nine
-newest entry paths from the canonical artifact root, taken a bucket at a time
-and at most once per artifact (2,400-UTF-8-byte bound, no body reads, no prompt
-classifier, silent when the root holds no such artifacts, worker-exempt,
-fail-open). It realizes `roles/response-policy.md` "Local
-evidence before recall" deterministically. It is registered matcher-less, so it
-fires for `startup`, `resume`, `clear`, and `compact` alike — the compaction
-case is why a per-prompt registration was defensible, and it is the one thing
-the start event already covers. Off the prompt path the block costs ~360 tokens
-once per session instead of once per turn.
 
 There is no automatic distiller (D-78). Claude's built-in file memory is
 disabled via the top-level `"autoMemoryEnabled": false` setting in

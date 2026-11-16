@@ -789,7 +789,7 @@ class PromptTest(_BaseTest):
         payload = {"session_id": "claude-payload-session", "cwd": "/tmp/project", "prompt": prompt}
         calls = []
         mod = SimpleNamespace(
-            receiver_guidance=lambda *args, **kwargs: calls.append((args, kwargs)) or "ordinary guidance",
+            receiver_guidance_once=lambda *args, **kwargs: calls.append((args, kwargs)) or "ordinary guidance",
             emit_peer_context=lambda *args, **kwargs: None,
         )
         with mock.patch.object(hook, "_is_helper_process", return_value=False), \

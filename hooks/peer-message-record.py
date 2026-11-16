@@ -724,7 +724,7 @@ def main(exit_guard=False):
         guidance = ""
         if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
                     or "cross-session-message" in prompt):
-            guidance = mod.receiver_guidance(
+            guidance = mod.receiver_guidance_once(
                 prompt, {"harness": "claude", "session_id": payload.get("session_id")},
                 cwd=payload.get("cwd") or os.getcwd())
         rows = []

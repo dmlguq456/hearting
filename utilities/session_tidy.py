@@ -2915,6 +2915,10 @@ def apply_deferred(entries) -> int:
                                  "memory_receipts": receipts[-200:]})
                 data["schema"] = SCHEMA
                 atomic_write_json(path, data)
+            elif kind == "repeat-seen":
+                import context_repeat
+                if not context_repeat.commit({**entry, "kind": entry.get("name")}):
+                    continue
             elif kind == "notices":
                 data = read_json(path)
                 if entry.get("require_existing") and not isinstance(data, dict):
@@ -3716,6 +3720,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     continue
                 wait_questions.append(item.get("question") or "답 필요")
     answer_wait_lines = answer_wait_text(wait_questions)
+    open_question_lines: list = []     # the person spoke while a question is open (this prompt only)
+    open_question_seen = False         # that line was looked for on this prompt
     state_seats = [seat]
     if _native_session_key(harness, sid) and prior_seat:
         state_seats.append(prior_seat)
@@ -3775,10 +3781,11 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                         human_wait_state.close_signal(seat.key, sequence=sequence,
                                                       harness=harness, session_id=sid,
                                                       answer=prompt_text)
+                        open_question_seen = bool(render_context)
                         line = render_context and _open_question_line(
                             human_wait_state, harness, sid, seat.key)
                         if line:
-                            answer_wait_lines.append(line)
+                            open_question_lines.append(line)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
@@ -3792,6 +3799,11 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # compaction; count it once.
         compacting = (event == "compact" or source == "compact") and not (
             prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC)
+        if compacting or (event == "start" and source == "clear"):
+            # The earlier text may be gone from the session's context: let it in once more.
+            with contextlib.suppress(Exception):
+                import context_repeat
+                context_repeat.reset(harness, sid)
         launch = None
         if event == "start" and source in {"startup", "resume", "select", "clear", "compact", "fork"}:
             try:
@@ -3957,7 +3969,26 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             resume_text = handover.resume_line(seat, harness, sid)
             if resume_text:
                 parts.append(resume_text)
-        parts.extend(answer_wait_lines)
+        # An unchanged "[답변 필요]" line is already in the session's context: it goes in once
+        # per question, again only when its text changes or after a compaction/clear. OpenCode
+        # keeps system-prompt context for the one request only, so its repeat is the carrier.
+        repeat_entries: list = []
+        if harness != "opencode":
+            for repeat_kind, repeat_lines, repeat_looked in (
+                    ("answer-needed", answer_wait_lines, render_context and event in ("start", "prompt")),
+                    ("open-question", open_question_lines, open_question_seen)):
+                if not repeat_looked:
+                    continue
+                with contextlib.suppress(BaseException):
+                    import context_repeat
+                    repeat_lines, entry = context_repeat.filter_fresh(harness, sid, repeat_kind, repeat_lines)
+                    if entry:
+                        repeat_entries.append(dict(entry, kind="repeat-seen", name=repeat_kind))
+                    if repeat_kind == "answer-needed":
+                        answer_wait_lines = repeat_lines
+                    else:
+                        open_question_lines = repeat_lines
+        parts.extend(answer_wait_lines + open_question_lines)
         if card_due or event == "start" or (event == "prompt" and (startup_context or {}).get("due")):
             # The experiment catalog's names, after everything else and inside the same 2400-byte budget.
             lab = _lab_block(cwd, INJECTION_MAX_BYTES - 1 - len("\n".join(parts).encode("utf-8")) - 1)
@@ -3976,6 +4007,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if notice:
                     emit_human(notice)
         if not text:
+            apply_deferred(repeat_entries)     # nothing goes out, so nothing is left to protect
             return ""
         (emit or (lambda t: None))(text)
         # The receipts are prepared here and applied by the caller when it
@@ -3983,6 +4015,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # card bridge prints in-process, a text CLI prints inside ``emit``) has
         # no later boundary, so it applies them immediately.
         receipts = [] if deferred is None else deferred
+        receipts.extend(repeat_entries)
         if card_due:
             receipts.append({"kind": "card-consumed",
                              "path": str(_consumed_path(card_seat)),
@@ -4038,6 +4071,9 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
                          bump_epoch=not (prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC))
     except (OSError, TimeoutError, StateError):
         return ""  # Native history remains the evidence; never hold up compaction.
+    with contextlib.suppress(Exception):
+        import context_repeat
+        context_repeat.reset(harness, sid)
     import session_tidy_clear as clear
     clear.note_compaction(seat, harness, sid, now=now)
     return ""

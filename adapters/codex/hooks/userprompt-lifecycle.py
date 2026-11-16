@@ -506,18 +506,15 @@ def retry_pending_peer(sid: str) -> None:
         pass
 
 
-def prompt_probe_context(payload, current_cwd, sid, *, startup_due):
+def prompt_probe_context(payload, current_cwd, sid):
     """Overlap independent reads, keeping their existing output/receipt order."""
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as probes:
-        evidence = (probes.submit(run_preflight, "local-evidence", current_cwd)
-                    if startup_due else None)
+    with ThreadPoolExecutor(max_workers=3) as probes:
         candidate = probes.submit(candidate_context, payload, current_cwd, sid)
         briefing = probes.submit(run_preflight, "briefing", current_cwd)
         budget = probes.submit(token_budget_context, current_cwd, sid)
         candidate_text, candidate_deferred = candidate.result()
-        return ([evidence.result() if evidence is not None else "", candidate_text,
-                 briefing.result(), budget.result()], candidate_deferred)
+        return ([candidate_text, briefing.result(), budget.result()], candidate_deferred)
 
 
 def main() -> int:
@@ -621,11 +618,10 @@ def main() -> int:
         spec = importlib.util.spec_from_file_location("peer_receiver_guidance", ROOT / "utilities/peer-message.py")
         peer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(peer)
-        parts.append(peer.receiver_guidance(current_prompt,
+        parts.append(peer.receiver_guidance_once(current_prompt,
             {"harness": "codex", "session_id": interaction_sid}, cwd=current_cwd))
     parts.append(card)
-    probe_parts, candidate_deferred = prompt_probe_context(
-        payload, current_cwd, sid, startup_due=startup.get("due"))
+    probe_parts, candidate_deferred = prompt_probe_context(payload, current_cwd, sid)
     parts.extend(probe_parts)
     if context_notice:
         parts.append(context_notice)
