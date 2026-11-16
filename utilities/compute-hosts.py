@@ -124,6 +124,39 @@ def _paths_overlap(left, right):
     return left == right or _path_contains(left, right) or _path_contains(right, left)
 
 
+def run_raw_data_dir(host, value):
+    """The launcher's raw_data_dir as the run on `host` sees it, or "" when it cannot.
+
+    A `path_namespace` run sees each target at its launcher path, so a value
+    below exactly one target passes unchanged and any other value is not
+    visible there. A host without a namespace gets the value as is, like cwd.
+    """
+    if not _canonical_namespace_path(value):
+        return ""
+    mapping = host.get("path_namespace")
+    if not isinstance(mapping, dict):
+        return value
+    covers = [target for target in mapping
+              if isinstance(target, str) and (target == value or _path_contains(target, value))]
+    return value if len(covers) == 1 else ""
+
+
+def raw_data_dir_setup(host, environ=None):
+    """The run preamble line for AGENT_RAW_DATA_DIR; never an empty value.
+
+    A run is not given AGENT_RUNTIME_DIR, so the raw dir is passed only when it
+    is a separate place the run can see. Otherwise the key is unset, which also
+    clears a stale shell value; a script reading `$AGENT_RAW_DATA_DIR/...` then
+    fails loudly instead of writing to `/experiments/...`.
+    """
+    values = os.environ if environ is None else environ
+    raw = values.get("AGENT_RAW_DATA_DIR", "")
+    if raw == values.get("AGENT_RUNTIME_DIR", ""):
+        return "unset AGENT_RAW_DATA_DIR"
+    visible = run_raw_data_dir(host, raw)
+    return f"export AGENT_RAW_DATA_DIR={shlex.quote(visible)}" if visible else "unset AGENT_RAW_DATA_DIR"
+
+
 def _validate_path_namespace(name, host, run_root):
     if "path_namespace" not in host:
         return
@@ -3096,6 +3129,7 @@ def cmd_run(args):
              + [
                  f"export HEARTING_COMPUTE_RUN_ID={shlex.quote(run_id)}",
                  f"export HEARTING_COMPUTE_HOST={shlex.quote(name)}",
+                 raw_data_dir_setup(host),
              ])
     workdir = args.cwd or host.get("workdir")
     if workdir:

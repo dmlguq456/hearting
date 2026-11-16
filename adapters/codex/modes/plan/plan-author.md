@@ -104,10 +104,11 @@ Preload per `_shared/profile-preload.md`:
    read callers, callees, and related modules.
 3. **Analyze current state**: identify the current structure, dependencies, and
    potential impact areas.
-   For environments, caches, downloads, external checkouts, temporary files and
-   training checkpoints, judge placement against the supplied project `runtime_dir`
-   or an established external project location. Keep artifact outputs to reports,
-   configs and small provenance; point to datasets by path/hash rather than
+   For environments, caches, downloads, external checkouts and temporary files,
+   judge placement against the supplied project `runtime_dir` or an established
+   external project location; checkpoints, per-sample outputs and raw results go
+   under `raw_data_dir`. Keep artifact outputs to reports, tables, figures,
+   summaries, configs and provenance; point to datasets by path/hash rather than
    planning automatic bulk copies. This is guidance, not a new plan field or
    approval condition.
 4. **Create the plan file** at the path specified in the prompt, using the

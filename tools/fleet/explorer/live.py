@@ -1295,7 +1295,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
     return routes, nodes
 
 
-def _direct_routes(routes, session_rows, session_index):
+def _direct_routes(routes, session_rows, session_index, now=None):
     """The route a session declared with ``--shape direct`` and does itself (11-16).
 
     A direct route has no job, stage record or worker row, so no route entity carries it and
@@ -1304,8 +1304,13 @@ def _direct_routes(routes, session_rows, session_index):
     result). It stands like any route while open (the session is its owner, so it is current
     while the session is live) and retires by the same rule as a finished one (a ``done`` row
     with its outcome and time). The row has no stages: the shape ``direct`` is its whole kind.
+    An open declaration older than this session's own process stands for nothing (Fleet's open-route rule,
+    ``route_chain.current_capability``: its ``ts`` is not before the session's start less the marker slack), so
+    a route left unfinished in an earlier run of the same session neither stands nor holds an idle tidy back.
     Only the session panel reads these rows (Fleet's own route list is not changed)."""
     from .. import route as route_reader
+    from ..projection import _SPEC_MARKER_FRESHNESS_SLACK_S
+    now = time.time() if now is None else now
     known = {route.get("id") for route in routes}
     state_of = {row["tag"]: row.get("state") for row in session_rows}
     found = []
@@ -1322,6 +1327,10 @@ def _direct_routes(routes, session_rows, session_index):
             state = state_of.get(tag)
             if state not in ("working", "idle", "blocked"):
                 continue                    # the owner is the session: no live session, no standing route
+            started = now - (_num(_get(info["session"], "elapsed_min")) or 0) * 60
+            stamp = node.get("ts")
+            if type(stamp) not in (int, float) or stamp < started - _SPEC_MARKER_FRESHNESS_SLACK_S:
+                continue                    # declared before this session process began: an earlier run's, left open
         elif status == "done" and result is not None:
             state = "done"
             outcome, result_at = _text(_get(result, "result", "status")), _num(_get(result, "at"))
@@ -1731,6 +1740,8 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "fold": fold,
             # The person's answer is on its way (rule 5, 11-14): listed as sent, waiting on no one.
             "sent": item.get("answer") == "sent",
+            # What that answer waits for when its session cannot take it by itself (`session_block`).
+            "answer_wait": (_text(item.get("answer_wait")) or None) if item.get("answer") == "sent" else None,
         }
         questions.append(record)
         if session and not older and not record["sent"]:
@@ -3763,7 +3774,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
     rows, index = _session_records(snapshot, now, resolver)
     routes, route_nodes = _route_records(snapshot, rows, index, resolver, now)
     # In place: the caller that observes this list (session_line) reads the same rows.
-    routes.extend(_direct_routes(routes, rows, index))
+    routes.extend(_direct_routes(routes, rows, index, now))
     counts, opened = current_route_counts(routes)
     result = {}
     for tag in opened:

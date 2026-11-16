@@ -255,6 +255,88 @@ def exact_binding(harness: str, sid: str) -> tuple[dict | None, str]:
     return (rows[0], "") if len(rows) == 1 else (None, "attachment-ambiguous" if rows else "attachment-unavailable")
 
 
+def release_behind(binding: dict) -> bool | None:
+    """Whether this window's display runs an older release than its launch path names now.
+
+    The host's own rule for its ``New release waiting`` line (host.cjs ``detectRelease``): the
+    release it runs is not the one its launch path (``HEARTING_SHELL_HOST_PATH``) resolves to
+    today. The release it runs is read from the backend it started from its own directory,
+    the launch path from its environment; None when either cannot be read.
+    """
+    if not valid_binding(binding):
+        return None
+    host = Path("/proc") / str(binding["host_pid"])
+    try:
+        launch = next((entry.split(b"=", 1)[1] for entry in (host / "environ").read_bytes().split(b"\0")
+                       if entry.startswith(b"HEARTING_SHELL_HOST_PATH=")), b"")
+        children = set()
+        for task in os.listdir(host / "task"):
+            with contextlib.suppress(OSError):
+                children.update((host / "task" / task / "children").read_text().split())
+    except OSError:
+        return None
+    if not launch:
+        return None
+    for child in sorted(children):
+        try:
+            argv = (Path("/proc") / child / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if len(argv) >= 3 and argv[1].endswith(b"/session_shell.py") and argv[2] == b"backend":
+            running = Path(os.fsdecode(argv[1])).resolve().parent
+            return running != Path(os.fsdecode(launch)).resolve().parent.parent
+    return None
+
+
+# Why an answer the person sent still waits on them (rule 5): a resting session takes it only at
+# a prompt typed in that window. An older shell's host may not take a newer answer (11-16: a
+# v4.29.3 host refused every v4.40.0 answer), and a Claude session outside the shell has no
+# idle wake. Codex takes it from its own queue; OpenCode's plugin takes it when idle. A session
+# still working takes it when its turn ends, so it waits on no one; nor is a reason given for a
+# session whose state is not known.
+ANSWER_WAIT_OLD_SHELL = "old-shell"
+ANSWER_WAIT_NO_SHELL = "no-shell"
+# Fleet's session states (``fleet.model.classify_session``) of a session that rests: idle, never
+# used, or silent past the session window with its process alive.
+RESTING_STATES = frozenset({"idle", "unused", "stale"})
+
+
+def answer_delivery_wait(harness: str, sid: str, state: str | None = None) -> str:
+    """``old-shell`` | ``no-shell`` | ``""``: what a sent answer to this session waits for.
+
+    ``state`` is the session's Fleet state; only a resting one waits on the person."""
+    if (state not in RESTING_STATES or harness not in ("claude", "opencode")
+            or not isinstance(sid, str) or not _SID.fullmatch(sid)):
+        return ""
+    binding, reason = exact_binding(harness, sid)
+    if binding is None:
+        return ANSWER_WAIT_NO_SHELL if harness == "claude" and reason == "attachment-unavailable" else ""
+    return ANSWER_WAIT_OLD_SHELL if release_behind(binding) else ""
+
+
+def mark_answer_waits(items, states=None):
+    """Mark each sent message answer of the shared board with what it waits for (``answer_wait``).
+
+    Read live by a surface (Fleet's collector), never stored: a window's shell and release are
+    not part of the answer record. ``states`` maps ``(harness, session_id)`` to the session's
+    Fleet state; a session missing from it is not known and gets no reason. A wait with no
+    session to take it says that instead.
+    """
+    states = states or {}
+    for item in items or ():
+        if (isinstance(item, dict) and item.get("answer") == "sent" and item.get("kind") == "message"
+                and item.get("owner_state") not in ("none", "successor")):
+            owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+            harness = item.get("harness") or owner.get("harness")
+            sid = item.get("session_id") or owner.get("session_id")
+            wait = answer_delivery_wait(harness, sid, states.get((harness, sid)))
+            if wait:
+                item["answer_wait"] = wait
+            else:
+                item.pop("answer_wait", None)
+    return items
+
+
 def pane_seat(info, harness: str | None = None, *, rows=None, birth=None) -> dict | None:
     """The one attachment whose PTY owner is this pane's foreground: the pane's seat.
 
@@ -1198,10 +1280,15 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
+    quota_raw = panel["quota"]
     for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp", "cost"):
         panel[name] = styled(panel[name])
     # Spec E9 rule 59 (11-16): the USAGE section, the three harnesses' usage rows (the records Fleet keeps).
     panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"])} for row in usage_rows(harness, values)]
+    # 11-16 (review of #1662): a reading at Fleet's red level carries `level: red`, so the folded strip can keep it
+    # (the strip lets the other windows go first) in the place the old notice row gave it.
+    panel["quota"] = [{**part, "level": "red"} if key == "lvl_r" else part
+                      for part, (_text_, key) in zip(panel["quota"], quota_raw)]
     def route_paint(row):
         paint = {}
         for name, key in (("glyph", "glyph_key"), ("harness", "harness_key"), ("model_text", "model_key"),

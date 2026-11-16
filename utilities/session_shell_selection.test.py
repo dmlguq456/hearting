@@ -265,7 +265,7 @@ const begin=source.indexOf('async function lifecycle(req)');
 const body=source.slice(begin,source.indexOf('async function request(req)',begin));
 const input=source.slice(source.indexOf('async function refreshReadiness()'),source.indexOf('function observeReport(data)'));
 const row={pid:10,start:'s'},noop=()=>{};
-const c={processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,sameTerminal:()=>true,token:'t',harness:'claude',sequence:0,
+const c={performance,processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,sameTerminal:()=>true,token:'t',harness:'claude',sequence:0,
  nativeFooter:null,paintedCommon:[],nativeContext:undefined,sid:'',nativeSelected:{},displayValues:{},panelModel:{},panelSections:undefined,panelLines:[],
  projectionKey:'',footer:'',footerSegments:[],routeDetail:false,routeScroll:0,selection:0,native:null,state:'unknown',nativeTurn:'',turnMark:0,
  seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,lastEnter:-1,block:{leave:noop,update:noop},publishNativeDisplay:noop,

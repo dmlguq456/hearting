@@ -372,8 +372,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // `+N` for those that do not fit) … `▴` at the right end. A group with nothing in it does not stand.
   // Short of cells, in this order: the reset times, the branch, the effort, the model windows (Fable's),
   // 7d, 5h, OpenCode's MCP count, the model, the messages' numbers (their count stays), MESSAGES, the
-  // project, the notices, the CTX bar (its percent stays), the routes' counts by state, and narrower than
-  // 44 cells `CTX` itself; the glyph and number, the wait, `N ROUTE` and `▴` stay. Nothing wraps. A press on the wait opens the question
+  // project, the windows at Fleet's red level (they outlast the other windows; the last first), the notices, the
+  // CTX bar (its percent stays), the routes' counts by state, and narrower than 44 cells `CTX` itself; the glyph and number, the wait, `N ROUTE` and `▴` stay. Nothing wraps. A press on the wait opens the question
   // popup, on the routes the routes popup, on MESSAGES its popup; anywhere else, and `▴`, opens the
   // panel. No frame, gear, beat or moving rule: only the state glyph turns.
   function foldedView(){
@@ -437,18 +437,25 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Each step lets one more thing go; the first that fits is drawn. (11-15, review A5: past the last
     // step the cell before `▴` is taken too, and then the session's number gives way, the glyph staying,
     // so the wait and `N ROUTE` stand whole from 30 cells.)
-    const steps=['resets','branch','effort','modelWindows','week','windows','mcp','model','numbers','messages','project','notices','bar','tally','ctx','tight','number'];
+    // 11-16 (review of #1662, the old notice row's `⚠ 5h 92%`): a window at Fleet's red level (the backend marks its
+    // parts `level: red`) outlasts the other windows and goes after the project, the last of the red ones first;
+    // then the notices (compaction imminent) go.
+    const redOf=new Map();let reds=0;
+    windows.forEach((g,i)=>{if(g.some(p=>p.level==='red'))redOf.set(i,++reds);});
+    const redSteps=Array.from({length:reds},(_,i)=>'red'+(reds-i));
+    const steps=['resets','branch','effort','modelWindows','week','windows','mcp','model','numbers','messages','project',...redSteps,'notices','bar','tally','ctx','tight','number'];
     const build=(gone,noticeRoom=Infinity)=>{
-      let q=windows;
-      if(gone.has('resets'))q=q.map(g=>g.filter(part=>!/^\s*\(↻/.test(String(part.text))));
-      if(gone.has('modelWindows'))q=q.filter(g=>kind(g)!=='model');
-      if(gone.has('week'))q=q.filter(g=>kind(g)!=='week');
-      if(gone.has('windows'))q=q.filter(g=>kind(g)!=='window');
+      let q=windows.map((g,i)=>({g,red:redOf.get(i)||0}));
+      if(gone.has('resets'))q=q.map(e=>({...e,g:e.g.filter(part=>!/^\s*\(↻/.test(String(part.text)))}));
+      const keep=e=>e.red>0&&!gone.has('red'+e.red);
+      if(gone.has('modelWindows'))q=q.filter(e=>kind(e.g)!=='model'||keep(e));
+      if(gone.has('week'))q=q.filter(e=>kind(e.g)!=='week'||keep(e));
+      if(gone.has('windows'))q=q.filter(e=>kind(e.g)!=='window'||keep(e));
       const m=gone.has('model')?[]:gone.has('effort')?selected.slice(0,1):selected;
       const c=gauge.length&&!gone.has('ctx')?[text('CTX ','dim'),...(gone.has('bar')?percent:gauge),...(!gone.has('mcp')&&P(model.mcp).length?[text(' │ ','dim'),...P(model.mcp)]:[])]:[];
       const lead2=gone.has('number')?glyph:lead;
       const head=[...lead2,...(!gone.has('project')&&project.length?[...(lead2.length?[text(' ')]:[]),...project,...(gone.has('branch')?[]:branch)]:[])];
-      const session=[head,m,c,...q];
+      const session=[head,m,c,...q.map(e=>e.g)];
       const n=gone.has('notices')?[]:notices.map(x=>size(x)<=noticeRoom?x:cut(x,Math.max(3,noticeRoom)));
       const route=routeHead.length?[...routeHead,...(gone.has('tally')?[]:tally)]:[];
       const groups=[...session.map(g=>({parts:g})),...(wait.length?[{parts:wait,action:'question'}]:[]),...n.map(x=>({parts:x})),
@@ -465,7 +472,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       let g=build(gone);
       if(size(joinAll(g.map(x=>x.parts)))<=limit()){groups=g;break;}
       // A notice's words are cut before the next value goes, while six cells of them stay.
-      if(notices.length&&!gone.has('notices')){const over=size(joinAll(g.map(x=>x.parts)))-room,longest=Math.max(...notices.map(size));
+      if(notices.length&&!gone.has('notices')&&redSteps.every(x=>gone.has(x))){const over=size(joinAll(g.map(x=>x.parts)))-room,longest=Math.max(...notices.map(size));
         if(longest-over>=8){g=build(gone,longest-over);if(size(joinAll(g.map(x=>x.parts)))<=room){groups=g;break;}}}
     }
     if(!groups)groups=build(gone);

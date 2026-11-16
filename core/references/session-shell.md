@@ -51,7 +51,8 @@ manual recovery. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
 A running window follows a new install without restarting its CLI. Each
 display host compares the installed link it was started from
-(`HEARTING_SHELL_HOST_PATH`, never resolved) with its own resolved file; it
+(`HEARTING_SHELL_HOST_PATH`, never resolved, including the Herdr hint's re-exec of the
+entry) with its own resolved file; it
 notices a change from a watch on the link's directory and at each idle
 transition, with no timer; a successor that took over keeps the same watch. A look that
 ends without asking is not lost: a reason that comes during a look is taken up when it ends, and
@@ -65,11 +66,20 @@ The host asks the PTY owner for a successor only at a safe moment: idle, an
 empty composer, no open form or answerable question, no popup, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
 action worker. Keys that reached native since the last submitted turn leave the
-composer unproven (an erased draft, a form answered with Enter, history-scroll
-keys, a turn stopped without a stop callback), so the switch then follows the
-next submitted turn. A start or selection (a resume picker's Enter, `/clear`,
+composer unproven (an erased draft, a form answered with Enter, a local command such
+as `/model` whose menu opened and closed, history-scroll keys, a turn stopped without
+a stop callback) until the native has painted after them and a reading at least two
+seconds after the last of them sees that newer screen idle with an empty composer;
+delivery readiness settles them the same way. The two seconds are compared at a reading
+that comes anyway (a courier pass's status, an idle transition), never waited for: right
+after a person's Enter the composer is empty before that turn's prompt callback comes, and
+a slow native repaints its old screen before the keys' own. A draft or form on that screen
+keeps them unproven, and keys the native has not painted after (an unechoed cursor key)
+wait for its next paint or submitted turn. OpenCode's keys always wait for the next
+submitted turn: its focus can leave the composer while the composer still reads empty
+(a dialog such as `/models` over the transcript, its terminal pane). A start or selection (a resume picker's Enter, `/clear`,
 OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
-delivery readiness does; keys after that Enter still wait for the next submitted turn.
+delivery readiness does; keys after that Enter are settled as above.
 A window with no selected session (OpenCode on its home route) has
 no such proof and waits for one; OpenCode's plugin reload (deselect, then select of the
 same session, no keys between) keeps an open popup. The owner starts the successor from the same installed path. The old host stops
@@ -177,15 +187,18 @@ to (`← [e7] → [73]`: each way and session once, the newest first, `+N` for t
 fit), and `▴` at its right end; a group with nothing in it does not stand. Short of cells it gives
 way whole value by whole value, in this order: the reset times, the branch, the effort, the model
 windows, 7d, 5h, OpenCode's MCP count, the model, the messages' sessions (their count stays,
-`MESSAGES 3`), MESSAGES, the project, the notices, the CTX bar (its percent stays), the routes'
+`MESSAGES 3`), MESSAGES, the project, the windows at Fleet's red level (11-16, review of #1662: they outlast the
+other windows, the backend marks their parts `level: red`; the last of them goes first, so the 5h stays longest),
+the notices, the CTX bar (its percent stays), the routes'
 counts by state, and narrower than 44 cells `CTX` itself; past that last step the cell before `▴`
 is taken too, and then the session's number gives way (11-15, review A5: from 30 cells the wait and
 `N ROUTE` stand whole beside each other); the glyph, the wait, `N ROUTE` and `▴` stay, and nothing
 wraps. Labels are dark gray upper case; there is no frame, gear, beat or moving rule, and only the
 state glyph turns and, while an answer waits, `◑답 대기 N` blinks (below). The strip has no status button. While the strip paints its
-session, Claude's row under its input keeps the notice (what to do now) as
-with the panel open, so no value shows twice; the strip carries no Git or job
-row. A press on the wait opens the question popup, on the routes the routes popup, on MESSAGES
+session, Claude's row under its input is the shell's one line (spec rule 60) as with the panel open, so no value
+shows twice; the strip carries no Git or job row. What the old notice row said stands on the strip: the answer wait
+(`◑답 대기 N`, never given up), compaction imminent (the notices), a red usage window (kept as above), a failed
+route (`✕N` after `N ROUTE`); a red context reading is the `CTX` percent, in its color. A press on the wait opens the question popup, on the routes the routes popup, on MESSAGES
 its popup (above the strip: the strip stays and the native keeps its width); anywhere else, and
 `▴`, opens the panel.
 **Ctrl+]** always opens a popup and every popup names **`p`**, which folds or opens the panel: the
@@ -546,7 +559,11 @@ popup; a request row the MESSAGES popup).
   `status_line` setting is left as it is. OpenCode has no setting or plugin slot that hides its bottom bar (checked in
   the installed `@opencode-ai/plugin` types and the documentation), so the shell's own paint is the way. Only what the line
   alone showed moves: OpenCode's cost (from the session record Fleet reads) stands after the context in that window's
-  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched.
+  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched. The row is found only in the
+  harness's own layout, and what is not found is not covered (review of #1662): Codex's footer is the status row and the help
+  row (or the one thread-id status row) after the composer's last `›` row, the status row opening with a word, a number or a
+  path, not a sign (`↳ queued`, `⏎ to send`, `■ stream error`) and not a draft line that begins with an id; OpenCode's bar is the
+  row with `ctrl+p commands` and the folder row right above it, never a `/`- or `~`-led row without that bar.
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
@@ -723,7 +740,7 @@ on top: secondary text and messages take 248/241, body text 253/237, the panel
 frame 244/243 while idle or unknown, messages rules 242/245; the question's border,
 `◑` and `›` are 174/131 on every colored theme.
 Neither recolors native space: the native area and Claude's status row keep
-their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
+their colors (Claude's own statusline row, where the panel is not painted, takes the theme, not the shade). An unknown position, theme or shade falls back to its own
 default without disabling the shell, and so does an unknown `route line` or
 `rule motion`.
 The same side width changes by dragging its boundary or by value controls.
@@ -788,15 +805,14 @@ confirmed; `sending` (`보내는 중`) while another answer is on its way; `clos
 (`닫힘`) for a request already gone (an existing state word such as expired
 stays). The head carries the short form under 64 columns and the body row the
 whole words. Every count of answer waits (Fleet's head and session rows, the
-`questions list` head, the status line, the panel's `◑ N`, the notice line under
-the input and the folded strip) counts every wait a person must answer, wherever
+`questions list` head, the status line, the panel's `◑ N` and the folded strip) counts every wait a person must answer, wherever
 it is answered: a question the panel answers, a Claude native request, a marker
 question and a human gate. Only a blocked worker's wait (its parent agent's) and
 a finished one (closed, replaced, expired, an answer on its way) are not counted.
 The questions section holds what the person can answer here now (answerable
 ones first; `Ctrl+]` opens the popup on the first of them); a counted wait answered in another
 place is one dim guidance line beside the count saying where
-(`1 QUESTIONS · answer below`), and the notice line names `Ctrl+]` only when the
+(`1 QUESTIONS · answer below`), and the question box names `Ctrl+]` only when the
 panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
 parent holds the worker's exact acknowledged completion receipt. Once the person
@@ -809,7 +825,16 @@ in plain text, a secret `•••`),
 it as sent); the line stays ten minutes from when it was sent (11-16, the person: "답 보냄도 한
 5~10분은 유지하도록 해두자"; `SENT_KEEP_MS` in `block-input.cjs`), its session having the answer or not,
 and goes at the first update or paint after that (no timer of its own), and a failed
-delivery brings the question back with its existing word. Answering returns
+delivery brings the question back with its existing word. Until its session takes
+it, the line says so: `✓ answer sent · <what was sent> · awaiting delivery`, and,
+when its session rests (Fleet's idle, unused or stale) and only the person can let it in,
+why: a window whose shell runs an older release than its launch path names
+(`New release waiting`, the window's own line) or a Claude window outside the shell
+takes it when that window is reopened or typed in once. A session still working takes it
+when its turn ends, and one whose state is not known gives no reason either.
+Fleet's QUESTIONS row and the panel's line draw the same parts from the same function
+(`session_block.sent_answer_line`): a secret answer `•••`, no control or direction
+characters; nothing offers to send it again. Answering returns
 focus to the native input, and one lone Esc or Enter within ten seconds of the
 answer is taken by the shell (never the native's interrupt of a running turn,
 never a submit of what stands in the native input).
@@ -982,17 +1007,17 @@ as the Ctrl+O transcript, keeps every row. Claude keeps as many rows as the
 callback's output has, and at least one while a statusline is set; the one row
 leaves two rows under the input box, this row and Claude's own mode row, at
 every width and with running jobs. That row is, since 11-16, the shell's one line (spec rule 60: the working folder and `hearting v<release>`); what was the notice
-row stood here until then: empty unless the person must do something now. One function picks a single
-item by priority from existing values: an answer this session owes, then
-compaction imminent, then a context or usage reading at Fleet's red level, then
-a failed, blocked or attention-needing route. News and release lines are not on
-it: a received peer report stands in MESSAGES, a finished route's result in the
+row stood here until then (an answer this session owes, compaction imminent, a context or usage reading at Fleet's
+red level, a failed or blocked route). Those four now stand in the panel and on the folded strip (the answer wait,
+the notices, the red window, `✕N`; see the strip's order above), and where the panel is not painted Claude's own
+statusline shows them (the common line's own order: the wait, compaction, a red reading, then the rest). The Python
+`session_panel.notice_line` and the projection's `notice` field are no longer read by the host; they stay as they are.
+News and release lines were never on that row: a received peer report stands in MESSAGES, a finished route's result in the
 route box (the producer's recent results follow the current routes), and a
 waiting release or a switch without scrollback in the panel's tidy-notice slot.
 A finished result's row leads its title with the result word (`FAIL · title`),
 takes Fleet's failure mark `✕` and color when the result did not pass, and leaves
-the rows after the person's next input or ten minutes, the bound the notice row's
-news used.
+the rows after the person's next input or ten minutes.
 It reuses Fleet's glyphs and colors and adds no collection, setting or judgment.
 A hidden (Fleet over the window), focused or not-yet-bound panel and a lost display host show
 that native row unchanged; unwrapped sessions keep their complete native rows.

@@ -22,7 +22,7 @@ function declaration(name){
 }
 const observation=declaration('refreshReadiness')+'\n'+declaration('observeInput');
 function make(){
-  const s={Buffer,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
+  const s={Buffer,performance,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
     relay:false,currentDelivery:null,sid:'owned-sid',sequence:0,selection:0,screenRevision:0,state:'idle',
     screenSnapshot:()=>[],queueProjection:()=>{},source:async()=>({ok:true,ready:true})};
   vm.createContext(s);vm.runInContext(observation,s);return s;
@@ -70,7 +70,7 @@ function declaration(name){
 }
 const code=['refreshReadiness','observeInput','observeReport','nativePointer'].map(declaration).join('\n');
 function make(){
-  const s={Buffer,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
+  const s={Buffer,performance,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
     relay:false,currentDelivery:null,sid:'owned-sid',sequence:0,selection:0,screenRevision:0,state:'idle',heldBytes:0,
     left:0,written:[],held:[],screenSnapshot:()=>[],queueProjection:()=>{},queueDisplay:()=>{},
     source:async()=>({ok:true,ready:true})};

@@ -54,7 +54,7 @@ Run experiments in a dedicated worktree and experiment branch, not directly on m
 Unlike a normal `autopilot-code` worktree, an experiment branch is a long-lived line of work and is not merged wholesale into main.
 
 1. Commit experiment configs on the experiment branch; do not hide them behind gitignore. This preserves the config-to-result relationship.
-2. Keep large checkpoints, logs, and artifact-root outputs ignored. Reproducibility comes from committed configs plus `<artifact-root>/experiments/{slug}/`.
+2. Keep large checkpoints, logs, and artifact-root outputs ignored. Reproducibility comes from committed configs plus `<artifact-root>/experiments/{slug}/` and the raw paths its `run.json` records.
 3. Graduate only reusable seams, modules, or a winning config through `autopilot-code`; do not merge the entire experiment branch.
 4. Treat the branch as a workspace, not the archive. The durable archive is the experiment artifact plus committed configuration.
 
@@ -185,7 +185,8 @@ by the dispatch-depth-1 owner). Full contract: `capabilities/autopilot-lab.md`
    --intensity <intensity> --env-file <env>`; export the returned
    `AGENT_ARTIFACT_*` variables. `legacy-compat` means the cutover is inactive
    and the legacy `experiments/` layout is still the write target.
-2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/experiments/...`; never
+2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/experiments/...` and raw
+   experiment data under `$AGENT_RAW_DATA_DIR`; never
    write to a legacy top-level bucket while the cutover is active, never write
    under `shared/`.
 3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch

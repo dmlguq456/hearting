@@ -368,6 +368,31 @@ class IdleObserverTests(unittest.TestCase):
             with mock.patch.object(collectors, "collect_all", return_value=snapshot):
                 self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "")
 
+    def test_a_direct_route_left_open_by_an_earlier_run_does_not_hold_the_tidy_back(self):
+        # Review of #1662: the direct route's label stands only for a declaration this session process made
+        # (Fleet's open-route rule), so an old unfinished one is not `route-active`; a current one still is.
+        from tools.fleet import collectors
+        from tools.fleet.model import Session
+        from tools.fleet.refresh import LiveSnapshot
+        now = 1_800_000_000.0
+        def snapshot(declared, started_minutes_ago):
+            node = {"label": "code", "capability": "autopilot-code", "capability_mode": "dev", "automatic": False,
+                    "route_id": "rt-direct", "route_file": None, "state": "open", "shape": "direct",
+                    "intensity": "direct", "round": 1, "ts": declared, "result": None}
+            chain = {"v": 1, "key": "repo", "visible": False, "plan": [], "nodes": [node], "current": node,
+                     "automatic_records": []}
+            session = Session(harness="claude", pid=os.getpid(), session_id="sid-A", session_tag="fixture", cwd=str(self.cwd),
+                              liveness="idle", route_chain=chain, elapsed_min=started_minutes_ago)
+            return LiveSnapshot(sessions=[session], jobs=[], resources=[],
+                                observations={"basic": {"state": "ok", "all_new": True, "generation_identity": "fixture"},
+                                              "required-details": {"state": "ok", "all_new": True, "generation_identity": "fixture"}})
+        from tools.fleet.explorer import live
+        with self.iso.patched_environ(self.extra), mock.patch.object(live.time, "time", return_value=now):
+            for declared, minutes, reason in ((now - 3 * 86400, 60, ""), (now - 900, 60, "route-active")):
+                with self.subTest(declared_ago=now - declared), \
+                     mock.patch.object(collectors, "collect_all", return_value=snapshot(declared, minutes)):
+                    self.assertEqual(clear._idle_route_reason("claude", "sid-A"), reason)
+
     def test_actual_empty_census_is_unknown_before_dispatch_is_read(self):
         from tools.fleet import collectors
         from tools.fleet.collectors import dispatch

@@ -2187,6 +2187,13 @@ def require_recovery_grant_addresses(candidate, history, *, route, access=None):
             source_root=history["worktree"])
         if runtime:
             writes.append(runtime); reads.append(runtime)
+        # The wrapper grants this project's raw data folder beside it, from the same resolver.
+        from worker_bootstrap import raw_data_dir_candidate
+        raw = raw_data_dir_candidate(route["artifact_root"], runtime, {
+            key: os.environ[key] for key in ("HOME", "XDG_CONFIG_HOME", "COMPUTE_HOSTS_CONFIG")
+            if key in os.environ}, source_root=history["worktree"])
+        if raw and raw != runtime:
+            writes.append(raw); reads.append(raw)
         if access:
             request = EA.load_request(Path(access["request_path"]), context=context)
             if request.request_sha256 != access["request_sha256"]:
