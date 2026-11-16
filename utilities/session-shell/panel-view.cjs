@@ -60,7 +60,16 @@ const FACES={
     // its side lines too), its line in `popupLine`, its words in `bright`, and a word drawn dim or gray
     // never reads below `popupFloor`. ("질문 선지 선택 효과를 틴트로 해 명확하게"): the choice the
     // question popup has chosen stands on `chosen` across the popup's inside, one ground and no other.
-    bright:255,popup:236,popupLine:250,popupFloor:247,chosen:24,
+    // 11-17 (the person: "팝업 창 배경색이 못생겼는데 ... 하팅의 테마 컬러 활용해보자"): the popup's own look in
+    // Hearting's earth tones (the public page's `--solid`, `--border-2`, `--text`), the whole of it in these
+    // few values: `popup` the ground, `popupLine` the frame's line, `popupTitle` the title, `chosen` the chosen
+    // row's ground, each a 256-color step, and `rgb` the same four in 24-bit color where the terminal says it
+    // takes it (no 256-color step is a dark brown: the ground there falls to its nearest gray, the line and
+    // the title keep their warmth). Another design is a change of these eight values (`POPUP-GROUND-MOCK-1117`).
+    // The chosen row stays 20 or more apart from the popup's ground (CIE76; the blue it replaced was 34.9 / 24.9), a clay in 24-bit
+    // color; on the dark face's 256 colors 52 (the one warm step that is both apart enough and reads the words on it).
+    bright:255,popup:235,popupLine:137,popupTitle:255,popupFloor:247,chosen:52,
+    rgb:{popup:'#29221e',popupLine:'#786453',popupTitle:'#f1eae3',chosen:'#5a3a1e'},
     // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): what waits for the person's answer (the
     // question's red letters in QUESTIONS, `◑답 대기 N` on the folded strip) goes between these two reds,
     // the lit one first, on Fleet's one-second beat (WAIT_BLINK). 11-16 ("점멸은 안하는데"): 174 and 131 were
@@ -74,7 +83,8 @@ const FACES={
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
-    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153,waitBlink:[88,167],
+    veil:250,bright:232,popup:254,popupLine:137,popupTitle:232,popupFloor:241,chosen:223,waitBlink:[88,167],
+    rgb:{popup:'#f1e7dc',popupLine:'#9c8571',popupTitle:'#342a23',chosen:'#fecca4'},
     // (The light face: the deep hues 23, 60, 25 (L* 36, 42, 40) one step lighter: L* 50.8, 45.7, 56.7.)
     harnessName:{claude:30,codex:96,opencode:68}},
 };
@@ -1746,19 +1756,22 @@ function grayLevel(fg){
   const [r,g,b]=m.slice(1).map(x=>parseInt(x,16));
   return Math.max(r,g,b)-Math.min(r,g,b)<=8?Math.round((r+g+b)/3):null;
 }
-// 11-15: a popup's own look where the panel shows hue (the face's `popup`, `popupLine`, `bright` and
+// 11-15: a popup's own look where the panel shows hue (the face's `popup`, `popupLine`, `popupTitle`, `bright` and
 // `popupFloor`; an unknown face the dark one's, as the veil): every cell of its frame on the ground (no
 // part keeps a ground or a reversed cell of its own: inside a popup there are two grounds, the popup's
 // and the chosen choice's), the line and the title bright, a word in the terminal's own color the
 // brightest, a dim or gray word no fainter than the floor. A hue (a state, a harness, the question's
 // rose) keeps its color and reads at its full strength (a dim one is no longer dimmed).
-function popupLook(part,F,light){
+// 11-17: the popup's ground, line, title and chosen ground are the face's 256-color step, or in 24-bit color
+// (where the terminal says it takes it) its `rgb` value.
+const popupTone=(F,key,colors)=>colors>256&&F.rgb&&F.rgb[key]!==undefined?F.rgb[key]:F[key];
+function popupLook(part,F,light,colors=256){
   const floor=grayLevel(F.popupFloor),level=grayLevel(part.foreground),faint=v=>light?v>floor:v<floor;
-  const ground={background:F.popup,reverse:false};
-  if(part.popupLine)return {...part,foreground:F.popupLine,dim:false,...ground};
+  const ground={background:popupTone(F,'popup',colors),reverse:false};
+  if(part.popupLine)return {...part,foreground:popupTone(F,'popupLine',colors),dim:false,...ground};
   const own=part.foreground===null||part.foreground===undefined||part.foreground===-1;
   if(!own&&level===null)return {...part,dim:false,...ground};
-  if(part.popupTitle)return {...part,foreground:F.bright,dim:false,...ground};
+  if(part.popupTitle)return {...part,foreground:popupTone(F,'popupTitle',colors),dim:false,...ground};
   if(own)return {...part,foreground:part.dim?F.popupFloor:F.bright,dim:false,...ground};
   return part.dim||faint(level)?{...part,foreground:F.popupFloor,dim:false,...ground}:{...part,...ground};
 }
@@ -1822,11 +1835,11 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels
   // on the frame's rows, where the window has it; the empty rows above and below keep the terminal's
   // own (they part it from what it covers). The chosen row's cells take the chosen ground.
   if(!bright){
-    const known=face(cfg.theme,background),F=FACES[known||'dark'],light=known==='light';
+    const known=face(cfg.theme,background),F=FACES[known||'dark'],light=known==='light',colors=model.colors??256;
     painted=painted.map((row,i)=>{
       const inFrame=i>=above&&i<above+frame.length;if(!inFrame)return row;
-      return row.map((part,k)=>(left&&k===0)||(right&&k===row.length-1)?{...part,background:F.popup,margin:true}:
-        part.chosenRow?{...popupLook(part,F,light),background:F.chosen}:popupLook(part,F,light));
+      return row.map((part,k)=>(left&&k===0)||(right&&k===row.length-1)?{...part,background:popupTone(F,'popup',colors),margin:true}:
+        part.chosenRow?{...popupLook(part,F,light,colors),background:popupTone(F,'chosen',colors)}:popupLook(part,F,light,colors));
     });
   }else painted=painted.map(row=>row.map(part=>part.chosenRow?{...part,reverse:true}:part));
   painted=painted.map(row=>row.map(({popupLine,popupTitle,chosenRow,tint,...part})=>part));

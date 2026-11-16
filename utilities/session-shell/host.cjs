@@ -415,9 +415,14 @@ function foregroundSgr(value){
   const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(value??''));
   return m?'38;2;'+m.slice(1).map(x=>parseInt(x,16)).join(';'):null;
 }
+// A part's background as SGR: a 256-color index, or `#rrggbb` (24-bit: the popup's ground where the terminal takes it).
+function backgroundSgr(value){
+  if(Number.isInteger(value)&&value>=0&&value<=255)return '48;5;'+value;
+  const m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(value??''));
+  return m?'48;2;'+m.slice(1).map(x=>parseInt(x,16)).join(';'):'49';
+}
 function cellAttr(part){
-  const a=[0,foregroundSgr(part.foreground)||'39',
-    Number.isInteger(part.background)&&part.background>=0&&part.background<=255?'48;5;'+part.background:'49'];
+  const a=[0,foregroundSgr(part.foreground)||'39',backgroundSgr(part.background)];
   if(part.bold===true)a.push(1);if(part.dim===true)a.push(2);if(part.reverse===true)a.push(7);
   return a.join(';');
 }

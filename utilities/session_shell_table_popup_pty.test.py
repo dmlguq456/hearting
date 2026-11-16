@@ -146,20 +146,20 @@ const outside=async()=>{const s=await screen(),b=box(s);if(!b)return -1;const c=
     if(!cell.isBgDefault()||cell.isInverse()||!blank&&(cell.isFgDefault()||cell.getFgColor()!==239||cell.isBold()||cell.isDim()))n++;}}return n;};
 const veil={};
 // 11-15 (the person: "팝업은 ... 배경 컬러도 다르고 폰트가 좀 더 밝아야"): the standing popup's frame cells and how
-// many stand on the popup's ground (palette 236, the dark face's: the fixture's face is unknown) or read
+// many stand on the popup's ground (palette 235, the dark face's: the fixture's face is unknown) or read
 // dim (a hue too), in the terminal's own color or in a gray fainter than the floor (palette 232-246); and anywhere
 // on the screen, the cells on that ground (none once it is closed).
 // (11-15: "스페이스바 한칸 정도 여백을 더") the cell each side of the frame on its rows is on the ground too
 // (`margins`), and the cell past it is not (`beyond`).
 const ground=async()=>{const s=await screen(),b=box(s);if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮');let all=0,on=0,faint=0,margins=0,beyond=0;
-  const grounded=cell=>cell&&cell.isBgPalette()&&cell.getBgColor()===236;
+  const grounded=cell=>cell&&cell.isBgPalette()&&cell.getBgColor()===235;
   for(let y=b.top;y<=b.bottom;y++){const line=term.buffer.active.getLine(y);for(let x=left;x<=right;x++){const cell=line?.getCell(x);if(!cell||cell.getWidth()===0)continue;all++;
     if(grounded(cell))on++;
     if(cell.getChars().trim()&&(cell.isDim()||cell.isFgDefault()||cell.isFgPalette()&&cell.getFgColor()>=232&&cell.getFgColor()<247))faint++;}
     for(const x of [left-1,right+1])if(grounded(line?.getCell(x)))margins++;for(const x of [left-2,right+2])if(grounded(line?.getCell(x)))beyond++;}
   return {all,on,faint,margins,beyond,rows:b.bottom-b.top+1};};
 const grounded=async()=>{await flush();let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const cell=line?.getCell(x);
-  if(cell&&cell.isBgPalette()&&cell.getBgColor()===236)n++;}}return n;};
+  if(cell&&cell.isBgPalette()&&cell.getBgColor()===235)n++;}}return n;};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
