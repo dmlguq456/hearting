@@ -670,6 +670,59 @@ console.log(JSON.stringify(inputs))
         doc = " ".join((ROOT / "core" / "LOOP_ENGINEERING.md").read_text().split())
         self.assertIn("only its first line, secrets masked and clipped", doc)
 
+    # --- PR #1667 review: one slow pattern and three small ones --------------------------------
+
+    def test_8_the_secret_pattern_stays_fast_on_long_hyphenated_runs(self):
+        # Fixtures are built at run time; none is key-shaped. The old prefix `(?:[A-Za-z0-9]+[_-])*`
+        # restarted from every `-`/`_` and took 3-10 s here; a bounded prefix takes about 0.01 s.
+        for name, text in (("dump", "-".join(["DE", "AD", "BE", "EF"] * 3300)[:40000]),
+                           ("kebab", "-".join(["fix", "the", "slow", "regex"] * 3000)[:40000]),
+                           ("short", "-".join(["a"] * 10000)[:20000])):
+            with self.subTest(name=name):
+                started = time.monotonic()
+                self.assertEqual(work_intent.redact_secrets(text), text)
+                self.assertLess(time.monotonic() - started, 2.0)
+        for text, value in (("MY_APP_DB_" + "PASS" + "WORD=hunter22x", "hunter22x"),
+                            ("x " + "-".join(["ab"] * 3000) + "-DB_" + "PASS" + "WORD=hunter22x", "hunter22x")):
+            with self.subTest(text=text[-30:]):
+                masked = work_intent.redact_secrets(text)
+                self.assertIn("[redacted]", masked)
+                self.assertNotIn(value, masked)
+
+    def test_9_secret_key_names_are_masked(self):
+        j = "".join
+        for text, value in ((j(("SECRET", "_KEY=abc123def456")), "abc123def456"),
+                            (j(("STRIPE_SECRET", "_KEY=abc123def456")), "abc123def456"),
+                            (j(('{"secret', '_key": "abc123def456"}')), "abc123def456"),
+                            (j(("secret-", "key: abc123def456")), "abc123def456")):
+            with self.subTest(text=text):
+                masked = work_intent.redact_secrets(text)
+                self.assertIn("[redacted]", masked)
+                self.assertNotIn(value, masked)
+        for plain in ("secret key rotation 문서", "secret_keeper 모듈을 고쳐줘"):
+            with self.subTest(plain=plain):
+                self.assertEqual(work_intent.redact_secrets(plain), plain)
+
+    def test_10_a_paste_after_runtime_blocks_shows_its_own_first_line(self):
+        line = session_tidy.prompt_first_line
+        pasted = '<pasted_content id="2">\n붙인 글\n둘째 줄\n</pasted_content>'
+        self.assertEqual(line("<system-reminder>x</system-reminder>\n" + pasted), "붙인 글")
+        self.assertEqual(line("<task-notification><summary>s</summary></task-notification>\n" + pasted), "붙인 글")
+        self.assertEqual(line(pasted), "붙인 글")
+
+    def test_11_scroll_steps_filters_the_sid_as_passage_does(self):
+        story = [{"kind": "prompt", "harness": "claude", "sid": sid, "key": "p", "generation": 0, "text": "x"}
+                 for sid in ("*", "../x", "a/b", "", None)]
+        with mock.patch.object(tl, "_jsonl_steps", return_value={"ok": False, "reason": "prompt-not-found"}) as jsonl, \
+             mock.patch.object(tl, "_opencode_steps", return_value={"ok": False, "reason": "prompt-not-found"}) as oc:
+            for index in range(len(story)):
+                with self.subTest(sid=story[index]["sid"]):
+                    self.assertEqual(tl.scroll_steps(story, index)["reason"], "invalid-target")
+            self.assertEqual(jsonl.call_count + oc.call_count, 0)
+            opencode = [{**story[0], "harness": "opencode"}]
+            self.assertEqual(tl.scroll_steps(opencode, 0)["reason"], "invalid-target")
+            self.assertEqual(oc.call_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -76,10 +76,13 @@ _SECRETS = (
                r"[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])"),
 )
 # ``NAME=value``/``name: value`` for a secret's usual names, also behind a prefix (``DB_PASSWORD=``,
-# ``OPENAI_API_KEY=``, an Azure ``AccountKey=``), and a Korean "비밀번호는 …" with an ASCII value.
+# ``OPENAI_API_KEY=``, an Azure ``AccountKey=``, a JSON ``"secret_key": "…"``), and a Korean "비밀번호는 …"
+# with an ASCII value. The prefix is bounded (up to four words of 32 characters): an open-ended
+# ``(?:[A-Za-z0-9]+[_-])*`` restarts from every ``-``/``_`` and takes quadratic time on a long
+# hyphenated run; a longer prefix still masks, from its last four words on.
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|token|password|passwd"
-    r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key)\s*[:=]\s*)[^\s,;]{6,}"
+    r"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9]{1,32}[_-]){0,4}(?:api[_-]?key|secret[_-]?key|secret|token|password|passwd"
+    r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key)[\"']?\s*[:=]\s*)[^\s,;]{6,}"
     r"|((?:비밀번호|패스워드)\s*(?:는|은|:|=)\s*)[\x21-\x7e]{4,}")
 
 

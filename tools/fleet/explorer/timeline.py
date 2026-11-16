@@ -1074,7 +1074,8 @@ def scroll_steps(story, index):
     backtrack preview highlights the newest; OpenCode: ``↓`` in its timeline dialog, newest first);
     ``texts`` each counted prompt's first 20 cells, oldest first, to check on screen. When the
     move cannot happen it returns ``{"ok": False, "reason": …}`` with ``earlier-generation``,
-    ``no-prompt``, ``no-transcript``, ``prompt-not-found``, ``not-counted`` (the harness does not
+    ``no-prompt``, ``invalid-target`` (the row's sid is not a session id), ``no-transcript``,
+    ``prompt-not-found``, ``not-counted`` (the harness does not
     stop at this prompt) or ``compacted-reopened`` (Claude reopened after a compaction that came
     after the prompt, so its view starts below it). This never raises.
     """
@@ -1092,6 +1093,8 @@ def scroll_steps(story, index):
     if row.get("generation", 0) != 0:
         return {"ok": False, "reason": "earlier-generation"}
     harness, sid = row.get("harness"), row.get("sid")
+    if harness in HARNESSES and not _safe(sid):
+        return {"ok": False, "reason": "invalid-target", "harness": harness, "sid": sid}
     try:
         if harness == "opencode":
             found = _opencode_steps(sid, row)

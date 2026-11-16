@@ -3083,12 +3083,18 @@ def prompt_first_line(text: str) -> str:
     # A person's prompt can arrive behind runtime blocks the harness put in front of it (a
     # reminder, a notification): its first line is the person's own, not the block's opener.
     # Only leading blocks go, and only while some text of the person's follows them.
+    stripped = False
     while True:
         lead = _RUNTIME_BLOCK.match(value.lstrip())
         rest = value.lstrip()[lead.end():] if lead else ""
         if not lead or not rest.strip():
             break
-        value = rest
+        value, stripped = rest, True
+    if stripped:
+        # What is left may be one pasted block: its text, not the wrapper's opener, is the first line.
+        wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+        if wrapped:
+            value = wrapped.group("body")
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     line = next((line.strip() for line in value.splitlines() if line.strip()), "")
     line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())
