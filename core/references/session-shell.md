@@ -75,11 +75,12 @@ that comes anyway (a courier pass's status, an idle transition), never waited fo
 after a person's Enter the composer is empty before that turn's prompt callback comes, and
 a slow native repaints its old screen before the keys' own. A draft or form on that screen
 keeps them unproven. Keys and reports that cannot put a character into an empty composer
-(a lone Esc, cursor and navigation keys, a click the native reads, the terminal's own
+(a lone Esc, Left, Home and page keys, a click the native reads, the terminal's own
 replies), when nothing else came since the composer was last seen empty, owe no repaint:
 they change nothing on screen, so after their two quiet seconds the reading alone settles
-them (11-16: a window kept messages for hours after an Esc). Keys that may have typed and
-the native has not painted after (an unechoed CSI u key) wait for its next paint or
+them (11-16: a window kept messages for hours after an Esc). Keys that may have typed, or
+brought a past prompt or a suggestion back (Up, Down, Right, End), and the native has not
+painted after (an unechoed CSI u key) wait for its next paint or
 submitted turn; a focus report is no key and restarts no quiet time. OpenCode's keys always
 wait for the next submitted turn: its focus can leave the composer while the composer still
 reads empty (a dialog such as `/models` over the transcript, its terminal pane). For

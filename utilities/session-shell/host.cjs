@@ -156,12 +156,14 @@ let keyRevision = -1, keyAt = performance.now();
 // The input frontier after the last byte that may have put a character into the composer (text, a
 // paste, an Enter, a key whose meaning the native decides). Bytes after it are keys and reports that
 // cannot (QUIET_KEY): once they are quiet, an empty composer on screen needs no repaint after them.
+// Up, Down, Right and End are not among them: they can bring a past prompt or a suggestion into the
+// composer, so the native must paint once after them (a slow one repaints its old, empty screen first).
 let typed = 0;
 // Why the last reading kept the window from taking a message (`status().hold`): what this host
 // knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
 let lastHold = 'unsettled';
 const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft'};
-const QUIET_KEY=/^(?:\x1b|\x1b\[[\d;]*[A-HPQRSZ]|\x1b\[(?:[1-8]|1\d|2[0-689]|3[0-4])(?:;\d+)*~|\x1bO[A-DFHP-S]|\x1b\[<[\d;]*[Mm]|\x1b\[[?>=][\d;:$ ]*[@-~]|\x1b\[[\d;]*[nt]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\))$/;
+const QUIET_KEY=/^(?:\x1b|\x1b\[[\d;]*[DEGHPQRSZ]|\x1b\[(?:[1-3567]|1\d|2[0-689]|3[0-4])(?:;\d+)*~|\x1bO[DHP-S]|\x1b\[<[\d;]*[Mm]|\x1b\[[?>=][\d;:$ ]*[@-~]|\x1b\[[\d;]*[nt]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\))$/;
 // How long the keys must have been quiet before a screen read after them may stand for them: right
 // after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
 // native repaints its old screen before the keys' own. Only compared at a reading that comes anyway

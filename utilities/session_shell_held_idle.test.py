@@ -1,14 +1,15 @@
 """A message reaches an idle shell window whose last bytes did not change its screen.
 
 11-16 (a window that looked idle with an empty composer kept messages for hours): keys and reports
-that cannot put a character into an empty composer (a lone Esc, cursor keys, a click or a focus
-report, the terminal's own replies) leave no repaint behind them, so a reading that waited for one
+that cannot put a character into an empty composer (a lone Esc, Left, Home and page keys, a click or
+a focus report, the terminal's own replies) leave no repaint behind them, so a reading that waited for one
 waited for the next prompt. Once they have been quiet for two seconds (host.cjs ``KEY_QUIET_MS``),
 an idle reading of the screen with an empty composer settles them and a waiting message goes in,
 once. A Claude window whose turn ended while a background shell still runs (its session record says
 ``shell``) is idle for delivery as well. Nothing the person is doing is typed into: a draft (also
 one Up brought back), an unfinished paste, an open menu and a key that may have typed something the
-native has not painted yet keep the message waiting. A real host runs in a private PTY with a
+native has not painted yet keep the message waiting; so do Up, Down, Right and End, which can bring
+text back (the native must paint once after them: a late repaint of an old prompt is not read as empty). A real host runs in a private PTY with a
 synthetic native (``fixtures.session_shell_rig``); no model, account or user pane is used.
 """
 import os, sys  # noqa: E401
@@ -119,8 +120,36 @@ class QuietBytesDeliveryTest(_Delivery, AnswerReachesIdleShellTest):
 
     def test_a_message_goes_in_after_cursor_keys(self):
         rig = ShellRig(self, ENTRY, "arrows").start()
-        self.press(rig, "\x1b[D", "\x1b[C", "\x1b[B", "\x1b[1;5D")
+        self.press(rig, "\x1b[D", "\x1b[1;5D", "\x1b[H", "\x1b[5~", "\x1b[Z")
         self.takes_it(rig, "PEER-AFTER-ARROWS")
+
+    def keeps_after_keys(self, name, *keys):
+        # (SS3 forms are read by the vm test below: the synthetic native types `ESC O x` as text.)
+        # Down, Right and End may fill the composer (a history entry, a suggestion). A native that
+        # paints nothing after them has not shown what they did: the message waits, as before 11-16.
+        rig = ShellRig(self, ENTRY, name).start()
+        self.press(rig, *keys)
+        self.keeps_it(rig, "PEER-NOT-AFTER-" + name.upper())
+
+    def test_down_the_native_does_not_paint_after_keeps_the_message_waiting(self):
+        self.keeps_after_keys("down", "\x1b[B", "\x1b[1;2B")
+
+    def test_right_the_native_does_not_paint_after_keeps_the_message_waiting(self):
+        self.keeps_after_keys("right", "\x1b[C", "\x1b[1;5C")
+
+    def test_end_the_native_does_not_paint_after_keeps_the_message_waiting(self):
+        self.keeps_after_keys("end", "\x1b[F", "\x1b[4~", "\x1b[8~", "\x1b[1;5F")
+
+    def test_up_that_the_native_paints_late_never_lets_a_message_over_the_prompt_it_brings_back(self):
+        # The native brings the last prompt back four seconds after Up and paints nothing before. The
+        # two quiet seconds must not stand for that key: the message stays out before the paint and,
+        # once the old prompt shows, over it (11-16 review: the message was appended to it at 2s).
+        rig = ShellRig(self, ENTRY, "up-late", env={"ARI_NATIVE_MODE": "slow-up", "ARI_NATIVE_LAG": "4"}).start()
+        self.press(rig, "\x1b[A")
+        self.keeps_it(rig, "PEER-NOT-BEFORE-THE-LATE-PAINT")
+        rig.wait(lambda: "❯ warm" in rig.screen(), "Up never brought the last prompt back")
+        self.keeps_it(rig, "PEER-NOT-OVER-THE-LATE-PROMPT")
+        self.assertEqual([row["prompt"] for row in rig.prompts()], [])
 
     def test_a_message_goes_in_after_the_terminals_own_replies(self):
         rig = ShellRig(self, ENTRY, "replies").start()
@@ -314,12 +343,18 @@ const after=async(keys,{harness,paint=false}={})=>{
   s.now=2000;await s.refreshReadiness();return {early,late:s.empty,s};
 };
 (async()=>{
-  for(const keys of [['\x1b'],['\x1b','\x1b'],['\x1b[D','\x1b[C','\x1b[B','\x1b[A'],['\x1b[1;5D','\x1b[H','\x1b[3~','\x1b[5~','\x1bOB','\x1b[Z'],
+  for(const keys of [['\x1b'],['\x1b','\x1b'],['\x1b[D','\x1bOD','\x1b[1;2D'],['\x1b[1;5D','\x1b[H','\x1b[3~','\x1b[5~','\x1b[6~','\x1b[2~','\x1bOH','\x1b[15~','\x1bOP','\x1b[Z'],
       ['\x1b[<0;6;3M\x1b[<0;6;3m'],['\x1b[24;80R\x1b[?62;22c\x1b[>0;95;0c\x1b[?2026;2$y'],
       ['\x1b]11;rgb:0000/0000/0000\x1b\\'],['\x1b]11;rgb:0000/','0000/0000\x07'],['\x1b[O','\x1b','\x1b[I']]){
     const r=await after(keys);a.equal(r.early,false,JSON.stringify(keys)+' within the quiet time');
     a.equal(r.late,true,JSON.stringify(keys)+' settles once quiet, with no repaint');
     a.equal(r.s.keyTail,'');a.equal(r.s.submitted,r.s.nativeEpoch);
+  }
+  // Up, Down, Right and End may bring text into the composer (history, a suggestion): they owe a repaint.
+  for(const keys of [['\x1b[A'],['\x1b[B'],['\x1b[C'],['\x1b[F'],['\x1bOA'],['\x1bOB'],['\x1bOC'],['\x1bOF'],['\x1b[4~'],['\x1b[8~'],
+      ['\x1b[1;5A'],['\x1b[1;2B'],['\x1b[1;5C'],['\x1b[1;3F'],['\x1b[1;5C','\x1b[D']]){
+    const r=await after(keys);a.equal(r.late,false,JSON.stringify(keys)+' may have recalled text: no repaint, no proof');
+    const p=await after(keys,{paint:true});a.equal(p.late,true,JSON.stringify(keys)+' a repaint after it and the quiet time');
   }
   for(const keys of [['x'],['\t'],['\x7f'],['\x15'],['\x19'],['\x1b[13;2u'],['\x1b[27;5;13~'],['\x1bOM'],['\x1bb','c'],
       ['\x1b[200~','x','\x1b[201~'],['\x1b]11;x\r'],['\x1b[D','a','\x1b[C']]){

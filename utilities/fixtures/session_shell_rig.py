@@ -61,7 +61,8 @@ def event(kind):
 last='READY'
 # `slow`: a person's Enter clears the composer at once and its turn calls back only once the test
 # opens ARI_NATIVE_GATE; `lag`: after the warm-up turn, a typed key's own paint comes ARI_NATIVE_LAG
-# seconds after a repaint of the old screen.
+# seconds after a repaint of the old screen; `slow-up`: Up's recalled prompt is painted
+# ARI_NATIVE_LAG seconds after the key and nothing is painted before it.
 mode=os.environ.get('ARI_NATIVE_MODE','')
 def dialog_screen():
     # OpenCode's model dialog as the real native draws it (fixtures/opencode-2.0.32-dialogs): the
@@ -133,6 +134,7 @@ while True:
         if key:
             # Up on an empty composer brings back the last prompt (a draft, painted).
             if key.group()=='\x1b[A' and not draft and history:
+                if mode=='slow-up':time.sleep(float(os.environ.get('ARI_NATIVE_LAG','4')))
                 draft=history[-1];paint(draft)
             # Any other cursor key, a focus or mouse report or a terminal reply changes nothing on
             # screen: taken, never painted.
