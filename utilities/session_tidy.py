@@ -3103,8 +3103,37 @@ def _received_prompt_line(prompt_text: str, origin: dict) -> str:
     return prompt_first_line(prompt_text)
 
 
+def _prompt_shape(text: str) -> tuple:
+    """``(line count, whole text was one pasted block)`` of a prompt, for its timeline row."""
+    value = text if isinstance(text, str) else ""
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+    body = wrapped.group("body") if wrapped else value
+    return max(1, len(body.strip().splitlines())), bool(wrapped)
+
+
+def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, text: str,
+                            prompt_text: str, answered: bool, transcript: str) -> None:
+    """One bounded line of the person's prompt beside the session's NOW record.
+
+    Only the one-line display text is kept (never the original); ``from`` is the
+    conversation file's size when the hook saw it, the cursor a later reader can start at.
+    """
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet import titles
+    lines, paste = _prompt_shape(prompt_text)
+    row = {"kind": "prompt", "at": now, "seq": sequence, "text": text, "lines": lines,
+           "paste": paste, "answer": bool(answered)}
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        if transcript and os.path.isfile(transcript):
+            row["from"] = os.stat(transcript).st_size
+    titles.append_timeline(sid, row, harness=harness)
+
+
 def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
-                          prompt_text: str, now: float) -> None:
+                          prompt_text: str, now: float, answered: bool = False,
+                          transcript: str = "") -> None:
     """Retain only the existing classifier's final result in its existing frontier."""
     seat = session_seat(seat, harness, sid)
     path = _prompt_seq_path(seat)
@@ -3136,6 +3165,10 @@ def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
             if isinstance(rows, list) else []
         current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
     atomic_write_json(path, current)
+    if source == "real":
+        with contextlib.suppress(Exception):    # the timeline never fails the prompt hook
+            _record_prompt_timeline(harness, sid, sequence, now, row["text"], prompt_text,
+                                    answered, transcript)
 
 
 def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
@@ -3746,6 +3779,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if not runtime_source and not request_origin:
                 runtime_source = _bound_delivery_source(prompt_text, sid)
             self_request = matching_tidy_claim(seat, harness, sid, prompt_text, sequence)
+            answered_wait = False
             notification = bool(runtime_source or request_origin or self_request)
             if runtime_source:
                 # A finished background task or another session reporting in is new content,
@@ -3772,9 +3806,12 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if isinstance(prompt_text, str) and prompt_text.strip():
                     with contextlib.suppress(BaseException):
                         import human_wait_state
-                        human_wait_state.close_signal(seat.key, sequence=sequence,
-                                                      harness=harness, session_id=sid,
-                                                      answer=prompt_text)
+                        open_wait = human_wait_state._read(human_wait_state._signal_path(
+                            {"harness": harness, "session_id": sid, "seat_key": seat.key}))
+                        closed_wait = human_wait_state.close_signal(
+                            seat.key, sequence=sequence, harness=harness, session_id=sid,
+                            answer=prompt_text)
+                        answered_wait = bool(open_wait and closed_wait)
                         line = render_context and _open_question_line(
                             human_wait_state, harness, sid, seat.key)
                         if line:
@@ -3785,7 +3822,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if not claimed and not notification:
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
             with contextlib.suppress(Exception):
-                record_prompt_display(seat, harness, sid, sequence, prompt_text, now)
+                record_prompt_display(seat, harness, sid, sequence, prompt_text, now,
+                                      answered=answered_wait, transcript=transcript)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
         # SessionStart(source=compact) and a separate compact event describe the same
