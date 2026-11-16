@@ -6,12 +6,12 @@ demo world: the route rows are the ones Fleet's session line reads from the same
 ``readme_demo.snapshot()`` (``session_route_status``), so the panel head and Fleet's row for the
 same session show the same values. Only the backend's readers of live state (the native session,
 answer waits, prompt record, message ledger, request records, memory journal, open work) are
-replaced by the demo values below; the LAB section reads a demo experiment board written by the
-real catalog and run-record writers into the temporary HOME. The SESSIONS section and the ROUTE,
-LAB and SESSIONS popups are the backend's own popup reading (``_panel_popup``) over Fleet's view
-model of the same demo world, so they read as Fleet's screens of that world do. The panel and its
-popups are painted by ``utilities/session-shell/panel-view.cjs`` under node, with the question
-editor ``block-input.cjs`` for focus and answers.
+replaced by the demo values below. The ROUTE popup is the backend's own popup reading
+(``_panel_popup``) over Fleet's view model of the same demo world, so it reads as Fleet's screens of
+that world do; the REPO row's status button and its popup read a demo campaign status document
+written into the temporary HOME with the backend's own status reader (``fleet.session_status``).
+The panel and its popups are painted by ``utilities/session-shell/panel-view.cjs`` under node, with
+the question editor ``block-input.cjs`` for focus and answers.
 
 Nothing here reads the real home directory, a registry, herdr, tmux or the network; no live
 window, session or model is started. ``readme_captures.py`` draws the published images from it.
@@ -135,12 +135,16 @@ def _memory(clock):
     def record(kind, tier, scope, minutes, text):
         return {"type": kind, "tier": tier, "scope": scope, "ts": _iso(_ago(clock, minutes)),
                 "headline_id": None, "headline": "", "snippet": text}
-    everywhere = record("lesson", "working", "global", 95, "Keep long test runs on the shared runner.")
+    everywhere = [record("lesson", "working", "global", 95, "Keep long test runs on the shared runner."),
+                  record("user-correction", "durable", "global", 150, "Give times in UTC, not local time."),
+                  record("preference", "durable", "global", 1500,
+                         "Short change reports: what changed, what was checked, what is left.")]
     return {
         "web-api": [record("decision", "durable", "project", 41, "The limit lives in the gateway, per API key."),
-                    everywhere],
-        "ml-train": [everywhere,
-                     record("decision", "durable", "project", 180, "Evaluate on the 16 kHz subset first.")],
+                    *everywhere],
+        "ml-train": [everywhere[0], everywhere[1],
+                     record("decision", "durable", "project", 180, "Evaluate on the 16 kHz subset first."),
+                     everywhere[2]],
     }
 
 
@@ -150,40 +154,57 @@ def _git(worktrees):
             "extra_worktrees": worktrees}
 
 
-def write_lab_board(project, now):
-    """A demo experiment board for ``project``, written by the real catalog and run writers."""
+STATUS_DOCUMENT = """# web-api status
+
+Updated 2026-11-16 09:20
+
+**One line**: the login rate limit is in execute; the 2.4 release notes wait on two choices.
+
+## Decisions needed
+- The layout of the 2.4 release notes ([9c] asks)
+- Whether the notes include internal API changes ([9c] asks)
+
+## Next
+- Finish the limiter tests, then the change report
+- Re-run the API suites on feat/rate-limit ([b2], rq-7d21c4)
+
+## Recently closed
+- Fix the pagination off-by-one: two findings in cursor.py, fixed
+"""
+
+
+def write_status_document(project, now, minutes=55):
+    """A demo campaign status document for ``project`` (``campaigns/<campaign>/STATUS.md``, the
+    project status document ``core/ARTIFACT_META.md`` names), changed ``minutes`` before ``now``."""
     import artifact_admission as admission
-    import experiment_catalog as catalog
-    import resource_progress as progress
     root = Path(project) / ".agent_reports"
     root.mkdir(parents=True, exist_ok=True)
     admission.ensure_root_identity(root)
-    metric = {"key": "wer", "unit": "%", "direction": "min", "split": "validation",
-              "scoring": "16 kHz subset"}
-    spec = {"groups": [{"display_name": "Checkpoint eval", "status": "running",
-                        "goal": "Does the new checkpoint beat 12.4% WER on the 16 kHz subset?",
-                        "metric": dict(metric),
-                        "target": {"kind": "fixed", "label": "baseline", "value": 12.4,
-                                   "split": "validation", "scoring": "16 kHz subset"}}],
-            "conditions": [{"display_name": name, "group": "Checkpoint eval",
-                            "refs": {"runs": [{"run_id": run}]}}
-                           for name, run in (("beam 4", "run-beam4"), ("beam 8", "run-beam8"),
-                                             ("last ckpt", "run-last"))]}
-    catalog.run_write(root, lambda ctx: catalog.op_register(ctx, spec), now=now - 3600)
-    healthy = {"state": "ok", "seconds_since_anchor": 60.0}
-    for run, points, status in (("run-beam4", [(10, 12.9), (12, 11.8)], "running"),
-                                ("run-beam8", [(10, 13.1), (12, 12.2)], "running"),
-                                ("run-last", [(10, 13.4), (12, 13.0)], "running")):
-        samples = [{"split": "validation", "epoch": epoch, "metrics": {"wer": value}}
-                   for epoch, value in points]
-        summary = progress.metric_summary(samples, decision_metric="wer", direction="min")
-        observation = {"reached": 12, "total": 40, "unit": "epoch", "eta_seconds": 1800.0,
-                       "at": now - 180, "summary": summary, "stagnation": healthy}
-        record = progress.public_run_record(
-            {"run_id": run, "status": status, "started_at": now - 3600, "decision_metric": "wer"},
-            status=status, observation=observation, metrics=[], started_at=now - 3600, ended_at=None)
-        progress.write_public_run_record(root, run, record)
-    return root
+    page = root / "campaigns" / "2026-11-10_rate-limit" / "STATUS.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(STATUS_DOCUMENT, encoding="utf-8")
+    os.utime(page, (now - minutes * 60, now - minutes * 60))
+    return Path(project)
+
+
+def with_status_document(snapshot, now):
+    """``(snapshot, {project: folder})``: the demo world with web-api's status document, written into
+    the temporary HOME (``write_status_document``) and read by Fleet's own collector
+    (``collectors.project_status``) for the sessions of that project, so Fleet's project line, the
+    panel's status button and its popup read the same page."""
+    import copy
+    from fleet.collectors import project_status
+    folders = {"web-api": write_status_document(Path(os.environ["HOME"]) / "demo-projects" / "web-api", now)}
+    documents = {}
+    for session in snapshot.sessions:
+        folder = folders.get(os.path.basename(str(session.cwd or "")))
+        if folder is not None:
+            project_status.clear_cache()
+            with mock.patch("time.time", return_value=now):
+                documents[session.cwd] = project_status.collect([str(folder)], now).get(str(folder))
+    value = copy.copy(snapshot)
+    value.project_status = documents
+    return value, folders
 
 
 class World:
@@ -191,6 +212,8 @@ class World:
 
     def __init__(self, snapshot, now):
         from tools.fleet.session_line import session_route_status
+        # The status document of the project the first picture shows, in the temporary HOME.
+        snapshot, self.status_projects = with_status_document(snapshot, now)
         self.snapshot, self.now = snapshot, now
         self.sessions = {s.session_id: s for s in snapshot.sessions if not s.is_child}
         self.tags = {(s.harness, s.session_id): "[" + s.session_tag + "]"
@@ -199,10 +222,8 @@ class World:
             self.labels, self.panels = session_route_status(snapshot, include_details=True)
         self.received, self.sent = _received(now), _sent(now)
         self.requests, self.questions, self.memory = _requests(now), _questions(now), _memory(time.time())
-        # The LAB board of the project that runs experiments, in the temporary HOME.
-        home = Path(os.environ["HOME"])
-        self.lab_roots = {"ml-train": write_lab_board(home / "demo-projects" / "ml-train", now)}
         self._view_model = None
+        self._status = {}
 
     def view_model(self):
         """Fleet's view model of this world at its moment, built as the backend's popups build it
@@ -213,13 +234,28 @@ class World:
                 self._view_model = live.build_view_model(self.snapshot, now=self.now)
         return self._view_model
 
-    def lab_read(self, real):
-        """``session_lab.read`` for the demo: only the project that runs experiments has a board
-        (written into the temporary HOME); ``real`` is the reader the board is read with."""
-        def read(cwd, now=None):
-            board = self.lab_roots.get(os.path.basename(str(cwd or "")))
-            return real(str(board.parent), now=now) if board else (None, [])
-        return read
+    def status_folder(self, sid):
+        """The temporary folder holding the demo status document of ``sid``'s project, else None
+        (a project without one shows no status button, as one without an artifact root)."""
+        found = self.status_projects.get(os.path.basename(str(self.sessions[sid].cwd or "")))
+        return str(found) if found else None
+
+    def status(self, sid):
+        """The REPO row's status button value (``session_shell._panel_status``: ``session_status.read``)
+        for ``sid``'s project, read once at the world's moment; None without a document folder."""
+        if sid not in self._status:
+            folder = self.status_folder(sid)
+            value = None
+            if folder:
+                import session_shell
+                from fleet import session_status
+                session_status.clear_cache()
+                session = self.sessions[sid]
+                binding = {"harness": session.harness, "sid": sid}
+                with mock.patch("time.time", return_value=self.now):
+                    value = session_shell._panel_status(binding, {"cwd": folder, "routes": []}).get("status")
+            self._status[sid] = value
+        return self._status[sid]
 
     def tag(self, harness, sid):
         return self.tags.get((harness, sid), "")
@@ -266,17 +302,15 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
     import human_wait_state
     import session_shell
     import session_tidy
-    from fleet import session_lab, session_tags, session_view, session_work
+    from fleet import session_tags, session_view, session_work
     from fleet.collectors import steward
     now = world.now
 
     def observe(h, pid, start, s, **_):
         return world.values(h, s), []
 
-    def memory(cwd):
-        return [dict(row) for row in world.memory.get(os.path.basename(str(cwd or "")), [])], []
-
-    lab_read = world.lab_read(session_lab.read)
+    def memory(cwd, limit=2):
+        return [dict(row) for row in world.memory.get(os.path.basename(str(cwd or "")), [])][:limit], []
 
     patches = [
         mock.patch("time.time", return_value=now),
@@ -285,7 +319,8 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
         mock.patch.object(human_wait_state, "cached_view", lambda request=False: world.view()),
         mock.patch.object(session_tidy, "resolve_seat", lambda *a, **k: None),
         mock.patch.object(session_tidy, "prompt_display", lambda seat, h, s, **k: world.display(s)),
-        mock.patch.object(session_tidy, "waiting_notice_display", lambda *a, **k: ("", [])),
+        mock.patch.object(session_tidy, "waiting_notice_display",
+                          lambda *a, with_level=False, **k: ("", [], None) if with_level else ("", [])),
         mock.patch.object(session_tidy, "session_seat", lambda *a, **k: None),
         mock.patch.object(session_tidy, "_prompt_seq_path", lambda *a, **k: Path("/nonexistent/seq")),
         mock.patch.object(session_tags, "assigned_tag", lambda h, s: world.tag(h, s).strip("[]")),
@@ -299,7 +334,6 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
                           lambda h, s, n, errors=None: (json.loads(json.dumps(world.requests.get(s, []))), [])),
         mock.patch.object(session_shell, "session_questions",
                           lambda h, s, view=None, retained=(), elsewhere=None: json.loads(json.dumps(world.questions.get(s, [])))),
-        mock.patch.object(session_lab, "read", lab_read),
         mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
     ]
     with contextlib.ExitStack() as stack:
@@ -307,20 +341,23 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
             stack.enter_context(patch)
         os.environ.pop("COLORTERM", None)
         os.environ.pop("NO_COLOR", None)
-        session_lab.clear_cache()
         payload = session_shell.panel_projection(harness, sid, native_pid=81000 + len(sid),
                                                  native_start=1, columns=columns, rows=rows,
                                                  state=state, expanded=True, popup_columns=popup_columns)
+    # The host puts the status button's value in the model (``host.cjs`` ``statusDoc``).
+    status = world.status(sid)
+    if isinstance(status, dict) and isinstance(status.get("word"), str):
+        payload["panel"] = {**payload["panel"], "status_doc": {"word": status["word"], "has_doc": status.get("has_doc") is True}}
     return payload
 
 
 def popup_read(world, sid, kind, *, columns, opened="", rows=30):
-    """What the backend answers the host for one popup of a demo session (``_panel_popup``:
-    ``routes``, ``lab`` or ``sessions``): Fleet's own table drawn from Fleet's view model of the same
-    demo world, its live readers replaced as in ``projection``. ``summary`` (sessions) is what the
-    panel's SESSIONS section shows."""
+    """What the backend answers the host for one popup of a demo session (``_panel_popup``):
+    ``routes``, Fleet's own table drawn from Fleet's view model of the same demo world, or
+    ``status``, the status document the REPO row's button names (the button's value comes with the
+    request, as the host sends it), its live readers replaced as in ``projection``."""
     import session_shell
-    from fleet import session_lab, session_tags, session_view
+    from fleet import session_status, session_tags, session_view
     session = world.sessions[sid]
     binding = {"harness": session.harness, "sid": sid, "native_pid": 81000 + len(sid), "native_start": 1}
 
@@ -329,20 +366,22 @@ def popup_read(world, sid, kind, *, columns, opened="", rows=30):
     patches = [
         mock.patch("time.time", return_value=world.now),
         mock.patch.object(session_shell, "_popup_view_model", lambda h, s, k: world.view_model()),
-        mock.patch.object(session_shell, "_session_folders", lambda: []),
         mock.patch.object(session_tags, "assigned_tag", lambda h, s: world.tag(h, s).strip("[]")),
         mock.patch.object(session_view, "observe", observe),
-        mock.patch.object(session_lab, "read", world.lab_read(session_lab.read)),
         mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
     ]
+    request = {"kind": kind, "columns": columns, "open": opened, "page": False, "rows": rows}
+    if kind == "status":
+        status = world.status(sid) or {}
+        request.update(cwd=world.status_folder(sid), routes=[],
+                       status={key: status.get(key) for key in ("word", "title", "has_doc", "path", "slot")})
     with contextlib.ExitStack() as stack:
         for patch in patches:
             stack.enter_context(patch)
         os.environ.pop("COLORTERM", None)
         os.environ.pop("NO_COLOR", None)
-        session_lab.clear_cache()
-        result = session_shell._panel_popup(binding, {"kind": kind, "columns": columns, "open": opened,
-                                                      "page": False, "rows": rows})
+        session_status.clear_cache()
+        result = session_shell._panel_popup(binding, request)
     if not result.get("ok"):
         raise RuntimeError(f"{kind} popup: {result}")
     return result
@@ -362,10 +401,10 @@ def unreceived_lines(world, sid):
 
 
 # Paints one or more panel frames with the real renderer and question editor; prints the rows.
-# The panel is rendered as ``host.cjs`` renders it (``panelViewNow``: the sessions section's summary,
-# the editor's summary and sent lines). With ``window`` set, a popup is laid out over that window as
-# ``host.cjs`` ``popupNow`` lays it: the question popup while the editor is focused, or the table
-# popup ``table`` names (``ROUTE``, ``LAB``, ``SESSIONS`` with the backend's rows, or ``MESSAGES``),
+# The panel is rendered as ``host.cjs`` renders it (``panelViewNow``: the editor's summary and sent
+# lines, the status button's value in the model). With ``window`` set, a popup is laid out over that
+# window as ``host.cjs`` ``popupNow`` lays it: the question popup while the editor is focused, or the
+# table popup ``table`` names (``ROUTE`` or ``STATUS`` with the backend's rows, or ``MESSAGES``),
 # with the sections that have something in them, the section's own head as its title and its keys;
 # ``veil`` is the gray everything behind a popup reads in (``panel-view`` ``veil``), null where none.
 _NODE = r"""
@@ -376,32 +415,37 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
   dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
 const cellWidth=s=>[...String(s)].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-const SECTIONS=['QUESTIONS','ROUTE','LAB','SESSIONS','MESSAGES'];
-// host.cjs: tableParts, sections, label, tableGuide, wrapGuide, tableTitle (the same code).
-const tableParts=result=>{const styles=Array.isArray(result.styles)?result.styles:[];
-  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{})})));};
+const SECTIONS=['STATUS','QUESTIONS','ROUTE','MESSAGES'];
+// host.cjs: tableParts, statusDoc, sectionLabel, sections, label, tableGuide, wrapGuide, tableTitle
+// (the same code, over the job's model and table instead of the host's globals).
+function tableParts(result){
+  const styles=Array.isArray(result.styles)?result.styles:[];
+  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{}),
+    ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
+}
+const statusDoc=m=>m.status_doc&&typeof m.status_doc.word==='string'?m.status_doc:null;
+const sectionLabel=(m,name)=>name==='STATUS'?String(statusDoc(m)?.word||'STATUS'):name;
 function sections(m,block,table){
   const list=v=>Array.isArray(v)&&v.length>0;
-  const has={QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,LAB:!!m.lab,
-    SESSIONS:true,MESSAGES:list(m.messages)||list(m.requests)};
+  const has={STATUS:!!statusDoc(m),QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+    MESSAGES:list(m.messages)||list(m.requests)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
 function tableGuide(m,kind,expanded=true){
   const label=(name,fallback)=>m.labels?.[name]||fallback;
-  const own=kind==='ROUTE'?label('popup_route','↑↓ route · Enter open'):
-    kind==='SESSIONS'?label('popup_sessions','↑↓ session · Enter its question'):'';
+  const own=kind==='ROUTE'?label('popup_route','↑↓ route · Enter open'):'';
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
 function wrapGuide(lines,inner,rows){
   return view.keyRows(lines.flatMap(line=>String(line).split(' · ')),inner,{rows,cellWidth});
 }
-function tableTitle(m,kind,sessionsSummary){
+function tableTitle(m,kind,table){
   const dim=v=>({text:v,dim:true});
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim());return r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];}
-  if(kind==='LAB'){const lab=m.lab||{};return [...(lab.count?[{text:String(lab.count)},dim(' ')]:[]),dim('LAB'),...(Array.isArray(lab.counts)?lab.counts:[]).flatMap(c=>[dim(' '),...c])];}
-  if(kind==='SESSIONS'){const s=sessionsSummary||{};return [...(Number.isInteger(s.count)?[{text:String(s.count)},dim(' ')]:[]),dim('SESSIONS'),...(Array.isArray(s.counts)?s.counts:[]).flatMap(c=>[dim(' '),...c])];}
+  if(kind==='STATUS'){const word=sectionLabel(m,'STATUS'),whole=String(table?.result?.title||word);
+    return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   return [dim('MESSAGES')];
 }
 (async()=>{
@@ -416,11 +460,11 @@ function tableTitle(m,kind,sessionsSummary){
       await tick();await tick();
     }
     const base={...p.panel,answerable:(p.questions||[]).some(i=>i.answerable===true&&(i.request_state||'open')==='open')};
-    const model=job.sessions?{...base,sessions:job.sessions}:base;
+    const model=base;
     const configuration=job.configuration||{};
     const r=view.render({width:job.width,height:job.height,side:job.side,fill:job.side,model,
       native:p.native_display||{},state:job.state,sid:job.sid,harness:job.harness,frame:job.frame||0,since:job.since,
-      sections:p.block,configuration,expandedKeys:job.expanded||[],focused:block.focused,
+      sections:p.block,configuration,routeScroll:0,focused:block.focused,cellWidth,
       cwd:'',background:'dark',folded:job.folded===true,brief:()=>block.summary(),sent:()=>block.sent()});
     let popup=null;
     const table=job.table||null;
@@ -435,7 +479,7 @@ function tableTitle(m,kind,sessionsSummary){
         const place=all.length>Math.max(1,fits)?`1/${all.length}`:'';
         const guide=wrapGuide([place,...tableGuide(base,table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
         const space=Math.max(1,room-guide.length);
-        title=tableTitle(base,table.kind,job.sessions);
+        title=tableTitle(base,table.kind,table);
         body=[...all.slice(0,space),...guide];
       }else{
         const label=[{text:block.summary()?.label||'QUESTIONS',dim:true}];
@@ -443,8 +487,8 @@ function tableTitle(m,kind,sessionsSummary){
         if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
         else body=block.detail({budget:room,columns:inner});
       }
-      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,current,model:base,
-        configuration,cellWidth,background:'dark'});
+      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,labels:names.map(name=>sectionLabel(base,name)),
+        current,model:base,configuration,cellWidth,background:'dark'});
       const veil=view.veil(configuration,{colors:base.colors??256,noColor:base.no_color===true,background:'dark'});
       popup={left:shown.left,top:shown.top,rows:shown.rows.map(row=>row.map(plain)),veil};
     }

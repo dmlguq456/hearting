@@ -13,15 +13,16 @@ and the session panel of the same demo world with ``readme_panel`` (the shell ba
 projection, painted by ``panel-view.cjs`` under node; the conversation beside it is illustrative):
 
     seat.png (session [4f]'s window: the conversation and its panel)
-    panel.png ([d1]'s window: its LAB section pressed, Fleet's LAB table in a popup, the rest gray)
-    panel-question.png (the bottom layout)  requests.png (one request in the requester's and the
-    receiver's MESSAGES)  panel-focus.gif (the question as a button > Ctrl+] > Tab > 2 > Enter: the
-    question popup over the window, then `answer sent`)
+    panel.png ([4f]'s window: its REPO row's STATUS button pressed, the project status document in
+    a popup, the rest gray)
+    panel-question.png (the bottom layout)  requests.png (one request in the route box of the
+    requester and of the receiver)  panel-focus.gif (the question in rose > Ctrl+] > Tab > 2 > Enter:
+    the question popup over the window, then `answer sent`)
     walkthrough.gif (OVERVIEW > ROUTES > session > that session's panel > output)
 
-The README opens with seat.png, overview.png, peers.png and routes.png: one moment of one demo world,
-so the route, the request and the other sessions [4f]'s panel shows read the same in the three Fleet
-screens (the panel's SESSIONS section and popups are Fleet's own table of the same world).
+The README opens with seat.png; overview.png, peers.png and routes.png show the same moment of the
+same demo world, so the route, the request and the messages [4f]'s panel shows read the same in the
+three Fleet screens (the panel's ROUTE popup is Fleet's own table of the same world).
 One run redraws every picture; two runs write the same bytes.
 
 PNGs are palette-quantised so the README loads quickly. Unlike ``explorer_capture.py`` (evidence,
@@ -60,7 +61,7 @@ PANEL_COLS = 40
 SEAT_TALK, SEAT_ROWS = 80, 38
 # The answering GIF: the [9c] window, its panel and the question popup over both.
 FOCUS_TALK, FOCUS_ROWS = 80, 30
-# The pressed section: the [d1] window with the LAB popup (as wide as the first picture).
+# The status button pressed: the [4f] window with the status popup (as wide as the first picture).
 POPUP_ROWS = 30
 # The request on both sides: the two panels.
 REQUEST_ROWS = 30
@@ -86,8 +87,9 @@ def isolate():
 def frames(render, wanted, rows_override=None):
     """``{name: Frame}`` for the wanted screens, all from one snapshot."""
     from tools.fleet.explorer.state import NavState
-    from tools.fleet.tests import readme_demo
+    from tools.fleet.tests import readme_demo, readme_panel
     snapshot, hosts = readme_demo.snapshot()
+    snapshot, _folders = readme_panel.with_status_document(snapshot, readme_demo.NOW)
     render.set_explorer_mode(True)
     render.set_compute_hosts(hosts)
     lab = readme_demo.route_id(snapshot, "lab")
@@ -125,32 +127,25 @@ def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), exp
     """One demo session's panel, painted by the shell's own renderer (``readme_panel``):
     ``{"rows", "popup"}``. With ``window`` (``cols``, ``rows``) the popup the host would lay over it:
     the question popup while ``keys`` leave the editor focused, or the ``table`` popup (``ROUTE``,
-    ``LAB``, ``SESSIONS`` or ``MESSAGES``) pressed in the panel. The SESSIONS section stands as the
-    host reads it (``host.cjs`` ``refreshPopups``): the backend's sessions reading of the same demo world,
-    made while the projection's ``sessions_key`` names another session waiting on the person or once the
-    sessions popup has been opened; with no reading the section is not drawn."""
+    ``STATUS`` or ``MESSAGES``) pressed in the panel."""
     from tools.fleet.tests import readme_panel
     session = world.sessions[sid]
     state = state or {"working": "working", "blocked": "blocked"}.get(session.liveness, "idle")
     columns = readme_panel.popup_width(window["cols"]) if window else None
     payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state,
                                       popup_columns=columns)
-    if "lab" in expanded:
-        expanded = [key for key in expanded if key != "lab"] + [str((payload["panel"].get("lab") or {}).get("key") or "lab:")]
     table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160, "table") - 4))
-    read = bool(payload["panel"].get("sessions_key")) or table == "SESSIONS"
-    summary = readme_panel.popup_read(world, sid, "sessions", columns=table_cols)["summary"] if read else None
     job_table = None
     if table:
         job_table = {"kind": table}
         if table == "MESSAGES":
             job_table["lines"] = readme_panel.unreceived_lines(world, sid)
         else:
-            kind = {"ROUTE": "routes", "LAB": "lab", "SESSIONS": "sessions"}[table]
+            kind = {"ROUTE": "routes", "STATUS": "status"}[table]
             job_table["result"] = readme_panel.popup_read(world, sid, kind, columns=table_cols)
     return readme_panel.paint([{"payload": payload, "width": width, "height": height, "side": side,
                                 "state": state, "sid": sid, "harness": session.harness, "frame": 3,
-                                "keys": list(keys), "expanded": list(expanded), "sessions": summary,
+                                "keys": list(keys), "expanded": list(expanded),
                                 "configuration": configuration or {}, "window": window, "table": job_table}])[0]
 
 
@@ -199,19 +194,19 @@ def panel_pictures(render, capture, with_gif):
     snapshot, _hosts = readme_demo.snapshot()
     world = panel.World(snapshot, readme_demo.NOW)
     pictures = {"seat.png": seat(world)}
-    # A section pressed in the panel: the LAB section of [d1] opens Fleet's LAB table in a popup in
-    # the middle of the window, everything behind it in one gray.
+    # The REPO row's status button pressed: [4f]'s project status document opens in a popup in the
+    # middle of the window, everything behind it in one gray.
     cols = SEAT_TALK + 2 + PANEL_COLS
     pictures["panel.png"] = panel.screen([[panel.window(
-        session_window(world, panel.ML, cols, POPUP_ROWS, table="LAB"),
-        "ml-train · claude [d1] — the LAB section pressed")]])
+        session_window(world, panel.API, cols, POPUP_ROWS, table="STATUS"),
+        "web-api · claude [4f] — the STATUS button pressed")]])
     question = panel.beside(panel.cells(panel.conversation(panel.API_NOTES, 100, 9)), [], 100, gap=0)
     question += panel.cells(panel_rows(world, panel.API_NOTES, 14, width=100, side=False,
                                        configuration={"layout": "bottom"}))
     pictures["panel-question.png"] = panel.screen([[panel.window(
         panel.image(question, 100, 23), "web-api · claude [9c] — the bottom layout")]])
-    # One request on both sides: its MESSAGES row in the panel of the session that asked (→) and of
-    # the one asked (◂), the same title and state.
+    # One request on both sides: its row in the route box of the session that asked (→) and of the
+    # one asked (◂), the same title and state.
     pictures["requests.png"] = panel.screen([[
         panel.window(panel.image(panel.cells(panel_rows(world, panel.API, REQUEST_ROWS)), PANEL_COLS, REQUEST_ROWS),
                      "claude [4f] — asked"),
