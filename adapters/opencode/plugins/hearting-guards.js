@@ -2634,13 +2634,13 @@ function createCompletionCarrier(ctx) {
 
 // Session card / tidy notice: `session_tidy.py hook` records the event and prints
 // what this session is due, once. Every failure is empty (no card, no throw).
-function collectCard(event, sid, cwd, prompt = "") {
+function collectCard(event, sid, cwd, prompt = "", promptMeta = null) {
   if (!sid || isWorkerSession()) return { text: "", pending: null }
   const result = spawnSync("python3", [sessionTidy, "hook", "--harness", "opencode",
     "--event", event, "--session-id", sid, "--cwd", cwd, "--format", "json"], {
     cwd: root,
     env: { ...process.env, AGENT_HOME: root },
-    input: JSON.stringify({ prompt }),
+    input: JSON.stringify(promptMeta ? { prompt, prompt_meta: promptMeta } : { prompt }),
     encoding: "utf8",
     timeout: 4000,
     killSignal: "SIGKILL",
@@ -3399,6 +3399,23 @@ async function pendingPeerDeliveryV2(ctx, sid) {
   } finally { pendingPeerBusy.delete(sid) }
 }
 
+// What the prompt hook may know of a prompt beyond its text, for its timeline row only: a task
+// session's prompt is its parent agent's (no row), and the person's own lines leave out the
+// synthetic parts (attached files' text) that `promptText` joins in.
+function promptMeta(sid, output) {
+  const meta = {}
+  if (knownChildSession(sid)) meta.child = true
+  if (Array.isArray(output?.parts)) {
+    const own = output.parts
+      .filter((part) => part && part.type === "text" && typeof part.text === "string" && !part.synthetic)
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+    if (own) meta.lines = own.split("\n").length
+  }
+  return meta
+}
+
 function promptText(output) {
   if (typeof output?.message?.content === "string") return output.message.content
   if (!Array.isArray(output?.parts)) return ""
@@ -3811,7 +3828,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       else carriedCompletionBySession.delete(sid)
     }
     if (eventSid && (!cardTurn || cardBySession.get(sid)?.turn !== cardTurn)) {
-      const cardResult = collectCard("prompt", eventSid, baseDir(ctx), prompt)
+      const cardResult = collectCard("prompt", eventSid, baseDir(ctx), prompt, promptMeta(eventSid, output))
       collectHistoryNotice(ctx, eventSid, baseDir(ctx), prompt, true)
       cardBySession.set(sid, { turn: cardTurn, text: cardResult.text,
                                pending: cardResult.pending })
