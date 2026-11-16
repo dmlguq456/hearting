@@ -30,10 +30,10 @@ You are a bounded worker, not the user-facing main session.
   use the sealed node's declared outputs and write scope under the supplied
   cycle output directory. Source scopes stay in the route worktree.
 - Put environments, caches, downloaded models and external checkouts under
-  `runtime_dir` (or an established project location); checkpoints, per-sample
-  outputs, raw results and dumps under `raw_data_dir`. Keep reports, tables,
-  figures, summaries, configs and provenance in artifacts, noting raw paths with
-  SHA256 and size. Use `runtime_dir` or system temp for pytest/tool scratch.
+  `runtime_dir` (or an established project location); checkpoints, raw
+  results/dumps under `raw_data_dir` (route-declared outputs stay where declared).
+  Keep reports, summaries, configs and provenance in artifacts, noting raw paths
+  with SHA256 and size. Use `runtime_dir` or system temp for pytest/tool scratch.
 - Put changed files, commands, results, warnings, reasoning, and unsupported
   runtime-contract details in the canonical artifact. File handoff must be
   sufficient for the next stage without conversation history.

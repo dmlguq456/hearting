@@ -160,12 +160,20 @@ class RawDataDirCandidateTest(unittest.TestCase):
         self.assertIn("- runtime_dir: /p/.agent_runtime\n", prompt)
         rule = next(line for line in prompt.splitlines() if "raw_data_dir" in line)
         self.assertIn(raw, rule)
-        for word in ("checkpoints", "per-sample outputs", "raw results", "artifacts"):
+        for word in ("checkpoints", "raw results", "artifacts"):
             self.assertIn(word, rule)
-        # Without a separate value the rule names the runtime dir as raw_data_dir.
-        fallback = W.artifact_context_prompt(base)
-        self.assertEqual(len(fallback.splitlines()), 5, fallback)
-        self.assertIn("raw_data_dir (/p/.agent_runtime)", fallback)
+
+    def test_no_raw_value_leaves_the_prompt_byte_equal_to_before(self):
+        # The line main (59c720022) printed; a user who set nothing sees no change.
+        before = ("- artifact_cycle_id: cyc_x\n- artifact_output_dir: /a/artifacts\n"
+                  "- runtime_dir: /p/.agent_runtime\n"
+                  "- Put environments, caches, external checkouts, and checkpoints under runtime_dir; "
+                  "keep reports and provenance in artifacts.\n"
+                  "- Resolve relative artifact paths beneath artifact_output_dir.\n")
+        base = {"AGENT_ARTIFACT_CYCLE_ID": "cyc_x", "AGENT_ARTIFACT_OUTPUT_DIR": "/a/artifacts",
+                "AGENT_RUNTIME_DIR": "/p/.agent_runtime"}
+        for extra in ({}, {"AGENT_RAW_DATA_DIR": ""}, {"AGENT_RAW_DATA_DIR": "/p/.agent_runtime"}):
+            self.assertEqual(W.artifact_context_prompt({**base, **extra}).encode(), before.encode(), extra)
 
 
 class ComputeHostRawDataDirTest(unittest.TestCase):
@@ -183,13 +191,18 @@ class ComputeHostRawDataDirTest(unittest.TestCase):
         self.assertEqual(self.hosts.run_raw_data_dir(host, ""), "")
         self.assertEqual(self.hosts.run_raw_data_dir(host, "relative"), "")
 
-    def test_run_setup_always_sets_the_key(self):
+    def test_run_setup_never_hands_an_empty_value(self):
         host = {"ssh_host": "gpu-a", "path_namespace": {"/home/nas": "/mnt/nas"}}
-        line = self.hosts.raw_data_dir_setup(host, {"AGENT_RAW_DATA_DIR": "/home/nas/d/proj"})
+        runtime = "/home/nas/p/.agent_runtime"
+        line = self.hosts.raw_data_dir_setup(host, {"AGENT_RAW_DATA_DIR": "/home/nas/d/proj",
+                                                    "AGENT_RUNTIME_DIR": runtime})
         self.assertEqual(line, "export AGENT_RAW_DATA_DIR=/home/nas/d/proj")
-        self.assertEqual(self.hosts.raw_data_dir_setup(host, {"AGENT_RAW_DATA_DIR": "/elsewhere/proj"}),
-                         "export AGENT_RAW_DATA_DIR=''")
-        self.assertEqual(self.hosts.raw_data_dir_setup(host, {}), "export AGENT_RAW_DATA_DIR=''")
+        # Outside the namespace, unset, or just the runtime dir: the key is unset, not ''.
+        for env in ({"AGENT_RAW_DATA_DIR": "/elsewhere/proj", "AGENT_RUNTIME_DIR": runtime},
+                    {}, {"AGENT_RAW_DATA_DIR": runtime, "AGENT_RUNTIME_DIR": runtime}):
+            line = self.hosts.raw_data_dir_setup(host, env)
+            self.assertEqual(line, "unset AGENT_RAW_DATA_DIR", env)
+            self.assertNotIn("''", line)
 
 
 class AdapterRawDataGrantTest(unittest.TestCase):

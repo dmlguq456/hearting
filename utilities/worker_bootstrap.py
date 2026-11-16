@@ -503,11 +503,17 @@ def artifact_context_prompt(environ) -> str:
     if not output:
         return ""
     runtime = values.get("AGENT_RUNTIME_DIR", "")
-    raw = environ.get("AGENT_RAW_DATA_DIR", "") or runtime
-    runtime_line = (f"- runtime_dir: {runtime}\n"
-                    "- Put environments, caches and external checkouts under runtime_dir; "
-                    f"checkpoints, per-sample outputs and raw results under raw_data_dir ({raw}); "
-                    "reports, tables, figures and summaries in artifacts.\n") if runtime or raw else ""
+    raw = environ.get("AGENT_RAW_DATA_DIR", "")
+    if not runtime:
+        runtime_line = ""
+    elif not raw or raw == runtime:
+        # No separate raw place: the old line, byte for byte (checkpoints do go to runtime_dir).
+        runtime_line = (f"- runtime_dir: {runtime}\n"
+                        "- Put environments, caches, external checkouts, and checkpoints under runtime_dir; keep reports and provenance in artifacts.\n")
+    else:
+        runtime_line = (f"- runtime_dir: {runtime}\n"
+                        "- Put environments, caches, external checkouts under runtime_dir; "
+                        f"checkpoints and raw results under raw_data_dir ({raw}); reports and summaries in artifacts.\n")
     return (f"- artifact_cycle_id: {values['AGENT_ARTIFACT_CYCLE_ID']}\n"
             f"- artifact_output_dir: {output}\n"
             f"{runtime_line}"

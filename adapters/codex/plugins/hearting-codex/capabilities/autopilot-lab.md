@@ -11,6 +11,7 @@ record optional `ckpt_sha256` and `ckpt_byte_size` and verify the digest at
 handoff and parent evaluation. While training is running, the expected path is
 valid without a hash or size. Keep configs, logs, reports, tables, figures and
 summary numbers in artifacts; `run.json` records the raw paths.
+A route's declared output (e.g. `eval-run`'s `raw-results/**`) stays at its declared path.
 
 ## Contract
 <!-- GENERATED: harness-manifest.json -->

@@ -142,10 +142,19 @@ def run_raw_data_dir(host, value):
 
 
 def raw_data_dir_setup(host, environ=None):
-    """The run preamble line; always set, so a stale shell never keeps a foreign value."""
+    """The run preamble line for AGENT_RAW_DATA_DIR; never an empty value.
+
+    A run is not given AGENT_RUNTIME_DIR, so the raw dir is passed only when it
+    is a separate place the run can see. Otherwise the key is unset, which also
+    clears a stale shell value; a script reading `$AGENT_RAW_DATA_DIR/...` then
+    fails loudly instead of writing to `/experiments/...`.
+    """
     values = os.environ if environ is None else environ
-    return "export AGENT_RAW_DATA_DIR=" + shlex.quote(
-        run_raw_data_dir(host, values.get("AGENT_RAW_DATA_DIR", "")))
+    raw = values.get("AGENT_RAW_DATA_DIR", "")
+    if raw == values.get("AGENT_RUNTIME_DIR", ""):
+        return "unset AGENT_RAW_DATA_DIR"
+    visible = run_raw_data_dir(host, raw)
+    return f"export AGENT_RAW_DATA_DIR={shlex.quote(visible)}" if visible else "unset AGENT_RAW_DATA_DIR"
 
 
 def _validate_path_namespace(name, host, run_root):
