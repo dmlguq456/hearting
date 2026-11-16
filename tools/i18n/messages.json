@@ -742,6 +742,10 @@
    "en": "%p percentage points",
    "ko": "%p 퍼센트포인트"
   },
+  "fleet.context.cleared": {
+   "en": "cleared {when}",
+   "ko": "정리 {when}"
+  },
   "fleet.context.compaction_imminent": {
    "en": "compaction imminent",
    "ko": "압축 임박"
@@ -757,6 +761,10 @@
   "fleet.context.observed": {
    "en": "observed",
    "ko": "관측"
+  },
+  "fleet.context.resting": {
+   "en": "idle {when}",
+   "ko": "쉼 {when}"
   },
   "fleet.context.server": {
    "en": "server",
@@ -1154,6 +1162,22 @@
    "en": "could not read · {reason}",
    "ko": "읽지 못함 · {reason}"
   },
+  "fleet.peers.connected": {
+   "en": "{count} sessions",
+   "ko": "{count} 세션"
+  },
+  "fleet.peers.connected_one": {
+   "en": "{count} session",
+   "ko": "{count} 세션"
+  },
+  "fleet.peers.links_meta": {
+   "en": "messages·requests · supervision · handover",
+   "ko": "메시지·요청 · 감독 · 이어받음"
+  },
+  "fleet.peers.steward": {
+   "en": "steward",
+   "ko": "감독"
+  },
   "fleet.repo.journals": {
    "en": "RECENT WORK",
    "ko": "최근 작은 일"
@@ -1318,6 +1342,10 @@
    "en": "answer every field · Tab next",
    "ko": "모든 문항에 답하기 · Tab 다음"
   },
+  "fleet.session_block.delivery_waiting": {
+   "en": "awaiting delivery",
+   "ko": "전달 대기"
+  },
   "fleet.session_block.editor_help": {
    "en": "←→ section · p open/fold panel · w work · f Fleet · Esc/Ctrl+] back",
    "ko": "←→ 구획 · p 패널 펼치기/접기 · w 열린 일 · f Fleet · Esc/Ctrl+] 돌아가기"
@@ -1393,6 +1421,30 @@
   "fleet.session_block.unknown": {
    "en": "unknown · check receipt",
    "ko": "미확인 · 영수증 확인"
+  },
+  "fleet.session_block.wait_no_shell": {
+   "en": "outside the shell · type once in that window to deliver it",
+   "ko": "셸 밖 창 · 그 창에 한 번 입력하면 받음"
+  },
+  "fleet.session_block.wait_old_shell": {
+   "en": "reopen that window or type once there to deliver it",
+   "ko": "그 창을 다시 열거나 한 번 입력하면 받음"
+  },
+  "fleet.session_page.generation": {
+   "en": "generation {count}",
+   "ko": "세대 {count}"
+  },
+  "fleet.session_page.go": {
+   "en": "⏎ go",
+   "ko": "⏎ 가기"
+  },
+  "fleet.session_page.no_card_body": {
+   "en": "no card body",
+   "ko": "카드 본문 없음"
+  },
+  "fleet.session_page.peers_tab": {
+   "en": "PEERS tab ›",
+   "ko": "PEERS 탭 ›"
   },
   "fleet.session_panel.answer": {
    "en": "answer needed",
@@ -1625,10 +1677,6 @@
   "fleet.session_panel.popup_route_page": {
    "en": "Enter back to the table",
    "ko": "Enter 표로 돌아가기"
-  },
-  "fleet.session_panel.popup_sessions": {
-   "en": "↑↓ session · Enter its question",
-   "ko": "↑↓ 세션 · Enter 그 세션의 질문"
   },
   "fleet.session_panel.popup_unfold": {
    "en": "p open panel",
@@ -2529,6 +2577,10 @@
   "route.tier.inline": {
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
+  },
+  "session_shell.tidy_done": {
+   "en": "Memory tidied · {text}",
+   "ko": "기억 정리 · {text}"
   },
   "session_shell.upgrade_pending": {
    "en": "New release waiting",

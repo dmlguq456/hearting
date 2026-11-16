@@ -622,10 +622,12 @@ def memory_kind(kind):
 # 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
 MEMORY_TIERS = ("durable", "working")
 MEMORY_SCOPES = ("project", "global")
+# 11-16 (panel polish 1116): the MEM section's records, five at most (the panel's `MEM_MAX`).
+MEMORY_ITEMS = 5
 
 
 def session_memory_items(values, now=None):
-    """Spec E9 rule 46: the MEM section's records, two at most, newest first: each its short type
+    """Spec E9 rule 46: the MEM section's records, ``MEMORY_ITEMS`` at most, newest first: each its short type
     word, its age and its headline (else the start of its snippet), and (11-15) its tier and scope
     as the record carries them (none where it carries neither name). Nothing without a record or a
     text; a body is never carried."""
@@ -638,7 +640,7 @@ def session_memory_items(values, now=None):
             items.append({"kind": memory_kind(kind), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
                           "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else ""})
-        if len(items) >= 2:
+        if len(items) >= MEMORY_ITEMS:
             break
     return items
 
@@ -735,7 +737,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium",
         # 11-15: the table popups' keys (the question popup's are the editor's own).
-        "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page", "popup_sessions",
+        "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page",
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action")}
     # Fixed words are English in every language (spec rule 3).

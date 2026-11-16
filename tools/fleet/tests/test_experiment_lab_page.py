@@ -72,7 +72,7 @@ class LabPageTest(T.Base):
 
     def test_wide_page_shows_goal_metric_base_and_ten_columns_from_the_catalog(self):
         text = self.page(self.board())
-        self.assertIn("── LAB", text)
+        self.assertIn("\nLAB ", text)
         for value in ("합성 잔향 조건에서 SI-SDR이 기준 8.0 dB보다 높은가", "si_sdr (dB) ↑", "fix 8.00 dB",
                       "기본 구성", "잔향 줄임", "9.10@5", "+1.10 dB", "36/60 ep"):
             self.assertIn(value, text)
@@ -81,8 +81,8 @@ class LabPageTest(T.Base):
         self.assertNotIn("run-1", text)  # a registered run is called by its name
         order = [text.index(name) for name in ("기본 구성", "잔향 줄임", "잡음 줄임")]
         self.assertEqual(order, sorted(order))  # catalog order, not value order
-        self.assertLess(text.index("── STATUS") if "── STATUS" in text else 0, text.index("── LAB"))
-        self.assertLess(text.index("── LAB"), text.index("── OPEN WORK") if "── OPEN WORK" in text else 10 ** 9)
+        self.assertLess(text.index("\nSTATUS ") if "\nSTATUS " in text else 0, text.index("\nLAB "))
+        self.assertLess(text.index("\nLAB "), text.index("\nOPEN WORK ") if "\nOPEN WORK " in text else 10 ** 9)
 
     def test_columns_leave_whole_in_the_documented_order(self):
         keep = ("최근", "기준", "최고", "예상", "진행뒤", "관측뒤")    # the one that stays longest first
@@ -145,14 +145,14 @@ class LabPageTest(T.Base):
 
     def test_hidden_when_there_is_nothing_and_unconfirmed_when_unreadable(self):
         quiet = B.board(E.status(self.make_root("empty", "z"), now=NOW_EPOCH))
-        self.assertNotIn("── LAB", self.page(quiet))
-        self.assertNotIn("── LAB", self.page(None))
+        self.assertNotIn("\nLAB ", self.page(quiet))
+        self.assertNotIn("\nLAB ", self.page(None))
         broken = self.make_root("broken", "y")
         path = E.catalog_path(broken)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{no", encoding="utf-8")
         text = self.page(B.board(E.status(broken, now=NOW_EPOCH)))
-        self.assertIn("── LAB", text)
+        self.assertIn("\nLAB ", text)
         self.assertIn("읽을 수 없음", text)
         with mock.patch.object(E, "status", side_effect=RuntimeError("x")):
             result, _ = B.read(self.root, now=NOW_EPOCH + 500, cache={})
@@ -248,7 +248,7 @@ class LabPageTest(T.Base):
         saved = persistable_view_model(replace(self.vm, repos=(repo,)))
         self.assertNotIn("lab", saved["repos"][0])      # the board is not in the saved allowlist
         restored = restore_persisted_view_model(saved)
-        self.assertNotIn("── LAB", pane(draw(restored, self.state, 168, 70, beat=1)))  # no stale table as fresh
+        self.assertNotIn("\nLAB ", pane(draw(restored, self.state, 168, 70, beat=1)))  # no stale table as fresh
 
     def test_the_first_pass_after_a_start_reads_the_catalog_again(self):
         from tools.fleet.collectors import experiment_status

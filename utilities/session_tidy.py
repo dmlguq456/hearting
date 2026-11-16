@@ -2915,6 +2915,10 @@ def apply_deferred(entries) -> int:
                                  "memory_receipts": receipts[-200:]})
                 data["schema"] = SCHEMA
                 atomic_write_json(path, data)
+            elif kind == "repeat-seen":
+                import context_repeat
+                if not context_repeat.commit({**entry, "kind": entry.get("name")}):
+                    continue
             elif kind == "notices":
                 data = read_json(path)
                 if entry.get("require_existing") and not isinstance(data, dict):
@@ -3103,8 +3107,37 @@ def _received_prompt_line(prompt_text: str, origin: dict) -> str:
     return prompt_first_line(prompt_text)
 
 
+def _prompt_shape(text: str) -> tuple:
+    """``(line count, whole text was one pasted block)`` of a prompt, for its timeline row."""
+    value = text if isinstance(text, str) else ""
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+    body = wrapped.group("body") if wrapped else value
+    return max(1, len(body.strip().splitlines())), bool(wrapped)
+
+
+def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, text: str,
+                            prompt_text: str, answered: bool, transcript: str) -> None:
+    """One bounded line of the person's prompt beside the session's NOW record.
+
+    Only the one-line display text is kept (never the original); ``from`` is the
+    conversation file's size when the hook saw it, the cursor a later reader can start at.
+    """
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet import titles
+    lines, paste = _prompt_shape(prompt_text)
+    row = {"kind": "prompt", "at": now, "seq": sequence, "text": text, "lines": lines,
+           "paste": paste, "answer": bool(answered)}
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        if transcript and os.path.isfile(transcript):
+            row["from"] = os.stat(transcript).st_size
+    titles.append_timeline(sid, row, harness=harness)
+
+
 def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
-                          prompt_text: str, now: float) -> None:
+                          prompt_text: str, now: float, answered: bool = False,
+                          transcript: str = "") -> None:
     """Retain only the existing classifier's final result in its existing frontier."""
     seat = session_seat(seat, harness, sid)
     path = _prompt_seq_path(seat)
@@ -3136,6 +3169,10 @@ def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
             if isinstance(rows, list) else []
         current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
     atomic_write_json(path, current)
+    if source == "real":
+        with contextlib.suppress(Exception):    # the timeline never fails the prompt hook
+            _record_prompt_timeline(harness, sid, sequence, now, row["text"], prompt_text,
+                                    answered, transcript)
 
 
 def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
@@ -3272,15 +3309,18 @@ def record_prompt_origin(seat: Seat, harness: str, sid: str, sequence: int, orig
 
 
 def write_notice(seat: Seat, text: str, *, author_harness: str = "", author_sid: str = "",
-                 now: Optional[float] = None, notice_id: str = "") -> dict:
-    """Leave one result line for the seat's next start/prompt (takes the seat lock)."""
+                 now: Optional[float] = None, notice_id: str = "", level: str = "") -> dict:
+    """Leave one result line for the seat's next start/prompt (takes the seat lock).
+
+    ``level`` ``"done"`` marks a line that reports work ended well and leaves the person nothing
+    to do (11-16: the shell panel shows it quietly); without it the line reads as before."""
     if author_harness and author_sid:
         seat = session_seat(seat, author_harness, author_sid)
     now = now_epoch() if now is None else now
     line = " ".join((text or "").split())
     line = _cut_bytes("".join(ch for ch in line if ch.isprintable()), NOTICE_MAX_BYTES)[0]
     item = {"id": (notice_id[:96] if notice_id else secrets.token_hex(6)), "text": line, "created": now,
-            "author": {"harness": author_harness, "sid": author_sid}}
+            "author": {"harness": author_harness, "sid": author_sid}, **({"level": level} if level else {})}
     with seat_lock(seat_state_key(seat)):
         data = read_json(_notices_path(seat))
         items = data.get("items", []) if isinstance(data, dict) else []
@@ -3290,7 +3330,8 @@ def write_notice(seat: Seat, text: str, *, author_harness: str = "", author_sid:
             return item
         for index, existing in enumerate(items):
             if existing.get("id") == item["id"]:
-                items[index] = {**existing, "text": line}
+                items[index] = {**{k: v for k, v in existing.items() if k != "level"}, "text": line,
+                                **({"level": level} if level else {})}
                 atomic_write_json(_notices_path(seat), {"schema": SCHEMA, "items": items[-20:],
                                                         "delivered": delivered[-200:],
                                                         "lineage_received": lineage_received[-200:]})
@@ -3380,21 +3421,25 @@ def _notice_groups(seat: Seat, harness: str, sid: str, *, now: float,
 
 
 def waiting_notice_display(seat: Seat, harness: str, sid: str, *,
-                           now: Optional[float] = None) -> tuple[str, list[str]]:
+                           now: Optional[float] = None, with_level: bool = False) -> tuple:
     """Read-only: the newest result line still waiting for this session's next hook.
 
     A cleared window's next hook is the person's next input, so the shell panel and
     the status line paint this line meanwhile (2026-11-10: a failed continue stayed
-    unseen for ~55 minutes). Returns the line and the files to watch; reading it
-    delivers nothing and settles nothing -- the hook still shows it to the session.
+    unseen for ~55 minutes). Returns the line and the files to watch (and, ``with_level``,
+    its ``level``: ``"done"`` or ``""``); reading it delivers nothing and settles nothing --
+    the hook still shows it to the session.
     """
     seat = session_seat(seat, harness, sid)
     try:
         groups, notices = _notice_groups(seat, harness, sid, now=now_epoch() if now is None else now)
     except Exception:
-        return "", []
+        return ("", [], "") if with_level else ("", [])
     paths = list(dict.fromkeys(str(_notices_path(origin)) for origin, _group in groups))
-    return (str(notices[-1].get("text") or "") if notices else ""), paths
+    text = str(notices[-1].get("text") or "") if notices else ""
+    if not with_level:
+        return text, paths
+    return text, paths, (str(notices[-1].get("level") or "") if notices else "")
 
 
 def _appeared_after(sessions: dict, harness: str, sid: str, author_key: tuple[str, str]) -> bool:
@@ -3716,6 +3761,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     continue
                 wait_questions.append(item.get("question") or "답 필요")
     answer_wait_lines = answer_wait_text(wait_questions)
+    open_question_lines: list = []     # the person spoke while a question is open (this prompt only)
     state_seats = [seat]
     if _native_session_key(harness, sid) and prior_seat:
         state_seats.append(prior_seat)
@@ -3746,6 +3792,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if not runtime_source and not request_origin:
                 runtime_source = _bound_delivery_source(prompt_text, sid)
             self_request = matching_tidy_claim(seat, harness, sid, prompt_text, sequence)
+            answered_wait = False
             notification = bool(runtime_source or request_origin or self_request)
             if runtime_source:
                 # A finished background task or another session reporting in is new content,
@@ -3772,26 +3819,35 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if isinstance(prompt_text, str) and prompt_text.strip():
                     with contextlib.suppress(BaseException):
                         import human_wait_state
-                        human_wait_state.close_signal(seat.key, sequence=sequence,
-                                                      harness=harness, session_id=sid,
-                                                      answer=prompt_text)
+                        open_wait = human_wait_state._read(human_wait_state._signal_path(
+                            {"harness": harness, "session_id": sid, "seat_key": seat.key}))
+                        closed_wait = human_wait_state.close_signal(
+                            seat.key, sequence=sequence, harness=harness, session_id=sid,
+                            answer=prompt_text)
+                        answered_wait = bool(open_wait and closed_wait)
                         line = render_context and _open_question_line(
                             human_wait_state, harness, sid, seat.key)
                         if line:
-                            answer_wait_lines.append(line)
+                            open_question_lines.append(line)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
                 if not claimed and not notification:
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
             with contextlib.suppress(Exception):
-                record_prompt_display(seat, harness, sid, sequence, prompt_text, now)
+                record_prompt_display(seat, harness, sid, sequence, prompt_text, now,
+                                      answered=answered_wait, transcript=transcript)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
         # SessionStart(source=compact) and a separate compact event describe the same
         # compaction; count it once.
         compacting = (event == "compact" or source == "compact") and not (
             prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC)
+        if compacting or (event == "start" and source == "clear"):
+            # The earlier text may be gone from the session's context: let it in once more.
+            with contextlib.suppress(Exception):
+                import context_repeat
+                context_repeat.reset(harness, sid)
         launch = None
         if event == "start" and source in {"startup", "resume", "select", "clear", "compact", "fork"}:
             try:
@@ -3957,7 +4013,20 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             resume_text = handover.resume_line(seat, harness, sid)
             if resume_text:
                 parts.append(resume_text)
-        parts.extend(answer_wait_lines)
+        # An unchanged "[답변 필요]" status line is already in the session's context: it goes in
+        # once per question, again only when its text changes or after a compaction/clear.
+        # OpenCode keeps system-prompt context for the one request only, so its repeat is the
+        # carrier. The open-question line is not filtered: it judges this very input ("not
+        # recorded as the answer"), so it is new every time the person types.
+        repeat_entries: list = []
+        if harness != "opencode" and render_context and event in ("start", "prompt"):
+            with contextlib.suppress(BaseException):
+                import context_repeat
+                answer_wait_lines, entry = context_repeat.filter_fresh(
+                    harness, sid, "answer-needed", answer_wait_lines)
+                if entry:
+                    repeat_entries.append(dict(entry, kind="repeat-seen", name="answer-needed"))
+        parts.extend(answer_wait_lines + open_question_lines)
         if card_due or event == "start" or (event == "prompt" and (startup_context or {}).get("due")):
             # The experiment catalog's names, after everything else and inside the same 2400-byte budget.
             lab = _lab_block(cwd, INJECTION_MAX_BYTES - 1 - len("\n".join(parts).encode("utf-8")) - 1)
@@ -3976,6 +4045,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if notice:
                     emit_human(notice)
         if not text:
+            apply_deferred(repeat_entries)     # nothing goes out, so nothing is left to protect
             return ""
         (emit or (lambda t: None))(text)
         # The receipts are prepared here and applied by the caller when it
@@ -3983,6 +4053,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # card bridge prints in-process, a text CLI prints inside ``emit``) has
         # no later boundary, so it applies them immediately.
         receipts = [] if deferred is None else deferred
+        receipts.extend(repeat_entries)
         if card_due:
             receipts.append({"kind": "card-consumed",
                              "path": str(_consumed_path(card_seat)),
@@ -4029,6 +4100,11 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
                        compact_context: Optional[dict], env, now: Optional[float]) -> str:
     """Observe native compaction. Never turn it into another card/clear/model request."""
     now = now_epoch() if now is None else now
+    # Every compaction (not deduped, and even when the state lock is busy) may have dropped
+    # the earlier text from the context: let it in once more and mark the compaction.
+    with contextlib.suppress(Exception):
+        import context_repeat
+        context_repeat.reset(harness, sid, compaction=True)
     seat = session_seat(resolve_seat(harness, cwd or None, env, sid, "compact", hook=True), harness, sid)
     try:
         with session_state_lock(seat, wait=COMPACT_LOCK_WAIT_SEC):

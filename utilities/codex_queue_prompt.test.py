@@ -251,7 +251,7 @@ class PromptReceiptTest(unittest.TestCase):
             def render(event, parts, **kw):
                 self.assertEqual(event, "UserPromptSubmit")
                 self.assertEqual([p for p in parts if p],
-                                 ["receipt", "card"] + (["local evidence"] if first else []) + ["candidate"])
+                                 ["receipt", "card", "candidate"])
                 self.assertEqual(kw["system_message"], "history notice" if first else "")
                 emit(event, parts, **kw)
             with mock.patch.dict(sys.modules, {"context_alert": context_alert, "fleet": fleet,
@@ -268,8 +268,7 @@ class PromptReceiptTest(unittest.TestCase):
                  mock.patch.object(hook, "native_queue_prompt_receipts", return_value=([], ["receipt"])), \
                  mock.patch.object(hook, "candidate_context",
                                    return_value=("candidate", candidate_pending)), \
-                 mock.patch.object(hook, "run_preflight", side_effect=lambda name, *a:
-                                   "local evidence" if name == "local-evidence" else ""), \
+                 mock.patch.object(hook, "run_preflight", return_value=""), \
                  mock.patch.object(hook, "token_budget_context", return_value=""), \
                  mock.patch.object(hook, "emit_context", side_effect=render), \
                  mock.patch.object(session_tidy, "apply_deferred",
@@ -333,7 +332,7 @@ class PromptReceiptTest(unittest.TestCase):
             def create_module(self, spec):
                 return None
             def exec_module(self, module):
-                module.receiver_guidance = lambda *args, **kwargs: calls.append((args, kwargs)) or "ordinary guidance"
+                module.receiver_guidance_once = lambda *args, **kwargs: calls.append((args, kwargs)) or "ordinary guidance"
 
         guidance_spec = importlib.machinery.ModuleSpec("peer_receiver_guidance_test", GuidanceLoader())
         projection = types.ModuleType("herdr_session_projection")
@@ -361,8 +360,10 @@ class PromptReceiptTest(unittest.TestCase):
              mock.patch.object(hook, "emit_context"), \
              mock.patch.object(importlib.util, "spec_from_file_location", return_value=guidance_spec):
             self.assertEqual(hook.main(), 0)
-        self.assertEqual(calls, [((prompt, {"harness": "codex", "session_id": sid}),
-                                  {"cwd": "/tmp/codex-project"})])
+        self.assertEqual([(args, {k: v for k, v in kwargs.items() if k != "deferred"}) for args, kwargs in calls],
+                         [((prompt, {"harness": "codex", "session_id": sid}),
+                           {"cwd": "/tmp/codex-project"})])
+        self.assertIsInstance(calls[0][1]["deferred"], list)   # the "delivered" record waits for the flush
 
 if __name__ == '__main__':
     unittest.main()

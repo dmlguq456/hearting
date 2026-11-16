@@ -82,7 +82,6 @@ class Briefing(T.Base):
 
 class OneTable(Briefing):
     def test_the_conversation_table_is_the_fleet_lab_table_narrowed_and_the_same_on_every_call(self):
-        from fleet import session_lab
         from fleet.explorer import lab_table
         from fleet.explorer.grid import CellGrid
         text = self.table()
@@ -97,19 +96,13 @@ class OneTable(Briefing):
         grid = CellGrid(200, 40)
         lab_table.draw_lab(grid, board, 0, 200, 0, NOW)
         fleet = "\n".join(grid.rows_text())
-        view = session_lab.view(board, NOW)
         for row in group["rows"]:
             cells = lab_table.cells(row, group, NOW)
             line = "| " + " | ".join(cells[c][0] for c in columns) + " |"
             self.assertIn(line, block)                                         # every cell is Fleet's own
             for column in columns:
                 self.assertIn(cells[column][0], fleet)                         # and Fleet shows the same words
-            # and so does the shell panel (its three rows: CONDITION, STATE, PROGRESS, DIFF)
-            panel = next((item for item in view["rows"] if item["name"]["text"] == cells["name"][0]), None)
-            if panel is not None:
-                for column in ("progress", "delta", "state"):
-                    self.assertEqual(panel["cells"][column]["text"], cells[column][0])
-        self.assertEqual(len(view["rows"]), min(3, len(group["rows"])))
+        # (11-15: the shell panel's LAB rows, a third reading of these cells, left the panel.)
         for header in (lab_table._header(c) for c in columns):
             self.assertIn(header, fleet)
         self.assertNotIn("%@", text)                                           # the unit is on the metric line, as in Fleet

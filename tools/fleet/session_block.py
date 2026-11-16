@@ -1,4 +1,6 @@
 """Question-first session block; values and authority keep their existing owners."""
+import re
+
 from .session_line import route_text, status_lines, clip_segments, wrap_segments as wrap_parts
 from .explorer.grid import cell_width
 from .config import ui_text
@@ -21,6 +23,65 @@ _CLOSED_MARKS = ("no-longer-current", "not-current", "not-pending", "cancelled",
 # The answer record's states once the person's answer was sent (rule 5, 11-14): the panel's one
 # dim line, in no box number or pane count.
 _SENT_STATES = frozenset({"submitted", "received", "applied"})
+
+
+# What an answer still on its way waits for, in the person's words (``session_shell.answer_delivery_wait``):
+# an older shell takes it once its window is reopened or typed in (the window's own `새 판 대기`), a Claude
+# window outside the shell at the next prompt typed there.
+_ANSWER_WAIT_WORDS = {"old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
+                      "no-shell": ("fleet.session_block.wait_no_shell",)}
+
+
+# What a drawn value may not carry, whatever draws it (Fleet's grid drops these; the panel may not):
+# C0/C1 controls (ESC, NUL), DEL and the bidirectional overrides and isolates.
+_UNDRAWABLE = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def _drawable(value):
+    return _UNDRAWABLE.sub("", " ".join(str(value).split()))
+
+
+def sent_values(sent, questions=()):
+    """What was sent, as the answer record says it: choice labels, free text, a decision; secrets
+    hidden (``secret``, ``is_secret`` or ``isSecret`` on the question), controls dropped."""
+    if isinstance(sent, (list, tuple)):
+        return [value for value in map(_drawable, sent) if value.strip()]
+    if not isinstance(sent, dict):
+        return []
+    if isinstance(sent.get("decision"), str):
+        return [_drawable(sent["decision"])]
+    by_id = {str(q.get("id")): q for q in questions or () if isinstance(q, dict)}
+    out = []
+    for qid, listed in (sent.get("answers") if isinstance(sent.get("answers"), dict) else {}).items():
+        question = by_id.get(str(qid)) or {}
+        for value in listed if isinstance(listed, list) else ():
+            if question.get("secret") or question.get("is_secret") or question.get("isSecret"):
+                out.append("•••")
+                continue
+            label = next((choice.get("label") for choice in question.get("choices") or ()
+                          if isinstance(choice, dict) and choice.get("value") == value and choice.get("label")), None)
+            shown = _drawable(label or value)
+            if shown.strip():
+                out.append(shown)
+    return out[:4]
+
+
+def sent_answer_line(sent=(), *, wait="", mark=True, questions=()):
+    """The one line of an answer the person sent that its session has not taken yet (rule 5).
+
+    ``✓ answer sent · <what was sent> · awaiting delivery``, then, when it waits on the person, why
+    and what takes it (``wait``). Fleet's QUESTIONS row and the shell panel's sent line draw these
+    same parts; it is never a question to answer again and is in no count.
+    """
+    word = ui_text("fleet.session_block.sent")
+    parts = [(word if mark else word.removeprefix("✓").strip(), "lvl_g")]
+    said = " ".join(", ".join(sent_values(sent, questions)).split())
+    if said:
+        parts += [(" · ", "dim"), (said, "loc_repo")]
+    parts += [(" · ", "dim"), (ui_text("fleet.session_block.delivery_waiting"), "dim")]
+    for key in _ANSWER_WAIT_WORDS.get(wait, ()):
+        parts += [(" · ", "dim"), (ui_text(key), "dim")]
+    return parts
 
 
 def unanswerable_state(reason, *, own=True):
@@ -111,6 +172,12 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
             item["answer_state"] = state
         else:
             item.pop("answer_state", None)
+        # The sent line's parts for the panel, from the same function Fleet's row draws (rule 5).
+        if state == "submitted":
+            item["sent_line"] = sent_answer_line(item.get("sent") or (), wait=item.get("answer_wait") or "",
+                                                 questions=item.get("questions") or ())
+        else:
+            item.pop("sent_line", None)
     for item, question in listed:
         state = question_state(item, own=own)
         key = "lvl_g" if state == "applied" else "g_blocked" if state == "open" else "dim"
@@ -138,8 +205,13 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
             for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix) - 2))):
                 options.append([(prefix if line_index == 0 else " " * cell_width(prefix), "dim"), *line])
         body = []
-        for source_line in str(question.get("question") or "?").splitlines():
-            if source_line.strip():
+        # 11-15: a markdown table in the question's text reads as aligned columns (the documents' one
+        # table rule, ``transcript.table_parts``); every other line wraps as before.
+        from .explorer.transcript import table_parts
+        for source_line in table_parts(str(question.get("question") or "?").splitlines(), width):
+            if isinstance(source_line, list):
+                body.extend(source_line)
+            elif source_line.strip():
                 body.extend(wrap_parts([(source_line, "loc_repo")], width))
         question["display"] = {
             "head": heading, "source": source,

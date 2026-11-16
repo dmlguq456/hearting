@@ -255,6 +255,88 @@ def exact_binding(harness: str, sid: str) -> tuple[dict | None, str]:
     return (rows[0], "") if len(rows) == 1 else (None, "attachment-ambiguous" if rows else "attachment-unavailable")
 
 
+def release_behind(binding: dict) -> bool | None:
+    """Whether this window's display runs an older release than its launch path names now.
+
+    The host's own rule for its ``New release waiting`` line (host.cjs ``detectRelease``): the
+    release it runs is not the one its launch path (``HEARTING_SHELL_HOST_PATH``) resolves to
+    today. The release it runs is read from the backend it started from its own directory,
+    the launch path from its environment; None when either cannot be read.
+    """
+    if not valid_binding(binding):
+        return None
+    host = Path("/proc") / str(binding["host_pid"])
+    try:
+        launch = next((entry.split(b"=", 1)[1] for entry in (host / "environ").read_bytes().split(b"\0")
+                       if entry.startswith(b"HEARTING_SHELL_HOST_PATH=")), b"")
+        children = set()
+        for task in os.listdir(host / "task"):
+            with contextlib.suppress(OSError):
+                children.update((host / "task" / task / "children").read_text().split())
+    except OSError:
+        return None
+    if not launch:
+        return None
+    for child in sorted(children):
+        try:
+            argv = (Path("/proc") / child / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if len(argv) >= 3 and argv[1].endswith(b"/session_shell.py") and argv[2] == b"backend":
+            running = Path(os.fsdecode(argv[1])).resolve().parent
+            return running != Path(os.fsdecode(launch)).resolve().parent.parent
+    return None
+
+
+# Why an answer the person sent still waits on them (rule 5): a resting session takes it only at
+# a prompt typed in that window. An older shell's host may not take a newer answer (11-16: a
+# v4.29.3 host refused every v4.40.0 answer), and a Claude session outside the shell has no
+# idle wake. Codex takes it from its own queue; OpenCode's plugin takes it when idle. A session
+# still working takes it when its turn ends, so it waits on no one; nor is a reason given for a
+# session whose state is not known.
+ANSWER_WAIT_OLD_SHELL = "old-shell"
+ANSWER_WAIT_NO_SHELL = "no-shell"
+# Fleet's session states (``fleet.model.classify_session``) of a session that rests: idle, never
+# used, or silent past the session window with its process alive.
+RESTING_STATES = frozenset({"idle", "unused", "stale"})
+
+
+def answer_delivery_wait(harness: str, sid: str, state: str | None = None) -> str:
+    """``old-shell`` | ``no-shell`` | ``""``: what a sent answer to this session waits for.
+
+    ``state`` is the session's Fleet state; only a resting one waits on the person."""
+    if (state not in RESTING_STATES or harness not in ("claude", "opencode")
+            or not isinstance(sid, str) or not _SID.fullmatch(sid)):
+        return ""
+    binding, reason = exact_binding(harness, sid)
+    if binding is None:
+        return ANSWER_WAIT_NO_SHELL if harness == "claude" and reason == "attachment-unavailable" else ""
+    return ANSWER_WAIT_OLD_SHELL if release_behind(binding) else ""
+
+
+def mark_answer_waits(items, states=None):
+    """Mark each sent message answer of the shared board with what it waits for (``answer_wait``).
+
+    Read live by a surface (Fleet's collector), never stored: a window's shell and release are
+    not part of the answer record. ``states`` maps ``(harness, session_id)`` to the session's
+    Fleet state; a session missing from it is not known and gets no reason. A wait with no
+    session to take it says that instead.
+    """
+    states = states or {}
+    for item in items or ():
+        if (isinstance(item, dict) and item.get("answer") == "sent" and item.get("kind") == "message"
+                and item.get("owner_state") not in ("none", "successor")):
+            owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+            harness = item.get("harness") or owner.get("harness")
+            sid = item.get("session_id") or owner.get("session_id")
+            wait = answer_delivery_wait(harness, sid, states.get((harness, sid)))
+            if wait:
+                item["answer_wait"] = wait
+            else:
+                item.pop("answer_wait", None)
+    return items
+
+
 def pane_seat(info, harness: str | None = None, *, rows=None, birth=None) -> dict | None:
     """The one attachment whose PTY owner is this pane's foreground: the pane's seat.
 
@@ -666,6 +748,27 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
+_NOTICE_TAG = re.compile(r"^\[[^\]]{1,16}\]\s*")
+_NOTICE_BATCH = re.compile(r"^(?:묶음|batch)\s+[A-Za-z0-9][A-Za-z0-9._-]{0,63}:\s*")
+_NOTICE_RANGE = re.compile(r"(?:,\s*)?\b(?:byte|rowid)\s+[\d,]+–[\d,]+\s*/\s*\S+\s+[\d,]+")
+
+
+def quiet_notice_line(text):
+    """The panel's line for a tidy result that ended well (11-16): the words a person reads, without
+    the machine's own (the `[tidy]` tag, the batch id, the undo command and a byte or rowid range), under
+    the one lead word `session_shell.tidy_done`. The notice itself (what the session receives) is unchanged."""
+    line = " ".join(str(text or "").split())
+    at = line.rfind("mem tidy-undo")
+    cut = line.rfind(" — ", 0, at) if at >= 0 else -1
+    if cut >= 0:
+        line = line[:cut]
+    line = _NOTICE_BATCH.sub("", _NOTICE_TAG.sub("", line))
+    line = re.sub(r"\(\s*\)", "", _NOTICE_RANGE.sub("", line))
+    line = " ".join(line.split()).strip(" ·")
+    from fleet.config import ui_text
+    return ui_text("session_shell.tidy_done", text=line) if line else ""
+
+
 def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="", panel_lines=None, detail_lines=None):
     """Conceal Codex's thread-id field, and known native fields the common area painted.
 
@@ -1001,25 +1104,10 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
                     "hb_claude", "hb_codex", "hb_opencode", "hb_other")
 
 
-def _sessions_key(view, harness, sid):
-    """11-15 (popup design D): another session's answer waits, as the shared observation holds them:
-    when they change, the sessions section and a standing sessions popup are read again (the host
-    reads them from Fleet's session table, apart from this projection). The key looks at the sessions
-    Fleet's table counts as waiting on a person (``human_wait_state.waiting_owner``: an owner, a wait
-    not folded as older, one a person must answer), whatever glyph the table paints them with."""
-    import human_wait_state
-    others = sorted("%s:%s:%s:%s" % (owner.get("harness"), owner.get("session_id"), item.get("id"), item.get("answer") or "")
-                    for item in (view or {}).get("items", ()) if isinstance(item, dict)
-                    for owner in (item.get("owner") or {},)
-                    if (owner.get("harness"), owner.get("session_id")) != (harness, sid)
-                    and human_wait_state.waiting_owner(item))
-    return hashlib.sha256("\n".join(others).encode()).hexdigest()[:16] if others else ""
-
-
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="", native_model=None, popup_columns=None) -> dict:
+                     upgrade_note="", native_model=None, popup_columns=None, table_columns=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -1035,7 +1123,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count, recent_memory
-    from fleet.session_panel import presentation, request_rows
+    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
@@ -1101,10 +1189,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
                  **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, two at most (the
+    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, five at most (11-16; the
     # journal Fleet reads, read again only when it changed); their headlines ride the open-work
     # query below.
-    memory_rows, memory_paths = recent_memory(values.get("cwd"))
+    memory_rows, memory_paths = recent_memory(values.get("cwd"), MEMORY_ITEMS)
     work, work_paths = observe_work(values.get("cwd"),
                                     tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
     if memory_rows:
@@ -1157,14 +1245,20 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # A result line (a continue that was not sent) otherwise waits for the next hook,
     # which in a cleared window is the person's next input. Display only. Its own
     # field: Claude's `notice` below is the native status row's segments.
-    notice, notice_paths = session_tidy.waiting_notice_display(seat, harness, sid)
-    panel["tidy_notice"] = _plain(notice, 400)
+    notice, notice_paths, notice_level = session_tidy.waiting_notice_display(seat, harness, sid, with_level=True)
+    # 11-16 (the person: "알림이 알림이 아니라 경고 같아서"): a line the writer marked as work that ended well
+    # (`done`) shows quietly (`tidy_quiet`: dim, no `⚠`), its inner words left out of the panel's line; the line
+    # the session receives stays whole. What leaves the person something to do keeps the caution look.
+    quiet = bool(notice) and notice_level == "done"
+    panel["tidy_notice"] = _plain(quiet_notice_line(notice) if quiet else notice, 400)
+    panel["tidy_quiet"] = quiet and bool(panel["tidy_notice"])
     # A newer installed release this window has not switched to yet, or a switch that could
-    # not carry the scrollback: the lowest-priority line, never over another notice.
+    # not carry the scrollback: the lowest-priority line, never over another notice (quiet too).
     panel["tidy_upgrade"] = False
     if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
         panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
         panel["tidy_upgrade"] = upgrade_note == "pending"
+        panel["tidy_quiet"] = True
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
@@ -1193,7 +1287,6 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # The repo's open work, as the earlier panel's tail row read it.
     # (`◌` is Fleet's stale route alone: the open work's line has no glyph, popup design F 10.)
     panel["work"] = styled([(str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
-    panel["sessions_key"] = _sessions_key(view, harness, sid)
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
@@ -1205,6 +1298,15 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     request_views, request_paths = _request_views(harness, sid, time.time(), request_errors)
     watched.extend(request_paths)
     panel["requests"] = request_rows(request_views, time.time(), assigned_tag) if request_views else []
+    # 11-15: a request body's markdown tables read aligned in the MESSAGES popup (its rows two cells in,
+    # at the popup's width); its other lines stay the strings the popup wraps as before.
+    from fleet.explorer.transcript import table_parts
+    for request in panel["requests"]:
+        parts = table_parts(request.get("body") or (), max(8, (table_columns or popup_columns or columns) - 2))
+        if any(isinstance(item, list) for item in parts):
+            # One item a row: a line the popup wraps (``str``), or a drawn table row (painted parts).
+            request["body_parts"] = [row for item in parts for row in
+                                     ([item] if isinstance(item, str) else [_runs(row, colors, no_color) for row in item])]
     if request_errors:
         panel["request_error"] = request_errors[0]
     if harness == "claude":
@@ -1213,17 +1315,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         panel["notice"] = styled(notice_line(values, panel["routes"], board))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
+    # A popup that could not be read says so in Fleet's own word (`fleet.output.unreadable`).
+    panel.setdefault("labels", {})["popup_unread"] = ui_text("fleet.output.unreadable")
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
-    # The LAB section (the chosen draft A): this project's experiment board, read through the
-    # board's own cache (`stat` calls only while nothing changed) and worded by Fleet's LAB table
-    # helpers; no board to show leaves no LAB row. Its files join the watch last (below).
-    from fleet import session_lab
-    lab_now = time.time()
-    lab_board, lab_paths = session_lab.read(values.get("cwd"), now=lab_now)
-    try:
-        panel["lab"] = session_lab.view(lab_board, lab_now, paint=styled)
-    except Exception as exc:  # noqa: BLE001 -- LAB's own failure is LAB's unconfirmed state; the panel draws on
-        panel["lab"] = session_lab.unconfirmed(lab_now, type(exc).__name__, paint=styled)
     # The model name the host reads off the native's own screen, painted by the rule route rows
     # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
     # panel keeps no family table of its own. Display only.
@@ -1239,9 +1333,6 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
-    # Last, so the host's bounded watch (64 paths) keeps every path above: the catalog, the run
-    # folder and the linked run records (a renamed condition redraws with its new name).
-    watched.extend(lab_paths)
     # Spec rule 26 and the 11-12 rule 6: the runtime's own turn record, read with the
     # session above (its files are watched), for the host's own display of this session's
     # state. Display only: it never stands for input readiness.
@@ -1264,6 +1355,19 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
             "panel": panel, "help": ui_text("fleet.session_block.editor_help")}
+
+
+def _runs(row, colors, no_color):
+    """A Fleet row of ``(text, key)`` segments as painted parts (a segment with no key: the terminal's own look)."""
+    from fleet.palette import style_components
+    out = []
+    for text, key in row:
+        try:
+            look = style_components(key, colors=colors, no_color=no_color) if key else {}
+        except Exception:  # noqa: BLE001 -- an unknown key draws in the terminal's own look
+            look = {}
+        out.append({"text": str(text), **look})
+    return out
 
 
 def _block_action(binding, request):
@@ -1290,21 +1394,9 @@ def _block_answer(binding, request):
     import questions
     import human_wait_state
     from types import SimpleNamespace
-    # 11-15 (popup design D): a question of another session, opened from the sessions popup, is
-    # answered with that session as the exact owner the questions API binds it to; this window's
-    # own attachment (Codex's) speaks only for its own session's questions.
-    owner = request.get("owner")
-    other = None
-    if owner is not None:
-        if (not isinstance(owner, dict) or set(owner) != {"harness", "session_id"}
-                or owner.get("harness") not in ("claude", "codex", "opencode")
-                or not isinstance(owner.get("session_id"), str) or not _SID.fullmatch(owner["session_id"])):
-            return {"ok": False, "reason": "question-changed"}
-        if (owner["harness"], owner["session_id"]) != (binding["harness"], binding["sid"]):
-            other = dict(owner)
-    if other is None and binding.get("harness") == "codex" and not answer_attachment_current(binding):
+    if binding.get("harness") == "codex" and not answer_attachment_current(binding):
         return {"ok": False, "reason": "current-session-unverified"}
-    expected = other or {"harness": binding["harness"], "session_id": binding["sid"]}
+    expected = {"harness": binding["harness"], "session_id": binding["sid"]}
     wanted = request.get("question_id")
     revision = request.get("revision")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
@@ -1324,7 +1416,7 @@ def _block_answer(binding, request):
     args = SimpleNamespace(id=wanted, choice=[], text=None, text_file=None,
                            decision=decision, answers_file=None, json=True,
                            expected_revision=revision, expected_owner=dict(expected))
-    if other is None and binding["harness"] == "codex":
+    if binding["harness"] == "codex":
         args.answer_attachment = dict(binding)
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         if answers is not None:
@@ -1338,9 +1430,10 @@ def _block_answer(binding, request):
     return {"ok": code == 0, **result}
 
 
-# 11-15 (popup design B, C, D): the route, LAB and sessions popups are Fleet's own tables, drawn by
-# Fleet's own functions into a grid of the popup's width; nothing here draws a table of its own.
-POPUP_KINDS = frozenset({"routes", "lab", "sessions", "questions"})
+# 11-15 (popup design B): the routes popup is Fleet's own table, drawn by Fleet's own functions into a
+# grid of the popup's width; nothing here draws a table of its own. (The LAB and sessions popups went
+# with their panel sections, 11-15.)
+POPUP_KINDS = frozenset({"routes", "status"})
 POPUP_ROWS = 160     # rows a table popup carries at most (the popup pages them with PgUp/PgDn)
 
 
@@ -1398,18 +1491,16 @@ POPUP_ANSWER_BYTES = 60 * 1024    # what a table's answer may weigh: the host re
 
 
 def _popup_table(kind, rows, styles, hits, total, *, colors, no_color, **extra):
-    """A route or sessions table as the host reads it, whole when it fits and else as many of its rows as
-    fit (``POPUP_ROWS`` rows and ``POPUP_ANSWER_BYTES``), with one dim last line for the rest (`외 N개`,
-    the entrance's own words): ``total`` is how many routes or sessions the table has, and the ones its
-    kept rows show are those that have a press target there. ``routes`` (routes) lists the shown ones."""
+    """A routes table as the host reads it, whole when it fits and else as many of its rows as fit
+    (``POPUP_ROWS`` rows and ``POPUP_ANSWER_BYTES``), with one dim last line for the rest (`외 N개`, the
+    entrance's own words): ``total`` is how many routes the table has, and the ones its kept rows show
+    are those that have a press target there. ``routes`` lists the shown ones."""
     from fleet.config import ui_text
     from fleet.palette import style_components
 
     def ident(hit):
         action = hit["action"]
-        if kind == "routes":
-            return action[1] if action[0] == "route" and len(action) > 1 else None
-        return action[2] if action[0] == "fold" and len(action) > 2 and action[1] == "sopen:OVERVIEW" else None
+        return action[1] if action[0] == "route" and len(action) > 1 else None
 
     def build(count):
         kept = [hit for hit in hits if hit["row"] < count]
@@ -1423,10 +1514,7 @@ def _popup_table(kind, rows, styles, hits, total, *, colors, no_color, **extra):
                 dim = {}
             painted = [*styles, dim]
             out = [*out, [[ui_text("entrance.more", count=left).strip(), len(styles)]]]
-        result = {"ok": True, "kind": kind, "rows": out, "styles": painted, "hits": kept, **extra}
-        if kind == "routes":
-            result["routes"] = shown
-        return result
+        return {"ok": True, "kind": kind, "rows": out, "styles": painted, "hits": kept, "routes": shown, **extra}
 
     def weight(result):
         return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
@@ -1442,126 +1530,112 @@ def _popup_table(kind, rows, styles, hits, total, *, colors, no_color, **extra):
 
 def _popup_view_model(harness, sid, kind):
     """Fleet's own view model, from Fleet's own collection (what its explorer shows), read once for
-    a person who opened a popup; the routes popup interprets only this session's routes."""
+    a person who opened the routes popup; it interprets only this session's routes."""
     from fleet.collectors import collect_all
     from fleet.refresh import as_snapshot
     from fleet.explorer import live
     snapshot = as_snapshot(collect_all(usage="cache-only", include_report_verification=False,
-                                       route_sessions=[(harness, sid)] if kind == "routes" else None))
+                                       route_sessions=[(harness, sid)]))
     return live.build_view_model(snapshot)
 
 
-def _session_folders():
-    """The folders each harness's session records live in (watched whole while the sessions popup stands)."""
-    from fleet import session_registry
-    out = []
-    try:
-        from fleet.collectors import claude as claude_collector
-        out.append(os.fspath(Path(claude_collector._home()) / "sessions") + os.sep)
-    except Exception:  # noqa: BLE001
-        pass
-    for harness in ("codex", "opencode"):
+_ROUTE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+
+
+def _status_request(request):
+    """``(cwd, route ids)`` a status read names: the session's folder (absolute) and its route ids, else None."""
+    cwd, routes = request.get("cwd"), request.get("routes")
+    if (not isinstance(cwd, str) or not os.path.isabs(cwd) or len(cwd) > 4096 or "\0" in cwd
+            or not isinstance(routes, list) or len(routes) > 64):
+        return None
+    return cwd, [route for route in routes if isinstance(route, str) and _ROUTE_ID.match(route)][:8]
+
+
+def _panel_status(binding, request):
+    """The panel's status button value (``fleet.session_status.read``), read in its own worker: the host asks
+    at its first projection, when this session's routes change and at a watch event on the paths the value
+    names, never per paint, so a slow first read holds neither the panel nor a key. No artifact root: None."""
+    named = _status_request(request)
+    if named is None:
+        return {"ok": False, "reason": "invalid-status"}
+    registry_root()
+    from fleet import session_status
+    return {"ok": True, "status": session_status.read(*named)}
+
+
+def _status_popup(binding, request, columns, colors, no_color):
+    """The status popup, in the two parts the host asks for one after the other (``part``): ``doc`` is the whole
+    document at the popup's width, with no wait on Fleet's collection (the value the button already read comes
+    with the request: ``session_status.held``, and only a request without one reads it); ``fleet`` is Fleet's
+    status lines for this project (``session_status.popup_head_rows``), which the host puts above the document
+    when they arrive. A document that cannot be read answers ``ok: False`` (the host draws its own dim word and
+    keeps nothing, so the next opening reads it again) and Fleet's part is not asked. Without ``part``: both, as
+    one answer."""
+    named = _status_request(request)
+    if named is None:
+        return {"ok": False, "reason": "invalid-status"}
+    part = request.get("part")
+    if part not in (None, "doc", "fleet"):
+        return {"ok": False, "reason": "invalid-status"}
+    from fleet import session_status
+    view = {}
+    if part != "fleet":
+        view = session_status.held(named[0], request.get("status")) or session_status.read(*named)
+        if view is None:
+            return {"ok": False, "reason": "no-status"}
+    rows = []
+    if part != "doc":
+        status = None
         try:
-            out.append(os.fspath(session_registry._dir_for(harness)) + os.sep)
-        except Exception:  # noqa: BLE001
-            pass
-    return out
+            from fleet.session_tags import assigned_tag
+            vm = _popup_view_model(binding["harness"], binding["sid"], "status")
+            tag = str(assigned_tag(binding["harness"], binding["sid"]))
+            own = next((row for row in tuple(getattr(vm, "sessions", ()) or ()) if str(row.get("tag")) == tag), None)
+            repo = next((row for row in tuple(getattr(vm, "repos", ()) or ())
+                         if own is not None and str(row.get("id")) == str(own.get("repo_id"))), None)
+            status = repo.get("status") if repo is not None else None
+        except Exception:  # noqa: BLE001 -- without Fleet's lines the document still reads
+            if part == "fleet":
+                return {"ok": False, "reason": "no-fleet"}
+        rows = session_status.popup_head_rows(status, columns)
+    if part != "fleet":
+        doc = session_status.popup_doc_rows(view, columns)
+        if doc is None:
+            return {"ok": False, "reason": "doc-unreadable"}
+        rows = rows + doc
+    styles, index = [], {}
 
+    def style(key):
+        if key not in index:
+            index[key] = len(styles)
+            styles.append(_runs([("", key)], colors, no_color)[0] if key else {})
+            styles[-1].pop("text", None)
+        return index[key]
+    # Each run carries its cells as Fleet measured them (``cell_width``), so the host lays the rows out by
+    # the same measure Fleet drew them with (its own differs for some characters: Thai marks, jamo, new emoji).
+    from fleet.explorer.grid import cell_width
+    runs = [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows]
+    result = {"ok": True, "kind": "status", "rows": runs, "styles": styles, "hits": [], "page": False}
+    if part != "fleet":
+        result.update(title=view.get("title") or view.get("word") or "", has_doc=view.get("has_doc") is True)
+    if part:
+        result["part"] = part
 
-def session_summary(vm, harness, sid, *, colors=256, no_color=False):
-    """The sessions section's values from Fleet's session table (popup design D): the count, each
-    state's count and the rows, the sessions waiting on a person first (Fleet's own "answer needed"
-    set, whatever glyph the table paints them with), then the running, then the idle; each row
-    Fleet's own cells (its state glyph and key, `[number]`, the title in its harness's bold hue, the
-    age), painted. ``own`` marks this window's own session: the panel leaves it out of its rows, and
-    out of the count and the state counts too, so the head and the rows count the same sessions. A
-    state's count is one glyph in one color: a `●` waiting on a person (blocked color) is not counted
-    with the `●` idle sessions, and the waiting groups head the counts as they head the rows."""
-    from fleet.explorer.tables import session_marker
-    from fleet.palette import style_components
-    from fleet.session_tags import assigned_tag
-    own = str(assigned_tag(harness, sid) or "")
-
-    def paint(text, key):
-        return {"text": text, **style_components(key, colors=colors, no_color=no_color)}
-    rows, counts = [], {}
-    for session in tuple(getattr(vm, "sessions", ()) or ()):
-        glyph, key = session_marker(session)
-        tag = _plain(session.get("tag") or "·", 16)
-        asking = bool(session.get("ask")) or glyph == "◑"
-        if tag != own:
-            group = counts.setdefault((glyph, key), [0, False])
-            group[0] += 1
-            group[1] = group[1] or asking
-        title_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0), "opencode": ("l", 1, 0)}.get(
-            str(session.get("harness") or ""), "unknown")
-        rows.append({"glyph": [paint(glyph, key)],
-                     "tag": [paint("[", "dim"), paint(tag, "steward" if session.get("steward") else "soft"), paint("]", "dim")],
-                     "title": [paint(_plain(session.get("title") or "·", 160), title_key)],
-                     "age": [paint(_plain(session.get("age") or "", 12), "dim")] if session.get("age") else [],
-                     "own": tag == own, "rank": 0 if asking else {"⠏": 1}.get(glyph, 2)})
-    rows.sort(key=lambda row: row.pop("rank"))
-    order = ("◑", "⠏", "●", "✕", "✓")
-    groups = sorted((group for group in counts if group[0] in order),
-                    key=lambda group: (0 if counts[group][1] else 1, order.index(group[0])))
-    return {"count": sum(1 for row in rows if not row["own"]),
-            "counts": [[paint(group[0] + str(counts[group][0]), group[1])] for group in groups],
-            "rows": rows[:12]}
-
-
-def _other_session(view, tag):
-    """The ``(harness, sid)`` whose shared number is ``tag``, among the sessions that own a wait."""
-    from fleet.session_tags import assigned_tag
-    for item in (view or {}).get("items", ()):
-        owner = item.get("owner") or {}
-        harness, sid = owner.get("harness"), owner.get("session_id")
-        if harness in ("claude", "codex", "opencode") and isinstance(sid, str) and _SID.fullmatch(sid) \
-                and str(assigned_tag(harness, sid)) == tag:
-            return harness, sid
-    return None
-
-
-def _popup_questions(binding, request, columns, colors, no_color):
-    """Another session's questions (the sessions popup's `◑` row), worded for the question popup's
-    editor as this window's own are; a wait that has no owner binding to answer it here reads with
-    the word for where it is answered (`그 창에서 답`)."""
-    import human_wait_state
-    from fleet.session_block import question_presentations
-    from fleet.palette import style_components
-    from fleet.config import ui_text
-    tag = request.get("tag")
-    if not isinstance(tag, str) or not re.fullmatch(r"[^\s\]\[]{1,16}", tag):
-        return {"ok": False, "reason": "invalid-popup"}
-    view = human_wait_state.cached_view(request=False) or {}
-    found = _other_session(view, tag)
-    if found is None or found == (binding["harness"], binding["sid"]):
-        return {"ok": True, "kind": "questions", "tag": tag, "questions": [], "owner": None}
-    harness, sid = found
-    elsewhere = []
-    board = session_questions(harness, sid, view=view, elsewhere=elsewhere)
-    for item in elsewhere:
-        if human_wait_state.person_wait(item):
-            # A wait with nothing to read still says where it is answered: one line, nothing to send.
-            board.append({**item, "answerable": False, "answer_state": "answer_there",
-                          **({} if item.get("questions") else {"questions": [{"id": "wait", "question": str(item.get("kind") or "wait")}]})})
-    board = board[:8]
-    question_presentations(board, columns + 4, own=False)
-
-    def styled(parts):
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
-    for item in board:
-        for question in item.get("questions") or ():
-            question["display"] = {key: ([styled(line) for line in value] if key not in ("head", "brief_line") else styled(value))
-                                   for key, value in question["display"].items()}
-    return {"ok": True, "kind": "questions", "tag": tag, "questions": board,
-            "owner": {"harness": harness, "session_id": sid},
-            "labels": {"answer_there": ui_text("fleet.session_block." + ("compact_" if columns < 60 else "") + "answer_there")}}
+    def weight(value):
+        return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
+    if weight(result) <= POPUP_ANSWER_BYTES:
+        return result
+    low, high = 0, len(runs)      # the most rows that fit with a dim `…` under them
+    dim = style("dim")
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if weight({**result, "rows": runs[:middle] + [[["…", dim, 1]]]}) <= POPUP_ANSWER_BYTES else (low, middle)
+    return {**result, "rows": runs[:low] + [[["…", dim, 1]]]}
 
 
 def _panel_popup(binding, request):
     """One popup's content, read when the person opens it and again at the watch events it names."""
     registry_root()
-    from types import SimpleNamespace
     from fleet.explorer.grid import CellGrid
     kind = request.get("kind")
     columns = request.get("columns")
@@ -1569,31 +1643,11 @@ def _panel_popup(binding, request):
         return {"ok": False, "reason": "invalid-popup"}
     colors, no_color = _paint_mode()
     harness, sid = binding["harness"], binding["sid"]
-    if kind == "questions":
-        return _popup_questions(binding, request, columns, colors, no_color)
+    if kind == "status":
+        return _status_popup(binding, request, columns, colors, no_color)
     opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""
-    watch = []
-    if kind == "lab":
-        from fleet import session_lab
-        from fleet.explorer import lab_table
-        from fleet.session_view import observe
-        value, _paths = observe(harness, binding["native_pid"], binding["native_start"], sid)
-        board, watch = session_lab.read(value.get("cwd"))
-        grid = CellGrid(columns, POPUP_ROWS + 8)
-        if isinstance(board, dict) and board.get("visible"):
-            lab_table.draw_lab(grid, board, 0, columns, 0)
-        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "watch": list(watch)[:16]}
     vm = _popup_view_model(harness, sid, kind)
     grid = CellGrid(columns, POPUP_ROWS + 8)
-    if kind == "sessions":
-        from fleet.explorer import tables
-        tables.draw_overview(grid, vm, SimpleNamespace(opened=opened or None, scope="-"), x=0, y=0, session_table=True)
-        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
-        repos = {str(repo.get("id", repo.get("name", "·"))) for repo in tuple(vm.repos or ())}
-        total = sum(1 for session in tuple(vm.sessions or ()) if str(session.get("repo_id", session.get("repo"))) in repos)
-        return _popup_table(kind, rows, styles, hits, total, colors=colors, no_color=no_color,
-                            summary=session_summary(vm, harness, sid, colors=colors, no_color=no_color), watch=_session_folders())
     from dataclasses import replace
     from fleet.explorer import pages
     from fleet.session_tags import assigned_tag
@@ -1735,10 +1789,13 @@ def _backend_operation(request: dict) -> dict:
         # The question popup's width (11-15); an older host sends none and keeps the panel's.
         popup = request.get("popup_columns")
         popup = popup if type(popup) is int and 20 <= popup <= 10000 else None
+        # The MESSAGES popup's inside (a table popup's width); an older host sends none.
+        table = request.get("table_columns")
+        table = table if type(table) is int and 16 <= table <= 10000 else None
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
-            popup_columns=popup,
+            popup_columns=popup, table_columns=table,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,
@@ -1748,6 +1805,8 @@ def _backend_operation(request: dict) -> dict:
         return _block_answer(binding, request)
     if op == "popup":
         return _panel_popup(binding, request)
+    if op == "status":
+        return _panel_status(binding, request)
     if op == "action":
         return _block_action(binding, request)
     if op == "readiness":

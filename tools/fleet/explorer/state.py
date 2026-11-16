@@ -896,7 +896,13 @@ def _reduce(state, event, frame=None):
             return state, ()
         if action[0] in ("view", "tab") and len(action) > 1:
             view = str(action[1])
-            return replace(state, view=view, scope="-", opened="", title=view), ()
+            folds = state.folds
+            if view == "PEERS" and len(action) > 2 and action[2]:
+                # The session page's ``PEERS tab ›``: the tab opens with that session's card picked.
+                picked = state.fold_map()
+                picked["pfocus:PEERS"] = str(action[2])
+                folds = tuple(sorted(picked.items()))
+            return replace(state, view=view, scope="-", opened="", title=view, folds=folds), ()
         if action[0] == "fold" and len(action) > 2:
             slot, identity = str(action[1]), str(action[2])
             folds = state.fold_map()

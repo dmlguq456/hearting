@@ -29,7 +29,34 @@ def _put_line(grid, x, y, label, value, key="soft", right=None):
     return y + 1
 
 
-def _section(grid, x, right, y, title, detail=""):
+def section_parts(title, count=None, detail=""):
+    """A section head's words in the shell panel's form: the count first, then the name in dim
+    upper case and a dim detail (``2 ROUTES``, ``MESSAGES · +2``)."""
+    parts = [] if count is None or count == "" else [(str(count) + " ", "soft")]
+    parts.append((str(title), "label"))
+    if detail not in (None, ""):
+        parts.append((" · " + str(detail), "dim"))
+    return parts
+
+
+def section_rule(grid, x, right, y, parts):
+    """``2 ROUTES ─────``: a section head inside a screen, its rule running to ``right``; the
+    next row. A screen's tab name row, page title row and VIEWS list keep their own forms."""
+    cursor = x
+    for text, key in parts:
+        cursor = grid.put(cursor, y, text, key, limit=right)
+    grid.put(cursor, y, " ", "branch_s", limit=right)
+    for xx in range(min(right, cursor + 1), right):
+        grid.put(xx, y, "─", "line")
+    return y + 1
+
+
+def _section(grid, x, right, y, title, detail="", count=None):
+    return section_rule(grid, x, right, y, section_parts(title, count, detail))
+
+
+def _page_title(grid, x, right, y, title, detail=""):
+    """A page's title row (``── [f5] title  repo · branch ───``), not a section head."""
     grid.put(x, y, "── ", "line", limit=right)
     cursor = grid.put(x + 3, y, title, "sect", limit=right)
     if detail:
@@ -67,24 +94,7 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     opened_for = nav.opened_for if nav is not None else lambda _key, default="": default
 
     y = _section(grid, x, right, 3, ui_text("fleet.repo.status"))
-    status = repo.get("status")
-    status = status if isinstance(status, Mapping) else {}
-    campaigns = tuple(status.get("campaigns") or ())
-    if campaigns:
-        for doc in campaigns[:3]:
-            title = str(doc.get("campaign") or doc.get("title") or "·")
-            line = str(doc.get("line") or "?")
-            if doc.get("stale"):
-                line = str(doc.get("doc_age") or "?") + " · " + line
-            grid.put(x + 3, y, clip(title + ": " + line, max(0, right - x - 3)), "soft", limit=right)
-            y += 1
-        if status.get("next"):
-            y = _put_line(grid, x + 3, y, "next:", status["next"], right=right)
-    elif status:
-        y = _repo_status_block(grid, x, right, y, status)
-    else:
-        grid.put(x + 3, y, ui_text("fleet.repo.no_status"), "dim", limit=right)
-        y += 1
+    y = repo_status_lines(grid, x, right, y, repo.get("status"))
 
     lab = repo.get("lab")
     if isinstance(lab, Mapping) and lab.get("visible"):
@@ -112,7 +122,7 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
         y += 1
 
     current = tuple(route for route in routes if not route_is_history(route))
-    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.routes"), str(len(current)))
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.routes"), count=len(current))
     if current:
         y = _draw_route_subset(grid, scoped_vm, current, x, y, bottom,
                               view_key="repo:" + ident, state=nav)
@@ -123,17 +133,20 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     y = _section(grid, x, right, y + 1, ui_text("fleet.repo.recent"))
     recent = []
     if repo.get("done") and repo.get("done_result") == "success":
-        recent.append((repo.get("done_at"), repo.get("age"), str(repo["done"])))
+        recent.append((repo.get("done_at"), str(repo["done"])))
     for route in routes:
         if route.get("state") == "done" and route.get("outcome") == "success" and route.get("title"):
-            recent.append((route.get("result_at"), route.get("age"), str(route["title"])))
+            recent.append((route.get("result_at"), str(route["title"])))
     recent.sort(key=lambda item: _result_time(item[0]), reverse=True)
     shown = set()
-    for _at, age, text in recent:
+    clock = getattr(vm, "clock", None)
+    from ..session_line import when_text
+    for at, text in recent:
         if text in shown:
             continue
         shown.add(text)
-        grid.put(x + 3, y, clip((str(age) + "  " if age else "") + "✓ " + text,
+        when = when_text(at, clock)          # when it finished (a time of day), never ``ago``
+        grid.put(x + 3, y, clip((when + "  " if when else "") + "✓ " + text,
                                 max(0, right - x - 3)), "now_sub", limit=right)
         y += 1
         if len(shown) == 3:
@@ -157,12 +170,38 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
         grid.put(x + 3, y, ui_text("fleet.repo.no_journals"), "dim", limit=right)
         y += 1
 
-    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.sessions"), str(len(sessions)))
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.sessions"), count=len(sessions))
     if sessions:
         draw_overview(grid, scoped_vm, state=SimpleNamespace(opened="", scope="repo:" + ident,
                       opened_for=opened_for), x=x, y=y, session_table=True)
     else:
         grid.put(x + 3, y, ui_text("fleet.repo.no_sessions"), "dim", limit=right)
+
+
+def repo_status_lines(grid, x, right, y, status):
+    """The lines under a project's status heading, from row ``y``; returns the next row.
+
+    With campaign status documents: ``campaign: line`` (three at most, a stale one with its age) and
+    ``next:``. Otherwise the four-line block, or Fleet's no-status word when Fleet holds nothing.
+    The project page and the shell's status popup draw these lines through this one function."""
+    status = status if isinstance(status, Mapping) else {}
+    campaigns = tuple(status.get("campaigns") or ())
+    if campaigns:
+        for doc in campaigns[:3]:
+            title = str(doc.get("campaign") or doc.get("title") or "·")
+            line = str(doc.get("line") or "?")
+            if doc.get("stale"):
+                line = str(doc.get("doc_age") or "?") + " · " + line
+            grid.put(x + 3, y, clip(title + ": " + line, max(0, right - x - 3)), "soft", limit=right)
+            y += 1
+        if status.get("next"):
+            y = _put_line(grid, x + 3, y, "next:", status["next"], right=right)
+    elif status:
+        y = _repo_status_block(grid, x, right, y, status)
+    else:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_status"), "dim", limit=right)
+        y += 1
+    return y
 
 
 def _repo_status_block(grid, x, right, y, status):
@@ -229,17 +268,60 @@ def _fit(parts, room):
     return fitted
 
 
+# The session page's field names: the shell panel's dim upper-case words (spec E9 rule 57), one
+# word for one value on both screens.
+FIELD_X, FIELD_VALUE = 2, 15
+MESSAGES_SHOWN = 5                       # the newest messages the page lists; ``+N`` counts the rest
+
+
+def _field(grid, x, y, label, right):
+    grid.put(x + FIELD_X, y, label, "label", limit=right)
+    return x + FIELD_VALUE
+
+
+def _session_peer_view(vm, tag):
+    """The session's MESSAGES and REQUEST rows the peer observation worded, or empty ones."""
+    edges = vm.peer_edges if isinstance(vm.peer_edges, Mapping) else {}
+    found = (edges.get("sessions") or {}).get(tag) if isinstance(edges.get("sessions"), Mapping) else None
+    found = found if isinstance(found, Mapping) else {}
+    return tuple(found.get("messages") or ()), tuple(found.get("requests") or ())
+
+
+def request_line_parts(request):
+    """``✓ → [a3] codex · 21:10 · 최종 답 21:21`` and the title: one request on one row, its
+    state glyph (a closed one's ``✓``/``✕``, else the direction), the other session, when it
+    was opened and its work state in the shell panel's words."""
+    glyph = str(request.get("glyph") or request.get("way") or "→")
+    way = str(request.get("way") or "→")
+    parts = [(glyph, "lvl_r" if glyph == "✕" else "lvl_g" if glyph == "✓" else "loc_repo")]
+    if glyph in ("✓", "✕"):
+        parts.append((" " + way, "loc_repo"))
+    if request.get("who"):
+        parts.append((" " + str(request["who"]), "loc_repo"))
+    if request.get("harness"):
+        parts.append((" " + str(request["harness"]), "dim"))
+    opened = str(request.get("opened") or "")
+    if opened:
+        parts.append((" · " + opened, "dim"))
+    state = str(request.get("state_text") or request.get("status") or "")
+    if state:
+        parts.append((" · " + state, "lvl_r" if request.get("kind") == "request-rejected" else "dim"))
+    return parts
+
+
 def _session_page(grid, vm, tag, x, right, bottom, state=None):
+    from ..session_line import context_line_parts, gauge_parts, message_head_parts
     session = next((item for item in vm.sessions if str(item.get("tag")) == tag), None)
     if session is None:
         return
     harness = str(session.get("harness") or "·")
     branch = session.get("branch") or "·"
-    y = _section(grid, x, right, 3, "[" + tag + "] " + str(session.get("title") or "·"),
-                 " · ".join(part for part in (repo_rule_label(session.get("repo")), str(branch)) if part))
+    clock = getattr(vm, "clock", None)
+    y = _page_title(grid, x, right, 3, "[" + tag + "] " + str(session.get("title") or "·"),
+                    " · ".join(part for part in (repo_rule_label(session.get("repo")), str(branch)) if part))
     model = tuple(session.get("model") or ())
-    grid.put(x + 3, y, "harness:", "label", limit=right)
-    cursor = grid.put(x + 16, y, harness, "hb_" + harness, limit=right)
+    value_x = _field(grid, x, y, "MODEL", right)
+    cursor = grid.put(value_x, y, harness, "hb_" + harness, limit=right)
     if model or session.get("effort"):
         # ``claude Opus 5.5 xhigh``: the session row's own MODEL cell words.
         from .tables import model_cell_parts
@@ -247,19 +329,18 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
             harness, model or None, str(session.get("effort") or ""))[1:], right)
     pane = session.get("pane")
     field = [("      pane ", "label"), (str(pane or "·"), "soft" if pane else "dim")]
-    link = "  (open ▸)" if pane else ""
+    link = "  " + ui_text("fleet.session_page.go") if pane else ""
     if pane and cursor + _width(field) + cell_width(link) > right - 1:
         # Too narrow beside the model: the pane gets its own field line, so its link still fits.
         y += 1
-        grid.put(x + 3, y, "pane:", "label", limit=right)
-        cursor, field = x + 16, [(str(pane), "soft")]
+        cursor, field = _field(grid, x, y, "PANE", right), [(str(pane), "soft")]
         if cursor + _width(field) + cell_width(link) > right - 1:
-            link = " ▸"
+            link = " ⏎"
     cursor = _segs(grid, cursor, y, field, right)
     if pane:
         open_x = grid.put(cursor, y, link, "hearting", limit=right)
         if open_x <= right - 1:          # the link is a target only where all of it is drawn in the pane
-            grid.add_hit(y, cursor + len(link) - len(link.lstrip()), open_x, ("pane", tag, str(pane)))
+            grid.add_hit(y, cursor + cell_width(link) - cell_width(link.lstrip()), open_x, ("pane", tag, str(pane)))
     y += 1
     session_state = str(session.get("state") or "·")
     ask = bool(session.get("ask"))
@@ -267,34 +348,25 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
                           "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
                           "done": ("✓", "done")}.get(session_state, ("·", "dim"))
     if ask:
-        answer_marker = session.get("answer_wait_marker")
-        marker, marker_key = (answer_marker or "●", "lvl_y" if answer_marker == "◑" else "g_blocked")
-    word = "answer needed" if ask else {"dead": "ended", "done": "ended"}.get(session_state, session_state)
-    grid.put(x + 3, y, "state:", "label", limit=right)
-    _segs(grid, x + 16, y, [(marker, marker_key), (" " + word, "blocked" if ask else "soft"),
-                            (" · " + str(session.get("age") or "·"), "dim")], right)
+        # The answer wait's mark in the shell panel's rose, its word from the word list.
+        marker, marker_key = (session.get("answer_wait_marker") or "●", "g_blocked")
+    word = (ui_text("fleet.session_panel.answer") if ask
+            else {"dead": "ended", "done": "ended"}.get(session_state, session_state))
+    value_x = _field(grid, x, y, "STATE", right)
+    _segs(grid, value_x, y, [(marker, marker_key), (" " + word, "blocked" if ask else "soft"),
+                             (" · " + str(session.get("age") or "·"), "dim")], right)
     y += 1
-    grid.put(x + 3, y, "context:", "label", limit=right)
+    value_x = _field(grid, x, y, "CTX", right)
     context = session.get("context")
-    generation = session.get("generation")
-    parts = []
-    if context is not None:
-        gauge_width = 16
-        pct = int(context)
-        filled = 0 if pct <= 0 else gauge_width if pct >= 100 else max(
-            1, min(gauge_width - 1, int(pct * gauge_width / 100 + 0.5)))
-        gauge_key = "g_blocked" if pct >= 80 else "g_idle" if pct >= 50 else "done"
-        parts += [("━" * filled, gauge_key), ("─" * (gauge_width - filled), "dim"),
-                  ("  %d%%" % pct, gauge_key if pct >= 50 else "dim")]
-    parts += [("      generation ", "label"),
-              (str(generation) if generation else "·", "soft" if generation else "dim")]
-    if any(str(item[0]) == tag for item in vm.seats or ()) or (generation and session.get("last_clear")):
-        parts.append((" · last clear " + str(session.get("last_clear") or "·"), "dim"))
-    _segs(grid, x + 16, y, parts, grid.cols)                # a field line runs to the screen edge and is cut there
+    gauge = gauge_parts(context) if context is not None else []
+    line = context_line_parts(context, session.get("tokens"), session.get("last_clear"),
+                              session.get("rest_since"), clock)
+    parts = (gauge[:3] if gauge else []) + line
+    _segs(grid, value_x, y, parts or [("·", "dim")], right)
     y += 1
     now = session.get("now")
-    grid.put(x + 3, y, "now:", "label", limit=right)
-    grid.put(x + 16, y, clip(str(now or "·"), right - x - 21), "now_sub" if now else "dim", limit=right)
+    value_x = _field(grid, x, y, "NOW", right)
+    grid.put(value_x, y, clip(str(now or "·"), right - value_x - 5), "now_sub" if now else "dim", limit=right)
     y += 1
     detail = session.get("context_detail")
     if detail is not None:
@@ -312,48 +384,76 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
             grid.put(x + 16, y, clip(", ".join(values[:4]) or "·", right - x - 19),
                      "soft" if values else "dim", limit=right)
             y += 1
-    grid.put(x + 3, y, "running:", "label", limit=right)
-    _segs(grid, x + 16, y, tuple(session.get("running") or ()) or (("·", "dim"),), right)
+    value_x = _field(grid, x, y, "RUN", right)
+    _segs(grid, value_x, y, tuple(session.get("running") or ()) or (("·", "dim"),), right)
     y += 1
-    y = _section(grid, x, right, y + 1, "ROUTES",
-                 sum(1 for route in vm.routes if route.get("session_tag") == tag) or "none")
+    messages, requests = _session_peer_view(vm, tag)
     routes = tuple(route for route in vm.routes if route.get("session_tag") == tag)
+    head = section_parts("ROUTES", len(routes)) if routes else (
+        [] if requests else section_parts("ROUTES", detail="none"))
+    if requests:
+        # ``2 ROUTES │ 1 REQUEST``: the requests this session sent or received, counted as the
+        # shell panel counts them (the same request rows), beside the routes.
+        head += ([(" │ ", "dim")] if head else []) + section_parts("REQUEST", len(requests))
+    y = section_rule(grid, x, right, y + 1, head)
     if routes:
         end = _draw_route_subset(grid, vm, routes, x, y, bottom, view_key=tag, state=state)
         # An opened route unfolds its detail in place, so the next section starts below what was drawn.
         fixed = y + len(routes) * 2 + 2
+        # The requests stand right under what the route table drew (an unfolded route's detail too).
+        below = end if end else y + len(routes) + 2
         y = end if end and end > fixed else fixed
+    else:
+        below = y
+    for request in requests:
+        # A request stands under the route rows, one row each, its title after its state.
+        parts = request_line_parts(request)
+        cursor = _segs(grid, x + 3, below, _fit(parts, max(0, right - x - 4)), right)
+        title = str(request.get("title") or "")
+        if title and cursor + 4 < right:
+            grid.put(cursor + 3, below, clip(title, max(0, right - cursor - 4)), "soft", limit=right)
+        below += 1
+    y = max(y, below)
     # The reference draws every section below unguarded; whatever passes the pane's foot is cut
     # and flagged by the frame, never left out here.
-    links = tuple(edge for edge in tuple((vm.peer_edges or {}).get("links", ()))
-                  if any(isinstance(end, (list, tuple)) and str(end[0]) == tag
-                         for end in edge[:2]))
-    y = _section(grid, x, right, y + 1, "PEERS",
-                 str(len(links)) + (" link" if len(links) == 1 else " links") if links else "none")
-    for edge in links[:4]:
-        for edge_x, endpoint in ((x + 3, edge[0]), (x + 19, edge[1])):
-            if isinstance(endpoint, (list, tuple)):
-                session_tag, endpoint_harness = str(endpoint[0]), str(endpoint[1])
-                edge_x = grid.put(edge_x, y, "[", "dim")
-                steward = any(str(item.get("tag")) == session_tag and item.get("steward")
-                              for item in vm.sessions)
-                edge_x = grid.put(edge_x, y, session_tag, "steward" if steward else "soft")
-                edge_x = grid.put(edge_x, y, "]", "dim")
-                grid.put(edge_x, y, " " + endpoint_harness,
-                         "hb_" + endpoint_harness, limit=right)
-            else:
-                grid.put(edge_x, y, _clip(str(endpoint), 14), "dim", limit=right)
-        grid.put(x + 16, y, "→", "soft")
-        kind = str(edge[2])
-        kind_key = {"steer": "soft", "notice": "dim", "handover": "hb_claude",
-                    "watch ⚑": "steward"}.get(kind, "dim")
-        grid.put(x + 40, y, kind, kind_key, limit=right)
-        grid.put(x + 51, y, str(edge[3]), "dim", limit=right)
-        grid.put(x + 64, y, _clip(str(edge[4]), max(0, right - x - 65)), "now_sub", limit=right)
+    shown = messages[-MESSAGES_SHOWN:]
+    hidden = len(messages) - len(shown)
+    y = section_rule(grid, x, right, y + 1, section_parts("MESSAGES") + (
+        [("  +" + str(hidden), "loc_repo")] if hidden else []))
+    for message in shown:
+        # The shell panel's MESSAGES head and, where the row has room, its body on the same row.
+        head_parts = message_head_parts(message)
+        body = str(message.get("body") or message.get("text") or "")
+        cursor = _segs(grid, x + FIELD_X, y, _fit(head_parts, max(0, right - x - FIELD_X - 1)), right)
+        if body and right - cursor - 4 >= 10:
+            grid.put(cursor + 3, y, clip(body, right - cursor - 4), "loc_repo", limit=right)
+        elif body:
+            y += 1
+            grid.put(x + FIELD_X + 2, y, clip(body, max(0, right - x - FIELD_X - 3)), "loc_repo", limit=right)
+        y += 1
+    if not shown:
+        grid.put(x + FIELD_X, y, "none", "dim", limit=right)
+        y += 1
+    linked = _linked_sessions(vm, tag)
+    if linked:
+        # ``PEERS  [09] ⚑ steward · [e4] · [a3]   PEERS tab ›``: the sessions this one is linked
+        # with, and the way to their tab with this session's card picked.
+        cursor = grid.put(x + FIELD_X, y, "PEERS  ", "label", limit=right)
+        for index, (other, steward) in enumerate(linked):
+            if index:
+                cursor = grid.put(cursor, y, " · ", "dim", limit=right)
+            cursor = grid.put(cursor, y, "[" + other + "]", "steward" if steward else "soft", limit=right)
+            if steward:
+                cursor = grid.put(cursor, y, " ⚑ " + ui_text("fleet.peers.steward"), "steward", limit=right)
+        go = ui_text("fleet.session_page.peers_tab")
+        start = cursor + 3
+        end = grid.put(start, y, go, "hearting", limit=right)
+        if end <= right - 1:
+            grid.add_hit(y, start, end, ("tab", "PEERS", tag))
         y += 1
     gpu_rows = tuple(session.get("gpu") or ())
     if gpu_rows:
-        y = _section(grid, x, right, y + 1, "GPU", str(len(gpu_rows)) + " in use")
+        y = _section(grid, x, right, y + 1, "GPU", "in use", count=len(gpu_rows))
         for gpu in gpu_rows:
             cursor = x + 3
             for text, key in gpu:
@@ -373,11 +473,34 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     if seat and history_bottom - y > 4:
         generations = tuple((vm.generations or {}).get(tag, ()))
         detail = any(isinstance(item, Mapping) and item.get("detail") for item in generations)
-        _section(grid, x, right, y, "HISTORY",
-                 "seat · %d generations" % len(generations) if detail else "")
-        from .history import draw_seat_expand
-        draw_seat_expand(grid, vm, state, tag, x, right - x - 1, y + 1, history_bottom, seat,
-                         harness)
+        _section(grid, x, right, y, "HISTORY")
+        # The seat's head line: its generation and last clear, as the CTX line words them.
+        words = [ui_text("fleet.session_page.generation", count=int(seat[2]) if len(seat) > 2 else 0)]
+        # A seat whose clear time is not known still says so (``cleared ·``), never leaves it out.
+        words.append(ui_text("fleet.context.cleared", when=session.get("last_clear") or "·"))
+        if not detail:
+            words.append(ui_text("fleet.session_page.no_card_body"))
+        grid.put(x + FIELD_X, y + 1, clip(" · ".join(words), max(0, right - x - FIELD_X - 1)), "dim", limit=right)
+        if detail:
+            from .history import draw_seat_expand
+            draw_seat_expand(grid, vm, state, tag, x, right - x - 1, y + 2, history_bottom, seat,
+                             harness)
+
+
+def _linked_sessions(vm, tag):
+    """``[(tag, watches this session)]``: the live sessions a LINK joins to ``tag``, in LINKS order."""
+    edges = vm.peer_edges if isinstance(vm.peer_edges, Mapping) else {}
+    live = {str(item.get("tag")) for item in vm.sessions}
+    found = {}
+    for link in tuple(edges.get("links", ())):
+        ends = [end for end in link[:2]]
+        if not any(isinstance(end, (list, tuple)) and end and str(end[0]) == tag for end in ends):
+            continue
+        for index, end in enumerate(ends):
+            if isinstance(end, (list, tuple)) and end and str(end[0]) != tag and str(end[0]) in live:
+                steward = index == 0 and str(link[2]).startswith("watch")
+                found[str(end[0])] = found.get(str(end[0]), False) or steward
+    return sorted(found.items(), key=lambda item: not item[1])
 
 
 def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):

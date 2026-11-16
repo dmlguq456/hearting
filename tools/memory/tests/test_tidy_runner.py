@@ -1223,7 +1223,7 @@ class WorkerFolderTest(RunnerCase):
                     raise runner.RunnerFailure("synthetic failure")
                 return "applied"
 
-            def notify(row, _text):
+            def notify(row, _text, **_kw):
                 if row["id"] == first:
                     blocked.chmod(0)
 

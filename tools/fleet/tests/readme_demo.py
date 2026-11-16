@@ -197,6 +197,13 @@ def snapshot(now=None, workdir=None):
          "to": {"session_id": to["session_id"], "harness": to["harness"]},
          "kind": kind, "ts": _iso(now - minutes * 60), "summary": note}
         for frm, to, kind, minutes, note in exchanges]}
+    sent = {}
+    for frm, to, kind, minutes, note in exchanges:
+        if kind in ("request", "report"):
+            continue
+        sent.setdefault(frm["harness"] + ":" + frm["session_id"], []).append({
+            "to": dict(to), "summary": note, "at": now - minutes * 60, "kind": kind,
+            "status": "received", "refs": []})
     api_session.work_projection = dataclasses.replace(
         api_session.work_projection,
         result={"name": "Fix the pagination off-by-one", "result": "success",
@@ -264,8 +271,11 @@ def snapshot(now=None, workdir=None):
     snapshot = LiveSnapshot(sessions=sessions, jobs=jobs, memory=memory, usage_snapshots=usage,
                         hearting={"version": VERSION, "install_method": "managed"},
                         answer_waits=waits,
-                        observations={"optional:peers": {"state": "success", "last_good": False,
-                                                         "observed_at": now},
+                        observations={"optional:peers": {
+                            "state": "success", "last_good": False, "observed_at": now,
+                            # The session page's MESSAGES: each session's own sent records, from the
+                            # same exchanges (a request and its report stay PEERS' REQUEST line).
+                            "messages": {"sent": sent, "requests": {}, "sides": {}, "rows": {}, "refs": []}},
                                       "replay_sources": {"peer_messages": peer_messages}})
     # Both GPU processes belong to the sessions above; without this the Explorer would compute
     # "not registered" rows from the host list it was handed.

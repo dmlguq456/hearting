@@ -90,7 +90,10 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertRegex(text["overview"], r"staged \d+/\d+ execute ●")
         self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
-        self.assertIn("2 links", text["session"])
+        # The session page's MESSAGES (the note it sent [e8]) and the session it is linked with.
+        self.assertIn("MESSAGES", text["session"])
+        self.assertIn("Profile 4, 8 and 16 loader workers", text["session"])
+        self.assertRegex(text["session"], r"PEERS  \[\w+\]")
         # The README's opening pictures: one moment, the request and the route [4f]'s panel shows,
         # each Fleet list whole (nothing cut off below it).
         self.assertIn("rq-7d21c4 · Test run", text["peers"])

@@ -789,7 +789,7 @@ class PromptTest(_BaseTest):
         payload = {"session_id": "claude-payload-session", "cwd": "/tmp/project", "prompt": prompt}
         calls = []
         mod = SimpleNamespace(
-            receiver_guidance=lambda *args, **kwargs: calls.append((args, kwargs)) or "ordinary guidance",
+            receiver_guidance_once=lambda *args, **kwargs: calls.append((args, kwargs)) or "ordinary guidance",
             emit_peer_context=lambda *args, **kwargs: None,
         )
         with mock.patch.object(hook, "_is_helper_process", return_value=False), \
@@ -799,8 +799,10 @@ class PromptTest(_BaseTest):
              mock.patch.object(hook, "_peer_message_module", return_value=mod), \
              mock.patch.object(hook.sys, "argv", [str(_HOOK), "prompt"]):
             hook.main()
-        self.assertEqual(calls, [((prompt, {"harness": "claude", "session_id": "claude-payload-session"}),
-                                  {"cwd": "/tmp/project"})])
+        self.assertEqual([(args, {k: v for k, v in kwargs.items() if k != "deferred"}) for args, kwargs in calls],
+                         [((prompt, {"harness": "claude", "session_id": "claude-payload-session"}),
+                           {"cwd": "/tmp/project"})])
+        self.assertIsInstance(calls[0][1]["deferred"], list)   # the "delivered" record waits for the flush
 
     def test_notice_record_has_no_body_text(self):
         payload = {

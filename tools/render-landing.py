@@ -780,7 +780,7 @@ SHOTS = {
     "questions": (1440, 720, "QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and "
                   "how to answer it; one older approval wait from a Codex session listed under it; and three questions answered today."),
     "session": (1440, 720, "A session page: one Claude Code session's state, context gauge, and current activity, its route, "
-                "its two links with the OpenCode session [e8], and the GPU it holds."),
+                "the messages it exchanged with the OpenCode session [e8] it is linked with, and the GPU it holds."),
     "resources": (1440, 720, "RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU "
                   "process, and CPU and memory use."),
     "output": (1440, 810, "A request's page: the stage graph with setup done, eval-asr running, eval-sep and report pending, and "
@@ -1652,7 +1652,7 @@ SCREENS = [
      ["Older waits stay listed until you answer or the work ends. Nothing drops off for its age.",
       "Answer from Fleet when the runtime offers a reply path. Otherwise Fleet points you to the session."]),
     ("session", "SESSION PAGE", "One session, in full.",
-     "State, context left, what it is doing now, its request, the sessions it steers, and the GPU it holds.",
+     "State, context left, what it is doing now, its routes and requests, the messages it sent and received and the sessions it is linked with, and the GPU it holds, in the session panel's words.",
      ["Select any session in the tree to open its page."]),
     ("resources", "RESOURCES", "What is using the machine.",
      "CPU, memory, and per-GPU use on this machine and on any hosts you configured, with the session that owns "

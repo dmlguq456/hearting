@@ -2,32 +2,35 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 const {keyRows}=require('./panel-view.cjs');
+// 11-16 (the person: "답 보냄도 한 5~10분은 유지하도록 해두자"): a sent answer's line stays SENT_KEEP_MS after it
+// was sent, whether or not its session has it yet (it used to go at that receipt, within seconds); it
+// leaves at the first update or paint past that, on the path it always left by (no timer of its own).
+const SENT_KEEP_MS=10*60*1000;
 module.exports=function({changed,answer,action,section,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
-  // 11-15 (popup design D): another session's questions, opened from the sessions popup, stand in
-  // the editor apart from this session's own (`own`, kept and updated meanwhile): they are answered
-  // with that session as their owner, and leaving brings this session's own back.
-  let foreign=null,own=null,ownUpdate=null;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
   let labels={},styles={},help='';
   const entries=new Map();
   const key=item=>item.id+'@'+item.revision;
   const state=item=>{
-    if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},notice:'',state:null});
+    if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},notice:'',state:null,sentAt:0});
     return entries.get(key(item));
   };
   // Rule 5 (11-14): the moment the person's answer is sent it has left their hands. While it
   // travels (`submitted`) the question is one dim line, never one to choose again; once its
-  // session has it (`received`, `applied`) the line goes too. A failed delivery leaves these
-  // states and the question comes back with its existing word.
+  // session has it (`received`, `applied`) the line stays until SENT_KEEP_MS after it was sent
+  // (11-16), then goes. A failed delivery leaves these states and the question comes back with
+  // its existing word.
   const phase=item=>{
-    const local=state(item).state,remote=item.request_state;
-    if(['received','applied'].includes(remote)||['received','applied'].includes(local))return 'done';
+    const entry=state(item),local=entry.state,remote=item.request_state;
+    if(['received','applied'].includes(remote)||['received','applied'].includes(local)){
+      // Its age decides: a clock behind the send (a negative age) leaves no age, so the line goes.
+      const age=Date.now()-entry.sentAt;
+      return entry.sentAt&&age>=0&&age<SENT_KEEP_MS?'sent':'done';
+    }
     return remote==='submitted'||local==='submitted'?'sent':null;
   };
-  const flatOf=list=>list.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
-  const flat=()=>flatOf(items);
-  const mine=()=>foreign?own:items;
+  const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
   const current=()=>frozen||flat()[index];
   const text=(name,fallback)=>labels[name]||fallback;
   const span=(value,style='dim')=>({text:String(value),...(styles[style]||{dim:style==='dim'})});
@@ -52,19 +55,17 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
   // longer asked for as a retained reference and leaves the panel.
-  const settled=item=>item.answerable!==true&&(['applied','expired','cancelled'].includes(item.request_state)||state(item).state==='applied');
+  // (A sent answer's line still standing, 11-16, is not let go.)
+  const settled=item=>item.answerable!==true&&phase(item)!=='sent'&&(['applied','expired','cancelled'].includes(item.request_state)||state(item).state==='applied');
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
-    // This session's own list while another session's stands: kept for when it is left.
-    if(foreign){ownUpdate=rows;own=Array.isArray(rows)?rows.slice(0,8).filter(item=>!['received','applied'].includes(item.request_state)):[];changed();return;}
-    apply(rows);
-  }
-  function apply(rows){
     const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
+        // An answer seen on its way (sent here, or from another place) keeps its line from then.
+        if(item.request_state==='submitted'&&!local.sentAt)local.sentAt=Date.now();
       }else if(item.request_state==='unknown'&&state(item).state==='submitted'&&!state(item).sending){
         // The delivery could not be confirmed: the question returns with its existing word.
         state(item).state='unknown';
@@ -100,20 +101,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
-  function leave(){
-    focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;
-    if(foreign){foreign=null;items=[];index=0;frozen=undefined;stale=false;const rows=ownUpdate;ownUpdate=null;own=null;apply(rows||[]);return;}
-    release();index=Math.min(index,Math.max(0,flat().length-1));changed();
-  }
-  function enterForeign({tag,owner,items:rows,labels:words}){
-    if(!foreign){own=items;ownUpdate=items;}
-    foreign=Object.freeze({tag:String(tag),owner:Object.freeze({...owner})});if(words)labels={...labels,...words};
-    items=[];index=0;frozen=undefined;stale=false;apply(rows);
-    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
-    const open=flat().findIndex(r=>active(r));if(open>=0)index=open;
-    changed();
-  }
-  function updateForeign(rows){if(foreign)apply(rows);}
+  function leave(){focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
@@ -141,7 +129,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     return result;
   }
   function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
-  function references(){return (mine()||[]).slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
+  function references(){return items.slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
   function preview({budget=10,columns=100}={}) {
     // Every key line is packed by the popup's one rule: broken between its ` · ` pieces, the closing key last.
     const keys=(pieces,rows)=>keyRows(pieces.flatMap(piece=>String(piece).split(' · ')),columns,{rows,cellWidth}).map(line=>[span(line)]);
@@ -164,10 +152,10 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       const draft=local.drafts[id]||'',safe=row.question.secret?'•'.repeat([...draft].length):draft;
       const chars=[...safe];let shown='',width=0;
       for(let i=chars.length-1;i>=0;i--){const w=chars[i].charCodeAt(0)<128?1:2;if(width+w>Math.max(1,columns-9))break;shown=chars[i]+shown;width+=w;}
-      tail.push([span('› '+(shown!==safe?'…':'')+shown,'loc_repo')]);
+      tail.push(chosenRow([span('› '+(shown!==safe?'…':'')+shown,'loc_repo')],active(row)));
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
-      tail.push([span('› '+selected.join(', '),'loc_repo')]);
+      tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
     }
     if(local.notice)tail.push([span(local.notice,stale?'lvl_r':'dim')]);
     if(focused){
@@ -199,7 +187,11 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // mark (blank, so focusing shifts nothing). While ↑↓ choose, the chosen choice's first row
   // carries `▸` in this session's harness color, bold, and every row of it (each row of a
   // wrapped one) has its words bold in the bright body color; every other choice reads dim
-  // grey. Without color the mark and the weight alone tell them apart.
+  // grey. Without color the mark and the weight alone tell them apart. 11-15 ("질문 선지 선택 효과를
+  // 틴트로 해 명확하게"): every row of the chosen one is marked `tint`, so the popup lays the chosen ground
+  // across it (one ground, no other inside it); the answer being typed, and an answer picked, are
+  // marked alike while this question is answered here.
+  const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
   function highlight(options,at,choosing){
     let n=-1;
     return options.map(parts=>{
@@ -208,7 +200,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       if(!choosing||at<0)return [span('  ',''),...parts];
       if(n!==at)return [span('  ',''),...parts.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
       const words=parts.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
-      return number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...words]:[span('  ',''),...words];
+      return chosenRow(number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...words]:[span('  ',''),...words]);
     });
   }
   // Rule 5: one line per answer on its way, `✓ answer sent · <what was sent>` (11-15 panel polish
@@ -217,7 +209,6 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // record's `sent` (secrets already hidden) comes first: when another place's claim won, it is
   // what was sent, not this panel's pick (review 1633, follow-up 3).
   function sentLines(){
-    const items=mine()||[];
     const label=(item,question,v)=>{
       const listed=item.answer_kind==='decision'?[]:question.choices||[];
       const choice=listed.find(c=>value(c)===v);
@@ -256,9 +247,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     busy=true;local.sending=true;local.notice='';changed();
     let sent=false;const started=moves;
     try{
-      const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values}),
-        ...(foreign?{owner:{...foreign.owner}}:{})});
-      if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;}
+      const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
+      if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;local.sentAt=Date.now();}
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}
     finally{
@@ -353,11 +343,6 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // whole first line, from the backend's rows at the panel's width. The popup reads it whole.
   // `answerable` (panel polish 1): it is one a press answers here, now (the panel paints it so).
   function summary(){
-    // The panel's summary is this session's own question, whatever the popup shows.
-    if(foreign){const listed=flatOf(own||[]);if(!listed.length)return null;const row=listed.find(active)||listed[0];
-      const view=row.question.display||{},fallback=[[span('◑ ','g_blocked'),span(row.question.question||'?','loc_repo')]];
-      return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),line:view.brief_line||fallback[0].slice(1),choices:choices(row).length,
-        answerable:active(row)};}
     const listed=flat();if(!listed.length)return null;
     let row=current();
     if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}
@@ -367,8 +352,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length,answerable:active(row||listed[0])};
   }
   return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
-    get question(){return foreign?flatOf(own||[]).length>0:!!current();},get foreign(){return foreign;},
-    enter,leave,update,input,detail:preview,summary,sent:sentLines,references,enterForeign,updateForeign,
+    get question(){return !!current();},
+    enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
     wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};
 };

@@ -44,10 +44,11 @@ class PromptAltitudeTest(unittest.TestCase):
             self.assertIn(word, prompt)
         self.assertIn("must not appear in the title", prompt)
 
-    def test_now_line_keeps_its_right_now_job(self):
-        prompt = rt._prompt("hello")
+    def test_now_line_names_the_latest_change_and_not_the_title_job(self):
+        prompt = " ".join(rt._prompt("hello").split())
         self.assertIn("NOW:", prompt)
-        self.assertIn("RIGHT NOW", prompt)
+        self.assertIn("saying what changed in the CONVERSATION block", prompt)
+        self.assertIn("do not restate the user's request", prompt)
 
     def test_existing_length_contract_is_unchanged(self):
         self.assertIn("3-6 words", rt.PROMPT_TEMPLATE)

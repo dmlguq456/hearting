@@ -150,6 +150,14 @@ function observeForm(){
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
 let expanded = !initialFold.folded, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
+// The screen revision the native had painted when its last native-bound byte arrived, and when
+// (monotonic ms) it arrived. A successor counts from its own start: it knows no earlier key's time.
+let keyRevision = -1, keyAt = performance.now();
+// How long the keys must have been quiet before a screen read after them may stand for them: right
+// after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
+// native repaints its old screen before the keys' own. Only compared at a reading that comes anyway
+// (a courier pass's status, an idle transition); nothing waits for it.
+const KEY_QUIET_MS = 2000;
 let last = [], nativeLast = [], nativeGap = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
@@ -161,6 +169,9 @@ let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,dragging=false;
+// The route box's place in its routes (spec rule 23: rows short, it scrolls in place under the wheel)
+// and the rows it takes on the panel, as the last paint drew them.
+let routeScroll=0,routeArea=null;
 // Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`
 // folded or `{folded:false}` opened by hand, at every width); without one `expanded` follows the width.
 let foldChoice=null;
@@ -357,8 +368,8 @@ function panelViewNow(){
   const shown=shownState();
   const model=stale?{...panelModel,stale}:panelModel;
   return panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:sessionsSummary?{...model,sessions:sessionsSummary}:model,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
-    settings,focused:block.focused,cwd:process.cwd(),cellWidth,background:terminalBackground,folded:!expanded,
+    model,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
+    settings,routeScroll,focused:block.focused,cwd:process.cwd(),cellWidth,background:terminalBackground,folded:!expanded,
     brief:()=>block.summary(),sent:()=>block.sent()});
 }
 // One beat for everything that runs (Fleet's 100 ms spinner frame and its
@@ -449,8 +460,8 @@ function motionSpan(y,screen,column){
   for(let k=0;k<list.length;){
     if(!stale(list[k])||covered(screen,column+list[k].col-1)){k++;continue;}
     let run=`\x1b[${screen+1};${column+list[k].col}H`,current=null;
-    for(let x=list[k].col;k<list.length&&list[k].col===x&&stale(list[k])&&!covered(screen,column+x-1);k++,x++){
-      const c=list[k];if(current!==now[c.i]){run+=`\x1b[${now[c.i]}m`;current=now[c.i];}run+=c.ch;
+    for(let x=list[k].col;k<list.length&&list[k].col===x&&stale(list[k])&&!covered(screen,column+x-1);k++){
+      const c=list[k];x+=Math.max(1,cellWidth(c.ch));if(current!==now[c.i]){run+=`\x1b[${now[c.i]}m`;current=now[c.i];}run+=c.ch;
       motionShown.set(screen+','+(column+c.col),now[c.i]);
     }
     out+=run+'\x1b[0m';
@@ -529,7 +540,7 @@ function spinPaint(){
       if(!quiet){motionWrote(y,y,column);wrote.add(y);}
       last[y]=line;written[y]=panelKey[y];
     }else{
-      const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
+      const row=rows-height()+y;if(expanded&&y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
       if(last[row]===panel)continue;
       const quiet=last[row]!==undefined&&written[row]===panelKey[y];
       text+=quiet?cellSpan(y,row,1):`\x1b[${row+1};1H`+panel;
@@ -549,29 +560,72 @@ function spinPaint(){
 // alone. Closed or moved, the rows it covered are written again from the native's copy as it is
 // now. The PTY keeps its size; the frame and its rows are panel-view's `popup`.
 let popupLayer=null,popupRect=null,overlayLast=[],overlayBase=null;
-// 11-15 (popup design B, C, D, E): the other popups are tables: Fleet's own route, LAB and session
-// tables, drawn by the backend at the popup's width (`popup`, read in its own worker as a person's
+// 11-15 (popup design B, E): the other popups: Fleet's own route table, drawn by the backend at the
+// popup's width (`popup`, read in its own worker as a person's
 // read: it never takes the answer's one action slot), and the messages read whole. `table` is the
 // one standing; the question popup stands while the editor has the keys. Both share the frame, the
 // keys (←→ the sections, ↑↓ Tab the rows, Enter, PgUp/PgDn, Esc · Ctrl+] · ✕ · a press outside)
 // and the rule that nothing opens by itself.
-let table=null,tableAsking=false,tableAgain=false,popupDirty=false,sessionsSummary=null,sessionsKey=null,sessionsAsking=false,sessionsAgain=false;
-const SECTIONS=['QUESTIONS','ROUTE','LAB','SESSIONS','MESSAGES'];
-const POPUP_KIND={ROUTE:'routes',LAB:'lab',SESSIONS:'sessions'};
+// (11-15: the panel's LAB and SESSIONS sections are gone, the person's word "실험 현황은 다소 섣부른
+// 추가같은데. 지금은 일단 빼" and the answer that "세션 현황" meant this session's own progress.)
+let table=null,tableAsking=false,tableAgain=false;
+// 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
+const SECTIONS=['STATUS','QUESTIONS','ROUTE','MESSAGES'];
+const POPUP_KIND={ROUTE:'routes',STATUS:'status'};
+// 11-15 (design 2): the panel's status button value (Fleet's `session_status.read`: the status document of
+// this session's campaign, else the one Fleet's project line picks; null where the project has no
+// artifact root, and no button then), read in its own worker so a slow first read holds neither the panel
+// nor a key: at the first projection, when this session's route list changes, and at an event of the file
+// watch on the paths it names (no timer, no poller); between them the value read last stands. The popup's
+// rows are kept the same way (`statusPopup`: read again only at such an event, or at another width).
+let statusValue=null,statusAsking=false,statusAgain=false,statusAgainDirty=false,statusKey='',statusDirty=false,statusGeneration=0,
+  statusTargets=new Set(),statusPopup=null,lastWatch=[];
+const STATUS_ROUTE=/^[A-Za-z0-9_.-]{1,80}$/;
+function statusRoutes(panel=panelModel){return [...new Set((Array.isArray(panel.routes)?panel.routes:[]).map(r=>r&&r.id).filter(id=>typeof id==='string'&&STATUS_ROUTE.test(id)))].slice(0,8);}
+// The button's value as the popup's read takes it (so the popup does not read again what the button read).
+function statusHeld(){const v=statusValue;
+  return v&&typeof v==='object'?{word:String(v.word||''),title:String(v.title||''),has_doc:v.has_doc===true,path:String(v.path||''),slot:String(v.slot||'')}:null;}
+function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true}:null;}
+function askStatus(dirty=false,routes=statusRoutes()){
+  if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
+  statusAsking=true;statusAgain=false;statusAgainDirty=false;
+  const selected=selection;
+  readAction({cwd:process.cwd(),routes},'status',true).then(result=>{
+    if(selected!==selection)return;
+    // A read that failed or ran out its time is asked again at the next projection event (the key it stood for is
+    // forgotten), never by a timer; one asks at a time, so a failure that goes on stacks no worker.
+    if(!result?.ok){statusKey='';return;}
+    const value=result.status&&typeof result.status==='object'?result.status:null;
+    const changed=JSON.stringify(value)!==JSON.stringify(statusValue);
+    statusValue=value;
+    statusTargets=new Set((Array.isArray(value?.watch)?value.watch:[]).filter(t=>typeof t==='string'&&path.isAbsolute(t)).slice(0,9));
+    if(changed||dirty)statusGeneration++;
+    if(observeFiles([...lastWatch,...statusTargets]))queueProjection();
+    panelModel={...panelModel,status_doc:statusDoc()};
+    if(table?.kind==='STATUS'&&(changed||dirty))askTable();
+    queueDisplay();
+  }).finally(()=>{statusAsking=false;if(statusAgain)askStatus(statusAgainDirty);});
+}
+// At a projection: the value is read again when this session's route list changed or a watch event came on its paths.
+function observeStatus(panel){
+  const key=JSON.stringify([process.cwd(),statusRoutes(panel)]);
+  if(key!==statusKey||statusDirty){const dirty=statusDirty;statusKey=key;statusDirty=false;askStatus(dirty,statusRoutes(panel));}
+}
+// The name a section has on a popup's bottom line: STATUS goes by its button's word (`현황`).
+function sectionLabel(name){return name==='STATUS'?String(statusValue?.word||'STATUS'):name;}
 function popupShown(){return (block.focused||!!table)&&activated&&!relay&&!ended&&!fleetView&&!settings&&!succeeding;}
 // The sections with something in them, in the panel's order (the one standing always).
 function sections(){
   const m=panelModel,list=v=>Array.isArray(v)&&v.length>0;
-  const has={QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,LAB:!!m.lab,
-    SESSIONS:true,MESSAGES:list(m.messages)||list(m.requests)};
+  const has={STATUS:!!statusDoc(),QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+    MESSAGES:list(m.messages)||list(m.requests)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
 function label(name,fallback){return panelModel.labels?.[name]||fallback;}
 // The popup's own words: its keys, for this kind (the panel fold key says which way it goes).
 function tableGuide(kind){
-  const own=kind==='ROUTE'?label(table?.page?'popup_route_page':'popup_route','↑↓ route · Enter open'):
-    kind==='SESSIONS'?label('popup_sessions','↑↓ session · Enter its question'):'';
+  const own=kind==='ROUTE'?label(table?.page?'popup_route_page':'popup_route','↑↓ route · Enter open'):'';
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
@@ -580,18 +634,19 @@ function tableGuide(kind){
 function wrapGuide(lines,inner,rows){
   return panelView.keyRows(lines.flatMap(line=>String(line).split(' · ')),inner,{rows,cellWidth});
 }
-// A table popup's title: the section's own head (`4 ROUTE ⠏2 ✕1`, `4 LAB failed 1`, `5 SESSIONS ◑2 ⠏1`).
+// A table popup's title: the section's own head (`4 ROUTE ⠏2 ✕1`).
 function tableTitle(kind){
   const dim=v=>({text:v,dim:true}),m=panelModel;
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim());return r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];}
-  if(kind==='LAB'){const lab=m.lab||{};return [...(lab.count?[{text:String(lab.count)},dim(' ')]:[]),dim('LAB'),...(Array.isArray(lab.counts)?lab.counts:[]).flatMap(c=>[dim(' '),...c])];}
-  if(kind==='SESSIONS'){const s=sessionsSummary||{};return [...(Number.isInteger(s.count)?[{text:String(s.count)},dim(' ')]:[]),dim('SESSIONS'),...(Array.isArray(s.counts)?s.counts:[]).flatMap(c=>[dim(' '),...c])];}
+  // `현황 <campaign> · <age>` (the word as the button's, dim; `현황` alone without a document).
+  if(kind==='STATUS'){const word=sectionLabel('STATUS'),whole=String(table?.title||statusValue?.title||word);
+    return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   return [dim('MESSAGES')];
 }
 function tableRows(inner){
   const t=table;
   if(t.kind==='MESSAGES')return [...panelView.messagesBody({model:panelModel,columns:inner,cellWidth}),...actionLines];
-  if(!t.loaded)return [[{text:t.error?'?':'⠏',dim:true}]];
+  if(!t.loaded)return [[{text:t.error?label('popup_unread','could not read'):'⠏',dim:true}]];
   return t.rows;
 }
 function popupNow(){
@@ -610,7 +665,7 @@ function popupNow(){
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
     // The table's own press targets, moved to where its rows stand on the screen.
     const first=view.frame.top+1,left=view.frame.left+2;
     view.tableHits=(table.hits||[]).filter(h=>h.row>=table.scroll&&h.row<table.scroll+space)
@@ -622,13 +677,14 @@ function popupNow(){
     if(actionLines.length)body=actionLines.slice(0,room);
     else if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
     else body=block.detail({budget:room,columns:inner});
-    // Another session's question (from the sessions popup): its number leads the title.
-    if(block.foreign)title=[{text:'['+block.foreign.tag+'] ',dim:true},...title];
-    view=panelView.popup({cols,rows,band,title,body,sections:names,current,model:panelModel,
+    view=panelView.popup({cols,rows,band,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,
       configuration:displayConfiguration,cellWidth,background:terminalBackground});
   }
-  // OpenCode paints its own background: every popup row starts from the terminal's own look.
-  view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f]/g,' ')}`).join('')+'\x1b[0m');
+  // OpenCode paints its own background: every popup row starts from the terminal's own look. The cell
+  // each side of the frame on its own ground (`margin`) is first written plain and then painted: a wide
+  // character it cuts in half leaves its other half blank in the terminal's own look, not the popup's.
+  // (11-15: no control character reaches the terminal from a popup row: C0, DEL and C1 alike.)
+  view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f-\x9f]/g,' ')}`).join('')+'\x1b[0m');
   if(table)return view;
   // The caret stands after the answer being typed (its row starts `› `), as it did in the panel.
   const edit=part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
@@ -637,81 +693,102 @@ function popupNow(){
     view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}
   return view;
 }
-// The table's rows as painted parts: the backend sends runs `[text, style index]` and the styles.
+// The table's rows as painted parts: the backend sends runs `[text, style index]` and the styles; a run
+// may carry its cells as Fleet measured them (`[text, style, cells]`, the status popup), which the popup
+// lays the row out by.
 function tableParts(result){
   const styles=Array.isArray(result.styles)?result.styles:[];
-  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{})})));
+  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{}),
+    ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
 }
 // One reading at a time for the table standing; a reason to read again while one is under way is
-// taken up when it ends (the content as it is then).
+// taken up when it ends (the content as it is then). The status popup's Fleet part is a reading of its
+// own: the document lets the table's place go when it ends, so a popup opened again while Fleet is out
+// stands at once; Fleet's lines are read one at a time and fill the popup standing when they arrive
+// (its width and generation as asked), and are not kept when either changed.
+let fleetAsking=false,fleetAgain=false,fleetWidth=0,fleetGeneration=0;
 function askTable(){
   const t=table;if(!t||!POPUP_KIND[t.kind])return;
   if(tableAsking){tableAgain=true;return;}
   tableAsking=true;tableAgain=false;
-  const selected=selection,columns=Math.max(20,Math.min(200,panelView.popupWidth(cols,'table')-4));
+  const selected=selection,width=t.width,columns=Math.max(20,Math.min(200,width-4));
   const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
-  readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room},'popup',true).then(result=>{
-    if(table!==t||selected!==selection)return;
+  const status=t.kind==='STATUS';
+  const ask=extra=>readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room,
+    ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{})},'popup',true);
+  const stale=()=>table!==t||selected!==selection;
+  let loaded=false;
+  ask(status?{part:'doc'}:{}).then(result=>{
+    if(stale())return;
+    // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
+    if(t.width!==width){tableAgain=true;return;}
     if(!result?.ok){t.error=!t.loaded;queueDisplay();return;}
-    t.rows=tableParts(result);t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;followOpen(t);
+    t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
+    if(status){
+      // The document first (it waits on nothing of Fleet's); Fleet's lines come after and stand above it.
+      t.title=typeof result.title==='string'?result.title:'';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
+    }else{t.rows=tableParts(result);followOpen(t);}
     if(Array.isArray(result.routes))t.routes=result.routes;
     if(t.kind==='ROUTE'&&t.page&&result.page!==true)t.page=false;
-    if(t.kind==='SESSIONS')noteSessions(result);
     queueDisplay();
-  }).finally(()=>{tableAsking=false;if(tableAgain)askTable();});
+  }).finally(()=>{
+    tableAsking=false;
+    if(tableAgain)askTable();
+    else if(status&&loaded)askFleet();
+  });
+}
+function askFleet(){
+  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!Array.isArray(t.doc))return;
+  const width=t.width,generation=statusGeneration;
+  if(fleetAsking){
+    // The one under way answers this popup too when it was asked at its width and generation; else once more after it.
+    if(fleetWidth!==width||fleetGeneration!==generation)fleetAgain=true;
+    return;
+  }
+  fleetAsking=true;fleetAgain=false;fleetWidth=width;fleetGeneration=generation;
+  const columns=Math.max(20,Math.min(200,width-4));
+  const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
+  readAction({kind:POPUP_KIND.STATUS,columns,open:t.open||'',page:false,rows:room,cwd:process.cwd(),
+    routes:statusRoutes(),status:statusHeld(),part:'fleet'},'popup',true).then(more=>{
+    const cur=table;
+    // A failed or late Fleet part leaves the document as it stands; it is not kept, so the next opening reads again.
+    if(!more?.ok||!cur||cur.kind!=='STATUS'||!cur.loaded||!Array.isArray(cur.doc))return;
+    // Rows laid out at another width, or read before the value changed, are not this popup's.
+    if(cur.width!==width||statusGeneration!==generation)return;
+    const head=tableParts(more),before=(cur.head||[]).length;
+    cur.head=head;cur.rows=[...head,...cur.doc];
+    // What the person was reading stays where it is when lines come in above it.
+    if(cur.scroll>0)cur.scroll=Math.max(0,cur.scroll+head.length-before);
+    statusPopup={rows:cur.rows,head:cur.head,doc:cur.doc,title:cur.title,width,generation};
+    queueDisplay();
+  }).finally(()=>{fleetAsking=false;if(fleetAgain){fleetAgain=false;askFleet();}});
 }
 // ↑↓ Tab move the unfolded row; the reading's place follows it (the row at the top when it is out of view),
 // once the table is read again with the row unfolded.
 function followOpen(t){
   if(!t.follow||!t.open||!t.space)return;t.follow=false;
-  const mine=t.kind==='ROUTE'?h=>h.action[0]==='route'&&h.action[1]===t.open:h=>h.action[0]==='fold'&&h.action[2]===t.open;
+  const mine=h=>h.action[0]==='route'&&h.action[1]===t.open;
   const rows=(t.hits||[]).filter(mine).map(h=>h.row);if(!rows.length)return;
   const row=Math.min(...rows),space=t.space;
   if(row<t.scroll||row>=t.scroll+space)t.scroll=row;
 }
-// The sessions section's values come from the same reading as the sessions popup (Fleet's session
-// table): read once the session is known, when another session's answer waits change (the
-// projection's `sessions_key`), and with every reading of the popup. Its folders join the watch
-// only while that popup stands.
-let popupWatch=[];
-function noteSessions(result){
-  const summary=result.summary&&typeof result.summary==='object'?result.summary:null;
-  if(JSON.stringify(summary)!==JSON.stringify(sessionsSummary)){sessionsSummary=summary;queueDisplay();}
-  const watch=table?.kind==='SESSIONS'&&Array.isArray(result.watch)?result.watch.filter(p=>typeof p==='string').slice(0,4):[];
-  if(JSON.stringify(watch)!==JSON.stringify(popupWatch)){popupWatch=watch;queueProjection();}
-}
-function askSessions(){
-  if(table?.kind==='SESSIONS'){askTable();return;}
-  if(sessionsAsking){sessionsAgain=true;return;}
-  sessionsAsking=true;sessionsAgain=false;const selected=selection;
-  readAction({kind:'sessions',columns:Math.max(20,Math.min(200,panelView.popupWidth(cols,'table')-4))},'popup',true).then(result=>{
-    if(selected===selection&&result?.ok)noteSessions(result);
-  }).finally(()=>{sessionsAsking=false;if(sessionsAgain)askSessions();});
-}
-// Another session's questions (its `◑` row in the sessions popup), read into the editor apart from
-// this session's own; they are read again while they stand, at the same events.
-function askForeign(tag){
-  const selected=selection,columns=Math.max(20,Math.min(200,panelView.popupWidth(cols)-4));
-  return readAction({kind:'questions',tag,columns},'popup',true).then(result=>{
-    if(selected!==selection||!result?.ok)return null;return result;});
-}
 // Opening a popup (a press on its section, Ctrl+], ←→ inside one). The keys are its own from now on.
 function openPopup(name,open=''){
   epoch++;empty=false;actionLines=[];resetTableInput();
-  if(name==='QUESTIONS'){table=null;popupWatch=[];if(block.foreign)block.leave();block.enter();queueDisplay();return;}
+  if(name==='QUESTIONS'){table=null;block.enter();queueDisplay();return;}
   const was=table;
-  // The routes popup opens with the pressed route unfolded, else the most pressing one (the panel's first).
+  // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
   table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table')};
+  // The status popup's rows as read last, while no watch event came and the width is the same.
+  const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
+  if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true});
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
-  else{
-    if(name!=='SESSIONS')popupWatch=[];
-    askTable();
-  }
+  else if(!kept)askTable();
   queueDisplay();
 }
-// The panel's route order (failed, running, waiting, finished), for the popup's first unfolded route.
+// The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
 function rankedRoutes(){
   const routes=Array.isArray(panelModel.routes)?panelModel.routes.filter(r=>r&&r.id):[];
   const rank=r=>r.kind==='dead'||r.kind==='done'&&r.outcome_key==='g_dead'?0:({working:1,blocked:2,idle:2,stale:3,done:4})[r.kind]??2;
@@ -719,7 +796,7 @@ function rankedRoutes(){
 }
 function closePopup(){
   resetTableInput();
-  if(table){table=null;if(popupWatch.length){popupWatch=[];queueProjection();}}
+  table=null;
   if(block.focused)block.leave();
   actionLines=[];queueDisplay();
 }
@@ -728,36 +805,19 @@ function moveSection(delta){
   const names=sections(),at=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
   openPopup(names[(at+delta+names.length)%names.length]);
 }
-// ↑↓ Tab: the routes popup unfolds the next route (Fleet's `▶`), the sessions popup the next
-// session; the others read on a row at a time.
+// ↑↓ Tab: the routes popup unfolds the next route (Fleet's `▶`); the others read on a row at a time.
 function moveRow(delta){
   const t=table;if(!t)return;
   if(t.kind==='ROUTE'&&!t.page&&t.routes.length){
     const at=t.routes.indexOf(t.open),next=at<0?(delta>0?0:t.routes.length-1):Math.max(0,Math.min(t.routes.length-1,at+delta));
     if(t.routes[next]!==t.open){t.open=t.routes[next];t.follow=true;askTable();}return;
   }
-  if(t.kind==='SESSIONS'){
-    const tags=[...new Set((t.hits||[]).filter(h=>h.action[0]==='fold'&&h.action[1]==='sopen:OVERVIEW').map(h=>h.action[2]))];
-    if(tags.length){const at=tags.indexOf(t.open),next=at<0?(delta>0?0:tags.length-1):Math.max(0,Math.min(tags.length-1,at+delta));
-      if(tags[next]!==t.open){t.open=tags[next];t.follow=true;askTable();}return;}
-  }
   t.scroll=Math.max(0,t.scroll+delta);queueDisplay();
 }
-// Enter: the unfolded route's page (Fleet's route page) and back to the table; a session's question.
-async function enterRow(){
+// Enter: the unfolded route's page (Fleet's route page) and back to the table.
+function enterRow(){
   const t=table;if(!t)return;
-  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;askTable();return;}
-  if(t.kind==='SESSIONS'&&t.open){
-    const own=sessionsSummary?.rows?.find(row=>row&&row.own)?.tag;
-    if(t.open===own){openPopup('QUESTIONS');return;}
-    // The session Enter was pressed on, whatever a key moves the unfolded row to while it is read.
-    const tag=t.open,result=await askForeign(tag);
-    if(table!==t)return;
-    if(!result||!Array.isArray(result.questions)||!result.questions.length)return;
-    table=null;popupWatch=[];
-    block.enterForeign({tag,owner:result.owner,items:result.questions,labels:result.labels});
-    queueDisplay();
-  }
+  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;askTable();}
 }
 function covered(y,x){const r=popupRect;return !!r&&y>=r.top&&y<r.top+r.height&&x>=r.left&&x<r.left+r.width;}
 // 11-15 (panel polish 3): while a popup stands, everything outside it (the native's rows, the panel,
@@ -804,7 +864,7 @@ const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=
 // while the panel is being drawn for another placement (folding or opening) is dropped.
 let panelHitsPlacement='';
 function placement(){const g=geometry();return [expanded,g.side,g.folded,g.left,g.panelCols,cols,rows,!!settings].join(':');}
-function panelContent(){const view=panelViewNow();panelHits=view.hits;panelHitsPlacement=placement();viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;panelHitsPlacement=placement();routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewMotion=view.motion||null;viewBlinks=!!view.blinks;viewAnimated=!!view.animated;return view.rows;}
 function height(){
   if(fleetView)return 0;
   if(geometry().side)return rows;
@@ -967,7 +1027,8 @@ function rebuildDisplay() {
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else{
     // Spec rule 49 (c): folded, the strip under the native area.
-    lines=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
+    // (11-15: the answer wait's blink is the strip's moving cells.)
+    lines=panelContent();groups=viewGroups;spins=viewSpins;motion=viewMotion;animated=viewAnimated;
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }
   displayLines(lines,height(),(painted,lengths,plain)=>{
@@ -1007,7 +1068,7 @@ function openFleet() {
     const session=pty.spawn(process.env.HEARTING_SHELL_PYTHON,[exe,'--explorer'],
       {cols,rows,cwd:process.cwd(),env:{...process.env}});
     const view={terminal:vt,child:session,closing:false,inputTail:'',paste:false};
-    fleetView=view;table=null;popupWatch=[];block.leave();last=[];emit('\x1b[2J');
+    fleetView=view;table=null;block.leave();last=[];emit('\x1b[2J');
     vt.onData(data=>session.write(data));vt.onWriteParsed(schedule);
     session.onData(data=>{try{vt.write(data);}catch{session.write('q');rawRelay();}});
     session.onExit(()=>{
@@ -1025,12 +1086,16 @@ function applyLayout() {
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
   refold();wasPinned=pinned();
   child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
-  // A table popup is Fleet's table at the popup's width: read again at the new one.
-  if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,'table')){table.width=panelView.popupWidth(cols,'table');askTable();}
+  // A table popup is Fleet's table at the popup's width: read again at the new one. Rows laid out at the
+  // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
+  // alone until the new read.
+  if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,'table')){table.width=panelView.popupWidth(cols,'table');
+    if(table.kind==='STATUS'&&table.loaded&&Array.isArray(table.doc)){table.head=[];table.rows=[...table.doc];}
+    askTable();}
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 // A redraw waits 25 ms to gather the events that come with it. A change seen only in a folder
-// watched whole (LAB's run records may change many times a second) redraws at most once a second:
+// watched whole (a folder of records may change many times a second) redraws at most once a second:
 // it waits for the second since the last redraw began, and the last change always lands. Any other
 // request keeps the 25 ms wait, and that redraw carries the folder's changes as well.
 function queueProjection(folder=false) {
@@ -1046,7 +1111,7 @@ const FOLDER_PAUSE=1000;let projectionDue=0,projectionStarted=0;
 // folder even when it is given the old inode number again.
 function folderIdentity(directory){try{const s=fs.statSync(directory);return [s.dev,s.ino,s.birthtimeMs].join(':');}catch{return '';}}
 // A target that ends in the path separator is a folder watched whole: any entry written,
-// replaced, added or removed in it redraws, however many files it holds (LAB's run records).
+// replaced, added or removed in it redraws, however many files it holds.
 // A watched folder removed, renamed away or made again leaves its watch on the old folder: the
 // watch is dropped at that event, or at the next projection's observation, and made again.
 // A folder's watch that fails stays as failed until the next projection's observation makes it
@@ -1078,13 +1143,14 @@ function observeFiles(paths) {
         const changed=name?path.join(directory,String(name)):directory;
         // The watched folder's own removal or move comes under its own name.
         if(event==='rename'&&(name===path.basename(directory)||folderIdentity(directory)!==row.identity)){
+          if(row.targets.some(target=>statusTargets.has(target)))statusDirty=true;
           row.watch.close();watchers.delete(directory);queueProjection(folder(row.targets));return;
         }
         const hits=name?row.targets.filter(target=>target===changed||target.startsWith(changed+path.sep)
           ||target.endsWith(path.sep)&&changed.startsWith(target)):row.targets;
+        // A change on a path the status value names: the value (and a standing status popup) is read again.
+        if(hits.some(target=>statusTargets.has(target)))statusDirty=true;
         if(hits.length){
-          // A folder only the standing popup watches (the sessions' records) reads it again.
-          if(hits.some(target=>popupWatch.includes(target)))popupDirty=true;
           // The native's own turn record is read at once; the rest waits for the projection.
           if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
           queueProjection(!!name&&folder(hits));
@@ -1102,33 +1168,21 @@ function observeFiles(paths) {
   }
   return changed;
 }
-// 11-15 (popup design, "while it stands"): a standing popup is read again at the events that changed
-// what it shows, never on a timer: the routes when this session's route rows change, LAB when its
-// board does, the sessions on their folders' events or another session's answer waits; another
-// session's questions with those waits.
+// 11-15 (popup design, "while it stands"): a standing routes popup is read again when this session's
+// route rows change, never on a timer.
 let popupKeys={};
 function refreshPopups(panel){
-  const keys={ROUTE:JSON.stringify([(Array.isArray(panel.routes)?panel.routes:[]).map(r=>[r.id,r.title,r.state,r.kind,r.stage,r.outcome,r.elapsed]),panel.route_label]),
-    LAB:JSON.stringify(panel.lab??null),SESSIONS:String(panel.sessions_key??'')};
+  const keys={ROUTE:JSON.stringify([(Array.isArray(panel.routes)?panel.routes:[]).map(r=>[r.id,r.title,r.state,r.kind,r.stage,r.outcome,r.elapsed]),panel.route_label])};
   const changed=name=>popupKeys[name]!==undefined&&popupKeys[name]!==keys[name];
-  // Fleet's whole collection runs for the sections only while another session waits for the person
-  // (and once more when that ends), or for a person who opened the sessions popup.
-  if(keys.SESSIONS!==sessionsKey){const before=sessionsKey;sessionsKey=keys.SESSIONS;
-    if(keys.SESSIONS||before&&sessionsSummary)askSessions();if(block.foreign)readForeign();}
-  else if(popupDirty&&table?.kind==='SESSIONS'){popupDirty=false;askTable();}
-  if(table&&(table.kind==='ROUTE'||table.kind==='LAB')&&changed(table.kind))askTable();
+  if(table&&table.kind==='ROUTE'&&changed(table.kind))askTable();
   popupKeys=keys;
-}
-function readForeign(){
-  const shown=block.foreign;if(!shown)return;
-  askForeign(shown.tag).then(result=>{if(block.foreign===shown&&result&&Array.isArray(result.questions))block.updateForeign(result.questions);});
 }
 async function projection() {
   if(!sid||ended||relay||succeeding)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const asked=++clock;
-    const data=await source('projection',{columns:openColumns(),popup_columns:panelView.popupWidth(cols),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
+    const data=await source('projection',{columns:openColumns(),popup_columns:panelView.popupWidth(cols),table_columns:panelView.popupWidth(cols,'table')-4,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
       ...(typeof displayValues.model==='string'&&displayValues.model?{native_model:displayValues.model}:{})});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
@@ -1137,13 +1191,15 @@ async function projection() {
     if(turnRecord)readTurnRecord();
     else noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
     // Close the read-before-watch gap once when the input set changes.
-    if(observeFiles([...popupWatch,...(Array.isArray(data.watch)?data.watch:[])]))projectionPending=true;
+    lastWatch=Array.isArray(data.watch)?data.watch.slice(0,64):[];
+    if(observeFiles([...lastWatch,...statusTargets]))projectionPending=true;
     refreshPopups(data.panel||{});
+    observeStatus(data.panel||{});
     const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState(),upgradeNoteNow()]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,status_doc:statusDoc(),answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
@@ -1238,22 +1294,35 @@ function screenSnapshot() {
 // input or lifecycle changed meanwhile; 'unavailable': the backend did not answer), or '' when it did.
 async function refreshReadiness() {
   // A previous empty frame cannot acknowledge bytes still waiting inside the
-  // native input loop. Only untouched startup or an exact submitted frontier
-  // can be corroborated by the screen/native-idle observation.
+  // native input loop. Untouched startup or an exact submitted frontier can be
+  // corroborated by the screen/native-idle observation; so can keys the native
+  // took without a turn (a local command's menu, an Esc, an erased draft: no
+  // prompt callback follows them) once it has painted after them and the keys
+  // have been quiet for KEY_QUIET_MS. A reading of that newer screen as idle
+  // with an empty composer settles them; a draft or form it shows keeps them
+  // unsettled, and a native that has not painted since its last key, or a
+  // reading within the quiet time (an Enter whose turn has not called back
+  // yet, a slow native's old screen), proves nothing (11-16: a window stayed
+  // undeliverable for hours after `/model`). OpenCode's keys wait for the next
+  // submitted turn: its focus can leave the composer while the composer still
+  // reads empty (a dialog over the transcript, its terminal pane).
   const inputSettled=nativeEpoch===0||(submitted>=0&&submitted===nativeEpoch);
-  if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return '';}
+  const painted=!inputSettled&&screenRevision>keyRevision&&harness!=='opencode'&&performance.now()-keyAt>=KEY_QUIET_MS;
+  const loneEscape=keyTail==='\x1b'&&!paste;
+  if(relay||paste||(keyTail&&!(loneEscape&&painted))||currentDelivery||!sid||(!inputSettled&&!painted)){empty=false;return '';}
   // A lifecycle event that arrives meanwhile is newer than this observation.
-  const before=epoch,selected=selection,revision=screenRevision,observed=sequence;
+  const before=epoch,selected=selection,revision=screenRevision,observed=sequence,frontier=nativeEpoch;
   const result=await source('readiness',{screen:screenSnapshot(),state});
   if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return 'moved';}
   empty=result.ok===true&&result.ready===true;
+  if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
   return result.ok===true?'':'unavailable';
 }
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
-  epoch+=data.length;empty=false;
+  epoch+=data.length;empty=false;keyRevision=screenRevision;keyAt=performance.now();
   for(let offset=0;offset<data.length;offset++) {
     nativeEpoch++;
     const c=String.fromCharCode(data[offset]);
@@ -1304,6 +1373,13 @@ function panelAction(action){
   }
   queueDisplay();
 }
+// Scroll the route box by `delta` routes; a box that shows every route keeps still.
+function scrollRoutes(delta){
+  if(!routeArea||!routeArea.max)return false;
+  const next=Math.max(0,Math.min(routeArea.max,routeScroll+delta));
+  if(next!==routeScroll){routeScroll=next;queueDisplay();}
+  return true;
+}
 let settingsTail='',settingsEscapeTimer,settingsPaste=false;
 function settingsInput(data){
   clearTimeout(settingsEscapeTimer);
@@ -1340,8 +1416,9 @@ function panelMouse(code,x,y,release){
   // panel, the right edge of a left one.
   if(g.side&&!g.folded&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
-  // The wheel over the panel does nothing (its sections read whole in their popups).
-  if((code&0xc3)===64||(code&0xc3)===65)return true;
+  // The wheel over the route box scrolls it in place (spec rule 23); elsewhere in the panel it does
+  // nothing (the other sections read whole in their popups).
+  if((code&0xc3)===64||(code&0xc3)===65){if(!release&&!settings&&routeArea&&row>=routeArea.top&&row<=routeArea.bottom)scrollRoutes((code&1)?1:-1);return true;}
   if(release||code>=32||(code&3)!==0)return true;
   // The targets drawn for this very placement are what the person pressed, a queued layout or not.
   if(panelHitsPlacement!==placement())return true;
@@ -1389,12 +1466,11 @@ function popupMouse(code,x,y,release){
   if(!inside||hit&&hit.action==='popup-close'){epoch++;closePopup();return true;}
   // A section's name on the bottom line opens its popup.
   if(hit&&hit.action.startsWith('popup:')){openPopup(hit.action.slice(6));return true;}
-  // A table's row: a route unfolds (pressed again, its page); a session unfolds (its `◑`, its question).
+  // A table's row: a route unfolds (pressed again, its page).
   const target=table&&(l.tableHits||[]).find(h=>h.row===row&&col>=h.left&&col<=h.right);
   if(target){
-    const [verb,second,third]=target.action;
+    const [verb,second]=target.action;
     if(table.kind==='ROUTE'&&verb==='route'&&second){if(table.open===second)enterRow();else{table.open=second;table.page=false;table.follow=true;askTable();}}
-    else if(table.kind==='SESSIONS'&&verb==='fold'&&third){if(table.open===third)enterRow();else{table.open=third;table.follow=true;askTable();}}
   }
   return true;
 }
@@ -1563,7 +1639,7 @@ async function lifecycle(req) {
     // A popup reads one session's values: another selection closes it; the same session selected again
     // with no key between (an OpenCode plugin reload) keeps it, read again for the session as it is now.
     const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
-    table=again?unselected.table:null;popupWatch=[];unselected=null;if(table)setImmediate(askTable);
+    table=again?unselected.table:null;routeScroll=again?unselected.routeScroll:0;unselected=null;if(table)setImmediate(askTable);
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
@@ -1579,8 +1655,8 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    unselected={sid:req.sid,nativeEpoch,table};
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;popupWatch=[];block.update([]);
+    unselected={sid:req.sid,nativeEpoch,table,routeScroll};
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
