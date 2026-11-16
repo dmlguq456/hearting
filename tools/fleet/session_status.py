@@ -11,6 +11,10 @@ No document at all is still a value (``has_doc`` False: the button stands, dim) 
 document would stand.  ``watch`` is for the panel's existing file watch (no poller): the document, and
 each session campaign's folder as one folder target (a trailing separator) so a new document redraws.
 
+``held(cwd, claim)`` is the value the host already holds (its button's) taken for the popup, so the popup
+does not read what the button read: it stands only where the claim names a status document inside this
+folder's own artifact root (else ``None``, and the popup reads).
+
 ``popup_rows(view, status, width)`` is the popup's body: Fleet's status lines for this project exactly as
 its project page draws them (``pages.repo_status_lines``), an empty row, then the whole document
 (``transcript.doc_rows``: Fleet cards, fences as written, markdown tables aligned).  Rows are lists of
@@ -205,6 +209,38 @@ def read(cwd, routes=(), now=None):
         return None
 
 
+def held(cwd, claim, now=None):
+    """``claim`` (the host's button value: ``word``, ``title``, ``has_doc``, ``path``, ``slot``) as a value, or ``None``.
+
+    Nothing the host sends is trusted as a place to read: a document path stands only when it is a status
+    document's name inside the artifact root of ``cwd`` (the one ``read`` would name)."""
+    try:
+        if not cwd or not isinstance(claim, Mapping):
+            return None
+        root = _root(cwd, time.time() if now is None else now)
+        word, title, slot = claim.get("word"), claim.get("title"), claim.get("slot") or ""
+        if (not root or not isinstance(word, str) or not isinstance(title, str) or not isinstance(slot, str)
+                or len(word) > 80 or len(title) > 400 or len(slot) > 400):
+            return None
+        path = ""
+        if claim.get("has_doc") is True:
+            path = claim.get("path")
+            if (not isinstance(path, str) or not os.path.isabs(path) or len(path) > 4096 or "\0" in path
+                    or os.path.commonpath([root, os.path.realpath(path)]) != root
+                    or _fold(os.path.basename(path)) not in project_status.STATUS_NAMES):
+                return None
+            slot = ""
+        return {"word": word, "has_doc": bool(path), "campaign": "", "age": "", "title": title, "path": path,
+                "slot": slot, "watch": []}
+    except Exception:  # noqa: BLE001 -- a claim that cannot be judged is read again
+        return None
+
+
+def _fold(name):
+    import artifact_campaign_documents as documents
+    return documents.fold(name)
+
+
 def _grid_rows(grid, until):
     """A Fleet grid's first ``until`` rows as ``(text, key)`` segments (tints dropped, trailing blanks cut)."""
     rows = []
@@ -250,9 +286,21 @@ def popup_rows(view, status, width):
 
     ``status`` is the project's Fleet status (``live._repo_status``'s ``status`` for its repo; ``None``
     or empty when Fleet holds none).  Without a document: Fleet's ``fleet.repo.no_status`` word, and the
-    place the document would stand when a campaign is known."""
-    return [[(transcript.clean(text), key) for text, key in row]
-            for row in _popup_rows(view, _clean_all(status) if isinstance(status, Mapping) else {}, max(1, int(width)))]
+    place the document would stand when a campaign is known.  The two parts are also read apart
+    (``popup_head_rows``, ``popup_doc_rows``): the document needs nothing of Fleet's collection."""
+    return popup_head_rows(status, width) + popup_doc_rows(view, width)
+
+
+def popup_head_rows(status, width):
+    """Fleet's status lines and the empty row under them; no row when Fleet holds no status."""
+    status = _clean_all(status) if isinstance(status, Mapping) else {}
+    rows = (_fleet_lines(status, max(1, int(width))) + [[]]) if status else []
+    return [[(transcript.clean(text), key) for text, key in row] for row in rows]
+
+
+def popup_doc_rows(view, width):
+    """The document's rows at ``width`` cells (``popup_rows`` without Fleet's lines above them)."""
+    return [[(transcript.clean(text), key) for text, key in row] for row in _doc_rows(view, max(1, int(width)))]
 
 
 def _clean_all(value):
@@ -266,18 +314,15 @@ def _clean_all(value):
     return value
 
 
-def _popup_rows(view, status, width):
+def _doc_rows(view, width):
     if not view.get("has_doc"):
         none = ui_text("fleet.repo.no_status")
         place = [(" · " + transcript.clean(view["slot"]), "dim")] if view.get("slot") else []
-        row = transcript._cut([(none, "dim")] + place, width)
-        return (_fleet_lines(status, width) + [[], row]) if status else [row]
-    # With a document, Fleet's "no status" word is left out when Fleet holds none (it may not know a large document)
-    rows = (_fleet_lines(status, width) + [[]]) if status else []
+        return [transcript._cut([(none, "dim")] + place, width)]
     lines, cut = read_text(view["path"])
     if lines is None:
-        return rows + [[("?", "dim")]]
-    rows += transcript.doc_rows(lines, width)
+        return [[("?", "dim")]]
+    rows = transcript.doc_rows(lines, width)
     if cut:
         rows.append([("… 64 KiB", "dim")])
     return rows

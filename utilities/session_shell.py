@@ -1206,6 +1206,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         panel["notice"] = styled(notice_line(values, panel["routes"], board))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
+    # A popup that could not be read says so in Fleet's own word (`fleet.output.unreadable`).
+    panel.setdefault("labels", {})["popup_unread"] = ui_text("fleet.output.unreadable")
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     # The model name the host reads off the native's own screen, painted by the rule route rows
     # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
@@ -1453,27 +1455,40 @@ def _panel_status(binding, request):
 
 
 def _status_popup(binding, request, columns, colors, no_color):
-    """The status popup: Fleet's status lines for this project and the whole document, at the popup's width
-    (``fleet.session_status.popup_rows``, with the value this read made itself: no path comes from the host)."""
+    """The status popup, in the two parts the host asks for one after the other (``part``): ``doc`` is the whole
+    document at the popup's width, with no wait on Fleet's collection (the value the button already read comes
+    with the request: ``session_status.held``, and only a request without one reads it); ``fleet`` is Fleet's
+    status lines for this project (``session_status.popup_head_rows``), which the host puts above the document
+    when they arrive. Without ``part``: both, as one answer."""
     named = _status_request(request)
     if named is None:
         return {"ok": False, "reason": "invalid-status"}
+    part = request.get("part")
+    if part not in (None, "doc", "fleet"):
+        return {"ok": False, "reason": "invalid-status"}
     from fleet import session_status
-    from fleet.session_tags import assigned_tag
-    view = session_status.read(*named)
-    if view is None:
-        return {"ok": False, "reason": "no-status"}
-    status = None
-    try:
-        vm = _popup_view_model(binding["harness"], binding["sid"], "status")
-        tag = str(assigned_tag(binding["harness"], binding["sid"]))
-        own = next((row for row in tuple(getattr(vm, "sessions", ()) or ()) if str(row.get("tag")) == tag), None)
-        repo = next((row for row in tuple(getattr(vm, "repos", ()) or ())
-                     if own is not None and str(row.get("id")) == str(own.get("repo_id"))), None)
-        status = repo.get("status") if repo is not None else None
-    except Exception:  # noqa: BLE001 -- without Fleet's lines the document still reads
+    view = {}
+    if part != "fleet":
+        view = session_status.held(named[0], request.get("status")) or session_status.read(*named)
+        if view is None:
+            return {"ok": False, "reason": "no-status"}
+    rows = []
+    if part != "doc":
         status = None
-    rows = session_status.popup_rows(view, status, columns)
+        try:
+            from fleet.session_tags import assigned_tag
+            vm = _popup_view_model(binding["harness"], binding["sid"], "status")
+            tag = str(assigned_tag(binding["harness"], binding["sid"]))
+            own = next((row for row in tuple(getattr(vm, "sessions", ()) or ()) if str(row.get("tag")) == tag), None)
+            repo = next((row for row in tuple(getattr(vm, "repos", ()) or ())
+                         if own is not None and str(row.get("id")) == str(own.get("repo_id"))), None)
+            status = repo.get("status") if repo is not None else None
+        except Exception:  # noqa: BLE001 -- without Fleet's lines the document still reads
+            if part == "fleet":
+                return {"ok": False, "reason": "no-fleet"}
+        rows = session_status.popup_head_rows(status, columns)
+    if part != "fleet":
+        rows = rows + session_status.popup_doc_rows(view, columns)
     styles, index = [], {}
 
     def style(key):
@@ -1486,8 +1501,11 @@ def _status_popup(binding, request, columns, colors, no_color):
     # the same measure Fleet drew them with (its own differs for some characters: Thai marks, jamo, new emoji).
     from fleet.explorer.grid import cell_width
     runs = [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows]
-    result = {"ok": True, "kind": "status", "rows": runs, "styles": styles, "hits": [], "page": False,
-              "title": view.get("title") or view.get("word") or "", "has_doc": view.get("has_doc") is True}
+    result = {"ok": True, "kind": "status", "rows": runs, "styles": styles, "hits": [], "page": False}
+    if part != "fleet":
+        result.update(title=view.get("title") or view.get("word") or "", has_doc=view.get("has_doc") is True)
+    if part:
+        result["part"] = part
 
     def weight(value):
         return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
