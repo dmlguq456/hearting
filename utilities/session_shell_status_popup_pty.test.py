@@ -144,9 +144,11 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   await sleep(600);s=await screen();frames.panel=s;
   const repo=await at('REPO'),button=await at('현황 ›'),head=await at('QUESTIONS');
   checks.button_row=repo&&button&&repo.y===button.y;
-  // `›` stands in the column of the section heads' `›`.
+  // `›` stands in the column of the section heads' `›`: two cells inside the panel's right line. (11-16: the QUESTIONS
+  // section is a thin box now, its `›` beside its name; the column is read from the panel's line on its top row.)
   const qrow=s[head.y],arrowAt=y=>{const c=cellsOf(y);for(let x=cols-1;x>=0;x--)if(c[x]==='›')return x;return -1;};
-  checks.arrow_column=[arrowAt(button.y),arrowAt(head.y)];
+  const edgeAt=y=>{const c=cellsOf(y);for(let x=cols-1;x>=0;x--)if(c[x]==='│')return x;return -1;};
+  checks.arrow_column=[arrowAt(button.y),edgeAt(head.y)-2];
   checks.button_look=looks(button.y,button.x,button.x+6).filter(c=>c.ch.trim()).map(c=>[c.ch,c.fg,c.dim]);
   // A hundred paints (the native echoes each key) and two projections (the shared cache changes): no read.
   const before=reads();checks.first_reads=before;
@@ -377,8 +379,10 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         # No document: the button dim; its popup says so under `현황`.
         self.assertTrue(checks['dim_look'] and all(c[2] for c in checks['dim_look']), checks['dim_look'])
         self.assertIn('╭─ 현황 ', checks['nodoc_title'])
-        # The blink: the question's red letters go between 217 and 95 together, once a second (the section head's count, a red
-        # that does not blink, keeps 174); every beat writes only blinking cells, a few dozen at most.
+        # The blink: the question's box lines (11-16: its top line, its walls and its bottom line, not the letters inside)
+        # go between 217 and 95 together, once a second (the section head's count, a red that does not blink, keeps
+        # 174); every beat writes only blinking cells, a few dozen at most (the box's lines are more cells than the letters
+        # were: the bound stands at 80 where the letters', 60, was).
         blink = checks['blink']
         seen = {}
         for sample in [blink['first'], *blink['samples']]:
@@ -400,7 +404,7 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         load = {'beats': len(beats), 'blinking_cells': len(moving),
                 'cells_per_beat': [len([cell for cell in written_cells(c) if cell[0] in blinking_rows]) for c in beats],
                 'bytes_per_beat': [len(c.encode()) for c in beats]}
-        self.assertTrue(all(n <= 60 for n in load['cells_per_beat']), load)
+        self.assertTrue(all(n <= 80 for n in load['cells_per_beat']), load)
         # The folded strip: `◑답 대기 N` alone moves, between the same two reds.
         strip = checks['strip']
         self.assertRegex(strip['row'], r'◑답 대기 \S+')

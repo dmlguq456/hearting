@@ -186,8 +186,8 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
   // An open question comes first: its rows stay and the line waits.
   if(asking){assert.equal(text,none,id+' '+s);continue;}
   const first=rows.findIndex(l=>l.includes('⚠ [정리]'));
-  // The notice ends at the next group: a blank row, a section rule or the answer wait.
-  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||/◑(답| to answer)/.test(l)));
+  // The notice ends at the next group: a blank row, a section rule, a box's top line (the QUESTIONS box, 11-16) or the answer wait.
+  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||/^│ ╭─/.test(l)||/◑(답| to answer)/.test(l)));
   assert(first>=0&&end>first&&text.includes('이어서해'),id+' '+s+'\n'+text);
   const lines=rows.slice(first,end);
   // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
@@ -482,12 +482,12 @@ assert(rows.at(-2).includes('7d 60%')&&/^│ MESSAGES ─+ › │$/.test(rows[m
 assert(rows[m+1].startsWith('│ ← [e7]')&&rows[m+2].startsWith('│   MESSAGE_1')&&rows[m+3].startsWith('│ ← [e7]')&&rows[m+4].startsWith('│   MESSAGE_2')&&rows[m+5].startsWith('│ ← [e7]')&&rows[m+6].startsWith('│   MESSAGE_3'),rows.join('\n'));
 assert(m+7===rows.length-3&&/^│ ─+ │$/.test(rows[m+7])&&rows.slice(rb+1,m).every(s=>/^│ +│$/.test(s)),'MESSAGES keeps to the bottom, the spare rows stand above it\n'+rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
-// The questions section sits first, above the route box (11-15): its head row, the count in the
-// question's rose and the name tag dim with a thin rule to `›`, then the question's summary;
-// messages are dim, the route box plain.
+// The questions section sits first, above the route box (11-15; 11-16 a thin rounded box like the route's): its top
+// line carries the count in the question's rose and the name tag dim, `›` at its end, then the question's summary
+// in the rows inside; messages are dim, the route box plain. (No question answerable here: the box's line is dim.)
 const asked=paint({state:'working',q:question,model:{answerable:true},height:36});rows=text(asked);
-const qTop=rows.findIndex(s=>/^│ 1 QUESTIONS ─+ › │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
-assert(qTop>0&&rows[qTop+1].startsWith('│ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│   1 A · 2 B')&&ra===qTop+3&&mq>ra&&rows.at(-2).includes('7d 60%')
+const qTop=rows.findIndex(s=>/^│ ╭─ 1 QUESTIONS › ─+╮ │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+assert(qTop>0&&rows[qTop+1].startsWith('│ │ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(rows[qTop+3])&&ra===qTop+4&&mq>ra&&rows.at(-2).includes('7d 60%')
  &&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
 assert.equal(asked.rows[qTop].find(x=>x.text==='1').foreground,174);assert.equal(asked.rows[qTop].find(x=>x.text==='QUESTIONS').dim,true);
@@ -495,7 +495,8 @@ assert.equal(asked.rows[qTop+1].find(x=>x.text==='◑').foreground,174);
 assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
 
 // A press on any of its rows opens the question popup.
-assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop,qTop+1,qTop+2]);
+assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop,qTop+1,qTop+2,qTop+3]);
+assert(asked.rows[qTop].filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim()).every(x=>x.dim===true&&x.role==='messages'),'a question not answered here leaves its box line dim');
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
 // before the route box scrolls in place; the messages go last.
@@ -692,7 +693,7 @@ const one={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:
  workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'utilities/panel.py'})]};
 const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:false,owner_paint:undefined,paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','61%','━━━━')},
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m'})]};
-const box=rows=>rows.slice(rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s)),rows.findIndex(s=>s.startsWith('│ ╰'))+1);
+const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1);};
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: owner / CTX with the route's time after its percent / title / kind; no inner box.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
@@ -1308,8 +1309,9 @@ for(let h=72;h>=16;h--){
  assert(rows.length<=h&&rows.filter(s=>s.includes('╭─ 9 ROUTE')).length===1,h+'\n'+all);
 }
 assert(first.rule>=first.msg&&first.msg>=first.ctx&&first.ctx>first.place&&first.place>first.names&&first.names>first.scroll,JSON.stringify(first));
-// Empty rows go before the rule does: with room to spare the rule stands.
-const tall=draw(nine,40,60);
+// Empty rows go before the rule does: with room to spare the rule stands. (11-16: the QUESTIONS box takes two rows
+// where its head row took one, so the height this stood at, 60, is 61 now; 62 leaves the same one spare row.)
+const tall=draw(nine,40,62);
 assert(/^│ [─━]+ │$/.test(tall[tall.findIndex(s=>s.startsWith('│ TITLE'))-1]),tall.join('\n'));
 """
         self.node(script, "panel-view.cjs")
@@ -1351,18 +1353,19 @@ const QUESTION={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('Q_HEAD')],[P('  ')
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
  state:'idle',configuration:{},brief:()=>o.q||null}).rows.map(r=>r.map(p=>p.text).join(''));
 const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
-const first=rows=>rows.findIndex(s=>/^│ (\d+ )?QUESTIONS |^│ ╭─/.test(s)),bottom=rows=>rows.findIndex(s=>s.startsWith('│ ╰'));
+// (11-16: the QUESTIONS section is a thin box too, its name in the top line; `bottom` is the last box's, the route box's.)
+const first=rows=>rows.findIndex(s=>/^│ (\d+ )?QUESTIONS |^│ ╭─/.test(s)),bottom=rows=>rows.findLastIndex(s=>s.startsWith('│ ╰'));
 const full=paint(six,58),m=rule(full),q0=first(full),rb=bottom(full);
 assert(q0>0&&blank(full[q0-1])&&/^│ 1 QUESTIONS ─+ › │$/.test(full[q0])&&full[q0+1].startsWith('│ ╭─ 6 ROUTE ─')&&rb>q0+24&&m>rb&&/^│ MESSAGES \+3 ─+ › │$/.test(full[m]),full.join('\n'));
 // MESSAGES keeps to the panel's bottom (spec rule 14): its rows end above the thin rule and the 5h/7d row, the spare rows
 // stand between the route box and it.
 assert([1,3,5,7,9].every(k=>/^│ [←→] \[/.test(full[m+k])&&/^│   \S/.test(full[m+k+1]))&&m+11===full.length-3&&/^│ ─+ │$/.test(full.at(-3))&&full.slice(rb+1,m).every(blank)&&full.at(-2).includes('7d 66%'),full.join('\n'));
-// With a question the summary stands between the QUESTIONS head and the route box (11-15: right above it).
-const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('1 QUESTIONS ─'));
-assert(q>2&&blank(asked[q-1])&&asked[q+1].includes('◑ Q_HEAD')&&asked[q+2].includes('1 A · 2 B')&&asked[q+3].startsWith('│ ╭─ 2 ROUTE ─')&&rule(asked)>bottom(asked),asked.join('\n'));
-// No routes: no box stands, and the parting row still stands above the first section.
+// With a question the summary stands in the QUESTIONS box, between its top line and the route box (11-15: right above it).
+const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('1 QUESTIONS ›'));
+assert(q>2&&blank(asked[q-1])&&asked[q+1].startsWith('│ │ ◑ Q_HEAD')&&asked[q+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(asked[q+3])&&asked[q+4].startsWith('│ ╭─ 2 ROUTE ─')&&rule(asked)>bottom(asked),asked.join('\n'));
+// No routes: no box stands (a section with no row to show inside is its head row), and the parting row still stands above the first section.
 const none=paint([],30,{model:{routes_known:true}});
-assert(!none.join('').includes('╭')&&!none.join('').includes('ROUTE')&&blank(none[first(none)-1])&&first(none)>0&&rule(none)>first(none),none.join('\n'));
+assert(none.filter(s=>s.includes('╭')).length===0&&/1 QUESTIONS/.test(none[first(none)])&&!none.join('').includes('ROUTE')&&blank(none[first(none)-1])&&first(none)>0&&rule(none)>first(none),none.join('\n'));
 // (d) Short of rows: the parting row goes first, then the thin rule above the last row, then values on
 // several rows, then the metadata row and the rule under it, then every message folds to one row; only then
 // does the route box fold (its context rows, then its kind rows) and scroll.
@@ -1557,7 +1560,8 @@ const blank=s=>/^│ +│$/.test(s);
 const tall=(height,o={})=>plain(view.render({width:o.width||40,height,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[oneShot,staged],route_count:2,...(o.model||{})},
  state:'idle',configuration:{},questions:()=>[]}));
 for(const height of [50,70,90]){
- const rows=tall(height),r=rows.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=rows.findIndex(s=>s.startsWith('│ ╰')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+ const rows=tall(height),r=rows.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=rows.findIndex((s,i)=>i>r&&s.startsWith('│ ╰')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+ // (11-16: with no row to show inside it, the section stays its head row: an empty box is no box.)
  assert(r>0&&/^│ 1 QUESTIONS /.test(rows[r-1])&&blank(rows[r-2]),height+'\n'+rows.join('\n'));
  // MESSAGES keeps its rows (five at most, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
  const last=rows.findLastIndex(s=>/^│ [←→] /.test(s));
@@ -1574,7 +1578,7 @@ for(const height of [50,70,90]){
 // No MESSAGES: MEM keeps to the bottom. Neither: the sections stand from the top, the blank rows are below.
 {const mem=tall(50,{model:{messages:[],memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'}]}}),e=mem.findIndex(s=>/^│ MEM ─+ │$/.test(s));
  assert(e>0&&e+3===mem.length-3&&/MEM_ONE/.test(mem[e+2])&&/^│ ─+ │$/.test(mem.at(-3))&&blank(mem[e-1]),mem.join('\n'));
- const none=tall(50,{model:{messages:[]}}),r=none.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=none.findIndex(s=>s.startsWith('│ ╰'));
+ const none=tall(50,{model:{messages:[]}}),r=none.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=none.findIndex((s,i)=>i>r&&s.startsWith('│ ╰'));
  assert(r>0&&rb>r&&none.slice(rb+1,-2).every(blank)&&!none.some(s=>/MEM|MESSAGES/.test(s)),none.join('\n'));}
 // No overlap and no overflow at any height 5-60 and width 12-60, beside the native area and below it: the rows
 // stay within the height, each as wide as the panel, and a press target stands on a row of its own section.
@@ -1649,20 +1653,23 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
 const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
 const paint=height=>pv.render({width:44,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
-const HEADS=[['QUESTIONS',/^│ 3 QUESTIONS ─+ › │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: ↓\d+ ─)?╮ │$|^│ ╭─ 4 ROUTE ─+╮ │$/],
+// (11-16: with room QUESTIONS is a thin rounded box, its name in the top line; short of rows the box's two lines go and the section reads as a head row and its rows.)
+const HEADS=[['QUESTIONS',/^│ ╭─ 3 QUESTIONS › ─+╮ │$|^│ 3 QUESTIONS ─+ › │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: ↓\d+ ─)?╮ │$|^│ ╭─ 4 ROUTE ─+╮ │$/],
  ['MESSAGES',/^│ MESSAGES(?: \+\d+)? ─+ › │$/],['MEM',/^│ MEM ─+ │$/]];
-// The rows under each head, up to the next head (MEM: its `◆` rows; the route box: up to its bottom line).
+// The rows under each head, up to the next head (MEM: its `◆` rows; a box: up to its bottom line).
 const sections=rows=>{const at=HEADS.map(([name,re])=>[name,rows.findIndex(s=>re.test(s))]);
  assert(at.every(([,i])=>i>0),rows.join('\n'));assert(at.every(([,i],k)=>!k||i>at[k-1][1]),'order of the heads\n'+rows.join('\n'));
- const out={};at.forEach(([name,i],k)=>{const end=name==='ROUTE'?rows.findIndex((s,j)=>j>i&&s.startsWith('│ ╰'))+1:k+1<at.length?at[k+1][1]:rows.findIndex((s,j)=>j>i&&!/^│ [◆◇·] |^│   \S/.test(s));
+ const out={};at.forEach(([name,i],k)=>{const end=name==='ROUTE'||/^│ ╭/.test(rows[i])?rows.findIndex((s,j)=>j>i&&s.startsWith('│ ╰'))+1:k+1<at.length?at[k+1][1]:rows.findIndex((s,j)=>j>i&&!/^│ [◆◇·] |^│   \S/.test(s));
   const body=rows.slice(i+1,end);while(body.length&&/^│ +│$/.test(body.at(-1)))body.pop();out[name]={head:i,rows:body,from:i+1};});return out;};
 for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS:1,MESSAGES:1,MEM:2}]]){
  const v=paint(height),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),label=height+'\n'+rows.join('\n');
  assert(rows.length<=height&&rows.at(-2).includes('7d 64%'),label);
  assert(!/\bLAB\b|SESSIONS|긴 문맥|분리 모델/.test(rows.join('\n')),label);
  // QUESTIONS: the summary's rows (the guide line stands under them while there is room), the others: their rows.
- const summary=sec.QUESTIONS.rows.filter(s=>!/입력창에 답/.test(s));
- assert.equal(summary.length,rowsOf.QUESTIONS,label);assert(summary[0].startsWith('│ ◑ 패널을'),label);
+ // (With room, in the box: its content rows `│ │ … │ │`, its bottom line the section's last row.)
+ const boxed=height===46,summary=sec.QUESTIONS.rows.filter(s=>!/입력창에 답/.test(s)&&!s.startsWith('│ ╰'));
+ assert.equal(summary.length,rowsOf.QUESTIONS,label);assert(summary[0].startsWith(boxed?'│ │ ◑ 패널을':'│ ◑ 패널을'),label);
+ assert.equal(rows[sec.QUESTIONS.head].startsWith('│ ╭'),boxed,label);assert.equal(sec.QUESTIONS.rows.at(-1).startsWith('│ ╰'),boxed,label);
  assert.equal(sec.QUESTIONS.rows.some(s=>/입력창에 답/.test(s)),height===46,label);
  for(const name of ['MESSAGES','MEM'])assert.equal(sec[name].rows.length,rowsOf[name],name+' '+label);
  // The route box: with room every route whole (its glyph and title, its time, its kind row), in the producer's
@@ -1742,6 +1749,10 @@ assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\
         # answers on their way and the guide line are never red. Short of rows the action row goes first,
         # then the choices, the first row to the last (heights 5-60 × widths 12-60). Eight colors keep the
         # red, mono and NO_COLOR the weight; no `▌` bar anywhere. A panel shade keeps its own ground.
+        # 11-16: with room the section is a thin rounded box (its rows at the box's inner width): its line is the
+        # rose (`accent-line`) and blinks where a question is answerable here, the letters inside stand still; a
+        # question answered elsewhere leaves the line dim. Short of rows the box's two lines go and the letters
+        # blink again as before.
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -1762,34 +1773,43 @@ const sent=()=>[[p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('2 
 const paint=(o={})=>pv.render({width:o.width||44,height:o.height||30,side:o.folded?false:true,fill:!o.folded,folded:!!o.folded,
  model:{...model,...(o.model||{})},state:'idle',sid:'s',harness:'claude',frame:0,brief:()=>o.q,sent:o.sent||(()=>[]),configuration:o.cfg||{},background:o.background||''});
 const str=r=>r.map(x=>x.text).join('');
-const inside=r=>r.slice(2,-2);
+const inside=r=>r.slice(3,-3);// (a row's content between the box's two walls)
 const grounds=v=>v.rows.map(r=>r.some(x=>x.background!==undefined));
 const red=x=>x.foreground===174&&x.dim!==true;
 // (a) 256 colors: the head, the sent line, then three rows; no ground anywhere, the words red.
-{const v=paint({q:choice(),sent}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ 1 QUESTIONS ─+ › │$/.test(r));
- assert(head>0,rows.join('\n'));assert.equal(rows[head+1],'│ ✓ 답 보냄 · 2 표준 출력                  │');
+{const v=paint({q:choice(),sent,width:48}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ ╭─ 1 QUESTIONS › ─+╮ │$/.test(r));
+ assert(head>0,rows.join('\n'));assert(/^│ │ ✓ 답 보냄 · 2 표준 출력 +│ │$/.test(rows[head+1])&&/^│ ╰─+╯ │$/.test(rows[head+5]),rows.join('\n'));
  assert(!grounds(v).some(Boolean),rows.join('\n'));
  const at=[head+2,head+3,head+4];
  // The first row: `◑` and the words in red, no weight added.
  const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
  assert(first.filter(x=>x.text.trim()).every(x=>red(x)&&x.bold!==true),JSON.stringify(first));
  // The choices: one row of words, the numbers and names red, the ` · ` and `(추천)` dim.
- assert(rows[at[1]].startsWith('│   1 파일 · 2 표준 출력 (추천) · 3 둘 다'),rows[at[1]]);
+ assert(rows[at[1]].startsWith('│ │   1 파일 · 2 표준 출력 (추천) · 3 둘 다'),rows[at[1]]);
  const ch=inside(v.rows[at[1]]);
  assert(ch.filter(x=>/파일|표준 출력|둘 다|^\d $/.test(x.text)).every(red)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
  // The action at the right, in rose.
- assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │'),rows[at[2]]);
+ assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │ │'),rows[at[2]]);
  assert(inside(v.rows[at[2]]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[at[2]]));
- // A press on any of its rows (and the head) opens the question popup.
- for(const i of [head,...at])assert(v.hits.some(h=>h.row===i&&h.action==='question'),String(i));
+ // The box's line is the rose and blinks (the answer is wanted here); the letters inside stand still.
+ const line=v.rows[head].filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim());
+ assert(line.length&&line.every(x=>x.role==='accent-line'&&x.blink===true),JSON.stringify(line));
+ assert(!v.rows.slice(head+1,head+5).flat().some((x,i)=>x.blink===true&&!/^[│╰╯─ ]+$/.test(x.text)),JSON.stringify(v.rows.slice(head+1,head+5)));
+ assert(v.rows[head+5].filter(x=>/^[╰─╯]+$/.test(x.text)).every(x=>x.role==='accent-line'&&x.blink===true),JSON.stringify(v.rows[head+5]));
+ // A press on any of its rows (and the head and the bottom line) opens the question popup.
+ for(const i of [head,...at,head+5])assert(v.hits.some(h=>h.row===i&&h.action==='question'),String(i));
  // The sent line keeps its own colors, not red.
- assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150&&!v.rows[head+1].some(red));
+ assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150&&!inside(v.rows[head+1]).some(red));
  // The messages' and memories' rows are not red: the question reads apart from them.
  for(const r of v.rows.filter(r=>/\[73\]|패널 접힘/.test(str(r))))assert(!r.some(red),str(r));}
 // (b) A wait answered elsewhere, the sent line alone, no question: nothing red but the count, no action row.
 for(const q of [there,null]){const v=paint({q,sent}),rows=v.rows.map(str);
  assert(!grounds(v).some(Boolean)&&!rows.join('').includes('↵'),JSON.stringify(q));
- for(const r of v.rows.filter(r=>/다른 세션의 질문|그 창에서 답/.test(str(r))))assert(!r.filter(x=>x.text!=='◑').some(red),str(r));}
+ for(const r of v.rows.filter(r=>/다른 세션의 질문|그 창에서 답/.test(str(r))))assert(!inside(r).filter(x=>x.text!=='◑').some(red),str(r));
+ // The box's line is dim (nothing here to answer), and does not blink.
+ const top=v.rows.find(r=>/^│ ╭─ 1 QUESTIONS/.test(str(r))),line=top.filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim());
+ assert(line.length&&line.every(x=>x.dim===true&&x.role==='messages'&&x.blink!==true),JSON.stringify(q)+JSON.stringify(line));
+ assert(!v.rows.flat().some(x=>x.role==='accent-line'),JSON.stringify(q));}
 // (c) Eight colors: the words in the terminal's red; mono and NO_COLOR: by weight; no bar, no ground.
 for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold===true],[{},{colors:8,styles:{...styles,g_blocked:{foreground:1}}},x=>x.foreground===1],[{},{no_color:true},x=>x.bold===true]]){
  const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);
@@ -1800,6 +1820,10 @@ for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold===true],[{},{colors:8,st
  assert(inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===131)&&!grounds(v).some(Boolean),JSON.stringify(r));}
 {const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
  assert(inside(r).every(x=>x.background===235)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===174),JSON.stringify(r));}
+// (e0) Short of rows (20): the plain section, no box lines; its red letters blink again as before.
+{const v=paint({q:choice(),height:20,sent}),rows=v.rows.map(str),at=rows.findIndex(r=>r.includes('◑ 로그를'));
+ assert(rows.some(r=>/^│ 1 QUESTIONS ─+ › │$/.test(r))&&!rows.some(r=>/╭─ 1 QUESTIONS/.test(r))&&at>0,rows.join('\n'));
+ assert(v.rows[at].filter(x=>/로그/.test(x.text)).every(x=>red(x)&&x.blink===true),JSON.stringify(v.rows[at]));}
 // (e) Short of rows: the action row goes first, then the choices; the first row stays to the last.
 // Every height 5-60 at every width 12-60 keeps its rows within the panel, each as wide.
 const kinds=new Set();
@@ -1809,7 +1833,7 @@ for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
  const at=rows.findIndex(r=>r.includes('◑ 로'));
  if(w>=20)assert(at>0,label);
  if(at<0)continue;
- const choices=/^│   1 /.test(rows[at+1]||''),action=(rows[at+(choices?2:1)]||'').includes('↵');
+ const choices=/^│ (?:│ )?  1 /.test(rows[at+1]||''),action=(rows[at+(choices?2:1)]||'').includes('↵');
  assert(!action||choices,label);
  kinds.add(1+(choices?1:0)+(action?1:0));
 }
@@ -2213,7 +2237,7 @@ const text=r=>r.map(p=>p.text).join('');
 const top=fs.readFileSync(process.argv[1],'utf8').split('const defaults=')[0];
 assert(top.includes('const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,BORDER_LIT=1;'),top);
 assert(top.includes('const WAVE_COUNT=3,WAVE_LAP=56,WAVE_STEPS=10,WAVE_FLOOR=0.3,WAVE_MIN=24;'),top);
-assert.deepEqual(view.RULE,{PEAK:5,FADE:4,SCAN:26,REST:10});assert.deepEqual(view.WAVE,{COUNT:3,LAP:56,STEPS:10,FLOOR:0.3,MIN:24});
+assert.deepEqual(view.RULE,{PEAK:5,FADE:4,SCAN:26,REST:10,EASE:1});assert.deepEqual(view.WAVE,{COUNT:3,LAP:56,STEPS:10,FLOOR:0.3,MIN:24});
 assert.deepEqual(view.FACES.dark.scan,[243,246,249,252,255]);
 // The setting: `rule` by default, four values beside `route_line`; the settings screen picks them.
 assert.equal(view.defaults.rule_motion,'rule');assert.deepEqual(view.options.rule_motion,['rule','border','scanners','off']);

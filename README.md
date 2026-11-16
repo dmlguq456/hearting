@@ -203,11 +203,16 @@ this repository and global ones, each a dim head — `◆` durable or `◇` work
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
 routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can
-answer here now reads in rose letters, on no fill: its first line, its choices as text
-(`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors, bold in
-mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
-While an answer waits those red letters, and the folded strip's `◑to answer N`, blink between
-two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
+answer here now stands in a thin rounded box with a rose border, on no fill (`╭─ 3 QUESTIONS › ──╮`; a dim border where only
+an answer on its way or a wait answered elsewhere stands): its first line, its choices as text
+(`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors; the border's weight tells the two apart
+in mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
+While an answer waits that box's border, and the folded strip's `◑to answer N`, blink between
+two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`).
+The panel ends with `USAGE`: one row each for Claude, Codex and OpenCode with the 5h, 7d and model windows each reports
+(from the usage records Fleet already keeps), then the gear and the fold button. The window's last line under the native
+screen is always the shell's one line in every harness: the working folder at the left, `hearting v<release>` at the
+right (a newer release waiting takes its place); OpenCode's cost moves into its panel. Once you answer, the
 question is one line for ten minutes, `✓ answer sent` in the passing green and what you chose
 after it. A tidy result that ended well reads as one dim line; only a notice that leaves you something to do
 keeps the `⚠` caution look. Short of rows the other sections step down to one row first, then the route

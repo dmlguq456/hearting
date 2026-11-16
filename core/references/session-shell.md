@@ -274,7 +274,9 @@ setting `rule motion` picks (11-15). While the session runs (an answer being typ
 on each side one shade down each (`FACES.*.scan`, 11-16, the person: "너무 과하게 은은해서 보이지도 않음": the
 gray ramp, no longer the lit frame's vanilla whose khaki steps sank beside it and whose last step stood
 an L* of 4 from the still rule; on a dark or unknown face 255 in the middle, a step brighter than the
-body text, then 252, 249, 246 and 243, an L* of about 11 apart; on a light one 236, 238, 240, 242, 244), out past one end and back in 2.6 seconds, then the dark rule
+body text, then 252, 249, 246 and 243, an L* of about 11 apart; on a light one 236, 238, 240, 242, 244), out past one end and back in 2.6 seconds (11-16, the person: "스캐너가 가속도가 붙는 방식이 아니네? 등속으로 오가는거 좀
+거슬리네": its place is a cosine of the time, so it slows toward the end it turns at and runs fastest in the middle, like a
+pendulum; `RULE_EASE` at the top of `panel-view.cjs` is the one value, 1 the cosine, 0 the steady speed of before), then the dark rule
 rests one second and the light comes in again on the same side (a panel whose head rule gave way
 for rows, and the bottom layout, which has none, move nothing but the glyph); `border` sends one
 bright arc round the frame clockwise, its head the running color and its tail four shades down
@@ -397,7 +399,16 @@ head or on any row of its section opens its popup (any row of a route, its worke
 box too, the routes popup with that route unfolded; the box's top line the routes
 popup; a request row the MESSAGES popup).
 
-- QUESTIONS: the count is the answer wait's (the `◑답 대기 N` row is merged into
+- QUESTIONS (11-16, the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리
+  말이야"): one thin rounded box like the route box's (v4.33.1's question box, restored: no ground is painted), its
+  name in the top line (`╭─ 3 QUESTIONS › ─────╮`, the count in the rose, `QUESTIONS` dim, `›`), the rows below inside
+  it laid out at the box's inner width (nothing cut by the border). The line is the rose (`accent`) where this window
+  has a question to answer, dim where only an answer on its way or a wait answered elsewhere stands; mono, eight colors
+  and `NO_COLOR` tell the two by the line's weight (undimmed against dim). While an answer is wanted here the box's line
+  blinks between the two reds of the waiting blink (`FACES.*.waitBlink`, Fleet's one-second beat) and the letters
+  inside stand still; a `◑` and a count of a wait answered elsewhere keep their own letter blink. A section with
+  nothing to show inside it stays its head row, and short of rows the box's two lines go after the content rows
+  (the section then reads as below). A press anywhere on the box opens the question popup. The count is the answer wait's (the `◑답 대기 N` row is merged into
   it, in the question's rose), then the answers sent (one line each, ten minutes from when it was sent),
   the next question's summary (its first row `◑ …` and its choices on one row
   `1 label (recommended) · 2 … · +2`, or its first two rows) and, for a wait
@@ -481,6 +492,31 @@ popup; a request row the MESSAGES popup).
   the kind, then the scope (the mark and the age stay); short of rows every headline
   takes one row, then fewer records show; no section without a journal row.
 
+- USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
+  USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
+  opens nothing; the thin rule that parted MEM from the last row became it), then one row per harness in Fleet's header
+  order (Claude, Codex, OpenCode): the harness's name dim, then the windows that harness reports as the last row showed
+  them (`5h 12%(↻ 2h) │ 7d 66%`, Fleet's level colors; a window not reported is left out; a harness with none reported reads a
+  dim `?`). The values are the usage records Fleet already keeps (`~/.local/state/agent-fleet/usage/<harness>.json`, read
+  by `usage_cache`; this window's own harness keeps the values its panel observed, a Claude callback included); nothing is
+  fetched, and a change to any of the three records redraws the section where the 5h/7d row was redrawn. The last row
+  carries the gear and the fold button at its right end; the last harness's row stands there while it fits beside them,
+  else it keeps the row above and the buttons stand alone. Every harness window shows the same three rows. A row
+  gives way short of cells in the last row's order (the reset times, 5h, the model windows from the last, 7d), each value
+  whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
+- The window's last line (spec rule 60, 11-16, the person: "맨 아래줄이 비면이 아니고 항상 비우라고 그냥" / "디렉토리 경로가 뜨던데,
+  그걸 모든 셸에서 통일해도 좋겠네. 대신 hearting version은 우측으로 붙이고"): in every harness the row at the bottom of the
+  native screen where the harness drew its own line (Claude's statusline rows, Codex's footer row with its thread id and
+  fields, OpenCode's bottom bar with its folder, context and cost) is the shell's one line, always: the working folder
+  at the left (the home folder as `~`, cut from the front with `…`), a dim `hearting v<release>` at the right end (the
+  release folder this window runs from; a newer installed release waiting puts its words, `새 판 대기` /
+  `New release waiting`, in its place). What the harness drew there is not shown; the shell paints over the row in its
+  painted copy only and keeps reading the native screen (Codex's thread id, OpenCode's context) as before, and Codex's
+  `status_line` setting is left as it is. OpenCode has no setting or plugin slot that hides its bottom bar (checked in
+  the installed `@opencode-ai/plugin` types and the documentation), so the shell's own paint is the way. Only what the line
+  alone showed moves: OpenCode's cost (from the session record Fleet reads) stands after the context in that window's
+  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched.
+
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
 empty rows and a value's further rows (title, NOW, a route's title); every other
@@ -498,9 +534,10 @@ newest staying, down to one; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
 what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves
 nothing else); then Git; then the route box (v4.36.4's place for it, before the running
-jobs); the running jobs; then MEM gives its row, then its head, then MESSAGES
-the same; the question's head and first row stay to the last;
-5h/7d last of all. Rows a later step frees beyond its need go back to the steps
+jobs); the running jobs; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
+harnesses that are not this window's (the last first) and its name row, then MESSAGES gives its row and its
+head; the question's head and first row stay to the last (its box's two border lines go after its content
+rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
 rows left over stand above MESSAGES and MEM (which keep to the bottom, with their
 press targets), or under the last section when there are none.
@@ -517,8 +554,8 @@ time), in two-cell Hangul and emoji as well. Claude's exact statusline callback
 remains the source of its values; the panel shows them in the same groups as
 the other harnesses.
 Fields already painted in a native-owned status area are omitted from the compact duplicate.
-Physical exceptions are explicit: Claude's reserved native status row and
-OpenCode's native Context/footer and native scroll gutter.
+Physical exceptions are explicit: the native scroll gutter (and, in a window the shell does not host, each harness's own
+last line; inside the shell it is the shell's line, spec rule 60).
 Native-owned spaces are not recolored or resized to imitate another harness.
 Question interiors have one blank cell on both sides. Route state and shared
 verification codes use the operator language; missing records remain absent or
@@ -895,24 +932,21 @@ row at the native width: the common line with the running jobs at its end
 callback at session start reads the same shared Git observation as later
 callbacks, so folder, branch and model show before the first input; context and quota readings Claude has not reported yet
 (it sends them after its first response) are left out, as the native statusline
-did, rather than shown as `?`. Only while the panel actually paints the groups
-that row carries (number and project, Git, context, the answer wait, the route
-count, 5h/7d and running jobs) for the callback's exact session does the shell blank Claude's
+did, rather than shown as `?`. For the callback's exact session the shell blanks Claude's
 statusline area, the rows directly under the input box, when their text equals
-the callback's latest recorded output. A group the panel paints counts even
-when its row is cut to the panel's width or wrapped; only a group the panel
-does not paint at all (dropped for rows, settings) keeps the
-native rows, so no value leaves the screen. Folded, the strip takes the row's
+the callback's latest recorded output. (11-16, spec rule 60: the rows are blanked
+whatever the panel paints, and the first of them is the shell's one line; only a settings
+screen or Fleet over the window keeps the native rows.) Folded, the strip takes the row's
 place (its one row always paints the session; it carries no Git or job row), so the
-values show once and the row keeps the notice. A native screen too short for the whole
+values show once and the row is the shell's line. A native screen too short for the whole
 record (the bottom layout's ten native rows) shows only its first rows, running
 to the screen's last line; those rows are the recorded ones and are blanked
 too. A screen without that input box, such
 as the Ctrl+O transcript, keeps every row. Claude keeps as many rows as the
 callback's output has, and at least one while a statusline is set; the one row
 leaves two rows under the input box, this row and Claude's own mode row, at
-every width and with running jobs. That row is the notice
-row, empty unless the person must do something now. One function picks a single
+every width and with running jobs. That row is, since 11-16, the shell's one line (spec rule 60: the working folder and `hearting v<release>`); what was the notice
+row stood here until then: empty unless the person must do something now. One function picks a single
 item by priority from existing values: an answer this session owes, then
 compaction imminent, then a context or usage reading at Fleet's red level, then
 a failed, blocked or attention-needing route. News and release lines are not on

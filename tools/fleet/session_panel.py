@@ -667,6 +667,33 @@ def quota_row(values):
     return parts
 
 
+USAGE_HARNESSES = ("claude", "codex", "opencode")
+
+
+def usage_rows(harness, values):
+    """Spec E9 rule 59 (11-16): the USAGE section's rows, one per harness in Fleet's header order (Claude, Codex,
+    OpenCode), each ``{"harness", "parts"}`` with the parts as the last row showed them (:func:`quota_row`).
+    This session's own harness takes the values the panel observed (its native callback included); the others
+    read the usage record Fleet already keeps (``usage_cache``): nothing is fetched here. A harness with no
+    reported window has no parts (the panel draws ``?``)."""
+    from .collectors import usage_cache
+    from .native_display import quota_windows
+    from .session_view import weekly_quota
+    rows = []
+    for name in USAGE_HARNESSES:
+        if name == harness:
+            source = values
+        else:
+            try:
+                payload = dict((usage_cache.read(name).get("payload")) or {})
+            except Exception:
+                payload = {}
+            source = {"quota_windows": quota_windows(payload), "weekly_pct": weekly_quota(payload),
+                      "model_quotas": payload.get("rl_ms") or []}
+        rows.append({"harness": name, "parts": quota_row(source)})
+    return rows
+
+
 # A finished route's result row (the producer keeps the two most recent after the current
 # routes) is news: it stays until the person's next input, ten minutes at most (the bound the
 # notice line's news used), and a result that did not pass takes Fleet's failure mark.
@@ -708,7 +735,10 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
                        # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
                        # stage worker leads the row, the owner's own model for its third row.
-                       "shape": clean(row.get("shape"))[:32], "owner_model": clean(row.get("owner_model"))[:64],
+                       # A direct route (the session does the work itself) is drawn with the shape word
+                       # in the person's language; the other shapes keep their own words.
+                       "shape": (ui_text("fleet.session_panel.shape_direct") if row.get("shape") == "direct"
+                                 else clean(row.get("shape"))[:32]), "owner_model": clean(row.get("owner_model"))[:64],
                        "doer_worker": row.get("doer_worker") is True,
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
@@ -785,6 +815,10 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
             "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
                     if values.get("jobs") else [],
             "quota": quota_row(values), "route_count": current, "route_total": total, "mcp": mcp_parts,
+            # 11-16 (spec E9 rule 60): OpenCode's cost, once at the bottom of its own screen, stands beside the
+            # context in this window's panel only (the value comes from the session record Fleet already reads).
+            "cost": [("$%.2f" % values["cost"], "loc_repo")]
+                    if values.get("harness") == "opencode" and type(values.get("cost")) in (int, float) and values["cost"] > 0 else [],
             "model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,

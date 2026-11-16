@@ -84,12 +84,15 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // Both inputs a host ever gave: the editor's rows (before 11-15) and the summary (now).
  const r=v.render({width,height:20,side,model,state:'idle',harness:'claude',configuration:{},questions:o=>b.detail(o),brief:()=>b.summary(),sent:()=>b.sent()});
  const rows=r.rows.map(row=>row.map(p=>p.text).join('')),all=rows.join('\n');
- for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3','3 QUESTIONS ─','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS › ─':'3 QUESTIONS ─','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
  assert(!/\bLAB\b/.test(all),all);
  assert(!/╭─ › ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
  assert(rows.filter(s=>/패널을|아래 두 줄|넓힌|지금 그대로|21칸/.test(s)).length<=2,all);
- const q=rows.findIndex(s=>s.includes('3 QUESTIONS ─'));
- assert(r.hits.filter(h=>h.action==='question').some(h=>h.row===q),JSON.stringify(r.hits));
+ // (11-16: beside the native area the section is a thin box, its name in the top line, the summary inside; the bottom layout
+ // keeps the head row and its rows. A press on the head and on every row of either opens the popup.)
+ const q=rows.findIndex(s=>s.includes(side?'╭─ 3 QUESTIONS › ─':'3 QUESTIONS ─')),last=side?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ 패널을'));
+ assert(q>0&&last>q,all);
+ for(let i=q;i<=last;i++)assert(r.hits.filter(h=>h.action==='question').some(h=>h.row===i),i+JSON.stringify(r.hits));
 }
 console.log('ok');
 """, json.dumps(presented(76, 52), ensure_ascii=False), json.dumps(presented(76, 40), ensure_ascii=False),

@@ -157,6 +157,32 @@ function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
   return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
 function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
+// 11-16 (spec E9 rule 60): the native rows that are a harness's own last line, which the shell writes over (the last of
+// them takes its one line, the others are blanked). Codex: its footer row, the line above its help row (or, with a
+// draft typed and no help row, the line under the composer that opens with the thread's id). OpenCode: the rows
+// among the last three that are its bottom bar (the working folder, the context and cost with `ctrl+p commands`).
+// Claude's rows are the ones its recorded status text fills (`claudeStatusRows`).
+function footerRows(harness,lines){
+  const n=lines.length,from=Math.max(0,n-4),out=[];
+  const help=s=>/(?:^|\s)\? for shortcuts(?:\s|$)/.test(s||'')||/(?:\^c|ctrl\+c) copy · enter copy & follow · esc clear/i.test(s||'');
+  if(harness==='codex'){
+    const id=/^ +[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i;
+    for(let y=from;y<n;y++){
+      const row=lines[y]||'';
+      if(!/\S/.test(row)||/^›/.test(row.trim())||help(row))continue;
+      const below=help(lines[y+1]),composer=lines.slice(Math.max(0,y-3),y).some(r=>/^›/.test(r));
+      if(below&&/^ {2}\S/.test(row)||composer&&id.test(row))out.push(y);
+    }
+    return out.length===1?out:[];
+  }
+  if(harness==='opencode'){
+    for(let y=Math.max(0,n-3);y<n;y++){
+      const row=lines[y]||'';
+      if(/ctrl\+p commands\b/.test(row)||/^\s*(?:~|\/)[\w.\-\/~]*(?::\S+)?(?:\s{2,}|$)/.test(row)&&/\S/.test(row))out.push(y);
+    }
+  }
+  return out;
+}
 // Spec rule 49 (d): the one narrow-width judgment. Beside the native area an open panel
 // folds by itself when the native area would be left under NATIVE_MIN columns, and opens
 // again when there is room. The judgment stands only while the person has not chosen: a
@@ -243,4 +269,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,observe,firstLine,hiddenFooterRows,footerConcealment,footerRows,claudeStatusRows,blockHeight,titleSequence,publisher};

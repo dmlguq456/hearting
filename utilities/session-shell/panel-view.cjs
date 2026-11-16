@@ -8,6 +8,11 @@
 // in RULE_SCAN spinner frames (100 ms each: 26 = 2.6 s), then the dark rule rests RULE_REST frames
 // (10 = 1 s) and the light comes in again on the same side.
 const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,BORDER_LIT=1;
+// 11-16 (the person: "스캐너가 가속도가 붙는 방식이 아니네? 등속으로 오가는거 좀 거슬리네"): the light slows toward the
+// ends it turns at and runs fastest in the middle, like a pendulum. RULE_EASE is the one value to tune: 1 puts
+// its place on a cosine (stopping at each end, the fastest in the middle), 0 is the old steady speed, between
+// them a mix of the two.
+const RULE_EASE=1;
 // `scanners`: a wide wave flows round the frame clockwise, no edge anywhere: WAVE_COUNT waves share
 // the frame (fewer where one would be narrower than WAVE_MIN cells), one place rises and falls once
 // every WAVE_LAP frames (56 = 5.6 s), in WAVE_STEPS shades in 24-bit color (the face's four in 256
@@ -227,7 +232,8 @@ function scanAt(tick,n){
   const plateau=(RULE_PEAK-1)/2,lo=-(RULE_FADE+plateau)-1,hi=n+RULE_FADE+plateau,q=mod(tick,RULE_CYCLE);
   if(q>=RULE_SCAN)return null;
   // (The middle stands on a whole cell, so the brightest run is always RULE_PEAK cells.)
-  const y=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2);
+  const steady=q<RULE_SCAN/2?q/(RULE_SCAN/2):2-q/(RULE_SCAN/2),swing=(1-Math.cos(2*Math.PI*q/RULE_SCAN))/2;
+  const y=steady+RULE_EASE*(swing-steady);
   return Math.round(lo+y*(hi-lo));
 }
 function scanLevel(tick,i,n){
@@ -596,7 +602,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const repo=Array.isArray(model.repo)?painted(model.repo):head.filter(p=>!/^\[[^\]]*\] ?$/.test(String(p.text)));
     const jobs=painted(model.jobs),work=painted(model.work),quota=painted(model.quota),mcp=painted(model.mcp);
     // OpenCode's MCP count stays beside the model and context (its native sidebar is hidden).
-    const contextParts=mcp.length?joined([painted(model.context),mcp]):painted(model.context);
+    // 11-16 (the person: "금액은 대신 opencode에선 옮겨도 되고"): OpenCode's cost, which stood in the bottom line of its own
+    // screen, stands after the context (and the MCP count) in that window's panel only.
+    const cost=painted(model.cost);
+    const contextParts=mcp.length||cost.length?joined([painted(model.context),mcp,cost]):painted(model.context);
     // A wait answered elsewhere (11-14): one dim line of where, never part of the count.
     const guide=typeof model.wait_guide==='string'?clean(model.wait_guide).trim():'';
     // 11-15 (popup design E): the answer wait's count leads the QUESTIONS section's head (below).
@@ -696,7 +705,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const word=parts=>{const first=parts[0],rest=String(first?.text??'').replace(/^context /,'');
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
-        const value=mcp.length?joined([gauge,mcp]):gauge;
+        const value=mcp.length||cost.length?joined([gauge,mcp,cost]):gauge;
         top.push(labelled('MODEL',firstGives(selected,inner-labelWidth)));
         if(value.length){top.push(labelled('CTX',cut(value,inner-labelWidth)));mark(top.length-1,'context');}
       }else{
@@ -789,7 +798,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
     });
     const waitCount=(()=>{const m=/(\S+)\s*$/u.exec(clean(model.wait||'').trim());return model.wait&&m?m[1]:'';})();
-    const sentRows=(typeof sent==='function'?sent()||[]:[]).map(row=>cut(row,inner));
+    const sentSource=typeof sent==='function'?sent()||[]:[];
+    const sentAt=()=>sentSource.map(row=>cut(row,inner));
+    const sentRows=sentAt();
     const questionCount=waitCount||(summary?String(summary.count):'');
     const asked=!!(summary||sentRows.length||model.wait||guide);
     let briefTwo=true,keepGuide=true,keepSent=true,keepAction=true;
@@ -830,16 +841,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): the red of what waits for the answer blinks:
     // the question answered here (its rows' red letters), and for one answered elsewhere its `◑` and the
     // guide line's count (in the wait's red). The sent answers' lines never blink.
+    // (A row the backend already cut to a wider panel ends in its own `…` part: that is taken off before the row is cut again.)
+    const recut=row=>size(row)>inner&&row.length>1&&clean(row.at(-1).text)==='…'?row.slice(0,-1):row;
     const summaryRows=()=>{
-      const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(P(row)));
+      const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(recut(P(row))));
       if(!here)return list.map(row=>cut(row,inner).map(blinking));
       const out=list.map((row,i)=>i===1&&summary.choices>0?choiceLine(row):cut(row.map(part=>part.role==='accent'||!clean(part.text).trim()?part:red(part)),inner));
       if(keepAction&&briefTwo)out.push(actionRow());
-      return out.map(row=>row.map(blinking));
+      // 11-16 (the person: the box's border blinks, not the letters inside it): the letters of a question answered here
+      // stand still while the box carries the blink; folded back to the plain section they blink as before.
+      return boxedQuestions()?out:out.map(row=>row.map(blinking));
     };
     const guideRow=()=>{const m=/^(\d+)(.*)$/su.exec(guide);
       return cut(m?[blinking(red(text(m[1],'g_blocked'))),text(m[2],'dim')]:[text(guide,'dim')],inner);};
-    const questionRows=()=>[...(keepSent?sentRows:[]),
+    const questionRows=()=>[...(keepSent?sentAt():[]),
       ...(summary?summaryRows():[]),
       ...(guide&&keepGuide?[guideRow()]:[])];
     // ROUTE (restored 11-15 from v4.36.4, the user's correction: "라우트도 비슷한 방식으로 팝업으로 뜨게"
@@ -948,7 +963,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // turns the box line to the failure color; a running one pulses `route N` (below).
     const failedRoute=!stale&&shown.some(r=>r.kind==='dead');
     const tone={route:failedRoute?{key:'g_dead',role:'route-dead'}:{key:'plain',role:'route'},messages:'dim'};
-    const L=(v,k)=>typeof k==='object'?{...text(v,k.key),role:k.role}:text(v,k);
+    const L=(v,k)=>typeof k==='object'?{...text(v,k.key),role:k.role,...(k.blink?{blink:true}:{})}:text(v,k);
     const box=4;
     // Box content is laid out at the box's inner width, so nothing is cut by the frame.
     const within=fn=>{inner-=box;try{return fn();}finally{inner+=box;}};
@@ -1367,14 +1382,69 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).flatMap(memRows)}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
-    const sectionRows=s=>s.name==='QUESTIONS'?questionRows():s.rows(take[s.name]);
-    const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():1+sectionRows(s).length;
+    // 11-16 (the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리 말이야"): the QUESTIONS
+    // section is one thin rounded box again (v4.33.1's, as the route box's line), its name `N QUESTIONS ›` in
+    // the top border; the line is the rose where this window has a question to answer, dim otherwise. The rows
+    // inside are the section's own, laid out at the box's inner width. Short of rows the two border rows go
+    // after the content rows (`keepQuestionBox`), the section standing as it did before.
+    // (A section with a wait count and no row to show stays the one head row: an empty box is no box.)
+    const boxedQuestions=()=>keepQuestionBox&&kept.QUESTIONS&&((keepSent&&sentSource.length>0)||!!summary||(keepGuide&&!!guide));
+    const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
+    const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
+    const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
-    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true;
+    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
+    // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
+    // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
+    // one row for each harness (Claude, Codex, OpenCode, Fleet's header order): the harness's name dim, then the
+    // windows it reports as the last row showed them. The last of them shares the last row with the gear and
+    // the fold button when it fits there, else stands above a row of the buttons alone. Short of rows the
+    // other two harnesses' rows go (the last first), then the name row; this window's own harness stays
+    // longest (spec rule 59). A backend that sends no `usage` keeps the one row of 5h/7d it had.
+    const usageData=Array.isArray(model.usage)?model.usage.filter(u=>u&&typeof u==='object'&&['claude','codex','opencode'].includes(u.harness)):[];
+    const usageOn=usageData.length>0;
+    if(usageOn)keepQuota=true;
+    const ownUsage=usageData.findIndex(u=>u.harness===harness);
+    const keepLine=usageData.map(()=>true);
+    let keepUsageHead=true;
+    const quotaRoom=inner-BUTTONS-1;
+    const usageName=u=>clean(u.harness);
+    const usageWide=Math.max(0,...usageData.map(u=>measure(usageName(u))));
+    // One harness's row within `room` cells: the windows from the first, each whole, going in the order the last row
+    // gave them up (the reset times, 5h, the model windows from the last, 7d); a harness with none reported reads
+    // `?`. `values` is false where only the name was left.
+    const usageFit=(u,room)=>{
+      const parts=painted(u.parts).filter(p=>p&&typeof p==='object'),groups=[];let current=[],sep=null;
+      for(const part of parts){if(String(part.text)===' │ '){sep=sep||part;if(current.length)groups.push(current);current=[];}else current.push(part);}
+      if(current.length)groups.push(current);
+      const name=usageName(u),lead=pad=>[text(name,'dim'),text(' '.repeat(Math.max(1,pad)))];
+      const tries=[];
+      if(!groups.length)tries.push([text('?','dim')]);
+      else{
+        const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
+        const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g]:g);
+        let left=groups.map(g=>g.filter(part=>!/^\(↻/.test(String(part.text))));
+        tries.push(join(groups),join(left));
+        left=left.filter(g=>kind(g)!=='window');tries.push(join(left));
+        while(left.some(g=>kind(g)==='model')){const at=left.map(kind).lastIndexOf('model');left=left.filter((_,i)=>i!==at);tries.push(join(left));}
+      }
+      for(const body of tries)for(const pad of inner>=30?[usageWide+1-measure(name),1]:[1]){
+        if(groups.length&&!body.length)continue;   // (nothing of its windows left is the name alone, below)
+        const row=[...lead(pad),...body];
+        if(size(row)<=room)return {row,values:true};
+      }
+      return {row:cut([text(name,'dim')],room),values:false};
+    };
+    const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
+    // The last row beside the buttons: that harness's row when its values fit there.
+    const usageShared=u=>u&&usageFit(u,quotaRoom).values;
+    const footRule=()=>{
+      if(usageOn){const list=usageLines();return list.length?(keepUsageHead?1:0)+list.length-1+(usageShared(list.at(-1))?0:1):0;}
+      return side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
+    };
     // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
-    const footRule=()=>side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
     const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
       +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
@@ -1394,7 +1464,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
     const lowest=['MEM','MESSAGES'];
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
-    give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
+    if(!usageOn)give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
       // (MEM, 11-16: its headlines take one row before fewer records show.)
@@ -1405,6 +1475,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
+    // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
+    give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
     give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
     give(()=>keepCtx,()=>{keepCtx=false;},()=>{if(keepWorkers||!anyWorkers)keepCtx=true;});
@@ -1419,15 +1491,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const name of lowest){
       give(()=>kept[name]&&take[name]>0,()=>{take[name]--;},()=>{take[name]++;});
       give(()=>kept[name],()=>{kept[name]=false;},()=>{kept[name]=true;});
+      // 11-16: USAGE gives way after MEM does: the harnesses that are not this window's (the last first), then its name row.
+      if(name==='MEM'&&usageOn){
+        for(let i=usageData.length-1;i>=0;i--)if(i!==ownUsage)give(()=>keepLine[i],()=>{keepLine[i]=false;},()=>{keepLine[i]=true;});
+        give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
+      }
     }
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
-    give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
+    // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
+    give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody]);
+      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine]);
     for(const undo of gave.reverse()){
       const was=choices();undo();
       if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody]=v.slice(12);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
@@ -1448,11 +1526,28 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         for(const item of block)add(item.parts,item.action,item.groups);
         continue;
       }
+      if(s.name==='QUESTIONS'&&boxedQuestions()){
+        const key={key:here?'lvl_y':'dim',role:here?'accent-line':'messages',blink:here&&waitBlinks};
+        const label=[...(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'},text(' ')]:[]),{...text(summary?.label||'QUESTIONS','dim'),role:'title'},text(' '),text('›','dim')];
+        add(boxTop(label,key,{action:'question'}).parts,'question',s.groups);
+        for(const row of questionRowsIn())add(boxRow({parts:row},key).parts,'question');
+        add(boxBottom(key).parts,'question');
+        continue;
+      }
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
       sectionRows(s).forEach(row=>into(row,s.action));
     }
-    const ruled=lower.length&&footRule()?1:0;
+    // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
+    let lastUsage=[];
+    if(usageOn&&usageLines().length){
+      const list=usageLines(),own=u=>u.harness===harness?['quota']:[];
+      if(keepUsageHead)lower.push({parts:sectionHead([],'USAGE',[],[[]],false)});
+      list.slice(0,-1).forEach(u=>lower.push({parts:usageFit(u,inner).row,groups:own(u)}));
+      const end=list.at(-1);
+      if(usageShared(end))lastUsage=usageFit(end,quotaRoom).row;else lower.push({parts:usageFit(end,inner).row,groups:own(end)});
+    }
+    const ruled=!usageOn&&lower.length&&footRule()?1:0;
     if(fill&&lower.length)while(content.length+lower.length+ruled<height-2-1)add([]);
     for(const row of lower)add(row.parts,row.action,row.groups);
     if(ruled)add([{...text('─'.repeat(inner),'dim'),role:'messages'}]);
@@ -1461,8 +1556,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Correction 7 (11-13): the model windows (Fable's) stand after 7d; short of cells the row
     // gives way in this order: the reset times, then 5h (the windows shorter than 7d), then the
     // model values from the last, then 7d. Each value goes whole.
-    const quotaRoom=inner-BUTTONS-1;
-    const quotaRow=(()=>{
+    const quotaRow=usageOn?lastUsage:(()=>{
       const groups=[];let cur=[],sep=null;
       for(const part of quota){if(String(part.text)===' │ '){sep=sep||part;if(cur.length)groups.push(cur);cur=[];}else cur.push(part);}
       if(cur.length)groups.push(cur);
@@ -1475,7 +1569,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       tries.push([]);
       return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
     })();
-    lastRow(keepQuota?quotaRow:[],keepQuota&&quota.length?['quota']:[],order.length,kept.QUESTIONS?0:1);
+    const lastEnd=usageOn?usageLines().at(-1):null;
+    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],order.length,kept.QUESTIONS?0:1);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17, 29 (a): the top border carries Fleet's session-row head on the
@@ -1776,5 +1871,5 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   return out.length?out:[[text('·')]];
 }
 module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
-  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST},WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
+  RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
