@@ -293,7 +293,11 @@ validation and payload reads, on both first close and later refreshes; existing
 profiles remain in place. Screenshots, browser logs and review reports beside
 them remain output. New browser work uses a process-owned temporary profile
 outside the cycle payload. `_internal/` and other non-hidden support paths, binary and large
-files are output. A payload name keeps UTF-8, spaces and the ASCII punctuation
+files are output. Raw experiment data is not written into the cycle: per-sample outputs, raw
+results, checkpoints and array or audio dumps (by kind: `raw-results`, `checkpoints*` and `ckpt`
+folders, `outputs` folders in the `experiments` bucket) go under `raw_data_dir` (CONVENTIONS
+§5.1), except a path a route node declares as its output. Artifacts keep reports, tables,
+figures, summary numbers, configs and records such as `run.json`. A payload name keeps UTF-8, spaces and the ASCII punctuation
 `_ . - ~ + ( ) @ , =` up to 255 bytes; other ASCII punctuation (quotes, `$`,
 backquotes, `;`, `|`, `&`, `<`/`>` and glob characters among them) makes it
 invalid. Absolute/escaping paths and out-of-payload files remain invalid. Cycle controls and legacy relocation/exclusion retain their contracts.
@@ -350,7 +354,7 @@ directly under the artifact root. Inside a cycle, the first segment below
 exactly the keys of `BUCKET_TYPES` in `utilities/artifact_producer.py`, and
 `artifact_producer.test.py` fails when the two differ. Another first segment (for example `shards/`) is not a
 bucket. A file outside a bucket stays where it was written and carries type
-`file`; nothing moves it. A `raw-results` directory and its ancestors also stay at their exact payload paths; first-seal finalize may register a non-empty tree with one directory-bundle descriptor, while `raw-results` is not a bucket. Compose shows the capability's default bucket as the
+`file`; nothing moves it. A `raw-results` directory in the payload (a route-declared output or older data; new raw results otherwise go under `raw_data_dir`) and its ancestors also stay at their exact payload paths; first-seal finalize may register a non-empty tree with one directory-bundle descriptor, while `raw-results` is not a bucket. Compose shows the capability's default bucket as the
 output folder.
 Payload paths retain valid UTF-8 names, so report images and audio with Korean
 filenames remain in checkpoint and sealed manifests.
