@@ -83,9 +83,9 @@ smaller budget.
      leg already produces. Compare total verification time with the attempt
      budget shown in the prompt.
    - **Runtime placement:** Check that environments, caches, large downloads,
-     external checkouts, temporary files and training checkpoints use the
-     supplied `runtime_dir` or an established external location, while reports
-     and compact provenance stay in artifacts. Dataset path/hash references are
+     external checkouts and temporary files use the supplied `runtime_dir` or an
+     established external location, checkpoints and raw outputs `raw_data_dir`,
+     while reports, tables, figures and compact provenance stay in artifacts. Dataset path/hash references are
      guidance; this check adds no required field or gate.
    - **Judge substance:** A missing estimate or table alone is not a finding.
    - Are source ownership and stage write boundaries respected?

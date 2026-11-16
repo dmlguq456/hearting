@@ -875,6 +875,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         ]
         if getattr(args, "runtime_dir", ""):
             command += ["--writable-root", str(args.runtime_dir)]
+        if WRAPPER_COMMON.raw_data_grant(args):
+            command += ["--writable-root", WRAPPER_COMMON.raw_data_grant(args)]
         if getattr(args, "report_bundle_root", None) is not None:
             command += ["--writable-root", str(args.report_bundle_root)]
         if owner_supervised:
@@ -945,6 +947,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     ]
     if getattr(args, "runtime_dir", ""):
         cmd += ["--add-dir", str(args.runtime_dir)]
+    if WRAPPER_COMMON.raw_data_grant(args):
+        cmd += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
     cmd += codex_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
@@ -1451,6 +1455,11 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
     # environment to the one path resolved above before any recovery prompt or
     # child environment is constructed.
     artifact_env["AGENT_RUNTIME_DIR"] = runtime_dir
+    # The raw data folder is named only when the recorded grant already holds it.
+    raw_data_dir = artifact_env.get("AGENT_RAW_DATA_DIR") or runtime_dir
+    if raw_data_dir not in {str(Path(root)) for root in effective["writable_roots"]}:
+        raw_data_dir = runtime_dir
+    artifact_env["AGENT_RAW_DATA_DIR"] = raw_data_dir
 
     parent_session = resolved.get("parent_session_id") or metadata.get("parent_sid", "")
     if metadata.get("parent_sid") and parent_session != metadata.get("parent_sid"):
@@ -1460,7 +1469,7 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
     args = SimpleNamespace(
         attempt_id=attempt_id, command_attempt_id=attempt_id, jobs_path=jobs,
         worktree=row_fields[3], slug=row_fields[4], artifact_root=artifact_root,
-        runtime_dir=runtime_dir, route_file=route_file, route_id=route_id,
+        runtime_dir=runtime_dir, raw_data_dir=raw_data_dir, route_file=route_file, route_id=route_id,
         route_hash=route_hash, route_node=launch.get("route_node") or metadata.get("route_node", ""),
         owner_route_binding=owner_binding, worker_type="owner", dispatch_depth=1,
         capability=resolved.get("capability", ""), capability_mode=resolved.get("capability_mode", ""),
@@ -1504,6 +1513,7 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         "AGENT_ARTIFACT_ROOT": artifact_root,
         "AGENT_DISPATCH_WORKTREE": row_fields[3],
         "AGENT_RUNTIME_DIR": runtime_dir,
+        "AGENT_RAW_DATA_DIR": raw_data_dir,
         "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
         "AGENT_ROUTE_FILE": route_file,
         "AGENT_ROUTE_ID": route_id,
@@ -1558,6 +1568,7 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         dispatch_env.pop("AGENT_DISPATCH_EXECUTION_ACCESS_FILE", None)
     dispatch_env.update(worker_env)
     dispatch_env["AGENT_RUNTIME_DIR"] = runtime_dir
+    dispatch_env["AGENT_RAW_DATA_DIR"] = raw_data_dir
     dispatch_env.update(parent_completion.worker_runtime_identity("codex"))
     dispatch_env.update(git_optional_locks_env())
     permission_args = SimpleNamespace(
@@ -1980,6 +1991,8 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(
             args.artifact_root, repository_kind=args.repository_kind, source_root=args.worktree)
+        args.raw_data_dir = WRAPPER_COMMON.prepare_raw_data_root(
+            args.artifact_root, args.runtime_dir, source_root=args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
     except ValueError as e:
         return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
