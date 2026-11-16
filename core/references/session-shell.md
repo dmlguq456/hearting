@@ -768,7 +768,12 @@ document's first 64 KiB as Fleet's cards, fences as written and markdown tables 
 `session_status.popup_rows`; without a document Fleet's `fleet.repo.no_status` and where it would
 stand. The value, `session_status.read`, is read in its own worker at the first projection, when this
 session's route list changes and at an event of the existing file watch on the paths it names, never
-per paint, and the rows it read stand until such an event or another width), QUESTIONS (the question editor),
+per paint, and the rows it read stand until such an event or another width; a read that failed or ran out its time is asked
+again at the next projection event, one worker at a time. The popup reads in two parts: the document at once, from the value the button
+already read (`session_status.held`, a path only inside the folder's own artifact root), then Fleet's lines, which stand above it when
+they arrive; a popup read that failed shows Fleet's `fleet.output.unreadable`, dim, and is read again at the next opening (a document it
+cannot read is that same failure, not a `?`), and the Fleet part holds no place of the document's: a popup opened again while it is out
+stands at once, and its lines are kept only for the width and value they were asked at), QUESTIONS (the question editor),
 ROUTE (Fleet's own table: the backend's `popup` reading draws
 Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid of
 the popup's width and sends the painted cells, Fleet's row tints left out; narrow,
