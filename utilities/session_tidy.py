@@ -3721,7 +3721,6 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 wait_questions.append(item.get("question") or "답 필요")
     answer_wait_lines = answer_wait_text(wait_questions)
     open_question_lines: list = []     # the person spoke while a question is open (this prompt only)
-    open_question_seen = False         # that line was looked for on this prompt
     state_seats = [seat]
     if _native_session_key(harness, sid) and prior_seat:
         state_seats.append(prior_seat)
@@ -3781,7 +3780,6 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                         human_wait_state.close_signal(seat.key, sequence=sequence,
                                                       harness=harness, session_id=sid,
                                                       answer=prompt_text)
-                        open_question_seen = bool(render_context)
                         line = render_context and _open_question_line(
                             human_wait_state, harness, sid, seat.key)
                         if line:
@@ -3969,25 +3967,19 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             resume_text = handover.resume_line(seat, harness, sid)
             if resume_text:
                 parts.append(resume_text)
-        # An unchanged "[답변 필요]" line is already in the session's context: it goes in once
-        # per question, again only when its text changes or after a compaction/clear. OpenCode
-        # keeps system-prompt context for the one request only, so its repeat is the carrier.
+        # An unchanged "[답변 필요]" status line is already in the session's context: it goes in
+        # once per question, again only when its text changes or after a compaction/clear.
+        # OpenCode keeps system-prompt context for the one request only, so its repeat is the
+        # carrier. The open-question line is not filtered: it judges this very input ("not
+        # recorded as the answer"), so it is new every time the person types.
         repeat_entries: list = []
-        if harness != "opencode":
-            for repeat_kind, repeat_lines, repeat_looked in (
-                    ("answer-needed", answer_wait_lines, render_context and event in ("start", "prompt")),
-                    ("open-question", open_question_lines, open_question_seen)):
-                if not repeat_looked:
-                    continue
-                with contextlib.suppress(BaseException):
-                    import context_repeat
-                    repeat_lines, entry = context_repeat.filter_fresh(harness, sid, repeat_kind, repeat_lines)
-                    if entry:
-                        repeat_entries.append(dict(entry, kind="repeat-seen", name=repeat_kind))
-                    if repeat_kind == "answer-needed":
-                        answer_wait_lines = repeat_lines
-                    else:
-                        open_question_lines = repeat_lines
+        if harness != "opencode" and render_context and event in ("start", "prompt"):
+            with contextlib.suppress(BaseException):
+                import context_repeat
+                answer_wait_lines, entry = context_repeat.filter_fresh(
+                    harness, sid, "answer-needed", answer_wait_lines)
+                if entry:
+                    repeat_entries.append(dict(entry, kind="repeat-seen", name="answer-needed"))
         parts.extend(answer_wait_lines + open_question_lines)
         if card_due or event == "start" or (event == "prompt" and (startup_context or {}).get("due")):
             # The experiment catalog's names, after everything else and inside the same 2400-byte budget.
@@ -4062,6 +4054,11 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
                        compact_context: Optional[dict], env, now: Optional[float]) -> str:
     """Observe native compaction. Never turn it into another card/clear/model request."""
     now = now_epoch() if now is None else now
+    # Every compaction (not deduped, and even when the state lock is busy) may have dropped
+    # the earlier text from the context: let it in once more and mark the compaction.
+    with contextlib.suppress(Exception):
+        import context_repeat
+        context_repeat.reset(harness, sid, compaction=True)
     seat = session_seat(resolve_seat(harness, cwd or None, env, sid, "compact", hook=True), harness, sid)
     try:
         with session_state_lock(seat, wait=COMPACT_LOCK_WAIT_SEC):
@@ -4071,9 +4068,6 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
                          bump_epoch=not (prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC))
     except (OSError, TimeoutError, StateError):
         return ""  # Native history remains the evidence; never hold up compaction.
-    with contextlib.suppress(Exception):
-        import context_repeat
-        context_repeat.reset(harness, sid)
     import session_tidy_clear as clear
     clear.note_compaction(seat, harness, sid, now=now)
     return ""

@@ -4047,24 +4047,46 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
         return guidance
 
 
-def receiver_guidance_once(text="", recipient=None, *, cwd=None):
-    """``receiver_guidance`` without repeating the text the session already holds.
+def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
+    """``receiver_guidance`` without repeating the fixed text the session already holds.
 
-    The ordinary guidance is one fixed string, so every peer message used to re-inject it.
-    An identical text right after the one delivered is left out; a changed text (another
-    request or handoff) and the first turn after a compaction or clear (``context_repeat``)
-    deliver again. OpenCode's system-prompt context lasts for one request only, so its
-    per-turn repeat stays the carrier there."""
+    Only the fixed ordinary guidance is withheld when it equals the one delivered just
+    before. Anything else it carries is about this very message and goes in every time: the
+    verified body of a long message, the notice that the body could not be verified, a
+    request command, a handoff accept command. The first turn after a compaction or clear
+    (``context_repeat``) delivers the fixed text again. OpenCode's system-prompt context lasts
+    for one request only, so its per-turn repeat stays the carrier there.
+
+    The fixed text counts as delivered only once it went out. With ``deferred`` (a list) the
+    record is appended there and the caller applies it with ``commit_receiver_guidance``
+    after its output was flushed; without it the record is written at once."""
     guidance = receiver_guidance(text, recipient, cwd=cwd)
-    if not guidance or not isinstance(recipient, dict) or recipient.get("harness") == "opencode":
+    if (not guidance or not isinstance(recipient, dict) or recipient.get("harness") == "opencode"
+            or guidance != _ordinary_receiver_guidance()):
         return guidance
     try:
         import context_repeat
-        return context_repeat.fresh_once(
+        blocks, entry = context_repeat.filter_fresh(
             str(recipient.get("harness") or ""), str(recipient.get("session_id") or ""),
-            "peer-guidance", guidance)
+            "peer-guidance", [guidance])
+        if entry is not None:
+            if deferred is None:
+                context_repeat.commit(entry)
+            else:
+                deferred.append(entry)
+        return blocks[0] if blocks else ""
     except Exception:
         return guidance
+
+
+def commit_receiver_guidance(entries):
+    """Record the fixed guidance as delivered, after the context carrying it was flushed."""
+    try:
+        import context_repeat
+        for entry in entries or ():
+            context_repeat.commit(entry)
+    except Exception:
+        pass
 
 
 def _ack_watch_refs(pending, recipient, carrier):

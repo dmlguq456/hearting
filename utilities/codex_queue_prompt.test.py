@@ -360,8 +360,10 @@ class PromptReceiptTest(unittest.TestCase):
              mock.patch.object(hook, "emit_context"), \
              mock.patch.object(importlib.util, "spec_from_file_location", return_value=guidance_spec):
             self.assertEqual(hook.main(), 0)
-        self.assertEqual(calls, [((prompt, {"harness": "codex", "session_id": sid}),
-                                  {"cwd": "/tmp/codex-project"})])
+        self.assertEqual([(args, {k: v for k, v in kwargs.items() if k != "deferred"}) for args, kwargs in calls],
+                         [((prompt, {"harness": "codex", "session_id": sid}),
+                           {"cwd": "/tmp/codex-project"})])
+        self.assertIsInstance(calls[0][1]["deferred"], list)   # the "delivered" record waits for the flush
 
 if __name__ == '__main__':
     unittest.main()

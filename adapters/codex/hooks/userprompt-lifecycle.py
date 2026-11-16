@@ -612,6 +612,7 @@ def main() -> int:
     except Exception:
         receipt_parts = []
     parts = []
+    guidance_seen = []
     if ("peer-from:" in current_prompt or "runtime-from:" in current_prompt
             or "cross-session-message" in current_prompt):
         import importlib.util
@@ -619,7 +620,8 @@ def main() -> int:
         peer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(peer)
         parts.append(peer.receiver_guidance_once(current_prompt,
-            {"harness": "codex", "session_id": interaction_sid}, cwd=current_cwd))
+            {"harness": "codex", "session_id": interaction_sid}, cwd=current_cwd,
+            deferred=guidance_seen))
     parts.append(card)
     probe_parts, candidate_deferred = prompt_probe_context(payload, current_cwd, sid)
     parts.extend(probe_parts)
@@ -631,6 +633,8 @@ def main() -> int:
             parts.insert(0, receipts)
     emit_context("UserPromptSubmit", parts,
                  system_message="\n".join(human_notices + ([context_notice] if context_notice else [])))
+    if guidance_seen:    # the fixed peer guidance counts as delivered only once it went out
+        peer.commit_receiver_guidance(guidance_seen)
     # Commit candidate/card consumption only after the context above actually
     # rendered, and before the existing native-queue ack does the same for its
     # records. A timeout or render error before this point leaves the same

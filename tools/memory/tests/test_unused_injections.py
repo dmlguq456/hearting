@@ -2,10 +2,11 @@
 """Injections nobody used (PR unused-injections-1116), with synthetic hook input only.
 
 1. the "Local evidence present" block reaches no harness's context;
-2. an unchanged start receipt / "[답변 필요]" line / peer guidance is not injected again
-   (first delivery always, changed text and the turn after a compaction deliver again);
+2. an unchanged start receipt / "[답변 필요]" status line / fixed peer guidance is not injected
+   again (first delivery always, changed text and the turn after a compaction deliver again);
+   a text that judges this very turn (the open-question line, a message body) is never withheld;
 3. at most three memory candidates in 600 bytes;
-4. the session-start summary does not arrive twice for one start.
+4. the session-start summary does not arrive twice for one start, but a new compaction brings it.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -128,22 +129,28 @@ class AnswerNeededOnceTest(RepeatCase):
                         self.assertIn("[답변 필요] which branch?", self.run_prompt(harness, sid))
                         self.assertNotIn("답변 필요", self.run_prompt(harness, sid))
 
-    def test_open_question_line_once_per_question_not_once_per_turn(self):
+    def test_open_question_line_comes_with_every_typed_prompt(self):
+        # The line judges this very input ("not recorded as the answer"): it is not a status
+        # line, so it is new each time the person types while the question is open.
         for harness in HARNESSES:
             with self.subTest(harness=harness):
                 sid = "open-" + harness
-                question = {"id": "q1"}
-                line = lambda *a: f"[답변 필요] 질문 {question['id']}이 아직 열려 있습니다: ok"  # noqa: E731
+                line = lambda *a: "[답변 필요] 질문 q1이 아직 열려 있습니다: 방금 입력은 답으로 기록하지 않음"  # noqa: E731
                 with mock.patch.object(st, "_open_question_line", side_effect=line):
                     texts = [self.run_prompt(harness, sid, prompt_text=f"something else {n}") for n in range(3)]
-                    self.assertIn("질문 q1", texts[0])
-                    if harness in REPEATS_IN_OPENCODE:
-                        self.assertTrue(all("질문 q1" in t for t in texts))
-                        continue
-                    self.assertTrue(all("질문 q1" not in t for t in texts[1:]))
-                    question["id"] = "q2"                                    # the next question
-                    self.assertIn("질문 q2", self.run_prompt(harness, sid, prompt_text="more"))
-                    self.assertNotIn("질문 q2", self.run_prompt(harness, sid, prompt_text="more"))
+                    self.assertTrue(all("질문 q1" in t for t in texts), texts)
+
+    def test_status_line_is_still_told_once_while_the_open_question_line_repeats(self):
+        import human_wait_state
+        harness, sid = "claude", "mixed-claude"
+        line = lambda *a: "[답변 필요] 질문 q1이 아직 열려 있습니다: 방금 입력은 답으로 기록하지 않음"  # noqa: E731
+        with mock.patch.object(human_wait_state, "cached_view",
+                               side_effect=lambda **kw: self.projected(harness, sid, "which file?")), \
+             mock.patch.object(st, "_open_question_line", side_effect=line):
+            texts = [self.run_prompt(harness, sid, prompt_text=f"other {n}") for n in range(3)]
+        self.assertIn("[답변 필요] which file?", texts[0])
+        self.assertTrue(all("[답변 필요] which file?" not in t for t in texts[1:]), texts)
+        self.assertTrue(all("질문 q1" in t for t in texts), texts)
 
 
 class StartReceiptOnceTest(unittest.TestCase):
@@ -199,6 +206,80 @@ class PeerGuidanceOnceTest(unittest.TestCase):
                 self.assertEqual(peer.receiver_guidance_once("hello", recipient), first)
 
 
+class PeerGuidanceOnlyFixedTextIsWithheldTest(unittest.TestCase):
+    def peer(self):
+        spec = importlib.util.spec_from_file_location("peer_unused2", ROOT / "utilities/peer-message.py")
+        peer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(peer)
+        return peer
+
+    def test_the_same_verified_body_arriving_twice_is_carried_both_times(self):
+        peer = self.peer()
+        body = "LONG-BODY " * 40
+        recipient = {"harness": "claude", "session_id": "long-body"}
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict(os.environ, {"XDG_STATE_HOME": raw}), \
+             mock.patch.object(peer, "_reference_transfer_from_text",
+                               side_effect=lambda text: (text.split("ref=")[1][:8], {"to": recipient, "body_ref": {}})), \
+             mock.patch.object(peer, "_reference_target_matches", return_value=True), \
+             mock.patch.object(peer, "_read_pending", return_value=None), \
+             mock.patch.object(peer, "read_peer_payload", return_value={"body": body}), \
+             mock.patch.object(peer, "_codex_model_read_access", return_value=False):
+            first = peer.receiver_guidance_once("preview (ref=aaaaaaaa)", recipient)
+            second = peer.receiver_guidance_once("preview (ref=bbbbbbbb)", recipient)
+        self.assertIn(body, first)
+        self.assertIn(body, second)
+
+    def test_a_request_command_and_a_failed_body_check_are_never_withheld(self):
+        peer = self.peer()
+        recipient = {"harness": "codex", "session_id": "differing"}
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict(os.environ, {"XDG_STATE_HOME": raw}):
+            for text, expected in (("r", "Peer request r-1 ... `show r-1`"), ("f", "could not be verified")):
+                with self.subTest(text=text), \
+                     mock.patch.object(peer, "_request_receiver_guidance",
+                                       return_value=expected if text == "r" else ""), \
+                     mock.patch.object(peer, "_body_reference_guidance",
+                                       return_value=expected if text == "f" else ""):
+                    for _ in range(3):
+                        self.assertIn(expected, peer.receiver_guidance_once(text, recipient))
+
+    def test_the_fixed_text_counts_as_delivered_only_after_the_caller_flushed(self):
+        import context_repeat
+        peer = self.peer()
+        for harness in ("claude", "codex"):
+            recipient = {"harness": harness, "session_id": "flush-" + harness}
+            with tempfile.TemporaryDirectory() as raw, mock.patch.dict(os.environ, {"XDG_STATE_HOME": raw}):
+                seen = []
+                first = peer.receiver_guidance_once("hello", recipient, deferred=seen)
+                self.assertIn("Peer request", first)
+                # the hook died before it printed: nothing was recorded, so the next turn carries it
+                again = []
+                self.assertEqual(peer.receiver_guidance_once("hello", recipient, deferred=again), first)
+                self.assertFalse(list(context_repeat._dir().glob("*.json")) if context_repeat._dir().exists() else [])
+                peer.commit_receiver_guidance(again)                       # it went out
+                self.assertEqual(peer.receiver_guidance_once("hello", recipient, deferred=[]), "")
+
+
+class WorkerCompactionLetsRepeatsInTest(unittest.TestCase):
+    def test_a_registered_worker_compaction_forgets_the_repeat_memory(self):
+        import context_repeat
+        spec = importlib.util.spec_from_file_location("worker_state_hook_unused", ROOT / "utilities/worker-state-hook.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        with tempfile.TemporaryDirectory() as raw:
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("AGENT_", "FLEET_", "MEM_", "OPENCODE_"))}
+            env.update(XDG_STATE_HOME=raw, AGENT_DISPATCH_DEPTH="2", AGENT_SESSION_ROLE="worker")
+            with mock.patch.dict(os.environ, env, clear=True):
+                for harness in ("claude", "codex"):
+                    sid = "worker-" + harness
+                    self.assertEqual(context_repeat.fresh_once(harness, sid, "start-receipt", "receipt text"), "receipt text")
+                    self.assertEqual(context_repeat.fresh_once(harness, sid, "start-receipt", "receipt text"), "")
+                    self.assertEqual(hook._main_compact("compact-before", harness, {"session_id": sid}), 0)
+                    self.assertEqual(context_repeat.fresh_once(harness, sid, "start-receipt", "receipt text"), "")
+                    self.assertEqual(hook._main_compact("compact-after", harness, {"session_id": sid}), 0)
+                    self.assertEqual(context_repeat.fresh_once(harness, sid, "start-receipt", "receipt text"), "receipt text")
+                    self.assertEqual(context_repeat.fresh_once(harness, sid, "start-receipt", "receipt text"), "")
+
+
 class MemoryCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -242,6 +323,38 @@ class SessionStartSummaryOnceTest(MemoryCase):
         self.assertIn("Unified memory", start("sum-1", "resume"))             # another start source
         self.assertIn("Unified memory", start("sum-2", "compact"))            # another session
         self.assertIn("Unified memory", self.mem("inject").stdout)            # manual run unchanged
+
+
+    def compaction(self, sid):
+        """What the PostCompact path does for one compaction of session ``sid``."""
+        code = ("import sys; sys.path.insert(0, %r); import context_repeat; "
+                "context_repeat.reset('claude', %r, compaction=True)" % (str(ROOT / "utilities"), sid))
+        done = subprocess.run([sys.executable, "-c", code], env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def start(self, sid, source="compact"):
+        return self.mem("inject", "--hook", stdin=json.dumps(
+            {"hook_event_name": "SessionStart", "session_id": sid, "source": source})).stdout
+
+    def test_two_real_compactions_a_second_apart_both_bring_the_summary_whichever_hook_comes_first(self):
+        self.assertEqual(self.mem("add", "working", "note", "summary probe record that is long enough to be kept").returncode, 0)
+        # PostCompact first, then SessionStart(compact)
+        for n in range(2):
+            self.compaction("order-a")
+            self.assertIn("Unified memory", self.start("order-a"), f"compaction {n + 1}")
+        # SessionStart(compact) first, then PostCompact
+        for n in range(2):
+            self.assertIn("Unified memory", self.start("order-b"), f"compaction {n + 1}")
+            self.compaction("order-b")
+
+    def test_one_compaction_event_called_twice_gives_one_summary(self):
+        self.assertEqual(self.mem("add", "working", "note", "summary probe record that is long enough to be kept").returncode, 0)
+        self.compaction("dup-a")                                              # PostCompact, then the event twice
+        self.assertIn("Unified memory", self.start("dup-a"))
+        self.assertEqual(self.start("dup-a"), "")
+        self.assertIn("Unified memory", self.start("dup-b"))                  # the event twice, PostCompact after
+        self.assertEqual(self.start("dup-b"), "")
+        self.compaction("dup-b")
 
 
 if __name__ == "__main__":

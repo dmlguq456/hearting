@@ -3996,14 +3996,11 @@ class MessageCompletionTests(unittest.TestCase):
             signal, envelope = self.f.ask(harness, text="panel " + harness, choices=["A", "B", "C"])
             self.f.submit(envelope, "B")
             wire, _ref, recipient = self.f.prepare(signal)
-            for number, text in enumerate(("질문 전송 중이라고 뜨고 바로 안가네..", "1", "C")):
+            for text in ("질문 전송 중이라고 뜨고 바로 안가네..", "1", "C"):
                 context = self.prompt(signal, text)
                 self.assertEqual(self.source(signal)["lifecycle"], "open")
-                # The unchanged line is told once per question (OpenCode's context lasts one request).
-                if number == 0 or harness == "opencode":
-                    self.assertIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
-                else:
-                    self.assertNotIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
+                # The line judges this very input ("not recorded as the answer"): every typed prompt.
+                self.assertIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
             self.f.peer.receive_peer_message(wire, recipient)
             completion = self.source(signal)["completion"]
             self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))

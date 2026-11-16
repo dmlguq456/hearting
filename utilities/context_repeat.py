@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Keep a block that is already in a session's context from being injected again.
 
-A hook that re-renders the same notice every turn (a start receipt, the open-question
-line, the peer-message guidance) pays for it on every later request, yet the model has
-already read it. This module remembers, per session and per kind, the hashes of the text
-last delivered; a block whose text is identical to that is left out. A changed text, and
-the first turn after a compaction or a clear (``reset``), is delivered again. The first
-delivery is never withheld.
+A hook that re-renders the same notice every turn (a start receipt, the "[답변 필요]"
+status line, the fixed peer-message guidance) pays for it on every later request, yet the
+model has already read it. This module remembers, per session and per kind, the hashes of
+the text last delivered; a block whose text is identical to that is left out. A changed
+text, and the first turn after a compaction or a clear (``reset``), is delivered again. The
+first delivery is never withheld. A line that judges the current input (the open-question
+line a person's prompt triggers) is new every turn and does not go through here.
 
 State is one tiny JSON file per session next to the session-tidy records
 (``<state>/hearting/session-tidy/repeat/``). No daemon or poller: files untouched for two
@@ -125,11 +126,42 @@ def fresh_once(harness: str, sid: str, kind: str, text: str) -> str:
     return blocks[0] if blocks else ""
 
 
-def reset(harness: str, sid: str) -> None:
-    """A compaction or clear may have dropped the earlier text: deliver once more."""
+def _mark_path(sid: str) -> Path:
+    return _dir() / f"compact-{hashlib.sha256(sid.encode('utf-8', 'replace')).hexdigest()[:20]}.mark"
+
+
+def compaction_mark(sid: str) -> str:
+    """Token of the session's latest compaction ("" when none is recorded).
+
+    It changes with every compaction (``reset(..., compaction=True)``), whatever the order
+    of the harness's compaction hooks, so a repeat guard elsewhere can tell a new
+    compaction from one event delivered twice."""
+    try:
+        return _mark_path(sid).read_text(encoding="utf-8").strip() if sid else ""
+    except OSError:
+        return ""
+
+
+def reset(harness: str, sid: str, *, compaction: bool = False) -> None:
+    """A compaction or clear may have dropped the earlier text: deliver once more.
+
+    ``compaction=True`` also records that a compaction happened (``compaction_mark``)."""
     if not harness or not sid:
         return
     try:
         _path(harness, sid).unlink(missing_ok=True)
     except OSError:
         pass
+    if compaction:
+        try:
+            path = _mark_path(sid)
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(f"{time.time_ns()}.{os.getpid()}", encoding="utf-8")
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        except OSError:
+            pass

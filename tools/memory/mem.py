@@ -5395,19 +5395,27 @@ def _session_start_repeat(payload, block):
 
     One SessionStart can reach the hook twice (a compaction right after a resume was seen
     to put the same summary into the context twice in a row). The marker lives in the
-    candidate-seen directory (swept by the same TTL), is keyed by session, start source and
-    text, and only a repeat inside SESSION_START_REPEAT_SECONDS counts; a later start, a
-    changed summary or another source (resume, then compact) still delivers. Any failure
-    delivers."""
+    candidate-seen directory (swept by the same TTL), is keyed by session, start source,
+    the session's compaction mark and text, and only a repeat inside
+    SESSION_START_REPEAT_SECONDS counts. A later start, a changed summary, another source
+    (resume, then compact) and a compaction that happened since (the compaction path records
+    it whichever of SessionStart(compact) and PostCompact comes first) still deliver. Any
+    failure delivers."""
     try:
         sid = _seen_session(next((payload.get(k) for k in ("session_id", "sessionID", "thread_id")
                                   if isinstance(payload.get(k), str) and payload.get(k)), ""))
         if not sid:
             return False
+        try:
+            import context_repeat
+            compaction = context_repeat.compaction_mark(sid)
+        except Exception:
+            compaction = ""
         source = str(payload.get("source") or "")
         digest, _ = _seen_names(sid, "")
         name = f"summary-{digest}"
-        key = hashlib.sha256((source + "\0" + block).encode("utf-8", "replace")).hexdigest()[:16]
+        key = hashlib.sha256(
+            (source + "\0" + compaction + "\0" + block).encode("utf-8", "replace")).hexdigest()[:16]
         now = time.time()
         with _seen_lock(name) as held:
             if not held:
