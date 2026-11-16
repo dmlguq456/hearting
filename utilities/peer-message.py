@@ -2684,6 +2684,28 @@ def release_unstarted_pending_write(row, *, receipt="herdr-not-started"):
         return True
 
 
+def note_pending_hold(ref, hold):
+    """Keep on a still-pending row why its receiving window holds it (``held``), for the sender.
+
+    ``hold`` is the receiving host's word (``session_shell._hold``) or ``no-shell``; ``""``
+    clears it. Written only when it changes, so an unchanged pass rewrites nothing."""
+    if not isinstance(hold, str) or len(hold) > 32:
+        return False
+    with pending_lock(ref):
+        current = _read_pending(ref)
+        if not current or current.get("state") != "pending":
+            return False
+        if ((current.get("held") or {}).get("reason") or "") == hold:
+            return True
+        row = dict(current)
+        if hold:
+            row["held"] = {"reason": hold, "at": time.time()}
+        else:
+            row.pop("held", None)
+        _save_pending(row)
+        return True
+
+
 def release_unsent_herdr_claim(row, *, receipt="target-form-open"):
     """Release this exact pending claim only before the external write.
 
