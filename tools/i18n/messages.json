@@ -2526,6 +2526,10 @@
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
   },
+  "session_shell.tidy_done": {
+   "en": "Memory tidied · {text}",
+   "ko": "기억 정리 · {text}"
+  },
   "session_shell.upgrade_pending": {
    "en": "New release waiting",
    "ko": "새 판 대기"

@@ -3305,15 +3305,18 @@ def record_prompt_origin(seat: Seat, harness: str, sid: str, sequence: int, orig
 
 
 def write_notice(seat: Seat, text: str, *, author_harness: str = "", author_sid: str = "",
-                 now: Optional[float] = None, notice_id: str = "") -> dict:
-    """Leave one result line for the seat's next start/prompt (takes the seat lock)."""
+                 now: Optional[float] = None, notice_id: str = "", level: str = "") -> dict:
+    """Leave one result line for the seat's next start/prompt (takes the seat lock).
+
+    ``level`` ``"done"`` marks a line that reports work ended well and leaves the person nothing
+    to do (11-16: the shell panel shows it quietly); without it the line reads as before."""
     if author_harness and author_sid:
         seat = session_seat(seat, author_harness, author_sid)
     now = now_epoch() if now is None else now
     line = " ".join((text or "").split())
     line = _cut_bytes("".join(ch for ch in line if ch.isprintable()), NOTICE_MAX_BYTES)[0]
     item = {"id": (notice_id[:96] if notice_id else secrets.token_hex(6)), "text": line, "created": now,
-            "author": {"harness": author_harness, "sid": author_sid}}
+            "author": {"harness": author_harness, "sid": author_sid}, **({"level": level} if level else {})}
     with seat_lock(seat_state_key(seat)):
         data = read_json(_notices_path(seat))
         items = data.get("items", []) if isinstance(data, dict) else []
@@ -3323,7 +3326,8 @@ def write_notice(seat: Seat, text: str, *, author_harness: str = "", author_sid:
             return item
         for index, existing in enumerate(items):
             if existing.get("id") == item["id"]:
-                items[index] = {**existing, "text": line}
+                items[index] = {**{k: v for k, v in existing.items() if k != "level"}, "text": line,
+                                **({"level": level} if level else {})}
                 atomic_write_json(_notices_path(seat), {"schema": SCHEMA, "items": items[-20:],
                                                         "delivered": delivered[-200:],
                                                         "lineage_received": lineage_received[-200:]})
@@ -3413,21 +3417,25 @@ def _notice_groups(seat: Seat, harness: str, sid: str, *, now: float,
 
 
 def waiting_notice_display(seat: Seat, harness: str, sid: str, *,
-                           now: Optional[float] = None) -> tuple[str, list[str]]:
+                           now: Optional[float] = None, with_level: bool = False) -> tuple:
     """Read-only: the newest result line still waiting for this session's next hook.
 
     A cleared window's next hook is the person's next input, so the shell panel and
     the status line paint this line meanwhile (2026-11-10: a failed continue stayed
-    unseen for ~55 minutes). Returns the line and the files to watch; reading it
-    delivers nothing and settles nothing -- the hook still shows it to the session.
+    unseen for ~55 minutes). Returns the line and the files to watch (and, ``with_level``,
+    its ``level``: ``"done"`` or ``""``); reading it delivers nothing and settles nothing --
+    the hook still shows it to the session.
     """
     seat = session_seat(seat, harness, sid)
     try:
         groups, notices = _notice_groups(seat, harness, sid, now=now_epoch() if now is None else now)
     except Exception:
-        return "", []
+        return ("", [], "") if with_level else ("", [])
     paths = list(dict.fromkeys(str(_notices_path(origin)) for origin, _group in groups))
-    return (str(notices[-1].get("text") or "") if notices else ""), paths
+    text = str(notices[-1].get("text") or "") if notices else ""
+    if not with_level:
+        return text, paths
+    return text, paths, (str(notices[-1].get("level") or "") if notices else "")
 
 
 def _appeared_after(sessions: dict, harness: str, sid: str, author_key: tuple[str, str]) -> bool:

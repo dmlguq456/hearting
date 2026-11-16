@@ -158,9 +158,10 @@ for(const [state,reason,word] of [['answer_below','marker-has-no-bound-native-re
         # Correction 3 (11-13): after a panel answer the question stayed in the panel for good
         # (`✓ consumed`): the editor held it, so the backend kept returning it as a retained
         # reference. Rule 5 (11-14): the moment it is sent the box folds to one dim line and
-        # focus returns; once its session has it the line goes and it is no longer asked for.
+        # focus returns; its session having it, the line stays 10 minutes, then it goes and is no longer asked for.
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let now=Date.now();Date.now=()=>now;
 (async()=>{
 const open={id:'S4:q',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['a','b']}]};
 const done={...open,answerable:false,request_state:'applied'};
@@ -170,6 +171,9 @@ assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);
 assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · a']);
 assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);
 b.update([done]);
+assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);assert.deepEqual(b.detail(),[]);
+assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · a']);
+now+=10*60*1000+1000;b.update([done]);
 assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
 // The backend no longer asks for it; were it still sent while unfocused, it stays out.
 b.update([done]);assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
@@ -190,6 +194,7 @@ b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equa
     def test_question_roundtrip_preserves_choices_and_free_text_paste_for_a_complete_form(self):
         self.node(r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let now=Date.now();Date.now=()=>now;
 (async()=>{
 let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
 const item={id:'form',revision:'revision',answerable:true,questions:[{id:'choice',question:'Which?',choices:['first','second']},{id:'text',question:'Why?'}]};
@@ -199,8 +204,9 @@ b.input(Buffer.from('\t\t'));assert.ok(JSON.stringify(b.detail()).includes('seco
 b.input(Buffer.from('\t'));assert.ok(JSON.stringify(b.detail()).includes('한글 j/k'));
 b.input(Buffer.from('\r'));await new Promise(setImmediate);
 assert.deepEqual(sent,[{question_id:'form',revision:'revision',answers:{choice:['second'],text:['한글 j/k\nline2']}}]);
-// Rule 5: once its session has the answer, nothing of it stays and keys go to the native input.
-b.update([{...item,request_state:'applied',answerable:false}]);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
+// Rule 5: once its session has the answer, its line stays 10 minutes, then nothing of it stays; keys go to the native input.
+b.update([{...item,request_state:'applied',answerable:false}]);assert.deepEqual(b.detail(),[]);assert.equal(b.sent().length,1);
+now+=10*60*1000+1000;b.update([{...item,request_state:'applied',answerable:false}]);assert.deepEqual(b.sent(),[]);
 const rest=b.input(Buffer.from('native\r'));assert.equal(rest.toString(),'native\r');
 })();''')
 
@@ -242,6 +248,7 @@ for(const picked of [false,true]){
     def test_single_active_action_keeps_another_questions_choice_without_claiming_consumption(self):
         self.node(r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let now=Date.now();Date.now=()=>now;
 (async()=>{
 let release,sent=[];const b=create({changed(){},answer:x=>{sent.push(x);return new Promise(r=>release=r);},action(){}});
 const item=id=>({id,revision:'r',answerable:true,questions:[{id,question:id,choices:['one','two']}]});
@@ -251,7 +258,10 @@ release({state:'received'});await new Promise(setImmediate);
 b.input(Buffer.from('\r'));assert.equal(sent.length,2);assert.deepEqual(sent[1].answers,{B:['two']});
 release({state:'received'});await new Promise(setImmediate);
 // Rule 5: B was sent where the person stood, so focus returns; both are with their session.
-assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
+assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);
+assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · one','✓ answer sent · two']);
+now+=10*60*1000+1000;b.update([{...item('A'),answerable:false,request_state:'received'},{...item('B'),answerable:false,request_state:'received'}]);
+assert.deepEqual(b.sent(),[]);
 assert.ok(!JSON.stringify(b.detail()).includes('consumed'));
 })();''')
 
