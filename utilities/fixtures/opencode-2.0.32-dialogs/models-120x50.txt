@@ -1,33 +1,33 @@
    New session                     New session                   +
 
   ┃
-  ┃  /models/sessions
+  ┃  a second message
   ┃
 
-     Error: Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to
-     keep going: https://opencode.ai/go
+     Error: placeholder error texts for the first prompt, with a placeholder link (https://example.invalid); more tos
+     keep going: https://example.org/go
 
-     Build · Big Pickle · 349ms
+     Build · Model Zeta · 349ms
 
   ┃
-  ┃  /themes/help
+  ┃  first prompt
   ┃
                                   Select model                                     esc
-     Error: Free usage limit r                                                            subscribe to OpenCode Go to
-     keep going: https://openc    Search
+     Error: placeholder text r                                                            placeholder error text here
+     keep going: placeholder-x    Search
 
-     Build · Big Pickle · 286m    Iceman Free                                     Free
-                                  Inkling 2 Small Free                            Free
-                                  LongCat 2.5 Free                                Free
-                                  Flint 40B Free                                  Free
-                                  MiniMax M3.1 Flash Free                         Free
-                                  DeepSeek V4.1 Flash Free                        Free
-                                  Nemotron 3.5 Super VL Free                      Free
-                                  Beam Free                                       Free
-                                  MiMo-V2.6-Flash Free                            Free
-                                  GLM-5.3-Flash Free                              Free
-                                  Nemotron 3.5 Lightning Free                     Free
-                                ● Big Pickle                                      Free
+     Build · Model Zeta · 286m    Model A Free                                    Free
+                                  Model B Free                                    Free
+                                  Model C Free                                    Free
+                                  Model D Free                                    Free
+                                  Model E Free                                    Free
+                                  Model F Free                                    Free
+                                  Model G Free                                    Free
+                                  Model H Free                                    Free
+                                  Model I Free                                    Free
+                                  Model J Free                                    Free
+                                  Model L Free                                    Free
+                                ● Model Zeta                                      Free
 
                                   View all integrations ctrl+a
 
@@ -44,7 +44,7 @@
   ┃
   ┃
   ┃
-  ┃  Build · Big Pickle OpenCode
+  ┃  Build · Model Zeta OpenCode
   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
   /tmp/ocx-XXXX/proj                                                                 shift+tab agents  ctrl+p commands
 

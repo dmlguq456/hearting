@@ -16,7 +16,9 @@ title row with `esc` at its right; OpenCode's terminal pane (`ctrl+x t`) takes t
 with no dialog text at all. `session_shell_local_command.test.py` paints these screens as
 the synthetic OpenCode's `/models` menu.
 
-Source: captures of 2026-11-16 (sha256 `044d66f6…967d`, `1a8a690f…7d11`); the private
-directory path is replaced and trailing blanks are trimmed. The transcript rows are that
-private session's own: two earlier lines it was sent were refused by the free endpoint
-(`Free usage limit reached`); no account or credential was present.
+Source: captures of 2026-11-16; the private directory path is replaced and trailing
+blanks are trimmed. The model names, the addresses and the transcript lines (two earlier
+lines the private session was sent and the error text they drew) are replaced with
+placeholder text of the same width (`Model A Free`, `first prompt`, `https://example.org/go`):
+the names and addresses are placeholders, not the real list. The dialog frame, the line
+count and the column places are as captured; no account or credential was present.

@@ -1,24 +1,24 @@
    New session                     New session                   +
   ┃
 
-     Error: Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to
-     keep going: https://opencode.ai/go
+     Error: placeholder error texts for the first prompt, with a placeholder link (https://example.invalid); more tos
+     keep going: https://example.org/go
 
-     Build · Big Pickle · 349m
+     Build · Model Zeta · 349m
                                   Select model                                     esc
   ┃
-  ┃  /themes/help                 Search
+  ┃  first prompt                 Search
   ┃
-                                  Iceman Free                                     Free
-     Error: Free usage limit r    Inkling 2 Small Free                            Free    subscribe to OpenCode Go to
-     keep going: https://openc    LongCat 2.5 Free                                Free
-                                  Flint 40B Free                                  Free
-     Build · Big Pickle · 286m    MiniMax M3.1 Flash Free                         Free
-                                  DeepSeek V4.1 Flash Free                        Free
+                                  Model A Free                                    Free
+     Error: placeholder text r    Model B Free                                    Free    placeholder error text here
+     keep going: placeholder-x    Model C Free                                    Free
+                                  Model D Free                                    Free
+     Build · Model Zeta · 286m    Model E Free                                    Free
+                                  Model F Free                                    Free
   ┃
   ┃                               View all integrations ctrl+a
   ┃
-  ┃  Build · Big Pickle OpenCode
+  ┃  Build · Model Zeta OpenCode
   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
   /tmp/ocx-XXXX/proj                                                                 shift+tab agents  ctrl+p commands
 
