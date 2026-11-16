@@ -321,11 +321,12 @@ turn a registered parent or confirmed successor into a child.
 Titles summarize the person's current goal in their language; NOW names what
 changed in the latest conversation step (the step, its object, and its result
 once it ended) and does not restate the request. The previous NOW is offered
-back as data, and when nothing new happened the model returns it unchanged.
-Internal stage, review and handoff instructions do not replace the goal. Failed
-generation preserves the last successful text and its original age. Each
-changed NOW, and each prompt the person typed (one shortened line, never the
-original), is also appended to `<sid>.timeline.jsonl` beside the title file;
+back as data, and when nothing new happened the model returns it unchanged and
+it keeps its original age. Internal stage, review and handoff instructions do
+not replace the goal. Failed generation preserves the last successful text and
+its original age. Each changed NOW, with the conversation span its model read,
+and each prompt the person typed (only its first line, secrets masked and
+clipped), is also appended to `<sid>.timeline.jsonl` beside the title file;
 it follows the title file's seven-day sweep. A folded session exposes its currently executing connected
 routes from the same observation; completed history alone is not activity.
 Model choices follow the installed runtime's current catalog through the existing

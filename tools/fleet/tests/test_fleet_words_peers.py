@@ -401,7 +401,7 @@ class OneRequest(unittest.TestCase):
         self.assertEqual(len(mine), len(panel))
         self.assertEqual([row["status"] for row in mine], [row["status"] for row in panel])
         text = body(rows(vm, NavState(scope="session:f5")))
-        self.assertTrue(any(re.fullmatch(r"1 REQUEST ─+", line) for line in text), text)
+        self.assertTrue(any(re.fullmatch(r"1 PEER REQUEST ─+", line) for line in text), text)
         line = next(line for line in text if "→ [a3] codex" in line)
         self.assertIn("✓ → [a3] codex · %s · final answer %s   review the popup keys"
                       % (clock(NOW - 6000), clock(NOW - 300)), line)

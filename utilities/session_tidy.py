@@ -3080,6 +3080,21 @@ def prompt_first_line(text: str) -> str:
             if body.strip():
                 bodies.append(body)
         value = "\n".join(bodies)
+    # A person's prompt can arrive behind runtime blocks the harness put in front of it (a
+    # reminder, a notification): its first line is the person's own, not the block's opener.
+    # Only leading blocks go, and only while some text of the person's follows them.
+    stripped = False
+    while True:
+        lead = _RUNTIME_BLOCK.match(value.lstrip())
+        rest = value.lstrip()[lead.end():] if lead else ""
+        if not lead or not rest.strip():
+            break
+        value, stripped = rest, True
+    if stripped:
+        # What is left may be one pasted block: its text, not the wrapper's opener, is the first line.
+        wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+        if wrapped:
+            value = wrapped.group("body")
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     line = next((line.strip() for line in value.splitlines() if line.strip()), "")
     line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())
@@ -3107,16 +3122,29 @@ def _received_prompt_line(prompt_text: str, origin: dict) -> str:
     return prompt_first_line(prompt_text)
 
 
-def _prompt_shape(text: str) -> tuple:
-    """``(line count, whole text was one pasted block)`` of a prompt, for its timeline row."""
+def _prompt_shape(text: str, lines=None) -> tuple:
+    """``(line count, whole text was one pasted block)`` of a prompt, for its timeline row.
+
+    The count is the person's own lines: a paste envelope's tag lines and leading runtime blocks
+    are not counted. ``lines``, when the harness counted the person's own text itself (OpenCode
+    joins attached files' text into the prompt it hands over), is that count.
+    """
     value = text if isinstance(text, str) else ""
     wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
-    body = wrapped.group("body") if wrapped else value
-    return max(1, len(body.strip().splitlines())), bool(wrapped)
+    body = wrapped.group("body") if wrapped else _PROMPT_PASTE_BLOCK.sub(
+        lambda match: match.group("body"), value)
+    while True:
+        lead = _RUNTIME_BLOCK.match(body.lstrip())
+        if not lead or not body.lstrip()[lead.end():].strip():
+            break
+        body = body.lstrip()[lead.end():]
+    count = lines if type(lines) is int and lines > 0 else max(1, len(body.strip().splitlines()))
+    return count, bool(wrapped)
 
 
 def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, text: str,
-                            prompt_text: str, answered: bool, transcript: str) -> None:
+                            prompt_text: str, answered: bool, transcript: str,
+                            lines=None) -> None:
     """One bounded line of the person's prompt beside the session's NOW record.
 
     Only the one-line display text is kept (never the original); ``from`` is the
@@ -3126,7 +3154,7 @@ def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, t
     if tools not in sys.path:
         sys.path.insert(0, tools)
     from fleet import titles
-    lines, paste = _prompt_shape(prompt_text)
+    lines, paste = _prompt_shape(prompt_text, lines)
     row = {"kind": "prompt", "at": now, "seq": sequence, "text": text, "lines": lines,
            "paste": paste, "answer": bool(answered)}
     with contextlib.suppress(OSError, TypeError, ValueError):
@@ -3137,8 +3165,12 @@ def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, t
 
 def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
                           prompt_text: str, now: float, answered: bool = False,
-                          transcript: str = "") -> None:
-    """Retain only the existing classifier's final result in its existing frontier."""
+                          transcript: str = "", prompt_meta: Optional[dict] = None) -> None:
+    """Retain only the existing classifier's final result in its existing frontier.
+
+    ``prompt_meta`` is what the harness knows of the prompt itself: ``child`` (an OpenCode task
+    session, whose prompt is its parent agent's, not a person's: no timeline row) and ``lines``
+    (the person's own line count)."""
     seat = session_seat(seat, harness, sid)
     path = _prompt_seq_path(seat)
     current = read_json(path)
@@ -3169,10 +3201,11 @@ def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
             if isinstance(rows, list) else []
         current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
     atomic_write_json(path, current)
-    if source == "real":
+    meta = prompt_meta if isinstance(prompt_meta, dict) else {}
+    if source == "real" and meta.get("child") is not True:
         with contextlib.suppress(Exception):    # the timeline never fails the prompt hook
             _record_prompt_timeline(harness, sid, sequence, now, row["text"], prompt_text,
-                                    answered, transcript)
+                                    answered, transcript, lines=meta.get("lines"))
 
 
 def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
@@ -3637,7 +3670,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
               human_only: bool = False,
               render_context: bool = True, startup_context: Optional[dict] = None,
               deferred: Optional[list] = None, _closed: Optional[list] = None,
-              human_deadline: Optional[float] = None, read_context=None) -> str:
+              human_deadline: Optional[float] = None, read_context=None,
+              prompt_meta: Optional[dict] = None) -> str:
     """Record the session, and print the card / notices it is due exactly once.
 
     Returns the text that was emitted ("" for none). The receipt is written only
@@ -3836,7 +3870,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
             with contextlib.suppress(Exception):
                 record_prompt_display(seat, harness, sid, sequence, prompt_text, now,
-                                      answered=answered_wait, transcript=transcript)
+                                      answered=answered_wait, transcript=transcript,
+                                      prompt_meta=prompt_meta)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
         # SessionStart(source=compact) and a separate compact event describe the same
@@ -4469,6 +4504,7 @@ def cmd_hook(args) -> int:
         sid = args.session_id or session_from_env(args.harness)[1] or ""
         summary = ""
         prompt_text = ""
+        prompt_meta = {}
         compact_context = {}
         if args.phase == "after" or args.event in ("runtime-status", "prompt"):
             try:
@@ -4480,6 +4516,14 @@ def cmd_hook(args) -> int:
                     summary = payload["summary"]
                 if isinstance(payload.get("prompt"), str):
                     prompt_text = payload["prompt"]
+                # What the harness itself knows of the prompt (OpenCode: a task session, the
+                # person's own line count): display facts only, never the prompt's source.
+                meta = payload.get("prompt_meta")
+                if isinstance(meta, dict):
+                    if meta.get("child") is True:
+                        prompt_meta["child"] = True
+                    if type(meta.get("lines")) is int and 0 < meta["lines"] <= 100000:
+                        prompt_meta["lines"] = meta["lines"]
                 for key in ("trigger", "summary_id", "parent_id", "tail_start_id", "compaction_part_id",
                             "turn_id", "event_id", "status", "observed_at"):
                     value = payload.get(key)
@@ -4496,7 +4540,8 @@ def cmd_hook(args) -> int:
                           human_only=getattr(args, "human_only", False),
                           startup_context=startup_context,
                           phase=args.phase, compact_summary=summary, compact_context=compact_context,
-                          prompt_text=prompt_text, deferred=deferred)
+                          prompt_text=prompt_text, deferred=deferred,
+                          prompt_meta=prompt_meta or None)
         if output_format == "json":
             payload = {"additionalContext": "\n".join(emitted),
                        "humanNotice": "\n".join(human)}
