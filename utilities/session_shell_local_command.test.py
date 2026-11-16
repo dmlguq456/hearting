@@ -162,10 +162,11 @@ class LocalCommandDeliveryTest(AnswerReachesIdleShellTest):
         self.assertEqual((_peer_module()._read_pending(ref) or {}).get("state"), "pending")
 
     def test_keys_the_native_has_not_painted_yet_are_still_unproven(self):
-        # A native that took a key but has not painted since: the old screen proves nothing, however
-        # long the keys have been quiet.
+        # A native that took a key that may have typed but has not painted since: the old screen proves
+        # nothing, however long the keys have been quiet. (A key that cannot type, such as a cursor key,
+        # owes no repaint: session_shell_held_idle.test.py.)
         rig = ShellRig(self, ENTRY, "unpainted").start()
-        rig.type("\x1b[1;5D")   # a key the synthetic native neither echoes nor repaints for
+        rig.type("\x1b[13;2u")   # Shift+Enter in CSI u form, which the synthetic native neither echoes nor repaints
         time.sleep(QUIET + 0.3)
         self.assertFalse(rig.status().get("empty"))
 

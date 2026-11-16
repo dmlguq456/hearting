@@ -505,6 +505,21 @@ def _peer_message():
     return sys.modules[name]
 
 
+def _hold(binding, status):
+    """Why the window keeps a message, in the receiving host's own word (``status().hold``).
+
+    A host from before that word names only its state; an older release than the one installed
+    takes the message once its window is reopened or typed in (``old-shell``)."""
+    hold = status.get("hold") if status.get("ok") else ""
+    if isinstance(hold, str) and hold:
+        return hold
+    if status.get("state") == "blocked":
+        return "form"
+    if status.get("state") in ("working", "submitting"):
+        return "busy"
+    return ANSWER_WAIT_OLD_SHELL if status.get("ok") and "hold" not in status and release_behind(binding) else "unobserved"
+
+
 def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     """Use the existing peer claim once; socket acceptance is not a receipt."""
     if harness not in ("claude", "opencode"):
@@ -522,7 +537,7 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
         return {"ok": False, "reason": reason, "not_started": True}
     before = control(binding, "status")
     if not before.get("ok") or before.get("state") != "idle" or not before.get("empty"):
-        return {"ok": False, "reason": "not-idle-empty", "not_started": True}
+        return {"ok": False, "reason": "not-idle-empty", "hold": _hold(binding, before), "not_started": True}
     recipient = {"harness": harness, "session_id": sid}
     reserved = peer.reserve_pending_herdr(ref, recipient, receipt="session-shell-inflight")
     if reserved is None:
@@ -1312,14 +1327,25 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
-    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8)
+    # A message to this session itself (a tidy notice to its own seat) is no message between two sessions.
+    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8, own=(harness, sid))
     panel["messages_new"] = messages_since_input(panel["messages"], display)
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).
     request_errors = []
     request_views, request_paths = _request_views(harness, sid, time.time(), request_errors)
     watched.extend(request_paths)
-    panel["requests"] = request_rows(request_views, time.time(), assigned_tag) if request_views else []
+    # 11-16: the other session's model and effort as far as the values Fleet's shared producer already read
+    # for the session displays (``session_doers`` in the cache this projection reads above) know them.
+    doers = view.get("session_doers") if isinstance(view.get("session_doers"), dict) else {}
+
+    def doer_of(other_harness, other_sid):
+        found = doers.get(str(other_harness) + "\0" + str(other_sid))
+        return found if isinstance(found, dict) else None
+    panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of) if request_views else []
+    for request in panel["requests"]:
+        # Painted as a route's doer is: the same harness, model and effort keys.
+        request["paint"] = route_paint(request)
     # 11-15: a request body's markdown tables read aligned in the MESSAGES popup (its rows two cells in,
     # at the popup's width); its other lines stay the strings the popup wraps as before.
     from fleet.explorer.transcript import table_parts
@@ -1726,9 +1752,13 @@ def _input_readiness(binding, request):
     if binding["harness"] == "claude":
         from fleet import session_registry
         record = session_registry.read("claude", binding["native_pid"])
+        # Claude writes `shell` once a turn has ended while a background shell it started still
+        # runs (a foreground call holds `busy`; see fleet.model._session_status_state): its composer
+        # takes input as at `idle`, so a waiting message goes in (11-16: held for that shell's life).
+        # Only this delivery reading counts it so; tidy and Fleet read the record themselves.
         idle = bool(record and record.get("pid") == binding["native_pid"]
                     and str(record.get("procStart")) == binding["native_start"]
-                    and record.get("sessionId") == binding["sid"] and record.get("status") == "idle")
+                    and record.get("sessionId") == binding["sid"] and record.get("status") in ("idle", "shell"))
     return {"ok": True, "idle": idle, "ready": idle and reason is None and valid_binding(binding),
             "reason": reason or (None if idle else "native-idle-unobserved")}
 

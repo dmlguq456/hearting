@@ -458,6 +458,25 @@ def current_segment(lines):
     return segment
 
 
+def outcome_state(outcome):
+    """``(state, ambiguity reason or None)`` of one route from its outcome sidecar
+    (``route.load_outcome``): ``open`` without one, ``done`` once its terminal gate is proven,
+    ``finish-pending`` while its inline finish waits, else ``unknown``. A false terminal gate is
+    unproven, not failed."""
+    if not isinstance(outcome, dict) or not outcome.get("present"):
+        return "open", None
+    if outcome.get("match") is False:
+        return "unknown", "outcome-mismatch"
+    tgp = outcome.get("terminal_gate_proven")
+    if outcome.get("finish_pending"):
+        return "finish-pending", None
+    if tgp is True:
+        return "done", None
+    if tgp is False:
+        return "unknown", "terminal-result-unproven"
+    return "unknown", None
+
+
 def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
     """PURE (loaders injected) — one displayed chain from a session's ledger lines."""
     from . import route as _route
@@ -509,22 +528,9 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
             except Exception:
                 outcome = None
             result = _route.result_projection(record, outcome)
-            if not isinstance(outcome, dict) or not outcome.get("present"):
-                state = "open"
-            elif outcome.get("match") is False:
-                state = "unknown"
-                ambiguity.append("outcome-mismatch")
-            else:
-                tgp = outcome.get("terminal_gate_proven")
-                if outcome.get("finish_pending"):
-                    state = "finish-pending"
-                elif tgp is True:
-                    state = "done"
-                elif tgp is False:
-                    state = "unknown"
-                    ambiguity.append("terminal-result-unproven")
-                else:
-                    state = "unknown"
+            state, reason = outcome_state(outcome)
+            if reason:
+                ambiguity.append(reason)
         nodes.append({
             "label": "fix record" if line.get("automatic") else short_capability(capability), "capability": capability,
             "capability_mode": capability_mode, "automatic": bool(line.get("automatic")),

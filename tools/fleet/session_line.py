@@ -1118,7 +1118,17 @@ def _message_delivery(status, at, now):
     return None
 
 
-def peer_message_rows(received, sent, tag_of, limit=8, now=None):
+def self_addressed(own, own_tag, harness, sid, tag):
+    """True when the other end of a message is this session itself: its exact identity, or the
+    Fleet number this session holds (a confirmed earlier id of the same seat reads the same
+    number). A session-tidy notice a session sends to its own seat is such a message: it is no
+    message between two sessions, so the MESSAGES lists leave it out (its tidy line still says it)."""
+    if own and (harness, sid) == tuple(own) and sid:
+        return True
+    return bool(own_tag) and bool(tag) and str(tag).strip("[]") == str(own_tag).strip("[]")
+
+
+def peer_message_rows(received, sent, tag_of, limit=8, now=None, own=None):
     """The latest ``limit`` peer messages, oldest first.
 
     Each row: ``way`` (``←`` received, ``→`` sent), ``who`` (the other session's Fleet
@@ -1127,13 +1137,21 @@ def peer_message_rows(received, sent, tag_of, limit=8, now=None):
     ``body``. ``received`` are the exact session's retained received inputs (source
     ``peer``); ``sent`` are its own ledger records. Values are what those records
     already keep; nothing is fetched or reconstructed here, and an absent one is left out.
+
+    ``own`` is this session's ``(harness, session_id)``: a message whose other end is this
+    session itself (:func:`self_addressed`) is left out here, the one place the shell panel's
+    MESSAGES (its popup and the folded strip's count) and Fleet's session page read them from,
+    so a record already written reads the same as a new one.
     """
     now = time.time() if now is None else now
+    own_tag = tag_of(*own) if own else None
     rows = []
     for row in received or ():
         if not isinstance(row, dict) or row.get("source") != "peer":
             continue
         tag = tag_of(row.get("sender_harness"), row.get("sender_session_id"))
+        if self_addressed(own, own_tag, row.get("sender_harness"), row.get("sender_session_id"), tag):
+            continue
         who = "[" + tag.strip("[]") + "]" if tag else _text(row.get("sender"), "peer")
         rows.append({"way": "←", "who": who, "harness": _text(row.get("sender_harness"), ""),
                      "kind": _text(row.get("kind"), ""), "text": _text(row.get("text"), ""),
@@ -1141,6 +1159,8 @@ def peer_message_rows(received, sent, tag_of, limit=8, now=None):
     for record in sent or ():
         target = record.get("to") if isinstance(record.get("to"), dict) else {}
         tag = tag_of(target.get("harness"), target.get("session_id"))
+        if self_addressed(own, own_tag, target.get("harness"), target.get("session_id"), tag):
+            continue
         who = "[" + tag.strip("[]") + "]" if tag else _text(target.get("name"), "peer")
         rows.append({"way": "→", "who": who, "harness": _text(target.get("harness"), ""),
                      "kind": _text(record.get("kind"), ""), "text": _text(record.get("summary"), ""),
