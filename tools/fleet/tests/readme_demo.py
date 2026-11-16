@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import time
 
-VERSION = "v4.43.0"
+VERSION = "v4.44.0"
 
 PROJECTS = ("web-api", "ml-train", "docs-site", "mobile-app")
 HOME = "/home/demo"

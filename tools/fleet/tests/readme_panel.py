@@ -297,13 +297,19 @@ def popup_width(cols, kind="text"):
     return min(116, cols - 4) if kind == "table" else 76
 
 
+# The other harnesses' usage windows (demo values; the session's own harness takes ``World.values``).
+DEMO_USAGE = {"claude": {"rl_5h": 18, "rl_7d": 40, "rl_ms": []},
+              "codex": {"rl_5h": 24, "rl_7d": 41, "rl_ms": []},
+              "opencode": {"rl_5h": 9, "rl_7d": 33, "rl_ms": []}}
+
+
 def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None):
     """``panel_projection``'s payload for one demo session, its live readers replaced."""
     import human_wait_state
     import session_shell
     import session_tidy
     from fleet import session_tags, session_view, session_work
-    from fleet.collectors import steward
+    from fleet.collectors import steward, usage_cache
     now = world.now
 
     def observe(h, pid, start, s, **_):
@@ -335,6 +341,8 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
         mock.patch.object(session_shell, "session_questions",
                           lambda h, s, view=None, retained=(), elsewhere=None: json.loads(json.dumps(world.questions.get(s, [])))),
         mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
+        # The USAGE section reads the usage records Fleet keeps for the other two harnesses.
+        mock.patch.object(usage_cache, "read", lambda name: {"payload": dict(DEMO_USAGE.get(name, {}))}),
     ]
     with contextlib.ExitStack() as stack:
         for patch in patches:
@@ -650,14 +658,26 @@ _CONVERSATION_STYLE = {"you": {"fg": 253, "bold": True}, "body": {"fg": None}, "
                        "claude": {"fg": 116}, "codex": {"fg": 176}, "opencode": {"fg": 147}}
 
 
+# The window's last line under the native screen is the shell's one line in every harness (spec rule 60):
+# the working folder at the left, a dim ``hearting v<release>`` at the right end.
+FOLDER = {API: "~/web-api", API_REVIEW: "~/web-api", API_NOTES: "~/web-api", ML: "~/ml-train"}
+
+
+def last_line(sid, cols):
+    from tools.fleet.tests import readme_demo
+    left, right = " " + FOLDER.get(sid, "~"), "hearting " + readme_demo.VERSION
+    gap = max(1, cols - len(left) - len(right) - 1)
+    return [{"text": left, "dim": True}, {"text": " " * gap}, {"text": right, "dim": True}]
+
+
 def conversation(sid, cols, rows, *, top=1):
     """The illustrative conversation of a demo session as panel-shaped rows of parts."""
     out = [[] for _ in range(top)]
     for line in CONVERSATION.get(sid, ()):
         out.append([{"text": (" " + text) if index == 0 else text, **_CONVERSATION_STYLE[key]}
                     for index, (text, key) in enumerate(line)])
-    out = out[:rows]
-    return out + [[] for _ in range(rows - len(out))]
+    out = out[:rows - 1]
+    return out + [[] for _ in range(rows - 1 - len(out))] + [last_line(sid, cols)]
 
 
 # --- framing --------------------------------------------------------------------------------

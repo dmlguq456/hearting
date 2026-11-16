@@ -201,10 +201,10 @@ def panel_pictures(render, capture, with_gif):
         session_window(world, panel.API, cols, POPUP_ROWS, table="STATUS"),
         "web-api · claude [4f] — the STATUS button pressed")]])
     question = panel.beside(panel.cells(panel.conversation(panel.API_NOTES, 100, 9)), [], 100, gap=0)
-    question += panel.cells(panel_rows(world, panel.API_NOTES, 14, width=100, side=False,
+    question += panel.cells(panel_rows(world, panel.API_NOTES, 18, width=100, side=False,
                                        configuration={"layout": "bottom"}))
     pictures["panel-question.png"] = panel.screen([[panel.window(
-        panel.image(question, 100, 23), "web-api · claude [9c] — the bottom layout")]])
+        panel.image(question, 100, 27), "web-api · claude [9c] — the bottom layout")]])
     # One request on both sides: its row in the route box of the session that asked (→) and of the
     # one asked (◂), the same title and state.
     pictures["requests.png"] = panel.screen([[
