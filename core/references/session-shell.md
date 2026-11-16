@@ -177,15 +177,18 @@ to (`← [e7] → [73]`: each way and session once, the newest first, `+N` for t
 fit), and `▴` at its right end; a group with nothing in it does not stand. Short of cells it gives
 way whole value by whole value, in this order: the reset times, the branch, the effort, the model
 windows, 7d, 5h, OpenCode's MCP count, the model, the messages' sessions (their count stays,
-`MESSAGES 3`), MESSAGES, the project, the notices, the CTX bar (its percent stays), the routes'
+`MESSAGES 3`), MESSAGES, the project, the windows at Fleet's red level (11-16, review of #1662: they outlast the
+other windows, the backend marks their parts `level: red`; the last of them goes first, so the 5h stays longest),
+the notices, the CTX bar (its percent stays), the routes'
 counts by state, and narrower than 44 cells `CTX` itself; past that last step the cell before `▴`
 is taken too, and then the session's number gives way (11-15, review A5: from 30 cells the wait and
 `N ROUTE` stand whole beside each other); the glyph, the wait, `N ROUTE` and `▴` stay, and nothing
 wraps. Labels are dark gray upper case; there is no frame, gear, beat or moving rule, and only the
 state glyph turns and, while an answer waits, `◑답 대기 N` blinks (below). The strip has no status button. While the strip paints its
-session, Claude's row under its input keeps the notice (what to do now) as
-with the panel open, so no value shows twice; the strip carries no Git or job
-row. A press on the wait opens the question popup, on the routes the routes popup, on MESSAGES
+session, Claude's row under its input is the shell's one line (spec rule 60) as with the panel open, so no value
+shows twice; the strip carries no Git or job row. What the old notice row said stands on the strip: the answer wait
+(`◑답 대기 N`, never given up), compaction imminent (the notices), a red usage window (kept as above), a failed
+route (`✕N` after `N ROUTE`); a red context reading is the `CTX` percent, in its color. A press on the wait opens the question popup, on the routes the routes popup, on MESSAGES
 its popup (above the strip: the strip stays and the native keeps its width); anywhere else, and
 `▴`, opens the panel.
 **Ctrl+]** always opens a popup and every popup names **`p`**, which folds or opens the panel: the
@@ -523,7 +526,11 @@ popup; a request row the MESSAGES popup).
   `status_line` setting is left as it is. OpenCode has no setting or plugin slot that hides its bottom bar (checked in
   the installed `@opencode-ai/plugin` types and the documentation), so the shell's own paint is the way. Only what the line
   alone showed moves: OpenCode's cost (from the session record Fleet reads) stands after the context in that window's
-  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched.
+  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched. The row is found only in the
+  harness's own layout, and what is not found is not covered (review of #1662): Codex's footer is the status row and the help
+  row (or the one thread-id status row) after the composer's last `›` row, the status row opening with a word, a number or a
+  path, not a sign (`↳ queued`, `⏎ to send`, `■ stream error`) and not a draft line that begins with an id; OpenCode's bar is the
+  row with `ctrl+p commands` and the folder row right above it, never a `/`- or `~`-led row without that bar.
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
@@ -700,7 +707,7 @@ on top: secondary text and messages take 248/241, body text 253/237, the panel
 frame 244/243 while idle or unknown, messages rules 242/245; the question's border,
 `◑` and `›` are 174/131 on every colored theme.
 Neither recolors native space: the native area and Claude's status row keep
-their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
+their colors (Claude's own statusline row, where the panel is not painted, takes the theme, not the shade). An unknown position, theme or shade falls back to its own
 default without disabling the shell, and so does an unknown `route line` or
 `rule motion`.
 The same side width changes by dragging its boundary or by value controls.
@@ -765,15 +772,14 @@ confirmed; `sending` (`보내는 중`) while another answer is on its way; `clos
 (`닫힘`) for a request already gone (an existing state word such as expired
 stays). The head carries the short form under 64 columns and the body row the
 whole words. Every count of answer waits (Fleet's head and session rows, the
-`questions list` head, the status line, the panel's `◑ N`, the notice line under
-the input and the folded strip) counts every wait a person must answer, wherever
+`questions list` head, the status line, the panel's `◑ N` and the folded strip) counts every wait a person must answer, wherever
 it is answered: a question the panel answers, a Claude native request, a marker
 question and a human gate. Only a blocked worker's wait (its parent agent's) and
 a finished one (closed, replaced, expired, an answer on its way) are not counted.
 The questions section holds what the person can answer here now (answerable
 ones first; `Ctrl+]` opens the popup on the first of them); a counted wait answered in another
 place is one dim guidance line beside the count saying where
-(`1 QUESTIONS · answer below`), and the notice line names `Ctrl+]` only when the
+(`1 QUESTIONS · answer below`), and the question box names `Ctrl+]` only when the
 panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
 parent holds the worker's exact acknowledged completion receipt. Once the person
@@ -959,17 +965,17 @@ as the Ctrl+O transcript, keeps every row. Claude keeps as many rows as the
 callback's output has, and at least one while a statusline is set; the one row
 leaves two rows under the input box, this row and Claude's own mode row, at
 every width and with running jobs. That row is, since 11-16, the shell's one line (spec rule 60: the working folder and `hearting v<release>`); what was the notice
-row stood here until then: empty unless the person must do something now. One function picks a single
-item by priority from existing values: an answer this session owes, then
-compaction imminent, then a context or usage reading at Fleet's red level, then
-a failed, blocked or attention-needing route. News and release lines are not on
-it: a received peer report stands in MESSAGES, a finished route's result in the
+row stood here until then (an answer this session owes, compaction imminent, a context or usage reading at Fleet's
+red level, a failed or blocked route). Those four now stand in the panel and on the folded strip (the answer wait,
+the notices, the red window, `✕N`; see the strip's order above), and where the panel is not painted Claude's own
+statusline shows them (the common line's own order: the wait, compaction, a red reading, then the rest). The Python
+`session_panel.notice_line` and the projection's `notice` field are no longer read by the host; they stay as they are.
+News and release lines were never on that row: a received peer report stands in MESSAGES, a finished route's result in the
 route box (the producer's recent results follow the current routes), and a
 waiting release or a switch without scrollback in the panel's tidy-notice slot.
 A finished result's row leads its title with the result word (`FAIL · title`),
 takes Fleet's failure mark `✕` and color when the result did not pass, and leaves
-the rows after the person's next input or ten minutes, the bound the notice row's
-news used.
+the rows after the person's next input or ten minutes.
 It reuses Fleet's glyphs and colors and adds no collection, setting or judgment.
 A hidden (Fleet over the window), focused or not-yet-bound panel and a lost display host show
 that native row unchanged; unwrapped sessions keep their complete native rows.

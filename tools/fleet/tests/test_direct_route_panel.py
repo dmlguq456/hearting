@@ -21,11 +21,11 @@ def chain_node(rid="rt-direct", *, state="open", shape="direct", result=None):
             "source_route_id": None, "ts": NOW - 900, "result": result}
 
 
-def snapshot(node, liveness="idle", jobs=()):
+def snapshot(node, liveness="idle", jobs=(), elapsed_min=60):
     chain = {"v": 1, "key": "repo", "visible": False, "plan": [], "nodes": [node] if node else [],
              "current": node, "automatic_records": []}
     session = Session(harness="claude", pid=os.getpid(), session_id="sid-direct", session_tag="s1",
-                      cwd="/fixture", liveness=liveness, route_chain=chain)
+                      cwd="/fixture", liveness=liveness, route_chain=chain, elapsed_min=elapsed_min)
     return {"sessions": [session], "jobs": list(jobs), "resources": []}
 
 
@@ -74,6 +74,36 @@ class DirectRoutePanelTests(unittest.TestCase):
         # The person's next input, or ten minutes, takes it off (the rule every finished route follows).
         self.assertEqual(shown(panels, label, now=NOW, human_at=NOW - 30)["routes"], [])
         self.assertEqual(shown(panels, label, now=NOW + 601)["routes"], [])
+
+    def test_a_declaration_older_than_this_session_process_is_not_a_standing_route(self):
+        # Fleet's open-route rule (route_chain.current_capability): `ts >= session_start - slack`, the start
+        # being now less the process's age. The declaration is 15 minutes old (NOW - 900).
+        for state in ("open", "finish-pending"):
+            for elapsed, stands in ((5, False), (12, False), (13, True), (16, True), (60, True)):
+                with self.subTest(state=state, session_minutes=elapsed):
+                    labels, panels = live.session_route_status(snapshot(chain_node(state=state), elapsed_min=elapsed), NOW,
+                                                               include_details=True)
+                    self.assertEqual(KEY in labels, stands, (labels, panels))
+                    self.assertEqual(len(panels[KEY]), 1 if stands else 0)
+        # Three days old, the same session started an hour ago, and read a month later: never stands.
+        old = chain_node()
+        old["ts"] = NOW - 3 * 86400
+        for at in (NOW, NOW + 30 * 86400):
+            labels, panels = live.session_route_status(snapshot(old, elapsed_min=60), at, include_details=True)
+            self.assertEqual((labels, panels[KEY]), ({}, []))
+        # The session line reader (the statusline's count) agrees.
+        labels, panels = session_line.session_route_status(snapshot(old, liveness="working", elapsed_min=60), NOW,
+                                                           include_details=True)
+        self.assertEqual((labels, panels[KEY]), ({}, []))
+        # And the panel shows no ROUTE for it.
+        self.assertEqual(shown(panels, "")["routes"], [])
+
+    def test_a_route_finished_in_an_earlier_run_still_retires_as_before(self):
+        # Only an open declaration is tied to the process's start; a finished one keeps the finished rule.
+        node = chain_node(state="done", result=finished(NOW - 60))
+        node["ts"] = NOW - 3 * 86400
+        _, panels = live.session_route_status(snapshot(node, elapsed_min=5), NOW, include_details=True)
+        self.assertEqual([row["state"] for row in panels[KEY]], ["done"])
 
     def test_a_route_that_is_not_the_last_or_not_direct_adds_no_row(self):
         for node in (chain_node(shape=None), chain_node(state="unknown"), chain_node(shape="staged")):

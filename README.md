@@ -170,13 +170,16 @@ enable` enables it explicitly;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
-Claude shows the same status area inside the panel as Codex and OpenCode, and its
-own statusline is one row under the input. While the panel, or its folded strip,
-shows the status area, that row is a notice row that stays empty unless you must
-act now: an answer you owe, compaction about to happen, a red context or usage
-reading, or a failed or blocked route. News stays in the panel: messages in
-MESSAGES, a finished route's result in the route box. With the panel hidden the
-row shows the status line itself, keeping what is urgent first on a narrow screen.
+Claude shows the same status area inside the panel as Codex and OpenCode, and the
+row under its input is the shell's one line there too (the working folder and
+`hearting v<release>`). What you must do now stands in the panel or its folded strip:
+an answer you owe in the question box and the strip's `◑to answer N`, compaction about to
+happen in the panel's top and the strip's `⚠`, a red usage reading in `USAGE` and on the
+strip (on a narrow strip the other windows go first and the red one stays), a failed or
+blocked route in the route box and the strip's `✕N`. News stays in the panel: messages in
+MESSAGES, a finished route's result in the route box. Where the panel is not painted (Fleet
+over the window, the settings screen, a window not yet bound) Claude's own statusline shows
+the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
 state's color the moment the native screen changes (running: the frame stands lit and
@@ -261,7 +264,7 @@ width back: one row at any window height, `● [e9] hearting │ Opus 5.5 xhigh 
 end (the wait only while you owe an answer, compaction about to happen or a tidy notice in its
 place; the Git branch after the project where it fits). Narrow, whole values go: reset times,
 branch, effort, 7d, 5h, the model, the message sessions (their count stays), MESSAGES, the
-project, the context bar (its percent stays), the route counts, and at 30 cells the session
+project, a window at Fleet's red level (it outlasts the other windows), the context bar (its percent stays), the route counts, and at 30 cells the session
 number; the state, wait, `N ROUTE` and **▴** stay. A press on the wait opens the question popup, on the routes or
 MESSAGES their popup above the strip, anywhere else opens the panel again; with the keyboard, **Ctrl+]** then **p** opens the panel. Where the open panel would leave the
 native area under 60 columns (a 40-column panel in a terminal under 102
