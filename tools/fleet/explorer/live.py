@@ -1659,6 +1659,8 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "fold": fold,
             # The person's answer is on its way (rule 5, 11-14): listed as sent, waiting on no one.
             "sent": item.get("answer") == "sent",
+            # What that answer waits for when its session cannot take it by itself (`session_block`).
+            "answer_wait": (_text(item.get("answer_wait")) or None) if item.get("answer") == "sent" else None,
         }
         questions.append(record)
         if session and not older and not record["sent"]:

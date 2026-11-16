@@ -630,6 +630,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             answer_waits = {"items": [], "by_session": {}, "complete": False,
                             "total": 0, "older": 0, "health": [
                                 {"source": "cache", "state": "unknown"}]}
+        # A sent message answer still on its way says what it waits for (rule 5): read live here,
+        # since a window's shell and release are not part of the shared answer record.
+        try:
+            import session_shell
+            session_shell.mark_answer_waits(answer_waits.get("items", ()))
+        except Exception:
+            pass
         from ..refresh import fleet_answer_wait_view
         fleet_answer_waits = fleet_answer_wait_view(answer_waits)
         for session in sessions:

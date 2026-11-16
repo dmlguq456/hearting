@@ -51,7 +51,8 @@ manual recovery. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
 A running window follows a new install without restarting its CLI. Each
 display host compares the installed link it was started from
-(`HEARTING_SHELL_HOST_PATH`, never resolved) with its own resolved file; it
+(`HEARTING_SHELL_HOST_PATH`, never resolved, including the Herdr hint's re-exec of the
+entry) with its own resolved file; it
 notices a change from a watch on the link's directory and at each idle
 transition, with no timer; a successor that took over keeps the same watch. A look that
 ends without asking is not lost: a reason that comes during a look is taken up when it ends, and
@@ -714,7 +715,13 @@ record's `submitted`/`received`) the popup closes and the question is one line
 in plain text, a secret `•••`),
 `Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
 it as sent); the line goes when its session takes the answer, and a failed
-delivery brings the question back with its existing word. Answering returns
+delivery brings the question back with its existing word. Until its session takes
+it, the line says so: `✓ answer sent · <what was sent> · awaiting delivery`, and,
+when only the person can let it in, why: a window whose shell runs an older release
+than its launch path names (`New release waiting`, the window's own line) or a
+Claude window outside the shell takes it when that window is reopened or typed in once.
+Fleet's QUESTIONS row draws the same parts from the same function
+(`session_block.sent_answer_line`); nothing offers to send it again. Answering returns
 focus to the native input, and one lone Esc or Enter within ten seconds of the
 answer is taken by the shell (never the native's interrupt of a running turn,
 never a submit of what stands in the native input).

@@ -23,6 +23,53 @@ _CLOSED_MARKS = ("no-longer-current", "not-current", "not-pending", "cancelled",
 _SENT_STATES = frozenset({"submitted", "received", "applied"})
 
 
+# What an answer still on its way waits for, in the person's words (``session_shell.answer_delivery_wait``):
+# an older shell takes it once its window is reopened or typed in (the window's own `새 판 대기`), a Claude
+# window outside the shell at the next prompt typed there.
+_ANSWER_WAIT_WORDS = {"old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
+                      "no-shell": ("fleet.session_block.wait_no_shell",)}
+
+
+def sent_values(sent, questions=()):
+    """What was sent, as the answer record says it: choice labels, free text, a decision; secrets hidden."""
+    if isinstance(sent, (list, tuple)):
+        return [str(value) for value in sent if str(value).strip()]
+    if not isinstance(sent, dict):
+        return []
+    if isinstance(sent.get("decision"), str):
+        return [sent["decision"]]
+    by_id = {str(q.get("id")): q for q in questions or () if isinstance(q, dict)}
+    out = []
+    for qid, listed in (sent.get("answers") if isinstance(sent.get("answers"), dict) else {}).items():
+        question = by_id.get(str(qid)) or {}
+        for value in listed if isinstance(listed, list) else ():
+            if question.get("secret") or question.get("is_secret"):
+                out.append("•••")
+                continue
+            label = next((choice.get("label") for choice in question.get("choices") or ()
+                          if isinstance(choice, dict) and choice.get("value") == value and choice.get("label")), None)
+            out.append(str(label or value))
+    return out[:4]
+
+
+def sent_answer_line(sent=(), *, wait="", mark=True, questions=()):
+    """The one line of an answer the person sent that its session has not taken yet (rule 5).
+
+    ``✓ answer sent · <what was sent> · awaiting delivery``, then, when it waits on the person, why
+    and what takes it (``wait``). Fleet's QUESTIONS row and the shell panel's sent line draw these
+    same parts; it is never a question to answer again and is in no count.
+    """
+    word = ui_text("fleet.session_block.sent")
+    parts = [(word if mark else word.removeprefix("✓").strip(), "lvl_g")]
+    said = " ".join(", ".join(sent_values(sent, questions)).split())
+    if said:
+        parts += [(" · ", "dim"), (said, "loc_repo")]
+    parts += [(" · ", "dim"), (ui_text("fleet.session_block.delivery_waiting"), "dim")]
+    for key in _ANSWER_WAIT_WORDS.get(wait, ()):
+        parts += [(" · ", "dim"), (ui_text(key), "dim")]
+    return parts
+
+
 def unanswerable_state(reason, *, own=True):
     reason = str(reason or "")
     if reason in _SENDING_REASONS:
@@ -111,6 +158,11 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
             item["answer_state"] = state
         else:
             item.pop("answer_state", None)
+        # The sent line's parts for the panel, from the same function Fleet's row draws (rule 5).
+        if state == "submitted":
+            item["sent_line"] = sent_answer_line(item.get("sent") or (), wait=item.get("answer_wait") or "")
+        else:
+            item.pop("sent_line", None)
     for item, question in listed:
         state = question_state(item, own=own)
         key = "lvl_g" if state == "applied" else "g_blocked" if state == "open" else "dim"
