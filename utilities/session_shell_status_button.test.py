@@ -134,7 +134,7 @@ const model={repo_side:[p('hearting')],wait:'◑답 대기 1',session_title:'점
  routes:[{id:'a',title:'휠 입력 시험',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'3m',paint:{glyph:p('✕')}}]};
 const red=(v,t)=>{const at=v.motion.at(t);return v.motion.cells.map((c,i)=>c.blink?at[i].foreground:null).filter(x=>x!==null);};
 // (a) A question to answer here: its red letters (the first row, the choices' red words, the action) and
-// nothing else move; lit (174) at the breath's brighter half, 131 in the darker half; the frame, the route
+// nothing else move; 217 on the even seconds, 95 on the odd; the frame, the route
 // box, the sent answer and the head's state glyph never take part.
 for(const state of ['idle','blocked']){
  const v=render({q:here,sent,model,state,since:0,height:30}),rows=v.rows.map(str);
@@ -145,14 +145,14 @@ for(const state of ['idle','blocked']){
   assert(found,JSON.stringify(c));}
  // No blink cell on the head's border, the route box or the sent answer's row.
  for(const c of blink)assert(c.row>0&&!/✓ 답 보냄|휠 입력/.test(rows[c.row]),rows[c.row]);
- // The two reds: lit through frames 0-11 and 36-47, the other through 12-35 (the breath's 48 frames).
- for(const [t,want] of [[0,174],[11,174],[12,131],[35,131],[36,174],[47,174],[48,174],[60,131]])
+ // The two reds follow Fleet's one-second beat of the clock: 217 through frames 0-9, 95 through 10-19, and so on.
+ for(const [t,want] of [[0,217],[9,217],[10,95],[19,95],[20,217],[29,217],[30,95],[60,217]])
   assert(red(v,t).every(x=>x===want),state+' '+t+' '+red(v,t));
  // Waiting, the frame breathes beside it (its cells keep their own look); idle, the blink alone moves.
  assert.equal(v.motion.cells.some(c=>!c.blink),state==='blocked',state);
- // The next change: the blink's quarter points (or the breath's next step when sooner).
- if(state==='idle')assert.deepEqual([0,5,12,30,36,47].map(t=>v.motion.next(t)),[12,12,36,36,60,60]);
- else assert(v.motion.next(0)<=12&&v.motion.next(13)<=36,String([v.motion.next(0),v.motion.next(13)]));
+ // The next change: the next whole second of the beat (or the breath's next step when sooner).
+ if(state==='idle')assert.deepEqual([0,5,10,19,30,47].map(t=>v.motion.next(t)),[10,10,20,20,40,50]);
+ else assert(v.motion.next(0)<=10&&v.motion.next(13)<=20,String([v.motion.next(0),v.motion.next(13)]));
  // A whole paint's red is the still accent (174) until the host splices the beat's look in.
  assert(v.rows.flat().filter(x=>x.blink).every(x=>x.foreground===174));
 }
@@ -164,7 +164,7 @@ for(const state of ['idle','blocked']){
 // (c) The folded strip: `◑답 대기 1`'s glyphs alone, on the same beat; the session's glyph keeps its spin.
 {const v=render({q:here,model,folded:true,width:120,height:1,state:'working',since:0});
  assert.equal(v.motion.cells.map(c=>c.ch).join(''),'◑답대기1');assert.equal(v.animated,true);
- assert(red(v,0).every(x=>x===174)&&red(v,20).every(x=>x===131),String(red(v,20)));
+ assert(red(v,0).every(x=>x===217)&&red(v,10).every(x=>x===95),String(red(v,10)));
  const strip=str(v.rows[0]);
  for(const c of v.motion.cells){let x=0,found=false;for(const ch of strip){if(x===c.col&&ch===c.ch)found=true;x+=cells(ch);}assert(found,JSON.stringify(c));}}
 // (d) `rule motion` off, mono, NO_COLOR, eight colors: nothing blinks (idle: nothing moves at all).
@@ -175,10 +175,10 @@ for(const [cfg,m] of [[{rule_motion:'off'},{}],[{theme:'mono'},{}],[{},{no_color
 // (e) No wait: no blink cell and, idle, no motion and no beat.
 for(const folded of [false,true]){const v=render({model:{...model,wait:''},folded,width:folded?120:44,height:folded?1:30});
  assert.equal(v.motion,null,String(folded));assert.equal(v.animated,false,String(folded));}
-// (f) A light face: its own pair (131 lit, 174 the other).
-{const v=render({q:here,model,cfg:{theme:'light'},since:0,height:30});assert(red(v,0).every(x=>x===131)&&red(v,20).every(x=>x===174));}
+// (f) A light face: its own pair (88, then 167).
+{const v=render({q:here,model,cfg:{theme:'light'},since:0,height:30});assert(red(v,0).every(x=>x===88)&&red(v,10).every(x=>x===167));}
 // (g) The two reds are FACES' values (the person tunes them on the installed copy).
-assert.deepEqual([pv.FACES.dark.waitBlink,pv.FACES.light.waitBlink],[[174,131],[131,174]]);
+assert.deepEqual([pv.FACES.dark.waitBlink,pv.FACES.light.waitBlink],[[217,95],[88,167]]);
 """)
 
     def test_the_folded_strip_keeps_n_route_whole_from_30_cells(self):

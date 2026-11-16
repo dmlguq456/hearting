@@ -57,8 +57,8 @@ transition, with no timer; a successor that took over keeps the same watch. A lo
 ends without asking is not lost: a reason that comes during a look is taken up when it ends, and
 the second's pause after an attempt that ended unsafe (or a reading the backend did not answer)
 ends in one more look. While a newer host is installed and not yet taken,
-the tidy-notice slot shows one lowest-priority line (`session_shell.upgrade_pending`),
-never over another notice; beside the native area the panel's thin rule that parts the
+the tidy-notice slot shows one lowest-priority line (`session_shell.upgrade_pending`, dim and
+without `⚠`, as a notice that leaves the person nothing to do), never over another notice; beside the native area the panel's thin rule that parts the
 session's content from the head goes with it, and nothing else on the screen changes.
 A popup stands over the window: the panel under it keeps its notice slot.
 The host asks the PTY owner for a successor only at a safe moment: idle, an
@@ -160,9 +160,10 @@ input/relay ownership.
 
 The approved v3.3 shell opens as a right Hearting work panel (left by choice,
 or under the native area by choice). Spec E9 rule 49 folds and unfolds it: the
-fold button `»` (`«` for a left panel, `▾` under the native area, the bottom
-layout or a side panel opened where it cannot stand beside) on the panel's last
-row inside folds it. Folded there is one form, by itself or by hand, beside or
+fold button `▾` at the right end of the panel's last row inside folds it (11-16, the person:
+"접는게 하단 접힘인데, 여전히 화살표가 우측이고, 위치 자체도 직관적이지 않음": it points where the panel
+folds to, the strip under the native area, in every placement, and stands where the strip's `▴`
+opens it again, so folding and opening are one place). Folded there is one form, by itself or by hand, beside or
 under: a strip under the native area, which keeps the whole width (the native
 is told its new size through the same PTY resize a window resize uses). The
 strip is one row (11-15, as the person changed rule 49 (c): "전체를 한줄로만"), whatever the
@@ -217,7 +218,9 @@ editing controls in all three harnesses, including startup and restoration.
 The panel follows the 2026-11-11 unified layout (the C3 draft the person
 chose), placed by the C6 rule: what is always there sits at the top, what
 comes and goes below it; the sections stand from the top one after another, and
-MESSAGES and MEM keep to the panel's bottom, right above the `5h`/`7d` row, so the
+MESSAGES and MEM keep to the panel's bottom, above the `5h`/`7d` row (beside the native area one thin
+rule, a section head's rule in its color, parts them from that row: 11-16, the person: "MEM과 가장
+하단을 구분하는 줄이 필요"; short of rows it goes before any content row), so the
 rows left over stand between the sections above them and MESSAGES (the person's own
 word, 2026-11-11, restored 2026-11-15; without MESSAGES MEM keeps to the bottom, with
 neither the rows left over are below the last section). The top border carries Fleet's row head for this
@@ -229,8 +232,8 @@ as on Fleet's session row); the state has no word, its glyph and number share th
 state's color, and the three glyph shapes still differ in `mono` and under
 `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
 the number; the glyph stays. Right of that head the border is the line alone:
-the gear `⚙` stands at the right end of the panel's last row inside, three cells
-right of the fold button, beside 5h/7d and the model windows (`5h … │ 7d … │
+the gear `⚙` stands on the panel's last row inside, three cells left of the fold button `▾`
+at its right end, beside 5h/7d and the model windows (`5h … │ 7d … │
 fable 70%`, the model word in its model color), and that row stays however
 short rows run; short of cells it gives way whole value by whole value: the
 reset times, then 5h, then the model values, then 7d. Claude's statusline
@@ -268,7 +271,10 @@ native area and under it alike (the folded strip has no frame: only its state gl
 setting `rule motion` picks (11-15). While the session runs (an answer being typed in included):
 `rule` (the default) keeps the outer frame still and lit one step below the running color (187;
 `BORDER_LIT`) and passes a light over the thin head rule: its middle five cells brightest and four
-on each side one shade down each, out past one end and back in 2.6 seconds, then the dark rule
+on each side one shade down each (`FACES.*.scan`, 11-16, the person: "너무 과하게 은은해서 보이지도 않음": the
+gray ramp, no longer the lit frame's vanilla whose khaki steps sank beside it and whose last step stood
+an L* of 4 from the still rule; on a dark or unknown face 255 in the middle, a step brighter than the
+body text, then 252, 249, 246 and 243, an L* of about 11 apart; on a light one 236, 238, 240, 242, 244), out past one end and back in 2.6 seconds, then the dark rule
 rests one second and the light comes in again on the same side (a panel whose head rule gave way
 for rows, and the bottom layout, which has none, move nothing but the glyph); `border` sends one
 bright arc round the frame clockwise, its head the running color and its tail four shades down
@@ -285,10 +291,12 @@ in 24-bit color (when `COLORTERM` says the terminal takes it) or three in 256 co
 time, each for an equal stretch, starting at the frame's waiting red, and the head rule stays the
 plain thin rule; the steward `⚑` keeps its own blink. Idle and an unknown state keep the still
 neutral frame under every value. What waits for the person's answer blinks (11-15, the person: "대기 중인건
-점멸을 시키자" / "질문만"), whatever the session's state: between two reds, `FACES.*.waitBlink` (174 then
-131 on a dark or unknown face, 131 then 174 on a light one; the person tunes them on the installed
-copy), never off and always readable, on the breath's beat (the lit red through the breath's brighter
-half, frames 36-11 of its 48, the other through 12-35: a change every 2.4 seconds) and on the tick
+점멸을 시키자" / "질문만"), whatever the session's state: between two reds, `FACES.*.waitBlink` (217 then
+95 on a dark or unknown face, an L* gap of 34; 88 then 167 on a light one, a gap of 28; the person
+tunes them on the installed copy), never off and always readable, on Fleet's own one-second beat from
+the clock (`render_cells._blink_phase`; `WAIT_BLINK` 10 spinner frames: the lit red through the even
+second, the other through the odd one; 11-16, the person on v4.40.0: "점멸은 안하는데" — 174 and 131, an
+L* gap of 15, changing every 2.4 seconds on the breath's beat, did not read as a blink) and on the tick
 that turns it, which runs folded too and wakes for nothing while no answer waits. It is the red
 letters of the question answered here (its first row, its choices' row and `↵ answer · Ctrl+]`), the
 `◑` of one answered elsewhere and the guide line's count (`1 QUESTIONS · answer below`, its count in
@@ -296,7 +304,7 @@ the wait's red), and the folded strip's `◑답 대기 N`; never the head's stat
 count, the route box, an answer on its way or anything in a popup. A beat writes those cells alone
 (the moving frame's cells, a run at a time). Nothing blinks with `rule motion` `off`, in `mono`, under
 `NO_COLOR`, in eight colors or on the settings screen. Every value is a constant in one place in `panel-view.cjs`; those
-a person tunes stand at its top (the rule's light `RULE_PEAK` 5, `RULE_FADE` 4, `RULE_SCAN` 26
+a person tunes stand at its top (the blink's `WAIT_BLINK` 10 frames; the rule's light `RULE_PEAK` 5, `RULE_FADE` 4, `RULE_SCAN` 26
 frames, `RULE_REST` 10 frames, the lit frame `BORDER_LIT` 1; the wave `WAVE_COUNT` 3, `WAVE_LAP` 56
 frames, `WAVE_STEPS` 10, `WAVE_FLOOR` 0.3, `WAVE_MIN` 24; the arc `BORDER_ARC` 1/4, `BORDER_LAP` 60
 frames), the breath and its shade count with the other `BORDER_*`, the colors in `FACES.*.orbit`,
@@ -361,7 +369,13 @@ there too; narrower than 30 cells the labels go first), Fleet's title (bold,
 in the session's harness color, Fleet's `hb_*`, on every row; plain without
 color, the weight kept without color as the steward's `⚑`) and NOW (bright
 while the session works or waits), each on as many rows as it needs, then a
-tidy notice; one empty row then parts the head from the sections. The bottom
+tidy notice (11-16, the person: "알림이 알림이 아니라 경고 같아서": a result that ended well and leaves the
+person nothing to do, which its writer marks `done`, is one or two dim rows without `⚠`, the machine's
+own words left out of the panel's line (the `[tidy]` tag, the batch id, the undo command, a byte or rowid
+range) while the line the session receives stays whole; a notice that leaves the person something to do,
+a failure, a compaction whose continue could not be typed, or one written without the mark keeps `⚠` in
+the caution color on up to three rows; the folded strip by the same rule); one empty row then parts the
+head from the sections. The bottom
 layout keeps the metadata row (or rows) first and one content row
 (`title │ NOW …`, each keeping at least half of what is left).
 
@@ -384,7 +398,7 @@ box too, the routes popup with that route unfolded; the box's top line the route
 popup; a request row the MESSAGES popup).
 
 - QUESTIONS: the count is the answer wait's (the `◑답 대기 N` row is merged into
-  it, in the question's rose), then the answers on their way (one line each),
+  it, in the question's rose), then the answers sent (one line each, ten minutes from when it was sent),
   the next question's summary (its first row `◑ …` and its choices on one row
   `1 label (recommended) · 2 … · +2`, or its first two rows) and, for a wait
   answered elsewhere, where (`1 QUESTIONS · answer below`). The question a press
@@ -445,8 +459,11 @@ popup; a request row the MESSAGES popup).
   stands over a `Checking` row, and a known empty list draws no box. The `route line`
   setting picks what a route keeps in its one-row form short of cells: `time` the
   elapsed time, `model` its context.
-- MESSAGES: the recent messages, one row each (`← [e7] text`), three at most;
-  `+N` counts the rest. The requests stand once, in the route box (above); the
+- MESSAGES: the recent messages, two rows each as v4.36.4 drew them (spec rule 31, restored 11-16, the
+  person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in
+  its direction's color, the other session's number, then dim harness, time, kind and a sent one's
+  delivery state; short of cells kind, harness and time go first) and, two cells in, the text's first
+  line in the body color (`…` where it goes on); five at most (`MESSAGES_MAX`), `+N` counts the rest. The requests stand once, in the route box (above); the
   popup reads both whole, the requests first (a request's numbers, reports and
   sealed body; a markdown table in the body drawn as aligned columns by Fleet's one table rule,
   `transcript.table_parts`, its other lines wrapped as before). A received message comes as one line
@@ -464,13 +481,16 @@ popup; a request row the MESSAGES popup).
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
 empty rows and a value's further rows (title, NOW, a route's title); every other
-section down to two rows, then to one, the lowest first (MEM, MESSAGES; the
-question's summary keeps one row and the guidance line goes); the
-structural rows (the empty row inside the metadata, the head's rule); then the
+section down to two rows, then to one, the lowest first (MEM; the question's action row,
+then its summary keeps one row and the guidance line goes); the
+structural rows (the empty row inside the metadata, the head's rule); then every message takes the
+one-row form (`← [e7] text`; 11-16, v4.36.4's places and order: a body keeps its one row, then the one-row
+form, then fewer messages); then the
 route box's own steps, every route at the same step (v4.36.4, spec rules 34 (b), 38,
 48 (c)): the context rows fold into the first rows (percent and time at the right,
 no gauge) and the workers take one row each, the workers go (the kind row ends with
-`· worker N`), the kind rows go, every route takes one row; then the box shows fewer
+`· worker N`), the kind rows go, every route takes one row; then fewer messages show, the
+newest staying, down to one; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
 what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves
 nothing else); then Git; then the route box (v4.36.4's place for it, before the running
@@ -558,15 +578,16 @@ exist. The display is as fresh as that cache; the routes popup reads Fleet's own
 table and route page (owner, evidence summary, paths) for them.
 The MESSAGES section shows the latest peer messages (`←` received
 from the exact session's retained received inputs, `→` sent from this session's
-own ledger shard and its 200-character summary), one row each (the arrow, the
-other session's number, the text); the MESSAGES popup reads each with its head (the
+own ledger shard and its 200-character summary), two rows each (the head and the text's first
+line, below); the MESSAGES popup reads each with its head (the
 arrow in its direction's color, the other session's number, then dim harness,
 `HH:MM` today or `MM-DD`, the record's kind and a sent one's delivery state:
 `delivered`/`sent` dim, `not delivered` (the recipient was never resolved; no age) in the caution color,
 `failed` red) and, two cells in, the text in the body color from its first
 meaningful words (leading bracket frames and heading marks left out, nothing
-else changed), the newest first. Three show in the panel at most, however many
-rows are left (`MESSAGES +2` counts the rest); short of rows fewer show from the
+else changed), the newest first; the panel draws the same head and that text's first line. Five
+show in the panel at most, however many rows are left (`MESSAGES +2` counts the rest); short of
+rows they take the one-row form, then fewer show from the
 oldest. Two limits differ: the source keeps a received input's first 384
 characters and a sent message's 200-character summary, never the whole payload;
 the popup never cuts that retained text further: a word wider than a row, such
@@ -713,7 +734,9 @@ record's `submitted`/`received`) the popup closes and the question is one line
 `✓ answer sent` in the passing green of a route's `✓`, the `·` dim, what was sent
 in plain text, a secret `•••`),
 `Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
-it as sent); the line goes when its session takes the answer, and a failed
+it as sent); the line stays ten minutes from when it was sent (11-16, the person: "답 보냄도 한
+5~10분은 유지하도록 해두자"; `SENT_KEEP_MS` in `block-input.cjs`), its session having the answer or not,
+and goes at the first update or paint after that (no timer of its own), and a failed
 delivery brings the question back with its existing word. Answering returns
 focus to the native input, and one lone Esc or Enter within ten seconds of the
 answer is taken by the shell (never the native's interrupt of a running turn,

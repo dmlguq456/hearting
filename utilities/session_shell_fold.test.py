@@ -25,34 +25,35 @@ const draw=o=>v.render({width:40,height:20,side:true,model,state:'idle',harness:
 const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
 for(const extra of [{},{routeDetail:true}]){
  const r=draw(extra),rows=text(r);
- // (a) The top border is the line alone right of the head; (a), (b) the last row inside ends `»   ⚙`.
+ // (a) The top border is the line alone right of the head; (a), (b) the last row inside ends `⚙   ▾`.
  assert(!rows[0].includes('⚙')&&rows[0].endsWith('─┐'),rows[0]);
- assert(rows.at(-2).endsWith('»   ⚙ │')&&rows.filter(s=>s.includes('⚙')).length===1,rows.join('\n'));
+ assert(rows.at(-2).endsWith('⚙   ▾ │')&&rows.filter(s=>s.includes('⚙')).length===1,rows.join('\n'));
  const fold=r.hits.find(h=>h.action==='fold'),gear=r.hits.find(h=>h.action==='settings');
- // The presses: `»` at panel column 33, `⚙` at 37; the cell between them is neither's.
+ // The presses: `⚙` at panel column 33, `▾` at 37; the cells between them are neither's.
  assert.deepEqual([fold.row,gear.row],[18,18]);
- assert(fold.left<=33&&fold.right>=33&&gear.left<=37&&gear.right>=37&&fold.right<35&&gear.left>35,JSON.stringify([fold,gear]));
+ assert.deepEqual([fold.left,fold.right,gear.left,gear.right],[36,38,32,34]);
+ assert(gear.left<=33&&gear.right>=33&&fold.left<=37&&fold.right>=37&&gear.right<35&&fold.left>35,JSON.stringify([fold,gear]));
  // Both marks dim, as the panel's labels.
- const last=r.rows.at(-2);assert(last.find(x=>x.text==='⚙').dim&&last.find(x=>x.text==='»').dim);
+ const last=r.rows.at(-2);assert(last.find(x=>x.text==='⚙').dim&&last.find(x=>x.text==='▾').dim);
 }
 // 5h/7d share the row: whole with room, their reset times going first when short.
 assert(text(draw({}))[18].startsWith('│ 5h 12%(↻ 2h) │ 7d 66%(↻ 5d)'));
 const narrow=text(v.render({width:32,height:20,side:true,model,state:'idle',questions:()=>[]}));
-assert(narrow.at(-2).startsWith('│ 5h 12% │ 7d 66%')&&narrow.at(-2).endsWith('»   ⚙ │'),narrow.at(-2));
+assert(narrow.at(-2).startsWith('│ 5h 12% │ 7d 66%')&&narrow.at(-2).endsWith('⚙   ▾ │'),narrow.at(-2));
 // The row stays however short the rows run (the head's last rows go first, boxes stay closed).
-for(let h=6;h<=14;h++){const rows=text(draw({height:h}));assert(rows.at(-2).endsWith('»   ⚙ │'),h+'\n'+rows.join('\n'));
+for(let h=6;h<=14;h++){const rows=text(draw({height:h}));assert(rows.at(-2).endsWith('⚙   ▾ │'),h+'\n'+rows.join('\n'));
  assert.equal(rows.filter(s=>s.includes('╭')).length,rows.filter(s=>s.includes('╰')).length,h+'\n'+rows.join('\n'));}
 // The settings editor keeps its own last row (Esc), no fold button.
-assert(!text(draw({settings:{index:0,value:v.defaults}})).join('').includes('»'));
-// (e) The bottom layout: `▾   ⚙`; a left panel folds with `«`.
+assert(!text(draw({settings:{index:0,value:v.defaults}})).join('').includes('▾'));
+// (e) The bottom layout and a left panel: the same `⚙   ▾`.
 const bottom=text(v.render({width:80,height:14,side:false,model,state:'idle',configuration:{layout:'bottom'},questions:()=>[]}));
-assert(bottom.at(-2).endsWith('▾   ⚙ │'),bottom.join('\n'));
-assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('«   ⚙ │'));
+assert(bottom.at(-2).endsWith('⚙   ▾ │'),bottom.join('\n'));
+assert(text(draw({configuration:{position:'left'}})).at(-2).endsWith('⚙   ▾ │')&&!text(draw({configuration:{position:'left'}})).join('').match(/[»«]/));
 // A side panel opened by hand where it cannot stand beside opens under the native area: `▾`
 // there too (the host draws it with `side:false`; the configured layout stays `side`).
 for(const position of ['right','left']){
  const under=v.render({width:90,height:14,side:false,model,state:'idle',configuration:{layout:'side',position},questions:()=>[]});
- assert(text(under).at(-2).endsWith('▾   ⚙ │')&&!text(under).join('').match(/[»«]/),text(under).join('\n'));
+ assert(text(under).at(-2).endsWith('⚙   ▾ │')&&!text(under).join('').match(/[»«]/),text(under).join('\n'));
 }
 """)
 
@@ -69,7 +70,7 @@ const model={tag:'[e9]',repo:[P('hearting/')],quota};
 const last=w=>{const r=v.render({width:w,height:20,side:true,model,state:'idle',harness:'claude',questions:()=>[]});return r.rows.at(-2);};
 const text=row=>row.map(x=>x.text).join('');
 const want=[[60,'5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 70%'],[40,'5h 12% │ 7d 66% │ fable 70%'],[32,'7d 66% │ fable 70%'],[26,'7d 66%'],[15,'']];
-for(const [w,s] of want){const t=text(last(w));assert(t.startsWith('│ '+s+(s?' ':''))&&t.endsWith('»   ⚙ │')&&!t.includes('…'),w+' '+t);}
+for(const [w,s] of want){const t=text(last(w));assert(t.startsWith('│ '+s+(s?' ':''))&&t.endsWith('⚙   ▾ │')&&!t.includes('…'),w+' '+t);}
 // The model word keeps its model color; nothing of the row is cut mid-value.
 assert.equal(last(40).find(x=>x.text==='fable ').foreground,176);
 // Folded, the strip's one row carries the same values (spec rule 49 (c), 11-15 one row): short of cells

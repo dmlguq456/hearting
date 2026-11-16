@@ -198,7 +198,7 @@ and its choices), the route box (`╭─ 4 ROUTE │ 2 REQUEST ─╮`: every ro
 now with its role, harness, model and effort, its `CTX` gauge with the time after it, its
 title, its kind and where it stands, its live workers in a smaller box under it, then the
 requests this session sent or received),
-`MESSAGES +3` (three messages) and `MEM` (the two newest saved memories of
+`MESSAGES +3` (up to five messages, each its head — who, harness, time, kind — and its first line) and `MEM` (the two newest saved memories of
 this repository and global ones, each `◆` durable or `◇` working, then its scope and kind), each
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
 routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
@@ -206,10 +206,11 @@ machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The qu
 answer here now reads in rose letters, on no fill: its first line, its choices as text
 (`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors, bold in
 mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
-While an answer waits those red letters, and the folded strip's `◑to answer N`, go slowly between
-two reds on the waiting frame's breath (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
-question is one line, `✓ answer sent` in the passing green and what you chose
-after it. Short of rows the other sections step down to one row first, then the route
+While an answer waits those red letters, and the folded strip's `◑to answer N`, blink between
+two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
+question is one line for ten minutes, `✓ answer sent` in the passing green and what you chose
+after it. A tidy result that ended well reads as one dim line; only a notice that leaves you something to do
+keeps the `⚠` caution look. Short of rows the other sections step down to one row first, then the route
 box folds its routes (context into the first row, then the kind row, then one row each)
 and scrolls in place under the wheel, its border counting what it hides. The ROUTE
 popup is Fleet's own table at the popup's width (a route unfolded
@@ -248,8 +249,8 @@ look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
 the previous view, and Defaults previews the defaults. Drag the side boundary
 to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
-The default is a 40-column side panel. **»** beside the gear (**▾** under the
-native area) folds it into a strip under the native area, which gets the whole
+The default is a 40-column side panel. **▾** at the right end of its last row, right of the gear,
+folds it into a strip under the native area (whose **▴** opens it from the same corner), which gets the whole
 width back: one row at any window height, `● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━──── 58% │
 5h 12% │ 7d 66% │ ◑to answer 1 │ 3 ROUTE ⠏2 ✕1 │ MESSAGES ← [e7] → [73]` with **▴** at its right
 end (the wait only while you owe an answer, compaction about to happen or a tidy notice in its

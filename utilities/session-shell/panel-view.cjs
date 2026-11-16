@@ -16,6 +16,13 @@ const RULE_PEAK=5,RULE_FADE=4,RULE_SCAN=26,RULE_REST=10,BORDER_LIT=1;
 const WAVE_COUNT=3,WAVE_LAP=56,WAVE_STEPS=10,WAVE_FLOOR=0.3,WAVE_MIN=24;
 // `border` (#1639): one bright arc, BORDER_ARC of the frame long, round once every BORDER_LAP frames.
 const BORDER_ARC=1/4,BORDER_LAP=60;
+// 11-16 (panel polish 1116, the person on v4.40.0: "점멸은 안하는데"): what waits for the person's answer blinks
+// on Fleet's own beat (render_cells `_blink_phase`): WAIT_BLINK spinner frames (10 = 1 s, the clock's even
+// second) in the lit red of `FACES.*.waitBlink`, as many in its other red.
+const WAIT_BLINK=10;
+// 11-16 (the person: "최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): MESSAGES shows the newest MESSAGES_MAX
+// messages at most, each its head row and its first line (spec rule 31).
+const MESSAGES_MAX=5;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
   position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
@@ -32,9 +39,11 @@ const FACES={
     // brightest first (the session spinner's vanilla, the running frame's color) down to the one
     // beside the neutral frame gray (`border`'s arc, `rule`'s lit frame, `scanners`' wave in 256
     // colors); the wave's two ends in 24-bit color (the still frame's gray, the brightest); the head
-    // rule's light, dimmest first; a waiting frame's reds, brightest first (the frame's waiting
-    // red), in 256 colors, and its two ends in 24-bit color.
-    orbit:[230,187,144,101],waveRGB:[[128,128,128],[255,255,215]],scan:[243,101,144,187,230],
+    // rule's light, dimmest first (11-16, the person: "너무 과하게 은은해서 보이지도 않음": no longer the lit
+    // frame's own vanilla, whose khaki steps sank beside it, but the gray ramp from the still rule's gray up
+    // to a head a step brighter than the body text, in even steps); a waiting frame's reds, brightest first
+    // (the frame's waiting red), in 256 colors, and its two ends in 24-bit color.
+    orbit:[230,187,144,101],waveRGB:[[128,128,128],[255,255,215]],scan:[243,246,249,252,255],
     breath:[217,210,174],breathRGB:[[255,175,175],[215,135,135]],
     // 11-15 (panel polish 3): while a popup stands, everything outside it reads in `veil` alone.
     veil:239,
@@ -46,13 +55,14 @@ const FACES={
     bright:255,popup:236,popupLine:250,popupFloor:247,chosen:24,
     // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): what waits for the person's answer (the
     // question's red letters in QUESTIONS, `◑답 대기 N` on the folded strip) goes between these two reds,
-    // the lit one first, on the waiting frame's breath (lit while the breath is in its brighter half).
-    waitBlink:[174,131]},
+    // the lit one first, on Fleet's one-second beat (WAIT_BLINK). 11-16 ("점멸은 안하는데"): 174 and 131 were
+    // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
+    waitBlink:[217,95]},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
-    orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[251,151,108,65,22],
+    orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
-    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153,waitBlink:[131,174]},
+    veil:250,bright:232,popup:254,popupLine:240,popupFloor:241,chosen:153,waitBlink:[88,167]},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -174,11 +184,11 @@ function breathStep(tick,steps){
   const slots=2*(steps-1),s=Math.floor(mod(tick,BORDER_BREATHE)*slots/BORDER_BREATHE);
   return s<steps?s:slots-s;
 }
-// 11-15: the waiting blink on the breath's beat: lit (`FACES.*.waitBlink[0]`) through the breath's brighter
-// half (its first and last quarter, the frame's brightest shade in the middle of it), the other red
-// through the darker half; and the next frame it changes at.
-function blinkTone(tick){const q=mod(tick,BORDER_BREATHE),Q=BORDER_BREATHE/4;return q<Q||q>=3*Q?0:1;}
-function blinkNext(tick){const t=Math.trunc(tick),q=mod(t,BORDER_BREATHE),Q=BORDER_BREATHE/4;return t+Math.ceil(q<Q?Q-q:q<3*Q?3*Q-q:BORDER_BREATHE-q+Q);}
+// 11-16: the waiting blink on Fleet's beat, from the clock (the spinner frame), not from when a state began:
+// lit (`FACES.*.waitBlink[0]`) through the even second, the other red through the odd one; and the next
+// frame it changes at.
+function blinkTone(tick){return mod(Math.floor(Math.trunc(tick)/WAIT_BLINK),2)===0?0:1;}
+function blinkNext(tick){return (Math.floor(Math.trunc(tick)/WAIT_BLINK)+1)*WAIT_BLINK;}
 // The cells of the parts marked `blink` in rows of parts (row, column, glyph, the part): one per glyph,
 // spaces and a glyph a zero-width mark joins left out (the host swaps one cell at a time).
 function blinkCells(rows,measure,clean,first=0,last=rows.length){
@@ -254,7 +264,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     return items;
   }
   let inner=width-4,routeArea=null;const content=[],hits=[],edge=[];
-  // 11-15: what waits for the person's answer blinks between two reds on the waiting breath's beat (spec
+  // 11-15: what waits for the person's answer blinks between two reds on Fleet's one-second beat (11-16; spec
   // rule 47's tick; not with `rule motion` off, mono, NO_COLOR, fewer than 256 colors or the settings).
   const waitBlinks=!settings&&cfg.rule_motion!=='off'&&model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
   const blinking=part=>waitBlinks&&part.role==='accent'?{...part,blink:true}:part;
@@ -353,7 +363,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   function foldedView(){
     const own=LIVE[state];
     const plain=model.no_color===true||cfg.theme==='mono';
-    // 11-15: the answer wait blinks on the waiting breath's beat (not with `rule motion` off, mono, NO_COLOR
+    // 11-15: the answer wait blinks on Fleet's one-second beat (not with `rule motion` off, mono, NO_COLOR
     // or fewer than 256 colors, as the frame's breath).
     const blinking=cfg.rule_motion!=='off'&&!plain&&(model.colors??256)>=256;
     const P=v=>Array.isArray(v)?v.filter(p=>p&&typeof p==='object'):[];
@@ -383,7 +393,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // The answer wait, then compaction imminent and a tidy notice, in the same place.
     const wait=model.wait?[{...text(clean(model.wait),'g_blocked'),role:'accent',...(model.no_color===true?{bold:true}:{}),...(blinking?{blink:true}:{})}]:[];
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const notices=[...(model.warning?[[text('⚠ ','lvl_r'),text(clean(model.warning),'lvl_r')]]:[]),...(tidy&&!model.answerable?[[text('⚠ ','lvl_y'),text(tidy,'lvl_y')]]:[])];
+    // 11-16 (the person: "알림이 알림이 아니라 경고 같아서"): a notice of something that ended well (`tidy_quiet`)
+    // reads dim, without `⚠`; what leaves the person something to do keeps the caution look.
+    const notices=[...(model.warning?[[text('⚠ ','lvl_r'),text(clean(model.warning),'lvl_r')]]:[]),
+      ...(tidy&&!model.answerable?[model.tidy_quiet===true?[text(tidy,'dim')]:[text('⚠ ','lvl_y'),text(tidy,'lvl_y')]]:[])];
     // The routes: the count first, the name tag dim, then the counts by state.
     const counted=routes.slice(0,Math.max(0,model.route_count??routes.length));
     const total=Number.isInteger(model.route_total)&&model.route_total>0?model.route_total:counted.length;
@@ -454,30 +467,30 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const groupsPainted=['head',...(groups.some(g=>g.parts.some(p=>p.text==='CTX '))?['context']:[]),...(body.some(part=>quotaParts.has(part))?['quota']:[]),
       ...(wait.length&&body.some(p=>wait.includes(p))?['wait']:[]),...(groups.some(g=>g.route)?['route']:[])];
     const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
-    // The wait's cells, swapped by the host between the two reds on the breath's beat (only those cells).
-    const anchored=Number.isFinite(since),local=t=>anchored?Math.trunc(t)-Math.trunc(since):Math.trunc(t);
+    // The wait's cells, swapped by the host between the two reds on Fleet's beat (only those cells).
     const cells=blinkCells(out,measure,clean,0,1);
     const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background};
-    const motion=cells.length?{cells,at:tick=>appearance([cells.map(c=>({...c.blink,text:c.ch,blinkTone:blinkTone(local(tick))}))],look,paint)[0],
-      next:tick=>Math.trunc(tick)-local(tick)+blinkNext(local(tick))}:null;
+    const motion=cells.length?{cells,at:tick=>appearance([cells.map(c=>({...c.blink,text:c.ch,blinkTone:blinkTone(tick)}))],look,paint)[0],
+      next:tick=>blinkNext(tick)}:null;
     return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0||!!motion,spins,motion,folded:true};
   }
-  // Spec rule 49 (a), (b), (e): the panel's last row inside carries the gear `⚙` (dim) at its
-  // right end and, three cells left of it, the fold button: `»` beside the native area (`«`
-  // for a left panel), `▾` under it (the bottom layout, or a panel opened by hand where it
-  // cannot stand beside). Their presses stay apart (the cell between them is neither's). The
-  // row stays however short rows run, so the panel can always fold; whatever shares it
+  // Spec rule 49 (a), (b), (e): the panel's last row inside carries the fold button at its right end and,
+  // three cells left of it, the gear `⚙` (both dim). 11-16 (the person: "접는게 하단 접힘인데, 여전히 화살표가
+  // 우측이고, 위치 자체도 직관적이지 않음"): the button points where the panel folds to, `▾` (the strip under the
+  // native area) in every placement, and stands where the strip's `▴` opens it again (a right panel's last
+  // row's right end: folding and opening are one place). Their presses stay apart (the cell between them is
+  // neither's). The row stays however short rows run, so the panel can always fold; whatever shares it
   // (5h/7d) takes the cells left of the buttons.
-  const foldMark=side?cfg.position==='left'?'«':'»':'▾';
+  const foldMark='▾';
   const BUTTONS=5;
   function footRow(left=[]){
     const at=content.length+1,room=Math.max(0,width-4-BUTTONS-1);
     const all=left.reduce((n,p)=>n+measure(clean(p.text)),0);
     const kept=all<=room?left:room>=4?[...clip(left,room-1).parts,{...(left.at(-1)||text('')),text:'…'}]:[];
     const used=kept.reduce((n,p)=>n+measure(clean(p.text)),0);
-    hits.push({row:at,left:width-8,right:width-6,action:'fold'});
-    hits.push({row:at,left:width-4,right:width-2,action:'settings'});
-    return [...kept,text(' '.repeat(Math.max(0,width-4-BUTTONS-used))),text(foldMark,'dim'),text('   '),text('⚙','dim')];
+    hits.push({row:at,left:width-8,right:width-6,action:'settings'});
+    hits.push({row:at,left:width-4,right:width-2,action:'fold'});
+    return [...kept,text(' '.repeat(Math.max(0,width-4-BUTTONS-used))),text('⚙','dim'),text('   '),text(foldMark,'dim')];
   }
   // The last row placed; beside the native area it stands on the panel's last row inside.
   // Rows past the panel's own give way to it: the head's last rows first (the first head row
@@ -703,9 +716,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(title)field('TITLE',[{...text(title,own),bold:true}]);
       if(now)field('NOW',line(now,nowKey));
       if(tidy&&!asking){
-        const rows=[];wrap(line('⚠ '+tidy,'lvl_y'),4,undefined,rows);
-        const kept=rows.slice(0,3);
-        if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…','lvl_y')];}
+        // 11-16: a notice of something that ended well (`tidy_quiet`) is one or two dim rows without `⚠`; what
+        // leaves the person something to do keeps the caution look on up to three rows.
+        const quiet=model.tidy_quiet===true,key=quiet?'dim':'lvl_y',most=quiet?2:3;
+        const rows=[];wrap(quiet?line(tidy,key):line('⚠ '+tidy,key),most+1,undefined,rows);
+        const kept=rows.slice(0,most);
+        if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…',key)];}
         top.push(...kept);
       }
       // One empty row parts the head from the route box below it (a head with no content has its rule).
@@ -729,9 +745,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
       if(model.warning)top.push(line(model.warning,'lvl_r'));
       if(tidy&&!asking){
-        const rows=[];wrap(line('⚠ '+tidy,'lvl_y'),2,undefined,rows);
+        const quiet=model.tidy_quiet===true,key=quiet?'dim':'lvl_y';
+        const rows=[];wrap(quiet?line(tidy,key):line('⚠ '+tidy,key),2,undefined,rows);
         const kept=rows.slice(0,1);
-        if(rows.length>kept.length){const fit=clip(kept[0],inner-1);kept[0]=[...fit.parts,text('…','lvl_y')];}
+        if(rows.length>kept.length){const fit=clip(kept[0],inner-1);kept[0]=[...fit.parts,text('…',key)];}
         top.push(...kept);
       }
       if(title||now){
@@ -1283,15 +1300,38 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       block.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};
     };
-    // MESSAGES (spec rules 31, 45 (b), 58): the recent messages, one row each (`← [e7] text`), three
-    // at most; `+N` counts the rest. The requests this session sent or received stand in the route box
-    // (above), once; the popup reads both whole.
+    // MESSAGES (spec rules 31, 45 (b), 58; 11-16, restored from v4.36.4, the person: "메시지 형식은 퇴행했네?
+    // ... 원래 형식으로 돌려. 3줄로 줄이라는게 아니라 원래는 3'건'으로 줄이자는 말이야"): a message takes two rows,
+    // its head (the direction arrow in its color, the other session's number, then dim harness, time, kind
+    // and a sent one's delivery state) and, two cells in, its first meaningful text in the body color on one
+    // row (`…` where it goes on). MESSAGES_MAX show at most however many rows are left; `+N` on the section
+    // head counts the rest. Short of rows (below) every message folds to the one-row form (arrow, number,
+    // text), then fewer show from the oldest. The requests this session sent or received stand in the route
+    // box (above), once; the popup reads both whole.
     const messages=painted(model.messages);
-    const messageLine=m=>cut([text(m.way,m.way==='←'?'lvl_g':'loc_repo'),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(String(m.body||m.text||''),'loc_repo')],inner);
+    let messageOne=false;
+    const arrowOf=m=>text(m.way,m.way==='←'?'lvl_g':'loc_repo');
+    const bodyOf=m=>String(m.body||m.text||'');
+    const messageLine=m=>cut([arrowOf(m),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(bodyOf(m),'loc_repo')],inner);
+    const messageTop=m=>{
+      const arrow=arrowOf(m),who=text(String(m.who||''),'loc_repo');
+      const delivery=Array.isArray(m.delivery)&&m.delivery[0]?[text(' · ','dim'),text(String(m.delivery[0]),m.delivery[1]||'dim')]:[];
+      const pieces=[m.harness?[text(' '+m.harness,'dim')]:[],m.when?[text(' · '+m.when,'dim')]:[],m.kind?[text(' · '+m.kind,'dim')]:[]];
+      // Short of cells kind, harness and time go first; the delivery state stays.
+      for(const drop of [[],[2],[2,0],[2,0,1]]){
+        const row=[arrow,text(' '),who,...pieces.flatMap((x,i)=>drop.includes(i)?[]:x),...delivery];
+        if(size(row)<=inner)return row;
+      }
+      return cut([arrow,text(' '),who,...delivery],inner);
+    };
+    const messageBody=m=>{
+      const body=wrapAll([text(bodyOf(m),'loc_repo')],inner-2),first=body[0]||[];
+      return [text('  '),...(body.length>1?cut([...first,text(' '),...body[1].slice(0,1)],inner-2):first)];
+    };
     const messageTotal=messages.length;
-    const messageHead=n=>{const hidden=messageTotal-Math.min(n,messageTotal);return sectionHead([],side?'MESSAGES':'messages',hidden>0?[text('+'+hidden,'loc_repo')]:[]);};
+    const messagesHead=n=>{const hidden=messageTotal-Math.min(n,messageTotal);return sectionHead([],side?'MESSAGES':'messages',hidden>0?[text('+'+hidden,'loc_repo')]:[]);};
     // The newest messages (in their order, the newest last).
-    const messageRows=n=>n>0?messages.slice(-n).map(messageLine):[];
+    const messageRows=n=>n>0?messages.slice(-n).flatMap(m=>messageOne?[messageLine(m)]:[messageTop(m),messageBody(m)]):[];
     // MEM (spec rule 46; 11-15 panel polish 5): the newest saved memory records of this repository and
     // the global ones together, newest first, two at most, one row each: `◆` durable or `◇` working
     // (`·` for a record that names no tier), then, dim, its scope and its kind as the memory system
@@ -1313,44 +1353,53 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
       {name:'ROUTE',on:!!routeTitle,box:true},
-      {name:'MESSAGES',on:messageTotal>0,max:3,head:()=>messageHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
+      {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
       {name:'MEM',on:memItems.length>0,max:2,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).map(memRow)}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
     const sectionRows=s=>s.name==='QUESTIONS'?questionRows():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():1+sectionRows(s).length;
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
-    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0;
+    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true;
+    // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
+    // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
+    // the fold button); short of rows it goes before any content row.
+    const footRule=()=>side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
     const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
-      +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+1;
+      +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
-    // Short of rows (spec rule 34 (b), 11-15): the empty rows and a value's further rows first (a route
-    // title's second row too); then every section but the route box down to two rows and then to one,
-    // the lowest first; then the structural rows. Then the route box's own steps (v4.36.4, spec rules
-    // 38, 48 (c)): every route's context row folds into its first row and, in the same step, its workers
-    // take one row each; the workers go (the kind row counts them); the kind rows go; every route takes
-    // one row; the box shows fewer routes and scrolls in place, down to one. Then Git, then the route
-    // box (v4.36.4's place for it: before the running jobs), then the running jobs; then MEM gives its
-    // row, then its name, then MESSAGES the same; QUESTIONS keeps its head and first
-    // row to the last; 5h/7d last of all. A step that freed more than it had to gives its rows back,
-    // the most important first.
+    // Short of rows (spec rule 34 (b), 11-15): the empty rows, the rule above the last row (11-16) and a
+    // value's further rows first (a route title's second row too); then MEM and the question step down
+    // (MEM to two rows, the question's action row; MEM to one row, the question's second row and the guide
+    // line); then the structural rows; then every message takes its one-row form (11-16, v4.36.4's places
+    // and order: a body keeps its one row, then the one-row form, then fewer messages). Then the route
+    // box's own steps (v4.36.4, spec rules 38, 48 (c)): every route's context row folds into its
+    // first row and, in the same step, its workers take one row each; the workers go (the kind row counts
+    // them); the kind rows go; every route takes one row; then fewer messages show, down to one; the box
+    // shows fewer routes and scrolls in place, down to one. Then Git, then the route box (v4.36.4's place
+    // for it: before the running jobs), then the running jobs; then MEM gives its row, then its name, then
+    // MESSAGES the same; QUESTIONS keeps its head and first row to the last; 5h/7d last of all. A step that
+    // freed more than it had to gives its rows back, the most important first.
     const gave=[];
     const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
     const lowest=['MEM','MESSAGES'];
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
+    give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
-    for(const down of [2,1])for(const name of [...lowest,'QUESTIONS']){
+    for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
       if(name==='QUESTIONS'){if(down===2)give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
         if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
       give(()=>kept[name]&&take[name]>down,()=>{take[name]--;},()=>{take[name]++;});
     }
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
+    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
     give(()=>keepCtx,()=>{keepCtx=false;},()=>{if(keepWorkers||!anyWorkers)keepCtx=true;});
     give(()=>anyWorkers&&keepWorkers&&!keepCtx,()=>{keepWorkers=false;},()=>{keepWorkers=true;});
     give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;});
     give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
     give(()=>keepGit,()=>{keepGit=false;},()=>{keepGit=true;});
     give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
@@ -1362,11 +1411,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit]);
+      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule]);
     for(const undo of gave.reverse()){
       const was=choices();undo();
       if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit]=v.slice(12);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule]=v.slice(12);}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
@@ -1379,7 +1428,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
       // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
-      if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)>budget-1)break;
+      if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)+(['MESSAGES','MEM'].includes(s.name)?footRule():0)>budget-1)break;
       if(s.box){
         // The rows the route box takes, for the host's wheel (panel rows, as hits count them).
         const {block,area}=routeBlockOf();
@@ -1391,8 +1440,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       into(s.head(),s.action,s.groups);
       sectionRows(s).forEach(row=>into(row,s.action));
     }
-    if(fill&&lower.length)while(content.length+lower.length<height-2-1)add([]);
+    const ruled=lower.length&&footRule()?1:0;
+    if(fill&&lower.length)while(content.length+lower.length+ruled<height-2-1)add([]);
     for(const row of lower)add(row.parts,row.action,row.groups);
+    if(ruled)add([{...text('─'.repeat(inner),'dim'),role:'messages'}]);
     // A reset time that does not fit goes whole, never as a cut `(↻ …`. Spec rule 49 (b): 5h/7d
     // share the last row with the fold button and the gear, which stay however short rows run.
     // Correction 7 (11-13): the model windows (Fable's) stand after 7d; short of cells the row
@@ -1503,13 +1554,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const y=rows.findIndex((r,i)=>i>0&&i<count-1&&r.some(part=>part.rule));
     if(y>0)for(let x=0;x<inner;x++)cells.push({row:y,col:2+x,ch:'─',rule:x});
   }
-  // 11-15: the waiting blink's cells (the QUESTIONS rows' red letters) ride the same motion.
+  // 11-15: the waiting blink's cells (the QUESTIONS rows' red letters) ride the same motion, on Fleet's beat (11-16).
   const framed=cells.length;
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(borderTick(tick))}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
-    next:tick=>Math.min(blinked?Math.trunc(tick)-borderTick(tick)+blinkNext(borderTick(tick)):Infinity,framed?frameNext(tick):Infinity)}:null;
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+    next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
       if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
       if(moving==='scanners')return Math.trunc(tick)+1;

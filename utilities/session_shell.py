@@ -666,6 +666,27 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
+_NOTICE_TAG = re.compile(r"^\[[^\]]{1,16}\]\s*")
+_NOTICE_BATCH = re.compile(r"^(?:묶음|batch)\s+[A-Za-z0-9][A-Za-z0-9._-]{0,63}:\s*")
+_NOTICE_RANGE = re.compile(r"(?:,\s*)?\b(?:byte|rowid)\s+[\d,]+–[\d,]+\s*/\s*\S+\s+[\d,]+")
+
+
+def quiet_notice_line(text):
+    """The panel's line for a tidy result that ended well (11-16): the words a person reads, without
+    the machine's own (the `[tidy]` tag, the batch id, the undo command and a byte or rowid range), under
+    the one lead word `session_shell.tidy_done`. The notice itself (what the session receives) is unchanged."""
+    line = " ".join(str(text or "").split())
+    at = line.rfind("mem tidy-undo")
+    cut = line.rfind(" — ", 0, at) if at >= 0 else -1
+    if cut >= 0:
+        line = line[:cut]
+    line = _NOTICE_BATCH.sub("", _NOTICE_TAG.sub("", line))
+    line = re.sub(r"\(\s*\)", "", _NOTICE_RANGE.sub("", line))
+    line = " ".join(line.split()).strip(" ·")
+    from fleet.config import ui_text
+    return ui_text("session_shell.tidy_done", text=line) if line else ""
+
+
 def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="", panel_lines=None, detail_lines=None):
     """Conceal Codex's thread-id field, and known native fields the common area painted.
 
@@ -1142,14 +1163,20 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # A result line (a continue that was not sent) otherwise waits for the next hook,
     # which in a cleared window is the person's next input. Display only. Its own
     # field: Claude's `notice` below is the native status row's segments.
-    notice, notice_paths = session_tidy.waiting_notice_display(seat, harness, sid)
-    panel["tidy_notice"] = _plain(notice, 400)
+    notice, notice_paths, notice_level = session_tidy.waiting_notice_display(seat, harness, sid, with_level=True)
+    # 11-16 (the person: "알림이 알림이 아니라 경고 같아서"): a line the writer marked as work that ended well
+    # (`done`) shows quietly (`tidy_quiet`: dim, no `⚠`), its inner words left out of the panel's line; the line
+    # the session receives stays whole. What leaves the person something to do keeps the caution look.
+    quiet = bool(notice) and notice_level == "done"
+    panel["tidy_notice"] = _plain(quiet_notice_line(notice) if quiet else notice, 400)
+    panel["tidy_quiet"] = quiet and bool(panel["tidy_notice"])
     # A newer installed release this window has not switched to yet, or a switch that could
-    # not carry the scrollback: the lowest-priority line, never over another notice.
+    # not carry the scrollback: the lowest-priority line, never over another notice (quiet too).
     panel["tidy_upgrade"] = False
     if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
         panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
         panel["tidy_upgrade"] = upgrade_note == "pending"
+        panel["tidy_quiet"] = True
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
