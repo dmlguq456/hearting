@@ -96,8 +96,8 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertRegex(text["session"], r"PEERS  \[\w+\]")
         # The README's opening pictures: one moment, the request and the route [4f]'s panel shows,
         # each Fleet list whole (nothing cut off below it).
-        # PEERS lists the newest link of each kind: the request [4f] sent [b2] stands as a REQUEST link.
-        self.assertRegex(text["peers"], r"\[4f\] claude +→ +\[b2\] codex +REQUEST")
+        # PEERS lists the newest link of each kind: the request [4f] sent [b2] stands as a PEER REQUEST link.
+        self.assertRegex(text["peers"], r"\[4f\] claude +→ +\[b2\] codex +PEER REQUEST")
         self.assertIn("Test run for [4f]", text["overview"])
         self.assertRegex(text["routes"], r"Rate limiting +staged 2/4 execute ●")
         self.assertIn("leg 1 · code dev", text["routes"])

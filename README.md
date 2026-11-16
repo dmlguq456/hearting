@@ -35,7 +35,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, and the request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.44.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, and, under a thin rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.45.1." width="100%">
 </p>
 <p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</sub></p>
 
@@ -65,7 +65,7 @@ layout, and per-runtime details are in
 [docs/session-panel.md](docs/session-panel.md).
 
 <p align="center">
-  <img src="docs/fleet/panel.png" alt="Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: the project status document in a popup in the middle of the window, with the one line, the decisions needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder and hearting v4.44.0." width="100%">
+  <img src="docs/fleet/panel.png" alt="Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: the project status document in a popup in the middle of the window, with the one line, the decisions needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder and hearting v4.45.1." width="100%">
 </p>
 <p align="center"><sub><b>STATUS pressed</b> — the project's status document opens whole in a popup; the rest goes gray. Demo data.</sub></p>
 
@@ -83,7 +83,7 @@ waiting on whom. Each has its own place in the panel and in Fleet.
 |---|---|---|---|---|
 | **QUESTIONS** | A question waiting for your answer or approval | An agent that needs you | When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where | Panel: the rose-bordered box · Fleet: QUESTIONS |
 | **ROUTE** | The work this session started: its stages, who runs each, and how each is checked | The session's owner, once a request needs a route | When the route finishes; its result stays one line until your next input or ten minutes | Panel: the route box · Fleet: ROUTES |
-| **REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box (`→` handed out, `◂` handed to you, `✓` finished), whole in the MESSAGES popup · Fleet: a PEERS link |
+| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box under a thin rule, each with the other session's number, harness, model, and effort (`→` handed out, `◂` handed to you, `✓` finished), whole in the MESSAGES popup · Fleet: a PEERS link |
 | **MESSAGES** | A short note, read and done | Any session | Nothing to close | Panel: MESSAGES · Fleet: the session page and PEERS |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover | Those links themselves | — | Fleet: PEERS |
 
@@ -101,12 +101,12 @@ when Hearting confirms the handover. A report is not an approval or an answer
 from you.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: in its route box, an arrow to [b2], Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: in its request box, an arrow from [4f], Test run, partial answer; under it its reply to [4f]." width="80%">
+  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: in its route box, under a thin rule, an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: in its PEER REQUEST box, an arrow from [4f] with its harness, model, and effort, Test run, partial answer; under it its reply to [4f]." width="80%">
 </p>
 <p align="center"><sub>The same request in the panel of the session that asked (<code>[4f]</code>) and the one asked (<code>[b2]</code>). Demo data.</sub></p>
 
 <p align="center">
-  <img src="docs/fleet/peers.png" alt="Fleet's PEERS: one card per session, grouped by project, with each owner's route and stage marks; below, the five links with their kind and time: a reply from [e8] to [d1], a steer from [4f] to [9c], a steer from [d1] to [e8], the REQUEST from [4f] to [b2], and a reply from [b2] to [4f]." width="100%">
+  <img src="docs/fleet/peers.png" alt="Fleet's PEERS: one card per session, grouped by project, with each owner's route and stage marks; below, the five links with their kind and time: a reply from [e8] to [d1], a steer from [4f] to [9c], a steer from [d1] to [e8], the PEER REQUEST from [4f] to [b2], and a reply from [b2] to [4f]." width="100%">
 </p>
 <p align="center"><sub>PEERS: which session asked, answered, or wrote to which, and when.</sub></p>
 

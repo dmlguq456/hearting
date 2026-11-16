@@ -35,7 +35,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자, [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.44.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자, 가는 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.45.1." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. 데모 데이터이며 대화는 예시입니다.</sub></p>
 
@@ -62,7 +62,7 @@ Fleet를 열고, **p**는 패널을 에이전트 화면 아래 띠로 접으며,
 있습니다.
 
 <p align="center">
-  <img src="docs/fleet/panel.png" alt="web-api 프로젝트 세션 [4f]의 창에서 REPO 줄의 현황 단추를 누른 모습: 창 가운데 팝업에 프로젝트 현황 문서가 뜬다. 한 줄 요약, 정해야 할 것, 다음 할 일, 최근 닫은 일. 뒤의 대화와 패널은 회색이고, 팝업 맨 아래 줄에 STATUS, ROUTE, MESSAGES. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.44.0." width="100%">
+  <img src="docs/fleet/panel.png" alt="web-api 프로젝트 세션 [4f]의 창에서 REPO 줄의 현황 단추를 누른 모습: 창 가운데 팝업에 프로젝트 현황 문서가 뜬다. 한 줄 요약, 정해야 할 것, 다음 할 일, 최근 닫은 일. 뒤의 대화와 패널은 회색이고, 팝업 맨 아래 줄에 STATUS, ROUTE, MESSAGES. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.45.1." width="100%">
 </p>
 <p align="center"><sub><b>현황 누르기</b> — 프로젝트 현황 문서가 팝업으로 전문이 뜨고 나머지는 회색이 됩니다. 데모 데이터.</sub></p>
 
@@ -80,7 +80,7 @@ Fleet를 열고, **p**는 패널을 에이전트 화면 아래 띠로 접으며,
 |---|---|---|---|---|
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 질문 | 사용자가 필요한 에이전트 | 사용자가 답할 때(패널이나 Fleet에서), 또는 일이 끝날 때. 다른 자리에서 답할 질문은 그 자리를 알려 줍니다 | 패널: 장미색 테두리 상자 · Fleet: QUESTIONS |
 | **ROUTE** | 이 세션이 띄운 일: 단계, 단계마다 맡은 쪽, 검증 | 요청이 route를 필요로 할 때 이 세션의 owner | route가 끝날 때. 결과는 다음 입력이나 10분까지 한 줄로 남습니다 | 패널: route 상자 · Fleet: ROUTES |
-| **REQUEST** | 다른 세션에 맡긴 일. 번호, 판, 보고가 붙습니다 | 맡기는 세션 | 상대 세션의 최종 보고나 거절, 또는 맡긴 쪽의 취소로. 일부 보고는 열어 둡니다 | 패널: route 상자의 줄(`→` 맡긴 일, `◂` 받은 일, `✓` 끝난 일), MESSAGES 팝업에 전문 · Fleet: PEERS의 연결 |
+| **PEER REQUEST** | 다른 세션에 맡긴 일. 번호, 판, 보고가 붙습니다 | 맡기는 세션 | 상대 세션의 최종 보고나 거절, 또는 맡긴 쪽의 취소로. 일부 보고는 열어 둡니다 | 패널: route 상자의 가는 선 아래 줄(상대 세션의 번호·하네스·모델·effort가 붙고, `→` 맡긴 일, `◂` 받은 일, `✓` 끝난 일), MESSAGES 팝업에 전문 · Fleet: PEERS의 연결 |
 | **MESSAGES** | 읽고 끝나는 짧은 글 | 어느 세션이든 | 닫을 것이 없습니다 | 패널: MESSAGES · Fleet: 세션 페이지와 PEERS |
 | **PEERS** | 메시지, 요청, 감독, 이어받음으로 이어진 세션들 | 그 이어짐 자체 | — | Fleet: PEERS |
 
@@ -96,12 +96,12 @@ API 시험을 다시 돌리고 보고해 달라고 해줘.” 요청에는 번�
 승인이나 사용자의 답이 아닙니다.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자에 [b2]로 가는 화살표와 Test run, partial answer, 끝난 검토. 그 아래 MESSAGES에 [b2]의 답과 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: 요청 상자에 [4f]에서 온 화살표와 Test run, partial answer, 그 아래 [4f]에 보낸 답." width="80%">
+  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자의 가는 선 아래에 [b2]로 가는 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 끝난 검토. 그 아래 MESSAGES에 [b2]의 답과 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: PEER REQUEST 상자에 [4f]에서 온 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 그 아래 [4f]에 보낸 답." width="80%">
 </p>
 <p align="center"><sub>같은 요청이 맡긴 세션(<code>[4f]</code>)과 맡은 세션(<code>[b2]</code>)의 패널에 보입니다. 데모 데이터.</sub></p>
 
 <p align="center">
-  <img src="docs/fleet/peers.png" alt="Fleet PEERS: 프로젝트별로 묶은 세션 카드와 owner의 route, 단계 표시. 아래 연결 다섯과 종류와 시각: [e8]이 [d1]에 보낸 reply, [4f]가 [9c]에 보낸 steer, [d1]이 [e8]에 보낸 steer, [4f]가 [b2]에 보낸 REQUEST, [b2]가 [4f]에 보낸 reply." width="100%">
+  <img src="docs/fleet/peers.png" alt="Fleet PEERS: 프로젝트별로 묶은 세션 카드와 owner의 route, 단계 표시. 아래 연결 다섯과 종류와 시각: [e8]이 [d1]에 보낸 reply, [4f]가 [9c]에 보낸 steer, [d1]이 [e8]에 보낸 steer, [4f]가 [b2]에 보낸 PEER REQUEST, [b2]가 [4f]에 보낸 reply." width="100%">
 </p>
 <p align="center"><sub>PEERS: 어느 세션이 어느 세션에 묻고 답하고 글을 보냈는지, 언제인지 봅니다.</sub></p>
 

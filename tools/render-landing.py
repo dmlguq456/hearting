@@ -781,21 +781,21 @@ TRACK_COLOR = {
 
 SHOTS = {
     # The README's pictures: one moment of one demo world (readme_captures.py).
-    "seat": (1128, 740, "A Claude Code session in project web-api, session [4f]. On the left an illustrative "
+    "seat": (1128, 830, "A Claude Code session in project web-api, session [4f]. On the left an illustrative "
              "conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report "
              "from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model "
              "Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the "
-             "Rate limiting route at 2/4 execute, its owner and its execute worker, and the request Test run to [b2] "
+             "Rate limiting route at 2/4 execute, its owner and its execute worker, and, under a thin rule, the peer request Test run to [b2] "
              "at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a "
              "global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line "
-             "the working folder and hearting v4.44.0."),
+             "the working folder and hearting v4.45.1."),
     "overview": (1440, 810, "Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, "
                  "Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run "
                  "for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with "
                  "their stage lines, staged 2/4 execute and staged 2/4 eval-asr."),
     "peers": (1440, 810, "Fleet's PEERS: one card per session, grouped by project, with each owner's route and stage "
               "marks; below, the five links with their kind and time: a reply from [e8] to [d1], a steer from [4f] to [9c], "
-              "a steer from [d1] to [e8], the REQUEST from [4f] to [b2], and a reply from [b2] to [4f]."),
+              "a steer from [d1] to [e8], the PEER REQUEST from [4f] to [b2], and a reply from [b2] to [4f]."),
     "routes": (1440, 900, "Fleet's ROUTES with the web-api route opened in place: Rate limiting, staged 2/4 with "
                "execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, "
                "execute running, test and report pending, each with who runs it, when, its gate, and its output; under "
@@ -810,18 +810,18 @@ SHOTS = {
                "below it the owner's raw output listing an edit, a shell command, and their results."),
     "narrow": (900, 720, "Fleet's OVERVIEW in a 100-column terminal: the same sessions, projects, and request lines in a narrower layout."),
     # The session panel of the same demo world (readme_panel.py), each in a plain window frame.
-    "panel": (1128, 596, "Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: "
+    "panel": (1128, 830, "Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: "
               "the project status document in a popup in the middle of the window, with the one line, the decisions "
               "needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and "
               "on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder "
-              "and hearting v4.44.0."),
+              "and hearting v4.45.1."),
     "panel-question": (930, 542, "The bottom layout in a 100-column window: the panel under the native area, with the "
                        "session's head, the 2 QUESTIONS box with a rose border, the first question, its three choices "
                        "as text, the first recommended, and answer, Ctrl+] at the right; then messages and the usage "
                        "of the three agents."),
-    "requests": (764, 596, "Two panels side by side. Left, the session [4f] that asked: in its route box, an arrow to "
-                 "[b2], Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and "
-                 "a note to [9c]. Right, the session [b2] that was asked: in its request box, an arrow from [4f], Test "
+    "requests": (764, 830, "Two panels side by side. Left, the session [4f] that asked: in its route box, under a thin rule, an arrow to "
+                 "[b2] with its harness, model, and effort, Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and "
+                 "a note to [9c]. Right, the session [b2] that was asked: in its PEER REQUEST box, an arrow from [4f] with its harness, model, and effort, Test "
                  "run, partial answer; under it its reply to [4f]."),
 }
 # The picture the README and the home page open with, with its one line.
@@ -875,9 +875,9 @@ KINDS = (
      "The session&rsquo;s owner, once a request needs a route",
      "When the route finishes; its result stays one line until your next input or ten minutes",
      "Panel: the route box &middot; Fleet: ROUTES"),
-    ("REQUEST", "Work handed to another session, with a number, revisions, and reports", "The session that asks",
+    ("PEER REQUEST", "Work handed to another session, with a number, revisions, and reports", "The session that asks",
      "By the other session&rsquo;s final report or rejection, or the asker&rsquo;s cancel; a partial report keeps it open",
-     "Panel: rows in the route box (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
+     "Panel: rows in the route box under a thin rule, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
      "<code>&#10003;</code> finished), whole in the MESSAGES popup &middot; Fleet: a PEERS link"),
     ("MESSAGES", "A short note, read and done", "Any session", "Nothing to close",
      "Panel: MESSAGES &middot; Fleet: the session page and PEERS"),
@@ -1824,7 +1824,7 @@ def render_fleet(d: dict) -> str:
       <h3>Sessions hand each other work</h3>
       <p class="t">A session can hand another session work as a <b>request</b>: it gets a number, the other session
       opens the body itself, partial reports keep it open, and a final report closes it and wakes the session
-      that asked. Both panels list it in the route box until it closes &mdash; <code>&rarr;</code> handed
+      that asked. Both panels list it as a PEER REQUEST until it closes &mdash; <code>&rarr;</code> handed
       out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished.</p>
       <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet shows
       requests only as PEERS links.</p>

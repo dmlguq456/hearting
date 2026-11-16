@@ -58,13 +58,14 @@ COLOURS = 96
 FRAME_MS = 2600
 PANEL_COLS = 40
 # The first picture: the [4f] window (conversation columns + two + the panel).
-SEAT_TALK, SEAT_ROWS = 80, 38
+SEAT_TALK, SEAT_ROWS = 80, 43
 # The answering GIF: the [9c] window, its panel and the question popup over both.
 FOCUS_TALK, FOCUS_ROWS = 80, 30
 # The status button pressed: the [4f] window with the status popup (as wide as the first picture).
-POPUP_ROWS = 30
-# The request on both sides: the two panels.
-REQUEST_ROWS = 30
+POPUP_ROWS = 43
+# The request on both sides: the two panels. (43 rows: the route box keeps its thin rule between the
+# routes and the requests, which it gives up first when rows are short.)
+REQUEST_ROWS = 43
 
 
 def isolate():

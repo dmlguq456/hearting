@@ -277,7 +277,11 @@ class World:
         for sid, items in self.questions.items():
             harness = self.sessions[sid].harness
             waiting[(harness, sid)] = [item["id"] for item in items]
+        # ``session_doers`` is the map Fleet's shared producer publishes (the model and effort of each
+        # session it read), here read from the demo snapshot by the same function.
+        import human_wait_state
         return {"route_panels": self.panels, "by_session": waiting,
+                "session_doers": human_wait_state.session_doers(self.snapshot),
                 "items": [item for items in self.questions.values() for item in items]}
 
     def counts(self, harness, sid):

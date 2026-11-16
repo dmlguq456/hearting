@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import time
 
-VERSION = "v4.44.0"
+VERSION = "v4.45.1"
 
 PROJECTS = ("web-api", "ml-train", "docs-site", "mobile-app")
 HOME = "/home/demo"
@@ -274,7 +274,7 @@ def snapshot(now=None, workdir=None):
                         observations={"optional:peers": {
                             "state": "success", "last_good": False, "observed_at": now,
                             # The session page's MESSAGES: each session's own sent records, from the
-                            # same exchanges (a request and its report stay PEERS' REQUEST line).
+                            # same exchanges (a request and its report stay PEERS' PEER REQUEST line).
                             "messages": {"sent": sent, "requests": {}, "sides": {}, "rows": {}, "refs": []}},
                                       "replay_sources": {"peer_messages": peer_messages}})
     # Both GPU processes belong to the sessions above; without this the Explorer would compute
