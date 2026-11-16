@@ -356,7 +356,7 @@ class WaitBlinkPtyTest(unittest.TestCase):
         # No answer waiting and nothing running: nothing is written for three seconds.
         self.assertEqual(found['quiet_writes'], [], found['quiet_writes'])
         # The head rule's light: its brightest as bright as the body text, then four steps down to the still rule,
-        # each an L* gap of 8 or more from the next (243 beside 101 was 5.4: a step that did not show).
+        # each an L* gap of 8 or more from the next (243 beside 101 was 5.8: a step that did not show).
         light = found['rule_light']
         self.assertTrue(light, found)
         self.assertGreaterEqual(lightness(light[0]), lightness(dark['body']) - 1, light)
