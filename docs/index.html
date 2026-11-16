@@ -178,6 +178,11 @@
     border: 1px solid var(--border); border-radius: var(--r-lg); padding: 24px 26px;
     background: var(--panel);
   }
+  .kinds-wrap { overflow-x: auto; margin-top: 16px; }
+  .kinds { border-collapse: collapse; width: 100%; font-size: 14.5px; color: var(--text-2); }
+  .kinds th, .kinds td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; }
+  .kinds thead th { color: var(--text-3); font-weight: 600; }
+  .kinds tbody th { font-family: var(--font-mono); font-size: 12.5px; letter-spacing: .04em; color: var(--accent); white-space: nowrap; }
   .card h3 { font-size: 18px; letter-spacing: -.02em; font-weight: 700; }
   .card p { margin-top: 9px; font-size: 15.5px; color: var(--text-2); }
   .card .num { font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; color: var(--accent); margin-bottom: 12px; display: block; letter-spacing: .06em; }
@@ -690,9 +695,9 @@
 <section class="hero"><div class="wrap">
   <span class="eyebrow"><i></i>For Claude Code, Codex, and OpenCode</span>
   <h1>Different agents. <span class="grad">One way of working.</span></h1>
-  <p class="lede">On Claude Code, Codex, or OpenCode, the work runs the same way, the way you meant, and
-  sessions hand work to each other. Every step shows in <b>the panel</b> and in <b>Fleet</b>, and you can
-  correct it at any point.</p>
+  <p class="lede"><b>Your way.</b> Before work starts it confirms what you meant. What you corrected and decided is remembered and offered to your next sessions, on any of the three agents.<br>
+  <b>The same everywhere.</b> On Claude Code, Codex, and OpenCode the work runs with the same requests, stages, and checks.<br>
+  <b>Across sessions, in view.</b> Sessions hand work to each other, and every step shows in the panel and in Fleet, so you can correct it at any point.</p>
 
   <div class="install" id="install">
     <span class="p">$</span>
@@ -704,46 +709,28 @@
     <a href="#quickstart">what you need first</a></p>
 
   <figure class="hero-shot">
-    <a class="shot" href="fleet/seat.png" target="_blank" rel="noopener"><img src="fleet/seat.png" width="1128" height="740" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; ROUTE with Rate limiting at 2/4 execute; SESSIONS with seven other sessions, [9c] waiting for an answer first and three of them running; MESSAGES with the request Test run to [b2] at a partial answer, a finished review, and a note to [9c]; MEM with a project decision and a global lesson." /></a>
+    <a class="shot" href="fleet/seat.png" target="_blank" rel="noopener"><img src="fleet/seat.png" width="1128" height="740" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, and the request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window&#x27;s last line the working folder and hearting v4.44.0." /></a>
     <figcaption>Session [4f] at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</figcaption>
-  </figure>
-  <figure class="hero-shot">
-    <a class="shot" href="fleet/overview.png" target="_blank" rel="noopener"><img src="fleet/overview.png" width="1440" height="810" alt="Fleet&#x27;s OVERVIEW at the same moment: eight sessions in four projects across Claude Code, Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with their stage lines, staged 2/4 execute and staged 2/4 eval-asr." loading="lazy" /></a>
-    <figcaption>Fleet&rsquo;s OVERVIEW at the same moment: every session on the machine, by project.</figcaption>
-  </figure>
-  <figure class="hero-shot">
-    <a class="shot" href="fleet/peers.png" target="_blank" rel="noopener"><img src="fleet/peers.png" width="1440" height="810" alt="Fleet&#x27;s PEERS: one card per session, grouped by project, with each owner&#x27;s route and stage marks; below, the links: [b2] reported a partial answer to request rq-7d21c4 two minutes ago, [4f] sent that request, Test run, sixteen minutes ago, [4f] wrote to [9c], and [d1] and [e8] exchanged notes about the data loader." loading="lazy" /></a>
-    <figcaption>PEERS: which session asked, answered, or wrote to which, and when.</figcaption>
-  </figure>
-  <figure class="hero-shot">
-    <a class="shot" href="fleet/routes.png" target="_blank" rel="noopener"><img src="fleet/routes.png" width="1440" height="900" alt="Fleet&#x27;s ROUTES with the web-api route opened in place: Rate limiting, staged 2/4 with execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, execute running, test and report pending, each with who runs it, when, its gate, and its output; under it the ml-train route at eval-asr." loading="lazy" /></a>
-    <figcaption>ROUTES, with [4f]&rsquo;s route opened in place: its stages and who runs each.</figcaption>
   </figure>
   <p class="fine" style="text-align:center"><a href="fleet.html">Take the Fleet tour &rarr;</a></p>
 </div></section>
 
 <section class="sec" id="why"><div class="wrap">
-  <div class="kick">Why Hearting</div>
-  <h2>The work stays tied to what you asked, not to how capable the agent is.</h2>
+  <div class="kick">Design principles</div>
+  <h2>Three more commitments behind those lines.</h2>
   <p class="lead">Agents differ by vendor, by model, and by what your workplace gives you, and working
   without them is no longer an option. Hearting keeps the way you work the same across them. You stay in
   charge, and the work holds together even when the agent contributes little on its own.</p>
-  <div class="grid why">
-    <div class="card"><span class="num">01</span><h3>Consistent work, whatever the agent</h3>
-      <p>Hearting confirms your intent with you before work starts, keeps each worker inside a bounded
-      scope, and checks results independently.</p></div>
-    <div class="card"><span class="num">02</span><h3>One way of working everywhere</h3>
-      <p>The same requests, stages, artifacts, memory, panel, and Fleet on Claude Code, Codex, and OpenCode
-      &mdash; one of them or all three.</p></div>
-    <div class="card hot"><span class="num">03</span><h3>A crutch for low-cost agents</h3>
+  <div class="grid grid3">
+    <div class="card hot"><span class="num">01</span><h3>A crutch for low-cost agents</h3>
       <p>Hearting cannot make a weak model smarter. It lets one carry out your intent anyway: a capable
       model settles the intent and the plan (the <i>frame</i>), and cheaper workers carry it out in small,
       checked steps (<i>dispatch</i>).</p></div>
-    <div class="card"><span class="num">04</span><h3>Light on the agent</h3>
+    <div class="card"><span class="num">02</span><h3>Light on the agent</h3>
       <p>No step works only if an agent memorizes a long procedure. The procedure lives in the harness.</p></div>
-    <div class="card"><span class="num">05</span><h3>Existing work first</h3>
-      <p>Before planning, a cheap read-only scan lists what your code, earlier artifacts, memory, and git
-      history already settled, so the plan starts from that instead of from what the model happens to know.</p></div>
+    <div class="card"><span class="num">03</span><h3>Existing work first</h3>
+      <p>Hearting looks at what your code, earlier artifacts, memory, and git history already settled before it
+      leans on what the model happens to know.</p></div>
   </div>
 </div></section>
 
@@ -754,8 +741,8 @@
   other work as tracked requests. What one session&rsquo;s panel says is what Fleet says about it.</p>
   <div class="grid grid3">
     <div class="card"><span class="num">PANEL</span><h3>The panel beside each session</h3>
-      <p>Project and Git, model and context, what it is doing now, then a few rows each of questions, routes,
-      experiments, other sessions, messages, and memory; press one for its whole table in a popup.
+      <p>Project and Git, model and context, what it is doing now, then a few rows each of questions, routes
+      and requests, messages, memory, and usage; press one for its whole table in a popup.
       <code>Ctrl+]</code> opens the question waiting here first; <code>f</code> in a popup opens Fleet in the same
       window. <a href="https://github.com/dmlguq456/hearting/blob/main/docs/session-panel.md">Details &rarr;</a></p></div>
     <div class="card"><span class="num">FLEET</span><h3>Every session at once</h3>
@@ -766,10 +753,13 @@
       or tmux needed. <a href="fleet.html#panel">See it &rarr;</a></p></div>
   </div>
   <div class="split" style="margin-top:30px">
-    <figure><div class="shot"><img src="fleet/panel-focus.gif" width="1128" height="632" alt="Answering a question, step by step, in session [9c]&#x27;s window: the first of two questions stands in the panel as a rose button while keys still go to the agent; Ctrl+] opens it in a popup in the middle of the window, the rest gray; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel shows answer sent in green with the choice." loading="lazy" /></div><figcaption>Answering a question: Ctrl+] &rarr; Tab &rarr; 2 &rarr; Enter.</figcaption></figure>
-    <figure><a class="shot" href="fleet/requests.png" target="_blank" rel="noopener"><img src="fleet/requests.png" width="764" height="596" alt="Two panels side by side. Left, the session [4f] that asked: under MESSAGES, an arrow to [b2], Test run, partial answer, then a finished review and a note to [9c]. Right, the session [b2] that was asked: under MESSAGES, an arrow from [4f], Test run, partial answer, and its reply to [4f]." loading="lazy" /></a><figcaption>One request in the MESSAGES of the session that asked and of the
+    <figure><div class="shot"><img src="fleet/panel-focus.gif" width="1128" height="632" alt="Answering a question, step by step, in session [9c]&#x27;s window: the first of two questions stands in the panel in a rose-bordered box while keys still go to the agent; Ctrl+] opens it in a popup in the middle of the window, the rest gray; Tab moves to the next question; 2 chooses the second option; Enter sends the answer, the popup closes, and the panel shows answer sent in green with the choice." loading="lazy" /></div><figcaption>Answering a question: Ctrl+] &rarr; Tab &rarr; 2 &rarr; Enter.</figcaption></figure>
+    <figure><a class="shot" href="fleet/requests.png" target="_blank" rel="noopener"><img src="fleet/requests.png" width="764" height="596" alt="Two panels side by side. Left, the session [4f] that asked: in its route box, an arrow to [b2], Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the session [b2] that was asked: in its request box, an arrow from [4f], Test run, partial answer; under it its reply to [4f]." loading="lazy" /></a><figcaption>One request in the panel of the session that asked and of the
       one asked.</figcaption></figure>
   </div>
+  <h3 style="margin-top:38px">Who opens it, and when it closes</h3>
+  <p class="lead">Hearting keeps five kinds of things apart, so a glance tells you what is waiting on whom.</p>
+  <div class="kinds-wrap"><table class="kinds"><thead><tr><th></th><th>What it is</th><th>Who opens it</th><th>When it closes</th><th>Where it shows</th></tr></thead><tbody><tr><th scope="row">QUESTIONS</th><td>A question waiting for your answer or approval</td><td>An agent that needs you</td><td>When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where</td><td>Panel: the rose-bordered box &middot; Fleet: QUESTIONS</td></tr><tr><th scope="row">ROUTE</th><td>The work this session started: its stages, who runs each, and how each is checked</td><td>The session&rsquo;s owner, once a request needs a route</td><td>When the route finishes; its result stays one line until your next input or ten minutes</td><td>Panel: the route box &middot; Fleet: ROUTES</td></tr><tr><th scope="row">REQUEST</th><td>Work handed to another session, with a number, revisions, and reports</td><td>The session that asks</td><td>By the other session&rsquo;s final report or rejection, or the asker&rsquo;s cancel; a partial report keeps it open</td><td>Panel: rows in the route box (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished), whole in the MESSAGES popup &middot; Fleet: a PEERS link</td></tr><tr><th scope="row">MESSAGES</th><td>A short note, read and done</td><td>Any session</td><td>Nothing to close</td><td>Panel: MESSAGES &middot; Fleet: the session page and PEERS</td></tr><tr><th scope="row">PEERS</th><td>The sessions linked by messages, requests, supervision, or a handover</td><td>Those links themselves</td><td>&mdash;</td><td>Fleet: PEERS</td></tr></tbody></table></div><p class="cap-note" style="margin-top:12px">The REPO row&rsquo;s <b>STATUS &rsaquo;</b> button opens the campaign&rsquo;s status document whole in a popup; Fleet shows its one line at the top of the project.</p>
 </div></section>
 
 <section class="sec" id="how"><div class="wrap">

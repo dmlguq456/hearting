@@ -128,7 +128,7 @@ OpenCode terminals launch the native CLI as before, and
 `hearting session shell enable` turns the panel on again;
 `hearting session shell status` shows the current choice. Running sessions keep
 what they started with. Updates keep your choice. To keep the panel but give
-the native area more room, press **»** beside the panel's gear to fold it into
+the native area more room, press **▾** at the right end of the panel's last row to fold it into
 a strip under the native area, which gets the whole width back, or change its
 width and position under **⚙**
 ([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding)).
@@ -141,14 +141,14 @@ sends a **request**: it gets a number, the other session receives one short
 line and opens the body itself, sends partial reports while it works and a
 final report (or a rejection) when done, and each report wakes the session that
 asked. The asker can send a new revision or cancel. Both panels list the
-request under `MESSAGES` until it closes. Short notes and watching (“tell me when [e8]
+request in the route box until it closes. Short notes and watching (“tell me when [e8]
 finishes”) work the same way. None of this needs herdr or tmux.
 
 In a terminal with the panel, an idle session on any runtime is reached at
 once. Codex is reached at once anywhere, through its own thread queue. Outside
 the panel's terminal, an idle Claude Code session is reached at its next turn
 and OpenCode at its next idle or tool callback; the request stays open and
-listed meanwhile. Fleet shows a request only as a PEERS link (sent, reported);
+listed meanwhile. Fleet shows a request only as a PEERS link (the newest of its kind);
 it has no request list yet, and you cannot send one from Fleet yet. Details:
 [docs/session-panel.md](docs/session-panel.md#requests-and-messages).
 

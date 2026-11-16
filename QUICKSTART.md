@@ -80,15 +80,12 @@ the expected change is one line:
 While the agent works, the panel's `NOW` row says what it is doing, and a
 request that needs a route shows under `ROUTE` in the panel with its current
 stage; press it for the route in Fleet's table. If the agent asks you something, the
-question shows under `QUESTIONS` in the panel as a rose button: press
+question stands in a rose-bordered box under `QUESTIONS` in the panel: press
 **Ctrl+]** and it opens in a popup in the middle of the window; answer with
 **Tab**, **1–9**, and **Enter**, and the popup closes and your keys go back to
 the agent (**Esc** closes it unanswered).
 
-Open a second session in another terminal, on any runtime. When one of them
-waits for your answer, `SESSIONS` appears in the other's panel with it first;
-the sessions table is always one of the **Ctrl+]** popups (**←/→** move between
-them), and once you open it `SESSIONS` stays in the panel. In either one press
+Open a second session in another terminal, on any runtime. In either one press
 **Ctrl+]** and then **f**: Fleet opens in that window and shows both sessions, each with its number
 (`[4f]`, `[b2]`). **Ctrl+]** closes Fleet again. Fleet also runs on its own:
 
@@ -106,7 +103,7 @@ Tell the first session, using the second session's number:
 
 > Ask session [b2] to re-run the tests and report back.
 
-The request gets a number (`rq-…`) and shows under `MESSAGES` in both panels:
+The request gets a number (`rq-…`) and shows in the route box of both panels:
 `→` in the session that asked, `◂` in the one asked. The second session opens the request
 body itself, works, and reports; a partial report keeps the request open, and
 a final report closes it and wakes the first session. Neither herdr nor tmux is
