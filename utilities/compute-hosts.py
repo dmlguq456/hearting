@@ -124,6 +124,30 @@ def _paths_overlap(left, right):
     return left == right or _path_contains(left, right) or _path_contains(right, left)
 
 
+def run_raw_data_dir(host, value):
+    """The launcher's raw_data_dir as the run on `host` sees it, or "" when it cannot.
+
+    A `path_namespace` run sees each target at its launcher path, so a value
+    below exactly one target passes unchanged and any other value is not
+    visible there. A host without a namespace gets the value as is, like cwd.
+    """
+    if not _canonical_namespace_path(value):
+        return ""
+    mapping = host.get("path_namespace")
+    if not isinstance(mapping, dict):
+        return value
+    covers = [target for target in mapping
+              if isinstance(target, str) and (target == value or _path_contains(target, value))]
+    return value if len(covers) == 1 else ""
+
+
+def raw_data_dir_setup(host, environ=None):
+    """The run preamble line; always set, so a stale shell never keeps a foreign value."""
+    values = os.environ if environ is None else environ
+    return "export AGENT_RAW_DATA_DIR=" + shlex.quote(
+        run_raw_data_dir(host, values.get("AGENT_RAW_DATA_DIR", "")))
+
+
 def _validate_path_namespace(name, host, run_root):
     if "path_namespace" not in host:
         return
@@ -3096,6 +3120,7 @@ def cmd_run(args):
              + [
                  f"export HEARTING_COMPUTE_RUN_ID={shlex.quote(run_id)}",
                  f"export HEARTING_COMPUTE_HOST={shlex.quote(name)}",
+                 raw_data_dir_setup(host),
              ])
     workdir = args.cwd or host.get("workdir")
     if workdir:

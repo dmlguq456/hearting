@@ -326,6 +326,100 @@ def runtime_dir_candidate(artifact_root, environ=None, *, repository_kind=None, 
         return ""
 
 
+RAW_DATA_ROOT_KEY = "raw_data_root"
+
+
+def raw_data_root_setting(environ=None) -> str:
+    """The `raw_data_root:` line of the user's compute-hosts.yaml, or "".
+
+    The data folder is one user value, written once beside the compute-host
+    paths it shares (`COMPUTE_HOSTS_CONFIG` or the XDG path compute-hosts.py
+    reads). Only this top-level line is read; the inventory's own state
+    (template, invalid hosts) never matters here and nothing ever raises.
+    """
+    values = os.environ if environ is None else environ
+    try:
+        override = values.get("COMPUTE_HOSTS_CONFIG", "")
+        if override:
+            path = Path(override).expanduser()
+        else:
+            config_home = values.get("XDG_CONFIG_HOME", "")
+            if not config_home or not Path(config_home).is_absolute():
+                config_home = str(Path(values.get("HOME") or Path.home()) / ".config")
+            path = Path(config_home) / "hearting" / "compute-hosts.yaml"
+        if path.is_symlink() or not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8")
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return ""
+    for line in text.splitlines():
+        key, colon, value = line.partition(":")
+        if colon and key == RAW_DATA_ROOT_KEY:
+            value = value.split(" #", 1)[0].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            return value
+    return ""
+
+
+def raw_data_dir_candidate(artifact_root, runtime_dir, environ=None, *, source_root=None) -> str:
+    """`<raw_data_root>/<project>` when that folder is usable, else `runtime_dir` unchanged.
+
+    The project is the directory that holds the resolved artifact root, the
+    same directory that names the runtime home, so linked names of one project
+    share one folder. A missing, invisible, unwritable or overlapping location
+    falls back without a question, a gate or a notice. Never creates anything.
+    """
+    fallback = runtime_dir or ""
+    setting = raw_data_root_setting(environ)
+    if not setting:
+        return fallback
+    try:
+        if not Path(setting).is_absolute():
+            return fallback
+        root = Path(os.path.realpath(setting))
+        if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
+            return fallback
+        project = Path(os.path.realpath(Path(artifact_root).expanduser())).parent
+        if project.name in ("", ".", ".."):
+            return fallback
+        candidate = root / project.name
+        if candidate.is_symlink() or (candidate.exists() and (
+                not candidate.is_dir() or not os.access(candidate, os.W_OK | os.X_OK))):
+            return fallback
+        values = os.environ if environ is None else environ
+        homes = {Path(os.path.realpath(Path.home()))}
+        if values.get("HOME"):
+            homes.add(Path(os.path.realpath(values["HOME"])))
+        source = Path(os.path.realpath(source_root)) if source_root else project
+
+        def overlaps(left: Path, right: Path) -> bool:
+            return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+        # The same fence as a runtime override: never home, the project or the source.
+        if (candidate == Path("/") or any(overlaps(candidate, home) for home in homes)
+                or overlaps(candidate, project) or overlaps(candidate, source)
+                or "releases" in candidate.parts or ".harness" in candidate.parts):
+            return fallback
+        return str(candidate)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return fallback
+
+
+def prepare_raw_data_dir(candidate: str, runtime_dir: str) -> str:
+    """Create only the project folder below an existing raw root; else `runtime_dir`."""
+    if not candidate or candidate == runtime_dir:
+        return runtime_dir or ""
+    try:
+        path = Path(candidate)
+        path.mkdir(exist_ok=True)  # the root itself is never created here
+        if path.is_symlink() or not path.is_dir():
+            return runtime_dir or ""
+        return str(path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return runtime_dir or ""
+
+
 def prepare_runtime_dir(candidate: str) -> str:
     """Create only the optional runtime root and its private ignore marker."""
     if not candidate:
@@ -409,8 +503,11 @@ def artifact_context_prompt(environ) -> str:
     if not output:
         return ""
     runtime = values.get("AGENT_RUNTIME_DIR", "")
+    raw = environ.get("AGENT_RAW_DATA_DIR", "") or runtime
     runtime_line = (f"- runtime_dir: {runtime}\n"
-                    "- Put environments, caches, external checkouts, and checkpoints under runtime_dir; keep reports and provenance in artifacts.\n") if runtime else ""
+                    "- Put environments, caches and external checkouts under runtime_dir; "
+                    f"checkpoints, per-sample outputs and raw results under raw_data_dir ({raw}); "
+                    "reports, tables, figures and summaries in artifacts.\n") if runtime or raw else ""
     return (f"- artifact_cycle_id: {values['AGENT_ARTIFACT_CYCLE_ID']}\n"
             f"- artifact_output_dir: {output}\n"
             f"{runtime_line}"

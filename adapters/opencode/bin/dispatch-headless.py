@@ -1094,11 +1094,15 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(
             args.artifact_root, repository_kind=args.repository_kind, source_root=args.worktree)
+        args.raw_data_dir = WRAPPER_COMMON.prepare_raw_data_root(
+            args.artifact_root, args.runtime_dir, source_root=args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
         args.opencode_config_content = scoped_external_directory_config(
             args.artifact_root,
             str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-            execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ()),
+            execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ())
+                                   + ((Path(WRAPPER_COMMON.raw_data_grant(args)),)
+                                      if WRAPPER_COMMON.raw_data_grant(args) else ()),
             agent_home=args.agent_home,
             worktree=args.worktree,
             selected_agent=args.agent,
@@ -1215,6 +1219,7 @@ def main(argv: list[str]) -> int:
             args.artifact_root,
             str(args.report_bundle_root) if args.report_bundle_root is not None else None,
             (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
+             *((Path(WRAPPER_COMMON.raw_data_grant(args)),) if WRAPPER_COMMON.raw_data_grant(args) else ()),
              *(grant.additional_writable_roots if grant is not None else ())),
             grant.read_roots if grant is not None else (),
             agent_home=args.agent_home,
@@ -1423,6 +1428,8 @@ def main(argv: list[str]) -> int:
             execution_access_roots=[
                 str(value) for value in (
                     (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
+                     *((Path(WRAPPER_COMMON.raw_data_grant(args)),)
+                       if WRAPPER_COMMON.raw_data_grant(args) else ()),
                      *(args.execution_access_grant.additional_writable_roots
                        if args.execution_access_grant is not None else ()))
                 )

@@ -176,7 +176,7 @@ def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
         f"- owner_harness: {args.owner_harness or '-'}\n"
         f"- worktree: {args.worktree}\n"
         f"- artifact_root: {args.artifact_root}\n"
-        f"{h.artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
+        f"{h.artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', ''), 'AGENT_RAW_DATA_DIR': getattr(args, 'raw_data_dir', '')})}"
     )
 
 
@@ -679,6 +679,7 @@ def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path
         # second lineage.
         **h.artifact_cycle_environment(os.environ),
         "AGENT_RUNTIME_DIR": getattr(args, "runtime_dir", ""),
+        "AGENT_RAW_DATA_DIR": getattr(args, "raw_data_dir", "") or getattr(args, "runtime_dir", ""),
         "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
         "AGENT_ROUTE_FILE": (
             args.route_file

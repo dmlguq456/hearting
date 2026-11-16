@@ -52,7 +52,8 @@ diagnosis** (`autopilot-lab:diagnose`, or `metrics` run with this unit), and a
 When the assignment is why evaluation results look the way they do (a metric gap,
 a field sample that fails, a regression between checkpoints):
 
-1. Read `raw-results/**` and `summary-stats.json`, plus any field samples or
+1. Read the raw results (`raw-results/**` or the `raw_data_dir` paths `run.json`
+   records) and `summary-stats.json`, plus any field samples or
    reproduction conditions the assignment names, against the person's primary
    comparison (for example the unprocessed input, not only an internal control).
 2. Split the aggregate by condition so offsetting gains and losses show, and open
