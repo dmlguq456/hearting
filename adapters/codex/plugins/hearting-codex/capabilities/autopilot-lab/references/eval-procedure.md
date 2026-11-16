@@ -36,7 +36,7 @@ Do not let stages write the same file concurrently without the OPERATIONS §5.8 
 ```text
 === Eval Spec ===
 Experiment:     <date>_<slug> or parent: <slug>
-Checkpoint:     $AGENT_RUNTIME_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt
+Checkpoint:     $AGENT_RAW_DATA_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt
 Mode:           eval
 Evaluation data:<existing test set or new data>
 Metrics:        <PSNR, SSIM, SI-SDR, ...>
@@ -53,7 +53,7 @@ Run the scaffolded `eval.py` against the checkpoint and data:
 
 ```bash
 cd experiments/<slug>
-python eval.py --config config.yaml --ckpt runs/run-001/ckpt/best.pt [--data <new_data>]
+python eval.py --config config.yaml --ckpt "$AGENT_RAW_DATA_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt" [--data <new_data>]
 ```
 
 The user runs heavy evaluation. For an explicit lightweight request such as `가볍게 평가 돌려줘`, a small test set may be executed by dispatching the `qa/test` unit in functional eval mode with `eval.py` and the checkpoint. It returns final metrics summarized into `run.json best` and the per-step stream path `experiments/<slug>/metrics.jsonl`.

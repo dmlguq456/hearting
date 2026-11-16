@@ -954,6 +954,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         ]
         if getattr(args, "runtime_dir", ""):
             command += ["--add-dir", str(args.runtime_dir)]
+        if WRAPPER_COMMON.raw_data_grant(args):
+            command += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
         if getattr(args, "report_bundle_root", None) is not None:
             command += ["--add-dir", str(args.report_bundle_root)]
         if getattr(args, "execution_access_grant", None) is not None:
@@ -994,6 +996,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     ]
     if getattr(args, "runtime_dir", ""):
         cmd += ["--add-dir", str(args.runtime_dir)]
+    if WRAPPER_COMMON.raw_data_grant(args):
+        cmd += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
     cmd += claude_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
@@ -1150,6 +1154,8 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(
             args.artifact_root, repository_kind=args.repository_kind, source_root=args.worktree)
+        args.raw_data_dir = WRAPPER_COMMON.prepare_raw_data_root(
+            args.artifact_root, args.runtime_dir, source_root=args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
     except ValueError as e:
         return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)

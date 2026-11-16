@@ -898,7 +898,9 @@ function render() {
     const selectedChanged=!!observed?.model&&(observed.model!==displayValues.model||(observed.effort||'')!==(displayValues.effort||''));
     const footerMask=fleetView?{rows:new Set(),cells:new Map()}:nativeDisplay.footerConcealment(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
     const concealed=footerMask.rows;
-    let notice=-1;
+    let notice=-1,ownLine=-1;
+    // Codex's footer row and OpenCode's bottom bar (rule 60): the row itself becomes the shell's line.
+    if(!fleetView&&activated&&!relay&&harness!=='claude'){const own=nativeDisplay.footerRows(harness,nativeLines);for(const y of own)concealed.add(y);ownLine=own.at(-1)??-1;}
     if(harness==='claude'){
       // The first concealed row (the top of the status area) carries the notice;
       // any further concealed row stays blank.
@@ -922,7 +924,7 @@ function render() {
       // The rest of a Codex footer row whose ID cells are concealed keeps the
       // row's own indent instead of starting after a blank gap.
       const masked=fleetView?0:footerMask.cells.get(y)||0,indent=masked?Math.min(masked,nativeLines[y].match(/^ */)[0].length):0;
-      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
+      let line=y===notice||y===ownLine?footerLine(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
         serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       let motion=false;
@@ -1210,30 +1212,32 @@ async function projection() {
 // the native rows, so no value leaves the screen. Spec rule 49 (c): the folded
 // strip takes that row's place while it paints its session row (the strip carries
 // no Git or job row), so a value never shows twice; the row keeps the notice.
+// 11-16 (the person: "맨 아래줄이 비면이 아니고 항상 비우라고 그냥"): the window's last line is always the shell's one line
+// (below), in every harness; what a harness drew there is not shown. The line is found on the native screen
+// (Claude: the rows its recorded status text fills; Codex: its footer row; OpenCode: its bottom bar) and
+// written over in the painted copy only; the native screen keeps what it drew, and the shell reads from it.
 function claudePanelPainted(){
-  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||settings||!height())return false;
-  if(!expanded)return paintedGroups.has('head');
-  const has=parts=>(Array.isArray(parts)?parts:[]).some(part=>String(part.text).trim());
-  const wanted=[['head',has(panelModel.head)],['git',has(panelModel.git)],['context',has(panelModel.context)],['quota',has(panelModel.quota)],
-    ['jobs',has(panelModel.jobs)],['wait',!!panelModel.wait],['route',!!panelModel.route_count]].filter(([,shown])=>shown).map(([name])=>name);
-  return wanted.length>0&&wanted.every(name=>paintedGroups.has(name));
+  return harness==='claude'&&!relay&&!ended&&!fleetView&&activated&&!!sid&&!settings&&height()>0;
 }
-// The blanked Claude row carries the panel's one-line notice (empty by default),
-// at the native statusline's own two-cell indent.
-function noticeRow(width){
-  let used=2,text='\x1b[0m  ';
-  // Claude's own status row: the panel's theme, never its shade.
-  const [notice=[]]=panelView.appearance([panelModel.notice||[]],{...displayConfiguration,shade:'none'},
-    {colors:panelModel.colors??256,noColor:panelModel.no_color===true});
-  for(const part of notice){
-    const attrs=[0];
-    if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
-    if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);
-    let chunk='';
-    for(const c of String(part.text).replace(/[\x00-\x1f\x7f]/g,' ')){const w=cellWidth(c);if(used+w>width-1)break;chunk+=c;used+=w;}
-    text+=`\x1b[${attrs.join(';')}m${chunk}`;if(used>=width-1)break;
+// The release this window runs, as the installed folder's name says (`v4.40.0`); none for a source checkout.
+const releaseVersion=(()=>{const m=/[\\/]releases[\\/](v\d+(?:\.\d+)*[^\\/]*)[\\/]/.exec(myRelease||'');return m?m[1]:'';})();
+// The line: two cells in, the working folder (home as `~`, cut from the front with `…` when it is wider than what
+// the right text leaves), `hearting v<version>` at the right end, both dim; a newer installed release waiting (this
+// window an old one) puts its words in the right text's place.
+function footerLine(width){
+  const room=Math.max(0,width-3),note=String(panelModel.footer_notice||'').replace(/[\x00-\x1f\x7f]/g,' ');
+  const right=note||('hearting'+(releaseVersion?' '+releaseVersion:''));
+  let rightText='',used=0;for(const c of right){const w=cellWidth(c);if(used+w>room)break;rightText+=c;used+=w;}
+  let path='';
+  const left=room-used-(used?2:0);
+  if(left>=2){
+    const chars=[...String(panelModel.footer_path||'').replace(/[\x00-\x1f\x7f]/g,' ')];
+    let w=chars.reduce((n,c)=>n+cellWidth(c),0);
+    if(w>left){let cut=[];w=1;for(let i=chars.length-1;i>=0;i--){const cw=cellWidth(chars[i]);if(w+cw>left)break;cut.unshift(chars[i]);w+=cw;}path='…'+cut.join('');}
+    else path=chars.join('');
   }
-  return text+'\x1b[0m'+' '.repeat(Math.max(0,width-used));
+  const pathWidth=[...path].reduce((n,c)=>n+cellWidth(c),0);
+  return '\x1b[0m  \x1b[2m'+path+' '.repeat(Math.max(0,room-pathWidth-used))+rightText+'\x1b[0m'+' '.repeat(Math.max(0,width-2-Math.max(room,pathWidth+used)));
 }
 let claudeStatus={key:'',value:null};
 function claudeStatusRecord(){
@@ -1632,7 +1636,7 @@ async function lifecycle(req) {
     displayValues={...nativeSelected};
     // Spec E9 rule 33 (c): this seat's own values (its folder, Git, the account usage)
     // stay drawn across a start, resume, /clear or switch; session values clear.
-    panelModel={labels:panelModel.labels,styles:panelModel.styles,repo:panelModel.repo,git:panelModel.git,quota:panelModel.quota,
+    panelModel={labels:panelModel.labels,styles:panelModel.styles,repo:panelModel.repo,git:panelModel.git,quota:panelModel.quota,usage:panelModel.usage,
       head:Array.isArray(panelModel.head)?panelModel.head.filter(part=>!/^\[/.test(String(part?.text))):undefined,
       ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];

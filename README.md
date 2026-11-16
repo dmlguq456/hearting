@@ -170,13 +170,16 @@ enable` enables it explicitly;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
-Claude shows the same status area inside the panel as Codex and OpenCode, and its
-own statusline is one row under the input. While the panel, or its folded strip,
-shows the status area, that row is a notice row that stays empty unless you must
-act now: an answer you owe, compaction about to happen, a red context or usage
-reading, or a failed or blocked route. News stays in the panel: messages in
-MESSAGES, a finished route's result in the route box. With the panel hidden the
-row shows the status line itself, keeping what is urgent first on a narrow screen.
+Claude shows the same status area inside the panel as Codex and OpenCode, and the
+row under its input is the shell's one line there too (the working folder and
+`hearting v<release>`). What you must do now stands in the panel or its folded strip:
+an answer you owe in the question box and the strip's `◑to answer N`, compaction about to
+happen in the panel's top and the strip's `⚠`, a red usage reading in `USAGE` and on the
+strip (on a narrow strip the other windows go first and the red one stays), a failed or
+blocked route in the route box and the strip's `✕N`. News stays in the panel: messages in
+MESSAGES, a finished route's result in the route box. Where the panel is not painted (Fleet
+over the window, the settings screen, a window not yet bound) Claude's own statusline shows
+the status line itself, keeping what is urgent first on a narrow screen.
 The panel's top border names the session as Fleet's row does (state glyph,
 session number, harness, and `⚑` for a steward), and its frame takes that
 state's color the moment the native screen changes (running: the frame stands lit and
@@ -203,11 +206,16 @@ this repository and global ones, each a dim head — `◆` durable or `◇` work
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
 routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can
-answer here now reads in rose letters, on no fill: its first line, its choices as text
-(`1 label · 2 label`), and `↵ answer · Ctrl+]` under them (red letters in eight colors, bold in
-mono or `NO_COLOR`); nothing else in the panel is red but a wait answered elsewhere's `◑` and count.
-While an answer waits those red letters, and the folded strip's `◑to answer N`, blink between
-two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`). Once you answer, the
+answer here now stands in a thin rounded box with a rose border, on no fill (`╭─ 3 QUESTIONS › ──╮`; a dim border where only
+an answer on its way or a wait answered elsewhere stands): its first line, its choices as text
+(`1 label · 2 label`) in the body color, and `↵ answer · Ctrl+]` under them (the border's weight tells the two apart
+in eight colors, mono or `NO_COLOR`); nothing else in the panel is red but that border and a wait answered elsewhere's `◑` and count.
+While an answer waits that box's border, and the folded strip's `◑to answer N`, blink between
+two clearly different reds once a second, on Fleet's own beat (still with **rule motion** `off`, in mono or `NO_COLOR`).
+The panel ends with `USAGE`: one row each for Claude, Codex and OpenCode with the 5h, 7d and model windows each reports
+(from the usage records Fleet already keeps), then the gear and the fold button. The window's last line under the native
+screen is always the shell's one line in every harness: the working folder at the left, `hearting v<release>` at the
+right (a newer release waiting takes its place); OpenCode's cost moves into its panel. Once you answer, the
 question is one line for ten minutes, `✓ answer sent` in the passing green and what you chose
 after it. A tidy result that ended well reads as one dim line; only a notice that leaves you something to do
 keeps the `⚠` caution look. Short of rows the other sections step down to one row first, then the route
@@ -256,7 +264,7 @@ width back: one row at any window height, `● [e9] hearting │ Opus 5.5 xhigh 
 end (the wait only while you owe an answer, compaction about to happen or a tidy notice in its
 place; the Git branch after the project where it fits). Narrow, whole values go: reset times,
 branch, effort, 7d, 5h, the model, the message sessions (their count stays), MESSAGES, the
-project, the context bar (its percent stays), the route counts, and at 30 cells the session
+project, a window at Fleet's red level (it outlasts the other windows), the context bar (its percent stays), the route counts, and at 30 cells the session
 number; the state, wait, `N ROUTE` and **▴** stay. A press on the wait opens the question popup, on the routes or
 MESSAGES their popup above the strip, anywhere else opens the panel again; with the keyboard, **Ctrl+]** then **p** opens the panel. Where the open panel would leave the
 native area under 60 columns (a 40-column panel in a terminal under 102

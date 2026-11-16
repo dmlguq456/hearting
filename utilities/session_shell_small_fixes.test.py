@@ -133,13 +133,14 @@ for(const first of firsts)for(const n of [1,2,5]){
   const v=paint({q:choice(first,n),height:h,width:w}),lines=v.rows.map(str),tag=h+'x'+w+' '+first+' '+n+'\n'+lines.join('\n');
   assert(lines.length<=h&&lines.every(r=>cells(r)===w),tag);
   const at=lines.findIndex(r=>r.includes('◑ 로그를'));
-  if(at<0||!/^│   (1 |\+\d)/.test(lines[at+1]||''))continue;
-  const row=v.rows[at+1],line=lines[at+1],text=line.slice(4,-2);
+  // (11-16: with room the section is a thin box, its rows between the box's two walls; short of rows the plain rows.)
+  if(at<0||!/^│ (?:│ )?  (1 |\+\d)/.test(lines[at+1]||''))continue;
+  const row=v.rows[at+1],line=lines[at+1],boxed=/^│ │ /.test(line),text=boxed?line.slice(6,-4):line.slice(4,-2);
   assert(/^1 /.test(text),'the first choice, its number kept\n'+tag);
   assert(row.every(x=>x.background===undefined),'no ground of its own\n'+tag);
-  assert(row.filter(x=>/[^\s·+\d│]/.test(x.text)).every(x=>x.foreground===174&&x.dim!==true),'its words in the answer wait\'s red\n'+tag);
+  assert(row.filter(x=>/[^\s·+\d│]/.test(x.text)).every(x=>x.foreground===(boxed?253:174)&&x.dim!==true),'its words in the body color inside the box (11-16), the answer wait\'s red in the plain section\n'+tag);
   const first1=[...first].slice(0,1).join('');
-  if(w>=16)assert(text.includes(first1)||first.length<1,'its name starts\n'+tag);
+  if(w>=(boxed?20:16))assert(text.includes(first1)||first.length<1,'its name starts\n'+tag);
   assert(text.includes(first)||text.includes('…'),'whole or cut with …\n'+tag);
   if(n>1&&!text.includes('2 '))assert(/\+\d+/.test(line)||w<18,'the rest counted\n'+tag);
   rows++;
@@ -152,8 +153,9 @@ for(const first of firsts)for(const n of [1,2,4])for(let w=44;w<=120;w++){
  assert(lines.length===1&&cells(lines[0])===w,w+'\n'+lines.join('\n'));
  assert(lines[0].includes('◑답 대기 1')&&!lines[0].includes('로그를')&&!lines[0].includes(' · 1 ')&&!lines[0].includes('둘 2'),w+'\n'+lines[0]);
 }
-// The case from the review: inner width 26, `ＡＢＣＤＥＦ (추천)`, three more choices.
-{const lines=paint({q:choice('ＡＢＣＤＥＦ (추천)',4),width:30}).rows.map(str);assert(lines.some(r=>/│   1 ＡＢＣＤＥＦ.*\+3 +│/.test(r)),lines.join('\n'));}
+// The case from the review: inner width 26, `ＡＢＣＤＥＦ (추천)`, three more choices (11-16: the box's walls take four
+// cells more, so the same inner width is a panel 34 wide).
+{const lines=paint({q:choice('ＡＢＣＤＥＦ (추천)',4),width:34}).rows.map(str);assert(lines.some(r=>/^│ │   1 ＡＢＣＤＥＦ.*\+3 +│ │$/.test(r)),lines.join('\n'));}
 """)
 
     def test_veil_row_turns_colon_form_sgr_gray_too(self):

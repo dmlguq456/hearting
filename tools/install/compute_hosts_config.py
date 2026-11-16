@@ -33,6 +33,10 @@ schema_version: 1
 # Detached runs write their logs, metadata, and process-owner claims here.
 # run_root: /shared/hearting/runs
 
+# Optional data folder for raw experiment data (checkpoints, per-sample outputs);
+# each project writes below <raw_data_root>/<project>, else in its runtime dir.
+# raw_data_root: /shared/data/_agent_raw
+
 hosts:
   # The key is the label used on the command line and in Fleet; it does not
   # have to match the system hostname.

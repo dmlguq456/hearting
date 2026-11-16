@@ -881,6 +881,15 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     return result
 
 
+def _footer_path(cwd):
+    """The working folder as the last line writes it: the home folder as ``~`` (spec E9 rule 60)."""
+    text = _plain(cwd, 1024) if isinstance(cwd, str) else ""
+    home = os.path.expanduser("~").rstrip("/")
+    if text and home and (text == home or text.startswith(home + "/")):
+        text = "~" + text[len(home):]
+    return text
+
+
 def _panel_common_rows(panel, columns):
     """The rows the panel paints for the values Codex's footer repeats, as painted.
 
@@ -1101,7 +1110,9 @@ def _observe_session(observe, harness, sid, pid, start):
 # the steward mark's two beats); the rest arrive already styled.
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
-                    "hb_claude", "hb_codex", "hb_opencode", "hb_other")
+                    "hb_claude", "hb_codex", "hb_opencode", "hb_other",
+                    # Fleet's stage colors (`render_stages.route_stage_key`): a running stage lit, the others dimmed.
+                    *("stg%d_%s" % (i, on) for i in range(5) for on in ("on", "off")))
 
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
@@ -1123,7 +1134,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count, recent_memory
-    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows
+    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, usage_rows
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
@@ -1255,6 +1266,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # A newer installed release this window has not switched to yet, or a switch that could
     # not carry the scrollback: the lowest-priority line, never over another notice (quiet too).
     panel["tidy_upgrade"] = False
+    # 11-16 (spec E9 rule 60): the same words also stand at the right end of the window's last line, in the
+    # place of `hearting v<version>` (the line the shell writes over the native one, in every harness).
+    panel["footer_notice"] = ui_text("session_shell.upgrade_" + upgrade_note) if upgrade_note in ("pending", "scrollback") else ""
+    panel["footer_path"] = _footer_path(values.get("cwd"))
     if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
         panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
         panel["tidy_upgrade"] = upgrade_note == "pending"
@@ -1265,8 +1280,15 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp"):
+    quota_raw = panel["quota"]
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp", "cost"):
         panel[name] = styled(panel[name])
+    # Spec E9 rule 59 (11-16): the USAGE section, the three harnesses' usage rows (the records Fleet keeps).
+    panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"])} for row in usage_rows(harness, values)]
+    # 11-16 (review of #1662): a reading at Fleet's red level carries `level: red`, so the folded strip can keep it
+    # (the strip lets the other windows go first) in the place the old notice row gave it.
+    panel["quota"] = [{**part, "level": "red"} if key == "lvl_r" else part
+                      for part, (_text_, key) in zip(panel["quota"], quota_raw)]
     def route_paint(row):
         paint = {}
         for name, key in (("glyph", "glyph_key"), ("harness", "harness_key"), ("model_text", "model_key"),

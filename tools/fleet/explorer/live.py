@@ -1295,6 +1295,83 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
     return routes, nodes
 
 
+def _direct_routes(routes, session_rows, session_index, now=None):
+    """The route a session declared with ``--shape direct`` and does itself (11-16).
+
+    A direct route has no job, stage record or worker row, so no route entity carries it and
+    :func:`_route_records` has nothing to read; its one witness is the session's own route chain
+    (``route_chain.current``: the last actual route, its shape and state, after ``finish`` its
+    result). It stands like any route while open (the session is its owner, so it is current
+    while the session is live) and retires by the same rule as a finished one (a ``done`` row
+    with its outcome and time). The row has no stages: the shape ``direct`` is its whole kind.
+    An open declaration older than this session's own process stands for nothing (Fleet's open-route rule,
+    ``route_chain.current_capability``: its ``ts`` is not before the session's start less the marker slack), so
+    a route left unfinished in an earlier run of the same session neither stands nor holds an idle tidy back.
+    Only the session panel reads these rows (Fleet's own route list is not changed)."""
+    from .. import route as route_reader
+    from ..projection import _SPEC_MARKER_FRESHNESS_SLACK_S
+    now = time.time() if now is None else now
+    known = {route.get("id") for route in routes}
+    state_of = {row["tag"]: row.get("state") for row in session_rows}
+    found = []
+    for tag, info in session_index.items():
+        chain = _get(info["session"], "route_chain")
+        node = _get(chain, "current") if isinstance(chain, Mapping) else None
+        rid = _text(node.get("route_id")) if isinstance(node, Mapping) else None
+        if not rid or rid in known or node.get("shape") != "direct" or node.get("automatic"):
+            continue
+        status = node.get("state")
+        result = node.get("result") if isinstance(node.get("result"), Mapping) else None
+        outcome = result_at = None
+        if status in ("open", "finish-pending"):
+            state = state_of.get(tag)
+            if state not in ("working", "idle", "blocked"):
+                continue                    # the owner is the session: no live session, no standing route
+            started = now - (_num(_get(info["session"], "elapsed_min")) or 0) * 60
+            stamp = node.get("ts")
+            if type(stamp) not in (int, float) or stamp < started - _SPEC_MARKER_FRESHNESS_SLACK_S:
+                continue                    # declared before this session process began: an earlier run's, left open
+        elif status == "done" and result is not None:
+            state = "done"
+            outcome, result_at = _text(_get(result, "result", "status")), _num(_get(result, "at"))
+            if outcome is None or result_at is None:
+                continue
+        else:
+            continue
+        record = route_reader.load(_text(node.get("route_file")), None, rid) or {}
+        capability = _text(record.get("capability")) or _text(node.get("capability"))
+        cwd = _text(record.get("cwd"))
+        row = {
+            "id": rid, "repo": (next((r for r in session_rows if r["tag"] == tag), {})).get("repo"),
+            "session_tag": tag,
+            "title": _route_subject(rid, record, {}, None, result,
+                                    [n for n in (chain.get("nodes") or ()) if isinstance(n, Mapping)]),
+            "state": state, "outcome": outcome, "result_at": result_at,
+            "worker": [], "age": None, "legs": [], "stages": [], "resume": None,
+            "activity": "running" if state == "working" else "ended",
+            "loops": None, "worktree": (os.path.basename(cwd.rstrip("/")) or None)
+            if cwd and ("-wt" in cwd or "/.worktrees/" in cwd) else None,
+            "tree_label": _short_capability(capability), "harness": None, "model": None, "effort": None,
+            "mode": _text(record.get("capability_mode")) or _text(node.get("capability_mode")),
+            "intensity": _text(record.get("effective_intensity")) or _text(node.get("intensity")),
+            "profile": None, "capability": _short_capability(capability), "shape": "direct",
+            "past_from": None, "worker_stage": "·", "worker_unit": None,
+            "worker_stage_key": None, "worker_step_key": None,
+            "owner_context": None, "owner_gauge": [None, None], "worker_contexts": [], "subworker": None,
+            "current": state != "done",
+        }
+        if record:
+            try:
+                row["visibility"] = route_visibility.bounded(route_visibility.describe(record, {}, owner=None))
+            except Exception:
+                pass
+            verification = ((row.get("visibility") or {}).get("codes") or {}).get("verification")
+            if isinstance(verification, Mapping) and verification.get("closed_at"):
+                row["closed"] = True
+        found.append(row)
+    return found
+
+
 def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_identity=False):
     """One leg group holding the route's stages: the detail the route page prints per stage."""
     if not view_nodes:
@@ -3695,6 +3772,8 @@ def session_route_status(snapshot, now=None, *, include_details=False):
     resolver = _resolver(snapshot)
     rows, index = _session_records(snapshot, now, resolver)
     routes, route_nodes = _route_records(snapshot, rows, index, resolver, now)
+    # In place: the caller that observes this list (session_line) reads the same rows.
+    routes.extend(_direct_routes(routes, rows, index, now))
     counts, opened = current_route_counts(routes)
     result = {}
     for tag in opened:

@@ -198,22 +198,25 @@ assert.deepEqual(draw({wait:''}),['● [e9] hearting │ Opus 5.5 │ CTX ━━
     def test_folded_the_host_gives_the_strip_its_rows_and_claudes_row_the_notice(self):
         # The host's own paths: folded, the panel's height is native-display's foldRows (the window's
         # rows alone) and the native keeps the rest at the whole width. Spec rule 49 (c), 11-14 night
-        # ("같은 값을 두 번 보이지 않는다"): while the strip paints its session row, the row under Claude's
-        # input keeps the notice (what to do now) as when the panel is open, so the status values show
-        # once, in the strip; the strip carries no Git or job row. Strip rows with what to do alone
-        # leave Claude its own status row, as an open panel short of rows does.
+        # ("같은 값을 두 번 보이지 않는다"), 11-16 ("맨 아래줄이 비면이 아니고 항상 비우라고 그냥"): the row under
+        # Claude's input is always the shell's one line (the working folder, `hearting v<version>`), folded or
+        # open, whatever groups the panel paints; the panel's notice text no longer stands there. Hidden (Fleet
+        # over the window), another harness or an open settings editor leave Claude's row.
         self.node(r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const text=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
-const pick=(start,end)=>{const at=text.indexOf(start);assert(at>=0,start);return text.slice(at,text.indexOf(end,at));};
+const pick=(start,end)=>{const at=text.indexOf(start);assert(at>=0,start);const to=text.indexOf(end,at);assert(to>at,end);return text.slice(at,to);};
 const code=pick('function geometry(){','function panelColumns(){')+pick('function nativeColumns(){','function panelRow(){')
- +pick('function maxHeight(){','\n')+pick('function height(){','function schedule()')+pick('function claudePanelPainted(){','// The blanked Claude row');
+ +pick('function maxHeight(){','\n')+pick('function height(){','function schedule()')+pick('function claudePanelPainted(){','// The release this window runs')
+ +pick('// The release this window runs','let claudeStatus=');
 const d=require(path.join(process.argv[1],'native-display.cjs'));
 const host=(cols,rows,expanded)=>{
  const c={nativeDisplay:d,cols,rows,expanded,foldChoice:null,displayConfiguration:{layout:'side',side_width:40,position:'right',bottom_rows:14},settings:undefined,dragging:false,
   block:{focused:false,leave(){}},fleetView:null,currentDelivery:null,panelContent:()=>Array(30).fill([]),
   harness:'claude',relay:false,ended:false,activated:true,sid:'s',paintedGroups:new Set(),
-  panelModel:{head:[{text:'[e9] hearting'}],git:[{text:'(main)'}],context:[{text:'context 58%'}],quota:[{text:'5h 12%'}],jobs:[{text:'>_ job'}],wait:'◑ 1',route_count:2}};
+  myRelease:'/home/u/.local/share/hearting/releases/v4.40.0/utilities/session-shell/host.cjs',cellWidth:t=>[...t].length,
+  panelModel:{head:[{text:'[e9] hearting'}],git:[{text:'(main)'}],context:[{text:'context 58%'}],quota:[{text:'5h 12%'}],jobs:[{text:'>_ job'}],wait:'◑ 1',route_count:2,
+   notice:[{text:'◑ 1 answer needed'}],footer_path:'~/work/project'}};
  vm.createContext(c);vm.runInContext(code,c);return c;};
 for(const rows of [60,40,24,23,16,15,12,6]){
  const c=host(160,rows,false),strip=d.foldRows(rows);
@@ -226,14 +229,21 @@ const painted=(expanded,groups,extra={})=>{Object.assign(c,{expanded,paintedGrou
 // Folded: the strip's session row takes the status row's place (no Git or job row needed).
 assert.equal(painted(false,['head','context','quota','wait','route']),true);
 assert.equal(painted(false,['head','context']),true);
-// Folded to what to do alone: Claude keeps its own status row.
-assert.equal(painted(false,['wait']),false);
-// Open: every group the row carries, as before (#1635).
-assert.equal(painted(true,['head','context','quota','wait','route']),false);
+// 11-16: the row is the shell's line whatever the panel paints; folded to what to do alone it is still the line.
+assert.equal(painted(false,['wait']),true);
+assert.equal(painted(true,['head','context','quota','wait','route']),true);
 assert.equal(painted(true,['head','git','context','quota','jobs','wait','route']),true);
-// Hidden (Fleet over the window) or another harness: Claude's row stays.
+assert.equal(painted(true,[]),true);
+// Hidden (Fleet over the window), another harness, an open settings editor or no panel rows: Claude's row stays.
 assert.equal(painted(false,['head'],{fleetView:{}}),false);
 assert.equal(painted(false,['head'],{fleetView:null,harness:'codex'}),false);
+assert.equal(painted(false,['head'],{harness:'claude',settings:{}}),false);
+Object.assign(c,{settings:undefined});
+// The line that takes the row: the working folder at the left, the release at the right, never the notice text.
+const line=c.footerLine(60).replace(/\x1b\[[0-9;]*m/g,'');
+assert.equal(line.length,60);
+assert(line.startsWith('  ~/work/project')&&line.trimEnd().endsWith('hearting v4.40.0'),JSON.stringify(line));
+assert(!line.includes('answer needed'),JSON.stringify(line));
 """)
 
     def test_messages_new_counts_what_arrived_since_the_last_input(self):

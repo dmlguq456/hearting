@@ -597,6 +597,10 @@ def _env_for(root: Path, record: Mapping[str, Any], route: Optional[Mapping[str,
     runtime_candidate = worker_bootstrap.runtime_dir_candidate(root, **runtime_context)
     if runtime_candidate:
         env["AGENT_RUNTIME_DIR"] = runtime_candidate
+    raw_candidate = worker_bootstrap.raw_data_dir_candidate(
+        root, runtime_candidate, source_root=runtime_context.get("source_root"))
+    if raw_candidate:
+        env["AGENT_RAW_DATA_DIR"] = raw_candidate
     # This is an already-declared producer context. Carrying it through the
     # existing artifact env lets the next explicit same-campaign cycle join
     # without an agent remembering a group ID or changing route lineage.
