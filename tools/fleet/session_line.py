@@ -1025,12 +1025,79 @@ def message_body(text):
     return " ".join(body.split()) or " ".join(str(text or "").split())
 
 
-def _message_when(at, now):
-    """``HH:MM`` today, ``MM-DD`` otherwise (local time); empty without a time."""
-    if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+def when_text(at, now=None):
+    """When something happened: ``HH:MM`` today, ``MM-DD`` on another day (local time); empty
+    without a time. The one form Fleet's screens and the shell panel write for a moment (how
+    long something took is :func:`elapsed_text`): never ``ago``, never seconds."""
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at) or at <= 0:
         return ""
-    stamp, today = time.localtime(at), time.localtime(now)
+    if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
+        now = time.time()
+    try:
+        stamp, today = time.localtime(at), time.localtime(now)
+    except (OverflowError, OSError, ValueError):
+        return ""
     return time.strftime("%H:%M" if stamp[:3] == today[:3] else "%m-%d", stamp)
+
+
+_message_when = when_text
+
+
+def message_head_parts(row):
+    """``← [e4] claude · 21:02 · steer`` as painted parts: the head of one
+    :func:`peer_message_rows` row, the pieces the shell panel's MESSAGES head draws (the arrow
+    in its direction's color, the other session, then dim harness, time and kind, and a sent
+    message's delivery word in its own color). A value the row does not carry is left out."""
+    way = str(row.get("way") or "")
+    parts = [(way, "lvl_g" if way == "←" else "loc_repo"), (" ", "dim"), (str(row.get("who") or ""), "loc_repo")]
+    for name, lead in (("harness", " "), ("when", " · "), ("kind", " · ")):
+        if row.get(name):
+            parts.append((lead + str(row[name]), "dim"))
+    delivery = row.get("delivery")
+    if isinstance(delivery, (list, tuple)) and delivery and delivery[0]:
+        parts += [(" · ", "dim"), (str(delivery[0]), str(delivery[1]) if len(delivery) > 1 and delivery[1] else "dim")]
+    return parts
+
+
+# A large context left resting long is worth a word (its cache cools while it rests): the CTX
+# line then says since when it rests in place of when it was last cleared. One constant,
+# ``(tokens, seconds)``; the line is worked out from the moment the rest began whenever it is
+# drawn, so no timer keeps it.
+LONG_REST = (500_000, 60 * 60)
+
+
+def context_line_parts(percent, tokens=None, cleared_at=None, resting_since=None, now=None):
+    """``42% · 415K · cleared 04:48`` (Korean ``정리 04:48``) as painted parts: the context
+    percent in its level color, the exact token count and when the session was last cleared
+    (``cleared_at``: epoch seconds, or a time already in :func:`when_text`'s form). A large
+    context (``LONG_REST``) resting since long reads ``81% · 812K · idle 03:40`` instead, its
+    count and rest in the caution color. Each piece only when it is observed; ``[]`` when none
+    is (nothing is estimated)."""
+    from .config import ui_text
+    now = time.time() if now is None else now
+    parts = []
+
+    def add(text, key):
+        if parts:
+            parts.append((" · ", "dim"))
+        parts.append((text, key))
+
+    if _percent(percent) != "?":
+        add(_percent(percent), _level(percent))
+    rest = _number(resting_since)
+    resting = (type(tokens) is int and tokens >= LONG_REST[0] and rest is not None and rest > 0
+               and now - rest >= LONG_REST[1] and bool(when_text(rest, now)))
+    count = token_text(tokens)
+    if count:
+        add(count, "lvl_y" if resting else "dim")
+    if resting:
+        add(ui_text("fleet.context.resting", when=when_text(rest, now)), "lvl_y")
+    else:
+        cleared = (cleared_at.strip() if isinstance(cleared_at, str)
+                   and re.fullmatch(r"\d\d[:-]\d\d", cleared_at.strip()) else when_text(cleared_at, now))
+        if cleared:
+            add(ui_text("fleet.context.cleared", when=cleared), "dim")
+    return parts
 
 
 # The sender's ledger status (peer-message `record --status`): the receiver's own

@@ -149,7 +149,7 @@
 | **ROUTES** | 요청마다 지금 하는 doer, 갈래와 지금 위치(`one-shot`, 단계마다 작업자를 띄우면 `staged 3/7 execute ●`)와 그 아래에서 도는 작업자. 펼치면 단계가 나옵니다. |
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 모든 에이전트: 어느 세션이, 어떤 질문을, 어느 요청에서, 언제부터 묻는지. 오래된 대기는 답하거나 일이 끝날 때까지 목록에 남습니다. 하네스가 답 경로를 주면 Fleet에서 바로 답하고, 아니면 해당 세션으로 안내합니다. |
 | **RESOURCES** | 이 기계와 설정한 호스트의 CPU, 메모리, GPU별 사용량, 각 GPU 프로세스를 가진 세션. |
-| **그 밖의 화면** | PEERS(어떤 세션이 어떤 세션을 지켜보거나 조정하는지), HISTORY(터미널 자리마다 이전 세션), MEMORY(프로젝트별 최근 결정과 남은 일), MODELS · SYSTEM(예산별 실제 모델과 설치된 릴리스). |
+| **그 밖의 화면** | PEERS(메시지·요청·감독·이어받음으로 이어진 세션들과 종류마다 가장 최근의 이어짐), HISTORY(터미널 자리마다 이전 세션), MEMORY(프로젝트별 최근 결정과 남은 일), MODELS · SYSTEM(예산별 실제 모델과 설치된 릴리스). |
 
 NOW는 세션이 지금 하는 일입니다(관측된 것이 없으면 `·`). 펼치면 LAST INPUT과 RECEIVED가 나옵니다. LAST INPUT은 마지막으로 확인한 사람 입력을 `› 1m · …`로 보여 주고, `› ?`는 설치 전에 첫 줄이 남지 않았거나 해당 세션의 입력 기록을 읽을 수 없어 본문을 확인하지 못했다는 뜻, `› ·`는 기록된 사람 입력이 없다는 뜻입니다.
 
@@ -225,7 +225,7 @@ route는 실패 까닭 전문, Enter로 산출물 경로가 있는 route 페이�
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: Claude Code 세션이 7분째 기다리는 결정 하나와 언제부터인지, 답하는 법. 그 아래 Codex 세션의 오래된 승인 대기 하나. 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 언제부터인지, 어떻게 답하는지, 오늘 무엇에 답했는지.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 요청, 조정하는 OpenCode 세션, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 한 세션의 상태, 문맥, 지금 하는 일, 요청, 연결된 세션, GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 요청, 이어진 OpenCode 세션에 보낸 메시지, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 한 세션의 상태, 문맥, 지금 하는 일, route와 요청, 메시지와 이어진 세션, GPU — 패널과 같은 낱말로.</sub></td>
     <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: 호스트 둘의 GPU별 사용률과 메모리, 각 GPU 프로세스를 돌리는 세션과 명령, CPU와 메모리 사용량."><br><sub><b>RESOURCES</b> — 호스트별 GPU 사용량과 각 프로세스 뒤의 세션과 명령.</sub></td>
   </tr>
 </table>
