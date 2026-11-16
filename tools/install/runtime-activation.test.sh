@@ -1436,7 +1436,7 @@ commands = [hook["command"] for groups in settings["hooks"].values()
             if isinstance(hook, dict) and isinstance(hook.get("command"), str)]
 managed = [command for command in commands if prefix in command]
 assert sum(command.count(prefix) for command in managed) == 44, len(managed)
-assert sum("/hooks/" in command for command in managed) == 43
+assert sum("/hooks/" in command for command in managed) == 42
 assert sum("/tools/memory/mem.py" in command for command in managed) == 1
 assert not (Path(os.environ["HOME"]) / ".claude/hooks/run-hook.sh").exists()
 
@@ -1476,7 +1476,7 @@ for raw in paths:
     assert str(path).startswith(str(expected_root) + os.sep), path
     assert path.is_file(), path
     assert ".claude}" not in str(path), path
-assert sum("/hooks/" in raw for raw in paths) == 43, paths
+assert sum("/hooks/" in raw for raw in paths) == 42, paths
 assert sum("/tools/memory/mem.py" in raw for raw in paths) == 1, paths
 assert sum(raw.endswith("/hooks/run-hook.sh") for raw in paths) == 42, paths
 assert sum(raw.endswith("/hooks/herdr-agent-state.sh") for raw in paths) == 1, paths

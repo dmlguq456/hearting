@@ -296,8 +296,11 @@ class WiringAndRulesTest(unittest.TestCase):
             self.assertTrue(re.search(groups[0]["matcher"], tool), tool)
         self.assertIn("pretooluse-question-redirect.py", groups[0]["hooks"][0]["command"])
         self.assertIn("pretooluse-question-redirect.py", (ROOT / "adapters/codex/hooks/run-hook.sh").read_text())
-        self.assertNotIn("frame-answer", json.dumps(hooks))
-        self.assertFalse((ROOT / "adapters/codex/hooks/posttooluse-frame-answer.py").exists())
+        # The retired bridge keeps its hooks.json position (Codex keys trust by position) as a no-op.
+        retired = (ROOT / "adapters/codex/hooks/posttooluse-frame-answer.py").read_text()
+        self.assertNotIn("frame_native_answer", retired)
+        self.assertEqual(subprocess.run([sys.executable, str(ROOT / "adapters/codex/hooks/posttooluse-frame-answer.py")],
+                                        input="{}", text=True, capture_output=True).stdout, "")
 
     def test_opencode_plugin_redirects_before_the_question_tool_and_keeps_no_frame_recorder(self):
         plugin = (ROOT / "adapters/opencode/plugins/hearting-guards.js").read_text()

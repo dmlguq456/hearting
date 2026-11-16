@@ -191,6 +191,8 @@ A question to the person goes to the Hearting question board: `PreToolUse` on
 `request_user_input` and `request_user_input_async` registers it and refuses the native call
 (`utilities/native_question_redirect.py`, the same behavior as Claude and OpenCode). The
 native tool below is only the fall-through when registration fails or the caller is a worker.
+The old `PostToolUse(request_user_input)` frame-answer bridge stays in `hooks.json` as a no-op
+because Codex keys hook trust by position.
 Native Codex owns question timing. Runtime activation enables
 `features.default_mode_request_user_input` in interactive `$CODEX_HOME/config.toml`
 when the existing feature table can be safely extended; explicit false and
