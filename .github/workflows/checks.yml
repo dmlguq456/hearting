@@ -182,6 +182,9 @@ jobs:
             --connect-timeout 20 --max-time 240 \
             --output "$archive" \
             https://api.github.com/repos/openai/codex/releases/assets/645227929
+          # The token is for this one download: the downloaded CLI and the tests
+          # below run without it.
+          unset GH_TOKEN
           printf '%s  %s\n' \
             beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4 \
             "$archive" | sha256sum --check --strict
