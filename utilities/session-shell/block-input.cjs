@@ -23,8 +23,11 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // its existing word.
   const phase=item=>{
     const entry=state(item),local=entry.state,remote=item.request_state;
-    if(['received','applied'].includes(remote)||['received','applied'].includes(local))
-      return entry.sentAt&&Date.now()-entry.sentAt<SENT_KEEP_MS?'sent':'done';
+    if(['received','applied'].includes(remote)||['received','applied'].includes(local)){
+      // Its age decides: a clock behind the send (a negative age) leaves no age, so the line goes.
+      const age=Date.now()-entry.sentAt;
+      return entry.sentAt&&age>=0&&age<SENT_KEEP_MS?'sent':'done';
+    }
     return remote==='submitted'||local==='submitted'?'sent':null;
   };
   const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));

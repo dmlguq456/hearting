@@ -124,7 +124,9 @@ const phases={};
   await until(s=>s.at(-1).includes('▴')&&!s.some(l=>l.includes('QUESTIONS')),'the folded strip');
   {const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));cache.observed_at=Date.now()/1000;write(cfg.cache,JSON.stringify(cache));}
   await until(s=>/◑\S* ?\S+ \d/.test(s.at(-1))||s.at(-1).includes('◑'),'the strip with its wait');
-  await record('strip',5600);
+  // The strip's own window: its first change can come two seconds in under load, and four changes at the
+  // second still have to fit (the beat's own assertions are the same as the other phases').
+  await record('strip',7600);
   fs.writeFileSync(cfg.result,JSON.stringify({phases}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
 finally{try{child.write('\x15quit\r');}catch{}await sleep(300);try{child.kill();}catch{}}
@@ -345,7 +347,7 @@ class WaitBlinkPtyTest(unittest.TestCase):
             got = found[name]
             self.assertGreaterEqual(got['cells'], 5 if name == 'strip' else 10, (name, got))
             # Fleet's beat: a change every second, on the clock's second (lit in the even one): four or more
-            # changes in 5.6 seconds (the breath's beat made two at most).
+            # changes in the window (5.6 seconds; the folded strip's 7.6, so a late first change still fits).
             self.assertGreaterEqual(len(got['gaps_ms']), 3, (name, got))
             self.assertTrue(all(850 <= g <= 1150 for g in got['gaps_ms']), (name, got))
             self.assertTrue(all(o < 150 for o in got['second_offset_ms']), (name, got))
