@@ -2099,6 +2099,19 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         ready = complete and not private.get("pending")
         items.append(("submit", "hearting" if ready else "dim",
                       ("question.submit",) if ready else None))
+    elif request_state == "submitted" and not private.get("pending"):
+        # On its way (rule 5): what was sent and what it waits for, the shell panel's same line;
+        # nothing here sends it again.
+        from ..session_block import sent_answer_line
+        cursor = indent
+        for text, key in sent_answer_line(envelope.get("sent") or (), wait=question.get("answer_wait") or "",
+                                          questions=[{**spec, "secret": bool(spec.get("is_secret") or spec.get("isSecret"))}
+                                                     for spec in specs]):
+            cursor = grid.put(cursor, y, text, key, limit=right)
+        if open_item and cursor < right:
+            cursor = grid.put(cursor, y, " │ ", "dim", limit=right)
+            _question_actions(grid, cursor, right, y, [open_item])
+        return y + 1
     elif request_state in _QUESTION_STATE_WORD:
         items.append((_QUESTION_STATE_WORD[request_state], "dim", None))
     else:
@@ -2210,8 +2223,11 @@ def draw_questions(grid, vm, state, x=34, y=3):
         else:
             parts = _question_line(question)
         if sent:
-            word = ui_text("fleet.session_block.sent").lstrip("✓ ").strip()
-            parts = [(word + " · ", "dim"), *[(text, "dim") for text, _key in parts]]
+            # The shell panel's sent line (`session_block.sent_answer_line`), its `✓` in the marker column.
+            from ..session_block import sent_answer_line
+            line = sent_answer_line(wait=question.get("answer_wait") or "", mark=False)
+            parts = [*[(text, "dim") for text, _key in line], (" · ", "dim"),
+                     *[(text, "dim") for text, _key in parts]]
         put_fit(grid, text_x, y, parts, limit=limit)
         if is_open:
             _tint_row(grid, y, x - 1, right, 236)
