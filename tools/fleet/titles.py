@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 
@@ -84,7 +85,7 @@ def annotate(entities):
 
 def _safe_key(value, label):
     value = str(value or "")
-    if not value or not _SAFE_KEY_RE.match(value):
+    if not value or not _SAFE_KEY_RE.fullmatch(value):     # `$` alone takes a final newline
         raise ValueError("invalid %s" % label)
     return value
 
@@ -120,7 +121,7 @@ def attempt_sid(attempt_id):
     A registered worker session runs no statusline producer, so its own runtime
     sid never gains a sidecar; the attempt-owned record is the only producer.
     """
-    if not isinstance(attempt_id, str) or not _SAFE_KEY_RE.match(attempt_id):
+    if not isinstance(attempt_id, str) or not _SAFE_KEY_RE.fullmatch(attempt_id):
         return None
     return "dispatch-" + attempt_id
 
@@ -282,13 +283,31 @@ def append_timeline(sid, row, harness="claude", now=None):
             return False
         path = timeline_path(sid, harness=harness)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        # A link or a FIFO in its place is not followed or waited on: only a regular file is written.
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return False
             return os.write(fd, line) == len(line)
         finally:
             os.close(fd)
     except Exception:
         return False
+
+
+def _timeline_record(raw):
+    """One line's record; a line a half-finished write ran into keeps the whole record after it."""
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        pass
+    start = raw.rfind(b'{"kind":"')
+    if start <= 0:
+        return None
+    try:
+        return json.loads(raw[start:].decode("utf-8"))
+    except Exception:
+        return None
 
 
 def read_timeline(sid, harness="claude"):
@@ -297,28 +316,28 @@ def read_timeline(sid, harness="claude"):
     Each item is a dict with a finite ``at``, a ``kind`` of ``now``/``prompt``, a string
     ``text`` and, when the writer knew them, the cursor fields (``from``/``to`` for a
     NOW, ``from`` for a prompt). A broken line, an unknown ``kind`` and a last line
-    that never got its newline (a half-finished write) are skipped. A missing file or
-    bad key reads as ``[]``. Only the last ``_TIMELINE_READ_MAX`` bytes are read.
+    that never got its newline (a half-finished write) are skipped; a whole record written
+    after a half-finished one on the same line is still read. A missing file or bad key
+    reads as ``[]``. Only the last ``_TIMELINE_READ_MAX`` bytes are read.
     """
     try:
         path = timeline_path(sid, harness=harness)
         with open(path, "rb") as handle:
             size = os.fstat(handle.fileno()).st_size
-            skip_first = size > _TIMELINE_READ_MAX
-            if skip_first:
-                handle.seek(size - _TIMELINE_READ_MAX)
-            data = handle.read(_TIMELINE_READ_MAX)
+            if size > _TIMELINE_READ_MAX:
+                # One byte more: when it is a newline the window starts on a whole line.
+                handle.seek(size - _TIMELINE_READ_MAX - 1)
+                data = handle.read(_TIMELINE_READ_MAX + 1).partition(b"\n")[2]
+            else:
+                data = handle.read(_TIMELINE_READ_MAX)
     except Exception:
         return []
     lines = data.split(b"\n")
     lines.pop()  # the segment after the last newline is empty or half written
-    if skip_first and lines:
-        lines.pop(0)  # it starts mid-line
     rows = []
     for raw in lines:
-        try:
-            item = json.loads(raw.decode("utf-8"))
-        except Exception:
+        item = _timeline_record(raw)
+        if item is None:
             continue
         if (not isinstance(item, dict) or item.get("kind") not in TIMELINE_KINDS
                 or not isinstance(item.get("text"), str)):
