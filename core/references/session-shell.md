@@ -66,11 +66,14 @@ The host asks the PTY owner for a successor only at a safe moment: idle, an
 empty composer, no open form or answerable question, no popup, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
 action worker. Keys that reached native since the last submitted turn leave the
-composer unproven (an erased draft, a form answered with Enter, history-scroll
-keys, a turn stopped without a stop callback), so the switch then follows the
-next submitted turn. A start or selection (a resume picker's Enter, `/clear`,
+composer unproven (an erased draft, a form answered with Enter, a local command such
+as `/model` whose menu opened and closed, history-scroll keys, a turn stopped without
+a stop callback) until the native has painted after them and that newer screen reads
+idle with an empty composer; delivery readiness settles them the same way. A draft or
+form on that screen keeps them unproven, and keys the native has not painted after
+(an unechoed cursor key, a slow native) wait for its next paint or submitted turn. A start or selection (a resume picker's Enter, `/clear`,
 OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
-delivery readiness does; keys after that Enter still wait for the next submitted turn.
+delivery readiness does; keys after that Enter are settled as above.
 A window with no selected session (OpenCode on its home route) has
 no such proof and waits for one; OpenCode's plugin reload (deselect, then select of the
 same session, no keys between) keeps an open popup. The owner starts the successor from the same installed path. The old host stops
