@@ -63,7 +63,7 @@ for(const c of i.cases){
     configuration:{theme:c.theme},cellWidth:cells,background:c.background||''});}catch(e){error=String(e&&e.stack||e);}
   if(error){out.push({id:c.id,error});continue;}
   out.push({id:c.id,rows:v.rows.map(r=>({width:r.reduce((n,p)=>n+cells(p.text),0),text:r.map(p=>p.text).join(''),
-    chosen:r.some(p=>p.background===c.chosen),reversed:r.some(p=>p.reverse===true&&p.text.trim()!==''),
+    chosen:r.some(p=>p.background===view.FACES[c.face||'dark'].chosen),reversed:r.some(p=>p.reverse===true&&p.text.trim()!==''),
     parts:r.map(p=>({text:p.text,background:p.background,reverse:p.reverse}))})),frame:v.frame,width:v.width,height:v.height,body:v.body});
 }
 console.log(JSON.stringify(out));
@@ -111,8 +111,6 @@ class PanelOpenerTest(unittest.TestCase):
 
 @unittest.skipUnless(NODE, "needs node")
 class PopupFrameTest(unittest.TestCase):
-    CHOSEN = {"dark": 24, "light": 153}
-
     def answer(self, harness="claude", colors=256, no_color=False, prompts=4, days=2):
         import session_shell
         from fleet.explorer import timeline as tl
@@ -135,7 +133,7 @@ class PopupFrameTest(unittest.TestCase):
                     answer, story = self.answer(harness, colors, no_color)
                     sel = story[4]["key"]
                     cases.append({"id": [harness, face, colors, no_color, theme_use], "answer": answer, "sel": sel, "cols": 120, "rows": 40,
-                                  "theme": theme_use, "colors": colors, "noColor": no_color, "chosen": self.CHOSEN[face]})
+                                  "theme": theme_use, "colors": colors, "noColor": no_color, "face": face})
         with tempfile.TemporaryDirectory(prefix="np-", dir="/tmp") as tmp:
             for case, got in zip(cases, self.frames(cases, tmp)):
                 with self.subTest(case=case["id"]):
@@ -154,7 +152,7 @@ class PopupFrameTest(unittest.TestCase):
         import tempfile
         answer, story = self.answer(prompts=7, days=3)
         cases = [{"id": [cols, rows], "answer": answer, "sel": story[9]["key"], "cols": cols, "rows": rows, "theme": "terminal",
-                  "colors": 256, "noColor": False, "chosen": 24} for cols in range(60, 161, 10) for rows in range(16, 61, 11)]
+                  "colors": 256, "noColor": False} for cols in range(60, 161, 10) for rows in range(16, 61, 11)]
         with tempfile.TemporaryDirectory(prefix="np-", dir="/tmp") as tmp:
             for case, got in zip(cases, self.frames(cases, tmp)):
                 with self.subTest(size=case["id"]):
@@ -168,7 +166,7 @@ class PopupFrameTest(unittest.TestCase):
         import tempfile
         answer, story = self.answer()
         cases = [{"id": cols, "answer": answer, "sel": story[3]["key"], "cols": cols, "rows": 40, "theme": "terminal", "colors": 256,
-                  "noColor": False, "chosen": 24} for cols in (80, 120)]
+                  "noColor": False} for cols in (80, 120)]
         with tempfile.TemporaryDirectory(prefix="np-", dir="/tmp") as tmp:
             narrow, wide = self.frames(cases, tmp)
         # 80 columns: the frame's inside is 72 cells; 120: 112.

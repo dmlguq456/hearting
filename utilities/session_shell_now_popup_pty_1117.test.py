@@ -89,10 +89,10 @@ const aligned=async()=>{await flush();const b=box(await screen());if(!b)return f
 const frameWidth=async()=>{await flush();const b=box(await screen());if(!b)return 0;const c=cells(b.top);return c.indexOf('╮')-c.indexOf('╭')+1;};
 const popupHas=word=>s=>{const b=box(s);return !!b&&b.rows.some(l=>l.includes(word));};
 const titled=word=>s=>{const b=box(s);return !!b&&b.title.includes(word);};
-// The row stood on: the popup's cells on the chosen ground (palette 24 on the dark face), or reversed.
+// The row stood on: the popup's cells on the chosen ground (the dark face's, `cfg.chosen`), or reversed.
 const standing=async()=>{await flush();const s=await screen(),b=box(s);if(!b)return null;
   for(let y=b.top+1;y<b.bottom;y++){const line=term.buffer.active.getLine(y);let hit=false;
-    for(let x=0;x<cols;x++){const c=line?.getCell(x);if(c&&c.getChars().trim()&&(c.isBgPalette()&&c.getBgColor()===24||cfg.reversed&&c.isInverse())){hit=true;break;}}
+    for(let x=0;x<cols;x++){const c=line?.getCell(x);if(c&&c.getChars().trim()&&(c.isBgPalette()&&c.getBgColor()===cfg.chosen||cfg.reversed&&c.isInverse())){hit=true;break;}}
     if(hit)return s[y].replace(/^.*?│ /,'').replace(/ │.*$/,'').trim();}
   return '';};
 const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split('│')[0].trimEnd():null;};
@@ -265,7 +265,9 @@ class NowPopupPtyTest(unittest.TestCase):
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'), 'project': str(project),
                   'result': str(case / 'result.json'), 'story': str(full), 'slow': str(case / 'slow'), 'now': NOW_TEXT,
-                  'passage': passage, 'cols': cols, 'rows': rows, 'reversed': False}
+                  'passage': passage, 'cols': cols, 'rows': rows, 'reversed': False,
+                  # the dark face's chosen ground, as panel-view has it (the popup's colors are not this test's to fix)
+                  'chosen': int(subprocess.run([self.node, '-p', "require(process.argv[1]).FACES.dark.chosen", str(ROOT / 'utilities/session-shell/panel-view.cjs')], capture_output=True, text=True, check=True).stdout)}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
         child = subprocess.Popen([self.node, str(self.driver)], env=env, cwd=project, stdout=subprocess.PIPE,
