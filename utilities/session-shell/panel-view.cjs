@@ -1001,8 +1001,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return out;
     };
     // A note on the right of a border (the route box's hidden counts) shows whole or not at all.
-    const boxTop=(label,key,{action,ellipsis=false,note=[]}={})=>{
+    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[]}={})=>{
       const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
+      // A shorter form of the title (the route box's `REQUEST`, then its route count alone, never a count without its
+      // name) stands where the whole one does not fit.
+      const fits=form=>form&&form.length&&size(form)<=room-size(tail)-3;
+      if(!fits(label)){const form=alt.find(fits);if(form)label=form;else if(alt.length)label=alt.filter(x=>x&&x.length).at(-1)||label;}
       const name=label.length&&room-size(tail)>=4?titled(label,room-size(tail)-3,ellipsis):[];
       const head=name.length?[L('─ ',key),...name,L(' ',key)]:[];
       return {parts:[L('╭',key),...head,L('─'.repeat(Math.max(0,room-size(head)-size(tail))),key),...tail,L('╮',key)],action};
@@ -1219,30 +1223,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return size(lead)<=inner?lead:null;
     }
-    // One folded request row: direction mark, the other session, the title and the status (a
-    // sent one not yet seen says so; then the work: open, partial answer, final answer, rejected,
-    // cancelled), then how long ago. A value that does not fit goes whole: the age; then the title
-    // is cut with `…` and, past two cells, gone (the other session and the status stay); the other
-    // session goes only after that (spec rules 29, 30).
-    const requestLine=q=>{
-      const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo');
-      const who=q.who?[text(' '+q.who,'dim')]:[],title=text(' '+String(q.title||q.id),'loc_repo');
-      const status=q.status?[text(' · ','dim'),text(String(q.status),q.kind==='request-rejected'?'lvl_r':'dim')]:[];
-      const age=q.age?[text(' '+q.age,'dim')]:[];
-      for(const form of [[mark,...who,title,...status,...age],[mark,...who,title,...status]])
-        if(size(form)<=inner)return form;
-      // The title gives way first: cut with `…` down to two cells and `…`, and past that gone,
-      // while the other session and the status stay. Only when those two alone do not fit does
-      // the other session go, and the title comes back (cut) in its place.
-      const stay=[mark,...who,...status];
-      if(size(stay)<=inner){
-        const room=inner-size(stay);
-        return room>=4?[mark,...who,...cut([title],room),...status]:stay;
-      }
-      const room=inner-size([mark,...status]);
-      if(room>=4)return [mark,...cut([title],room),...status];
-      return cut([mark,title],inner);
-    };
     const routeRows=[];
     within(()=>{
       for(const r of listed){
@@ -1258,8 +1238,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       for(const q of requestList){
         // A request row opens the MESSAGES popup, where the requests read whole (as their MESSAGES rows did).
-        const key='popup:MESSAGES';
-        routeRows.push({parts:requestLine(q),two:false,action:key,kind:q.kind||'request-out',request:true});
+        // 11-16: beside the native area its rows read as a route's (`requestForms`, the one drawing of them).
+        const key='popup:MESSAGES',f=requestForms(q,{text,measure,width:inner});
+        routeRows.push({parts:f.one,two:side,head:f.head,titleRow:f.title,statusRow:f.status,titled:f.titled,
+          action:key,kind:q.kind||'request-out',request:true});
       }
     });
     // No rows yet: the producer's own label stands alone; a known empty list draws no box.
@@ -1273,8 +1255,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // route count keeps its state color; `REQUEST` is a name tag like `MESSAGES`, `MEM` and the
     // info labels: dark gray upper case (spec rules 57, 58), never a state color.
     const routeHead=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:[];
-    const requestHead=requestList.length?[text(side?requestList.length+' REQUEST':'request '+requestList.length,'dim')]:[];
-    const routeTitle=routeHead.length||requestHead.length?[...routeHead,...(routeHead.length&&requestHead.length?[text(' │ ','dim')]:[]),...requestHead]:null;
+    // 11-16 (the person: "PEER REQUEST라고 할까?"): the tag is `PEER REQUEST` (the word list's), `REQUEST` only where
+    // the whole title does not fit in the top line (the title's first step, before a word of it goes).
+    const requestTag=word=>side?requestList.length+' '+word:word.toLowerCase()+' '+requestList.length;
+    const requestHead=requestList.length?[text(requestTag(t('peer_request','PEER REQUEST')),'dim')]:[];
+    const requestShort=requestList.length?[text(requestTag(t('peer_request_short','REQUEST')),'dim')]:[];
+    const titleOfBox=tag=>routeHead.length||tag.length?[...routeHead,...(routeHead.length&&tag.length?[text(' │ ','dim')]:[]),...tag]:null;
+    const routeTitle=titleOfBox(requestHead),routeTitleShort=requestHead.length?titleOfBox(requestShort):null;
+    const routeTitleAlt=requestHead.length?[routeTitleShort,...(routeHead.length?[routeHead]:[])]:[];
     const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'popup:ROUTE'}]:[];
     // The route box's own steps short of rows (below): its title's second rows (`keepMulti`), the
     // context rows (and the workers' box) fold into the first rows, the workers go, the kind rows go,
@@ -1289,6 +1277,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Spec rule 38: who / context and time / what (two rows, then one) / which kind.
     const routeForm=x=>{
       if(!(twoRows&&x.two))return [x.parts];
+      // A request: who and age / title / status; the kind rows gone, the title and the status share a row.
+      if(x.request)return [x.head,...(keepPlace&&x.statusRow?[x.titleRow,x.statusRow]:[x.titled])];
       if(x.tree)return treeForm(x);
       const head=keepCtx?x.who:x.lead,names=keepMulti?x.names:x.name,out=[];
       if(head){out.push(head);if(keepCtx&&x.ctx)out.push(x.ctx);out.push(...names.map(row=>[text('  '),...row]));}
@@ -1317,7 +1307,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const routeOrder=()=>routeLimit<routeRows.length?routeRows.map((x,i)=>[x,i]).sort((a,b)=>((rank[a[0].kind]??2)-(rank[b[0].kind]??2))||a[1]-b[1]).map(([x])=>x):routeRows;
     const routeWindows=()=>{const list=routeOrder().map(routeSize),n=Math.max(1,list.length-routeLimit+1);
       return Math.max(...Array.from({length:n},(_,at)=>list.slice(at,at+routeLimit).reduce((a,b)=>a+b,0)));};
-    const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows():routeChecking.length):0;
+    // 11-16 (the person: "블록 안에서 구분선을 하나 긋고"): one thin rule of the box's own line (`├──┤`) parts the routes
+    // from the requests, only where both stand and the box shows all of them; short of rows it goes before any content row.
+    let keepRouteRule=true;
+    const routeRule=()=>keepRouteRule&&listed.length>0&&requestList.length>0&&routeLimit>=routeRows.length;
+    const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows()+(routeRule()?1:0):routeChecking.length):0;
     const routeBlockOf=()=>{
       const key=tone.route;
       // Spec rule 23: rows short, the box shows a window of the routes and scrolls
@@ -1332,8 +1326,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const inView=sorted.slice(routeOffset,routeOffset+routeLimit);
       const above=routeOffset,below=routeRows.length-routeOffset-inView.length+unsent;
       const hiddenNote=n=>[text(n,'loc_repo')];
-      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[]}),groups:['route']}];
+      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt}),groups:['route']}];
+      let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
+        if(routeRule()&&item.request&&before&&!before.request)block.push({parts:[L('├',key),L('─'.repeat(Math.max(0,inner-2)),key),L('┤',key)]});
+        before=item;
         // A press on any row of a route opens the route popup with it unfolded.
         for(const parts of item.two?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
       });
@@ -1486,6 +1483,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
     const lowest=['MEM','MESSAGES'];
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
+    give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
     if(!usageOn)give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
@@ -1523,11 +1521,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine]);
+      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule]);
     for(const undo of gave.reverse()){
       const was=choices();undo();
       if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
@@ -1846,6 +1844,57 @@ function veil(configuration={},{colors=256,noColor=false,background=''}={}){
   const theme={...defaults,...configuration}.theme;
   return noColor||!(colors>=256)||theme==='mono'?null:FACES[face(theme,background)||'dark'].veil;
 }
+// 11-16 (the person: "블록 안에서 구분선을 하나 긋고, 양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로"): one peer request's
+// rows, drawn here alone for the route box (beside the native area and under it) and the MESSAGES popup. Its head reads
+// as a route's doer row: the mark (→ sent, ◂ received, ✓/✕ closed), the other session's Fleet number, then its harness,
+// model and effort in the colors a route's doer takes (the backend's `paint`), and the age at the right edge, where a
+// route keeps its time. Two cells in, the title where a route's title stands, then the status, dim, where a route's kind
+// row stands. `titled` is the title and the status on one row (the kind rows gone), `one` the one-row form. Short of
+// cells the age goes first, then the effort, then the model; then the title is cut with `…` (past that the harness goes,
+// then the title); the other session and the status stay.
+function requestForms(q,{text,measure,width}){
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+  const clip=(parts,limit)=>{const out=[];let used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return out;};
+  const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1),text('…','dim')];
+  const pad=n=>text(' '.repeat(Math.max(0,n)));
+  const paint=q.paint&&typeof q.paint==='object'?q.paint:{};
+  const piece=p=>p&&typeof p==='object'&&clean(p.text).trim()?[{...p,text:clean(p.text)}]:[];
+  const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo');
+  const who=q.who?[text(String(q.who),'dim')]:[];
+  const H=piece(paint.harness),M=piece(paint.model_text),F=piece(paint.effort);
+  const title=[text(String(q.title||q.id),'loc_repo')];
+  const status=q.status?[text(String(q.status),q.kind==='request-rejected'?'lvl_r':'dim')]:[];
+  const age=q.age?[text(String(q.age),'dim')]:[];
+  const joint=[text(' · ','dim')],indent=[text('  ')];
+  const spaced=list=>list.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
+  // A row with the age at the right edge, one cell at least between them; null where it does not fit.
+  const ended=(left,end)=>size(left)+1+size(end)<=width?[...left,pad(width-size(left)-size(end)),...end]:null;
+  const drops=[[H,M,F,age],[H,M,F,[]],[H,M,[],[]],[H,[],[],[]]];
+  const lead=w=>[mark,...(w.length?[text(' '),...w]:[])];
+  let head=null;
+  for(const [h,m,f,e] of [...drops,[[],[],[],[]]]){
+    const left=lead(spaced([who,h,m,f])),row=e.length?ended(left,e):size(left)<=width?left:null;
+    if(row){head=row;break;}
+  }
+  head=head||cut(lead(who),width);
+  const titleRow=[...indent,...cut(title,width-2)];
+  const statusRow=status.length?[...indent,...cut(status,width-2)]:null;
+  const room=width-2-size(joint)-size(status);
+  const titled=!status.length?titleRow:room>=3?[...indent,...cut(title,room),...joint,...status]:[...indent,...cut(status,width-2)];
+  const body=(w,t)=>[...lead(w),...(t.length?[text(' '),...t]:[]),...(status.length?[...joint,...status]:[])];
+  const one=(()=>{
+    for(const [h,m,f,e] of drops){
+      const left=body(spaced([who,h,m,f]),title),row=e.length?ended(left,e):size(left)<=width?left:null;
+      if(row)return row;
+    }
+    for(const h of [H,[]]){const w=spaced([who,h]),left=width-size(body(w,[]))-1;if(left>=3)return body(w,cut(title,left));}
+    if(size(body(who,[]))<=width)return body(who,[]);
+    const left=width-size(body([],[]))-1;
+    return left>=3?body([],cut(title,left)):cut([mark,text(' '),...title],width);
+  })();
+  return {head,title:titleRow,status:statusRow,titled,one};
+}
 // 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
 // (their numbers, reports and body) and the recent messages, the newest first, each its head (the
 // direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
@@ -1872,8 +1921,8 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   const out=[];
   for(const q of (Array.isArray(model.requests)?model.requests:[]).filter(q=>q&&typeof q.id==='string')){
     if(out.length)out.push([]);
-    out.push([text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo'),text(' '),text(String(q.who||''),'dim'),text(' '),
-      text(String(q.title||q.id),'loc_repo'),...(q.status?[text(' · '+q.status,'dim')]:[]),...(q.age?[text(' '+q.age,'dim')]:[])]);
+    // (11-16: its head is the route box's one-row request form, at the popup's width: the same values, one drawing.)
+    out.push(requestForms(q,{text,measure,width:columns}).one);
     for(const [label,value,tone] of Array.isArray(q.details)?q.details:[])out.push(...wrapText((label?label+': ':'')+String(value||''),({lvl_r:'lvl_r',lvl_g:'lvl_g',dim:'dim'})[tone]||'loc_repo',columns));
     // (11-15: a body's markdown tables come drawn by Fleet as aligned rows, two cells in; its other lines wrap.)
     for(const value of Array.isArray(q.body_parts)?q.body_parts:Array.isArray(q.body)?q.body:[]){

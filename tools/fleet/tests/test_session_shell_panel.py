@@ -77,10 +77,16 @@ class RequestRowsTest(unittest.TestCase):
         for line in self.rows([view]) + self.rows([_request('partial')]):
             self.assertNotIn('진행', str(line))
 
-    def test_received_work_is_shown_while_open_and_leaves_when_closed(self):
+    def test_received_work_is_shown_while_open_and_stays_the_afterglow_once_answered(self):
         row, = self.rows([_request('open', 'in')])
         self.assertEqual((row['glyph'], row['kind'], row['who']), ('◂', 'request-in', '[e9]'))
-        self.assertEqual(self.rows([_request('final', 'in', reports=[{'n': 1, 'kind': 'final', 'at': NOW - 5}])]), [])
+        # 11-16 ("패널에 요청 받은 기록이 안뜨네?"): answered, it stays for the same afterglow a sent one does
+        # (closed, dim), and leaves after it; a received one does not wait for an answer this session wrote itself.
+        final = {'n': 1, 'kind': 'final', 'at': NOW - 5, 'transfer_ref': 't1'}
+        row, = self.rows([_request('final', 'in', reports=[final])])
+        self.assertEqual((row['glyph'], row['kind'], row['status']), ('✓', 'request-done', '최종 답'))
+        old = dict(final, at=NOW - 16 * 60)
+        self.assertEqual(self.rows([_request('final', 'in', reports=[old])]), [])
 
     def test_a_closed_sent_request_stays_for_the_existing_afterglow_and_until_its_answer_is_seen(self):
         final = {'n': 1, 'kind': 'final', 'at': NOW - 60, 'transfer_ref': 't1', 'revision': 1, 'result': 'ok'}
