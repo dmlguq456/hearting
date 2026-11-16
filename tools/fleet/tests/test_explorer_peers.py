@@ -123,6 +123,48 @@ def _history_recede_delta(expected_cells):
     return normalized
 
 
+def _links_words_delta(frame, expected_cells):
+    """The approved 2026-11-16 words delta (Fleet takes the shell panel's words and forms): the
+    LINKS head leads with its count (``9 LINKS messages·requests · supervision · handover``), a
+    supervision link reads ``steward ⚑`` and the status row first counts the linked sessions
+    (``7 sessions · 9 links · …``). Only those rows may differ, and only by exactly those words;
+    every other frozen cell stays as captured."""
+    import re
+    rows = [[list(cell) for cell in row] for row in frame.cells]
+    normalized = [list(row) for row in expected_cells]
+    for y, row in enumerate(normalized):
+        expected = "".join(str(cell[0] or " ") for cell in row)
+        actual_row = [list(cell) for cell in rows[y + 5][SEPARATOR:]]
+        actual = "".join(str(cell[0] or " ") for cell in actual_row)
+        if expected.startswith("── LINKS"):
+            old_meta = expected[len("── LINKS  "):].split(" ─", 1)[0]
+            head = re.match(r"(\d+) LINKS (.+?) ─", actual)
+            if not head:
+                raise AssertionError(f"the LINKS head row {y} is not the approved form: {actual!r}")
+            if old_meta == "communication · supervision · handover":
+                if head.group(2) != "messages·requests · supervision · handover":
+                    raise AssertionError(f"the LINKS head row {y} words differ: {actual!r}")
+            elif not head.group(2).endswith(" · click it again: all"):
+                raise AssertionError(f"the filtered LINKS head row {y} differs: {actual!r}")
+            normalized[y] = actual_row
+            continue
+        full = "".join(str(cell[0] or " ") for cell in rows[y + 5])
+        found = re.search(r"\d+ sessions? · (?=\d+ links? · )", full)
+        if found:
+            old = (full[:found.start()] + full[found.end():]).ljust(len(full))
+            if old[SEPARATOR:] != expected:
+                raise AssertionError(f"the PEERS status row {y} differs beyond its session count: {actual!r}")
+            normalized[y] = actual_row
+            continue
+        start = expected.find("watch ⚑")
+        if start >= 0:
+            if actual[start:start + len("steward ⚑")] != "steward ⚑":
+                raise AssertionError(f"the supervision link row {y} does not read steward ⚑: {actual!r}")
+            end = start + len("steward ⚑")
+            normalized[y] = row[:start] + actual_row[start:end] + row[end:]
+    return normalized
+
+
 class PeerPaneReference(unittest.TestCase):
     def test_peers_and_selected_links_match_reference_pane(self):
         vm = load_fixture(FIXTURES / "view_model.json")
@@ -146,6 +188,7 @@ class PeerPaneReference(unittest.TestCase):
                     expected_cells = _lane_gutter_delta(frame, vm, expected_cells)
                     expected_cells = _arrow_glyph_delta(expected_cells)
                     expected_cells = _history_recede_delta(expected_cells)
+                    expected_cells = _links_words_delta(frame, expected_cells)
                     expected_hits = [[hit[0] - 5, hit[1] - SEPARATOR, hit[2] - SEPARATOR, hit[3]]
                                      for hit in expected_full_hits
                                      if hit[0] >= 5 and hit[1] >= SEPARATOR]
@@ -181,7 +224,7 @@ class PeerPaneReference(unittest.TestCase):
         for cols in (80, 100):
             with self.subTest(cols=cols):
                 text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), cols, 45).text_rows())
-                self.assertIn("LINKS  communication", text)
+                self.assertIn("0 LINKS messages·requests", text)
                 self.assertIn("FROM", text)
                 self.assertIn("KIND", text)
 
@@ -287,7 +330,7 @@ class PeerDerivedElements(unittest.TestCase):
         for cols in (80, 100):
             with self.subTest(cols=cols):
                 text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), cols, 45).text_rows())
-                self.assertIn("LINKS  communication", text)
+                self.assertIn("0 LINKS messages·requests", text)
                 self.assertIn("FROM", text)
                 self.assertIn("KIND", text)
 
@@ -570,7 +613,7 @@ class PeerCrossLinks(unittest.TestCase):
                     self.assertEqual(short.pane_scroll[4], offset)
                     tall_rows, short_rows = tall.text_rows(), short.text_rows()
                     for y in range(4, short.pane_scroll[3]):
-                        if "── LINKS" in short_rows[y] or "── LINKS" in tall_rows[y + offset]:
+                        if " LINKS " in short_rows[y] or " LINKS " in tall_rows[y + offset]:
                             break
                         self.assertEqual(short_rows[y][SEPARATOR:], tall_rows[y + offset][SEPARATOR:],
                                          f"scrolled pane row {y} differs from the shifted long render")

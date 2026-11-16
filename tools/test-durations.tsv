@@ -39,7 +39,6 @@ hooks/agent_home_equivalence.test.py	0.27
 hooks/core_write_guard.test.py	0.31
 hooks/design-postwrite.test.sh	0.21
 hooks/dispatch_owner_rewake.test.py	50.81
-hooks/local-evidence-inject.test.sh	1.45
 hooks/mem-recall-inject.test.sh	2.42
 hooks/peer_message_record.test.py	74.81
 hooks/peer_steward_rewake.test.py	53.44
@@ -580,7 +579,6 @@ utilities/foreground_terminal.test.py	0.52
 utilities/foreground_terminal_outcome.test.py	19.33
 utilities/frame_interview.test.py	0.24
 utilities/frame_launch_binding.test.py	22.86
-utilities/frame_native_answer.test.py	0.37
 utilities/frame_revision.test.py	15.62
 utilities/framed_route.test.py	24.56
 utilities/framed_start.test.py	189.62

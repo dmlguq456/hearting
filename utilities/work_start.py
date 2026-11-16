@@ -257,135 +257,6 @@ def _frame_decision_result(decision, question, question_path, answer_path):
     return result
 
 
-def _native_partial(directory, raw, round_no, route_id) -> dict:
-    """The rows an earlier native call of this exact interview left; {} for a stale or foreign file."""
-    import frame_interview as FI
-    path = directory / FI.NATIVE_PARTIAL_NAME
-    try:
-        if path.is_symlink() or not path.is_file():
-            return {}
-        value = FI.load_json_file(path, max_bytes=FI.MAX_NATIVE_PARTIAL_BYTES, kind="answers")
-    except (OSError, ValueError):
-        return {}
-    if (isinstance(value, dict) and value.get("schema") == FI.NATIVE_PARTIAL_SCHEMA
-            and value.get("route_id") == route_id and value.get("round") == round_no
-            and value.get("interview_sha256") == hashlib.sha256(raw).hexdigest()
-            and isinstance(value.get("slots"), dict)):
-        return value["slots"]
-    return {}
-
-
-def _native_progress(route, jobs, asked):
-    """What a native call adds to this route's registered interview, or None when it adds nothing.
-
-    A call may answer only some of the registered rows (a tool shows a few questions per call);
-    its rows are combined with those an earlier call of the same interview left, the later row
-    winning. `answers` is the complete answers file once every row has an answer, else None."""
-    import frame_interview as FI
-    import workflow_state as WS
-    if not isinstance(route, dict) or not route.get("route_id") or not route.get("route_hash"):
-        return None
-    resolution = WS.human_gate_resolution(
-        WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs).journal(), "frame-review")
-    question_path = Path(resolution.get("artifact") or "")
-    if resolution.get("status") != "blocked" or not question_path.is_file():
-        return None
-    try:
-        if question_path.is_symlink():
-            return None
-        question, raw = FI.load_json_file(question_path, return_bytes=True)
-        if resolution.get("artifact_sha256") and hashlib.sha256(raw).hexdigest() != resolution["artifact_sha256"]:
-            return None
-    except (OSError, ValueError, TypeError):
-        return None
-    if not FI.is_interview(question) or question.get("route_id") != route["route_id"]:
-        return None
-    manual_answer = question_path.parent / "answers.json"
-    if manual_answer.exists():
-        try:
-            existing = FI.load_json_file(manual_answer, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
-        except (OSError, ValueError):
-            existing = None
-        if isinstance(existing, dict) and not FI.validate_answers(question, existing):
-            return None
-    slots = FI.native_slots(question, asked)
-    if not slots:
-        return None
-    merged = {**_native_partial(question_path.parent, raw, question.get("round"), question["route_id"]), **slots}
-    answers = FI.answers_from_native_slots(question, merged)
-    if answers is not None and FI.validate_answers(question, answers):
-        return None
-    return SimpleNamespace(directory=question_path.parent, question=question, raw=raw, slots=merged,
-                           answers=answers, missing=FI.missing_native_slots(question, merged))
-
-
-def native_answer_candidate(route, jobs, asked):
-    """Purely identify a valid reply to this route's currently registered interview.
-
-    `(path, answers-or-None, interview-digest)` binds candidate selection and
-    commit to the same revision, including a partial native call."""
-    import frame_interview as FI
-    progress = _native_progress(route, jobs, asked)
-    if progress is None:
-        return None
-    if progress.answers is None:
-        return progress.directory / FI.NATIVE_PARTIAL_NAME, None, hashlib.sha256(progress.raw).hexdigest()
-    return progress.directory / FI.NATIVE_ANSWERS_NAME, progress.answers, hashlib.sha256(progress.raw).hexdigest()
-
-
-def record_native_answer(route, jobs, asked, *, expected_interview_digest=None):
-    """Keep a valid native reply beside the one current registered interview.
-
-    A complete reply becomes `answers.native.json`. A partial one is kept as
-    `answers.native.partial.json` until a later call finishes the interview; the partial is
-    bound to this interview's digest and is never read as answers."""
-    import frame_interview as FI
-    progress = _native_progress(route, jobs, asked)
-    if progress is None:
-        return None
-    if expected_interview_digest and hashlib.sha256(progress.raw).hexdigest() != expected_interview_digest:
-        return None
-    import workflow_state as WS
-    ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
-    with ledger.lock():
-        resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
-        question_path = Path(resolution.get("artifact") or "")
-        if (resolution.get("status") != "blocked" or question_path.is_symlink()
-                or question_path != progress.directory / "interview.json"
-                or question_path.read_bytes() != progress.raw):
-            return None  # The reply was calculated for a different interview revision.
-        manual = progress.directory / "answers.json"
-        if manual.exists():
-            try:
-                existing = FI.load_json_file(manual, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
-            except (OSError, ValueError):
-                existing = None
-            if isinstance(existing, dict) and not FI.validate_answers(progress.question, existing):
-                return None
-        # Other native calls may have committed partial rows while this call was
-        # being interpreted. Merge again under the same lock as replacement.
-        digest = hashlib.sha256(progress.raw).hexdigest()
-        slots = {**_native_partial(progress.directory, progress.raw, progress.question.get("round"),
-                                   route["route_id"]), **FI.native_slots(progress.question, asked)}
-        answers = FI.answers_from_native_slots(progress.question, slots)
-        if answers is not None:
-            value = answers  # The same locked directory now prevents interview replacement.
-            target = progress.directory / FI.NATIVE_ANSWERS_NAME
-        else:
-            target = progress.directory / FI.NATIVE_PARTIAL_NAME
-            value = {"schema": FI.NATIVE_PARTIAL_SCHEMA, "route_id": route["route_id"],
-                     "round": progress.question.get("round"), "interview_sha256": digest,
-                     "slots": slots, "missing": FI.missing_native_slots(progress.question, slots)}
-        if target.is_symlink():
-            return None
-        from workflow_state import _atomic_write
-        _atomic_write(target, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
-        if answers is not None:
-            with contextlib.suppress(OSError):
-                (progress.directory / FI.NATIVE_PARTIAL_NAME).unlink()
-        return target
-
-
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                          decision="proceed", runtime_root=ROOT, run=subprocess.run, automatic=False):
     """Own raise -> actual answers -> intent -> release through existing commands.
@@ -427,7 +298,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                 "next_step": "Compare these exact frame results; fill this semantic interview template (its "
                     "understanding and brief are drafts from the request and the frame brief: rewrite them in the "
                     "person's words) and "
-                    "rerun resume_command with --interview <file> before displaying the native question. "
+                    "rerun resume_command with --interview <file> before presenting the question. "
                     "question_example shows one complete question; write yours in the person's language "
                     "(code names in backticks are fine). "
                     "The runtime supplies route/cycle fields and registers the gate. If the user already "
@@ -600,17 +471,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                 "parent_next": "end-turn",
                 "next_step": ("Present the registered question once. " if ask_now else
                               "Keep waiting for the actual answer. If this question has not yet been presented, "
-                              "present human_wait.question_block now; registration alone does not prove presentation. "
-                              "Do not automatically open another native question. ") +
-                    "Put the registered understanding sentence verbatim as the first question; its first option "
-                    "confirms understanding and typed text corrects it. Then put every registered question and its "
-                    "choices without changing their words, in the same native question call when the tool accepts "
-                    "them all, otherwise continuing with the remaining ones in the next call; the runtime combines "
-                    "the calls of one interview. "
-                    "Leave human_wait.question_block in the final conversation reply if the native box closes. "
-                    "When the native question tool returns the reply, the runtime keeps it beside the question "
-                    "(answers.native.json, recorded by the harness hook): then just rerun resume_command. Otherwise "
-                    "record the person's reply in answers_template, or use supervisor_answers_template for the "
+                              "present human_wait.question_block now; registration alone does not prove presentation. ") +
+                    "The registered question is already on the Hearting question board (the panel, Fleet and "
+                    "`hearting run questions`), where the person answers it; do not ask it again through another "
+                    "tool. Leave human_wait.question_block in the final conversation reply and end the turn. "
+                    "When the person answers there, the runtime sends this session a notice with "
+                    "resume_command; run it then to render intent and start the owner. A reply the person gives in "
+                    "conversation goes into answers_template, or use supervisor_answers_template for the "
                     "depth-0 supervisor's answer on the person's behalf. " + FI.ANSWER_SOURCE_GUIDANCE + " "
                     "An acknowledgement or template is never a decision. Then rerun "
                     "resume_command with --answers <file>. The runtime renders intent and releases the gate. "

@@ -371,8 +371,6 @@ def _slow_recovery_probe(base: Path, record_path: Path, snapshot_path: Path,
         "subprocess.Popen = _tracked_popen\n"
         "def _tracked_run(args, *pos, **kwargs):\n"
         "    argv = [str(item) for item in args] if not isinstance(args, str) else [args]\n"
-        "    if os.environ.get('R1_CONTEXT_OUTPUT') and any(Path(item).name == 'local-evidence-inject.sh' for item in argv):\n"
-        "        return subprocess.CompletedProcess(args, 0, os.environ['R1_CONTEXT_OUTPUT'], '')\n"
         "    return _real_run(args, *pos, **kwargs)\n"
         "subprocess.run = _tracked_run\n"
         "def _slow_ensure(*args, **kwargs):\n"
@@ -2291,6 +2289,27 @@ class StrictGateReceiptRenderTest(unittest.TestCase):
         self.assertTrue(text.startswith(sweep.GATE_DELIVERY_HEADER))
         self.assertIn("gate=full-run-authorization artifact=/art/gate.md", text)
         self.assertIn("route_file=/r/route.json", text)
+
+
+class GateHeaderQuestionBoardTest(unittest.TestCase):
+    """A gate's question is already on the Hearting question board: the delivery text never sends the
+    agent to another question tool, and the header the previous release shipped is still recognized."""
+
+    def test_the_gate_header_points_to_the_board_and_names_no_native_question_tool(self):
+        header = SWEEP.GATE_DELIVERY_HEADER
+        self.assertIn("question board", header)
+        self.assertIn("do not ask them again through another tool", header)
+        for tool in ("AskUserQuestion", "request_user_input", "`question`"):
+            self.assertNotIn(tool, header)
+        self.assertIn("workflow-supervisor.py release", header)           # an answer given in conversation is still recorded
+
+    def test_the_previous_release_header_is_still_recognized_and_rebuilt_for_recovery(self):
+        import dispatch_recipient_receipt as receipt
+        shipped = SWEEP._SHIPPED_V440_GATE_DELIVERY_HEADER
+        self.assertIn("AskUserQuestion", shipped)                           # frozen text of the earlier release
+        self.assertIn(shipped + "\n", receipt._delivery_heads())
+        rebuilt = SWEEP._shipped_headers(SWEEP.GATE_DELIVERY_HEADER + "\nroute_file=/r/route.json")
+        self.assertTrue(rebuilt.startswith(shipped))
 
 
 class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
@@ -4294,7 +4313,6 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
                     "AGENT_DISPATCH_JOBS": str(dispatch_root / "jobs.log"),
                     "HARNESS_STATE_ROOT": str(case_base / "stable-state"),
                     "AGENT_PEER_LEDGER_ROOT": str(case_base / "peer-ledger"),
-                    "R1_CONTEXT_OUTPUT": "fixture SessionStart context",
                 })
                 payload = {"source": "startup", "cwd": str(self.root.parent)}
                 if sid:

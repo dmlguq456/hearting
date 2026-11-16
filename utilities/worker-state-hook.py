@@ -47,13 +47,33 @@ def _native_worker(harness: str, payload: dict) -> bool:
     return False
 
 
+def _forget_repeats(harness: str, payload: dict) -> None:
+    """A registered owner/worker session keeps no session-tidy card, but it did compact: the
+    start receipt and the fixed peer guidance it already holds may be gone, so let each in
+    once more (context_repeat). Nothing else of the worker's compaction changes."""
+    sid = payload.get("session_id") or payload.get("sessionID") or payload.get("sessionId")
+    if not harness or not isinstance(sid, str) or not sid:
+        return
+    try:
+        if str(ROOT / "utilities") not in sys.path:
+            sys.path.insert(0, str(ROOT / "utilities"))
+        import context_repeat
+        context_repeat.reset(harness, sid, compaction=True)
+    except Exception:
+        pass
+
+
 def _main_compact(action: str, harness: str, payload: dict) -> int:
     env = os.environ.copy()
+    registered = (env.get("AGENT_SESSION_ROLE") == "worker" or env.get("AGENT_DISPATCH_CHILD") == "1"
+                  or bool(env.get("AGENT_DISPATCH_DEPTH")))
     if _native_worker(harness, payload):
         env["AGENT_SESSION_ROLE"] = "worker"
     if env.get("AGENT_SESSION_ROLE") == "worker" or env.get("AGENT_DISPATCH_CHILD") == "1" \
             or env.get("AGENT_DISPATCH_DEPTH") or env.get("FLEET_TITLE_REFRESH") == "1" \
             or env.get("MEM_DISTILL") == "1" or any(k.startswith("OPENCODE_DISPATCH") and v for k, v in env.items()):
+        if registered and action == "compact-after":
+            _forget_repeats(harness, payload)
         return 0
     root = Path(os.environ.get("AGENT_HOME") or Path(__file__).resolve().parents[1])
     runtime_status = action == "runtime-status"

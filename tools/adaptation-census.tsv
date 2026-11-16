@@ -34,6 +34,7 @@ shared-utility-deferred	codex_permission_profile.py
 shared-utility-deferred	completion_close_probe.py
 shared-utility-deferred	compute-hosts
 shared-utility-deferred	context_alert.py
+shared-utility-deferred	context_repeat.py
 shared-utility-deferred	conversation_reader.py
 shared-utility-deferred	dispatch-readiness.py
 shared-utility-deferred	dispatch_attempt_policy.py
@@ -112,7 +113,7 @@ shared-utility-deferred	route_parent_close.py
 shared-utility-deferred	route_plan.py
 shared-utility-deferred	route_presence_gate.py
 shared-utility-deferred	turn_change_record.py
-shared-utility-deferred	frame_native_answer.py
+shared-utility-deferred	native_question_redirect.py
 shared-utility-deferred	git_index_lock.py
 shared-utility-deferred	codex_tui_exit.py
 shared-utility-deferred	spec_merge.py

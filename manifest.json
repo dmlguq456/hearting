@@ -798,13 +798,6 @@
       "hard_block": false
     },
     {
-      "slug": "hook__frame-native-answer.py__PostToolUse",
-      "name": "frame-native-answer.py",
-      "mono": "frame-native-answer.py",
-      "event": "PostToolUse",
-      "hard_block": false
-    },
-    {
       "slug": "hook__git-index-lock-context.py__PostToolUse",
       "name": "git-index-lock-context.py claude",
       "mono": "git-index-lock-context.py",
@@ -882,9 +875,9 @@
       "hard_block": false
     },
     {
-      "slug": "hook__fleet-interaction-state.py__PreToolUse",
-      "name": "fleet-interaction-state.py set",
-      "mono": "fleet-interaction-state.py",
+      "slug": "hook__native-question-redirect.py__PreToolUse",
+      "name": "native-question-redirect.py",
+      "mono": "native-question-redirect.py",
       "event": "PreToolUse",
       "hard_block": false
     },

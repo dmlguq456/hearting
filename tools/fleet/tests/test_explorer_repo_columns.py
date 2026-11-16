@@ -2,6 +2,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import re
 import unittest
 from dataclasses import replace
 
@@ -177,9 +178,9 @@ class RouteSummaryCountBlink(unittest.TestCase):
         frame = draw(vm, NavState(view="OVERVIEW"), 140, 60, beat=beat)
         for y, row in enumerate(frame.cells):
             text = "".join(cell[0] for cell in row)
-            if "── ROUTES" in text:
-                start = text.index("ROUTES") + len("ROUTES  ")
-                end = text.index(" open", start) + len(" open")
+            found = re.search(r"│ (\d+) ROUTES", text)     # the head leads with the open count
+            if found:
+                start, end = found.span(1)
                 return text[start:end], {cell[1] for cell in row[start:end]}
         self.fail("no OVERVIEW ROUTES rule")
 
@@ -187,7 +188,7 @@ class RouteSummaryCountBlink(unittest.TestCase):
         vm = model()
         text_on, keys_on = self._count_cells(vm, 1)
         text_off, keys_off = self._count_cells(vm, 0)
-        self.assertEqual(text_on, "2 open")
+        self.assertEqual(text_on, "2")
         self.assertEqual(text_on, text_off)
         self.assertEqual(keys_on, {"g_work"})
         self.assertEqual(keys_off, {"g_work_off"})
@@ -199,7 +200,7 @@ class RouteSummaryCountBlink(unittest.TestCase):
             for tag in ("a1", "b2")])
         text_on, keys_on = self._count_cells(vm, 1)
         text_off, keys_off = self._count_cells(vm, 0)
-        self.assertEqual(text_on, "0 open")
+        self.assertEqual(text_on, "0")
         self.assertEqual(keys_on, keys_off)
         self.assertNotIn("g_work", keys_on)
         self.assertNotIn("g_work_off", keys_on)
