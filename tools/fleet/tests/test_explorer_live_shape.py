@@ -91,7 +91,9 @@ def route_extension(key, value):
 _QUESTION_TEXT_FIELDS = frozenset(("node", "since_at", "route_id", "route_title", "owner_sid",
                                    "registered"))
 _QUESTION_ENUMS = {"owner_state": ("live", "successor", "none", "unknown"),
-                   "fold": ("older", "ownerless")}
+                   "fold": ("older", "ownerless"),
+                   # What a sent answer waits for (11-16, `session_shell.answer_delivery_wait`).
+                   "answer_wait": ("old-shell", "no-shell")}
 # Rule 5 (11-14): the person's answer is on its way.
 _QUESTION_FLAGS = frozenset(("sent",))
 

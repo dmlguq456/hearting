@@ -109,7 +109,9 @@ def main(argv=None):
         # Herdr inspects the foreground process's initial environment. Updating
         # os.environ after startup is insufficient on Linux. Re-exec this same
         # PID before starting any native child; the explicit hint prevents a loop.
-        os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve()), *args], hinted)
+        # The path stays as the launcher named it (the installed link, not the release it
+        # points at today): the host's launch path is how it sees the next release installed.
+        os.execve(sys.executable, [sys.executable, os.path.abspath(__file__), *args], hinted)
     with tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/tmp") as directory:
         # A closed window (SIGHUP) or a stop request (SIGTERM) ends this owner
         # through the normal unwind, so the per-session directory is removed.
