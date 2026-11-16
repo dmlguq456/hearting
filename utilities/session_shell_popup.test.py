@@ -127,7 +127,7 @@ const term=new Terminal({cols,rows,allowProposedApi:true,scrollback:0});
 term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid],{cols,rows,cwd:cfg.project,
-  env:{...process.env,TERM:cfg.term||'xterm-256color',...(cfg.no_color?{NO_COLOR:'1'}:{}),NODE_OPTIONS:'--require '+cfg.launcher}});
+  env:{...process.env,TERM:cfg.term||'xterm-256color',...(cfg.no_color?{NO_COLOR:'1'}:{}),...(cfg.colorterm?{COLORTERM:cfg.colorterm}:{}),...(cfg.colorfgbg?{COLORFGBG:cfg.colorfgbg}:{}),NODE_OPTIONS:'--require '+cfg.launcher}});
 child.onData(d=>{term.write(d);raw+=d;});
 const flush=()=>new Promise(r=>term.write('',r));
 // Each row as one character per cell (a wide character's second cell is empty).
@@ -217,6 +217,18 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     checks.flood_closed=await flood(false);checks.flood_open=await flood(true);
     fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
   }
+  if(cfg.scenario==='ground'){
+    // 11-17: the popup's ground as the terminal shows it, in 24-bit color (the cell's RGB) or in a palette step: the popup's
+    // own cells, the cell each side of it, and the chosen choice's rows; nothing of them outside the popup.
+    await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
+    await key('\x1d',500);await until(s=>!!box(s),'the popup');await flush();
+    const s=await screen(),b=box(s),c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),rowsOut=[];
+    const bg=(line,x)=>{const cell=line?.getCell(x);return !cell?null:cell.isBgRGB()?'#'+cell.getBgColor().toString(16).padStart(6,'0'):cell.isBgPalette()?cell.getBgColor():-1;};
+    for(let y=b.top;y<=b.bottom;y++){const line=term.buffer.active.getLine(y);
+      rowsOut.push({y,side:[bg(line,left),bg(line,right)],margin:[bg(line,left-1),bg(line,right+1)],inside:Array.from({length:right-left-3},(_,i)=>bg(line,left+2+i))});}
+    checks.rows=rowsOut;checks.outside=bg(term.buffer.active.getLine(b.top-2),left+4);
+    fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
+  }
   if(cfg.scenario==='empty'){
     // No question waits: Ctrl+] opens a popup all the same, whose keys name `p` (the panel's fold):
     // a folded panel opens by the keyboard alone; `r` is the messages' popup.
@@ -247,19 +259,19 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   s=await until(s=>!!box(s),'the popup by a press on QUESTIONS');
   frames.pressed=s;
   // 11-15 ("질문 선지 선택 효과를 틴트로 해 명확하게"): the chosen choice's row stands on the chosen ground (palette
-  // 24, the dark face's: the fixture's face is unknown) across the popup's inside, the cell between it and
-  // each side line on the popup's ground (236); ↓ moves it to the next choice; the cell each side of the
+  // 237, the dark face's: the fixture's face is unknown) across the popup's inside, the cell between it and
+  // each side line on the popup's ground (235); ↓ moves it to the next choice; the cell each side of the
   // frame stands on the popup's ground too.
   const tint=async()=>{await flush();const b=box(await screen());if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),out=[];
     for(let y=b.top+1;y<b.bottom;y++){const line=term.buffer.active.getLine(y),bg=x=>{const cell=line?.getCell(x);return cell&&cell.isBgPalette()?cell.getBgColor():-1;};
       const inside=[];for(let x=left+2;x<=right-2;x++){const cell=line?.getCell(x);if(cell&&cell.getWidth()===0)continue;inside.push(bg(x));}
       out.push({text:cells(y).slice(left,right+1).join(''),inside,beside:[bg(left+1),bg(right-1)],margin:[bg(left-1),bg(right+1)]});}
     return out;};
-  {const t=await tint(),chosen=t.filter(r=>r.inside.every(b=>b===24));
-   checks.tint_rows=chosen.map(r=>r.text);checks.tint_beside=chosen.length>0&&chosen.every(r=>r.beside.every(b=>b===236));
-   checks.tint_others=t.filter(r=>!chosen.includes(r)).every(r=>r.inside.every(b=>b===236));
-   checks.margins=t.every(r=>r.margin.every(b=>b===236));
-   await key('\x1b[B',250);checks.tint_moved=(await tint()).filter(r=>r.inside.every(b=>b===24)).map(r=>r.text);}
+  {const t=await tint(),chosen=t.filter(r=>r.inside.every(b=>b===237));
+   checks.tint_rows=chosen.map(r=>r.text);checks.tint_beside=chosen.length>0&&chosen.every(r=>r.beside.every(b=>b===235));
+   checks.tint_others=t.filter(r=>!chosen.includes(r)).every(r=>r.inside.every(b=>b===235));
+   checks.margins=t.every(r=>r.margin.every(b=>b===235));
+   await key('\x1b[B',250);checks.tint_moved=(await tint()).filter(r=>r.inside.every(b=>b===237)).map(r=>r.text);}
   await key('abc');await key('\t');
   s=await until(s=>box(s)&&s[box(s).top].includes('2/2'),'Tab to 2/2');frames.tab=s;
   await key('\x1b[Z');s=await until(s=>box(s)&&s[box(s).top].includes('1/2'),'Shift+Tab back to 1/2');
@@ -272,7 +284,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   frames.answered=s;
   // Closed, no popup ground or chosen ground is left anywhere.
   await flush();{let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const c=line?.getCell(x);
-    if(c&&c.isBgPalette()&&[24,236].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
+    if(c&&c.isBgPalette()&&[237,235].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
   await key('\r',400);checks.enter_swallowed=!(await screen()).some(l=>l.includes('DONE_draft1'));
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');
   // The other question: a text answer in Korean and a paste, kept when the popup closes.
@@ -376,11 +388,14 @@ class SessionShellPopupTest(unittest.TestCase):
         cls.launcher = cls.root / 'launcher.cjs'; cls.launcher.write_text(LAUNCHER)
         cls.driver = cls.root / 'driver.cjs'; cls.driver.write_text(DRIVER)
 
-    def popup(self, harness, scenario=None, term=None, no_color=False):
-        case = self.root / (harness + (scenario or '') + (term or '') + ('-nc' if no_color else '')); case.mkdir(mode=0o700)
+    def popup(self, harness, scenario=None, term=None, no_color=False, colorterm=None, colorfgbg=None):
+        case = self.root / (harness + (scenario or '') + (term or '') + ('-nc' if no_color else '') + (colorterm or '') + (colorfgbg or '').replace(';', '_')); case.mkdir(mode=0o700)
         project = case / 'project'; project.mkdir()
         sid = {'claude': '00000000-0000-4000-8000-0000000000c1', 'codex': '00000000-0000-4000-8000-0000000000c2',
                'opencode': 'ses_popupfixture'}[harness]
+        if scenario == 'ground':  # its own session: the question it leaves unanswered must not stay for the other cases
+            sid = {'claude': '00000000-0000-4000-8000-0000000000d1', 'codex': '00000000-0000-4000-8000-0000000000d2',
+                   'opencode': 'ses_groundfixture'}[harness]
         cache = Path(self.env['XDG_STATE_HOME']) / 'hearting/human-waits'
         cache.mkdir(mode=0o700, parents=True, exist_ok=True); cache.chmod(0o700)
         key = harness + '\0' + sid
@@ -414,7 +429,7 @@ class SessionShellPopupTest(unittest.TestCase):
         backend.chmod(0o700)
         config = {'harness': harness, 'sid': sid, 'python': sys.executable, 'fake': str(self.fake),
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
-                  'scenario': scenario, 'term': term, 'no_color': no_color,
+                  'scenario': scenario, 'term': term, 'no_color': no_color, 'colorterm': colorterm, 'colorfgbg': colorfgbg,
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'),
                   'project': str(project), 'result': str(case / 'result.json')}
         (case / 'config.json').write_text(json.dumps(config))
@@ -562,6 +577,31 @@ class SessionShellPopupTest(unittest.TestCase):
 
     def test_no_veil_in_eight_colors(self):
         self.plain(term='xterm')
+
+    def ground(self, harness):
+        # 11-17: the popup's ground is Hearting's earth tone, in 24-bit color where the terminal says it takes it and the
+        # 256-color step beside it where not, the same under each harness: the frame's rows on it, the cell each side of
+        # it too, the chosen choice's rows on the chosen ground; the face is the terminal's (COLORFGBG; unknown is dark).
+        for fgbg, colorterm, ground, chosen in (
+                ('', 'truecolor', '#29221e', '#4a3b30'), ('0;15', 'truecolor', '#f1e7dc', '#e3d2bf'),
+                ('0;15', None, 254, 188), ('', None, 235, 237)):
+            rows = self.popup(harness, 'ground', colorterm=colorterm, colorfgbg=fgbg)['checks']
+            label = repr((harness, fgbg, colorterm, rows['rows'][:2]))
+            for row in rows['rows']:
+                self.assertEqual(row['side'], [ground, ground], label)
+                self.assertEqual(row['margin'], [ground, ground], label)
+                self.assertTrue(all(c in (ground, chosen) for c in row['inside']), label)
+            self.assertTrue(any(all(c == chosen for c in row['inside']) for row in rows['rows']), label)
+            self.assertEqual(rows['outside'], -1, label)
+
+    def test_ground_claude(self):
+        self.ground('claude')
+
+    def test_ground_codex(self):
+        self.ground('codex')
+
+    def test_ground_opencode(self):
+        self.ground('opencode')
 
     def test_claude(self):
         self.check('claude')

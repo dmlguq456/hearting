@@ -192,7 +192,9 @@ assert(!strip.join('').includes('╭')&&strip.some(r=>/4 ROUTE/.test(r)),strip.j
 const F={dark:pv.FACES.dark,light:pv.FACES.light};
 // The constants: a ground off the terminal's own, a line and words brighter than the veil, a floor well above it.
 const level=n=>8+10*(n-232);
-assert(F.dark.popup>=235&&F.dark.popup<=238&&level(F.dark.popupFloor)-level(F.dark.veil)>=60&&level(F.dark.popupLine)>level(F.dark.popupFloor),JSON.stringify(F.dark));
+// (11-17: the line is a theme step now, not a gray: it only has to stand off the ground and off the veil; its contrast
+// is measured in `session_shell_popup_ground_1117.test.py`.)
+assert(F.dark.popup>=235&&F.dark.popup<=238&&level(F.dark.popupFloor)-level(F.dark.veil)>=60&&F.dark.popupLine!==F.dark.popup,JSON.stringify(F.dark));
 assert(F.light.popup>=252&&F.light.popup<=254&&level(F.light.veil)-level(F.light.popupFloor)>=60,JSON.stringify(F.light));
 const styles={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:150},g_dead:{foreground:217,bold:true},hb_claude:{foreground:116},soft:{foreground:253}};
 // Fleet's table cells as the backend sends them: plain, dim, a gray, a hue, a dim hue, a bold dim.
@@ -221,7 +223,7 @@ for(const [name,body,kind] of [['question',question,'text'],['table',table,'tabl
   }
   // The line and the title are bright; the plain words the brightest; hues as they were.
   const top=frame[0];assert(top.filter(p=>/[╭╮─]/.test(p.text)).every(p=>p.foreground===f.popupLine),label);
-  assert.equal(top.find(p=>p.text.includes('QUESTIONS')).foreground,f.bright,label);
+  assert.equal(top.find(p=>p.text.includes('QUESTIONS')).foreground,f.popupTitle,label);
   assert.equal(top.find(p=>p.text==='3 ').foreground,face==='light'?88:217,label);
   if(name==='table'){const all=frame.flat();assert.equal(all.find(p=>p.text.includes('휠 입력')).foreground,f.bright);
    assert.equal(all.find(p=>p.text==='claude').foreground,face==='light'?23:116);const d=all.find(p=>p.text===' 대기');assert(d.dim===false&&d.foreground===(face==='light'?22:150),label);}
