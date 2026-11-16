@@ -116,7 +116,7 @@ adapter row unverified/unsupported.
 The exact-batch sidecar checks consumed and pending messages before sending;
 ambiguous sends may repeat. Only an exact Hearting item may restart an interrupted
 parent. The TUI owns questions and approvals; headless owners keep their separate
-supervisor. Default mode asks via waiting `request_user_input` (`default_mode_request_user_input`); it submits empty at 120 s (countdown from 60 s; typing cancels). Empty is no decision: restate at turn end (Fleet keeps `answer needed`); `_async`: fallback.
+supervisor. A question to the person is a Hearting question (`hearting run questions ask`); if the model calls `request_user_input` anyway, `PreToolUse` registers it the same way and refuses the call (`pretooluse-question-redirect.py`), and a registration failure lets the native tool run: it submits empty at 120 s (countdown from 60 s; typing cancels), and empty is no decision: restate at turn end (Fleet keeps `answer needed`).
 Arbitrary detached shell output still does not auto-resume. For non-dispatch
 long-running work, obey `preflight.sh loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
 instead of ending with a detached completion promise. The native queue never
@@ -187,6 +187,10 @@ read-only unless the user explicitly opts into a separately validated feature.
 | autopilot routing | Codex exposes `autopilot-*` as native Skills/plugin entries and can select matching Skills from descriptions, but the adapter does not emulate Claude slash-command routing. `prompt-signal` emits the portable routing contract and Codex-native entrypoint surface; for spec-backed work, rely on spec-read/capability gates plus the relevant Skill or explicit dispatch wrapper |
 | subagent delegation | Codex supports native subagent workflows, but they are explicit or main-dispatched. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents before claiming delegation parity. Use prompt-directed subagents or `preflight.sh dispatch`; do not treat UI/status state as an automatic delegation trigger |
 
+A question to the person goes to the Hearting question board: `PreToolUse` on
+`request_user_input` and `request_user_input_async` registers it and refuses the native call
+(`utilities/native_question_redirect.py`, the same behavior as Claude and OpenCode). The
+native tool below is only the fall-through when registration fails or the caller is a worker.
 Native Codex owns question timing. Runtime activation enables
 `features.default_mode_request_user_input` in interactive `$CODEX_HOME/config.toml`
 when the existing feature table can be safely extended; explicit false and

@@ -717,13 +717,13 @@ information, not a second question. `범위` (Scope) stays the approved scope th
 execution access reads for an owner's write roots (`OPERATIONS` execution
 access). `compose --explain` prints the same `[의도]` lines without writing
 anything, so the card can come before `compose --start`. When the runtime
-exposes a native structured-question surface (Claude `AskUserQuestion`, Codex
-`request_user_input`, OpenCode `question`), deliver this confirmation through
-it: the card's fields form the question body; the optional start-approval line
-is scope metadata, and the options are exactly 진행 (recommended) / 수정 / 중단
-(in English Proceed (recommended) / Edit / Stop). The plain-text card above is the fallback when
-no such surface exists or it fails. The structured form changes only the
-delivery surface — never the fields, their order, the one-time approval
+can register a Hearting question (`hearting run questions ask`), register this
+confirmation as one: the card's fields form the question text; the optional
+start-approval line is scope metadata, and the choices are exactly 진행 / 수정 /
+중단 (in English Proceed / Edit / Stop) with 진행 (Proceed) recommended. Then end the
+turn; the answer arrives as the next prompt. The plain-text card above is the
+fallback when registration is unavailable or fails. The registered form changes
+only the delivery surface — never the fields, their order, the one-time approval
 semantics, or the exemptions below.
 
 Keep each confirmation value to one line. Include the start-approval line only
@@ -860,10 +860,9 @@ card and the interview. User approval precedes the owner and the §0.4 notice:
 → 진행(권장) / 수정: <틀린 부분> / 중단
 ```
 
-Deliver this card through the native question tool (Claude `AskUserQuestion`,
-Codex `request_user_input`, OpenCode `question`) when one is
-available, the plain-text form otherwise — the same fallback rule as the §0.4
-card. Only once the direction is confirmed does the owner start, and the §0.4
+Register this card as a Hearting question (`hearting run questions ask`; choices
+진행(권장) / 수정 / 중단, the first recommended) when the runtime can, the
+plain-text form otherwise — the same fallback rule as the §0.4 card. Only once the direction is confirmed does the owner start, and the §0.4
 gate then arrives as a non-blocking `[실행 통지]` — the same card fields, in
 order. It announces the route the confirmed direction produced; it does not
 re-ask a direction the user has already settled.
@@ -922,23 +921,17 @@ The interview proceeds in this order:
 1. Ask first whether the restatement is right — that sentence, verbatim,
    with 예 / 아니오(고쳐 말하기) — and record a correction in the user's words.
 2. Put the `[방향 확인]` five-field summary as the card above.
-3. Ask the understanding sentence first, then the registered interview
-   questions, in one native question call when the tool accepts them all;
-   otherwise continue with the remaining questions verbatim in the next call,
-   and the runtime combines the calls of one interview. Use Claude `AskUserQuestion`,
-   Codex `request_user_input`, or OpenCode `question`, one topic
-   per question, the recommended option first and labelled
-   (권장), each option with its one-line meaning; never paraphrase a question
-   into harness vocabulary, and never add questions the interview does not
-   carry. A tired reader must be able to answer without opening the plan.
-4. The native tool's reply is kept by the harness's post-tool hook beside the
-   registered question (`answers.native.json`; the restatement asked verbatim,
-   its first option confirming it — a partial reply waits beside it until every
-   registered question has an answer), so `resume_command` alone continues. A
-   reply given in conversation goes into the returned `answers_template` and
-   `start --route <file> --answers <file>`. The runtime renders intent and
-   records the release that authorizes owner launch. A repeated submission
-   reuses it.
+3. The registered interview is already on the Hearting question board (the panel,
+   Fleet and `hearting run questions`), the understanding sentence first, then the
+   registered questions one topic each with the recommended option first and labelled
+   (권장) and each option's one-line meaning. It is not asked again through another
+   tool; never paraphrase a question into harness vocabulary, and never add questions
+   the interview does not carry. A tired reader must be able to answer without
+   opening the plan.
+4. The person answers on the board; the answer releases the gate and renders
+   intent, so `resume_command` alone continues. A reply given in conversation goes
+   into the returned `answers_template` and `start --route <file> --answers <file>`.
+   A repeated submission reuses the release.
 
 `OPERATIONS §5.10b` owns selector mechanics and the one-time `top`→`deep`
 demotion; the public work entry owns launch calls and artifact context. Both legs

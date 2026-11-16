@@ -119,7 +119,7 @@ const nativeContextPolicyVersion = "1.19.0"
 let resolvedRuntimeConfig = null
 let contextPolicyRuntimeVersion = null
 let contextPolicyRequestedWindow = null
-const frameNativeAnswer = path.join(root, "utilities", "frame_native_answer.py")
+const nativeQuestionRedirect = path.join(root, "utilities", "native_question_redirect.py")
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
 // V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
 const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
@@ -3948,6 +3948,16 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       })
       if (result.status === 1) throw new Error((result.stdout || "").trim())
     }
+    // A native question becomes this session's Hearting question (utilities/native_question_redirect.py):
+    // the call is refused with the short reason; any failure there lets the native question through.
+    if (toolName === "question") {
+      const result = spawnSync("python3", [nativeQuestionRedirect, "--opencode"], {
+        input: JSON.stringify({ tool: toolName, args: output.args || {}, sessionID: input.sessionID || "", cwd: baseDir(ctx) }),
+        encoding: "utf8",
+        timeout: 8000,
+      })
+      if (result.status === 1 && (result.stdout || "").trim()) throw new Error((result.stdout || "").trim())
+    }
     // SD-11 stage-dispatch reminder (Claude PreToolUse[Skill]); delivered with the skill's result.
     const skill = skillToolID(toolName, output.args || {})
     if (skill) {
@@ -4028,15 +4038,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (toolName === "read") {
       const readFile = normalizeFile(ctx, args.filePath || args.path || args.file)
       if (readFile) collectPreflight("read", [readFile, input.sessionID || "opencode-plugin"])
-    }
-    // The person's reply to a registered frame question is kept for the next start
-    // (utilities/frame_native_answer.py). Non-blocking, like the read marker.
-    if (toolName === "question") {
-      spawnSync("python3", [frameNativeAnswer, "--opencode"], {
-        input: JSON.stringify({ tool: toolName, sessionID: input.sessionID || "", args,
-                                answers: output?.metadata?.answers || [] }),
-        encoding: "utf8",
-      })
     }
     afterSkillTool({ ...input, args }, output, baseDir(ctx),
       promptBySession.get(input.sessionID || "opencode-plugin") || "")

@@ -323,13 +323,24 @@ tool-contract-bound, or adapter-coupled.
 Write-denying hook gates are retired; no write preflight or core-read marker is required.
 
 `fleet-interaction-state.py` is the Claude-native payload wrapper for the
-portable interaction-wait invariant. `PreToolUse(AskUserQuestion)` publishes a
-decision marker and `PermissionRequest(*)` publishes a permission marker;
+portable interaction-wait invariant. `PermissionRequest(*)` publishes a permission marker, and `PreToolUse(AskUserQuestion)`
+publishes a decision marker only when the native question goes through (see below);
 `PostToolUse(*)`, `PostToolUseFailure(*)`, `UserPromptSubmit`, `Stop`, and
 `SessionEnd` clear only the exact session. The hook stores no question,
 choices, command, arguments, reason, model output, or tool payload, emits no
 stdout, and is a no-op for registered workers and native subagents. Herdr's
-separate hook remains optional corroboration and is not edited. Codex has no
+separate hook remains optional corroboration and is not edited.
+
+`native-question-redirect.py` is `PreToolUse(AskUserQuestion)` (it replaces the plain
+decision-marker entry). It registers the question (text, choices, a label ending
+`(권장)`/`(Recommended)` as the recommendation) as this session's Hearting question through
+`utilities/native_question_redirect.py` and refuses the native call with one short line
+(the question id, "end your turn"). Several questions, `multiSelect` and `preview` are
+written as one text question listing the options. When registration fails, times out
+(5 s inside the hook's 10 s) or the caller is a registered worker or native subagent, the
+native question runs as before and only then does the decision marker above apply. The
+frame-answer `PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question
+is answered on the question board. Codex has no
 `PostToolUseFailure` event; its `PostToolUse` also runs after a Bash command that
 exits non-zero (https://learn.chatgpt.com/docs/hooks#posttooluse) and carries the
 same wait clear and index-lock hint there, so the adaptation boundary keeps the
