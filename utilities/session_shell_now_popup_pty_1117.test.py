@@ -44,9 +44,13 @@ import json,os,sys,time
 sys.path.insert(0,@UTILITIES@);sys.path.insert(0,@TOOLS@)
 import session_shell as m
 from fleet.explorer import timeline as tl
-STORY=@STORY@;SLOW=@SLOW@
+STORY=@STORY@;SLOW=@SLOW@;SPAWNS=@SPAWNS@;HANG=@HANG@;LOGGED=[]
 def rows(harness,sid,**kw):
+    if not LOGGED:
+        LOGGED.append(1);open(SPAWNS,'a').write('%d\n'%os.getpid())     # one line for each process that reads a list
     while os.path.exists(SLOW):time.sleep(0.05)
+    if os.path.exists(HANG):
+        os.unlink(HANG);time.sleep(60)      # this one read never answers (once)
     return json.load(open(STORY))
 def passage(target,width):
     cfg=json.load(open(STORY+'.passage'))
@@ -112,6 +116,54 @@ const downTo=async(word,max=14)=>{for(let i=0;i<max;i++){const t=await standing(
   await key('draft9',300);
   frames.panel=await screen();
   const p0=await at(NOWWORD);checks.panel_row=(await screen())[p0.y];checks.mark=checks.panel_row.includes('›');
+  if(cfg.scenario==='keys'){
+    // 11-17 review, the folded list's ↑↓: one backend answers while the popup stands, nothing is left behind, and a held
+    // key steps over every row.
+    const out={};
+    const spawned=()=>fs.existsSync(cfg.spawns)?fs.readFileSync(cfg.spawns,'utf8').split('\n').filter(Boolean).map(Number):[];
+    // The backends that read a list and are still running (the host's own projection backend is another matter).
+    const isAlive=pid=>{try{process.kill(pid,0);return true;}catch{return false;}};
+    const live=()=>spawned().filter(isAlive).length;
+    const boxText=async()=>{await flush();const b=box(await screen());return b?b.rows.join('\n'):'';};
+    out.base=live();
+    await openNow();await until(popupHas('지금'),'the list');await sleep(300);
+    out.open={spawned:spawned().length,live:live()};
+    // A press at a time: the popup is drawn again with the list read for the new row, from the one backend.
+    const first=spawned().length,lat=[];
+    for(let i=0;i<17;i++){
+      const t0=Date.now();let prev=await boxText(),last=t0,states=1;child.write('\x1b[A');
+      while(Date.now()-t0<600){await sleep(5);const now=await boxText();if(now!==prev){prev=now;last=Date.now();states++;}}
+      lat.push([last-t0,states]);
+    }
+    out.single={spawned:spawned().length-first,lat,live:live()};
+    // A key held (30 a second): every row is stepped on, none is stepped over, and reads never run side by side.
+    await close();await openNow();await until(popupHas('지금'),'the list again');await sleep(300);
+    out.held_start=await standing();let most=live();
+    for(let i=0;i<cfg.held;i++){child.write('\x1b[A');await sleep(33);if(i%6===5)most=Math.max(most,live());}
+    await sleep(2500);out.held={final:await standing(),most,live:live()};
+    // Every key was the popup's: the draft stands, nothing was sent.
+    out.draft_now=await draft();
+    // A backend that dies under the popup: the next key still moves the row, and nothing is left behind.
+    let alive=spawned().filter(isAlive);
+    out.alive_before_kill=alive.length;
+    if(alive.length)try{process.kill(alive.at(-1),'SIGKILL');}catch{}
+    await sleep(300);
+    let before=await standing();child.write('\x1b[A');await sleep(1500);
+    out.killed={moved:(await standing())!==before,live:live()};
+    // A backend that does not answer: the read is made the one-shot way, the silent one is ended, nothing is left.
+    fs.writeFileSync(cfg.hang,'');before=await standing();child.write('\x1b[A');await sleep(6500);
+    out.hung={moved:(await standing())!==before,live:live(),hang_left:fs.existsSync(cfg.hang)};
+    before=await standing();child.write('\x1b[A');await sleep(1200);
+    out.after_hung={moved:(await standing())!==before,live:live()};
+    // Closing it, another section, the section again, closing: none leaves a backend running.
+    await close();await sleep(500);out.closed=live();
+    await openNow();await until(popupHas('지금'),'the list once more');await sleep(300);out.reopened=live();
+    await key('\x1b[C',600);await until(titled('QUESTIONS'),'QUESTIONS');await sleep(400);out.next_section=live();
+    await key('\x1b[D',600);await until(titled('NOW'),'NOW again');await sleep(500);out.back=live();
+    await key('\x1d',500);await sleep(500);out.ctrl=live();
+    const end=await screen();out.draft=end.some(l=>l.startsWith('❯ draft9'));out.submitted=end.some(l=>l.includes('DONE_draft9'));out.native_mouse=raw.includes('NATIVE_ESC_');
+    fs.writeFileSync(cfg.result,JSON.stringify({frames,checks:out}));return;
+  }
   if(cfg.layout==='bottom'){
     // The bottom layout: the NOW shares the title's row; a press on it opens the popup.
     let s=await openNow();frames.bottom=s;checks.bottom_title=box(s).title;await close();
@@ -154,7 +206,7 @@ const downTo=async(word,max=14)=>{for(let i=0;i<max;i++){const t=await standing(
   fs.writeFileSync(cfg.story+'.passage',JSON.stringify({ok:true,text:cfg.passage}));
   // 5. An event row's Enter opens that section's popup.
   checks.sections={};
-  for(const [word,title] of [['route','ROUTE'],['question','QUESTIONS'],['같이 봐','MESSAGES']]){
+  for(const [word,title] of [['route','ROUTE'],['질문','QUESTIONS'],['같이 봐','MESSAGES']]){
     await close();await openNow();
     let found=await downTo(word,16);
     if(!found.includes(word)){for(let i=0;i<30&&!(await standing()||'').includes(word);i++)await key('\x1b[A',250);found=await standing();}
@@ -239,8 +291,8 @@ class NowPopupPtyTest(unittest.TestCase):
         cls.fake.write_text(NATIVE.FAKE_NATIVE)
         cls.driver.write_text(DRIVER)
 
-    def run_shell(self, harness, layout="side", cols=160, rows=40):
-        case = self.root / (harness + layout); case.mkdir(mode=0o700)
+    def run_shell(self, harness, layout="side", cols=160, rows=40, scenario=''):
+        case = self.root / (harness + layout + scenario); case.mkdir(mode=0o700)
         project = case / 'project'; project.mkdir()
         sid = {'claude': '00000000-0000-4000-8000-0000000000d1', 'codex': '00000000-0000-4000-8000-0000000000d2',
                'opencode': 'ses_nowpopupfixture'}[harness]
@@ -259,13 +311,15 @@ class NowPopupPtyTest(unittest.TestCase):
         backend = case / 'backend'
         backend.write_text(BACKEND.replace('@PY@', sys.executable).replace('@UTILITIES@', repr(str(ROOT / 'utilities')))
                            .replace('@TOOLS@', repr(str(ROOT / 'tools'))).replace('@STORY@', repr(str(full)))
-                           .replace('@SLOW@', repr(str(case / 'slow'))))
+                           .replace('@SLOW@', repr(str(case / 'slow'))).replace('@SPAWNS@', repr(str(case / 'spawns')))
+                           .replace('@HANG@', repr(str(case / 'hang'))))
         backend.chmod(0o700)
         config = {'harness': harness, 'sid': sid, 'python': sys.executable, 'fake': str(self.fake), 'layout': layout,
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'), 'project': str(project),
                   'result': str(case / 'result.json'), 'story': str(full), 'slow': str(case / 'slow'), 'now': NOW_TEXT,
-                  'passage': passage, 'cols': cols, 'rows': rows, 'reversed': False,
+                  'passage': passage, 'cols': cols, 'rows': rows, 'reversed': False, 'scenario': scenario, 'held': 24,
+                  'spawns': str(case / 'spawns'), 'hang': str(case / 'hang'),
                   # the dark face's chosen ground, as panel-view has it (the popup's colors are not this test's to fix)
                   'chosen': int(subprocess.run([self.node, '-p', "require(process.argv[1]).FACES.dark.chosen", str(ROOT / 'utilities/session-shell/panel-view.cjs')], capture_output=True, text=True, check=True).stdout)}
         (case / 'config.json').write_text(json.dumps(config))
@@ -309,7 +363,7 @@ class NowPopupPtyTest(unittest.TestCase):
         self.assertIn('>', checks['on_prompt'])
         self.assertIn('대화 기록을 찾지 못했습니다', text('reason'))
         # An event row opens its section's popup.
-        for word, title in (('route', 'ROUTE'), ('question', 'QUESTIONS'), ('같이 봐', 'MESSAGES')):
+        for word, title in (('route', 'ROUTE'), ('질문', 'QUESTIONS'), ('같이 봐', 'MESSAGES')):
             self.assertIn(word, checks['sections'][word]['on'], checks['sections'])
             self.assertIn(title, checks['sections'][word]['title'])
         # ←→ keep working; Ctrl+] opens what it always opened.
@@ -339,6 +393,58 @@ class NowPopupPtyTest(unittest.TestCase):
 
     def test_opencode(self):
         self.check('opencode')
+
+    def leftovers(self):
+        """Processes of this test's backend wrappers still alive (any case), by their command line."""
+        out = []
+        for entry in Path('/proc').iterdir():
+            if entry.name.isdigit():
+                try:
+                    cmd = (entry / 'cmdline').read_bytes().decode(errors='replace')
+                except OSError:
+                    continue
+                if str(self.root) in cmd and '/backend' in cmd and str(os.getpid()) != entry.name:
+                    out.append((entry.name, cmd[:120]))
+        return out
+
+    def test_the_folded_lists_keys_ask_one_backend_that_ends_with_the_popup(self):
+        """11-17 review: ↑↓ in a folded list start no process of their own and draw in 150 ms; a held key steps on every
+        row; the backend ends with the popup (closed, another section, the window ended) and when it dies or is silent."""
+        result = self.run_shell('claude', scenario='keys')
+        c = result['checks']
+        # One backend read the list on opening and none was started for the keys that followed (17 single, 24 held).
+        self.assertEqual(c['open']['spawned'], 1, c['open'])
+        self.assertEqual(c['single']['spawned'], 0, c['single'])
+        self.assertEqual(c['open']['live'], c['base'] + 1, c['open'])
+        self.assertEqual(c['single']['live'], c['base'] + 1, c['single'])
+        # The key to the list drawn for the new row: milliseconds (150 or less), measured on the presses that change the rows
+        # (those that step into another prompt's group: it opens and the one left folds).
+        crossed = sorted(ms for ms, states in c['single']['lat'] if states >= 2)
+        self.assertGreaterEqual(len(crossed), 3, c['single'])
+        median = crossed[len(crossed) // 2]
+        print('NOW-POPUP-LATENCY key->drawn ms (presses that read the list again):', crossed, 'median', median, flush=True)
+        self.assertLessEqual(median, 150, crossed)
+        # A held key: the row stood on is the 24th selectable row above where it began, none stepped over; one read at a time.
+        selectable = [row for row in story('claude', 'x') if row['kind'] in ('prompt', 'now', 'route', 'question', 'message')]
+        at = next(i for i, row in enumerate(selectable) if row['kind'] == 'now' and row['text'].split()[0] in c['held_start'] and row.get('current'))
+        self.assertIn(selectable[at - 24]['text'], c['held']['final'], (c['held'], selectable[at - 24]['text']))
+        self.assertLessEqual(c['held']['most'], c['base'] + 1, c['held'])
+        self.assertEqual(c['draft_now'], 'draft9')
+        # A backend killed under the popup: the next key still moves the row.
+        self.assertEqual(c['alive_before_kill'], 1, c)
+        self.assertTrue(c['killed']['moved'], c['killed'])
+        self.assertLessEqual(c['killed']['live'], c['base'] + 1)
+        # A silent backend: ended after its wait, the read made the one-shot way, nothing left, and the popup reads that way on.
+        self.assertTrue(c['hung']['moved'] and not c['hung']['hang_left'], c['hung'])
+        self.assertEqual(c['hung']['live'], c['base'], c['hung'])
+        self.assertTrue(c['after_hung']['moved'] and c['after_hung']['live'] == c['base'], c['after_hung'])
+        # Closing, another section and Ctrl+] leave no backend; opening it again starts one.
+        b = c['base']
+        self.assertEqual((c['closed'], c['reopened'], c['next_section'], c['back'], c['ctrl']), (b, b + 1, b, b + 1, b), c)
+        # Every key was the popup's: nothing reached the native.
+        self.assertTrue(c['draft'] and not c['submitted'] and not c['native_mouse'])
+        self.assertEqual(self.leftovers(), [], 'a backend outlived the window')
+
 
     def test_bottom_layout_opens_from_the_row_it_shares_with_the_title(self):
         result = self.run_shell('claude', layout='bottom', cols=120, rows=40)

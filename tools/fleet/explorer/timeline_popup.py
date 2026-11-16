@@ -95,8 +95,32 @@ def _elapsed(seconds):
         return ""
 
 
-def draw_row(row, width, *, folded=0):
-    """One story row as ``(segments, meta)``; ``meta`` is what the host keeps for the line."""
+def marker(row):
+    """The word that says what an event row is (``route``, the question word, a message's kind), else ``""``."""
+    kind = row.get("kind")
+    if kind == "route":
+        return "route"
+    if kind == "question":
+        return _word("now_question")
+    if kind == "message":
+        return str(row.get("message_kind") or "")
+    return ""
+
+
+def marker_width(story):
+    """The widest event marker of ``story``, in cells: the text of every event row starts in the same column."""
+    return max((cells(marker(row)) for row in story or ()), default=0)
+
+
+def _marked(row, mark):
+    word = marker(row)
+    return word + " " * max(0, mark - cells(word)) + "  "
+
+
+def draw_row(row, width, *, folded=0, mark=0):
+    """One story row as ``(segments, meta)``; ``meta`` is what the host keeps for the line.
+
+    ``mark`` is the width the event markers are filled to (see ``marker_width``)."""
     kind = row.get("kind")
     meta = {"key": row.get("key") or "", "kind": kind, "select": kind in SELECTABLE}
     if kind == "date":
@@ -139,13 +163,13 @@ def draw_row(row, width, *, folded=0):
             tail = [(" · " + " · ".join(more), "dim")] if more else []
             right = []
         meta["go"] = "routes:" + str(row.get("route_id") or "")
-        return _line([stamp, (GAP, None), (glyph, key), (" route  ", "dim")],
+        return _line([stamp, (GAP, None), (glyph, key), (" " + _marked(row, mark), "dim")],
                      [(row.get("text") or "", "loc_repo"), *tail], width, right), meta
     if kind == "question":
         sub = row.get("sub")
         tail = [(" · " + _word("now_question_" + str(sub)), "dim")] if sub in ("answered", "closed") else []
         meta["go"] = "questions"
-        return _line([stamp, (GAP, None), ("◑", "g_blocked"), (" question  ", "dim")],
+        return _line([stamp, (GAP, None), ("◑", "g_blocked"), (" " + _marked(row, mark), "dim")],
                      [(row.get("text") or str(row.get("id") or ""), "loc_repo"), *tail], width), meta
     if kind == "message":
         arrow = "←" if row.get("sub") == "received" else "→"
@@ -155,7 +179,7 @@ def draw_row(row, width, *, folded=0):
             body.append((" · " + str(row["delivery"]), "dim"))
         meta["go"] = "messages"
         return _line([stamp, (GAP, None), (arrow, "lvl_g" if arrow == "←" else "loc_repo"),
-                      (" " + str(row.get("message_kind") or "") + "  ", "dim")], body, width), meta
+                      (" " + _marked(row, mark), "dim")], body, width), meta
     return [(str(row.get("text") or ""), "dim")], {**meta, "select": False}
 
 
@@ -182,9 +206,10 @@ def list_view(story, width, room, selected=""):
     if index is None:
         index = next((i for i in range(len(story) - 1, -1, -1) if story[i].get("kind") in SELECTABLE), None)
     shown = timeline.fold(story, room, index)
+    mark = marker_width(story)
     rows, meta = [], []
     for item in shown:
-        drawn, note = draw_row(story[item["index"]], width, folded=item.get("folded") or 0)
+        drawn, note = draw_row(story[item["index"]], width, folded=item.get("folded") or 0, mark=mark)
         rows.append(drawn)
         meta.append(note)
     prompts, nows = counts(story)

@@ -47,7 +47,7 @@ motion, or none, under [Settings](#settings)). From the top:
 |---|---|
 | `REPO`, `GIT` | The repository and its linked-worktree count (`web-api · wt 1`); the branch, then `✓` when it is level with its upstream or `↑N`/`↓N`, then any merge or rebase warning. The **STATUS ›** button at the right end of the REPO row (the screen's language word) opens this session's campaign status document whole in a popup: Fleet's status lines for the project first, markdown tables as aligned columns. It is dim when there is no document yet and absent where the project keeps no artifact root |
 | `MODEL`, `CTX` | The model and effort, and the context gauge and percent |
-| `TITLE`, `NOW` | Fleet's title for the session and what it is doing now, under a thin rule |
+| `TITLE`, `NOW` | Fleet's title for the session and what it is doing now, under a thin rule. The NOW row ends in `›` like the section heads: a press opens this session's story in a popup (below). The `›` takes the last line's room only when there is some, otherwise it replaces the end of that line (`…›`), so the rows around it keep their size |
 | `N QUESTIONS` | The questions waiting for you, in one thin rounded box. The line is rose where this window has a question to answer, dim where only an answer on its way or a wait answered elsewhere stands. Inside, in the body color: the first line, the choices as text (`1 label · 2 label`), and `↵ answer · Ctrl+]` at the right. An answer on its way reads `✓ answer sent · Public only` for ten minutes, the first words green. Nothing else in the panel is red but that border and a wait answered elsewhere's `◑` and count; in mono, eight colors, or `NO_COLOR` the border's weight tells the two apart |
 | `N ROUTE │ N PEER REQUEST` | The route box (`REQUEST` where the whole title does not fit). Every route: who works on it now (role, runtime, model, effort), its `CTX` gauge with the time after it, its title, its kind and where it stands (`code · staged 2/4 · execute ●`), its live workers in a smaller box under it; then, under one thin rule when both stand and rows allow, the requests this session sent (`→`) or received (`◂`, `✓` closed): the first row names the other session (`[6c] claude Opus 5.5 xhigh`, its age at the right), then the title, then the status. A failed route colors only its own line. A finished route stays with its result until your next input or ten minutes |
 | `MESSAGES +N` | Up to five messages, each its head (who, runtime, time, kind) and its first line; see [Requests and messages](#requests-and-messages) |
@@ -81,7 +81,7 @@ Ordinary keys stay with the native CLI. A section opens in a popup in the
 middle of the window (the native area and the panel together), never by
 itself: the question editor for QUESTIONS, Fleet's own table at the popup's
 width for ROUTE (a route unfolded with its failure reason whole, Enter for its
-page with its paths), the status document for STATUS, and the requests and
+page with its paths), the status document for STATUS, this session's story for NOW, and the requests and
 messages whole for MESSAGES. While it stands every key and press is its own,
 everything behind it reads in one dark gray (the native's output keeps
 arriving, still gray, and the native is never told) while the popup stands on
@@ -92,10 +92,11 @@ choice stands on its own blue ground (reversed in mono, eight colors, or
 | Key | What it does |
 |---|---|
 | **Ctrl+]** | Open a popup: the question you can answer here, else the first section with something in it; again (or **Esc**) closes it |
-| **←/→** | Move to the next or previous section (`STATUS · QUESTIONS · ROUTE · MESSAGES`, its name on the popup's bottom line) |
+| **←/→** | Move to the next or previous section (`STATUS · NOW · QUESTIONS · ROUTE · MESSAGES`, its name on the popup's bottom line); **Ctrl+]** skips NOW |
 | **Tab**, **1–9**, **t** | In a question: the next waiting question, an option (**↑/↓** too; **PgUp/PgDn** read a long question), an answer in text, including pasted text; **p**, **f**, **r**, **w** below work while you choose and are letters while you type |
 | **Enter** | In a question: send, once every form field is answered; the popup closes and keys go back to the native CLI. In ROUTE: the unfolded route's page, and again back to the table |
 | **↑/↓** | In ROUTE: unfold the next route; elsewhere read on (**PgUp/PgDn** a page) |
+| **↑/↓**, **Enter** | In NOW: choose a line of the story (oldest first, the latest NOW at the bottom; a prompt's own NOW values fold under it and open with it). **Enter** reads that part of the conversation in the popup and again goes back to the list; on a route, question, or message line it opens that section's popup. Nothing is sent to the agent's window. A very long story shows `… N earlier lines` on top where the oldest were left out |
 | **p** | Fold the panel into the strip, or open a folded one (the popup closes) |
 | **f** | Open Fleet in the same window; **Ctrl+]** closes it and returns |
 | **r**, **w** | The MESSAGES popup; this repository's open work |

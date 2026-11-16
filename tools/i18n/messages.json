@@ -1678,6 +1678,10 @@
    "en": "handed over",
    "ko": "이어받음"
   },
+  "fleet.session_panel.now_earlier": {
+   "en": "… {count} earlier lines",
+   "ko": "… 이전 {count}줄"
+  },
   "fleet.session_panel.now_empty": {
    "en": "Nothing is recorded for this session yet",
    "ko": "이 세션에는 아직 남은 기록이 없습니다"
@@ -1685,6 +1689,10 @@
   "fleet.session_panel.now_folded": {
    "en": "+{count} folded",
    "ko": "+{count} 접음"
+  },
+  "fleet.session_panel.now_question": {
+   "en": "question",
+   "ko": "질문"
   },
   "fleet.session_panel.now_question_answered": {
    "en": "answered",

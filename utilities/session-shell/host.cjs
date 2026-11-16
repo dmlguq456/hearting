@@ -339,6 +339,48 @@ function readAction(extra,operation='action',own=false) {
     worker.stdin.end(JSON.stringify({op:operation,binding:binding(),...extra})+'\n');
   });
 }
+// The NOW popup's reader. A key in its folded list asks for the list again with the row stood on open, and a
+// backend started for each key costs 0.2 s (its modules load again), so one backend is held while that popup
+// stands and asked a line at a time (the backend already answers a line at a time). It ends with the popup
+// (closed, another section, the window ended) and when it fails; a read it cannot answer in time, or at all,
+// is made the one-shot way as before, and the popup then reads that way for as long as it stands.
+let nowWorker=null,nowNext=0;
+function nowStop(){
+  const worker=nowWorker;nowWorker=null;if(!worker)return;
+  if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.resolve(null);worker.pending=null;}
+  try{worker.stdin.end();}catch{}
+  try{worker.kill('SIGKILL');}catch{}
+}
+function nowRead(extra){
+  return new Promise(resolve=>{
+    let worker=nowWorker;
+    if(!worker){
+      try{worker=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});}
+      catch{resolve(null);return;}
+      worker.pending=null;worker.raw='';worker.warm=false;nowWorker=worker;
+      const fail=()=>{if(nowWorker===worker)nowStop();else if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.resolve(null);worker.pending=null;}};
+      worker.on('error',fail);worker.stdin.on('error',fail);worker.on('close',fail);
+      worker.stdout.setEncoding('utf8');
+      worker.stdout.on('data',bytes=>{
+        worker.raw+=bytes;
+        for(let at=worker.raw.indexOf('\n');at>=0;at=worker.raw.indexOf('\n')){
+          const line=worker.raw.slice(0,at);worker.raw=worker.raw.slice(at+1);
+          const pending=worker.pending;if(!pending)continue;
+          let value;try{value=JSON.parse(line);}catch{fail();return;}
+          if(value?.id!==pending.id)continue;
+          worker.pending=null;worker.warm=true;clearTimeout(pending.timer);pending.resolve(value);
+        }
+        if(Buffer.byteLength(worker.raw)>65536)fail();
+      });
+    }
+    const id=++nowNext;
+    // The first answer waits for the backend to start; the ones after it come in milliseconds.
+    const timer=setTimeout(()=>{if(nowWorker===worker)nowStop();},worker.warm?4000:12000);
+    worker.pending={id,timer,resolve};
+    try{worker.stdin.write(JSON.stringify({id,op:'popup',binding:binding(),...extra})+'\n');}catch{if(nowWorker===worker)nowStop();}
+  });
+}
+process.on('exit',nowStop);
 function emit(value) { process.stdout.write(value); }
 function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration});}
 // Spec rule 49: the panel opened or folded through the same layout path a window resize takes
@@ -699,16 +741,22 @@ function popupNow(){
   if(table){
     // The keys, broken between their ` · ` pieces where the popup is narrow (never cut), and where the
     // table is longer than its rows, the reading's place first (`3/20 · …`).
-    const all=tableRows(inner),fits=room-tableGuide(table.kind).length;
-    const place=all.length>Math.max(1,fits)?`${Math.min(all.length,table.scroll+1)}/${all.length}`:'';
-    const guide=wrapGuide([place,...tableGuide(table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
-    const space=Math.max(1,room-guide.length);
-    // The row stood on comes into view (the popup opens on the bottom one; a list moves with the keys).
+    const all=tableRows(inner);
+    let place,guide,space;
+    const lay=()=>{
+      place=all.length>Math.max(1,room-tableGuide(table.kind).length)?`${Math.min(all.length,table.scroll+1)}/${all.length}`:'';
+      guide=wrapGuide([place,...tableGuide(table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
+      space=Math.max(1,room-guide.length);
+    };
+    const clamp=()=>{table.scroll=Math.max(0,Math.min(table.scroll,Math.max(0,all.length-space)));};
+    lay();
+    // The row stood on comes into view (the popup opens on the bottom one; a list moves with the keys) before the
+    // place is said, so the place is the one the popup stands at (a second pass where the place's width moved a line).
     if(table.kind==='NOW'&&!table.page&&table.reveal&&table.list){
       const at=table.list.meta.findIndex(m=>m.key===table.sel);
-      if(at>=0){if(at<table.scroll)table.scroll=at;else if(at>=table.scroll+space)table.scroll=at-space+1;table.reveal=false;}
+      if(at>=0){for(let pass=0;pass<2;pass++){if(at<table.scroll)table.scroll=at;else if(at>=table.scroll+space)table.scroll=at-space+1;clamp();lay();}table.reveal=false;}
     }
-    table.scroll=Math.max(0,Math.min(table.scroll,Math.max(0,all.length-space)));
+    clamp();lay();clamp();
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
@@ -763,8 +811,18 @@ function askTable(){
   // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
   const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
   const status=t.kind==='STATUS';
-  const ask=extra=>readAction({kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
-    ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{})},'popup',true);
+  const ask=extra=>{
+    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
+      ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{})};
+    if(!now||t.noWorker)return readAction(asked,'popup',true);
+    // The NOW popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
+    // that way from then on); a popup that is gone by then starts nothing.
+    return nowRead(asked).then(result=>{
+      if(result)return result;
+      t.noWorker=true;
+      return table===t?readAction(asked,'popup',true):{ok:false,reason:'action-unavailable'};
+    });
+  };
   const stale=()=>table!==t||selected!==selection;
   let loaded=false;
   ask(status?{part:'doc'}:{}).then(result=>{
@@ -773,8 +831,11 @@ function askTable(){
     if(t.width!==width){tableAgain=true;return;}
     if(now){
       // A part that could not be asked for goes back to the list; a list that could not be read says so.
-      if(!result?.ok){if(t.page){t.page=false;t.scroll=t.listScroll||0;t.reveal=true;}else t.error=!t.list;queueDisplay();return;}
-      nowAnswer(t,result);queueDisplay();return;
+      if(!result?.ok){t.queued=[];if(t.page){t.page=false;t.scroll=t.listScroll||0;t.reveal=true;}else t.error=!t.list;queueDisplay();return;}
+      nowAnswer(t,result);queueDisplay();
+      // The keys that waited for this list: the first moves over it (and reads again if the list is folded).
+      setImmediate(()=>nowDrain(t));
+      return;
     }
     if(!result?.ok){t.error=!t.loaded;queueDisplay();return;}
     t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
@@ -832,8 +893,15 @@ function nowAnswer(t,result){
 }
 // ↑↓ (a row at a time) and PgUp/PgDn (a page of rows): the row stood on moves to the next one that has a press
 // to give; a list folded to its room is read again with the new row open (its prompt unfolds).
+function nowDrain(t){
+  while(table===t&&!tableAsking&&!tableAgain&&t.queued?.length){t.queued.shift()();}
+}
 function moveSel(delta,byRow=false){
   const t=table;if(!t||t.page||!t.list)return;
+  // A folded list that is being read again is not the one this key moves over (its row stood on is open there, the
+  // list in hand has it folded): the key waits for the answer and moves over that, so a held key never steps over
+  // the middle of a folded prompt. (`t.queued` is taken up, in order, as the answers arrive.)
+  if(t.list.folded&&(tableAsking||tableAgain)){if((t.queued=t.queued||[]).length<200)t.queued.push(()=>moveSel(delta,byRow));return;}
   const meta=t.list.meta,at=meta.findIndex(m=>m.key===t.sel),dir=delta<0?-1:1;
   const find=(from,way)=>{for(let i=from;i>=0&&i<meta.length;i+=way)if(meta[i].select)return i;return -1;};
   let to;
@@ -857,6 +925,7 @@ function followOpen(t){
 // Opening a popup (a press on its section, Ctrl+], ←→ inside one). The keys are its own from now on.
 function openPopup(name,open=''){
   epoch++;empty=false;actionLines=[];resetTableInput();
+  if(name!=='NOW')nowStop();
   if(name==='QUESTIONS'){table=null;block.enter();queueDisplay();return;}
   const was=table;
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
@@ -879,7 +948,7 @@ function rankedRoutes(){
 }
 function closePopup(){
   resetTableInput();
-  table=null;
+  table=null;nowStop();
   if(block.focused)block.leave();
   actionLines=[];queueDisplay();
 }
@@ -906,7 +975,9 @@ function enterRow(){
 }
 // Enter in the NOW popup: a prompt or NOW row reads its part of the conversation here (Enter again is back at
 // the list, on that row); a route, question or message row opens that section's popup. No key goes to the window.
-function enterNow(t){
+function enterNow(t,queued=false){
+  // Keys that wait for a list read again come first.
+  if(!queued&&t.queued?.length){if(t.queued.length<200)t.queued.push(()=>enterNow(t,true));return;}
   if(t.page){
     t.page=false;t.scroll=t.listScroll||0;t.reveal=true;
     if(!t.list||t.list.width!==t.width)askTable();
@@ -1172,7 +1243,7 @@ function openFleet() {
     const session=pty.spawn(process.env.HEARTING_SHELL_PYTHON,[exe,'--explorer'],
       {cols,rows,cwd:process.cwd(),env:{...process.env}});
     const view={terminal:vt,child:session,closing:false,inputTail:'',paste:false};
-    fleetView=view;table=null;block.leave();last=[];emit('\x1b[2J');
+    fleetView=view;table=null;nowStop();block.leave();last=[];emit('\x1b[2J');
     vt.onData(data=>session.write(data));vt.onWriteParsed(schedule);
     session.onData(data=>{try{vt.write(data);}catch{session.write('q');rawRelay();}});
     session.onExit(()=>{
@@ -1788,7 +1859,7 @@ async function lifecycle(req) {
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
     unselected={sid:req.sid,nativeEpoch,table,routeScroll};
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;nowStop();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
@@ -1921,7 +1992,7 @@ function wireDisplay() {
   child.onExit(async event=>{
     // A successor that has not taken over owns nothing outside itself.
     if(!switched)process.exit(0);
-    ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
+    ended=true;nowStop();clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     for(const watch of releaseWatchers)try{watch.close();}catch{}
     server.close();await source('unregister');backend?.stdin.end();

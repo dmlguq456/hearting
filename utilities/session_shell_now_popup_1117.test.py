@@ -35,6 +35,7 @@ def load(name, path):
 
 POLISH = load("now_popup_panel_head", ROOT / "utilities/session_shell_panel_polish_1116.test.py")
 POPUP = load("now_popup_synth", ROOT / "tools/fleet/tests/test_now_popup.py")
+PANEL_TEST = load("now_popup_panel_test", ROOT / "utilities/session_shell_panel.test.py")
 NODE = shutil.which("node")
 
 PANEL = POLISH.HEAD + r"""
@@ -107,6 +108,109 @@ class PanelOpenerTest(unittest.TestCase):
         with_now = self.draw(now="두 줄 꼴")
         without = self.draw(now="")
         self.assertEqual(sorted(a for a in with_now["all"] if a != "popup:NOW"), sorted(without["all"]))
+
+
+SWEEP = POLISH.HEAD + r"""
+// The same panel-view without the mark (`base`, made from the source by the test) and with it: the mark changes the
+// NOW's last row and nothing else, in the side layout across its sizes.
+const base=require(process.argv[2]);
+const o=JSON.parse(process.argv[3]);
+const paint=(mod,w,h,now,title)=>{const m=model({});m.now=now;m.session_title=title;
+  const v=mod.render({width:w,height:h,side:true,model:m,state:'working',harness:'claude',frame:1000,since:990,brief:undefined,sent:()=>[],cellWidth:cells,
+  configuration:{side_width:w,rule_motion:'rule',theme:'terminal',position:'right'},folded:false});
+  return {lines:lines(v),now:v.hits.filter(x=>x.action==='popup:NOW').map(x=>x.row)};};
+const bad=[];let runs=0,changed=0;
+for(const title of o.titles)for(let w=o.w?o.w[0]:30;w<=(o.w?o.w[1]:60);w++)for(let h=o.h?o.h[0]:16;h<=(o.h?o.h[1]:40);h++)for(const n of o.lengths){
+  const now=('가'.repeat(n)).replace(/(.{4})/g,'$1 ').trim(),a=paint(view,w,h,now,title),b=paint(base,w,h,now,title);runs++;
+  const ours=new Set(a.now);
+  if(a.lines.length!==b.lines.length){bad.push({w,h,n,why:'rows',a:a.lines.length,b:b.lines.length});continue;}
+  const last=Math.max(...a.now,-1);
+  for(let i=0;i<a.lines.length;i++){
+    if(a.lines[i]===b.lines[i])continue;
+    // the NOW's last row alone may differ, and it ends in the mark
+    if(i===last&&a.lines[i].trimEnd().replace(/\s*│$/,'').endsWith('›')){changed++;continue;}
+    bad.push({w,h,n,why:'row '+i,a:a.lines[i],b:b.lines[i]});break;
+  }
+}
+console.log(JSON.stringify({runs,changed,bad:bad.slice(0,6),badCount:bad.length}));
+"""
+
+
+@unittest.skipUnless(NODE, "needs node")
+class MarkKeepsTheRestTest(unittest.TestCase):
+    """11-17 review: the mark takes room only where the last row of the NOW has it; no other row of the panel moves."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls.dir = Path(tempfile.mkdtemp(prefix="now-mark-"))
+        source = (SHELL / "panel-view.cjs").read_text(encoding="utf-8")
+        mark = "[text(' '),text('›','dim')]"
+        for here in ("Infinity," + mark, "now?" + mark + ":[]"):     # the NOW field's mark and the bottom row's
+            assert source.count(here) == 1, here
+            source = source.replace(here, here.replace(mark, "[]"))
+        (cls.dir / "base.cjs").write_text(source, encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def sweep(self, **options):
+        out = subprocess.run([NODE, "-e", SWEEP, str(SHELL), str(self.dir / "base.cjs"), json.dumps(options)],
+                             capture_output=True, text=True, check=True, timeout=240)
+        return json.loads(out.stdout)
+
+    def test_no_row_but_the_nows_last_moves_from_30_to_60_wide_and_16_to_40_high(self):
+        got = self.sweep(titles=["패널 손질", "제목도 길어서 여러 줄로 접히는 하팅 v4-open 감독 셸 상태 고치기와 Fleet 세션 줄 다듬기"],
+                         lengths=[6, 20, 27, 28, 54, 55, 100])
+        self.assertGreater(got["runs"], 10000)
+        self.assertEqual(got["badCount"], 0, got["bad"])
+        self.assertGreater(got["changed"], 0)       # the mark is there where the sweep put a NOW
+
+    def test_the_default_side_panel_at_40_by_24_with_a_54_cell_now_keeps_its_title(self):
+        # The review's case: 40 columns, 24 rows, a NOW of 54 cells (27 wide characters). Every row but the NOW's last
+        # stands as it stood without the mark, the title's rows and the first of the NOW's two among them.
+        title = "제목도 길어서 여러 줄로 접히는 하팅 v4-open 감독 셸 상태 고치기와 Fleet 세션 줄 다듬기"
+        got = self.sweep(titles=[title, "패널 손질"], lengths=[27, 28, 29], w=[40, 40], h=[24, 24])
+        self.assertEqual((got["runs"], got["badCount"]), (6, 0), got["bad"])
+        self.assertEqual(got["changed"], 6)         # and the mark is on the NOW's last row in every one
+
+    def test_the_panel_suites_own_session_at_40_wide_keeps_its_title_and_its_other_rows(self):
+        # The same session the panel suite draws (title, messages, a question), 40 wide, a NOW of 56 cells: where the
+        # mark took two cells of every row of the NOW, its last row spilled onto a row of its own (or the title folded);
+        # now every row but the NOW's last stands as it stood without the mark.
+        script = PANEL_TEST.PanelTest.FIXTURE + r"""
+const base=require(process.argv[2]);
+const paint=(mod,h,now)=>{const v=mod.render({width:40,height:h,side:true,fill:true,model:{...head,now,routes:[],route_count:0},state:'working',
+  configuration:{},expandedKeys:[],questions:()=>[]});return {lines:v.rows.map(r=>r.map(p=>p.text).join('')),now:v.hits.filter(x=>x.action==='popup:NOW').map(x=>x.row)};};
+const out=[];
+for(const h of [24,25,26,27,28])for(const n of [24,25,26,27,28]){
+  const now=('가'.repeat(n)).replace(/(.{4})/g,'$1 ').trim(),a=paint(view,h,now),b=paint(base,h,now),last=Math.max(...a.now,-1);
+  const odd=a.lines.length!==b.lines.length||a.lines.some((s,i)=>s!==b.lines[i]&&i!==last);
+  out.push({h,n,cells:cells(now),odd,mark:last>=0&&a.lines[last].trimEnd().replace(/\s*│$/,'').endsWith('›')});
+}
+console.log(JSON.stringify(out));
+"""
+        out = subprocess.run([NODE, "-e", script, str(SHELL / "panel-view.cjs"), str(self.dir / "base.cjs")], capture_output=True, text=True, check=True)
+        cases = json.loads(out.stdout)
+        self.assertEqual([c for c in cases if c["odd"]], [], cases)
+        self.assertTrue(all(c["mark"] for c in cases), cases)
+        self.assertTrue(any(c["h"] in (24, 26, 27) and c["cells"] in (54, 56, 58) for c in cases))
+
+    def test_a_now_that_fills_its_last_row_takes_the_mark_as_an_ellipsis_at_its_end(self):
+        script = POLISH.HEAD + """
+const m=model({});m.session_title='제목';m.now=process.argv[2];
+const v=view.render({width:40,height:30,side:true,model:m,state:'working',harness:'claude',frame:1000,since:990,brief:undefined,sent:()=>[],cellWidth:cells,
+ configuration:{side_width:40,rule_motion:'rule',theme:'terminal',position:'right'},folded:false});
+console.log(JSON.stringify(lines(v)));"""
+        def row(now):
+            out = subprocess.run([NODE, "-e", script, str(SHELL), now], capture_output=True, text=True, check=True)
+            return [line for line in json.loads(out.stdout) if line.startswith("│ NOW") or line.startswith("│        ")]
+        full = "가가가가 가가가가 가가가가 가가가가 가가가"      # fills the 32 cells of the NOW's row (a word of 3)
+        rows = row(full)
+        self.assertTrue(rows[-1].rstrip("│ ").rstrip().endswith("…›"), rows)   # no room: `…›` takes the row's end
+        short = row("가가가가 가가가가")
+        self.assertTrue(short[-1].rstrip("│ ").rstrip().endswith(" ›") and "…" not in short[-1], short)  # room: ` ›`
 
 
 @unittest.skipUnless(NODE, "needs node")

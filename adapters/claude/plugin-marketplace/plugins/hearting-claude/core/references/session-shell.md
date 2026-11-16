@@ -392,8 +392,9 @@ in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,
 in the session's harness color, Fleet's `hb_*`, on every row; plain without
 color, the weight kept without color as the steward's `⚑`) and NOW (bright
-while the session works or waits; 11-17: its last row ends in `›` and a press on any row of it opens the NOW popup,
-in the bottom layout the row it shares with the title), each on as many rows as it needs, then a
+while the session works or waits; 11-17: a press on any row of it opens the NOW popup, in the bottom layout the
+row it shares with the title; its last row ends in ` ›` only where that row has the room, else the row's end is
+`…›`, so the mark never adds a row, folds a title or moves another row), each on as many rows as it needs, then a
 tidy notice (11-16, the person: "알림이 알림이 아니라 경고 같아서": a result that ended well and leaves the
 person nothing to do, which its writer marks `done`, is one or two dim rows without `⚠`, the machine's
 own words left out of the panel's line (the `[tidy]` tag, the batch id, the undo command, a byte or rowid
@@ -917,8 +918,13 @@ bright with `지금` at the right; a route `⠏` start, `✓` or `✕` end with 
 compaction or handover (`●` `○` `◆`). A line's text is the layer's own masked, bounded one; a text too long for
 the popup's inside is cut with `…` and the time, mark and `지금` stay. A list taller than the popup's rows is folded
 by `timeline.fold` (each prompt its last NOW and `+N 접음`, the prompt stood on open, date and divider rows
-never folded; the list is read again as the row stood on moves); one that fits is whole; no record is one dim
-line. ↑↓ move the row stood on (the chosen tint, reversed where there is no hue), PgUp/PgDn a page of rows;
+never folded; the list is read again as the row stood on moves, by the one backend the popup holds while it
+stands: it ends with the popup, another section or the window, and a read it cannot answer is made the one-shot way,
+so a key starts no process; keys that come while a folded list is read again wait for it and step over it in order);
+one that fits is whole; no record is one dim line. The event marks (`route`, the screen's word for a question,
+a message's kind) are filled to the widest one so the text of every event row starts in one column. An answer
+past the host's 60 KB leaves its oldest rows off at a group's start (a date, a divider or a prompt) and says so on
+its first row (`… 이전 N줄`, dim). ↑↓ move the row stood on (the chosen tint, reversed where there is no hue), PgUp/PgDn a page of rows;
 Enter on a prompt or NOW row reads that part of the conversation in the popup (`timeline.passage`, drawn as the
 harness draws it; a part that cannot be read is one dim line in words from the layer's reason) and Enter again is
 back on that row (keys `Enter 목록으로 돌아가기`); on a route, question or message row Enter opens that

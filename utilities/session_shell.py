@@ -1733,14 +1733,30 @@ def _now_popup(binding, request, columns, colors, no_color):
     full = build(everything)
     if weight(full) <= POPUP_ANSWER_BYTES:
         return full
-    # Too much for one answer: a list keeps its newest rows (the popup opens at the bottom); a page keeps its top
-    # rows and as many of its last ones as fit, with a `…` between.
-    head = timeline_popup.PAGE_HEAD_ROWS if page else 0
-    low, high = 0, len(runs) - head      # `low` rows from the end fit, `high` do not
+    if page:
+        # Too much for one answer: a page keeps its top rows and as many of its last ones as fit, with a `…` between.
+        head = timeline_popup.PAGE_HEAD_ROWS
+        low, high = 0, len(runs) - head      # `low` rows from the end fit, `high` do not
+        while high - low > 1:
+            middle = (low + high) // 2
+            low, high = (middle, high) if weight(build(everything[:head] + everything[len(runs) - middle:])) <= POPUP_ANSWER_BYTES else (low, middle)
+        return build(everything[:head] + everything[len(runs) - low:])
+
+    # Too much for one answer: a list keeps its newest rows (the popup opens at the bottom), from a group's start (a
+    # date, a divider or a prompt, never a NOW without its prompt), and says how many rows it left off.
+    def newest(first):
+        kept = build(everything[first:])
+        word = timeline_popup._word("now_earlier", count=first)
+        return {**kept, "rows": [[[word, style("dim"), cell_width(word)]]] + kept["rows"],
+                "meta": [{"key": "", "kind": "gap", "select": False}] + kept["meta"]}
+    starts = [number for number, note in enumerate(meta) if note.get("kind") in ("date", "divider", "prompt") and number]
+    if not starts or weight(newest(starts[-1])) > POPUP_ANSWER_BYTES:
+        starts = everything[1:]              # one group past the answer: any row will do
+    low, high = -1, len(starts) - 1          # `starts[high]` fits (or is the last that can); `low` does not
     while high - low > 1:
         middle = (low + high) // 2
-        low, high = (middle, high) if weight(build(everything[:head] + everything[len(runs) - middle:])) <= POPUP_ANSWER_BYTES else (low, middle)
-    return build(everything[:head] + everything[len(runs) - low:])
+        low, high = (low, middle) if weight(newest(starts[middle])) <= POPUP_ANSWER_BYTES else (middle, high)
+    return newest(starts[high])
 
 
 def _panel_popup(binding, request):

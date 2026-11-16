@@ -230,12 +230,54 @@ class FoldTest(_Korean):
         self.assertRegex(last, r"\+2 접음 · 지금$")
 
 
+class MarkerColumnTest(_Korean):
+    """11-17 review: the question marker is the screen's word, and the event markers fill one column."""
+
+    def event_rows(self, story, width=100):
+        view = popup.list_view(story, width, 200)
+        return [(row, drawn) for row, drawn in zip(story, view["rows"]) if row["kind"] in ("route", "question", "message")]
+
+    def test_the_question_marker_is_the_screens_word_in_both_languages(self):
+        question = next(row for row in synth() if row["kind"] == "question")
+        for lang, word in (("ko", "질문"), ("en", "question")):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                drawn, _note = popup.draw_row(question, 90)
+                line = text_of(drawn)
+                self.assertIn(" " + word + " ", line)
+                self.assertEqual(popup.marker(question), word)
+        self.assertNotIn("question", text_of(popup.draw_row(question, 90)[0]))   # ko: no hard-coded English left
+
+    def test_the_text_of_every_event_row_starts_in_one_column(self):
+        story = synth()
+        story.append({**next(row for row in story if row["kind"] == "message"), "key": "message:m2:sent", "sub": "sent",
+                      "message_kind": "request", "text": "다른 종류"})
+        for lang in ("ko", "en"):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                events = self.event_rows(story)
+                kinds = {popup.marker(row) for row, _ in events}
+                self.assertGreaterEqual(len(kinds), 4, kinds)
+                starts = {popup.cells("".join(text for text, _key in drawn[:4])) for _row, drawn in events}
+                self.assertEqual(len(starts), 1, starts)
+                widest = max(popup.cells(word) for word in kinds)
+                self.assertEqual(starts.pop(), 5 + 2 + 1 + 1 + widest + 2)
+
+    def test_the_column_does_not_move_when_a_fold_shows_fewer_rows(self):
+        story = synth(prompts=9, nows=3)
+        whole = popup.list_view(story, 100, 500)
+        folded = popup.list_view(story, 100, 12)
+        self.assertTrue(folded["folded"])
+        def starts(view, count):
+            return {popup.cells("".join(text for text, _key in drawn[:4])) for drawn, note in zip(view["rows"], view["meta"])
+                    if note["kind"] in ("route", "question", "message")}
+        self.assertEqual(starts(whole, 0), starts(folded, 0))
+
+
 class WordsTest(_Korean):
     def test_every_new_word_has_both_languages(self):
         messages = json.loads((TOOLS / "i18n" / "messages.json").read_text(encoding="utf-8"))["messages"]
         used = set(re.findall(r'_word\("([a-z_]+)"', (TOOLS / "fleet/explorer/timeline_popup.py").read_text(encoding="utf-8")))
         used = {name for name in used if not name.endswith("_")}
-        used |= {"now_divider_" + name for name in popup.DIVIDER_MARKS} | {"now_question_answered", "now_question_closed"}
+        used |= {"now_divider_" + name for name in popup.DIVIDER_MARKS} | {"now_question_answered", "now_question_closed", "now_earlier"}
         used |= {"now_reason_" + name.replace("-", "_") for name in popup.REASONS} | {"popup_now", "popup_now_page"}
         self.assertTrue(used)
         for name in used:
@@ -389,6 +431,33 @@ class AnswerTest(_Box, unittest.TestCase):
         self.assertEqual(answer["meta"][-1]["key"], current["key"])
         self.assertEqual(len(answer["rows"]), len(answer["meta"]))
         self.assertTrue(page["ok"])
+
+    def test_a_list_past_the_limit_says_how_many_rows_it_left_off_and_starts_at_a_group(self):
+        story = synth(prompts=240, nows=1, days=3)
+        for row in story:
+            if row["kind"] in ("prompt", "now"):
+                row["text"] = "한국어로 길게 적은 요청과 요약이다 " * 6
+        with mock.patch.object(tl, "rows", return_value=story):
+            answer = session_shell._now_popup({"harness": "claude", "sid": SID}, {"rows": 30, "columns": 120}, 120, 256, False)
+            whole = popup.list_view(story, 120, 30)
+        self.assertLessEqual(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), session_shell.POPUP_ANSWER_BYTES)
+        self.assertGreater(len(whole["rows"]), len(answer["rows"]) - 1, "the case must really be over the limit")
+        first = "".join(run[0] for run in answer["rows"][0])
+        dropped = len(whole["rows"]) - (len(answer["rows"]) - 1)
+        self.assertEqual(first, "… 이전 %d줄" % dropped)
+        self.assertEqual(answer["meta"][0]["select"], False)
+        # The row under it begins a group: a date, a divider or a prompt, never a NOW without its prompt.
+        self.assertIn(answer["meta"][1]["kind"], ("date", "divider", "prompt"), answer["meta"][:3])
+        self.assertTrue(dropped > 0 and answer["meta"][-1]["key"] == [row for row in story if row.get("current")][0]["key"])
+        self.assertEqual(len(answer["rows"]), len(answer["meta"]))
+        # Dim, like the `외 N개` of the other popups.
+        self.assertEqual(answer["styles"][answer["rows"][0][0][1]].get("dim"), True)
+
+    def test_a_list_within_the_limit_says_nothing_of_the_kind(self):
+        story = synth(prompts=9, nows=2)
+        with mock.patch.object(tl, "rows", return_value=story):
+            answer = session_shell._now_popup({"harness": "claude", "sid": SID}, {"rows": 30, "columns": 120}, 120, 256, False)
+        self.assertFalse(any("이전" in "".join(run[0] for run in row) for row in answer["rows"]))
 
     def test_a_long_page_keeps_its_top_and_its_end_with_a_gap(self):
         self.build()

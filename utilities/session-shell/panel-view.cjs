@@ -656,13 +656,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // A row that ends a value cut short: its last cell becomes `…` (spec rule 36 (c), 37 (b)).
     const ellipsis=(row,limit)=>{const all=size(row);if(all+1<=limit)return [...row,{...(row.at(-1)||text('')),text:'…'}];
       const fit=clip(row,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
-    // `tail` stands after the value's last row and keeps its cells (the `›` of a row a press opens).
+    // `tail` stands after the value's last row and keeps its cells (the `›` of a row a press opens). The value is cut
+    // and wrapped as it is without it: the tail takes room only where the last row has it, else it stands at that
+    // row's end as `…›`, so neither the value's rows nor any row around them depend on the tail.
+    const tailed=(row,limit,tail)=>{
+      if(!tail.length||size(row)+size(tail)<=limit)return [...row,...tail];
+      const fit=clip(row,Math.max(0,limit-2));
+      return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'},tail.at(-1)];
+    };
     const field=(label,parts,max=Infinity,tail=[])=>{
-      const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth),room=Math.max(1,inner-labelWidth-size(tail));
+      const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth),room=inner-labelWidth;
       let rows=wrapAll(parts,room);const from=top.length;
-      if(rows.length>max){rows=rows.slice(0,max);rows[max-1]=ellipsis(rows[max-1],inner-labelWidth);}
-      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...row,...(i===rows.length-1?tail:[])]);if(i)extra.add(top.length-1);});
-      if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...cut(parts,room),...tail]);
+      if(rows.length>max){rows=rows.slice(0,max);rows[max-1]=ellipsis(rows[max-1],room);}
+      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...(i===rows.length-1?tailed(row,room,tail):row)]);if(i)extra.add(top.length-1);});
+      if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...tailed(cut(parts,room),room,tail)]);
     };
     // Spec rules 37 (a), 41: beside the native area the worktree count stands beside the
     // repository name (`REPO   hearting · wt 12`) and the Git row keeps the branch, whether it
@@ -792,11 +799,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(title||now){
         // Title and NOW share what the answer wait leaves: each keeps at least half of it.
         const nowParts=now?[text('NOW ','dim'),text(now,nowKey)]:[],titleParts=title?line(title,'loc_repo'):[];
-        // A NOW ends the row in `›` (two cells), and a press on the row opens the NOW popup.
-        const arrow=now?[text(' '),text('›','dim')]:[],avail=inner-(title&&now?3:0)-size(arrow);
-        const titleRoom=title&&now?Math.max(Math.min(size(titleParts),Math.floor(avail/2)),avail-size(nowParts)):avail;
+        // A NOW ends the row in `›`, a press on the row opens the NOW popup. The row is laid out without it.
+        const arrow=now?[text(' '),text('›','dim')]:[],avail=inner-(title&&now?3:0),
+          titleRoom=title&&now?Math.max(Math.min(size(titleParts),Math.floor(avail/2)),avail-size(nowParts)):avail;
         if(now)topActions.set(top.length,'popup:NOW');
-        top.push([...cut(joined([cut(titleParts,Math.max(1,titleRoom)),cut(nowParts,Math.max(1,avail-(title?Math.min(size(titleParts),titleRoom):0)))]),inner-size(arrow)),...arrow]);
+        top.push(tailed(cut(joined([cut(titleParts,Math.max(1,titleRoom)),cut(nowParts,Math.max(1,avail-(title?Math.min(size(titleParts),titleRoom):0)))]),inner),inner,arrow));
       }
     }
     const rows=height-2;
