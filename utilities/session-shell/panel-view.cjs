@@ -646,12 +646,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // A row that ends a value cut short: its last cell becomes `…` (spec rule 36 (c), 37 (b)).
     const ellipsis=(row,limit)=>{const all=size(row);if(all+1<=limit)return [...row,{...(row.at(-1)||text('')),text:'…'}];
       const fit=clip(row,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
-    const field=(label,parts,max=Infinity)=>{
-      const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth);
-      let rows=wrapAll(parts,inner-labelWidth);const from=top.length;
+    // `tail` stands after the value's last row and keeps its cells (the `›` of a row a press opens).
+    const field=(label,parts,max=Infinity,tail=[])=>{
+      const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth),room=Math.max(1,inner-labelWidth-size(tail));
+      let rows=wrapAll(parts,room);const from=top.length;
       if(rows.length>max){rows=rows.slice(0,max);rows[max-1]=ellipsis(rows[max-1],inner-labelWidth);}
-      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...row]);if(i)extra.add(top.length-1);});
-      if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...cut(parts,inner-labelWidth)]);
+      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...row,...(i===rows.length-1?tail:[])]);if(i)extra.add(top.length-1);});
+      if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...cut(parts,room),...tail]);
     };
     // Spec rules 37 (a), 41: beside the native area the worktree count stands beside the
     // repository name (`REPO   hearting · wt 12`) and the Git row keeps the branch, whether it
@@ -740,7 +741,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // the label stays dim). No color keeps the weight, as the steward's `⚑` (rule 35 (a)).
       const own='hb_'+(['claude','codex','opencode'].includes(harness)?harness:'other');
       if(title)field('TITLE',[{...text(title,own),bold:true}]);
-      if(now)field('NOW',line(now,nowKey));
+      // 11-17: a press on the NOW (its rows end in `›`, as a section's head does) opens the NOW popup.
+      if(now){const from=top.length;field('NOW',line(now,nowKey),Infinity,[text(' '),text('›','dim')]);for(let i=from;i<top.length;i++)topActions.set(i,'popup:NOW');}
       if(tidy&&!asking){
         // 11-16: a notice of something that ended well (`tidy_quiet`) is one or two dim rows without `⚠`; what
         // leaves the person something to do keeps the caution look on up to three rows.
@@ -780,9 +782,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(title||now){
         // Title and NOW share what the answer wait leaves: each keeps at least half of it.
         const nowParts=now?[text('NOW ','dim'),text(now,nowKey)]:[],titleParts=title?line(title,'loc_repo'):[];
-        const avail=inner-(title&&now?3:0);
+        // A NOW ends the row in `›` (two cells), and a press on the row opens the NOW popup.
+        const arrow=now?[text(' '),text('›','dim')]:[],avail=inner-(title&&now?3:0)-size(arrow);
         const titleRoom=title&&now?Math.max(Math.min(size(titleParts),Math.floor(avail/2)),avail-size(nowParts)):avail;
-        top.push(cut(joined([cut(titleParts,Math.max(1,titleRoom)),cut(nowParts,Math.max(1,avail-(title?Math.min(size(titleParts),titleRoom):0)))]),inner));
+        if(now)topActions.set(top.length,'popup:NOW');
+        top.push([...cut(joined([cut(titleParts,Math.max(1,titleRoom)),cut(nowParts,Math.max(1,avail-(title?Math.min(size(titleParts),titleRoom):0)))]),inner-size(arrow)),...arrow]);
       }
     }
     const rows=height-2;

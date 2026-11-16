@@ -1271,10 +1271,10 @@ for(const width of [28,32,36]){
  for(const s of narrow){assert.equal(cells(s),width,s);assert(!/│ +5\.5|(Opus|Sonnet) *│|Sonne…|Opu…/.test(s),s+'\n'+narrow.join('\n'));}
  assert(narrow.some(s=>/│ │ ⠋ (claude )?Sonnet 5\.5/.test(s)),narrow.join('\n'));
 }
-// The same function breaks TITLE and NOW at word boundaries, as before.
+// The same function breaks TITLE and NOW at word boundaries, as before (11-17: the NOW's last row ends in `›`, the mark of a row a press opens).
 const title=rows.findIndex(s=>s.includes('TITLE'));
 assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TITLE  하팅 v4-open 감독 — 셸','       상태·표시 고치기와 Fleet 세션',
- '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음'],all);
+ '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음 ›'],all);
 // With room the whole values stand on one row each.
 const wide=draw([oneShot,staged,failed],80,76,{side:false}).join('\n');
 for(const want of ['PG-50 휠','2/3 execute ✕','54m','3/7 execute ●','one-shot','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);

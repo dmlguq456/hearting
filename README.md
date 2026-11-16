@@ -193,6 +193,10 @@ The head's REPO row carries a **STATUS ›** button at its right end (the screen
 opens this session's campaign status document whole in a popup (Fleet's status lines for the
 project first, markdown tables as aligned columns), dim when there is no document yet and
 absent where the project keeps no artifact root.
+The NOW row ends in `›` as the sections' heads do: a press on it opens this session's story in a popup, its
+prompts and NOW values oldest first with its routes, questions and messages between them and the latest NOW at the
+bottom; **Enter** reads that part of the conversation in the popup and again goes back to the list, and on a route,
+question or message it opens that section's popup. Nothing is sent to the agent's window.
 Under the head (folder, branch and Git state, model and context, title and now,
 running jobs) the panel is a few rows per section, each a press away from a
 popup in the middle of the window that shows the whole thing, so nothing has to
@@ -224,7 +228,7 @@ and scrolls in place under the wheel, its border counting what it hides. The ROU
 popup is Fleet's own table at the popup's width (a route unfolded
 with its failure reason whole, Enter for its page with its paths), drawn again when what it
 shows changes; a markdown table in a request's body or a question reads as aligned columns;
-**←/→** moves between the sections (`STATUS · QUESTIONS · ROUTE · MESSAGES`) and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
+**←/→** moves between the sections (`STATUS · NOW · QUESTIONS · ROUTE · MESSAGES`) and **↑/↓** through the routes. Press a section, or **Ctrl+]** (the question popup when one
 waits here, else the first section), and use **p** in any popup to fold or open
 the panel, **f** for Fleet. Escape, **Ctrl+]**, its `✕` or a
 press outside closes it; while it stands every key is its own, everything around

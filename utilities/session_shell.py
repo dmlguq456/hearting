@@ -1466,7 +1466,7 @@ def _block_answer(binding, request):
 # 11-15 (popup design B): the routes popup is Fleet's own table, drawn by Fleet's own functions into a
 # grid of the popup's width; nothing here draws a table of its own. (The LAB and sessions popups went
 # with their panel sections, 11-15.)
-POPUP_KINDS = frozenset({"routes", "status"})
+POPUP_KINDS = frozenset({"routes", "status", "now"})
 POPUP_ROWS = 160     # rows a table popup carries at most (the popup pages them with PgUp/PgDn)
 
 
@@ -1666,6 +1666,68 @@ def _status_popup(binding, request, columns, colors, no_color):
     return {**result, "rows": runs[:low] + [[["…", dim, 1]]]}
 
 
+def _now_popup(binding, request, columns, colors, no_color):
+    """The NOW popup: this session's story as a list (``timeline.rows``, folded by ``timeline.fold`` where it is
+    taller than the popup) or, with ``page``, the conversation one row stands for (``timeline.passage``). Nothing
+    is drawn here that the timeline layer does not give; the rows are painted in the panel's own style keys.
+    ``open`` is the key of the row the person stands on."""
+    from fleet.explorer import timeline, timeline_popup
+    from fleet.explorer.grid import cell_width
+    wanted = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 320 else ""
+    room = request.get("rows") if type(request.get("rows")) is int and 3 <= request["rows"] <= 200 else 12
+    story = timeline.rows(binding["harness"], binding["sid"], events=True)
+    page = request.get("page") is True
+    target = next((row for row in story if row.get("key") == wanted and row.get("kind") in ("prompt", "now")), None)
+    if page and target is None:
+        return {"ok": False, "reason": "no-row"}
+    if page:
+        view = timeline_popup.page_view(target, columns)
+        drawn, meta, extra = view["rows"], [{"key": "", "kind": "page", "select": False}] * len(view["rows"]), {
+            "title": view["title"], "start": wanted, "folded": False, "read": view["ok"]}
+    else:
+        view = timeline_popup.list_view(story, columns, room, wanted)
+        drawn, meta, extra = view["rows"], view["meta"], {"title": view["title"], "start": view["start"],
+                                                          "folded": view["folded"]}
+    styles, index = [], {}
+
+    def style(key):
+        if key not in index:
+            index[key] = len(styles)
+            styles.append(_runs([("", key)], colors, no_color)[0] if key else {})
+            styles[-1].pop("text", None)
+        return index[key]
+    runs = [[[text, style(key), cell_width(text)] for text, key in row if text] for row in drawn]
+    result = {"ok": True, "kind": "now", "rows": runs, "styles": styles, "hits": [], "page": page, "meta": [],
+              **extra}
+
+    def weight(value):
+        return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
+
+    def build(keep):
+        """The rows ``keep`` names (indices, in order), each with its note; the gap between is one dim ``…``."""
+        out, notes, last = [], [], -1
+        for number in keep:
+            if number != last + 1 and out:
+                out.append([["…", style("dim"), 1]])
+                notes.append({"key": "", "kind": "gap", "select": False})
+            out.append(runs[number])
+            notes.append(meta[number])
+            last = number
+        return {**result, "rows": out, "meta": notes}
+    everything = list(range(len(runs)))
+    full = build(everything)
+    if weight(full) <= POPUP_ANSWER_BYTES:
+        return full
+    # Too much for one answer: a list keeps its newest rows (the popup opens at the bottom); a page keeps its top
+    # rows and as many of its last ones as fit, with a `…` between.
+    head = timeline_popup.PAGE_HEAD_ROWS if page else 0
+    low, high = 0, len(runs) - head      # `low` rows from the end fit, `high` do not
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if weight(build(everything[:head] + everything[len(runs) - middle:])) <= POPUP_ANSWER_BYTES else (low, middle)
+    return build(everything[:head] + everything[len(runs) - low:])
+
+
 def _panel_popup(binding, request):
     """One popup's content, read when the person opens it and again at the watch events it names."""
     registry_root()
@@ -1678,6 +1740,8 @@ def _panel_popup(binding, request):
     harness, sid = binding["harness"], binding["sid"]
     if kind == "status":
         return _status_popup(binding, request, columns, colors, no_color)
+    if kind == "now":
+        return _now_popup(binding, request, columns, colors, no_color)
     opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""
     vm = _popup_view_model(harness, sid, kind)
     grid = CellGrid(columns, POPUP_ROWS + 8)

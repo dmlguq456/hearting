@@ -570,8 +570,8 @@ let popupLayer=null,popupRect=null,overlayLast=[],overlayBase=null;
 // 추가같은데. 지금은 일단 빼" and the answer that "세션 현황" meant this session's own progress.)
 let table=null,tableAsking=false,tableAgain=false;
 // 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
-const SECTIONS=['STATUS','QUESTIONS','ROUTE','MESSAGES'];
-const POPUP_KIND={ROUTE:'routes',STATUS:'status'};
+const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
+const POPUP_KIND={ROUTE:'routes',STATUS:'status',NOW:'now'};
 // 11-15 (design 2): the panel's status button value (Fleet's `session_status.read`: the status document of
 // this session's campaign, else the one Fleet's project line picks; null where the project has no
 // artifact root, and no button then), read in its own worker so a slow first read holds neither the panel
@@ -617,7 +617,7 @@ function popupShown(){return (block.focused||!!table)&&activated&&!relay&&!ended
 // The sections with something in them, in the panel's order (the one standing always).
 function sections(){
   const m=panelModel,list=v=>Array.isArray(v)&&v.length>0;
-  const has={STATUS:!!statusDoc(),QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+  const has={STATUS:!!statusDoc(),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
     MESSAGES:list(m.messages)||list(m.requests)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
@@ -625,7 +625,8 @@ function sections(){
 function label(name,fallback){return panelModel.labels?.[name]||fallback;}
 // The popup's own words: its keys, for this kind (the panel fold key says which way it goes).
 function tableGuide(kind){
-  const own=kind==='ROUTE'?label(table?.page?'popup_route_page':'popup_route','↑↓ route · Enter open'):'';
+  const own=kind==='ROUTE'?label(table?.page?'popup_route_page':'popup_route','↑↓ route · Enter open')
+    :kind==='NOW'?label(table?.page?'popup_now_page':'popup_now',table?.page?'Enter back to the list':'↑↓ · Enter read that part'):'';
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
@@ -641,13 +642,30 @@ function tableTitle(kind){
   // `현황 <campaign> · <age>` (the word as the button's, dim; `현황` alone without a document).
   if(kind==='STATUS'){const word=sectionLabel('STATUS'),whole=String(table?.title||statusValue?.title||word);
     return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
+  // `NOW · <counts>` for the list; `NOW · <time> <kind>` for the part being read.
+  if(kind==='NOW'){const v=table?.page?table.read:table?.list,more=String(v?.title||'');return more?[dim('NOW · '),{text:more}]:[dim('NOW')];}
   return [dim('MESSAGES')];
 }
 function tableRows(inner){
   const t=table;
   if(t.kind==='MESSAGES')return [...panelView.messagesBody({model:panelModel,columns:inner,cellWidth}),...actionLines];
+  if(t.kind==='NOW')return nowRows(t);
   if(!t.loaded)return [[{text:t.error?label('popup_unread','could not read'):'⠏',dim:true}]];
   return t.rows;
+}
+// The NOW popup's rows: the list with the row stood on shown as a chosen row (the frame's `tint`, reversed
+// where there is no color), or the part being read. Until the first answer, the NOW the panel already holds
+// stands on its own row, so the popup is never empty.
+function nowRows(t){
+  const v=t.page?t.read:t.list;
+  if(!v){
+    const now=String(panelModel.now||'').trim();
+    if(t.error)return [[{text:label('popup_unread','could not read'),dim:true}]];
+    return now&&!t.page?[[{text:'    '+now,...(panelModel.styles?.loc_repo||{})}]]:[[{text:'⠏',dim:true}]];
+  }
+  if(t.page)return v.rows;
+  const at=v.meta.findIndex(m=>m.key===t.sel);
+  return at<0?v.rows:v.rows.map((row,i)=>i===at?row.map(part=>({...part,tint:true})):row);
 }
 function popupNow(){
   if(!popupShown())return null;
@@ -661,6 +679,11 @@ function popupNow(){
     const place=all.length>Math.max(1,fits)?`${Math.min(all.length,table.scroll+1)}/${all.length}`:'';
     const guide=wrapGuide([place,...tableGuide(table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
     const space=Math.max(1,room-guide.length);
+    // The row stood on comes into view (the popup opens on the bottom one; a list moves with the keys).
+    if(table.kind==='NOW'&&!table.page&&table.reveal&&table.list){
+      const at=table.list.meta.findIndex(m=>m.key===table.sel);
+      if(at>=0){if(at<table.scroll)table.scroll=at;else if(at>=table.scroll+space)table.scroll=at-space+1;table.reveal=false;}
+    }
     table.scroll=Math.max(0,Math.min(table.scroll,Math.max(0,all.length-space)));
     table.space=space;
     title=tableTitle(table.kind);
@@ -712,9 +735,11 @@ function askTable(){
   if(tableAsking){tableAgain=true;return;}
   tableAsking=true;tableAgain=false;
   const selected=selection,width=t.width,columns=Math.max(20,Math.min(200,width-4));
-  const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
+  const now=t.kind==='NOW';
+  // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
+  const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
   const status=t.kind==='STATUS';
-  const ask=extra=>readAction({kind:POPUP_KIND[t.kind],columns,open:t.open||'',page:!!t.page,rows:room,
+  const ask=extra=>readAction({kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
     ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{})},'popup',true);
   const stale=()=>table!==t||selected!==selection;
   let loaded=false;
@@ -722,6 +747,11 @@ function askTable(){
     if(stale())return;
     // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
     if(t.width!==width){tableAgain=true;return;}
+    if(now){
+      // A part that could not be asked for goes back to the list; a list that could not be read says so.
+      if(!result?.ok){if(t.page){t.page=false;t.scroll=t.listScroll||0;t.reveal=true;}else t.error=!t.list;queueDisplay();return;}
+      nowAnswer(t,result);queueDisplay();return;
+    }
     if(!result?.ok){t.error=!t.loaded;queueDisplay();return;}
     t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
     if(status){
@@ -763,6 +793,34 @@ function askFleet(){
     queueDisplay();
   }).finally(()=>{fleetAsking=false;if(fleetAgain){fleetAgain=false;askFleet();}});
 }
+// The NOW popup's answer: the list (with its note per row) or the part being read. The row stood on stays
+// where it is while another reading is still owed (the key was moved meanwhile); a first one starts on the
+// bottom row (`start`, the current NOW).
+function nowAnswer(t,result){
+  const rowsOf=tableParts(result),title=typeof result.title==='string'?result.title:'';
+  t.error=false;t.loaded=true;
+  if(result.page===true){t.read={rows:rowsOf,title,width:t.width};return;}
+  const meta=Array.isArray(result.meta)?result.meta.map(m=>({key:String(m?.key??''),kind:String(m?.kind??''),select:m?.select===true,
+    read:m?.read===true,go:typeof m?.go==='string'?m.go:''})):[];
+  t.list={rows:rowsOf,meta,title,folded:result.folded===true,width:t.width};
+  if(!t.sel||(!meta.some(m=>m.key===t.sel)&&!tableAgain))t.sel=String(result.start||t.sel||'');
+  t.reveal=true;
+}
+// ↑↓ (a row at a time) and PgUp/PgDn (a page of rows): the row stood on moves to the next one that has a press
+// to give; a list folded to its room is read again with the new row open (its prompt unfolds).
+function moveSel(delta,byRow=false){
+  const t=table;if(!t||t.page||!t.list)return;
+  const meta=t.list.meta,at=meta.findIndex(m=>m.key===t.sel),dir=delta<0?-1:1;
+  const find=(from,way)=>{for(let i=from;i>=0&&i<meta.length;i+=way)if(meta[i].select)return i;return -1;};
+  let to;
+  if(byRow){
+    const target=Math.max(0,Math.min(meta.length-1,(at<0?(dir>0?-1:meta.length):at)+delta));
+    to=find(target,dir);if(to<0)to=find(target,-dir);
+  }else to=find(at<0?(dir>0?0:meta.length-1):at+dir,dir);
+  if(to<0||to===at)return;
+  t.sel=meta[to].key;t.reveal=true;
+  if(t.list.folded)askTable();else queueDisplay();
+}
 // ↑↓ Tab move the unfolded row; the reading's place follows it (the row at the top when it is out of view),
 // once the table is read again with the row unfolded.
 function followOpen(t){
@@ -779,7 +837,8 @@ function openPopup(name,open=''){
   const was=table;
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
-  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table')};
+  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table'),
+    ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{})};
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
   if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true});
@@ -808,6 +867,7 @@ function moveSection(delta){
 // ↑↓ Tab: the routes popup unfolds the next route (Fleet's `▶`); the others read on a row at a time.
 function moveRow(delta){
   const t=table;if(!t)return;
+  if(t.kind==='NOW'&&!t.page){moveSel(delta);return;}
   if(t.kind==='ROUTE'&&!t.page&&t.routes.length){
     const at=t.routes.indexOf(t.open),next=at<0?(delta>0?0:t.routes.length-1):Math.max(0,Math.min(t.routes.length-1,at+delta));
     if(t.routes[next]!==t.open){t.open=t.routes[next];t.follow=true;askTable();}return;
@@ -817,7 +877,25 @@ function moveRow(delta){
 // Enter: the unfolded route's page (Fleet's route page) and back to the table.
 function enterRow(){
   const t=table;if(!t)return;
+  if(t.kind==='NOW'){enterNow(t);return;}
   if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;askTable();}
+}
+// Enter in the NOW popup: a prompt or NOW row reads its part of the conversation here (Enter again is back at
+// the list, on that row); a route, question or message row opens that section's popup. No key goes to the window.
+function enterNow(t){
+  if(t.page){
+    t.page=false;t.scroll=t.listScroll||0;t.reveal=true;
+    if(!t.list||t.list.width!==t.width)askTable();
+    queueDisplay();return;
+  }
+  const at=t.list?t.list.meta.findIndex(m=>m.key===t.sel):-1,m=at>=0?t.list.meta[at]:null;
+  if(!m)return;
+  if(m.go){
+    const [where,...rest]=m.go.split(':');
+    if(where==='routes')openPopup('ROUTE',rest.join(':'));else if(where==='questions')openPopup('QUESTIONS');else if(where==='messages')openPopup('MESSAGES');
+    return;
+  }
+  if(m.read){t.listScroll=t.scroll;t.page=true;t.read=null;t.scroll=0;askTable();queueDisplay();}
 }
 function covered(y,x){const r=popupRect;return !!r&&y>=r.top&&y<r.top+r.height&&x>=r.left&&x<r.left+r.width;}
 // 11-15 (panel polish 3): while a popup stands, everything outside it (the native's rows, the panel,
@@ -1174,9 +1252,11 @@ function observeFiles(paths) {
 // route rows change, never on a timer.
 let popupKeys={};
 function refreshPopups(panel){
-  const keys={ROUTE:JSON.stringify([(Array.isArray(panel.routes)?panel.routes:[]).map(r=>[r.id,r.title,r.state,r.kind,r.stage,r.outcome,r.elapsed]),panel.route_label])};
+  const keys={NOW:JSON.stringify(panel.now||''),ROUTE:JSON.stringify([(Array.isArray(panel.routes)?panel.routes:[]).map(r=>[r.id,r.title,r.state,r.kind,r.stage,r.outcome,r.elapsed]),panel.route_label])};
   const changed=name=>popupKeys[name]!==undefined&&popupKeys[name]!==keys[name];
   if(table&&table.kind==='ROUTE'&&changed(table.kind))askTable();
+  // A standing NOW list reads again when this session's NOW changed (the read it holds is still the one shown).
+  if(table&&table.kind==='NOW'&&!table.page&&table.list&&changed('NOW'))askTable();
   popupKeys=keys;
 }
 async function projection() {
@@ -1546,7 +1626,7 @@ function inputBytes(data) {
     // first section with something in it. Every popup names its keys: ←→ the sections, `p` the
     // panel's fold (the keyboard's way to open a folded one), `f` Fleet. Ctrl+] closes it again.
     if(!paste&&!keyTail){
-      const names=sections().filter(name=>name!=='QUESTIONS');
+      const names=sections().filter(name=>name!=='QUESTIONS'&&name!=='NOW');
       openPopup(block.question||!names.length?'QUESTIONS':names[0]);
     }
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
@@ -1600,6 +1680,7 @@ function tableInput(data){
       if(key==='\x1b[A')moveRow(-1);else if(key==='\x1b[B')moveRow(1);
       else if(key==='\x1b[C')moveSection(1);else if(key==='\x1b[D')moveSection(-1);
       else if(key==='\x1b[Z')moveRow(-1);
+      else if((key==='\x1b[5~'||key==='\x1b[6~')&&table.kind==='NOW'&&!table.page&&table.list)moveSel((key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1),true);
       else if(key==='\x1b[5~'||key==='\x1b[6~'){table.scroll=Math.max(0,table.scroll+(key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1));}
       continue;
     }
