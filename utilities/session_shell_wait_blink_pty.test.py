@@ -97,7 +97,9 @@ child.onData(d=>{term.write(d);if(chunks)chunks.push([Date.now(),d]);});
 const flush=()=>new Promise(r=>term.write('',r));
 const cellsOf=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
 const screen=async()=>{await flush();return Array.from({length:rows},(_,y)=>cellsOf(y).join('').trimEnd());};
-const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return s;await sleep(40);}
+// The ceiling only ends a hang: each wait returns the moment its screen shows, so a loaded machine that needs
+// 30 s to paint the panel is slow, not wrong (4 cores shared by 14 busy loops: 20 s was not enough, 60 s was).
+const until=async(test,what,ms=60000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return s;await sleep(40);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
 const has=word=>s=>s.some(line=>line.includes(word));
 const record=async(name,ms)=>{await sleep(400);await flush();chunks=[];const t0=Date.now();await sleep(ms);await flush();

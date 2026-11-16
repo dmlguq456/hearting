@@ -162,6 +162,12 @@ jobs:
         if: steps.scope.outputs.full_tests == 'true'
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          # The built-in read-only token of this job (`contents: read`; no new
+          # secret). An unauthenticated call is rate-limited per runner address
+          # and the shared pool's addresses are often spent: the 403s of
+          # 11-08..11-16 came back in 20 ms each, so retrying them for 8 s
+          # could not help.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           work="$(mktemp -d "${RUNNER_TEMP}/hearting-codex-cli.XXXXXX")"
@@ -171,6 +177,7 @@ jobs:
           # The browser download endpoint can return 504 before its CDN redirect.
           curl --fail --location --silent --show-error \
             --header 'Accept: application/octet-stream' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
             --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 300 \
             --connect-timeout 20 --max-time 240 \
             --output "$archive" \
