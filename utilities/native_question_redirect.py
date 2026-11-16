@@ -9,8 +9,9 @@ line: the question id and "end the turn". Nothing else is asked of the agent.
 
 Registration never blocks a question: when it cannot be written (no seat, no Hearting
 state, a timeout, an invalid shape) the native call goes through untouched, so the person
-always sees the question. Registered workers and native subagents do nothing here, and a
-secret question is left to its own surface.
+always sees the question. A session that already has a different waiting Hearting question keeps it (the native call
+goes through; a new registration would silently cancel it). Registered workers and native
+subagents do nothing here, and a secret question is left to its own surface.
 
 One native call may carry several questions; a Hearting question record holds one. A single
 plain question keeps its choices and its recommendation (a label ending `(권장)` or
@@ -145,7 +146,7 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
                 harness, session_id, seat, built["text"], sequence=tidy.read_prompt_seq(seat),
                 choices=built["choices"],
                 recommended=built["recommend"] - 1 if built["recommend"] else None,
-                cwd=cwd, incarnation=incarnation)
+                cwd=cwd, incarnation=incarnation, replace=False)
             return value["id"]
         except ValueError as exc:
             if str(exc) != "question-detail-too-large" or not detail:

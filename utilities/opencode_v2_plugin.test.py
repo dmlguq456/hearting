@@ -2024,7 +2024,7 @@ try {
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_v2_question_call_is_refused_after_registration_and_passes_on_failure(self):
+    def test_v2_question_call_is_refused_after_registration_and_passes_on_failure_and_a_child_session_is_left_alone(self):
         # A native `question` call is registered as the session's Hearting question by the shared
         # redirect (utilities/native_question_redirect.py): the plugin refuses the call with its
         # one-line reason (exit 1), and lets it run when the redirect registers nothing (exit 0).
@@ -2056,7 +2056,8 @@ const ctx = {
   location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
   app: { log: async () => {} },
   session: {
-    get: async () => ({ data: { id: "ses_main", agent: "build", title: "Main", parentID: null } }),
+    get: async ({ sessionID }) => ({ data: { id: sessionID, agent: "build", title: "Main",
+                                             parentID: sessionID === "ses_child" ? "ses_main" : null } }),
     prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
     hook: async (name, fn) => hooks.set("session." + name, fn),
   },
@@ -2073,7 +2074,9 @@ const call = { tool: "question", sessionID: "ses_main",
 try {
   let refused = ""
   try { await hooks.get("tool.execute.before")(call) } catch (error) { refused = String(error.message) }
-  console.log(JSON.stringify({ refused }))
+  let childRefused = ""
+  try { await hooks.get("tool.execute.before")({ ...call, sessionID: "ses_child" }) } catch (error) { childRefused = String(error.message) }
+  console.log(JSON.stringify({ refused, childRefused }))
   await hooks.get("tool.execute.after")({ ...call, status: "completed",
     result: { content: [{ type: "text", text: "answered" }], metadata: { answers: [["B"]] } } })
 } finally { await cleanup() }
@@ -2089,11 +2092,13 @@ try {
                                         env={**base, "REDIRECT_REGISTERS": registers}, text=True,
                                         capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                outcomes[registers] = json.loads(result.stdout.strip().splitlines()[-1])["refused"]
-            self.assertEqual(outcomes["1"], "Registered as Hearting question S4:fixture")
-            self.assertEqual(outcomes["0"], "")
+                outcomes[registers] = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(outcomes["1"]["refused"], "Registered as Hearting question S4:fixture")
+            self.assertEqual(outcomes["0"]["refused"], "")
+            # a child (task) session's question runs as before, even where the parent's is replaced
+            self.assertEqual((outcomes["1"]["childRefused"], outcomes["0"]["childRefused"]), ("", ""))
             recorded = [json.loads(line) for line in seen.read_text().splitlines() if line.strip()]
-            self.assertEqual(len(recorded), 2)       # only the before hook runs the redirect, once per call
+            self.assertEqual(len(recorded), 2)       # only the parent's before hook runs the redirect, once per call
             self.assertEqual(recorded[0]["sessionID"], "ses_main")
             self.assertEqual(recorded[0]["args"]["questions"][0]["question"], "Which?")
 

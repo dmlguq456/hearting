@@ -1026,6 +1026,19 @@ _SHIPPED_NOTICE_DELIVERY_HEADER = (
 
 GATE_DELIVERY_HEADER = (
     "Hearting human gate awaiting your decision (SD-123/129). Read the named artifact "
+    "(an interview file or a frame summary) and show the [방향 확인] card in your reply. The gate's "
+    "questions are already on the Hearting question board (the panel, Fleet and "
+    "`hearting run questions`), where the person answers them; do not ask them again through "
+    "another tool. The answer releases the gate; the owner is waiting on `await-release` or has "
+    "paused at the gate, and the release continues the work either way. An answer the person "
+    "gives in conversation is recorded with `workflow-supervisor.py release --route <route file> "
+    "--gate <name> --decision proceed|revise|stop "
+    "[--answers <file from frame_interview.py answers-template>]`. "
+    "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
+)
+# The gate header v4.40 shipped (receipt recovery only).
+_SHIPPED_V440_GATE_DELIVERY_HEADER = (
+    "Hearting human gate awaiting your decision (SD-123/129). Read the named artifact "
     "(an interview file or a frame summary), put the [방향 확인] card and every interview "
     "question to the user through AskUserQuestion -- one topic at a time, in plain words, "
     "recommended answer first -- then record the answer with `workflow-supervisor.py "
@@ -1184,10 +1197,11 @@ def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[di
 
 
 def _shipped_headers(text: str) -> str:
-    """The same body under the block headers v4.32.4 shipped (receipt recovery only)."""
+    """The same body under the block headers v4.32.4 shipped, and the gate header v4.40 shipped (receipt recovery only)."""
     from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE
     shipped = {COMPLETION_DELIVERY_HEADER: _SHIPPED_COMPLETION_DELIVERY_HEADER,
-               NOTICE_DELIVERY_HEADER: _SHIPPED_NOTICE_DELIVERY_HEADER}
+               NOTICE_DELIVERY_HEADER: _SHIPPED_NOTICE_DELIVERY_HEADER,
+               GATE_DELIVERY_HEADER: _SHIPPED_V440_GATE_DELIVERY_HEADER}
     blocks, previous = [], None
     for block in text.split("\n\n"):
         header, separator, body = block.partition("\n")

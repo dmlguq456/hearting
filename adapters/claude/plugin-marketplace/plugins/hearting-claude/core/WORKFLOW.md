@@ -928,10 +928,12 @@ The interview proceeds in this order:
    tool; never paraphrase a question into harness vocabulary, and never add questions
    the interview does not carry. A tired reader must be able to answer without
    opening the plan.
-4. The person answers on the board; the answer releases the gate and renders
-   intent, so `resume_command` alone continues. A reply given in conversation goes
-   into the returned `answers_template` and `start --route <file> --answers <file>`.
-   A repeated submission reuses the release.
+4. The person answers on the board, which releases the gate; when no owner continues
+   by itself the runtime then sends this session one notice carrying `resume_command`.
+   Present the question and end the turn; the notice is the next input, and running
+   `resume_command` then renders intent and starts the owner. A reply given in
+   conversation goes into the returned `answers_template` and
+   `start --route <file> --answers <file>`. A repeated submission reuses the release.
 
 `OPERATIONS §5.10b` owns selector mechanics and the one-time `top`→`deep`
 demotion; the public work entry owns launch calls and artifact context. Both legs

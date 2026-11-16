@@ -192,20 +192,20 @@ A question to the person goes to the Hearting question board: `PreToolUse` on
 (`utilities/native_question_redirect.py`, the same behavior as Claude and OpenCode). The
 native tool below is only the fall-through when registration fails or the caller is a worker.
 The old `PostToolUse(request_user_input)` frame-answer bridge stays in `hooks.json` as a no-op
-because Codex keys hook trust by position.
-Native Codex owns question timing. Runtime activation enables
+so the other entries keep their place and their current-hash hook trust.
+Native Codex owns the timing of the native question box. Runtime activation enables
 `features.default_mode_request_user_input` in interactive `$CODEX_HOME/config.toml`
 when the existing feature table can be safely extended; explicit false and
 unsupported feature forms are preserved and reported as a config conflict, while
 the harness identity block is still merged.
-Worker homes override the feature to false. In Default mode use the waiting
-`request_user_input`: its countdown is hidden for 60 seconds, then visibly
-counts down for 60 seconds before submitting an empty answer. Typing or pasting
-cancels the countdown and the box waits for submit. Empty answers never satisfy
-a human decision gate; restate an open question at turn end and keep Fleet's
-ledger based `answer needed` indication active until a real answer is recorded.
-Use `request_user_input_async` only in an interactive session when the waiting
-tool is unavailable; a registered worker has no reader for either tool. Do not
+Worker homes override the feature to false. When the native box does appear (the
+fall-through above), the waiting `request_user_input` hides its countdown for 60
+seconds, then visibly counts down for 60 seconds before submitting an empty answer;
+typing or pasting cancels the countdown and the box waits for submit. Empty answers
+never satisfy a human decision gate; restate an open question at turn end and keep
+Fleet's ledger based `answer needed` indication active until a real answer is
+recorded. `request_user_input_async` is the box Codex offers when the waiting tool is
+unavailable; a registered worker has no reader for either tool. Do not
 open repeated boxes or switch to Plan mode. The normal frame start
 receipt keeps `human_wait.question_block` and the existing interview artifact;
 empty/timeout/accepted responses return the same pending question without

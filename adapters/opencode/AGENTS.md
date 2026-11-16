@@ -155,9 +155,9 @@ Portable behavior contract = `roles/response-policy.md`.
   named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`.
   Before claiming a tool works, run its check; exit 69 means unavailable, so
   use the reported fallback or keep the adapter row partial.
-- Every question to the person, including the §0.4 card (choices 진행(권장) /
-  수정 / 중단), is registered with `hearting run questions ask`; use the shared
-  response policy. A plain-text card is the fallback.
+- Every question, including the §0.4 card (진행(권장) /
+  수정 / 중단), is registered with `hearting run questions ask`; a text card is
+  the fallback.
 - If the hearting guard plugin is unavailable or untrusted, run the guards
   explicitly (README Session Command Reference).
 - While this session is idle, the hearting plugin hands it the completion

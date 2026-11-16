@@ -3950,7 +3950,9 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     // A native question becomes this session's Hearting question (utilities/native_question_redirect.py):
     // the call is refused with the short reason; any failure there lets the native question through.
-    if (toolName === "question") {
+    // A child (task) session's question is its own: it is not the person's session, so it stays native.
+    if (toolName === "question" && !knownChildSession(input.sessionID)
+        && (await rootSessionId(ctx, input.sessionID || "")) === (input.sessionID || "")) {
       const result = spawnSync("python3", [nativeQuestionRedirect, "--opencode"], {
         input: JSON.stringify({ tool: toolName, args: output.args || {}, sessionID: input.sessionID || "", cwd: baseDir(ctx) }),
         encoding: "utf8",

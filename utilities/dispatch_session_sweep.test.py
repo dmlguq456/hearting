@@ -2293,6 +2293,27 @@ class StrictGateReceiptRenderTest(unittest.TestCase):
         self.assertIn("route_file=/r/route.json", text)
 
 
+class GateHeaderQuestionBoardTest(unittest.TestCase):
+    """A gate's question is already on the Hearting question board: the delivery text never sends the
+    agent to another question tool, and the header the previous release shipped is still recognized."""
+
+    def test_the_gate_header_points_to_the_board_and_names_no_native_question_tool(self):
+        header = SWEEP.GATE_DELIVERY_HEADER
+        self.assertIn("question board", header)
+        self.assertIn("do not ask them again through another tool", header)
+        for tool in ("AskUserQuestion", "request_user_input", "`question`"):
+            self.assertNotIn(tool, header)
+        self.assertIn("workflow-supervisor.py release", header)           # an answer given in conversation is still recorded
+
+    def test_the_previous_release_header_is_still_recognized_and_rebuilt_for_recovery(self):
+        import dispatch_recipient_receipt as receipt
+        shipped = SWEEP._SHIPPED_V440_GATE_DELIVERY_HEADER
+        self.assertIn("AskUserQuestion", shipped)                           # frozen text of the earlier release
+        self.assertIn(shipped + "\n", receipt._delivery_heads())
+        rebuilt = SWEEP._shipped_headers(SWEEP.GATE_DELIVERY_HEADER + "\nroute_file=/r/route.json")
+        self.assertTrue(rebuilt.startswith(shipped))
+
+
 class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
     """The OpenCode plugin carrier: look, claim and render through the shared sweep, hand the text
     to the idle session's next turn, then ack (taken) or release (not taken)."""

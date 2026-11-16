@@ -59,6 +59,12 @@ class Base(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def answered(self, harness):
+        """The person answered this session's waiting question: its source is gone, so a new one may register."""
+        for signal in state.read_signals():
+            if signal["harness"] == harness and signal["session_id"] == SID:
+                state._remove_signal_source(signal, state._signal_path(signal))
+
     def registered(self, harness, reason):
         """The one registered question a refusal names."""
         self.assertIsNotNone(reason)
@@ -83,6 +89,7 @@ class RedirectTest(Base):
         (question,) = self.registered("claude", redirect.redirect("claude", payload))
         self.assertEqual([questions._choice_label(c) for c in question["choices"]], ["수정", "진행", "중단"])
         self.assertEqual(question["recommended"], 1)
+        self.answered("claude")
         none = claude_payload([{"question": "Which?", "multiSelect": False,
                                 "options": [{"label": "A", "description": ""}, {"label": "B", "description": ""}]}])
         (plain,) = self.registered("claude", redirect.redirect("claude", none))
@@ -121,6 +128,7 @@ class RedirectTest(Base):
                                            "options": [option, {"label": "B", "description": "b"}]}])
                 (question,) = self.registered("claude", redirect.redirect("claude", payload))
                 self.assertEqual(question["choices"], [])
+                self.answered("claude")
 
     def test_the_three_harnesses_register_the_same_question(self):
         seen = {}
@@ -130,6 +138,7 @@ class RedirectTest(Base):
             (question,) = self.registered(harness, reason)
             seen[harness] = (question["question"], [questions._choice_label(c) for c in question["choices"]],
                              question["recommended"])
+            self.answered(harness)
         self.assertEqual(seen["claude"], seen["codex"])
         self.assertEqual(seen["claude"], seen["opencode"])
         self.assertEqual(seen["claude"][2], 0)
@@ -166,6 +175,34 @@ class PassThroughTest(Base):
                     with contextlib.redirect_stdout(out):
                         code = redirect.main([flag], stdin=io.StringIO(json.dumps(payload)))
                     self.assertEqual((code, out.getvalue()), (0, ""))
+
+    def test_a_waiting_hearting_question_is_kept_and_the_native_call_goes_through(self):
+        """A new registration would cancel the session's earlier waiting question (`replaced`)."""
+        import session_tidy as tidy
+        for harness, payload in (("claude", claude_payload()), ("codex", codex_payload()),
+                                 ("opencode", opencode_payload())):
+            earlier, envelope = self.f.ask(harness, SID, text="Which scope first?",
+                                           choices=["Small", "Large"], recommended=0)
+            for turn in ("same turn", "next turn after an unrelated human prompt"):
+                with self.subTest(harness=harness, turn=turn):
+                    if turn != "same turn":
+                        seat = self.f.seat(harness, SID)
+                        tidy.bump_prompt_seq(seat, harness, SID, time.time())
+                    self.assertIsNone(redirect.redirect(harness, payload))
+                    self.assertEqual(state._read(state._signal_path(earlier))["id"], earlier["id"])
+                    self.assertEqual(state._selected_entry(envelope)["state"], "open")
+                    self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == harness],
+                                     [earlier["id"]])
+            # asking again with the same question is the same registration, not a second one
+            again, _ = self.f.ask(harness, SID, text="Which scope first?", choices=["Small", "Large"], recommended=0)
+            self.assertNotEqual(again["id"], earlier["id"])                  # the turn moved on: `questions ask` still replaces
+            self.assertEqual(state._selected_entry(envelope)["result"]["status"], "replaced")
+            self.answered(harness)
+
+    def test_a_question_whose_earlier_one_was_answered_still_registers(self):
+        earlier, _ = self.f.ask("claude", SID, text="Earlier?", choices=["A", "B"])
+        self.answered("claude")
+        self.assertIsNotNone(redirect.redirect("claude", claude_payload()))
 
     def test_no_seat_is_a_pass_through(self):
         import session_tidy as tidy
@@ -292,11 +329,14 @@ class WiringAndRulesTest(unittest.TestCase):
         hooks = json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text())["hooks"]
         groups = [g for g in hooks["PreToolUse"] if "request_user_input" in g["matcher"]]
         self.assertEqual(len(groups), 1)
-        for tool in ("request_user_input", "request_user_input_async"):
+        for tool in ("request_user_input", "request_user_input_async", "functions.request_user_input",
+                     "functions.request_user_input_async"):             # both name shapes, as the other matchers
             self.assertTrue(re.search(groups[0]["matcher"], tool), tool)
+        for shape in (r"functions\.request_user_input", r"functions\.request_user_input_async"):
+            self.assertIn(shape, groups[0]["matcher"])
         self.assertIn("pretooluse-question-redirect.py", groups[0]["hooks"][0]["command"])
         self.assertIn("pretooluse-question-redirect.py", (ROOT / "adapters/codex/hooks/run-hook.sh").read_text())
-        # The retired bridge keeps its hooks.json position (Codex keys trust by position) as a no-op.
+        # The retired bridge keeps its hooks.json place (entries keep their order; Codex trusts each by its current hash) as a no-op.
         retired = (ROOT / "adapters/codex/hooks/posttooluse-frame-answer.py").read_text()
         self.assertNotIn("frame_native_answer", retired)
         self.assertEqual(subprocess.run([sys.executable, str(ROOT / "adapters/codex/hooks/posttooluse-frame-answer.py")],
