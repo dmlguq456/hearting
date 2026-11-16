@@ -153,6 +153,17 @@ let screenRevision = 0;
 // The screen revision the native had painted when its last native-bound byte arrived, and when
 // (monotonic ms) it arrived. A successor counts from its own start: it knows no earlier key's time.
 let keyRevision = -1, keyAt = performance.now();
+// The input frontier after the last byte that may have put a character into the composer (text, a
+// paste, an Enter, a key whose meaning the native decides). Bytes after it are keys and reports that
+// cannot (QUIET_KEY): once they are quiet, an empty composer on screen needs no repaint after them.
+// Up, Down, Right and End are not among them: they can bring a past prompt or a suggestion into the
+// composer, so the native must paint once after them (a slow one repaints its old, empty screen first).
+let typed = 0;
+// Why the last reading kept the window from taking a message (`status().hold`): what this host
+// knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
+let lastHold = 'unsettled';
+const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft'};
+const QUIET_KEY=/^(?:\x1b|\x1b\[[\d;]*[DEGHPQRSZ]|\x1b\[(?:[1-3567]|1\d|2[0-689]|3[0-4])(?:;\d+)*~|\x1bO[DHP-S]|\x1b\[<[\d;]*[Mm]|\x1b\[[?>=][\d;:$ ]*[@-~]|\x1b\[[\d;]*[nt]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\))$/;
 // How long the keys must have been quiet before a screen read after them may stand for them: right
 // after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
 // native repaints its old screen before the keys' own. Only compared at a reading that comes anyway
@@ -198,7 +209,15 @@ function publishNativeDisplay() {
     ?{context_percent:nativeContext.percent}:{})});
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
-function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !table && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!table||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
+function status() {
+  const ready=empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !table && !settings && !fleetView;
+  // `busy` a turn runs, `form` a native or shell menu/question is open, `draft` text stands in the
+  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `unobserved` the
+  // native's rest is not confirmed.
+  const hold=ready&&state==='idle'?'':paste?'paste':state==='blocked'?'form':state!=='idle'?'busy'
+    :table||settings||fleetView||block.focused&&!block.waitingForReceipt?'form':keyTail?'unsettled':lastHold||'unsettled';
+  return {...identity(),epoch,state,empty:ready,hold,alive:live(),expanded,focused:block.focused||!!table||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"};
+}
 // A projection reply past the 1.5 s limit is still awaited and painted: one
 // projection is in flight at a time, so no older reply can follow a newer one.
 // Values left unanswered or failed for STALE_MS stop claiming a route state
@@ -1312,18 +1331,25 @@ async function refreshReadiness() {
   // unsettled, and a native that has not painted since its last key, or a
   // reading within the quiet time (an Enter whose turn has not called back
   // yet, a slow native's old screen), proves nothing (11-16: a window stayed
-  // undeliverable for hours after `/model`). OpenCode's keys wait for the next
+  // undeliverable for hours after `/model`). Keys since the composer was last
+  // seen empty that cannot have typed into it (`typed` has not moved: a lone
+  // Esc, cursor keys, a click, the terminal's own replies) owe no repaint: they
+  // change nothing on screen, so waiting for one waited for the next prompt
+  // (11-16, the same window after an Esc). OpenCode's keys wait for the next
   // submitted turn: its focus can leave the composer while the composer still
   // reads empty (a dialog over the transcript, its terminal pane).
   const inputSettled=nativeEpoch===0||(submitted>=0&&submitted===nativeEpoch);
-  const painted=!inputSettled&&screenRevision>keyRevision&&harness!=='opencode'&&performance.now()-keyAt>=KEY_QUIET_MS;
+  const untyped=typed<=Math.max(submitted,0);
+  const painted=!inputSettled&&(screenRevision>keyRevision||untyped)&&harness!=='opencode'&&performance.now()-keyAt>=KEY_QUIET_MS;
   const loneEscape=keyTail==='\x1b'&&!paste;
-  if(relay||paste||(keyTail&&!(loneEscape&&painted))||currentDelivery||!sid||(!inputSettled&&!painted)){empty=false;return '';}
+  if(relay||paste||(keyTail&&!(loneEscape&&painted))||currentDelivery||!sid||(!inputSettled&&!painted)){
+    empty=false;lastHold=currentDelivery?'busy':!sid||relay?'unobserved':'unsettled';return '';}
   // A lifecycle event that arrives meanwhile is newer than this observation.
   const before=epoch,selected=selection,revision=screenRevision,observed=sequence,frontier=nativeEpoch;
   const result=await source('readiness',{screen:screenSnapshot(),state});
   if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return 'moved';}
   empty=result.ok===true&&result.ready===true;
+  lastHold=empty?'':HOLD_OF[result.reason]||'unobserved';
   if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
   return result.ok===true?'':'unavailable';
@@ -1331,19 +1357,35 @@ async function refreshReadiness() {
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
-  epoch+=data.length;empty=false;keyRevision=screenRevision;keyAt=performance.now();
+  epoch+=data.length;empty=false;const before=nativeEpoch;
   for(let offset=0;offset<data.length;offset++) {
     nativeEpoch++;
     const c=String.fromCharCode(data[offset]);
-    if(keyTail){keyTail+=c;
+    // A string the terminal sends (an OSC or DCS reply) ends at BEL or ST. An
+    // Escape that starts no ST, or another control byte, ends it unfinished (as
+    // typed) and is read as the key it is: a paste's start, an Enter.
+    if(/^\x1b[\]P_]/.test(keyTail)){
+      if(keyTail.endsWith('\x1b')&&c!=='\\'){typed=nativeEpoch;keyTail='\x1b';}
+      else if(c<' '&&c!=='\x07'&&c!=='\x1b'){typed=nativeEpoch;keyTail='';}
+    }
+    if(keyTail){
+      // An Escape after a lone Escape: that one was its own key.
+      if(keyTail==='\x1b'&&c==='\x1b'&&!paste)continue;
+      keyTail+=c;
+      const string=/^\x1b[\]P_]/.test(keyTail);
       // FocusIn/FocusOut report terminal focus, not a composer edit. Keep the
       // observation epoch above, including split reports; pasted bytes count.
       if(!paste&&(keyTail==='\x1b[I'||keyTail==='\x1b[O')){nativeEpoch-=keyTail.length;keyTail='';}
-      else if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
-      else if(keyTail.length>2&&/[\x40-\x7e]/.test(c)||keyTail.length>64)keyTail='';}
+      else if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';typed=nativeEpoch;}
+      else if(string?c==='\x07'||keyTail.endsWith('\x1b\\'):keyTail.length>2&&/[\x40-\x7e]/.test(c)){if(!QUIET_KEY.test(keyTail))typed=nativeEpoch;keyTail='';}
+      else if(keyTail.length>(string?512:64)){typed=nativeEpoch;keyTail='';}
+    }
     else if(c==='\x1b')keyTail=c;
-    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;
+    else {typed=nativeEpoch;if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;}
+    if(paste)typed=nativeEpoch;
   }
+  // A focus report alone is no key: it neither restarts the quiet time nor owes a repaint.
+  if(nativeEpoch!==before||keyTail){keyRevision=screenRevision;keyAt=performance.now();}
 }
 function observeReport(data){epoch+=data.length;empty=false;}
 function openSettings(){
@@ -1714,7 +1756,7 @@ async function request(req) {
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
   if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
-  currentDelivery=req.ref;state='submitting';eventMark=++clock;empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueDisplay();queueProjection();
+  currentDelivery=req.ref;state='submitting';eventMark=++clock;empty=false;epoch++;nativeEpoch++;lastEnter=typed=nativeEpoch;queueDisplay();queueProjection();
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // The retained owner is the sole writer for this admitted paste/50ms Enter
@@ -1912,7 +1954,7 @@ function buildSeed() {
   const limit=Math.min(8*1024*1024,Number(process.env.HEARTING_SHELL_SEED_LIMIT)||8*1024*1024);
   const captured=succession.capture(terminal,{scrollback:true});
   const seed={schema:succession.SCHEMA,harness,sid,native:{pid:native.pid,start:native.start},rootNative:{pid:rootNative.pid,start:rootNative.start},
-    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
+    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,typed,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
     deliveries:[...deliveries].filter(([,value])=>value==='submitted'||value==='transport-submitted').slice(-128),
     displayValues,nativeSelected,nativeContext:nativeContext??null,nativeMcp:nativeMcp??null,
     // The host's own turn observation (what the panel shows as the state), so the successor shows the same
@@ -2027,7 +2069,8 @@ async function commitSuccessor(file) {
     if(!root||root.start!==seed.rootNative.start||child.pid!==root.pid||!row||row.start!==seed.native.start)throw Error('native changed');
     rootNative=root;native=row;
     sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
-    submitted=seed.submitted;lastEnter=seed.lastEnter;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
+    // An older host's seed has no `typed`: every byte it took may have typed.
+    submitted=seed.submitted;lastEnter=seed.lastEnter;typed=Number.isSafeInteger(seed.typed)?seed.typed:nativeEpoch;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
     // An earlier release's open-by-hand choice also carried its width (`{folded:false,cols}`).
     const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&typeof choice.folded==='boolean'?{folded:choice.folded}:null;
     displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;

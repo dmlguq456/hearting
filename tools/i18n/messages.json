@@ -2106,6 +2106,46 @@
    "en": "tier {sealed}→{actual}",
    "ko": "등급 {sealed}→{actual}"
   },
+  "peer.delivery.hold_busy": {
+   "en": "a turn is running · it goes in when the turn ends",
+   "ko": "작업 중 · 끝나면 받음"
+  },
+  "peer.delivery.hold_draft": {
+   "en": "text stands in its input · it goes in once that is sent or cleared",
+   "ko": "입력창에 글 있음 · 보내거나 지우면 받음"
+  },
+  "peer.delivery.hold_form": {
+   "en": "a menu or question is open · it goes in once that closes",
+   "ko": "메뉴·질문 창 열림 · 닫으면 받음"
+  },
+  "peer.delivery.hold_paste": {
+   "en": "a paste is under way",
+   "ko": "붙여 넣는 중"
+  },
+  "peer.delivery.hold_unobserved": {
+   "en": "its rest is not confirmed",
+   "ko": "쉬는 것이 확인되지 않음"
+  },
+  "peer.delivery.hold_unsettled": {
+   "en": "its input has not settled · type once in that window to deliver it",
+   "ko": "입력이 가라앉지 않음 · 그 창에 한 번 입력하면 받음"
+  },
+  "peer.delivery.queued": {
+   "en": "delivered",
+   "ko": "전달됨"
+  },
+  "peer.delivery.seen": {
+   "en": "seen",
+   "ko": "보임"
+  },
+  "peer.delivery.sent": {
+   "en": "sent",
+   "ko": "보냄"
+  },
+  "peer.delivery.waiting": {
+   "en": "awaiting delivery",
+   "ko": "전달 대기"
+  },
   "questions.registered": {
    "en": "Waiting for your answer. Reply in Fleet or in this session.",
    "ko": "질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요."
