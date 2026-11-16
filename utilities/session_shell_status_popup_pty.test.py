@@ -192,7 +192,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   await key('\x1b',400);await until(s=>!box(s),'closed');
   fs.unlinkSync(cfg.doc+'.none');fs.writeFileSync(cfg.folder+'/touch','2');await sleep(1800);
   // The blink: idle, a question waiting; over five seconds only its red letters are written, between two reds.
-  const reds=()=>{const out=[];for(let y=0;y<rows;y++)for(const c of looks(y,cols-40,cols))if(c.fg===174||c.fg===131)out.push([y,c.x,c.fg]);return out;};
+  const reds=()=>{const out=[];for(let y=0;y<rows;y++)for(const c of looks(y,cols-40,cols))if(c.fg===217||c.fg===95)out.push([y,c.x,c.fg]);return out;};
   await sleep(300);await flush();
   chunks=[];const a=reds();const t0=Date.now();
   const samples=[];for(let i=0;i<11;i++){await sleep(500);await flush();samples.push(reds());}
@@ -200,7 +200,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   // The folded strip (90 columns): `◑답 대기 N` blinks; a beat writes only its cells.
   cols=90;rows=24;term.resize(cols,rows);child.resize(cols,rows);
   await until(s=>s.at(-1).includes('▴')&&!s.some(l=>l.includes('REPO')),'the folded strip');await sleep(600);await flush();
-  const stripReds=()=>looks(rows-1,0,cols).filter(c=>c.fg===174||c.fg===131).map(c=>[c.x,c.fg]);
+  const stripReds=()=>looks(rows-1,0,cols).filter(c=>c.fg===217||c.fg===95).map(c=>[c.x,c.fg]);
   chunks=[];const f=[];for(let i=0;i<11;i++){await sleep(500);await flush();f.push(stripReds());}
   checks.strip={chunks,samples:f,row:(await screen()).at(-1)};chunks=null;
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
@@ -378,25 +378,28 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         # No document: the button dim; its popup says so under `현황`.
         self.assertTrue(checks['dim_look'] and all(c[2] for c in checks['dim_look']), checks['dim_look'])
         self.assertIn('╭─ 현황 ', checks['nodoc_title'])
-        # The blink: the question's red letters go between 174 and 131 together (the section head's count, a red
+        # The blink: the question's red letters go between 217 and 95 together, once a second (the section head's count, a red
         # that does not blink, keeps 174); every beat writes only blinking cells, a few dozen at most.
         blink = checks['blink']
         seen = {}
         for sample in [blink['first'], *blink['samples']]:
             for y, x, fg in sample:
                 seen.setdefault((y + 1, x + 1), set()).add(fg)
-        moving = {cell for cell, tones in seen.items() if tones == {174, 131}}
+        moving = {cell for cell, tones in seen.items() if tones == {217, 95}}
         self.assertGreaterEqual(len(moving), 10, seen)
         phases = {tuple(sorted({fg for y, x, fg in sample if (y + 1, x + 1) in moving})) for sample in blink['samples']}
-        self.assertEqual(phases, {(174,), (131,)}, phases)
-        # (The working route's mark spins on the same beat: the beats that write anything but it.)
-        beats = [chunk for chunk in blink['chunks'] if chunk.startswith('\x1b[?2026h\x1b7') and written_cells(chunk)]
-        # (A projection's whole rows may carry one of the changes: at least one beat, never more than the changes.)
-        self.assertTrue(1 <= len(beats) <= 4, (len(beats), blink['ms']))
+        self.assertEqual(phases, {(217,), (95,)}, phases)
+        # (The working route's count pulses on Fleet's same second, so a change rides the paint that rewrites that row:
+        # the beats are the writes that touch a blinking cell, one a second, and on the blinking rows they write
+        # nothing but the blinking cells.)
+        beats = [chunk for chunk in blink['chunks'] if set(written_cells(chunk)) & moving]
+        self.assertTrue(4 <= len(beats) <= 7, (len(beats), blink['ms']))
+        blinking_rows = {row for row, _col in moving}
         for chunk in beats:
-            cells = written_cells(chunk)
+            cells = [cell for cell in written_cells(chunk) if cell[0] in blinking_rows]
             self.assertTrue(cells and set(cells) <= moving, sorted(set(cells) - moving)[:5])
-        load = {'beats': len(beats), 'blinking_cells': len(moving), 'cells_per_beat': [len(written_cells(c)) for c in beats],
+        load = {'beats': len(beats), 'blinking_cells': len(moving),
+                'cells_per_beat': [len([cell for cell in written_cells(c) if cell[0] in blinking_rows]) for c in beats],
                 'bytes_per_beat': [len(c.encode()) for c in beats]}
         self.assertTrue(all(n <= 60 for n in load['cells_per_beat']), load)
         # The folded strip: `◑답 대기 N` alone moves, between the same two reds.
@@ -406,10 +409,10 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         for sample in strip['samples']:
             for x, fg in sample:
                 seen.setdefault(x + 1, set()).add(fg)
-        wait = {x for x, tones in seen.items() if tones == {174, 131}}
+        wait = {x for x, tones in seen.items() if tones == {217, 95}}
         self.assertGreaterEqual(len(wait), 5, seen)
         stones = {tuple(sorted({fg for x, fg in sample if x + 1 in wait})) for sample in strip['samples']}
-        self.assertEqual(stones, {(174,), (131,)}, stones)
+        self.assertEqual(stones, {(217,), (95,)}, stones)
         strip_beats = [chunk for chunk in strip['chunks'] if chunk.startswith('\x1b[?2026h\x1b7') and written_cells(chunk)]
         self.assertTrue(strip_beats)
         for chunk in strip_beats:

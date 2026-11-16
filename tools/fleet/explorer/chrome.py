@@ -219,7 +219,15 @@ _CENSUS_STATUS_KEYS = {
     "idle": "idle", "g_work_off": "idle",
     "blocked": "blocked", "g_blocked": "blocked",
 }
-_CENSUS_LABELS = frozenset({"working", "idle", "answer needed"})
+_CENSUS_LABELS = frozenset({"working", "idle", "answer needed", "답 필요"})
+
+
+def connected_sessions(vm):
+    """The live sessions at either end of a PEERS link: what the PEERS tab's count counts."""
+    edges = vm.peer_edges if isinstance(vm.peer_edges, Mapping) else {}
+    live = {str(item.get("tag")) for item in vm.sessions or ()}
+    return {str(end[0]) for link in tuple(edges.get("links", ())) for end in tuple(link)[:2]
+            if isinstance(end, (list, tuple)) and end and str(end[0]) in live}
 
 
 def _compact_status_parts(parts):
@@ -356,7 +364,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
         idle = sum(1 for item in sessions if item.get("state") == "idle")
         census_parts = [(f"⠏ {working}", "spin"), (" working", "dim"),
                         (f"  ● {idle}", "idle"), (" idle", "dim"),
-                        (f"  ● {blocked}", "blocked"), (" answer needed", "dim"),
+                        (f"  ● {blocked}", "blocked"), (" " + ui_text("fleet.session_panel.answer"), "dim"),
                         ("   ", "branch_s")]
     system = vm.system or {}
     fallback_install = system.get("install", {}) if isinstance(system, Mapping) else {}
@@ -510,11 +518,13 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
                     continue
                 x = grid.put(x, y, str(name).rjust(5), "label", limit=usage_limit)
                 x = grid.put(x + 1, y, "[", "dim", limit=usage_limit)
-                filled = max(1, min(12, round(12 * int(percent) / 100))) if int(percent) else 0
-                gauge_key = "lvl_r_flat" if int(percent) >= 80 else "lvl_y" if int(percent) >= 50 else "lvl_g"
-                x = grid.put(x, y, "━" * filled, gauge_key, limit=usage_limit)
+                # The shell panel's gauge (``session_line.gauge_parts``) at twelve cells.
+                from ..session_line import gauge_parts
+                bar, rest, _space, value = gauge_parts(int(percent), cells=12)
+                gauge_key = value[1]
+                x = grid.put(x, y, bar[0], bar[1], limit=usage_limit)
                 track = "·" if annotation.startswith("stale") else "─"
-                x = grid.put(x, y, track * (12 - filled), "dim", limit=usage_limit)
+                x = grid.put(x, y, track * len(rest[0]), "dim", limit=usage_limit)
                 x = grid.put(x, y, f"{int(percent):4d}%", gauge_key, limit=usage_limit)
                 x = grid.put(x, y, "]", "dim", limit=usage_limit)
                 if reset:
@@ -594,7 +604,10 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             edges = tuple(vm.peer_edges.get("links", ())) if isinstance(vm.peer_edges, Mapping) else ()
             observation = _peer_observation_summary(vm)
             if observation.get("state") == "success":
-                status = (f"{count_word(len(edges), 'link')} · "
+                linked = len(connected_sessions(vm))
+                status = (ui_text("fleet.peers.connected" if linked != 1 else "fleet.peers.connected_one",
+                                  count=linked) + " · "
+                          f"{count_word(len(edges), 'link')} · "
                           f"{count_word(sum(1 for item in sessions if item.get('steward')), 'steward')} · "
                           f"{count_word(sum(1 for edge in edges if len(edge) > 2 and edge[2] == 'handover'), 'handover')}")
             else:
@@ -698,8 +711,8 @@ def draw_explorer(grid: CellGrid, vm, state):
     scope_kind, _, scope_id = str(getattr(state, "scope", "-") or "-").partition(":")
     question_count = answer_wait_count(vm)
     peers = _peer_observation_summary(vm)
-    peer_count = (len(vm.peer_edges.get("links", ()))
-                  if peers.get("state") == "success" else None)
+    # PEERS counts the sessions its LINKS join (not the LINKS rows).
+    peer_count = len(connected_sessions(vm)) if peers.get("state") == "success" else None
     counts = {"PEERS": peer_count,
               "ROUTES": route_count_label(vm.routes, word="", mark_text="?"),
               "QUESTIONS": question_count, "HISTORY": len(vm.seats or ())}

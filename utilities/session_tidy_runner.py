@@ -1017,13 +1017,14 @@ def advance_watermarks(bundle: Bundle) -> None:
             tt.write_watermark(entry["harness"], entry["sid"], entry["cursor"], source=entry["source"])
 
 
-def notify(item: dict, text: str) -> None:
+def notify(item: dict, text: str, level: str = "") -> None:
+    """``level`` ``"done"``: the tidy ended well and leaves the person nothing to do."""
     if item.get("origin") == "idle":
         return  # Idle completion has one card+compaction notice, no memory-work details.
     with contextlib.suppress(BaseException):
         stable = str(item.get("id") or item.get("operation_id") or "")
         st.write_notice(_card_seat(item), text, author_harness=item["harness"],
-                        author_sid=item["sid"], notice_id=f"tidy:{stable}" if stable else "")
+                        author_sid=item["sid"], notice_id=f"tidy:{stable}" if stable else "", level=level)
 
 
 def applied_writes(run_dir: Path) -> tuple:
@@ -1173,7 +1174,7 @@ def process_item(item: dict) -> None:
             note = coverage_note(bundle)
             # Unread ranges left means the read part had nothing to tidy, never "nothing new".
             notify(item, st._ui_translator()("tidy.runner.nothing_in_range", note=note) if note
-                   else st._ui_translator()("tidy.runner.nothing_new"))
+                   else st._ui_translator()("tidy.runner.nothing_new"), level="done")
             end_batch_files(item, run_dir, True)
             set_status(item, "notified", result="nothing-in-range" if note else "nothing-new")
             finished = True
@@ -1205,7 +1206,9 @@ def process_item(item: dict) -> None:
             line = _with_coverage(line, coverage_note(bundle))
         publish_memory(item, batch, run_dir, bundle, "applied" if not over else "partial",
                        "상한 초과 제안 폐기" if over else "")
-        notify(item, line)
+        # A partly applied batch or a failed deletion check is no quiet result.
+        applied_status = result.get("status") if isinstance(result, dict) else ""
+        notify(item, line, level="" if applied_status in ("partial", "integrity-violation") else "done")
         # A terminal status is written last: whoever reads it sees the folder as it stays.
         end_batch_files(item, run_dir, True)
         set_status(item, "notified", result="applied")

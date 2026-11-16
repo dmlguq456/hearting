@@ -3,6 +3,7 @@
 import re
 
 from . import tables
+from ..config import ui_text
 from .output import cell_width
 from .tables import _clip, repo_rule_label
 from .style import steward_flag_key
@@ -29,7 +30,7 @@ def _extra_lines(session, questions):
                              else item.get("tag")) == tag), None)
     if question is not None or session.get("ask"):
         wait = str((question or {}).get("wait") or "")
-        lines.append(("answer needed" + (f" · {wait}" if wait else ""), "blocked"))
+        lines.append((ui_text("fleet.session_panel.answer") + (f" · {wait}" if wait else ""), "blocked"))
     return lines
 
 
@@ -338,9 +339,20 @@ def _draw_markers(grid, vm, edges, boxes, frames, right, clear_of):
                      limit=min(right, frame[2] + 1))
 
 
+def link_kind_text(kind):
+    """The KIND words a LINKS row shows: a supervision link reads ``steward ⚑`` (Korean ``감독 ⚑``)."""
+    kind = str(kind)
+    return ui_text("fleet.peers.steward") + " ⚑" if kind.startswith("watch") else kind
+
+
+def links_head_parts(links, opened):
+    """``3 LINKS messages·requests · supervision · handover``: the LINKS section head (count first)."""
+    meta = (f"[{opened}] · click it again: all" if opened else ui_text("fleet.peers.links_meta"))
+    return [(f"{len(links)} ", "soft"), ("LINKS", "label"), (" " + meta, "dim")]
+
+
 def _draw_links_compact(grid, vm, state, links, opened, x, y, use, right, bottom):
-    grid.put(x, y, "── LINKS", "head", limit=right)
-    grid.put(x + 10, y, f"{len(links)}" + (f" · [{opened}]" if opened else ""), "dim", limit=right)
+    tables.section_head(grid, x, right, y, links_head_parts(links, opened))
     y += 2
     for link in links:
         if y + 1 >= bottom:
@@ -361,7 +373,7 @@ def _draw_links_compact(grid, vm, state, links, opened, x, y, use, right, bottom
                 grid.add_hit(y, offset, min(right, offset + cell_width(endpoint_text(endpoint))),
                              ("fold", "pfocus:" + state.view, str(endpoint[0])))
         y += 1
-        grid.put(x + 4, y, f"{kind} · {when} · {note}", "dim", limit=right)
+        grid.put(x + 4, y, f"{link_kind_text(kind)} · {when} · {note}", "dim", limit=right)
         y += 1
 
 
@@ -590,20 +602,12 @@ def draw_peers(grid, vm, state, x=34, y=3):
     _draw_links(grid, state, session_by_tag, links, opened, x, y, use, right)
 
 
-LINK_KIND_KEYS = {"steer": "soft", "notice": "dim", "watch ⚑": "steward"}
+LINK_KIND_KEYS = {"steer": "soft", "notice": "dim", "watch ⚑": "steward", "REQUEST": "label"}
 
 
 def _draw_links(grid, state, session_by_tag, links, opened, x, y, use, right):
     """Section rule, tinted column heads, then every link (or how many did not fit)."""
-    cursor = grid.put(x, y, "── ", "line", limit=right)
-    cursor = grid.put(cursor, y, "LINKS", "head", limit=right)
-    meta = (f"[{opened}] · {len(links)} link{'' if len(links) == 1 else 's'} · click it again: all"
-            if opened else "communication · supervision · handover")
-    cursor = grid.put(cursor, y, "  " + meta, "dim", limit=right)
-    grid.put(cursor, y, " ", "branch_s", limit=right)
-    for xx in range(cursor + 1, right):
-        grid.put(xx, y, "─", "line", limit=right)
-    y += 1
+    y = tables.section_head(grid, x, right, y, links_head_parts(links, opened))
     grid.fill(x, right, y, " ", tint=234)
     for off, label in ((3, "FROM"), (19, "TO"), (40, "KIND"), (51, "WHEN"), (64, "NOTE")):
         grid.put(x + off, y, label, "head", tint=234, limit=right)
@@ -640,7 +644,7 @@ def _draw_links(grid, state, session_by_tag, links, opened, x, y, use, right):
         endpoint(x + 19, y, to, 20)
         kind_key = LINK_KIND_KEYS.get(str(kind)) or (
             "hb_" + str(to[1]) if isinstance(to, (tuple, list)) and len(to) > 1 else "dim")
-        grid.put(x + 40, y, str(kind), kind_key, limit=right)
+        grid.put(x + 40, y, link_kind_text(kind), kind_key, limit=right)
         grid.put(x + 51, y, str(when), "dim", limit=right)
         grid.put(x + 64, y, _clip(str(note), max(0, use - 64)), "now_sub", limit=right)
         y += 1

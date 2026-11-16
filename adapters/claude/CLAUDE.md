@@ -144,9 +144,9 @@ Portable behavior contract = `roles/response-policy.md`.
 
 ## Claude Notes
 
-- Register ordinary questions with `hearting run questions ask`; use the
-  shared response policy. Ask structured exceptions, including the §0.4 card, with `AskUserQuestion`
-  (options 진행(권장) / 수정 / 중단); a plain-text card is the fallback.
+- Every question to the person, including the §0.4 card (choices 진행(권장) /
+  수정 / 중단), is registered with `hearting run questions ask`; use the shared
+  response policy. A plain-text card is the fallback.
 - CronCreate, ScheduleWakeup, Monitor, and backgrounded waits follow the
   shared "Do not build your own waiting" guidance above.
 - A Codex job the openai-codex plugin detaches runs in the plugin's own queue,

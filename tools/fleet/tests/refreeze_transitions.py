@@ -6,7 +6,8 @@
 Replays every case exactly like test_explorer_transitions (same decoder, reducer and draw).
 Each step whose current frame differs from its stored frame gets a new frame (new rows go to
 the end of the shared row pool) and points at it; input chunks, navigation states and every
-unchanged frame stay as they are. PEERS steps are skipped (the test normalizes their lanes).
+unchanged frame stay as they are. A PEERS step moves only where it differs beyond the lane
+normalization the test applies.
 ``--check`` only lists the steps that would move. transitions.json is one line, so two screen
 PRs always conflict on it: take either side and run this again on the merged renderer.
 """
@@ -60,11 +61,13 @@ for case in cases:
             step = by_state.get(T._nav_projection(state))
             if step is None:
                 raise SystemExit(f"{case['name']}: unexpected state {T._nav_projection(state)}")
-            if state.view == "PEERS":
-                continue                     # untouched here; the test normalizes its lanes
-            cells, hits = T._frame_json(draw(vm, state, case["cols"], 45, beat=1))
+            drawn = draw(vm, state, case["cols"], 45, beat=1)
+            cells, hits = T._frame_json(drawn)
             stored = frames[step["frame"]]
             expected = T._expand([rows[i] for i in stored["cells"]])
+            if state.view == "PEERS":
+                # A PEERS step moves only where it differs beyond the lane normalization the test applies.
+                expected = T._lane_gutter_delta_full(drawn, vm, expected)
             if expected == cells and stored["hits"] == hits:
                 continue
             refs = []

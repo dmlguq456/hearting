@@ -152,8 +152,7 @@ Each clause is one contract line plus the signal that it was violated.
   asking about a recommended reversible option, stopping for usage, or omitting a
   decision's difference, recommendation, or no-answer outcome.
 - **No answer is not a decision** — an empty answer, no response, or elapsed
-  time or an async acknowledgement (`accepted`) from a structured question (`AskUserQuestion`, Codex
-  `request_user_input[_async]`, OpenCode `question`, or equivalent) never counts
+  time or an async acknowledgement (`accepted`) from a question tool or a registered question never counts
   as the user's decision. A question that
   needs a user decision — goals, architecture, destructive actions, external
   effects, a large scope, or any question a Hearting receipt asks — stays open:

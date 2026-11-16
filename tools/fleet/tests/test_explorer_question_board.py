@@ -93,7 +93,7 @@ class OneCount(unittest.TestCase):
         self.assertIn("◑ to answer 3", overview[-1])
         self.assertNotIn("9 question", "\n".join(overview))
         board = _text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)
-        self.assertIn("── ◑ to answer 3 ─", "\n".join(board))
+        self.assertIn("│ ◑ to answer 3 ─", "\n".join(board))
         self.assertIn("older waits 6", "\n".join(board))
         self.assertIn("◑ to answer 3 · older waits 6", board[-1])
 
@@ -124,7 +124,7 @@ class SentAnswer(unittest.TestCase):
         self.assertTrue(all(not row.get("ask") for row in vm.sessions))
         board = _text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)
         joined = "\n".join(board)
-        self.assertIn("── ◑ to answer 0 ─", joined)
+        self.assertIn("│ ◑ to answer 0 ─", joined)
         row = next(line for line in board if "[a1]" in line)
         self.assertIn("✓", row)
         self.assertIn("answer sent · ", row)
@@ -139,7 +139,7 @@ class SentAnswer(unittest.TestCase):
         self.assertEqual(sorted((q["id"], q["sent"]) for q in vm.questions),
                          [("S4:open", False), ("S4:sent", True)])
         self.assertEqual([row.get("ask") for row in vm.sessions], ["answer needed"])
-        self.assertIn("── ◑ to answer 1 ─", "\n".join(_text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)))
+        self.assertIn("│ ◑ to answer 1 ─", "\n".join(_text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)))
 
 
 class EachRow(unittest.TestCase):
@@ -196,7 +196,7 @@ class OlderWaits(unittest.TestCase):
         state = NavState(view="QUESTIONS", title="QUESTIONS")
         frame = draw(vm, state, 168, 60, beat=1)
         rows = frame.text_rows()
-        heading = next(y for y, row in enumerate(rows) if "── older waits 2" in row)
+        heading = next(y for y, row in enumerate(rows) if "│ 2 OLDER WAITS" in row)
         self.assertIn("hide", rows[heading])
         self.assertTrue(any(hit.y == heading and hit.action == ("question.older.toggle",)
                             for hit in frame.hits))
@@ -207,7 +207,7 @@ class OlderWaits(unittest.TestCase):
         folded, _ = reduce(state, {"type": "click", "action": ("question.older.toggle",)})
         text = "\n".join(_text(vm, folded))
         self.assertNotIn("run-authorization", text)
-        self.assertIn("── older waits 2 (no session to take it 1)  show", text)
+        self.assertIn("│ 2 OLDER WAITS (no session to take it 1)  show", text)
 
 
 class NoResponseRoutes(unittest.TestCase):

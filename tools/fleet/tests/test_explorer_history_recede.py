@@ -164,8 +164,8 @@ class RecedeDeltaTest(unittest.TestCase):
             with self.subTest(cols=cols), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
                 grid = draw(vm, NavState(scope="repo:" + str(repo["id"])), cols, 45, beat=1)
                 lines = _lines(grid)
-                start = next(y for y, text in enumerate(lines) if "── RECENT RESULTS" in text)
-                end = next(y for y, text in enumerate(lines) if y > start and "── RECENT WORK" in text)
+                start = next(y for y, text in enumerate(lines) if "RECENT RESULTS ─" in text)
+                end = next(y for y, text in enumerate(lines) if y > start and "RECENT WORK ─" in text)
                 rows = [y for y in range(start + 1, end) if "✓ " in lines[y][TABLE_X:]]
                 self.assertEqual(len(rows), 1)
                 self.assertIn(str(done["title"]), lines[rows[0]])

@@ -52,7 +52,7 @@
 <text x="1062" y="126" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">NOW</text>
 <text x="1404" y="126" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">AGE</text>
 <text x="9" y="144" textLength="45" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">PEERS</text>
-<text x="270" y="144" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
+<text x="270" y="144" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">4 │</text>
 <text x="315" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
 <text x="333" y="144" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
 <text x="414" y="144" textLength="126" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ route 1 ⠏1 │</text>
@@ -239,10 +239,9 @@
 <text x="108" y="396" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
 <text x="171" y="396" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
 <text x="189" y="396" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
-<text x="288" y="396" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ ──</text>
-<text x="333" y="396" textLength="54" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">ROUTES</text>
-<text x="405" y="396" textLength="54" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">2 open</text>
-<text x="468" y="396" textLength="639" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────────────────────────────────────────────────────────── owner·worker</text>
+<text x="288" y="396" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
+<text x="306" y="396" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">2</text>
+<text x="324" y="396" textLength="783" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">ROUTES ─────────────────────────────────────────────────────────────────── owner·worker</text>
 <text x="1116" y="396" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
 <text x="1179" y="396" textLength="9" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">2</text>
 <text x="1197" y="396" textLength="234" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· codex 0 · opencode 0 ───</text>
@@ -302,9 +301,7 @@
 <text x="90" y="468" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
 <text x="108" y="468" textLength="72" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode</text>
 <text x="189" y="468" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
-<text x="288" y="468" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ ──</text>
-<text x="333" y="468" textLength="54" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">RECENT</text>
-<text x="405" y="468" textLength="1026" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">completed results ────────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="288" y="468" textLength="1143" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ RECENT · completed results ──────────────────────────────────────────────────────────────────────────────────────────────────</text>
 <text x="9" y="486" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="486" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>
 <text x="72" y="486" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">7a</text>
@@ -315,7 +312,7 @@
 <text x="315" y="486" textLength="9" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">✓</text>
 <text x="333" y="486" textLength="72" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">web-api/</text>
 <text x="468" y="486" textLength="261" lengthAdjust="spacing" fill="#858689" xml:space="preserve">Fix the pagination off-by-one</text>
-<text x="1359" y="486" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">52m ago</text>
+<text x="1377" y="486" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">11:08</text>
 <text x="9" y="504" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─</text>
 <text x="36" y="504" textLength="99" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">mobile-app/</text>
 <text x="288" y="504" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>

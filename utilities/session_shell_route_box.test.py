@@ -132,9 +132,9 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);
  assert(inBox.length===2&&outside.length===0,label);
  const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
- // MESSAGES: the three messages, three rows, no `+N` for the requests.
+ // MESSAGES: the three messages, two rows each (head, body), no `+N` for the requests.
  assert(m>b.b&&/^│ (MESSAGES|messages) ─+ › │$/.test(rows[m]),label);
- assert.deepEqual(rows.slice(m+1,m+4).map(s=>s.slice(2,8)),['← [e7]','→ [52]','← [e1]'],label);
+ assert.deepEqual([1,3,5].map(i=>rows[m+i].slice(2,8)),['← [e7]','→ [52]','← [e1]'],label);
 }
 const body=pv.messagesBody({model:scene,columns:72}).map(txt);
 const first=body.findIndex(s=>s.includes('검토 요청: 팝업 바탕')),msg=body.findIndex(s=>s.includes('[e1]'));
@@ -156,7 +156,7 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
  const rows=v.rows.map(txt),label=[side,height,w].join(' ')+'\n'+rows.join('\n');seen++;
  assert(rows.length<=height&&rows.every(r=>cells(r)===w),label);
  assert(v.hits.every(h=>h.row>0&&h.row<rows.length-1&&h.left>=0&&h.right<w),label);
- assert(/⚙ │$/.test(rows.at(-2)),label);
+ assert(/⚙   ▾ │$/.test(rows.at(-2)),label);
  if(height>=10&&w>=28){assert(rows.some(r=>/QUESTIONS/.test(r)),'the question head stays\n'+label);assert(rows.some(r=>r.includes('route 상자를')),'its first row stays\n'+label);}
  const tops=rows.filter(r=>/^│ ╭/.test(r)).length,bottoms=rows.filter(r=>/^│ ╰/.test(r)).length;
  assert(tops===bottoms&&tops<=1,label);

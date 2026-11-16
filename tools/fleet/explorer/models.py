@@ -33,8 +33,8 @@ def _write(grid, x, y, text, key="dim", limit=None):
 
 
 def _section(grid, x, width, y, title, meta=""):
-    cursor = grid.put(x, y, "── ", "line")
-    cursor = grid.put(cursor, y, title, "head")
+    """A section head in the shell panel's form: the name in dim upper case, the rule to the edge."""
+    cursor = grid.put(x, y, title, "label")
     if meta:
         cursor = grid.put(cursor, y, _cut("  " + meta, grid.cols - cursor), "dim")
     grid.put(cursor, y, " ", "branch_s")
@@ -189,8 +189,7 @@ def _model_cell(grid, x, y, harness, value, shown, effort_keys, room, limit=None
 
 def _draw_context(grid, data, state, x, y, width):
     right = min(grid.cols - 1, x + width)
-    cursor = grid.put(x, y, "── ", "line")
-    cursor = grid.put(cursor, y, "CONTEXT & TIDY", "head")
+    cursor = grid.put(x, y, "CONTEXT & TIDY", "label")
     cursor = grid.put(cursor, y, "  input tokens · new sessions only", "dim", limit=right)
     grid.put(cursor, y, " ", "branch_s")
     for col in range(cursor + 1, right + 1):
@@ -527,8 +526,7 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     pool_col = columns["opencode"] + col_width + 6 + GAP
     left = min(grid.cols - x - 2, pool_col + pool_width)
     right = x + left
-    cursor = grid.put(x, y, "── ", "line")
-    cursor = grid.put(cursor, y, "MODEL PROFILE", "head")
+    cursor = grid.put(x, y, "MODEL PROFILE", "label")
     cursor = grid.put(cursor, y, "  profile → model · effort, per harness", "dim", limit=right + 1)
     grid.put(cursor, y, " ", "branch_s")
     for col in range(cursor + 1, right + 1):

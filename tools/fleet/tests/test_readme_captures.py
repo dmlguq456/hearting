@@ -90,7 +90,10 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertRegex(text["overview"], r"staged \d+/\d+ execute ●")
         self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
-        self.assertIn("1 link", text["session"])
+        # The session page's MESSAGES (one sent message) and the session it is linked with.
+        self.assertIn("MESSAGES", text["session"])
+        self.assertIn("Try four data-loader workers", text["session"])
+        self.assertRegex(text["session"], r"PEERS  \[\w+\]")
         self.assertIn("owner raw", text["output"])
         self.assertIn("1,200 clips", text["output"])
 

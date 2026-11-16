@@ -2,6 +2,10 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 const {keyRows}=require('./panel-view.cjs');
+// 11-16 (the person: "답 보냄도 한 5~10분은 유지하도록 해두자"): a sent answer's line stays SENT_KEEP_MS after it
+// was sent, whether or not its session has it yet (it used to go at that receipt, within seconds); it
+// leaves at the first update or paint past that, on the path it always left by (no timer of its own).
+const SENT_KEEP_MS=10*60*1000;
 module.exports=function({changed,answer,action,section,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
@@ -9,16 +13,21 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   const entries=new Map();
   const key=item=>item.id+'@'+item.revision;
   const state=item=>{
-    if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},notice:'',state:null});
+    if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},notice:'',state:null,sentAt:0});
     return entries.get(key(item));
   };
   // Rule 5 (11-14): the moment the person's answer is sent it has left their hands. While it
   // travels (`submitted`) the question is one dim line, never one to choose again; once its
-  // session has it (`received`, `applied`) the line goes too. A failed delivery leaves these
-  // states and the question comes back with its existing word.
+  // session has it (`received`, `applied`) the line stays until SENT_KEEP_MS after it was sent
+  // (11-16), then goes. A failed delivery leaves these states and the question comes back with
+  // its existing word.
   const phase=item=>{
-    const local=state(item).state,remote=item.request_state;
-    if(['received','applied'].includes(remote)||['received','applied'].includes(local))return 'done';
+    const entry=state(item),local=entry.state,remote=item.request_state;
+    if(['received','applied'].includes(remote)||['received','applied'].includes(local)){
+      // Its age decides: a clock behind the send (a negative age) leaves no age, so the line goes.
+      const age=Date.now()-entry.sentAt;
+      return entry.sentAt&&age>=0&&age<SENT_KEEP_MS?'sent':'done';
+    }
     return remote==='submitted'||local==='submitted'?'sent':null;
   };
   const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
@@ -46,7 +55,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
   // longer asked for as a retained reference and leaves the panel.
-  const settled=item=>item.answerable!==true&&(['applied','expired','cancelled'].includes(item.request_state)||state(item).state==='applied');
+  // (A sent answer's line still standing, 11-16, is not let go.)
+  const settled=item=>item.answerable!==true&&phase(item)!=='sent'&&(['applied','expired','cancelled'].includes(item.request_state)||state(item).state==='applied');
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
@@ -54,6 +64,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
+        // An answer seen on its way (sent here, or from another place) keeps its line from then.
+        if(item.request_state==='submitted'&&!local.sentAt)local.sentAt=Date.now();
       }else if(item.request_state==='unknown'&&state(item).state==='submitted'&&!state(item).sending){
         // The delivery could not be confirmed: the question returns with its existing word.
         state(item).state='unknown';
@@ -236,7 +248,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     let sent=false;const started=moves;
     try{
       const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
-      if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;}
+      if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;local.sentAt=Date.now();}
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}
     finally{
