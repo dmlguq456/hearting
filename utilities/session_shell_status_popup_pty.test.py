@@ -158,7 +158,8 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   // A press on the REPO row: the status popup.
   const r0=reads();
   await press(repo.x+2,repo.y,300);
-  s=await until(s=>!!box(s)&&box(s).title.includes('현황 panel-test · 3m')&&popupHas('┈')(s),'the status popup');frames.popup=s;
+  // (The document stands first and Fleet's lines come above it a moment later: both are waited for.)
+  s=await until(s=>!!box(s)&&box(s).title.includes('현황 panel-test · 3m')&&popupHas('┈')(s)&&popupHas('시험 마무리')(s),'the status popup');frames.popup=s;
   const b=box(s);checks.title=b.title;checks.foot=b.foot;checks.popup_reads=reads()-r0;
   checks.lines=b.rows.map(l=>l.slice(b.left));
   // PgDn reads it on (its place `i/N` moves), no read.
