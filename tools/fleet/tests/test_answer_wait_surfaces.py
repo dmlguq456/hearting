@@ -525,7 +525,7 @@ try {
             with self.subTest(lang=lang), mock.patch.dict("os.environ", {"FLEET_NOW_LANG": lang}):
                 rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
                 text = "\n".join(rows)
-                self.assertIn(f"── {word} ?", text)
+                self.assertIn(f"│ {word} ?", text)
                 self.assertNotIn(f"{word} 0", text)
                 self.assertIn(f"{word} ? ·", rows[-1])
 

@@ -244,8 +244,14 @@ def snapshot(now=None, workdir=None):
     snapshot = LiveSnapshot(sessions=sessions, jobs=jobs, memory=memory, usage_snapshots=usage,
                         hearting={"version": VERSION, "install_method": "managed"},
                         answer_waits=waits,
-                        observations={"optional:peers": {"state": "success", "last_good": False,
-                                                         "observed_at": now}})
+                        observations={"optional:peers": {
+                            "state": "success", "last_good": False, "observed_at": now,
+                            # The session page's MESSAGES: the ml-train session's own sent record.
+                            "messages": {"sent": {"claude:readme-claude-ml": [{
+                                "to": {"harness": "opencode", "session_id": "readme-oc-ml", "name": "ml-train"},
+                                "summary": "Try four data-loader workers", "at": now - 14 * 60,
+                                "kind": "steer", "status": "received", "refs": []}]},
+                                "requests": {}, "sides": {}, "rows": {}, "refs": []}}})
     # Both GPU processes belong to the sessions above; without this the Explorer would compute
     # "not registered" rows from the host list it was handed.
     snapshot.unregistered_gpu = ()

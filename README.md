@@ -152,7 +152,7 @@ working, idle, or waiting for you. Below it, one screen per question:
 | **ROUTES** | Each request: who does it now, its kind and where it stands — `one-shot`, or `staged 3/7 execute ●` for one worker per stage — with the workers running under it; open it for its stages. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
-| **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
+| **Others** | PEERS (the sessions linked by messages, requests, supervision or a handover, and the newest link of each kind), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
 
 NOW is what the session is doing now (`·` when nothing is observed). Expand the row for LAST INPUT and RECEIVED: LAST INPUT uses `› 1m · …` for your last confirmed input, `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record, and `› ·` means no human input was recorded.
 
@@ -281,7 +281,7 @@ notices do not guarantee remaining time before native compaction.
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and how to answer it; one older approval wait from a Codex session listed under it; and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, since when, how to answer it, and what you answered today.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the OpenCode session it steers, and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, route, peers, and GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the message it sent the OpenCode session it is linked with, and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, routes and requests, messages and linked sessions, and GPU, in the session panel's words.</sub></td>
     <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU process, and CPU and memory use."><br><sub><b>RESOURCES</b> — per-GPU use on each host and the session and command behind each process.</sub></td>
   </tr>
 </table>
