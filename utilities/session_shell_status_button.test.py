@@ -133,18 +133,19 @@ const sent=()=>[[p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('2 
 const model={repo_side:[p('hearting')],wait:'◑답 대기 1',session_title:'점멸',route_label:'route 1',route_count:1,route_total:1,
  routes:[{id:'a',title:'휠 입력 시험',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'3m',paint:{glyph:p('✕')}}]};
 const red=(v,t)=>{const at=v.motion.at(t);return v.motion.cells.map((c,i)=>c.blink?at[i].foreground:null).filter(x=>x!==null);};
-// (a) A question to answer here: its red letters (the first row, the choices' red words, the action) and
-// nothing else move; 217 on the even seconds, 95 on the odd; the frame, the route
-// box, the sent answer and the head's state glyph never take part.
+// (a) A question to answer here: the lines of its box (11-16: the person's "붉은 바운더리") and nothing else move, the
+// letters inside it stand still (the first row, the choices' words, the action, the sent answer); 217 on the even
+// seconds, 95 on the odd; the panel's frame, the route box and the head's state glyph never take part.
 for(const state of ['idle','blocked']){
  const v=render({q:here,sent,model,state,since:0,height:30}),rows=v.rows.map(str);
  const blink=v.motion.cells.filter(c=>c.blink),text=blink.map(c=>c.ch).join('');
- assert.equal(text,'◑로그를어느쪽에남길까요?1파일2표준출력↵answer·Ctrl+]',state+' '+text);
+ // The top line `╭─ … ─╮` (its name and count stand still), a wall pair for each of the four rows inside, the bottom line.
+ assert(/^╭─+╮│{8}╰─+╯$/.test(text),state+' '+text);
  // Each blink cell stands where the row shows its glyph.
  for(const c of blink){let x=0,found=false;for(const part of v.rows[c.row])for(const ch of part.text){if(x===c.col&&ch===c.ch)found=true;x+=cells(ch);}
   assert(found,JSON.stringify(c));}
- // No blink cell on the head's border, the route box or the sent answer's row.
- for(const c of blink)assert(c.row>0&&!/✓ 답 보냄|휠 입력/.test(rows[c.row]),rows[c.row]);
+ // No blink cell on the head's border, the route box, or a letter of the sent answer's row (its two walls do).
+ for(const c of blink)assert(c.row>0&&!/휠 입력/.test(rows[c.row])&&(!/✓ 답 보냄/.test(rows[c.row])||c.ch==='│'),rows[c.row]);
  // The two reds follow Fleet's one-second beat of the clock: 217 through frames 0-9, 95 through 10-19, and so on.
  for(const [t,want] of [[0,217],[9,217],[10,95],[19,95],[20,217],[29,217],[30,95],[60,217]])
   assert(red(v,t).every(x=>x===want),state+' '+t+' '+red(v,t));
