@@ -505,6 +505,21 @@ def _peer_message():
     return sys.modules[name]
 
 
+def _hold(binding, status):
+    """Why the window keeps a message, in the receiving host's own word (``status().hold``).
+
+    A host from before that word names only its state; an older release than the one installed
+    takes the message once its window is reopened or typed in (``old-shell``)."""
+    hold = status.get("hold") if status.get("ok") else ""
+    if isinstance(hold, str) and hold:
+        return hold
+    if status.get("state") == "blocked":
+        return "form"
+    if status.get("state") in ("working", "submitting"):
+        return "busy"
+    return ANSWER_WAIT_OLD_SHELL if status.get("ok") and "hold" not in status and release_behind(binding) else "unobserved"
+
+
 def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     """Use the existing peer claim once; socket acceptance is not a receipt."""
     if harness not in ("claude", "opencode"):
@@ -522,7 +537,7 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
         return {"ok": False, "reason": reason, "not_started": True}
     before = control(binding, "status")
     if not before.get("ok") or before.get("state") != "idle" or not before.get("empty"):
-        return {"ok": False, "reason": "not-idle-empty", "not_started": True}
+        return {"ok": False, "reason": "not-idle-empty", "hold": _hold(binding, before), "not_started": True}
     recipient = {"harness": harness, "session_id": sid}
     reserved = peer.reserve_pending_herdr(ref, recipient, receipt="session-shell-inflight")
     if reserved is None:
@@ -1801,9 +1816,13 @@ def _input_readiness(binding, request):
     if binding["harness"] == "claude":
         from fleet import session_registry
         record = session_registry.read("claude", binding["native_pid"])
+        # Claude writes `shell` once a turn has ended while a background shell it started still
+        # runs (a foreground call holds `busy`; see fleet.model._session_status_state): its composer
+        # takes input as at `idle`, so a waiting message goes in (11-16: held for that shell's life).
+        # Only this delivery reading counts it so; tidy and Fleet read the record themselves.
         idle = bool(record and record.get("pid") == binding["native_pid"]
                     and str(record.get("procStart")) == binding["native_start"]
-                    and record.get("sessionId") == binding["sid"] and record.get("status") == "idle")
+                    and record.get("sessionId") == binding["sid"] and record.get("status") in ("idle", "shell"))
     return {"ok": True, "idle": idle, "ready": idle and reason is None and valid_binding(binding),
             "reason": reason or (None if idle else "native-idle-unobserved")}
 
