@@ -1,4 +1,6 @@
 """Question-first session block; values and authority keep their existing owners."""
+import re
+
 from .session_line import route_text, status_lines, clip_segments, wrap_segments as wrap_parts
 from .explorer.grid import cell_width
 from .config import ui_text
@@ -30,25 +32,37 @@ _ANSWER_WAIT_WORDS = {"old-shell": ("session_shell.upgrade_pending", "fleet.sess
                       "no-shell": ("fleet.session_block.wait_no_shell",)}
 
 
+# What a drawn value may not carry, whatever draws it (Fleet's grid drops these; the panel may not):
+# C0/C1 controls (ESC, NUL), DEL and the bidirectional overrides and isolates.
+_UNDRAWABLE = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def _drawable(value):
+    return _UNDRAWABLE.sub("", " ".join(str(value).split()))
+
+
 def sent_values(sent, questions=()):
-    """What was sent, as the answer record says it: choice labels, free text, a decision; secrets hidden."""
+    """What was sent, as the answer record says it: choice labels, free text, a decision; secrets
+    hidden (``secret``, ``is_secret`` or ``isSecret`` on the question), controls dropped."""
     if isinstance(sent, (list, tuple)):
-        return [str(value) for value in sent if str(value).strip()]
+        return [value for value in map(_drawable, sent) if value.strip()]
     if not isinstance(sent, dict):
         return []
     if isinstance(sent.get("decision"), str):
-        return [sent["decision"]]
+        return [_drawable(sent["decision"])]
     by_id = {str(q.get("id")): q for q in questions or () if isinstance(q, dict)}
     out = []
     for qid, listed in (sent.get("answers") if isinstance(sent.get("answers"), dict) else {}).items():
         question = by_id.get(str(qid)) or {}
         for value in listed if isinstance(listed, list) else ():
-            if question.get("secret") or question.get("is_secret"):
+            if question.get("secret") or question.get("is_secret") or question.get("isSecret"):
                 out.append("•••")
                 continue
             label = next((choice.get("label") for choice in question.get("choices") or ()
                           if isinstance(choice, dict) and choice.get("value") == value and choice.get("label")), None)
-            out.append(str(label or value))
+            shown = _drawable(label or value)
+            if shown.strip():
+                out.append(shown)
     return out[:4]
 
 
@@ -160,7 +174,8 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
             item.pop("answer_state", None)
         # The sent line's parts for the panel, from the same function Fleet's row draws (rule 5).
         if state == "submitted":
-            item["sent_line"] = sent_answer_line(item.get("sent") or (), wait=item.get("answer_wait") or "")
+            item["sent_line"] = sent_answer_line(item.get("sent") or (), wait=item.get("answer_wait") or "",
+                                                 questions=item.get("questions") or ())
         else:
             item.pop("sent_line", None)
     for item, question in listed:

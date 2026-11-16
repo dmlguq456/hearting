@@ -288,17 +288,25 @@ def release_behind(binding: dict) -> bool | None:
     return None
 
 
-# Why an answer the person sent still waits on them (rule 5): its session takes it only at a
-# prompt typed in that window. An older shell's host may not take a newer answer (11-16: a
+# Why an answer the person sent still waits on them (rule 5): a resting session takes it only at
+# a prompt typed in that window. An older shell's host may not take a newer answer (11-16: a
 # v4.29.3 host refused every v4.40.0 answer), and a Claude session outside the shell has no
-# idle wake. Codex takes it from its own queue; OpenCode's plugin takes it when idle.
+# idle wake. Codex takes it from its own queue; OpenCode's plugin takes it when idle. A session
+# still working takes it when its turn ends, so it waits on no one; nor is a reason given for a
+# session whose state is not known.
 ANSWER_WAIT_OLD_SHELL = "old-shell"
 ANSWER_WAIT_NO_SHELL = "no-shell"
+# Fleet's session states (``fleet.model.classify_session``) of a session that rests: idle, never
+# used, or silent past the session window with its process alive.
+RESTING_STATES = frozenset({"idle", "unused", "stale"})
 
 
-def answer_delivery_wait(harness: str, sid: str) -> str:
-    """``old-shell`` | ``no-shell`` | ``""``: what a sent answer to this session waits for."""
-    if harness not in ("claude", "opencode") or not isinstance(sid, str) or not _SID.fullmatch(sid):
+def answer_delivery_wait(harness: str, sid: str, state: str | None = None) -> str:
+    """``old-shell`` | ``no-shell`` | ``""``: what a sent answer to this session waits for.
+
+    ``state`` is the session's Fleet state; only a resting one waits on the person."""
+    if (state not in RESTING_STATES or harness not in ("claude", "opencode")
+            or not isinstance(sid, str) or not _SID.fullmatch(sid)):
         return ""
     binding, reason = exact_binding(harness, sid)
     if binding is None:
@@ -306,18 +314,22 @@ def answer_delivery_wait(harness: str, sid: str) -> str:
     return ANSWER_WAIT_OLD_SHELL if release_behind(binding) else ""
 
 
-def mark_answer_waits(items):
+def mark_answer_waits(items, states=None):
     """Mark each sent message answer of the shared board with what it waits for (``answer_wait``).
 
     Read live by a surface (Fleet's collector), never stored: a window's shell and release are
-    not part of the answer record. A wait with no session to take it says that instead.
+    not part of the answer record. ``states`` maps ``(harness, session_id)`` to the session's
+    Fleet state; a session missing from it is not known and gets no reason. A wait with no
+    session to take it says that instead.
     """
+    states = states or {}
     for item in items or ():
         if (isinstance(item, dict) and item.get("answer") == "sent" and item.get("kind") == "message"
                 and item.get("owner_state") not in ("none", "successor")):
             owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
-            wait = answer_delivery_wait(item.get("harness") or owner.get("harness"),
-                                        item.get("session_id") or owner.get("session_id"))
+            harness = item.get("harness") or owner.get("harness")
+            sid = item.get("session_id") or owner.get("session_id")
+            wait = answer_delivery_wait(harness, sid, states.get((harness, sid)))
             if wait:
                 item["answer_wait"] = wait
             else:

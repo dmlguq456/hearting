@@ -1,0 +1,50 @@
+   New session                     New session                   +
+
+  ┃
+  ┃  /models/sessions
+  ┃
+
+     Error: Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to
+     keep going: https://opencode.ai/go
+
+     Build · Big Pickle · 349ms
+
+  ┃
+  ┃  /themes/help
+  ┃
+                                  Select model                                     esc
+     Error: Free usage limit r                                                            subscribe to OpenCode Go to
+     keep going: https://openc    Search
+
+     Build · Big Pickle · 286m    Iceman Free                                     Free
+                                  Inkling 2 Small Free                            Free
+                                  LongCat 2.5 Free                                Free
+                                  Flint 40B Free                                  Free
+                                  MiniMax M3.1 Flash Free                         Free
+                                  DeepSeek V4.1 Flash Free                        Free
+                                  Nemotron 3.5 Super VL Free                      Free
+                                  Beam Free                                       Free
+                                  MiMo-V2.6-Flash Free                            Free
+                                  GLM-5.3-Flash Free                              Free
+                                  Nemotron 3.5 Lightning Free                     Free
+                                ● Big Pickle                                      Free
+
+                                  View all integrations ctrl+a
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /tmp/ocx-XXXX/proj                                                                 shift+tab agents  ctrl+p commands
+

@@ -4,8 +4,10 @@ The host (this checkout's, or an older release's from git) runs a synthetic nati
 private HOME; no model, user pane or account is used. The native acts as its harness does:
 lifecycle events over the shell socket, its composer painted as the readiness reader expects,
 the real Claude UserPromptSubmit hooks (or OpenCode's plugin receive helper) on every prompt it
-takes, and local commands (``/model``) that open and close a menu with no prompt event. The
-obligation runner's own pass is called in-process, so a suite owns every process it starts.
+takes, and local commands (``/model``) that open and close a menu with no prompt event (OpenCode's
+``/models`` paints the real dialog of ``fixtures/opencode-2.0.32-dialogs``). ``ARI_NATIVE_MODE`` makes
+it slow to call back after an Enter (``slow``) or slow to paint a key (``lag``). The obligation
+runner's own pass is called in-process, so a suite owns every process it starts.
 """
 import contextlib
 import fcntl
@@ -53,7 +55,20 @@ def event(kind):
         channel.settimeout(5);channel.connect(os.environ['HEARTING_SHELL_SOCKET'])
         channel.sendall((json.dumps(request)+'\n').encode());channel.recv(8192)
 last='READY'
+# `slow`: a person's Enter clears the composer at once and its turn calls back only once the test
+# opens ARI_NATIVE_GATE; `lag`: after the warm-up turn, a typed key's own paint comes ARI_NATIVE_LAG
+# seconds after a repaint of the old screen.
+mode=os.environ.get('ARI_NATIVE_MODE','')
+def dialog_screen():
+    # OpenCode's model dialog as the real native draws it (fixtures/opencode-2.0.32-dialogs): the
+    # rows that fit from the bottom, so its composer stays the last box, each cut to this width.
+    size=os.get_terminal_size(0)
+    path=os.path.join(root,'utilities','fixtures','opencode-2.0.32-dialogs',os.environ.get('ARI_DIALOG_SCREEN','models-120x50.txt'))
+    rows=open(path,encoding='utf-8').read().rstrip('\n').split('\n')[-size.lines:]
+    return '\r\n'.join(row[:size.columns-1] for row in rows)
 def paint(draft=''):
+    if menu and harness=='opencode':
+        print('\x1b[2J\x1b[H'+dialog_screen(),end='',flush=True);return
     if menu:
         # A local command's menu (`/model`): a form, never a composer.
         box='Select model\r\n  1. Default\r\n  2. Synthetic\r\nEnter to select \u00b7 Esc to cancel\r\n'
@@ -85,7 +100,7 @@ def close_menu(word):
 tty.setraw(0)
 event('start')
 print('\x1b[?2004h',end='',flush=True);paint()
-buffer='';draft='';pasting=False;prompts=0
+buffer='';draft='';pasting=False;prompts=0;warmed=False
 while True:
     data=os.read(0,65536)
     if not data or data==b'\x03':break
@@ -113,10 +128,15 @@ while True:
         char,buffer=buffer[0],buffer[1:]
         if char=='\x7f':draft=draft[:-1];paint(draft);continue
         if char!='\r':
+            if mode=='lag' and warmed:
+                paint(draft);time.sleep(float(os.environ.get('ARI_NATIVE_LAG','1.5')))
             draft+=char if char>=' ' or char=='\n' else '';paint(draft);continue
         line,draft=draft,''
         if line=='warm':
-            event('prompt');last='DONE_warm';paint();event('stop');continue
+            event('prompt');last='DONE_warm';paint();event('stop');warmed=True;continue
+        if mode=='slow' and line.startswith('slow'):
+            note(taken=line);paint()
+            while not os.path.exists(os.environ['ARI_NATIVE_GATE']):time.sleep(0.05)
         if line.startswith('/') and harness!='opencode' or line.startswith('/models'):
             menu=True;record('waiting','dialog open');note(local=line);paint();continue
         prompts+=1
@@ -131,7 +151,7 @@ while True:
 # headless xterm (its painter writes only changed cells, so the raw bytes do not hold whole words).
 SCREEN = r"""
 const fs=require('fs'),{Terminal}=require('@xterm/headless');
-const term=new Terminal({cols:130,rows:30,allowProposedApi:true});
+const term=new Terminal({cols:Number(process.argv[2]),rows:Number(process.argv[3]),allowProposedApi:true});
 term.write(fs.readFileSync(process.argv[1]),()=>{
   const b=term.buffer.active,out=[];
   for(let y=0;y<term.rows;y++)out.push(b.getLine(b.viewportY+y)?.translateToString(true)||'');
@@ -173,8 +193,9 @@ def _peer_module():
 class ShellRig:
     """One private shell window around the synthetic native, driven through its PTY."""
 
-    def __init__(self, test, entry, name, harness="claude", env=None):
+    def __init__(self, test, entry, name, harness="claude", env=None, size=(30, 130)):
         self.test, self.entry, self.name, self.harness = test, Path(entry), name, harness
+        self.rows, self.cols = size
         self.env = dict(os.environ, **(env or {}))
         self.directory = test.case / ("window-" + name)
         self.directory.mkdir(mode=0o700)
@@ -187,7 +208,7 @@ class ShellRig:
 
     def start(self):
         master, slave = os.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 130, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.cols, 0, 0))
         command = [sys.executable, str(self.entry), self.harness, sys.executable, str(self.test.root / "native.py"),
                    self.harness, SID, str(ROOT), str(self.log)]
         self.process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=self.env,
@@ -241,7 +262,8 @@ class ShellRig:
         dump = self.directory / "screen.bin"
         with self.lock:
             dump.write_bytes(bytes(self.raw))
-        done = subprocess.run([shutil.which("node"), "-e", SCREEN, str(dump)], capture_output=True, text=True,
+        done = subprocess.run([shutil.which("node"), "-e", SCREEN, str(dump), str(self.cols), str(self.rows)],
+                              capture_output=True, text=True,
                               timeout=30, env=dict(os.environ))
         return done.stdout
 

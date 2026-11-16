@@ -68,10 +68,16 @@ Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
 action worker. Keys that reached native since the last submitted turn leave the
 composer unproven (an erased draft, a form answered with Enter, a local command such
 as `/model` whose menu opened and closed, history-scroll keys, a turn stopped without
-a stop callback) until the native has painted after them and that newer screen reads
-idle with an empty composer; delivery readiness settles them the same way. A draft or
-form on that screen keeps them unproven, and keys the native has not painted after
-(an unechoed cursor key, a slow native) wait for its next paint or submitted turn. A start or selection (a resume picker's Enter, `/clear`,
+a stop callback) until the native has painted after them and a reading at least two
+seconds after the last of them sees that newer screen idle with an empty composer;
+delivery readiness settles them the same way. The two seconds are compared at a reading
+that comes anyway (a courier pass's status, an idle transition), never waited for: right
+after a person's Enter the composer is empty before that turn's prompt callback comes, and
+a slow native repaints its old screen before the keys' own. A draft or form on that screen
+keeps them unproven, and keys the native has not painted after (an unechoed cursor key)
+wait for its next paint or submitted turn. OpenCode's keys always wait for the next
+submitted turn: its focus can leave the composer while the composer still reads empty
+(a dialog such as `/models` over the transcript, its terminal pane). A start or selection (a resume picker's Enter, `/clear`,
 OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
 delivery readiness does; keys after that Enter are settled as above.
 A window with no selected session (OpenCode on its home route) has
@@ -720,11 +726,14 @@ in plain text, a secret `•••`),
 it as sent); the line goes when its session takes the answer, and a failed
 delivery brings the question back with its existing word. Until its session takes
 it, the line says so: `✓ answer sent · <what was sent> · awaiting delivery`, and,
-when only the person can let it in, why: a window whose shell runs an older release
-than its launch path names (`New release waiting`, the window's own line) or a
-Claude window outside the shell takes it when that window is reopened or typed in once.
-Fleet's QUESTIONS row draws the same parts from the same function
-(`session_block.sent_answer_line`); nothing offers to send it again. Answering returns
+when its session rests (Fleet's idle, unused or stale) and only the person can let it in,
+why: a window whose shell runs an older release than its launch path names
+(`New release waiting`, the window's own line) or a Claude window outside the shell
+takes it when that window is reopened or typed in once. A session still working takes it
+when its turn ends, and one whose state is not known gives no reason either.
+Fleet's QUESTIONS row and the panel's line draw the same parts from the same function
+(`session_block.sent_answer_line`): a secret answer `•••`, no control or direction
+characters; nothing offers to send it again. Answering returns
 focus to the native input, and one lone Esc or Enter within ten seconds of the
 answer is taken by the shell (never the native's interrupt of a running turn,
 never a submit of what stands in the native input).

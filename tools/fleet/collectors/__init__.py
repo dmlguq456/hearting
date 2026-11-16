@@ -372,6 +372,21 @@ def _adopt_child_titles(sessions, jobs):
             job._dispatch_context_owned = True
 
 
+def answer_wait_view(answer_waits, sessions):
+    """Fleet's view of the shared answer board, each sent message answer marked with what it waits for.
+
+    Read live here (rule 5): a window's shell and release are not part of the shared answer record,
+    and only a session whose state says it rests waits on the person (a working one takes the
+    answer when its turn ends). Run once each session's liveness is classified.
+    """
+    import session_shell
+    from ..refresh import fleet_answer_wait_view
+    states = {(session.harness, sid): session.liveness for session in sessions
+              for sid in (session.session_id, *(getattr(session, "session_aliases", None) or ())) if sid}
+    session_shell.mark_answer_waits(answer_waits.get("items", ()), states)
+    return fleet_answer_wait_view(answer_waits)
+
+
 def apply_session_aliases(sessions):
     """Attach each row's prior session ids (resume/fork), display-join use only.
 
@@ -630,13 +645,6 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             answer_waits = {"items": [], "by_session": {}, "complete": False,
                             "total": 0, "older": 0, "health": [
                                 {"source": "cache", "state": "unknown"}]}
-        # A sent message answer still on its way says what it waits for (rule 5): read live here,
-        # since a window's shell and release are not part of the shared answer record.
-        try:
-            import session_shell
-            session_shell.mark_answer_waits(answer_waits.get("items", ()))
-        except Exception:
-            pass
         from ..refresh import fleet_answer_wait_view
         fleet_answer_waits = fleet_answer_wait_view(answer_waits)
         for session in sessions:
@@ -885,6 +893,12 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             s.liveness = liveness.classify(s, now)
     except Exception:
         pass
+
+    if answer_waits is not None:
+        try:
+            fleet_answer_waits = answer_wait_view(answer_waits, sessions)
+        except Exception:
+            pass
 
     # A session display asks the existing collector/projector for only its
     # native identities. No display request is evidence of existence/liveness.

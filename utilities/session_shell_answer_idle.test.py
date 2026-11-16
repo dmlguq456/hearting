@@ -101,10 +101,13 @@ class AnswerReachesIdleSessionTest(AnswerReachesIdleShellTest):
         # side panel drew no `New release waiting` here; a window whose launch path was pinned to a
         # release (every Herdr window before this change) cannot see the next release at all.
         rig.wait(lambda: session_shell.release_behind(rig.current_binding()), "the move was not seen as a newer release")
-        self.assertEqual(session_shell.answer_delivery_wait("claude", SID), "old-shell")
+        # The reason is given while the window rests (Fleet's state for it); never while it works.
+        self.assertEqual(session_shell.answer_delivery_wait("claude", SID, "idle"), "old-shell")
+        self.assertEqual(session_shell.answer_delivery_wait("claude", SID, "working"), "")
         board = [{"id": signal_["id"], "kind": "message", "answer": "sent", "owner_state": "live",
                   "harness": "claude", "session_id": SID}]
-        self.assertEqual(session_shell.mark_answer_waits(board)[0]["answer_wait"], "old-shell")
+        resting = {("claude", SID): "idle"}
+        self.assertEqual(session_shell.mark_answer_waits(board, resting)[0]["answer_wait"], "old-shell")
         self.fleet_answer(signal_)
         self.courier(passes=3)
         self.assertEqual(rig.prompts(), [])
@@ -120,8 +123,8 @@ class AnswerReachesIdleSessionTest(AnswerReachesIdleShellTest):
         self.assertEqual(self.states(signal_)["request_state"], "applied", self.states(signal_))
         rig.wait(lambda: rig.idle_empty() and session_shell.release_behind(rig.current_binding()) is False,
                  "the window never handed over to the installed release")
-        self.assertEqual(session_shell.answer_delivery_wait("claude", SID), "")
-        self.assertNotIn("answer_wait", session_shell.mark_answer_waits(board)[0])
+        self.assertEqual(session_shell.answer_delivery_wait("claude", SID, "idle"), "")
+        self.assertNotIn("answer_wait", session_shell.mark_answer_waits(board, resting)[0])
 
     def test_a_herdr_window_keeps_its_installed_launch_path_and_sees_the_next_release(self):
         import session_shell
@@ -229,21 +232,82 @@ class SentAnswerLineTest(unittest.TestCase):
         self.assertNotIn("PRIVATE-SECRET", line)
         self.assertIn("•••", line)
 
+    def test_the_panel_line_hides_a_secret_and_carries_no_control_characters(self):
+        from fleet.session_block import question_presentations
+        raw = "a\x1b[31mb\x00c\u202ed\u2066e\x9bf\x7fg"
+        for key in ("is_secret", "isSecret", "secret"):
+            with self.subTest(key=key):
+                item = {"id": "S4:sent", "revision": "r", "answerable": False, "request_state": "submitted",
+                        "sent": {"answers": {"pw": ["TOP-SECRET-PW"], "note": [raw]}},
+                        "questions": [{"id": "pw", "question": "Password?", key: True},
+                                      {"id": "note", "question": "Note?"}]}
+                question_presentations([item], 80, brief_columns=36)
+                line = "".join(text for text, _key in item["sent_line"])
+                self.assertNotIn("TOP-SECRET-PW", line)
+                self.assertIn("•••", line)
+                self.assertIn("a[31mbcdefg", line)
+                self.assertEqual([ch for ch in line if ord(ch) < 32 or 0x7f <= ord(ch) <= 0x9f
+                                  or ch in "\u202e\u2066"], [])
+        # The list the board already carries (`questions.py` hides its secrets) loses its controls too.
+        item = {"id": "S4:sent", "revision": "r", "answerable": False, "request_state": "submitted",
+                "sent": ["•••", raw], "questions": [{"id": "pw", "question": "Password?"}]}
+        question_presentations([item], 80)
+        self.assertIn("•••, a[31mbcdefg", "".join(text for text, _key in item["sent_line"]))
+
     def test_what_each_harness_waits_for_without_a_shell(self):
         import session_shell
         with mock.patch.object(session_shell, "exact_binding", return_value=(None, "attachment-unavailable")):
-            self.assertEqual(session_shell.answer_delivery_wait("claude", "sid-a"), "no-shell")
+            self.assertEqual(session_shell.answer_delivery_wait("claude", "sid-a", "idle"), "no-shell")
             # OpenCode's plugin takes it when idle; Codex from its own queue.
-            self.assertEqual(session_shell.answer_delivery_wait("opencode", "sid-a"), "")
-            self.assertEqual(session_shell.answer_delivery_wait("codex", "sid-a"), "")
+            self.assertEqual(session_shell.answer_delivery_wait("opencode", "sid-a", "idle"), "")
+            self.assertEqual(session_shell.answer_delivery_wait("codex", "sid-a", "idle"), "")
         with mock.patch.object(session_shell, "exact_binding", return_value=(None, "attachment-ambiguous")):
-            self.assertEqual(session_shell.answer_delivery_wait("claude", "sid-a"), "")
+            self.assertEqual(session_shell.answer_delivery_wait("claude", "sid-a", "idle"), "")
         with mock.patch.object(session_shell, "exact_binding", return_value=(None, "attachment-unavailable")):
             board = [{"kind": "message", "answer": "sent", "owner_state": state, "harness": "claude",
                       "session_id": "sid-a"} for state in ("live", "none", "successor")]
             board.append({"kind": "message", "harness": "claude", "session_id": "sid-a"})
-            self.assertEqual([item.get("answer_wait") for item in session_shell.mark_answer_waits(board)],
+            self.assertEqual([item.get("answer_wait") for item in
+                              session_shell.mark_answer_waits(board, {("claude", "sid-a"): "idle"})],
                              ["no-shell", None, None, None])
+
+    def test_the_reason_is_given_only_while_the_session_rests(self):
+        # Working: it takes the answer when its turn ends, so no reason. Not known: no reason either.
+        import session_shell
+        binding = {"harness": "claude", "sid": "sid-a"}
+        windows = {"old-shell": ((binding, ""), True), "same-release": ((binding, ""), False),
+                   "no-shell": ((None, "attachment-unavailable"), None)}
+        expected = {"old-shell": "old-shell", "same-release": "", "no-shell": "no-shell"}
+        for window, (bound, behind) in windows.items():
+            for state in ("working", "blocked", "idle", "unused", "stale", "unknown", "dead", None):
+                want = expected[window] if state in ("idle", "unused", "stale") else ""
+                with self.subTest(window=window, state=state), \
+                        mock.patch.object(session_shell, "exact_binding", return_value=bound), \
+                        mock.patch.object(session_shell, "release_behind", return_value=behind):
+                    self.assertEqual(session_shell.answer_delivery_wait("claude", "sid-a", state), want)
+                    board = [{"kind": "message", "answer": "sent", "owner_state": "live", "harness": "claude",
+                              "session_id": "sid-a", "answer_wait": "old-shell"}]
+                    states = {} if state is None else {("claude", "sid-a"): state}
+                    self.assertEqual(session_shell.mark_answer_waits(board, states)[0].get("answer_wait"),
+                                     want or None)
+
+    def test_fleet_marks_the_reason_from_each_sessions_own_state(self):
+        # The collector reads the session's classified state (and its resumed ids) for the mark.
+        from types import SimpleNamespace
+        import session_shell
+        from fleet.collectors import answer_wait_view
+        for liveness, want in (("working", None), ("idle", "old-shell"), ("unknown", None)):
+            with self.subTest(liveness=liveness), \
+                    mock.patch.object(session_shell, "exact_binding", return_value=({"harness": "claude"}, "")), \
+                    mock.patch.object(session_shell, "release_behind", return_value=True):
+                board = {"items": [{"id": "S4:sent", "source": "S4", "kind": "message", "since": 900,
+                                    "stale": "current", "harness": "claude", "session_id": "sid-old",
+                                    "answer": "sent", "owner_state": "live"}],
+                         "total": 0, "older": 0, "complete": True, "health": []}
+                sessions = [SimpleNamespace(harness="claude", session_id="sid-new", session_aliases=["sid-old"],
+                                            liveness=liveness)]
+                view = answer_wait_view(board, sessions)
+                self.assertEqual([item.get("answer_wait") for item in view["items"]], [want])
 
     def test_each_harness_takes_one_answer_once_through_the_existing_courier(self):
         from fixtures.message_questions import MessageQuestionFixture
