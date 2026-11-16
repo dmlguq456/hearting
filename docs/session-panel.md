@@ -123,7 +123,7 @@ Fleet, **Ctrl+]** on a session page opens that exact session's panel.
 panel is under the native area), folds the panel into a strip under the native
 area, whose **▴** opens it again from the same corner; the native area gets
 the whole width back. The strip is one row at any window height:
-`● [e9] hearting │ Opus 5.5 xhigh │ CTX ━━━━──── 58% │ 5h 12% │ 7d 66% │ ◑to answer 1 │ 3 ROUTE ⠏2 ✕1 │ MESSAGES ← [e7] → [73]`
+`● [4f] web-api │ Opus 5.5 xhigh │ CTX ━━━━──── 46% │ 5h 12% │ 7d 66% │ ◑to answer 1 │ 3 ROUTE ⠏2 ✕1 │ MESSAGES ← [b2] → [9c]`
 with **▴** at its right end. The wait shows only while you owe an answer; compaction about to
 happen or a tidy notice takes its place; the Git branch follows the project
 where it fits. Narrow, whole values go: reset times, branch, effort, 7d, 5h,
@@ -196,7 +196,9 @@ How an idle session is reached differs by runtime
 ([core/ADAPTATION.md](../core/ADAPTATION.md), PG-58 and PG-59):
 
 - In a terminal with the panel, the shell injects a waiting message, request
-  line, or report into an idle Claude Code, Codex, or OpenCode session.
+  line, or report into an idle Claude Code, Codex, or OpenCode session when its
+  input is empty and no form is open. With text typed or a menu open it waits,
+  and the sender sees `awaiting delivery` with the reason.
 - Codex takes them through its own thread queue, with or without the panel.
 - Outside the panel's terminal, Claude Code takes them at its next callback
   (an idle session at your next prompt), and OpenCode at its next idle or tool
@@ -207,8 +209,9 @@ How an idle session is reached differs by runtime
   a command to wait on (`bounded-wait` with a `join`) instead of promising a
   wake.
 
-Fleet shows a request only as a PEERS link (the newest of its kind); it has no request
-list yet, and you cannot send a request or message from Fleet yet.
+Fleet lists a session's requests on its session page and shows the newest as a PEERS
+link; it has no list of every request across sessions, and you cannot send a request or
+message from Fleet yet.
 
 ## Per runtime
 

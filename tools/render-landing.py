@@ -39,12 +39,14 @@ INSTALL_CLAUDE_CMD = INSTALL_CMD + " -s -- --runtime claude"
 # is a one-line change. (README.md and README.ko.md keep their own copy, one place each.)
 HEADLINE = ("Different agents.", "One way of working.")
 THREE_LINES = (
-    ("Your way.", "Before work starts it confirms what you meant. What you corrected and decided is remembered "
-                  "and offered to your next sessions, on any of the three agents."),
-    ("The same everywhere.", "On Claude Code, Codex, and OpenCode the work runs with the same requests, "
+    ("Your way.", "Before work you ask for starts it confirms what you meant. What you corrected and decided is "
+                  "remembered and offered to your next sessions, on any of the three agents (Claude Code, Codex, "
+                  "OpenCode)."),
+    ("The same everywhere.", "Hearting is a layer on top of all three, so the work runs with the same requests, "
                              "stages, and checks."),
     ("Across sessions, in view.", "Sessions hand work to each other, and every step shows in the panel and in "
-                                  "Fleet, so you can correct it at any point."),
+                                  "Fleet (a terminal view of all your sessions), so you can correct it at any "
+                                  "point."),
 )
 
 
@@ -788,7 +790,7 @@ SHOTS = {
              "Rate limiting route at 2/4 execute, its owner and its execute worker, and, under a thin rule, the peer request Test run to [b2] "
              "at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a "
              "global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line "
-             "the working folder and hearting v4.45.1."),
+             "the working folder and hearting v4.46.0."),
     "overview": (1440, 810, "Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, "
                  "Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run "
                  "for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with "
@@ -814,7 +816,7 @@ SHOTS = {
               "the project status document in a popup in the middle of the window, with the one line, the decisions "
               "needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and "
               "on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder "
-              "and hearting v4.45.1."),
+              "and hearting v4.46.0."),
     "panel-question": (930, 542, "The bottom layout in a 100-column window: the panel under the native area, with the "
                        "session's head, the 2 QUESTIONS box with a rose border, the first question, its three choices "
                        "as text, the first recommended, and answer, Ctrl+] at the right; then messages and the usage "
@@ -826,8 +828,8 @@ SHOTS = {
 }
 # The picture the README and the home page open with, with its one line.
 OPENING = (
-    ("seat", "Session [4f] at work, with its Hearting panel on the right. Demo data; the conversation is "
-             "illustrative."),
+    ("seat", "Session [4f] at work, with its Hearting panel on the right. A route is the staged work this "
+             "session started. Demo data; the conversation is illustrative."),
 )
 GIF_ALT = ("Fleet walk-through in five steps: the OVERVIEW of all sessions, the ROUTES list with one route opened in "
            "place, one session's page, that session's own window with its Hearting panel, and one request's stage "
@@ -872,13 +874,13 @@ KINDS = (
      "When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where",
      "Panel: the rose-bordered box &middot; Fleet: QUESTIONS"),
     ("ROUTE", "The work this session started: its stages, who runs each, and how each is checked",
-     "The session&rsquo;s owner, once a request needs a route",
+     "This session, once a request needs a route (the route then starts its owner)",
      "When the route finishes; its result stays one line until your next input or ten minutes",
      "Panel: the route box &middot; Fleet: ROUTES"),
     ("PEER REQUEST", "Work handed to another session, with a number, revisions, and reports", "The session that asks",
      "By the other session&rsquo;s final report or rejection, or the asker&rsquo;s cancel; a partial report keeps it open",
-     "Panel: rows in the route box under a thin rule, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
-     "<code>&#10003;</code> finished), whole in the MESSAGES popup &middot; Fleet: a PEERS link"),
+     "Panel: rows in the route box, under a thin rule when a route and a request both show and there is room, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
+     "<code>&#10003;</code> finished, <code>&#10005;</code> rejected or cancelled), whole in the MESSAGES popup &middot; Fleet: the session page&rsquo;s PEER REQUEST rows and a PEERS link"),
     ("MESSAGES", "A short note, read and done", "Any session", "Nothing to close",
      "Panel: MESSAGES &middot; Fleet: the session page and PEERS"),
     ("PEERS", "The sessions linked by messages, requests, supervision, or a handover", "Those links themselves",
@@ -1521,7 +1523,7 @@ def render_index(d: dict) -> str:
   <div class="grid grid3">
     <div class="card"><span class="num">PANEL</span><h3>The panel beside each session</h3>
       <p>Project and Git, model and context, what it is doing now, then a few rows each of questions, routes
-      and requests, messages, memory, and usage; press one for its whole table in a popup.
+      and requests, messages, memory, and usage; press the questions, the routes, or messages for the whole table in a popup.
       <code>Ctrl+]</code> opens the question waiting here first; <code>f</code> in a popup opens Fleet in the same
       window. <a href="{REPO_URL}/blob/main/docs/session-panel.md">Details &rarr;</a></p></div>
     <div class="card"><span class="num">FLEET</span><h3>Every session at once</h3>
@@ -1690,7 +1692,7 @@ SCREENS = [
       "<b>Marks:</b> working, idle, and waiting-for-you each look different.",
       "<b>Top row:</b> each runtime's usage-window gauges, and how many sessions are working, idle, or waiting."]),
     ("peers", "PEERS", "Who works with whom.",
-     "One card per session, and every link between them: a request sent, a report back, a message, a watch, "
+     "One card per session, and the newest link of each kind between them: a request, a message, a watch, "
      "and when.",
      ["The same exchanges each session&rsquo;s panel lists, at the same minutes."]),
     ("routes", "ROUTES", "Each request, stage by stage.",
@@ -1806,8 +1808,8 @@ def render_fleet(d: dict) -> str:
       <p class="t">Project and Git, model and context, the title and what the session is doing now; then a few
       rows each of the questions waiting for you, this session&rsquo;s routes and requests in one box, messages, and
       saved memory with its scope and kind; then the usage windows of the three agents. The <b>STATUS &rsaquo;</b>
-      button opens the project&rsquo;s status document. Press a section and its whole table opens in a popup in the
-      middle of the window, the rest gray behind it.</p>
+      button opens the project&rsquo;s status document. Press the questions, the route box, or MESSAGES and its whole table opens in a popup in the
+      middle of the window, the rest gray behind it; MEM and USAGE open nothing.</p>
     </div>
     <div>
       <p class="t"><b>A question you can answer here</b> stands in a rose-bordered box under <code>QUESTIONS</code>. Press
@@ -1826,8 +1828,9 @@ def render_fleet(d: dict) -> str:
       opens the body itself, partial reports keep it open, and a final report closes it and wakes the session
       that asked. Both panels list it as a PEER REQUEST until it closes &mdash; <code>&rarr;</code> handed
       out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished.</p>
-      <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet shows
-      requests only as PEERS links.</p>
+      <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet lists a
+      session&rsquo;s requests on its session page and shows the newest as a PEERS link; it has no list of every
+      request across sessions, and you cannot send one from Fleet yet.</p>
     </div>
     {shot("requests")}
   </div>

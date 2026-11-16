@@ -11,9 +11,9 @@
 <p align="center"><strong>Different agents. One way of working.</strong></p>
 
 <p align="center">
-<strong>Your way.</strong> Before work starts it confirms what you meant. What you corrected and decided is remembered and offered to your next sessions, on any of the three agents.<br>
-<strong>The same everywhere.</strong> On Claude Code, Codex, and OpenCode the work runs with the same requests, stages, and checks.<br>
-<strong>Across sessions, in view.</strong> Sessions hand work to each other, and every step shows in the panel and in Fleet, so you can correct it at any point.
+<strong>Your way.</strong> Before work you ask for starts it confirms what you meant. What you corrected and decided is remembered and offered to your next sessions, on any of the three agents (Claude Code, Codex, OpenCode).<br>
+<strong>The same everywhere.</strong> Hearting is a layer on top of all three, so the work runs with the same requests, stages, and checks.<br>
+<strong>Across sessions, in view.</strong> Sessions hand work to each other, and every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.
 </p>
 
 <p align="center">
@@ -35,9 +35,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, and, under a thin rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.45.1." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, and, under a thin rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.46.0." width="100%">
 </p>
-<p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. Demo data; the conversation is illustrative.</sub></p>
+<p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. A route is the staged work this session started. Demo data; the conversation is illustrative.</sub></p>
 
 ## One seat for every session
 
@@ -52,8 +52,8 @@ Codex, and OpenCode terminal. Under the project and Git state, the model and
 context, and the session's title and what it is doing now, each section keeps a
 few rows: questions waiting for you, this session's routes and requests in one
 box, messages, saved memory (`MEM`), and the usage windows of the three agents
-(`USAGE`). Press a section and its whole table opens in a popup in the middle
-of the window, the rest gray behind it. A question you can answer here stands
+(`USAGE`). Press the questions, the route box, or `MESSAGES` and its whole table opens in a popup in the middle
+of the window, the rest gray behind it; `MEM` and `USAGE` open nothing. A question you can answer here stands
 in a rose-bordered box. **Ctrl+]** always opens a popup, that question first:
 answer with **Tab**, **1–9**, and **Enter**, and the popup closes with
 `✓ answer sent`. The **STATUS ›** button on the REPO row opens the project's
@@ -65,7 +65,7 @@ layout, and per-runtime details are in
 [docs/session-panel.md](docs/session-panel.md).
 
 <p align="center">
-  <img src="docs/fleet/panel.png" alt="Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: the project status document in a popup in the middle of the window, with the one line, the decisions needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder and hearting v4.45.1." width="100%">
+  <img src="docs/fleet/panel.png" alt="Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: the project status document in a popup in the middle of the window, with the one line, the decisions needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder and hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub><b>STATUS pressed</b> — the project's status document opens whole in a popup; the rest goes gray. Demo data.</sub></p>
 
@@ -82,8 +82,8 @@ waiting on whom. Each has its own place in the panel and in Fleet.
 | | What it is | Who opens it | When it closes | Where it shows |
 |---|---|---|---|---|
 | **QUESTIONS** | A question waiting for your answer or approval | An agent that needs you | When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where | Panel: the rose-bordered box · Fleet: QUESTIONS |
-| **ROUTE** | The work this session started: its stages, who runs each, and how each is checked | The session's owner, once a request needs a route | When the route finishes; its result stays one line until your next input or ten minutes | Panel: the route box · Fleet: ROUTES |
-| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box under a thin rule, each with the other session's number, harness, model, and effort (`→` handed out, `◂` handed to you, `✓` finished), whole in the MESSAGES popup · Fleet: a PEERS link |
+| **ROUTE** | The work this session started: its stages, who runs each, and how each is checked | This session, once a request needs a route (the route then starts its owner) | When the route finishes; its result stays one line until your next input or ten minutes | Panel: the route box · Fleet: ROUTES |
+| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box, under a thin rule when a route and a request both show and there is room, each with the other session's number, harness, model, and effort (`→` handed out, `◂` handed to you, `✓` finished, `✕` rejected or cancelled), whole in the MESSAGES popup · Fleet: the session page's `PEER REQUEST` rows and a PEERS link |
 | **MESSAGES** | A short note, read and done | Any session | Nothing to close | Panel: MESSAGES · Fleet: the session page and PEERS |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover | Those links themselves | — | Fleet: PEERS |
 
@@ -113,9 +113,9 @@ from you.
 A session can also watch another and be woken once when it finishes, stops, or
 needs you. None of this needs herdr or tmux; it runs on Hearting's own records.
 How fast an idle session is reached differs by runtime (see
-[Runtimes and models](#runtimes-and-models)). Fleet shows a request only as a
-PEERS link (the newest of its kind); it has no request list of its own yet, and you
-cannot send one from Fleet yet. For scripts, the commands are
+[Runtimes and models](#runtimes-and-models)). Fleet lists a session's requests on its session page and shows the newest as a PEERS
+link; it has no list of every request across sessions, and you cannot send one from Fleet
+yet. For scripts, the commands are
 `hearting run peer-steward request`, `report`, and `show`
 ([core/OPERATIONS.md](core/OPERATIONS.md), “Peer requests”).
 
@@ -336,7 +336,7 @@ reached is not:
 | | Claude Code | Codex | OpenCode |
 |---|---|---|---|
 | Panel | yes | yes | yes |
-| A message, request, or report reaches an idle session | at once in the panel's terminal; outside it, at the session's next turn | at once, through its own thread queue | at once in the panel's terminal; outside it, at its next idle or tool callback |
+| A message, request, or report reaches an idle session | at once in the panel's terminal when its input is empty (typed text or an open menu makes it wait, and the sender sees why); outside it, at the session's next turn | at once, through its own thread queue | at once in the panel's terminal when its input is empty (typed text or an open menu makes it wait, and the sender sees why); outside it, at its next idle or tool callback |
 | Woken when a watched session finishes or needs you | yes | where Hearting has proven its terminal; otherwise it gets a command to wait on | it gets a command to wait on |
 
 Shared contracts name budgets, not vendor models. Each runtime maps the budgets

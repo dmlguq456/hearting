@@ -145,11 +145,13 @@ request in the route box until it closes. Short notes and watching (“tell me w
 finishes”) work the same way. None of this needs herdr or tmux.
 
 In a terminal with the panel, an idle session on any runtime is reached at
-once. Codex is reached at once anywhere, through its own thread queue. Outside
+once when its input is empty (typed text or an open menu makes it wait, and the sender
+sees why). Codex is reached at once anywhere, through its own thread queue. Outside
 the panel's terminal, an idle Claude Code session is reached at its next turn
 and OpenCode at its next idle or tool callback; the request stays open and
-listed meanwhile. Fleet shows a request only as a PEERS link (the newest of its kind);
-it has no request list yet, and you cannot send one from Fleet yet. Details:
+listed meanwhile. Fleet lists a session's requests on its session page and shows the newest as a PEERS
+link; it has no list of every request across sessions, and you cannot send one from Fleet
+yet. Details:
 [docs/session-panel.md](docs/session-panel.md#requests-and-messages).
 
 ## Does the language setting translate every label?
