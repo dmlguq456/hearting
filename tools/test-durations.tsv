@@ -39,7 +39,6 @@ hooks/agent_home_equivalence.test.py	0.27
 hooks/core_write_guard.test.py	0.31
 hooks/design-postwrite.test.sh	0.21
 hooks/dispatch_owner_rewake.test.py	50.81
-hooks/local-evidence-inject.test.sh	1.45
 hooks/mem-recall-inject.test.sh	2.42
 hooks/peer_message_record.test.py	74.81
 hooks/peer_steward_rewake.test.py	53.44

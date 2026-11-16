@@ -119,12 +119,16 @@ class RouteParentScenarioTest(unittest.TestCase):
                 self.assertEqual(row["unextracted"], 0)
 
     def test_a_typed_prompt_carries_a_repeated_wait_line_once_with_its_count(self):
+        # The unchanged line enters the session once; OpenCode's system-prompt context lasts one
+        # request, so there it is carried on every typed prompt.
         for harness, result in self.results.items():
-            for prompt in result["prompts"]:
+            for number, prompt in enumerate(result["prompts"]):
                 with self.subTest(harness=harness, prompt=prompt["prompt"]):
                     cards = [item["text"] for item in result["texts"]
-                             if item["prompt"] == prompt["prompt"] and item["carrier"] == "prompt-card"]
-                    self.assertEqual(cards, ["[답변 필요] 답 필요 ×3"])
+                             if item["prompt"] == prompt["prompt"] and item["carrier"] == "prompt-card"
+                             and item["text"]]
+                    carried = number == 0 or harness == "opencode"
+                    self.assertEqual(cards, ["[답변 필요] 답 필요 ×3"] if carried else [])
 
 
 class StewardScenarioTest(unittest.TestCase):

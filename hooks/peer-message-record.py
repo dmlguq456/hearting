@@ -722,11 +722,12 @@ def main(exit_guard=False):
                 note_turn_received(payload, [], [peer])
         mod = _peer_message_module()
         guidance = ""
+        guidance_seen = []
         if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
                     or "cross-session-message" in prompt):
-            guidance = mod.receiver_guidance(
+            guidance = mod.receiver_guidance_once(
                 prompt, {"harness": "claude", "session_id": payload.get("session_id")},
-                cwd=payload.get("cwd") or os.getcwd())
+                cwd=payload.get("cwd") or os.getcwd(), deferred=guidance_seen)
         rows = []
 
         def extra_context():
@@ -750,6 +751,8 @@ def main(exit_guard=False):
                 "UserPromptSubmit", extra_context=extra_context,
                 native_delivery=True, deadline=_deadline(), stream=out)
             if out.flushed:
+                if guidance_seen:        # the fixed guidance counts as delivered only now
+                    mod.commit_receiver_guidance(guidance_seen)
                 note_turn_received(payload, [], _peer_items(shown))
         else:
             extra = extra_context()

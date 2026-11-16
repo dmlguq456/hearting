@@ -161,9 +161,6 @@ def context(harness, sid, jobs=None):
             receipt = row["receipt"]
             if not isinstance(receipt, dict) or not receipt.get("parent_next"):
                 return ""
-            seen = folder / (key + ".seen")
-            if seen.exists() and json.loads(seen.read_text()) == row["id"]:
-                return ""
             text = "[start-receipt] " + " ".join(f"{k}={receipt[k]}" for k in ("route_id", "state") if k in receipt)
             text += f"\nreceipt_file={path}"
             for name in ("parent_next", "parent_next_reason", "parent_next_command", "required_action", "resume_command"):
@@ -174,8 +171,10 @@ def context(harness, sid, jobs=None):
                 text += "\n" + line
             if len(text.encode()) > 8000:
                 text = f"[start-receipt] parent_next={receipt['parent_next']}\nRead the full receipt: {path}"
-            _write(seen, row["id"])
-            return text
+            # The same text twice in a row adds nothing the session has not read; the first
+            # turn after a compaction or clear delivers it once more (context_repeat.reset).
+            import context_repeat
+            return context_repeat.fresh_once(harness, sid, "start-receipt", text)
     except (OSError, ValueError, TypeError, KeyError):
         return ""
 

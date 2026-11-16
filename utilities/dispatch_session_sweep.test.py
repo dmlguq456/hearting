@@ -371,8 +371,6 @@ def _slow_recovery_probe(base: Path, record_path: Path, snapshot_path: Path,
         "subprocess.Popen = _tracked_popen\n"
         "def _tracked_run(args, *pos, **kwargs):\n"
         "    argv = [str(item) for item in args] if not isinstance(args, str) else [args]\n"
-        "    if os.environ.get('R1_CONTEXT_OUTPUT') and any(Path(item).name == 'local-evidence-inject.sh' for item in argv):\n"
-        "        return subprocess.CompletedProcess(args, 0, os.environ['R1_CONTEXT_OUTPUT'], '')\n"
         "    return _real_run(args, *pos, **kwargs)\n"
         "subprocess.run = _tracked_run\n"
         "def _slow_ensure(*args, **kwargs):\n"
@@ -4315,7 +4313,6 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
                     "AGENT_DISPATCH_JOBS": str(dispatch_root / "jobs.log"),
                     "HARNESS_STATE_ROOT": str(case_base / "stable-state"),
                     "AGENT_PEER_LEDGER_ROOT": str(case_base / "peer-ledger"),
-                    "R1_CONTEXT_OUTPUT": "fixture SessionStart context",
                 })
                 payload = {"source": "startup", "cwd": str(self.root.parent)}
                 if sid:
