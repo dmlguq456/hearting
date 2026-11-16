@@ -416,7 +416,7 @@ def _request_delivery(row, gone=False):
     return word
 
 
-def request_rows(views, now, tag_of):
+def request_rows(views, now, tag_of, doer_of=None):
     """The panel's lines for requests this session sent (``out``) and received (``in``).
 
     ``views`` are plain dicts made by the host (a ``peer-request-v1`` record, which side this
@@ -425,8 +425,14 @@ def request_rows(views, now, tag_of):
     can reuse it. Delivery (``sent``/``delivered``/``seen``) and the work state (``open``,
     ``partial``, ``final``, ``rejected``, ``cancelled``) are two columns and are never mixed;
     no ``in progress`` word appears (a route is what would say it). A closed request stays
-    ``DONE_AFTERGLOW_MIN`` minutes after it closed, and longer while its last answer (or
-    cancel notice) has not been seen by this session. A value that is unknown is left out.
+    ``DONE_AFTERGLOW_MIN`` minutes after it closed, sent or received (11-16: the receiving
+    window shows that it answered); a sent one longer while its last answer (or cancel
+    notice) has not been seen by this session. A value that is unknown is left out.
+
+    11-16 (the person: "[6c] claude opus 5.5 xhigh 이런식으로"): the other session's harness
+    (the record's), and its model and effort from ``doer_of(harness, session_id)`` (a session
+    value already read: ``{"model", "effort"}`` or None; nothing is collected here), painted as
+    a route's doer (:func:`doer_paint`). A session that is gone keeps its name alone.
     """
     from .model import DONE_AFTERGLOW_MIN
     rows = []
@@ -443,19 +449,31 @@ def request_rows(views, now, tag_of):
                        revisions[-1] if revisions else {})
         closed = state in ("final", "rejected", "cancelled")
         if closed:
-            if side == "in":
-                continue  # received work is shown while it is open
             closed_at = ((record.get("cancel") or {}).get("at") if state == "cancelled"
                          else max((r.get("at") or 0 for r in reports if not r.get("late")), default=0)) \
                 or record.get("updated") or 0
             last_ref = ((record.get("cancel") or {}).get("notice_ref") if state == "cancelled"
                         else next((r.get("transfer_ref") for r in reversed(reports) if not r.get("late")), None))
-            unseen = bool(last_ref) and (deliveries.get(last_ref) or {}).get("state") != "received"
+            # (Only a sent one waits for this session to see its answer; a received one's answer is this session's own.)
+            unseen = (side == "out" and bool(last_ref)
+                      and (deliveries.get(last_ref) or {}).get("state") != "received")
             if now - closed_at >= DONE_AFTERGLOW_MIN * 60 and not unseen:
                 continue
         other = record.get("recipient" if side == "out" else "requester") or {}
         tag = tag_of(other.get("harness"), other.get("session_id"))
         who = "[" + str(tag).strip("[]") + "]" if tag else str(other.get("name") or "")
+        # The other session as a route's doer reads (`[6c] claude Opus 5.5 xhigh`): only while it has its
+        # Fleet number; its model and effort only as far as a value already read knows them.
+        doer = {}
+        if tag and other.get("harness") in ("claude", "codex", "opencode"):
+            known = None
+            if doer_of is not None:
+                try:
+                    known = doer_of(other.get("harness"), other.get("session_id"))
+                except Exception:  # noqa: BLE001 - a display value never costs the row
+                    known = None
+            known = known if isinstance(known, dict) else {}
+            doer = doer_paint({"harness": other["harness"], "model": known.get("model"), "effort": known.get("effort")})
         delivery = _request_delivery(deliveries.get(current.get("transfer_ref")),
                                      gone=bool(view.get("gone")))
         word = lambda key: ui_text("fleet.session_panel." + key)  # noqa: E731
@@ -511,7 +529,7 @@ def request_rows(views, now, tag_of):
             "kind": kind, "state": state, "side": side, "delivery": delivery or "",
             "details": details, "body": body_lines[:_REQUEST_BODY_LINES],
             "body_more": len(body_lines) > _REQUEST_BODY_LINES,
-            "body_label": word("request_body")})
+            "body_label": word("request_body"), **doer})
     order = {"request-in": 0, "request-rejected": 1, "request-out": 2, "request-done": 4}
     rows.sort(key=lambda row: order.get(row["kind"], 2))
     return rows
@@ -777,7 +795,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         # 11-15: the table popups' keys (the question popup's are the editor's own).
         "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page",
         # 11-15 (panel polish 1): the action under a question to answer here.
-        "answer_action")}
+        "answer_action",
+        # 11-16 (the person: "PEER REQUEST라고 할까?"): the route box's request name tag, and its one shorter form.
+        "peer_request", "peer_request_short")}
     # Fixed words are English in every language (spec rule 3).
     labels.update(settings="Settings", routes="route", context="context", route_line="route line",
                   rule_motion="rule motion")
