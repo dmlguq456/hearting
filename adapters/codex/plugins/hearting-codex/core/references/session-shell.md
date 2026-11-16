@@ -469,19 +469,23 @@ popup; a request row the MESSAGES popup).
   `transcript.table_parts`, its other lines wrapped as before). A received message comes as one line
   (the backend joins its text), so it has no table.
 - MEM: the newest saved memory records of this repository and the global ones
-  together (11-15), newest first, two at most, from the journal Fleet reads (the
-  newest `add`/`supersede` rows of its project, and the global ones of the same
-  read), one row each saying what the record is as the memory system records it:
-  `◆` durable or `◇` working (`·` for a record naming no tier), then dim its scope
-  (`project`, `global`) and its kind, the stored headline (else the start of its
-  snippet), its age at the right. Short of cells the headline is cut first, then
-  the kind leaves, then the scope (the mark and the age stay); no section without
-  a journal row.
+  together (11-15), newest first, five at most (`MEM_MAX`; 11-16, the person: "메모리도
+  메시지랑 같은 맥락이야"), from the journal Fleet reads (the newest `add`/`supersede`
+  rows of its project, and the global ones of the same read), two rows each as
+  v4.36.4 drew them (spec rule 46 (b), restored 11-16): a dim head row saying what the
+  record is as the memory system records it (the person's 11-15 words: `◆` durable
+  or `◇` working, `·` for a record naming no tier, then its scope, `project` or
+  `global`, its kind and its age: `◆ project · decision · 10m`) and, two cells in,
+  the stored headline (else the start of its snippet) in the body color on up to two
+  rows, the second ending in `…` where it goes on. Short of cells the head row loses
+  the kind, then the scope (the mark and the age stay); short of rows every headline
+  takes one row, then fewer records show; no section without a journal row.
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
 empty rows and a value's further rows (title, NOW, a route's title); every other
-section down to two rows, then to one, the lowest first (MEM; the question's action row,
+section down to two rows, then to one, the lowest first (MEM: its headlines one row each, then
+down to two records and to one; the question's action row,
 then its summary keeps one row and the guidance line goes); the
 structural rows (the empty row inside the metadata, the head's rule); then every message takes the
 one-row form (`← [e7] text`; 11-16, v4.36.4's places and order: a body keeps its one row, then the one-row

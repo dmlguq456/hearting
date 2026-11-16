@@ -1041,7 +1041,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count, recent_memory
-    from fleet.session_panel import presentation, request_rows
+    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
@@ -1107,10 +1107,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
                  **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, two at most (the
+    # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, five at most (11-16; the
     # journal Fleet reads, read again only when it changed); their headlines ride the open-work
     # query below.
-    memory_rows, memory_paths = recent_memory(values.get("cwd"))
+    memory_rows, memory_paths = recent_memory(values.get("cwd"), MEMORY_ITEMS)
     work, work_paths = observe_work(values.get("cwd"),
                                     tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
     if memory_rows:

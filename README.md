@@ -198,8 +198,8 @@ and its choices), the route box (`╭─ 4 ROUTE │ 2 REQUEST ─╮`: every ro
 now with its role, harness, model and effort, its `CTX` gauge with the time after it, its
 title, its kind and where it stands, its live workers in a smaller box under it, then the
 requests this session sent or received),
-`MESSAGES +3` (up to five messages, each its head — who, harness, time, kind — and its first line) and `MEM` (the two newest saved memories of
-this repository and global ones, each `◆` durable or `◇` working, then its scope and kind), each
+`MESSAGES +3` (up to five messages, each its head — who, harness, time, kind — and its first line) and `MEM` (up to five of the newest saved memories of
+this repository and global ones, each a dim head — `◆` durable or `◇` working, its scope, kind and age — over its headline), each
 head but the route box's `N NAME counts ─── ›`. A press on any row of a route opens the
 routes popup with that route unfolded, a request's row the MESSAGES popup. Experiments and the
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. The question you can

@@ -23,6 +23,9 @@ const WAIT_BLINK=10;
 // 11-16 (the person: "최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): MESSAGES shows the newest MESSAGES_MAX
 // messages at most, each its head row and its first line (spec rule 31).
 const MESSAGES_MAX=5;
+// 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
+// dim head row and its headline on up to two rows (spec rule 46 (b)).
+const MEM_MAX=5;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
   position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
@@ -652,13 +655,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return [...cut(name,Math.max(1,room-2)),pad(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
     };
-    // Spec rule 46: the newest saved memory records (this repository's and the global ones, two at
-    // most) stand in their own section under the messages, one row each (below). An older backend
+    // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
+    // most) stand in their own section under the messages, two rows or three each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
     // without its kind (rule 46 (e)); the head carries no MEM row either way.
     const memItems=(()=>{
       if(!side)return [];
-      if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,2)
+      if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,MEM_MAX)
         .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim()}));
       const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
       return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
@@ -1332,21 +1335,28 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const messagesHead=n=>{const hidden=messageTotal-Math.min(n,messageTotal);return sectionHead([],side?'MESSAGES':'messages',hidden>0?[text('+'+hidden,'loc_repo')]:[]);};
     // The newest messages (in their order, the newest last).
     const messageRows=n=>n>0?messages.slice(-n).flatMap(m=>messageOne?[messageLine(m)]:[messageTop(m),messageBody(m)]):[];
-    // MEM (spec rule 46; 11-15 panel polish 5): the newest saved memory records of this repository and
-    // the global ones together, newest first, two at most, one row each: `◆` durable or `◇` working
-    // (`·` for a record that names no tier), then, dim, its scope and its kind as the memory system
-    // names them (`◆ project decision headline   10m`, `◇ global lesson …   2h`), the age at the right.
-    // Short of cells the headline is cut first, then the kind word leaves, then the scope word (the
-    // mark and the age stay). No popup: its head has no `›`.
-    const memRow=m=>{
-      const age=m.age?[text(m.age,'dim')]:[],tail=age.length?size(age)+1:0;
-      const mark=text((m.tier==='durable'?'◆':m.tier==='working'?'◇':'·')+' ','dim'),words=[m.scope,m.kind].filter(Boolean);
-      for(let k=words.length;k>=0;k--){
-        const lead=[mark,...words.slice(0,k).map(w=>text(w+' ','dim'))],room=inner-size(lead)-tail;
-        if(room>=4||!k){const n=cut([text(m.text,'loc_repo')],Math.max(1,room));
-          return room>=4?[...lead,...n,pad(room-size(n)),...(age.length?[text(' '),...age]:[])]:cut([...lead,text(m.text,'loc_repo')],inner);}
+    // MEM (spec rule 46; 11-16, v4.36.4's two rows restored, the person: "메모리도 메시지랑 같은 맥락이야"): the
+    // newest saved memory records of this repository and the global ones together, newest first,
+    // MEM_MAX at most, each a dim head row and, two cells in, its headline in the body color on up to
+    // two rows (the second ending in `…` where it goes on). The head keeps what the person asked for on
+    // 11-15 ("전역인지 여기 레포인지, 영구적인지, 일시적인이"): `◆` durable or `◇` working (`·` for a record that
+    // names no tier), its scope and its kind as the memory system names them, and its age
+    // (`◆ project · decision · 10m`); short of cells the kind leaves, then the scope (the mark and the
+    // age stay). Short of rows (below) every headline takes one row, then fewer records show. No popup:
+    // its head has no `›`.
+    let memBody=2;
+    const memTop=m=>{
+      const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
+      for(const words of [[m.scope,m.kind],[m.scope],[]]){
+        const row=[text([mark,...words.filter(Boolean),m.age].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 '),'dim')];
+        if(size(row)<=inner)return row;
       }
-      return [];
+      return cut([text([mark,m.age].filter(Boolean).join(' '),'dim')],inner);
+    };
+    const memRows=m=>{
+      let body=wrapAll([text(m.text,'loc_repo')],inner-2);
+      if(body.length>memBody)body=[...body.slice(0,memBody-1),ellipsis(body[memBody-1],inner-2)];
+      return [memTop(m),...body.map(row=>[text('  '),...row])];
     };
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
@@ -1354,7 +1364,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
       {name:'ROUTE',on:!!routeTitle,box:true},
       {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
-      {name:'MEM',on:memItems.length>0,max:2,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).map(memRow)}];
+      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).flatMap(memRows)}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
     const sectionRows=s=>s.name==='QUESTIONS'?questionRows():s.rows(take[s.name]);
@@ -1387,6 +1397,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
+      // (MEM, 11-16: its headlines take one row before fewer records show.)
+      if(name==='MEM'&&down===2)give(()=>kept.MEM&&memBody>1,()=>{memBody=1;},()=>{memBody=2;});
       if(name==='QUESTIONS'){if(down===2)give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
         if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
       give(()=>kept[name]&&take[name]>down,()=>{take[name]--;},()=>{take[name]++;});
@@ -1411,11 +1423,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule]);
+      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody]);
     for(const undo of gave.reverse()){
       const was=choices();undo();
       if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule]=v.slice(12);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody]=v.slice(12);}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
