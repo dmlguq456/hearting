@@ -22,7 +22,7 @@ from tools.fleet.tests import explorer_fixture as ef
 
 FIXTURE = Path(__file__).parent / "fixtures" / "explorer" / "view_model.json"
 HARNESSES = ("claude", "codex", "opencode")
-FREE_KEYED = frozenset(("peer_edges.cards", "dialogue.logs", "models.shown", "models.profile_map", "models.model_choices",
+FREE_KEYED = frozenset(("peer_edges.cards", "peer_edges.sessions", "dialogue.logs", "models.shown", "models.profile_map", "models.model_choices",
                         "models.main_only", "models.pools", "models.context", "models.context_source",
                         "models.token_units", "models.effort_keys"))
 # Sections only the selection pump's reads can fill: without them they are omitted (empty), never invented.
@@ -91,7 +91,9 @@ def route_extension(key, value):
 _QUESTION_TEXT_FIELDS = frozenset(("node", "since_at", "route_id", "route_title", "owner_sid",
                                    "registered"))
 _QUESTION_ENUMS = {"owner_state": ("live", "successor", "none", "unknown"),
-                   "fold": ("older", "ownerless")}
+                   "fold": ("older", "ownerless"),
+                   # What a sent answer waits for (11-16, `session_shell.answer_delivery_wait`).
+                   "answer_wait": ("old-shell", "no-shell")}
 # Rule 5 (11-14): the person's answer is on its way.
 _QUESTION_FLAGS = frozenset(("sent",))
 

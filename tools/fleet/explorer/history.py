@@ -54,7 +54,9 @@ def draw_history(grid, vm, state, x=34, y=3):
         tag = str(seat[0])
         repo = str(seat[1])
         generation_count = int(seat[2]) if len(seat) > 2 else 0
-        last_clear = str(seat[3]) if len(seat) > 3 else "·"
+        # When the seat was last cleared, as a time of day (``HH:MM``, ``MM-DD``), never ``ago``.
+        from .live import _clear_when
+        last_clear = (_clear_when(seat[3]) if len(seat) > 3 else None) or "·"
         cards = tuple((vm.cards or {}).get(tag, {}).get("cards", ()))
         title = str(seat[5] or "·") if len(seat) > 5 else "·"
         is_open = opened == tag

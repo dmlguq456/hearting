@@ -1388,10 +1388,10 @@ class Scenario:
         raise NotImplementedError
 
 
-# The local-evidence probe's own header: every harness injects it on the first
-# prompt through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the
-# plugin's system-context hook), and no static instruction file contains it.
-HOOK_CONTEXT_MARKER = "# Local evidence present"
+# The memory-candidate probe's own header: every harness injects it on the prompt
+# through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the plugin's
+# system-context hook), and no static instruction file contains it.
+HOOK_CONTEXT_MARKER = "# Memory candidates"
 
 
 class BootScenario(Scenario):
@@ -1400,13 +1400,15 @@ class BootScenario(Scenario):
                "first model request carries Hearting's hook-injected context.")
 
     def prepare(self, run):
-        # One artifact makes the local-evidence probe emit its block, so the check
-        # reads hook output rather than the bootstrap instructions every harness loads.
-        root = Path(run.home.env.get("AGENT_ARTIFACT_ROOT")
-                    or run.home.workspace / ".agent_reports")
-        seeded = root / "research" / "2026-01-01_boot-hook-context" / "report.md"
-        seeded.parent.mkdir(parents=True, exist_ok=True)
-        seeded.write_text("boot scenario hook-context probe\n", encoding="utf-8")
+        # One global record that the boot prompt matches makes the candidate probe emit
+        # its block, so the check reads hook output rather than the bootstrap
+        # instructions every harness loads. The store lives in the throwaway HOME.
+        subprocess.run(
+            [sys.executable, str(SOURCE / "tools" / "memory" / "mem.py"), "add", "--scope", "global",
+             "--headline", "SCENARIO-BOOT hello hook context probe", "working", "note",
+             "SCENARIO-BOOT hello hook context probe"],
+            env={**run.home.env, "MEM_INIT": "1"}, cwd=run.home.workspace, capture_output=True,
+            timeout=60, check=False)
 
     def drive(self, run):
         run.prompt("SCENARIO-BOOT hello")

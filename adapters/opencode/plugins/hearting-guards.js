@@ -147,15 +147,10 @@ const runtimeStatusBySession = new Map()
 //   * memoryBySession — session memory briefing, computed once per session and
 //     re-emitted on every call so it persists the way Claude's SessionStart
 //     additionalContext does.
-//   * localEvidenceBySession — artifact-root presence probe, computed at the
-//     first chat.message, then replayed: the block is byte-identical between turns
-//     because only a newly written artifact changes it, so recomputing it per
-//     turn bought nothing and spent ~360 tokens a turn.
 //   * turnContextBySession — { turn, blocks } for the capsule candidate probe
 //     and the per-turn signals: recomputed when a new user turn arrives, then
 //     re-emitted on every model call of that turn.
 const memoryBySession = new Map()
-const localEvidenceBySession = new Map()
 const turnContextBySession = new Map()
 //   * cardBySession — { turn, text } for the session card / tidy notice. The
 //     card is consumed once per user turn in chat.message (independent of the
@@ -3769,7 +3764,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         promptBySession.delete(sid)
         turnBySession.delete(sid)
         memoryBySession.delete(sid)
-        localEvidenceBySession.delete(sid)
         turnContextBySession.delete(sid)
         cardBySession.delete(sid)
         historyNoticeSettledBySession.delete(sid)
@@ -3793,9 +3787,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     spawnSummary(eventSid, "initial")
     await projectPane(eventSid, ctx)
     const prompt = promptText(output)
-    if (eventSid && !localEvidenceBySession.has(sid)) {
-      localEvidenceBySession.set(sid, collectPreflight("local-evidence", [baseDir(ctx)]))
-    }
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
     peerGuidanceBySession.delete(sid)
@@ -3803,7 +3794,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (prompt && eventSid && (prompt.includes("peer-from:") || prompt.includes("runtime-from:"))) {
       const guidance = spawnSync(
         "python3",
-        ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
+        ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
         { cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 4000,
           input: JSON.stringify({ prompt, recipient: { harness: "opencode", session_id: eventSid }, cwd: baseDir(ctx) }) })
       if (guidance.status === 0) peerGuidanceBySession.set(sid, (guidance.stdout || "").trim())
@@ -3867,7 +3858,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       return
     }
     // Every model call re-emits the same blocks. The probe/preflight work still
-    // runs once per session (memory, local evidence) or once per user turn
+    // runs once per session (memory) or once per user turn
     // (candidates, prompt-signal, briefing) — only the emission repeats, so the
     // caps in core/MEMORY.md are unchanged and no extra process is spawned per
     // tool-loop continuation.
@@ -3876,7 +3867,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     appendContext(output, memoryBySession.get(sid))
 
-    appendContext(output, localEvidenceBySession.get(sid))
     appendContext(output, cardBySession.get(sid)?.text)
     appendContext(output, peerGuidanceBySession.get(sid))
     appendContext(output, contextAlertBySession.get(sid)?.text)

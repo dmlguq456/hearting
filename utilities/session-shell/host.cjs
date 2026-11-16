@@ -150,6 +150,14 @@ function observeForm(){
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
 let expanded = !initialFold.folded, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
+// The screen revision the native had painted when its last native-bound byte arrived, and when
+// (monotonic ms) it arrived. A successor counts from its own start: it knows no earlier key's time.
+let keyRevision = -1, keyAt = performance.now();
+// How long the keys must have been quiet before a screen read after them may stand for them: right
+// after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
+// native repaints its old screen before the keys' own. Only compared at a reading that comes anyway
+// (a courier pass's status, an idle transition); nothing waits for it.
+const KEY_QUIET_MS = 2000;
 let last = [], nativeLast = [], nativeGap = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
@@ -1286,22 +1294,35 @@ function screenSnapshot() {
 // input or lifecycle changed meanwhile; 'unavailable': the backend did not answer), or '' when it did.
 async function refreshReadiness() {
   // A previous empty frame cannot acknowledge bytes still waiting inside the
-  // native input loop. Only untouched startup or an exact submitted frontier
-  // can be corroborated by the screen/native-idle observation.
+  // native input loop. Untouched startup or an exact submitted frontier can be
+  // corroborated by the screen/native-idle observation; so can keys the native
+  // took without a turn (a local command's menu, an Esc, an erased draft: no
+  // prompt callback follows them) once it has painted after them and the keys
+  // have been quiet for KEY_QUIET_MS. A reading of that newer screen as idle
+  // with an empty composer settles them; a draft or form it shows keeps them
+  // unsettled, and a native that has not painted since its last key, or a
+  // reading within the quiet time (an Enter whose turn has not called back
+  // yet, a slow native's old screen), proves nothing (11-16: a window stayed
+  // undeliverable for hours after `/model`). OpenCode's keys wait for the next
+  // submitted turn: its focus can leave the composer while the composer still
+  // reads empty (a dialog over the transcript, its terminal pane).
   const inputSettled=nativeEpoch===0||(submitted>=0&&submitted===nativeEpoch);
-  if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return '';}
+  const painted=!inputSettled&&screenRevision>keyRevision&&harness!=='opencode'&&performance.now()-keyAt>=KEY_QUIET_MS;
+  const loneEscape=keyTail==='\x1b'&&!paste;
+  if(relay||paste||(keyTail&&!(loneEscape&&painted))||currentDelivery||!sid||(!inputSettled&&!painted)){empty=false;return '';}
   // A lifecycle event that arrives meanwhile is newer than this observation.
-  const before=epoch,selected=selection,revision=screenRevision,observed=sequence;
+  const before=epoch,selected=selection,revision=screenRevision,observed=sequence,frontier=nativeEpoch;
   const result=await source('readiness',{screen:screenSnapshot(),state});
   if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return 'moved';}
   empty=result.ok===true&&result.ready===true;
+  if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
   return result.ok===true?'':'unavailable';
 }
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
-  epoch+=data.length;empty=false;
+  epoch+=data.length;empty=false;keyRevision=screenRevision;keyAt=performance.now();
   for(let offset=0;offset<data.length;offset++) {
     nativeEpoch++;
     const c=String.fromCharCode(data[offset]);

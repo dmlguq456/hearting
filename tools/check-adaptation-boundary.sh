@@ -4031,8 +4031,8 @@ check_language_neutrality_contract() {
     || ! grep -Fq 'Memory follows D-40: the acting agent decides storing, retrieval, promotion, merge, and pruning.' core/DESIGN_PRINCIPLES.md \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/opencode/bin/preflight.sh \
-    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 6' \
-    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 1200' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 3' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 600' \
     || ! cat $mem_sources | grep -Fq 'records_capsule_fts'; then
     fail_msg "memory semantics must remain agent-owned while capsule candidates and same-turn opportunity are enforced mechanically"
   fi

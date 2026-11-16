@@ -51,7 +51,8 @@ manual recovery. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
 A running window follows a new install without restarting its CLI. Each
 display host compares the installed link it was started from
-(`HEARTING_SHELL_HOST_PATH`, never resolved) with its own resolved file; it
+(`HEARTING_SHELL_HOST_PATH`, never resolved, including the Herdr hint's re-exec of the
+entry) with its own resolved file; it
 notices a change from a watch on the link's directory and at each idle
 transition, with no timer; a successor that took over keeps the same watch. A look that
 ends without asking is not lost: a reason that comes during a look is taken up when it ends, and
@@ -65,11 +66,20 @@ The host asks the PTY owner for a successor only at a safe moment: idle, an
 empty composer, no open form or answerable question, no popup, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
 action worker. Keys that reached native since the last submitted turn leave the
-composer unproven (an erased draft, a form answered with Enter, history-scroll
-keys, a turn stopped without a stop callback), so the switch then follows the
-next submitted turn. A start or selection (a resume picker's Enter, `/clear`,
+composer unproven (an erased draft, a form answered with Enter, a local command such
+as `/model` whose menu opened and closed, history-scroll keys, a turn stopped without
+a stop callback) until the native has painted after them and a reading at least two
+seconds after the last of them sees that newer screen idle with an empty composer;
+delivery readiness settles them the same way. The two seconds are compared at a reading
+that comes anyway (a courier pass's status, an idle transition), never waited for: right
+after a person's Enter the composer is empty before that turn's prompt callback comes, and
+a slow native repaints its old screen before the keys' own. A draft or form on that screen
+keeps them unproven, and keys the native has not painted after (an unechoed cursor key)
+wait for its next paint or submitted turn. OpenCode's keys always wait for the next
+submitted turn: its focus can leave the composer while the composer still reads empty
+(a dialog such as `/models` over the transcript, its terminal pane). A start or selection (a resume picker's Enter, `/clear`,
 OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
-delivery readiness does; keys after that Enter still wait for the next submitted turn.
+delivery readiness does; keys after that Enter are settled as above.
 A window with no selected session (OpenCode on its home route) has
 no such proof and waits for one; OpenCode's plugin reload (deselect, then select of the
 same session, no keys between) keeps an open popup. The owner starts the successor from the same installed path. The old host stops
@@ -741,7 +751,16 @@ in plain text, a secret `•••`),
 it as sent); the line stays ten minutes from when it was sent (11-16, the person: "답 보냄도 한
 5~10분은 유지하도록 해두자"; `SENT_KEEP_MS` in `block-input.cjs`), its session having the answer or not,
 and goes at the first update or paint after that (no timer of its own), and a failed
-delivery brings the question back with its existing word. Answering returns
+delivery brings the question back with its existing word. Until its session takes
+it, the line says so: `✓ answer sent · <what was sent> · awaiting delivery`, and,
+when its session rests (Fleet's idle, unused or stale) and only the person can let it in,
+why: a window whose shell runs an older release than its launch path names
+(`New release waiting`, the window's own line) or a Claude window outside the shell
+takes it when that window is reopened or typed in once. A session still working takes it
+when its turn ends, and one whose state is not known gives no reason either.
+Fleet's QUESTIONS row and the panel's line draw the same parts from the same function
+(`session_block.sent_answer_line`): a secret answer `•••`, no control or direction
+characters; nothing offers to send it again. Answering returns
 focus to the native input, and one lone Esc or Enter within ten seconds of the
 answer is taken by the shell (never the native's interrupt of a running turn,
 never a submit of what stands in the native input).

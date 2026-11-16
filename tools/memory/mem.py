@@ -5387,10 +5387,72 @@ def inject_cleanup_candidates(con, encc, max_groups=5, soft_ceiling=80):
     return lines
 
 
-def inject(max_working=None, max_durable=None, hook=False):
+SESSION_START_REPEAT_SECONDS = 120
+
+
+def _session_start_repeat(payload, block):
+    """True when this session was just shown this very summary for this very start source.
+
+    One SessionStart can reach the hook twice (a compaction right after a resume was seen
+    to put the same summary into the context twice in a row). The marker lives in the
+    candidate-seen directory (swept by the same TTL), is keyed by session, start source,
+    the session's compaction mark and text, and only a repeat inside
+    SESSION_START_REPEAT_SECONDS counts. A later start, a changed summary, another source
+    (resume, then compact) and a compaction that happened since (the compaction path records
+    it whichever of SessionStart(compact) and PostCompact comes first) still deliver. Any
+    failure delivers."""
+    try:
+        sid = _seen_session(next((payload.get(k) for k in ("session_id", "sessionID", "thread_id")
+                                  if isinstance(payload.get(k), str) and payload.get(k)), ""))
+        if not sid:
+            return False
+        try:
+            import context_repeat
+            compaction = context_repeat.compaction_mark(sid)
+        except Exception:
+            compaction = ""
+        source = str(payload.get("source") or "")
+        digest, _ = _seen_names(sid, "")
+        name = f"summary-{digest}"
+        key = hashlib.sha256(
+            (source + "\0" + compaction + "\0" + block).encode("utf-8", "replace")).hexdigest()[:16]
+        now = time.time()
+        with _seen_lock(name) as held:
+            if not held:
+                return False
+            path = CANDIDATE_SEEN / f"{name}.json"
+            try:
+                last = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                last = {}
+            if (isinstance(last, dict) and last.get("key") == key
+                    and 0 <= now - float(last.get("at") or 0) < SESSION_START_REPEAT_SECONDS):
+                return True
+            fd, raw = tempfile.mkstemp(prefix=f".{name}.", dir=CANDIDATE_SEEN)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"key": key, "at": now}))
+                os.replace(raw, path)
+            finally:
+                try:
+                    os.unlink(raw)
+                except FileNotFoundError:
+                    pass
+            _seen_sweep(now, keep=path)
+    except Exception:
+        return False
+    return False
+
+
+def inject(max_working=None, max_durable=None, hook=False, payload=None):
     """Build the SessionStart memory block and optional hook JSON wrapper."""
+    payload = payload if isinstance(payload, dict) else {}
+
     def emit(block):
         if hook:
+            if _session_start_repeat(payload, block):
+                return
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                      "additionalContext": block}},
                               ensure_ascii=False))
@@ -8881,11 +8943,13 @@ def _cli_main():
         _EXCHANGE_SUPPRESS = True  # the explicit sync is the exchange
         sys.exit(sync(json_output=args.json_output))
     elif args.cmd == "inject":
+        hook_payload = {}
         if args.hook:
             # SessionStart hands its JSON to stdin; compact/clear mean the
             # model's context lost what the display history says it saw.
-            _seen_reset_from_hook_payload(_hook_stdin_payload())
-        inject(hook=args.hook)
+            hook_payload = _hook_stdin_payload()
+            _seen_reset_from_hook_payload(hook_payload)
+        inject(hook=args.hook, payload=hook_payload)
     elif args.cmd == "register-postit":
         register_postit(args.path)
     elif args.cmd == "export":

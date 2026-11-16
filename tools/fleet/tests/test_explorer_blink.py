@@ -327,11 +327,16 @@ class SupervisorPhaseTests(BlinkAssertions):
 
 
 def route_count_spans(frame):
-    """The OVERVIEW ROUTES rule's ``N open`` pulses on the working pair while N > 0."""
+    """The OVERVIEW ROUTES rule's open count (``N ROUTES``) pulses on the working pair while N > 0.
+
+    A page's own ``N ROUTES`` section head (a session's routes) is a plain count: only the rule
+    whose count is drawn on the working beat's lit key is the OVERVIEW one."""
     spans = {}
     for y, line in enumerate(frame.text_rows()):
-        match = re.search(r"── ROUTES  ([0-9]+ open)", line)
-        if match and int(match.group(1).split()[0]) > 0:
+        match = re.search(r"│ ([0-9]+) ROUTES", line)
+        if match and frame.cells[y][match.start(1)][1] != "g_work":
+            continue
+        if match and int(match.group(1)) > 0:
             spans.update({(y, col): "g_work_off" for col in range(*match.span(1))})
     return spans
 

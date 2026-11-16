@@ -461,6 +461,10 @@ def _session_records(snapshot, now, resolver):
             **_session_pane(session, delivery_panes),
             "generation": None, "last_clear": None,
             "running": _running(session), "gpu": None, "pane_meta": None, "pane_lines": [],
+            # The CTX line's exact token count and, for a resting session, when its rest began
+            # (its newest transcript write); the line is worded when drawn, no timer keeps it.
+            "tokens": _context_tokens(session),
+            "rest_since": _num(_get(session, "mtime")) if state == "idle" else None,
         }
         if (_get(session, "_resume_attention") == "stopped"
                 and state not in ("working", "dead", "stale") and not record["ask"]):
@@ -1659,6 +1663,8 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "fold": fold,
             # The person's answer is on its way (rule 5, 11-14): listed as sent, waiting on no one.
             "sent": item.get("answer") == "sent",
+            # What that answer waits for when its session cannot take it by itself (`session_block`).
+            "answer_wait": (_text(item.get("answer_wait")) or None) if item.get("answer") == "sent" else None,
         }
         questions.append(record)
         if session and not older and not record["sent"]:
@@ -1709,7 +1715,7 @@ def _handover_links(snapshot, session_index, seat_rows, now):
         words = (_text(message.get("summary")) or "").split(" true ", 1)[-1].strip()
         links.append((_epoch_of(message.get("ts")) or 0.0, [
             source, [tag, _text(_get(session_index[tag]["session"], "harness")) or "claude"], "handover",
-            _iso_age(message.get("ts"), now),
+            when_text(_epoch_of(message.get("ts")), now) or None,
             f"clear → {words} ({found.group(1)[:8]} → {found.group(2)[:8]})".replace("  ", " ")]))
     newest = {}
     for stamp, link in links:
@@ -1834,6 +1840,151 @@ def _finish_peers(nodes, edges, session_rows, session_index, routes, handovers, 
     return nodes, edges
 
 
+def when_text(at, now=None):
+    """``HH:MM`` today, ``MM-DD`` on another day: the one time-of-day form (session_line)."""
+    from ..session_line import when_text as shared
+    return shared(at, now)
+
+
+def _not_conversation(kind, harness):
+    """A runtime notice (sent by ``runtime``) and a notice record are no message between two
+    sessions: PEERS and LINKS leave them out (the feed line and route results show them)."""
+    return str(kind or "") == "notice" or str(harness or "") == "runtime"
+
+
+_REQUEST_REF = re.compile(r"peer-request:(rq-[0-9a-f]{6}):\d+:[a-z-]+\Z")
+
+
+def _request_ref(refs):
+    """The request id a message's refs name (``peer-request:<id>:<revision>:<role>``), else None."""
+    for ref in refs or () if isinstance(refs, (list, tuple)) else ():
+        found = _REQUEST_REF.match(ref) if isinstance(ref, str) else None
+        if found:
+            return found.group(1)
+    return None
+
+
+def _peer_observed_requests(snapshot):
+    """The peer observation's sent records and requests (``details._peer_requests``), or {}."""
+    observations = _get(snapshot, "observations", default={}) or {}
+    peers = observations.get("optional:peers") if isinstance(observations, Mapping) else None
+    found = peers.get("messages") if isinstance(peers, Mapping) else None
+    return found if isinstance(found, Mapping) else {}
+
+
+_REQUEST_CLOSED = ("final", "rejected", "cancelled")
+
+
+def _request_closed_at(record):
+    """When a closed request closed: its cancel, else its last answer that was not late."""
+    if record.get("state") == "cancelled":
+        return _num((record.get("cancel") or {}).get("at")) or _num(record.get("updated"))
+    return max((_num(report.get("at")) or 0 for report in record.get("reports") or ()
+                if isinstance(report, Mapping) and not report.get("late")), default=0) or _num(record.get("updated"))
+
+
+def request_state_text(record, now):
+    """``최종 답 21:21`` / ``열림``: the request's work state in the shell panel's words, with
+    the time a closed one closed."""
+    state = str(record.get("state") or "")
+    word = ui_text("fleet.session_panel.request_state_" + state) if state else ""
+    closed = when_text(_request_closed_at(record), now) if state in _REQUEST_CLOSED else ""
+    return (word + " " + closed).strip() if closed else word
+
+
+def _one_request_line(candidates, endpoint, observed, now):
+    """A request and its answers on one ``REQUEST`` link from the requester to the recipient.
+
+    With the request's record (the peer observation's) the link carries its work state in the
+    shell panel's words and its title; without one, a ``request`` and its ``report`` still make
+    one line. Every other link is kept as it was."""
+    records = observed.get("requests") if isinstance(observed.get("requests"), Mapping) else {}
+    built = {}
+    for record in records.values():
+        if not isinstance(record, Mapping) or now is not None and now - float(record.get("updated") or 0) > 86400:
+            continue                                   # the LINKS window (the peer collection's 24 hours)
+        requester, recipient = record.get("requester") or {}, record.get("recipient") or {}
+        src = endpoint(requester.get("session_id"), requester.get("harness"))
+        dst = endpoint(recipient.get("session_id"), recipient.get("harness"))
+        if not (src and dst):
+            continue
+        stamp = float(record.get("created") or 0)
+        key = (repr(src), repr(dst))
+        if key in built and built[key][0] >= stamp:
+            continue
+        title = " ".join(str(record.get("title") or "").split())
+        note = " · ".join(part for part in (request_state_text(record, now), title) if part)
+        built[key] = (stamp, [src, dst, "REQUEST", when_text(stamp, now) or None, note,
+                              {"request": record.get("id"), "state": record.get("state")}])
+    pairs = {frozenset(key) for key in built}
+    kept, pending = [], {}
+    for stamp, link in candidates:
+        kind = str(link[2])
+        if kind not in ("request", "report"):
+            kept.append((stamp, link))
+            continue
+        meta = link[5] if len(link) > 5 and isinstance(link[5], Mapping) else {}
+        ident = meta.get("request")
+        if ident in records or frozenset((repr(link[0]), repr(link[1]))) in pairs:
+            continue                                   # the record's REQUEST line words it once
+        src, dst = (link[0], link[1]) if kind == "request" else (link[1], link[0])
+        key = ident or (repr(src), repr(dst))
+        held = pending.get(key)
+        if held is None or kind == "request" and held[2] != "request" or kind == held[2] and stamp > held[0]:
+            pending[key] = (stamp, [src, dst, "REQUEST", link[3], link[4] if kind == "request" else ""], kind)
+    return kept + list(built.values()) + [(stamp, link) for stamp, link, _kind in pending.values()]
+
+
+def _peer_session_views(session_rows, session_index, now, snapshot):
+    """``{tag: {"messages": [...], "requests": [...]}}`` for the session page, worded by the
+    shell panel's own functions over the same records: the session's received inputs and its
+    own sent ledger records (:func:`peer_message_rows`, a request's own messages left out) and
+    its peer requests (:func:`request_rows`). Only a session with one of them has an entry."""
+    observed = _peer_observed_requests(snapshot)
+    from ..session_line import peer_message_rows
+    from ..session_panel import request_rows
+    tags = {(_get(info["session"], "harness"), ident): tag
+            for tag, info in session_index.items() for ident in info["ids"]}
+
+    def tag_of(harness, sid):
+        return tags.get((harness, sid))
+    owned = set(observed.get("refs") or ())
+    records = observed.get("requests") if isinstance(observed.get("requests"), Mapping) else {}
+    pending = observed.get("rows") if isinstance(observed.get("rows"), Mapping) else {}
+    sent_by = observed.get("sent") if isinstance(observed.get("sent"), Mapping) else {}
+    sides = observed.get("sides") if isinstance(observed.get("sides"), Mapping) else {}
+    views = {}
+    for row in session_rows:
+        info = session_index[row["tag"]]
+        key = f"{row['harness']}:{info['sid']}"
+        display = _get(info["session"], "_prompt_display")
+        received = [item for item in ((display or {}).get("received") or () if isinstance(display, Mapping) else ())
+                    if isinstance(item, Mapping) and not (isinstance(item.get("ref"), str) and item["ref"] in owned)]
+        sent = [item for item in sent_by.get(key) or () if isinstance(item, Mapping)
+                and not _request_ref(item.get("refs"))]
+        messages = peer_message_rows(received, sent, tag_of, limit=8, now=now) if received or sent else []
+        request_views = []
+        for ident, side in sides.get(key) or ():
+            record = records.get(ident)
+            if not isinstance(record, Mapping):
+                continue
+            refs = [revision.get("transfer_ref") for revision in record.get("revisions") or ()]
+            refs += [report.get("transfer_ref") for report in record.get("reports") or ()]
+            refs.append((record.get("cancel") or {}).get("notice_ref"))
+            request_views.append({"record": record, "side": side, "gone": False, "body": "",
+                                  "rows": {ref: pending.get(ref) for ref in refs if isinstance(ref, str) and ref}})
+        requests = request_rows(request_views, now, tag_of) if request_views else []
+        for request in requests:
+            record = records.get(request.get("id")) or {}
+            other = record.get("recipient" if request.get("side") == "out" else "requester") or {}
+            request["harness"] = other.get("harness") if other.get("harness") in HARNESSES else ""
+            request["opened"] = when_text(_num(record.get("created")), now)
+            request["state_text"] = request_state_text(record, now)
+        if messages or requests:
+            views[row["tag"]] = {"messages": messages, "requests": requests}
+    return views
+
+
 def _peer_records(session_rows, session_index, now, snapshot=None):
     tag_by_sid = {known: tag for tag, info in session_index.items() for known in info["ids"]}
     observations = _get(snapshot, "observations", default={}) or {}
@@ -1851,25 +2002,31 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
             return [tag, harness_of.get(tag) or harness]
         return str(sid)[:8] if _text(sid) and _text(harness) else None      # an ended session: its short id
 
+    def observed_at(record):
+        """When a newest-message record was observed: its stamp, else ``now`` less its age."""
+        stamp = _epoch_of(record.get("ts", record.get("at")))
+        if stamp is None and _num(record.get("age_min")) is not None and now is not None:
+            stamp = now - float(record["age_min"]) * 60
+        return stamp
+
     for row in session_rows:
         session = session_index[row["tag"]]["session"]
         me = [row["tag"], row["harness"]]
         received = _get(session, "peer_last_recv")
-        if isinstance(received, Mapping):
+        if isinstance(received, Mapping) and not _not_conversation(received.get("kind"),
+                                                                     received.get("from_harness")):
             other = endpoint(received.get("from_session_id"), received.get("from_harness"))
             if other and _text(received.get("kind")):
-                age = _dur(received.get("age_min"))
-                add([other, me, received["kind"], f"{age} ago" if age else None, ""],
-                    _epoch_of(received.get("ts", received.get("at"))) or
-                    -float(_num(received.get("age_min")) or 0))
+                stamp = observed_at(received)
+                add([other, me, received["kind"], when_text(stamp, now) or None, ""],
+                    stamp or -float(_num(received.get("age_min")) or 0))
         sent = _get(session, "peer_last_sent")
-        if isinstance(sent, Mapping):
+        if isinstance(sent, Mapping) and not _not_conversation(sent.get("kind"), sent.get("to_harness")):
             other = endpoint(sent.get("to_session_id"), sent.get("to_harness"))
             if other and _text(sent.get("kind")):
-                age = _dur(sent.get("age_min"))
-                add([me, other, sent["kind"], f"{age} ago" if age else None, ""],
-                    _epoch_of(sent.get("ts", sent.get("at"))) or
-                    -float(_num(sent.get("age_min")) or 0))
+                stamp = observed_at(sent)
+                add([me, other, sent["kind"], when_text(stamp, now) or None, ""],
+                    stamp or -float(_num(sent.get("age_min")) or 0))
         targets = [t for t in (_get(session, "steward_targets") or ()) if isinstance(t, Mapping) or hasattr(t, "get")]
         for target in targets:
             sid = _text(_get(target, "session_id"))
@@ -1880,9 +2037,7 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
                 continue
             raw_ts = _get(target, "ts", "start_ts")
             stamp = _epoch_of(raw_ts)
-            when = _iso_age(raw_ts, now)
-            if when is None and stamp is not None:
-                when = datetime.datetime.fromtimestamp(stamp).strftime("%m-%d")
+            when = when_text(stamp, now) or None
             live_tag = tag_by_sid.get(sid)
             live_tag = live_tag if live_tag in harness_of else None
             if live_tag:
@@ -1896,20 +2051,27 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
         summary = _text(message.get("summary")) or ""
         if summary in _RECEIPTS or summary.startswith("[notice] action="):
             continue                          # delivery receipts and clear/continue notices are not conversations
+        if _not_conversation(_text(message.get("kind")) or "notice", _get(source, "harness")):
+            continue                          # a runtime notice is no link between two sessions
         src = endpoint(_get(source, "session_id"), _get(source, "harness"))
         dst = endpoint(_get(target, "session_id"), _get(target, "harness"))
         if src and dst:
-            add([src, dst, _text(message.get("kind")) or "notice",
-                 _iso_age(message.get("ts"), now), _text(message.get("summary")) or ""],
-                _epoch_of(message.get("ts")))
+            stamp = _epoch_of(message.get("ts"))
+            link = [src, dst, _text(message.get("kind")) or "notice",
+                    when_text(stamp, now) or None, _text(message.get("summary")) or ""]
+            request = _request_ref(message.get("refs"))
+            if request:
+                link.append({"request": request})
+            add(link, stamp)
     for handover in _get(joined, "history_handovers", default=()) or ():
         if not isinstance(handover, Mapping):
             continue
         src = endpoint(_get(handover, "frm"), _get(handover, "frm_h"))
         dst = endpoint(_get(handover, "to"), _get(handover, "to_h"))
         if src and dst:
-            add([src, dst, "handover", _iso_age(handover.get("ts", handover.get("at")), now), ""],
-                _epoch_of(handover.get("ts", handover.get("at"))))
+            stamp = _epoch_of(handover.get("ts", handover.get("at")))
+            add([src, dst, "handover", when_text(stamp, now) or None, ""], stamp)
+    candidates = _one_request_line(candidates, endpoint, _peer_observed_requests(snapshot), now)
     # Keep the newest observation for each directed endpoint pair and kind; a link needs a live
     # session at one end (two ended sessions talking is history, not the fleet) and two different ends.
     def live_end(end):
@@ -1940,7 +2102,7 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
         if (b, a) in sent and repo_of.get(a) == repo_of.get(b) and a not in paired and b not in paired:
             side_lanes.append(sorted((a, b)))             # the lower tag sits below the higher one
             paired.update((a, b))
-    cross = next(([a, b, re.sub(r" ago$", "", link[3] or "")] for (a, b), link in sent.items()
+    cross = next(([a, b, str(link[3] or "")] for (a, b), link in sent.items()
                   if repo_of.get(a) != repo_of.get(b) and link[3]), None)
     by_repo = {}
     for row in session_rows:
@@ -3120,7 +3282,7 @@ def selected_detail(model, detail, *, peer_model=None):
         if ended_seat(seat):
             continue
         by_tag[seat[0]]["generation"] = seat[2]
-        by_tag[seat[0]]["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+        by_tag[seat[0]]["last_clear"] = _clear_when(seat[3])
     panes_result = detail.results.get("panes")
     pane_request = _get(panes_result, "request")
     if tag in by_tag and pane_request is not None and "pane" in pane_request.wants:
@@ -3191,6 +3353,16 @@ def _stamp(epoch, now):
     except (OverflowError, OSError, ValueError):
         return None
     return when.strftime("%m-%d %H:%M")
+
+
+def _clear_when(text):
+    """A seat's clear text (``HH:MM · Nm ago`` / ``MM-DD HH:MM``) in the time-of-day form the
+    screens write: ``HH:MM`` today, ``MM-DD`` on another day; None without one."""
+    text = str(text or "").split(" · ")[0].strip()
+    if not text or text == "·":
+        return None
+    day = re.fullmatch(r"(\d\d-\d\d) \d\d:\d\d", text)
+    return day.group(1) if day else text
 
 
 def _clear_text(entries, now):
@@ -3734,19 +3906,21 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     peer_nodes, peer_edges = _finish_peers(peer_nodes, peer_edges, session_rows, session_index, routes,
                                            _handover_links(snapshot, session_index, seat_rows, clock),
                                            _routeless_jobs(snapshot, session_index))
+    # The session page's MESSAGES and REQUEST lines travel with the observed peer graph.
+    peer_sessions = _peer_session_views(session_rows, session_index, clock, snapshot)
+    if peer_sessions:
+        peer_edges = dict(peer_edges or {}, sessions=peer_sessions)
     by_tag = {row["tag"]: row for row in session_rows}
     for seat in seat_rows:
         if ended_seat(seat):
             continue
         row = by_tag[seat[0]]
         row["generation"] = seat[2]
-        row["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+        row["last_clear"] = _clear_when(seat[3])
     cleared = _clear_times(snapshot, session_index)
     for row in session_rows:
         if row["last_clear"] is None and row["tag"] in cleared and not any(seat[0] == row["tag"] for seat in seat_rows):
-            when = datetime.datetime.fromtimestamp(cleared[row["tag"]])
-            today = datetime.datetime.fromtimestamp(clock).date()
-            row["last_clear"] = when.strftime("%H:%M" if when.date() == today else "%m-%d %H:%M")
+            row["last_clear"] = when_text(cleared[row["tag"]], clock) or None
     if pane_read:
         tag, read = pane_read
         if _text(read.get("pane")):
