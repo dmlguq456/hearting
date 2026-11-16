@@ -5298,6 +5298,10 @@ def _ensure_sender_delay_notice(row):
             created, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         body = (f"[notice] Your peer message ref {original_ref} is still pending "
                 f"delivery; it was sent at {sent_at}.")
+        import peer_request
+        held = peer_request.hold_words(row)
+        if held:
+            body += f" {held}."
         duty = peer_obligations.ObligationStore().create(
             notice_id, "message", identity,
             {"delay_notice_for": original_ref, "target": sender.get("name") or sender.get("session_id"),
@@ -5559,9 +5563,20 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
         harness == "codex" and row.get("state") == "queued"
         and str(row.get("receipt") or "").startswith("native-queue-held-interrupted"))
     reason = "awaiting-native-receiver"
-    if row.get("state") == "pending" and harness in {"claude", "opencode"} and attachment is not None:
-        result = session_shell.deliver_pending(ref, harness, sid) or {}
-        reason = result.get("reason") or "awaiting-exact-receiver-ref"
+    if row.get("state") == "pending" and harness in {"claude", "opencode"}:
+        # The sender's record says why the window keeps it: the receiving host's word, or a
+        # window outside the shell (taken at the next prompt typed there).
+        hold = "no-shell"
+        if attachment is not None:
+            result = session_shell.deliver_pending(ref, harness, sid) or {}
+            reason = result.get("reason") or "awaiting-exact-receiver-ref"
+            hold = "" if result.get("ok") else str(result.get("hold") or "")
+        try:
+            peer_message.note_pending_hold(ref, hold)
+        except (OSError, ValueError):
+            pass
+        if hold:
+            row = dict(row, held={"reason": hold})
     elif harness == "codex" and (row.get("state") == "pending" or held_codex_restart):
         peer_message.deliver_pending_codex(
             ref, timeout=0.25, start_interrupted=_codex_shell_start_gate(attachment))

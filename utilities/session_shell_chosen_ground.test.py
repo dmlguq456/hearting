@@ -52,7 +52,7 @@ const assert=require('node:assert/strict'),path=require('node:path'),v=require(p
 const create=require(path.join(process.argv[1],'block-input.cjs'));
 const items=JSON.parse(process.argv[2]),F=v.FACES.dark,L=v.FACES.light;
 // The FACES constant (item 8): the dark face's and the light face's chosen ground, apart from the popup's.
-assert.equal(F.chosen,24);assert.equal(L.chosen,153);assert.notEqual(F.chosen,F.popup);assert.notEqual(L.chosen,L.popup);
+assert.equal(F.chosen,52);assert.equal(L.chosen,223);assert.notEqual(F.chosen,F.popup);assert.notEqual(L.chosen,L.popup);
 const editor=(which=items)=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
   b.update(which,'',{labels:{questions:'QUESTIONS'},styles:{}});b.enter();return b;};
 const key=(b,s)=>b.input(Buffer.from(s));
