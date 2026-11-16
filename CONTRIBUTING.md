@@ -64,7 +64,7 @@ activation suite. Packaged activation refuses a dirty working tree, so run the
 installation lifecycle suites from a clean checkout. A small prose change does
 not call for every suite; say what you ran and what you did not.
 
-If you change what a Fleet screen shows, redraw the README pictures from their
+If you change what a Fleet or panel screen shows, redraw the README pictures from their
 demo rows and commit them with the change:
 
 ```sh

@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import time
 
-VERSION = "v4.0.0"
+VERSION = "v4.46.0"
 
 PROJECTS = ("web-api", "ml-train", "docs-site", "mobile-app")
 HOME = "/home/demo"
@@ -93,9 +93,9 @@ def snapshot(now=None, workdir=None):
           summary="Running the limiter tests"),
         S(harness="codex", pid=71002, cwd=api, session_id="readme-codex-api",
           title="Pagination review", model="gpt-5.5", effort="high",
-          ctx_pct=71, rl_5h=24, rl_7d=41, rl_rs=(now + 2 * 3600 + 10 * 60, now + 4 * 86400), elapsed_min=38, branch="main", liveness="idle",
-          session_tag="b2", herdr_attached=True, mtime=now - 600,
-          summary="Review done; ready for more"),
+          ctx_pct=71, rl_5h=24, rl_7d=41, rl_rs=(now + 2 * 3600 + 10 * 60, now + 4 * 86400), elapsed_min=38, branch="main", liveness="working",
+          session_tag="b2", herdr_attached=True, mtime=now - 20,
+          summary="Test run for [4f]: 31/40 pass"),
         S(harness="claude", pid=71003, cwd=api, session_id="readme-claude-notes",
           title="Release notes 2.4", model="Sonnet 5.5", effort="medium",
           ctx_pct=33, elapsed_min=19, branch="main", liveness="blocked",
@@ -166,17 +166,44 @@ def snapshot(now=None, workdir=None):
             "received": [{"source": "peer", "sender": "Codex [b2]", "at": now - 30,
                           "text": "The regression test is ready"}]}
     api_session = by_sid["readme-claude-api"]
-    codex = by_sid["readme-codex-api"]
-    api_session.peer_last_sent = {"to_name": "web-api", "to_session_id": "readme-codex-api",
-                                  "to_harness": "codex", "kind": "steer", "age_min": 26}
-    codex.peer_last_recv = {"from_name": "web-api-4f", "from_session_id": "readme-claude-api",
-                            "from_harness": "claude", "kind": "steer", "age_min": 26}
-    by_sid["readme-claude-ml"].peer_last_sent = {
-        "to_name": "ml-train", "to_session_id": "readme-oc-ml", "to_harness": "opencode",
-        "kind": "steer", "age_min": 14}
-    by_sid["readme-oc-ml"].peer_last_recv = {
-        "from_name": "ml-train-d1", "from_session_id": "readme-claude-ml",
-        "from_harness": "claude", "kind": "steer", "age_min": 14}
+    # Who last sent what to whom, the way each session's peer record keeps it: the same exchanges
+    # the panels show (readme_panel: [4f] asked [b2] for the API tests, [b2] sent a partial report,
+    # [4f] wrote to [9c]; [d1] and [e8] talk about the loader), at the same minutes.
+    def peer(sid, harness, name):
+        return {"session_id": sid, "harness": harness, "name": name}
+    four_f, b2, nine_c = (peer("readme-claude-api", "claude", "web-api-4f"),
+                          peer("readme-codex-api", "codex", "web-api-b2"),
+                          peer("readme-claude-notes", "claude", "web-api-9c"))
+    d1, e8 = peer("readme-claude-ml", "claude", "ml-train-d1"), peer("readme-oc-ml", "opencode", "ml-train-e8")
+    exchanges = (   # from, to, kind, minutes ago, note
+        (four_f, b2, "request", 16, "rq-7d21c4 · Test run"),
+        (b2, four_f, "report", 2, "rq-7d21c4 · partial answer · 31 of 40 suites pass; 9 still running"),
+        (b2, four_f, "reply", 19, "Pagination review done: 2 findings, both in cursor.py; details in the report."),
+        (four_f, nine_c, "steer", 8, "The release notes can wait for the limiter; I will ping you."),
+        (d1, e8, "steer", 14, "Profile 4, 8 and 16 loader workers and tell me where it flattens."),
+        (e8, d1, "reply", 6, "8 loader workers is the knee: 1.9x over 4, flat after that."),
+    )
+    for frm, to, kind, minutes, _note in exchanges:
+        sender, receiver = by_sid[frm["session_id"]], by_sid[to["session_id"]]
+        last = {"kind": kind, "age_min": minutes}
+        if (sender.peer_last_sent or {}).get("age_min", 1e9) > minutes:
+            sender.peer_last_sent = {"to_name": to["name"], "to_session_id": to["session_id"],
+                                     "to_harness": to["harness"], **last}
+        if (receiver.peer_last_recv or {}).get("age_min", 1e9) > minutes:
+            receiver.peer_last_recv = {"from_name": frm["name"], "from_session_id": frm["session_id"],
+                                       "from_harness": frm["harness"], **last}
+    peer_messages = {"records": [
+        {"from": {"session_id": frm["session_id"], "harness": frm["harness"]},
+         "to": {"session_id": to["session_id"], "harness": to["harness"]},
+         "kind": kind, "ts": _iso(now - minutes * 60), "summary": note}
+        for frm, to, kind, minutes, note in exchanges]}
+    sent = {}
+    for frm, to, kind, minutes, note in exchanges:
+        if kind in ("request", "report"):
+            continue
+        sent.setdefault(frm["harness"] + ":" + frm["session_id"], []).append({
+            "to": dict(to), "summary": note, "at": now - minutes * 60, "kind": kind,
+            "status": "received", "refs": []})
     api_session.work_projection = dataclasses.replace(
         api_session.work_projection,
         result={"name": "Fix the pagination off-by-one", "result": "success",
@@ -246,12 +273,10 @@ def snapshot(now=None, workdir=None):
                         answer_waits=waits,
                         observations={"optional:peers": {
                             "state": "success", "last_good": False, "observed_at": now,
-                            # The session page's MESSAGES: the ml-train session's own sent record.
-                            "messages": {"sent": {"claude:readme-claude-ml": [{
-                                "to": {"harness": "opencode", "session_id": "readme-oc-ml", "name": "ml-train"},
-                                "summary": "Try four data-loader workers", "at": now - 14 * 60,
-                                "kind": "steer", "status": "received", "refs": []}]},
-                                "requests": {}, "sides": {}, "rows": {}, "refs": []}}})
+                            # The session page's MESSAGES: each session's own sent records, from the
+                            # same exchanges (a request and its report stay PEERS' PEER REQUEST line).
+                            "messages": {"sent": sent, "requests": {}, "sides": {}, "rows": {}, "refs": []}},
+                                      "replay_sources": {"peer_messages": peer_messages}})
     # Both GPU processes belong to the sessions above; without this the Explorer would compute
     # "not registered" rows from the host list it was handed.
     snapshot.unregistered_gpu = ()
