@@ -3590,7 +3590,10 @@ class JoinTest(_WatchMixin, unittest.TestCase):
         armed = self._run("watch", self.target, env=self._env("held"))
         fields = self._fields(armed.stdout)
         started = time.monotonic()
-        proc = self._run("join", fields["watch_id"], "--timeout", "700")
+        # `_env()` with no mode sets the target idle. The join must see the same working target the watch
+        # armed on, or a watcher that is quick to notice the idle finishes the watch inside the 700 ms and
+        # the join returns the receipt (exit 0, `state=idle`) instead of timing out (CI 43664319284).
+        proc = self._run("join", fields["watch_id"], "--timeout", "700", env=self._env("held"))
         elapsed = time.monotonic() - started
         self.assertEqual(proc.returncode, 6, proc.stdout + proc.stderr)
         self.assertIn("state=join-timeout", proc.stdout)

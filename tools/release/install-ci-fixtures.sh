@@ -23,20 +23,42 @@ fi
 
 apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=15
              -o Acquire::https::Timeout=15 -o Acquire::Languages=none)
-if ! sudo timeout 90 apt-get "${apt_options[@]}" install --yes --no-install-recommends "${packages[@]}"; then
+install_once() {
+  if sudo timeout 90 apt-get "${apt_options[@]}" install --yes --no-install-recommends "${packages[@]}"; then
+    return 0
+  fi
   # Ignore unrelated third-party feeds and the runner's Azure mirror list.
   # Keep the usual Ubuntu components and signature verification.
   . /etc/os-release
+  local sources
   sources=$(mktemp)
-  trap 'rm -f "$sources"' EXIT
   printf 'deb https://archive.ubuntu.com/ubuntu %s main universe\n' \
     "$VERSION_CODENAME" "${VERSION_CODENAME}-updates" > "$sources"
   printf 'deb https://security.ubuntu.com/ubuntu %s-security main universe\n' \
     "$VERSION_CODENAME" >> "$sources"
-  apt_options+=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
-  sudo timeout 120 apt-get "${apt_options[@]}" update
-  sudo timeout 90 apt-get "${apt_options[@]}" install --yes --no-install-recommends "${packages[@]}"
-fi
+  local official=("${apt_options[@]}" -o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
+  local status=0
+  sudo timeout 120 apt-get "${official[@]}" update &&
+    sudo timeout 90 apt-get "${official[@]}" install --yes --no-install-recommends "${packages[@]}" ||
+    status=$?
+  rm -f "$sources"
+  return "$status"
+}
+# A name-resolution or mirror outage on the runner (2026-11-11: nine runs lost the
+# same hour to "Temporary failure resolving") often clears within a minute, so back
+# off and try again here instead of failing the shard. Three rounds at most, and no
+# new round once four minutes are spent, so a real stall still ends the step.
+for round in 1 2 3; do
+  if install_once; then
+    break
+  fi
+  if ((round == 3 || SECONDS > 240)); then
+    echo "Could not install ${packages[*]} after $round rounds" >&2
+    exit 1
+  fi
+  echo "apt install failed (round $round); trying again in $((round * 15)) s" >&2
+  sleep $((round * 15))
+done
 for command_name in "${commands[@]}"; do
   command -v "$command_name" >/dev/null
 done
