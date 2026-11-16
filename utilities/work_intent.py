@@ -60,8 +60,27 @@ _SECRETS = (
     re.compile(r"\bglpat-[A-Za-z0-9_-]{20,255}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}\b"),
+    # Common shapes the person's prompt lines can carry (the NOW timeline keeps their first lines
+    # for seven days): a JWT, Google API and OAuth keys, Stripe, Hugging Face and npm tokens, a
+    # Slack webhook, and an unlabeled AWS secret key (40 base64 characters with upper and lower
+    # case and three digits, or a digit and a `/` or `+`; a lower-case SHA-1 or a long identifier stays).
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+    re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
+    re.compile(r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b"),
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}\b"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"),
+    re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"),
+    re.compile(r"(?<![A-Za-z0-9/+=])(?=[A-Za-z0-9/+]{0,39}[A-Z])(?=[A-Za-z0-9/+]{0,39}[a-z])"
+               r"(?=(?:[A-Za-z/+]*[0-9]){3}|[A-Za-z0-9]{0,39}[/+])(?=[A-Za-z/+]{0,39}[0-9])"
+               r"[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])"),
 )
-_SECRET_ASSIGNMENT = re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)[^\s,;]{6,}")
+# ``NAME=value``/``name: value`` for a secret's usual names, also behind a prefix (``DB_PASSWORD=``,
+# ``OPENAI_API_KEY=``, an Azure ``AccountKey=``), and a Korean "비밀번호는 …" with an ASCII value.
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|token|password|passwd"
+    r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key)\s*[:=]\s*)[^\s,;]{6,}"
+    r"|((?:비밀번호|패스워드)\s*(?:는|은|:|=)\s*)[\x21-\x7e]{4,}")
 
 
 def _line(value, cap=MAX_LINE_CHARS) -> str:
@@ -134,7 +153,7 @@ def redact_secrets(text: str) -> str:
     value = attempt_view.sanitize(text or "")
     for pattern in _SECRETS:
         value = pattern.sub("[redacted]", value)
-    return _SECRET_ASSIGNMENT.sub(r"\1[redacted]", value)
+    return _SECRET_ASSIGNMENT.sub(lambda match: (match.group(1) or match.group(2)) + "[redacted]", value)
 
 
 # ---------------------------------------------------------------------------
