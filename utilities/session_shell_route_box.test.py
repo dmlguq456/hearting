@@ -46,18 +46,38 @@ const styleOf=p=>JSON.stringify([p.foreground??null,!!p.dim,!!p.bold,p.backgroun
 const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.push([c,styleOf(p)]);
  const inner=all.slice(2,-2),out=[];for(const [c,s] of inner){const last=out.at(-1);if(last&&last[1]===s)last[0]+=c;else out.push([c,s]);}return out;};
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
-let n=0;
+let n=0,same=0,folded=0;
 for(const c of golden.cases){
  const model=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
  const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:c.cfg,background:c.background});
  const label=JSON.stringify({scene:c.scene,side:c.side,width:c.width,height:c.height,cfg:c.cfg,background:c.background,alone:!!c.alone});
  const b=boxOf(v);assert(b,'no route box '+label+'\n'+v.rows.map(txt).join('\n'));
  const want=c.rows.map(row=>row.map(([t,s])=>[t,JSON.stringify(golden.styles[s])]));
- assert.deepEqual(v.rows.slice(b.a,b.b+1).map(runs),want,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
  const hits=v.hits.filter(h=>h.row>=b.a&&h.row<=b.b).map(h=>[h.row-b.a,h.left,h.right,h.action]);
- assert.deepEqual(hits,c.hits,label);n++;
+ // 11-16: the request rows, the rule above them and the title/bottom lines that count them are drawn anew (peer
+ // requests read as a route's doer: `peer-request-1116`); the route rows are still v4.36.4's cell for cell, and
+ // so are their press cells. A scene without requests is compared whole.
+ const drawn=model.requests&&model.requests.length;
+ const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));
+  const keep=rows.map((r,i)=>i>0&&i<rows.length-1&&!own.has(i)&&!txt(r.map(([t])=>({text:t}))).includes('├'));
+  const at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
+  return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
+ if(!drawn){
+  assert.deepEqual(v.rows.slice(b.a,b.b+1).map(runs),want,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
+  assert.deepEqual(hits,c.hits,label);
+ }else{
+  const got=mine(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),exp=mine(want,c.hits);
+  // The requests now take more rows than the one row v4.36.4 gave each, so a short box folds its routes one step
+  // sooner: where it still draws the routes in the same form, they are v4.36.4's rows cell for cell (and their
+  // press cells); where it folds them, the golden's rows no longer apply (the fold's own tests are below).
+  if(got.rows.length===exp.rows.length&&JSON.stringify(got.rows.map(r=>r.length))===JSON.stringify(exp.rows.map(r=>r.length))){
+   assert.deepEqual(got.rows,exp.rows,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
+   assert.deepEqual(got.hits,exp.hits,label);same++;
+  }else folded++;
+ }
+ n++;
 }
-console.log('cases',n);
+console.log('cases',n);assert(same>=12&&folded<=4&&same+folded===17,JSON.stringify({same,folded}));
 """)
         self.assertIn("cases 68", out)
 
@@ -74,14 +94,18 @@ for(const [side,width,height] of [[true,40,60],[true,54,46],[false,120,20]]){
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action);
  assert.deepEqual(act(b.a),['popup:ROUTE'],label);assert.deepEqual(act(b.b),[],label);
  for(let i=b.a+1;i<b.b;i++){
-  const a=act(i);assert.equal(a.length,1,i+label);
-  if(/^│ │ [→◂✓✕] /.test(rows[i]))assert.equal(a[0],'popup:MESSAGES',i+label);
+  const a=act(i);
+  // (11-16: the thin rule between the routes and the requests has no press of its own; a request is three rows, all of them the request's.)
+  if(rows[i].includes('├')){assert.equal(a.length,0,i+label);continue;}
+  assert.equal(a.length,1,i+label);
+  if(i>rows.findIndex(s=>s.includes('├'))&&rows.some(s=>s.includes('├')))assert.equal(a[0],'popup:MESSAGES',i+label);
   else assert(['popup:ROUTE:rt-1111111111111111','popup:ROUTE:rt-2222222222222222'].includes(a[0]),i+' '+a[0]+label);
  }
  // Each route's rows, from its first to its last (the workers' box with it), open that route.
  const first=id=>v.hits.find(h=>h.action==='popup:ROUTE:'+id).row,last=id=>v.hits.filter(h=>h.action==='popup:ROUTE:'+id).at(-1).row;
  assert(first('rt-1111111111111111')===b.a+1&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
- assert(v.hits.filter(h=>h.action==='popup:MESSAGES'&&h.row>b.a&&h.row<b.b).length===2,label);
+ assert(v.hits.filter(h=>h.action==='popup:MESSAGES'&&h.row>b.a&&h.row<b.b).length>=2,label);
+ assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length===2,label);
  // Nothing opens in place any more.
  assert(!v.hits.some(h=>/^(route|request|message|read)[:-]|^route$/.test(h.action)),JSON.stringify(v.hits));
 }
@@ -127,9 +151,10 @@ const scene=golden.scenes.na;
 for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const v=pv.render({width,height,side,fill:side,model:scene,state:'working',configuration:{}});
  const rows=v.rows.map(txt),b=boxOf(v),label=side+' '+width+'\n'+rows.join('\n');
- assert(rows[b.a].includes(side?'│ 2 REQUEST':'│ request 2'),label);
+ // (`PEER REQUEST` whole where the title's line holds it, `REQUEST` where it does not: 32 cells' panel.)
+ assert(rows[b.a].includes(side?(width>=40?'│ 2 PEER REQUEST':'│ 2 REQUEST'):'│ peer request 2'),label);
  // The two request rows stand in the box, once each (`◂ [e7] 검토 요청…`, `→ [52] frames…`).
- const requestRow=s=>/◂ \[e7\] 검토|→ \[52\] fram/.test(s);
+ const requestRow=s=>/^│ │ (◂ \[e7\]|→ \[52\])/.test(s);
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);
  assert(inBox.length===2&&outside.length===0,label);
  const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
@@ -165,13 +190,13 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
  const b=boxOf(v);
  if(b){boxes++;
   // Inside the box every row is the box's own (its side lines), and a press there opens a popup of its routes or requests.
-  for(let i=b.a+1;i<b.b;i++){assert(/^│ │ .* │ │$/.test(rows[i]),i+'\n'+label);
+  for(let i=b.a+1;i<b.b;i++){assert(/^│ (│ .* │|├─+┤) │$/.test(rows[i]),i+'\n'+label);
    for(const h of v.hits.filter(h=>h.row===i))assert(/^popup:(ROUTE:rt-|MESSAGES$)/.test(h.action),h.action+'\n'+label);}
   const shown=new Set(v.hits.filter(h=>h.row>b.a&&h.row<b.b).map(h=>h.action).filter(a=>a.startsWith('popup:ROUTE:'))).size;
   const hidden=(rows.slice(b.a,b.b+1).join('').match(/[↑↓](\d+) ─/g)||[]).reduce((n,m)=>n+Number(m.slice(1,-2)),0);
   if(hidden)scrolled++;
   // Routes and requests shown plus those the border counts are all of them.
-  const requests=v.hits.filter(h=>h.row>b.a&&h.row<b.b&&h.action==='popup:MESSAGES').length;
+  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length;
   assert.equal(shown+requests+hidden,6,label);
   if(v.routeArea)assert(v.routeArea.top===b.a&&v.routeArea.bottom===b.b,JSON.stringify(v.routeArea)+label);
  }

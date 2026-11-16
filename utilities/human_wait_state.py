@@ -1207,6 +1207,19 @@ def _message_source_state(item: dict) -> str:
     return "open"
 
 
+def _valid_doers(value):
+    """The bounded ``session_doers`` map, or {} (display detail never crowds question truth out)."""
+    if not isinstance(value, dict) or len(value) > _SESSION_DOERS:
+        return {}
+    kept = {}
+    for key, doer in value.items():
+        if (isinstance(key, str) and "\0" in key and len(key) <= 300 and isinstance(doer, dict)
+                and all(name in ("model", "effort") and isinstance(text, str) and len(text) <= 64
+                        and text.isprintable() for name, text in doer.items())):
+            kept[key] = dict(doer)
+    return kept
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -1251,6 +1264,7 @@ def publish_cache(result: dict) -> bool:
              "items": items, "by_session": by_session,
              "route_status": result.get("route_status", {}),
              "route_panels": panels,
+             "session_doers": _valid_doers(result.get("session_doers")),
              "route_sessions": result.get("route_sessions", []),
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
@@ -1471,6 +1485,7 @@ def cached_view(*, now=None, request=True):
             "stale_total": value.get("stale_total", 0), "unattributed": value.get("unattributed", []),
             "health": value.get("health", []), "complete": bool(value.get("complete")),
             "route_panels": value.get("route_panels", {}),
+            "session_doers": _valid_doers(value.get("session_doers")),
             "observed_at": value["observed_at"]}
 
 
@@ -4764,6 +4779,30 @@ def _reconnect_locked_cache_producer(root, lock, binding, code_root, observers):
     return _ensure_producer()
 
 
+_SESSION_DOERS = 64
+
+
+def session_doers(snapshot):
+    """``{"<harness>\\0<session id>": {"model", "effort"}}`` for the sessions a refresh pass already
+    interpreted (each id the session answers to), bounded; a value it does not know is left out."""
+    doers = {}
+    for session in getattr(snapshot, "sessions", None) or ():
+        harness = getattr(session, "harness", None)
+        if harness not in {"claude", "codex", "opencode"}:
+            continue
+        value = {}
+        for name, limit in (("model", 64), ("effort", 16)):
+            found = getattr(session, name, None)
+            if isinstance(found, str) and 0 < len(found) <= limit and found.isprintable():
+                value[name] = found
+        if not value:
+            continue
+        for sid in (getattr(session, "session_id", None), *(getattr(session, "session_aliases", None) or ())):
+            if isinstance(sid, str) and _safe_native_ref(sid) == sid and len(doers) < _SESSION_DOERS:
+                doers[harness + "\0" + sid] = value
+    return doers
+
+
 def _refresh_cache() -> bool:
     """Run one observational refresh. Caller owns the single-flight lock."""
     try:
@@ -4795,6 +4834,9 @@ def _refresh_cache() -> bool:
                     labels, panels = session_route_status(snapshot, include_details=True)
                     result["route_status"] = {key: label for key, label in labels.items() if key in demands}
                     result["route_panels"] = {key: panel for key, panel in panels.items() if key in demands}
+                    # The displayed sessions' own model and effort from this same pass: a panel names
+                    # the other session of a peer request with them (no second read or collection).
+                    result["session_doers"] = session_doers(snapshot)
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):

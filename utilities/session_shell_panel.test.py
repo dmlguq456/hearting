@@ -2557,7 +2557,8 @@ const render=(width,height,extra={},model=base)=>view.render({width,height,side:
         self.node(r"""
 for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
  const lines=text(render(width,height));
- assert(lines.some(s=>s.includes(width<80?'1 ROUTE │ 3 REQUEST':'route 1 │ request 3')),lines.join('\n'));
+ // (11-16: `PEER REQUEST` whole where the title's line holds it, `REQUEST` where it does not.)
+ assert(lines.some(s=>width<80?(width>=37?s.includes('1 ROUTE │ 3 PEER REQUEST'):s.includes('1 ROUTE │ 3 REQUEST')):s.includes('route 1 │ peer request 3')),lines.join('\n'));
  for(const mark of ['◂','→','✓'])assert(lines.filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
  assert(!lines.join('').includes('⏳')&&!lines.join('').includes('⌛'));
  assert(lines.some(s=>s.includes('MSG_KEPT')),'messages stay at '+width);
@@ -2573,7 +2574,7 @@ assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
 const styled={...base,routes:[{...routes[0],state:'idle',kind:'idle'}],styles:{dim:{dim:true},g_idle:{fg:186}}};
 for(const width of [32,38]){
  const v=render(width,30,{},styled),parts=v.rows.flat();
- const tag=parts.find(p=>/^\d+ REQUEST$/.test(p.text));
+ const tag=parts.find(p=>/^\d+ (PEER )?REQUEST$/.test(p.text));
  assert(tag&&tag.dim===true&&tag.fg===undefined,JSON.stringify(tag));
  const count=parts.find(p=>/^\d+ ROUTE$/.test(p.text));
  assert(count&&count.fg===186,JSON.stringify(count));
@@ -2597,27 +2598,35 @@ assert.notDeepEqual(text(wheel),lines);
 """)
     def test_a_long_status_cuts_the_title_first_and_keeps_the_other_session(self):
         # r3: `◂ 검토 제목 1c… · partial answer` lost its `[6e]`; the title is what gives way.
+        # (11-16: beside the native area a request reads as a route's doer: its head row `◂ [6e]` with the age at
+        # the right edge, then the title, then the status on a row of its own; short of rows the title and the
+        # status share a row and the title is the part cut: the other session and the status stay in every form.)
         self.node(r"""
-for(const width of [32,37,38])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9','review title 1c9036d9'])for(const [glyph,kind] of [['◂','request-in'],['✓','request-done']]){
- const model={...base,requests:[q('rq-aaaaaa',glyph,'[6e]',title,status,kind)]};
- const lines=text(render(width,30,{},model));
- const row=lines.find(s=>s.includes(glyph)&&s.includes('· '+status));
- assert(row,'the row stands: '+width+status+'\n'+lines.join('\n'));
- assert(row.includes('[6e]'),'the other session stays: '+row);
- if(width>=37||status==='open')assert(row.includes('…')||row.includes(title),'the title is cut with an ellipsis: '+row);
+for(const width of [32,37,38])for(const height of [30,9])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9 길게 이어지는 제목','review title 1c9036d9 and more words'])for(const [glyph,kind] of [['◂','request-in'],['✓','request-done']]){
+ const model={...base,messages:[],requests:[q('rq-aaaaaa',glyph,'[6e]',title,status,kind)]};
+ const lines=text(render(width,height,{},model));
+ const at=lines.findIndex(s=>s.includes(glyph+' [6e]'));
+ const label=[width,height,status,glyph].join(' ')+'\n'+lines.join('\n');
+ assert(at>0,'the head row stands with the other session: '+label);
+ const rows=lines.slice(at,at+3).join('\n');
+ assert(rows.includes(status),'the status stays: '+label);
+ assert(rows.includes('…')||rows.includes(title),'the title is cut with an ellipsis: '+label);
+ if(height===9)assert(lines[at+1].includes('· '+status),'short of rows the status joins the title row: '+label);
 }
 // A title that fits stays whole beside the session and the status.
-const whole=text(render(38,30,{},{...base,requests:[q('rq-aaaaaa','◂','[6e]','짧은 일','final answer','request-in')]}));
-assert(whole.some(s=>s.includes('[6e] 짧은 일 · final answer')),whole.join('\n'));
+const whole=text(render(38,9,{},{...base,messages:[],requests:[q('rq-aaaaaa','◂','[6e]','짧은 일','final answer','request-in')]}));
+assert(whole.some(s=>s.includes('짧은 일 · final answer')),whole.join('\n'));
 """)
 
     def test_a_request_alone_still_draws_the_box_and_a_long_url_title_is_cut_whole(self):
         self.node(r"""
 const lone=text(render(32,24,{},{...base,routes:[],route_count:0,requests:[
  q('rq-dddddd','→','[52]','https://example.com/'+'a'.repeat(80),'전달됨','request-out')]}));
-assert(lone.some(s=>s.includes('1 REQUEST')),lone.join('\n'));
-const row=lone.find(s=>s.includes('→'));
-assert(row.includes('…')&&row.includes('전달됨'),row);
+// (11-16: `REQUEST` where `PEER REQUEST` does not fit the title's line; no thin rule: no route stands above.)
+assert(lone.some(s=>s.includes('1 PEER REQUEST')||s.includes('1 REQUEST')),lone.join('\n'));
+assert(!lone.some(s=>s.includes('├')),lone.join('\n'));
+const at=lone.findIndex(s=>s.includes('→ [52]'));
+assert(at>0&&lone[at+1].includes('…')&&lone[at+2].includes('전달됨'),lone.join('\n'));
 assert(lone.every(s=>[...s].length<=32));
 """)
 

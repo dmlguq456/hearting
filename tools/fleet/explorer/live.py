@@ -2039,7 +2039,8 @@ def _peer_session_views(session_rows, session_index, now, snapshot):
                     if isinstance(item, Mapping) and not (isinstance(item.get("ref"), str) and item["ref"] in owned)]
         sent = [item for item in sent_by.get(key) or () if isinstance(item, Mapping)
                 and not _request_ref(item.get("refs"))]
-        messages = peer_message_rows(received, sent, tag_of, limit=8, now=now) if received or sent else []
+        messages = (peer_message_rows(received, sent, tag_of, limit=8, now=now, own=(row["harness"], info["sid"]))
+                    if received or sent else [])
         request_views = []
         for ident, side in sides.get(key) or ():
             record = records.get(ident)
