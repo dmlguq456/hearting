@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/test_stage_color_panel.py

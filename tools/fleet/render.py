@@ -110,7 +110,7 @@ from .render_stages import (  # noqa: F401
     _compact_dispatch_name, _DISPATCH_NAME_MAX, _dispatch_stage_color_index,
     _dispatch_stage_label, _display_session_subject, _ICON_STEWARD, _interaction_badge,
     _interaction_chip, _is_owner_mode_row, _is_plugin_agent, _LEGACY_STAGE_COLOR_INDEX,
-    _one_shot_route, _plugin_phase, _projection_route_seq, _projection_stage_for_dispatch,
+    _one_shot_route, route_stage_key, _plugin_phase, _projection_route_seq, _projection_stage_for_dispatch,
     _projection_stage_text, _route_rides_the_rail, _ROUTE_STATE_MARK, _session_name,
     _session_tag_chip, _session_tag_slot, _spec_phase_seq, _stage_zone_segs,
     _stall_attention_stage_segs, _steward_flag, _subject_name_key, _subject_title, _text_age,
@@ -607,17 +607,17 @@ def _route_stage_segs(route_seq, working, max_width):
     # a node name and its state mark. Flush (`execute✕`) the glyph read as part of the word.
     for i, (nid, st) in enumerate(route_seq):
         if st == "failed":
-            items.append((i, nid + " ✕", "lvl_r"))
+            items.append((i, nid + " ✕", route_stage_key(i, st)))
         elif st == "attention":
-            items.append((i, nid + " !", "lvl_y"))
+            items.append((i, nid + " !", route_stage_key(i, st)))
         elif st == "degraded":
-            items.append((i, nid + " ◐", "lvl_y"))
+            items.append((i, nid + " ◐", route_stage_key(i, st)))
         elif st in ("reconciling", "recovering"):
-            items.append((i, nid + " …", "lvl_y"))
+            items.append((i, nid + " …", route_stage_key(i, st)))
         elif st == "done":
-            items.append((i, nid + " ✓", "stg%d_off" % (i % 5)))
+            items.append((i, nid + " ✓", route_stage_key(i, st)))
         elif st == "active":
-            items.append((i, nid, _cur_key(i)))
+            items.append((i, nid, route_stage_key(i, st, bright=not (working and not _BLINK_ON))))
         else:
             # pending (and any residual skipped that a caller did not filter) — the name in the
             # dim off-hue, no glyph. Kept glyph-free on purpose: ✓/✕ are the only markers, and a

@@ -157,6 +157,44 @@ function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
   return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
 function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
+// 11-16 (spec E9 rule 60): the native rows that are a harness's own last line, which the shell writes over (the last of
+// them takes its one line, the others are blanked). Found only when the screen has the harness's own footer layout; a
+// row that is merely like it is left alone (review of #1662: what is not found is not covered).
+// Codex: the footer rows are the ones after the composer's last `›` row (a multi-line draft's rows end at the blank row
+// that closes the composer), and they are exactly two, the status row and the help row, or exactly one, the thread-id
+// status row Codex draws without a help row (the layout `pane_ownership._codex_current_footer` reads). The status row
+// opens with a word, a number or a path, never a sign (`↳ queued`, `⏎ to send`, `■ stream error`); a row that opens
+// with a thread's id counts only as the id status row (`<id> · …`), not as a draft's line that begins with an id.
+// OpenCode: its bottom bar is the row with `ctrl+p commands` among the last three, and the row right above it that
+// opens with the working folder; without that row nothing is covered.
+// Claude's rows are the ones its recorded status text fills (`claudeStatusRows`).
+function footerRows(harness,lines){
+  const n=lines.length,from=Math.max(0,n-4);
+  const help=s=>/(?:^|\s)\? for shortcuts(?:\s|$)/.test(s||'')||/(?:\^c|ctrl\+c) copy · enter copy & follow · esc clear/i.test(s||'');
+  if(harness==='codex'){
+    const rows=Array.from({length:n},(_,y)=>lines[y]||''),filled=s=>/\S/.test(s);
+    const uuid='[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',idStatus=new RegExp('^ +'+uuid+'(?: [\\u2800-\\u28ff])? · ','i'),idFirst=new RegExp('^ +'+uuid,'i');
+    let top=-1;for(let y=n-1;y>=0&&top<0;y--)if(/^›/.test(rows[y].trim()))top=y;
+    if(top<0)return [];
+    const tail=[];for(let y=top+1;y<n;y++)if(filled(rows[y]))tail.push(y);
+    // The footer block: the rows after the composer's closing blank row, when there is one.
+    let first=tail.length;while(first>0&&(first===tail.length||tail[first]-tail[first-1]===1))first--;
+    const block=tail.slice(first);
+    if(block.length===2&&block[0]>=from&&help(rows[block[1]])&&!help(rows[block[0]])
+       &&/^ {2}[\p{L}\p{N}~.\/]/u.test(rows[block[0]])&&(!idFirst.test(rows[block[0]])||idStatus.test(rows[block[0]])))return [block[0]];
+    if(block.length===1&&block[0]>=from&&idStatus.test(rows[block[0]]))return [block[0]];
+    return [];
+  }
+  if(harness==='opencode'){
+    const out=[],bar=y=>/ctrl\+p commands\b/.test(lines[y]||''),path=/^\s*(?:~|\/)[\w.\-\/~]*(?::\S+)?(?:\s{2,}|$)/;
+    for(let y=Math.max(0,n-3);y<n;y++){
+      const row=lines[y]||'';
+      if(bar(y)||y+1<n&&bar(y+1)&&path.test(row)&&/\S/.test(row))out.push(y);
+    }
+    return out;
+  }
+  return [];
+}
 // Spec rule 49 (d): the one narrow-width judgment. Beside the native area an open panel
 // folds by itself when the native area would be left under NATIVE_MIN columns, and opens
 // again when there is room. The judgment stands only while the person has not chosen: a
@@ -243,4 +281,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,observe,firstLine,hiddenFooterRows,footerConcealment,footerRows,claudeStatusRows,blockHeight,titleSequence,publisher};
