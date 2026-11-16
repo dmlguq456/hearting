@@ -259,7 +259,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   s=await until(s=>!!box(s),'the popup by a press on QUESTIONS');
   frames.pressed=s;
   // 11-15 ("질문 선지 선택 효과를 틴트로 해 명확하게"): the chosen choice's row stands on the chosen ground (palette
-  // 237, the dark face's: the fixture's face is unknown) across the popup's inside, the cell between it and
+  // 52, the dark face's: the fixture's face is unknown) across the popup's inside, the cell between it and
   // each side line on the popup's ground (235); ↓ moves it to the next choice; the cell each side of the
   // frame stands on the popup's ground too.
   const tint=async()=>{await flush();const b=box(await screen());if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),out=[];
@@ -267,11 +267,11 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
       const inside=[];for(let x=left+2;x<=right-2;x++){const cell=line?.getCell(x);if(cell&&cell.getWidth()===0)continue;inside.push(bg(x));}
       out.push({text:cells(y).slice(left,right+1).join(''),inside,beside:[bg(left+1),bg(right-1)],margin:[bg(left-1),bg(right+1)]});}
     return out;};
-  {const t=await tint(),chosen=t.filter(r=>r.inside.every(b=>b===237));
+  {const t=await tint(),chosen=t.filter(r=>r.inside.every(b=>b===52));
    checks.tint_rows=chosen.map(r=>r.text);checks.tint_beside=chosen.length>0&&chosen.every(r=>r.beside.every(b=>b===235));
    checks.tint_others=t.filter(r=>!chosen.includes(r)).every(r=>r.inside.every(b=>b===235));
    checks.margins=t.every(r=>r.margin.every(b=>b===235));
-   await key('\x1b[B',250);checks.tint_moved=(await tint()).filter(r=>r.inside.every(b=>b===237)).map(r=>r.text);}
+   await key('\x1b[B',250);checks.tint_moved=(await tint()).filter(r=>r.inside.every(b=>b===52)).map(r=>r.text);}
   await key('abc');await key('\t');
   s=await until(s=>box(s)&&s[box(s).top].includes('2/2'),'Tab to 2/2');frames.tab=s;
   await key('\x1b[Z');s=await until(s=>box(s)&&s[box(s).top].includes('1/2'),'Shift+Tab back to 1/2');
@@ -284,7 +284,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   frames.answered=s;
   // Closed, no popup ground or chosen ground is left anywhere.
   await flush();{let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const c=line?.getCell(x);
-    if(c&&c.isBgPalette()&&[237,235].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
+    if(c&&c.isBgPalette()&&[52,235].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
   await key('\r',400);checks.enter_swallowed=!(await screen()).some(l=>l.includes('DONE_draft1'));
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');
   // The other question: a text answer in Korean and a paste, kept when the popup closes.
@@ -583,8 +583,8 @@ class SessionShellPopupTest(unittest.TestCase):
         # 256-color step beside it where not, the same under each harness: the frame's rows on it, the cell each side of
         # it too, the chosen choice's rows on the chosen ground; the face is the terminal's (COLORFGBG; unknown is dark).
         for fgbg, colorterm, ground, chosen in (
-                ('', 'truecolor', '#29221e', '#4a3b30'), ('0;15', 'truecolor', '#f1e7dc', '#e3d2bf'),
-                ('0;15', None, 254, 188), ('', None, 235, 237)):
+                ('', 'truecolor', '#29221e', '#5a3a1e'), ('0;15', 'truecolor', '#f1e7dc', '#fecca4'),
+                ('0;15', None, 254, 223), ('', None, 235, 52)):
             rows = self.popup(harness, 'ground', colorterm=colorterm, colorfgbg=fgbg)['checks']
             label = repr((harness, fgbg, colorterm, rows['rows'][:2]))
             for row in rows['rows']:

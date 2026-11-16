@@ -24,14 +24,19 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const pv=require(path.join(process.argv[1],'panel-view.cjs'));
 // What each face and color count must paint (named here, not read from FACES): ground, line, title, chosen ground.
 const WANT={
- dark:{256:{popup:235,line:137,title:255,chosen:237},24:{popup:'#29221e',line:'#786453',title:'#f1eae3',chosen:'#4a3b30'}},
- light:{256:{popup:254,line:137,title:232,chosen:188},24:{popup:'#f1e7dc',line:'#9c8571',title:'#342a23',chosen:'#e3d2bf'}}};
+ dark:{256:{popup:235,line:137,title:255,chosen:52},24:{popup:'#29221e',line:'#786453',title:'#f1eae3',chosen:'#5a3a1e'}},
+ light:{256:{popup:254,line:137,title:232,chosen:223},24:{popup:'#f1e7dc',line:'#9c8571',title:'#342a23',chosen:'#fecca4'}}};
 const FACESET=[[{},'','dark'],[{},'dark','dark'],[{theme:'light'},'','light'],[{},'light','light']];
 // The cells' colors as sRGB: a 256-color step by the xterm palette, a hex as it is.
 const rgb=v=>{if(typeof v==='string'){const m=/^#(..)(..)(..)$/.exec(v);return m.slice(1).map(x=>parseInt(x,16));}
   if(v<16)return [[0,0,0],[128,0,0],[0,128,0],[128,128,0],[0,0,128],[128,0,128],[0,128,128],[192,192,192],[128,128,128],[255,0,0],[0,255,0],[255,255,0],[0,0,255],[255,0,255],[0,255,255],[255,255,255]][v];
   if(v>=232){const g=8+10*(v-232);return [g,g,g];}const n=v-16,s=[0,95,135,175,215,255];return [s[Math.floor(n/36)],s[Math.floor(n/6)%6],s[n%6]];};
 const lum=c=>{const [r,g,b]=c.map(x=>{x/=255;return x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4;});return 0.2126*r+0.7152*g+0.0722*b;};
+// The colour difference (CIE76, sRGB to Lab under D65): how far one colour stands from another.
+const lab=c=>{const f=t=>t>216/24389?Math.cbrt(t):(24389/27*t+16)/116,[r,g,b]=rgb(c).map(x=>{x/=255;return x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4;});
+  const X=(0.4124564*r+0.3575761*g+0.1804375*b)/0.95047,Y=0.2126729*r+0.7151522*g+0.072175*b,Z=(0.0193339*r+0.119192*g+0.9503041*b)/1.08883;
+  return [116*f(Y)-16,500*(f(X)-f(Y)),200*(f(Y)-f(Z))];};
+const delta=(a,b)=>{const x=lab(a),y=lab(b);return Math.hypot(x[0]-y[0],x[1]-y[1],x[2]-y[2]);};
 const ratio=(a,b)=>{const x=lum(rgb(a)),y=lum(rgb(b));return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);};
 // Every kind of word a popup carries: a plain one, a dim one, a gray, the question's rose, a failure, a caution, a
 // success, the three harnesses, a stage, a steward, an orange model name; and the chosen choice's rows.
@@ -74,6 +79,9 @@ for(const [name,kind] of kinds)for(const colors of [256,1<<24])for(const [cfg,ba
   // The line stands off the ground, the title reads.
   out.line=out.line||{};out.line[face+colors]=+ratio(w.line,w.popup).toFixed(2);assert(ratio(w.line,w.popup)>=2.5,label+' line ratio');
   assert(ratio(w.title,w.popup)>=10,label+' title ratio');
+  // The chosen row stands off the ground (the person: "질문 선지 선택 효과를 틴트로 해 명확하게"): 20 or more apart, as the
+  // blue it replaced was (34.9 dark, 24.9 light), in 256 colors and in 24-bit.
+  out.chosenGap=out.chosenGap||{};out.chosenGap[face+colors]=+delta(w.chosen,w.popup).toFixed(1);assert(delta(w.chosen,w.popup)>=20,label+' chosen against ground '+delta(w.chosen,w.popup));
 }
 assert.deepEqual(out.low,[],JSON.stringify(out.low));
 assert(out.checked>200,out.checked);
@@ -100,7 +108,7 @@ for(const [name,kind] of kinds)for(const [model,cfg] of none){
 for(const face of ['dark','light']){const F=pv.FACES[face],w=WANT[face];
   assert.deepEqual([F.popup,F.popupLine,F.popupTitle,F.chosen],[w[256].popup,w[256].line,w[256].title,w[256].chosen],face);
   assert.deepEqual([F.rgb.popup,F.rgb.popupLine,F.rgb.popupTitle,F.rgb.chosen],[w[24].popup,w[24].line,w[24].title,w[24].chosen],face);}
-console.log(JSON.stringify({checked:out.checked,line:out.line,worst:out.ratios.sort((x,y)=>x.ratio-y.ratio).slice(0,6)}));
+console.log(JSON.stringify({checked:out.checked,line:out.line,chosenGap:out.chosenGap,worst:out.ratios.sort((x,y)=>x.ratio-y.ratio).slice(0,6)}));
 """
 
 
