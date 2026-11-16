@@ -1005,10 +1005,40 @@ def render_line(record, role, *, revision=None, label="", report=None, body_line
     raise ValueError("request-role-invalid")
 
 
+# What a held row waits for, in the person's words: the receiving host's `hold` (session_shell._hold)
+# and a window outside the shell. The last two are the words a sent answer uses (session_block).
+_HOLD_WORDS = {"busy": ("peer.delivery.hold_busy",), "form": ("peer.delivery.hold_form",),
+               "draft": ("peer.delivery.hold_draft",), "paste": ("peer.delivery.hold_paste",),
+               "unsettled": ("peer.delivery.hold_unsettled",), "unobserved": ("peer.delivery.hold_unobserved",),
+               "old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
+               "no-shell": ("fleet.session_block.wait_no_shell",)}
+
+
+def _ui_text(key):
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.config import ui_text
+    return ui_text(key)
+
+
+def hold_words(row):
+    """Why a still-pending row waits (its ``held``), in words; "" when nothing is known."""
+    row = row or {}
+    if row.get("state") != "pending":
+        return ""
+    keys = _HOLD_WORDS.get(str((row.get("held") or {}).get("reason") or ""), ())
+    return " · ".join(_ui_text(key) for key in keys)
+
+
 def delivery_word(row):
-    """The delivery column from the pending row: 보냄 / 전달됨 / 보임."""
+    """The delivery column from the pending row: awaiting delivery (and why) / sent / delivered / seen."""
     state = (row or {}).get("state")
-    return {"pending": "보냄", "unverified": "보냄", "queued": "전달됨", "received": "보임"}.get(state, "")
+    key = {"pending": "peer.delivery.waiting", "unverified": "peer.delivery.sent",
+           "queued": "peer.delivery.queued", "received": "peer.delivery.seen"}.get(state)
+    if key is None:
+        return ""
+    return " · ".join(part for part in (_ui_text(key), hold_words(row)) if part)
 
 
 def describe(record, *, rows=None, now=None):

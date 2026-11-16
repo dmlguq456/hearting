@@ -6,8 +6,12 @@ lifecycle events over the shell socket, its composer painted as the readiness re
 the real Claude UserPromptSubmit hooks (or OpenCode's plugin receive helper) on every prompt it
 takes, and local commands (``/model``) that open and close a menu with no prompt event (OpenCode's
 ``/models`` paints the real dialog of ``fixtures/opencode-2.0.32-dialogs``). ``ARI_NATIVE_MODE`` makes
-it slow to call back after an Enter (``slow``) or slow to paint a key (``lag``). The obligation
-runner's own pass is called in-process, so a suite owns every process it starts.
+it slow to call back after an Enter (``slow``) or slow to paint a key (``lag``). It reads its keys as a
+terminal app does: cursor keys, focus and mouse reports and the terminal's own replies are taken without a
+paint, and Up on an empty composer brings back the last prompt. ``ARI_NATIVE_MOUSE`` makes it turn on mouse
+reporting, and a ``bgshell`` prompt ends its turn as Claude does while a background shell still runs
+(session record ``shell``). The obligation runner's own pass is called in-process, so a suite owns every
+process it starts.
 """
 import contextlib
 import fcntl
@@ -99,8 +103,8 @@ def close_menu(word):
     menu=False;last=word;record('idle');note(local=word);paint()
 tty.setraw(0)
 event('start')
-print('\x1b[?2004h',end='',flush=True);paint()
-buffer='';draft='';pasting=False;prompts=0;warmed=False
+print('\x1b[?2004h'+('\x1b[?1000h\x1b[?1006h' if os.environ.get('ARI_NATIVE_MOUSE') else ''),end='',flush=True);paint()
+buffer='';draft='';pasting=False;prompts=0;warmed=False;history=[]
 while True:
     data=os.read(0,65536)
     if not data or data==b'\x03':break
@@ -121,9 +125,17 @@ while True:
             if char=='\r':close_menu('MODEL_CHOSEN')
             continue
         if buffer.startswith('\x1b') and len(buffer)<6 and '\x1b[200~'.startswith(buffer):break
-        key=re.match(r'\x1b\[[0-9;]*[A-Za-z~]',buffer)
+        # The terminal's own replies (OSC, DCS strings) are read whole, never as typed text.
+        reply=re.match(r'\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\)',buffer)
+        if reply:buffer=buffer[reply.end():];continue
+        if re.match(r'\x1b[\]P_][^\x07]*$',buffer) and len(buffer)<512:break
+        key=re.match(r'\x1b\[[0-9;?<>=$]*[A-Za-z~]',buffer)
         if key:
-            # A cursor key on this composer changes nothing on screen: taken, never painted.
+            # Up on an empty composer brings back the last prompt (a draft, painted).
+            if key.group()=='\x1b[A' and not draft and history:
+                draft=history[-1];paint(draft)
+            # Any other cursor key, a focus or mouse report or a terminal reply changes nothing on
+            # screen: taken, never painted.
             buffer=buffer[key.end():];continue
         char,buffer=buffer[0],buffer[1:]
         if char=='\x7f':draft=draft[:-1];paint(draft);continue
@@ -132,6 +144,7 @@ while True:
                 paint(draft);time.sleep(float(os.environ.get('ARI_NATIVE_LAG','1.5')))
             draft+=char if char>=' ' or char=='\n' else '';paint(draft);continue
         line,draft=draft,''
+        history.append(line)
         if line=='warm':
             event('prompt');last='DONE_warm';paint();event('stop');warmed=True;continue
         if mode=='slow' and line.startswith('slow'):
@@ -144,6 +157,8 @@ while True:
         event('prompt')
         note(number=prompts,prompt=line,context=context)
         last='DONE_PROMPT_%d'%prompts;paint();event('stop')
+        # The turn ended with a background shell still running: Claude writes `shell`, not `idle`.
+        if line=='bgshell':record('shell')
 """
 
 

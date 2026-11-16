@@ -74,10 +74,18 @@ delivery readiness settles them the same way. The two seconds are compared at a 
 that comes anyway (a courier pass's status, an idle transition), never waited for: right
 after a person's Enter the composer is empty before that turn's prompt callback comes, and
 a slow native repaints its old screen before the keys' own. A draft or form on that screen
-keeps them unproven, and keys the native has not painted after (an unechoed cursor key)
-wait for its next paint or submitted turn. OpenCode's keys always wait for the next
-submitted turn: its focus can leave the composer while the composer still reads empty
-(a dialog such as `/models` over the transcript, its terminal pane). A start or selection (a resume picker's Enter, `/clear`,
+keeps them unproven. Keys and reports that cannot put a character into an empty composer
+(a lone Esc, cursor and navigation keys, a click the native reads, the terminal's own
+replies), when nothing else came since the composer was last seen empty, owe no repaint:
+they change nothing on screen, so after their two quiet seconds the reading alone settles
+them (11-16: a window kept messages for hours after an Esc). Keys that may have typed and
+the native has not painted after (an unechoed CSI u key) wait for its next paint or
+submitted turn; a focus report is no key and restarts no quiet time. OpenCode's keys always
+wait for the next submitted turn: its focus can leave the composer while the composer still
+reads empty (a dialog such as `/models` over the transcript, its terminal pane). For
+delivery a Claude session record that says `shell` (the turn ended while a background shell
+it started still runs) is at rest as `idle` is; tidy and Fleet read that record as before.
+A start or selection (a resume picker's Enter, `/clear`,
 OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
 delivery readiness does; keys after that Enter are settled as above.
 A window with no selected session (OpenCode on its home route) has
@@ -809,6 +817,12 @@ why: a window whose shell runs an older release than its launch path names
 (`New release waiting`, the window's own line) or a Claude window outside the shell
 takes it when that window is reopened or typed in once. A session still working takes it
 when its turn ends, and one whose state is not known gives no reason either.
+A message or request still on its way has the same kind of reason on the sender's side: each
+courier pass keeps on its pending row (`held`) the word the receiving host gave for keeping it
+(`busy`, `form`, `draft`, `paste`, `unsettled`, `unobserved`) or that the window is outside the
+shell or on an older release, and `peer-steward show <request>` and the one-hour notice to the
+sender say `awaiting delivery` with it (`peer_request.delivery_word`). The panel's MESSAGES line
+does not show it yet.
 Fleet's QUESTIONS row and the panel's line draw the same parts from the same function
 (`session_block.sent_answer_line`): a secret answer `•••`, no control or direction
 characters; nothing offers to send it again. Answering returns
