@@ -2,7 +2,7 @@
 
 This walks one small fix through Hearting, from install to a finished result,
 then hands a piece of work from one session to another. The
-[README](README.md) explains what Hearting is; this page is the shortest path
+[README](../README.md) explains what Hearting is; this page is the shortest path
 to seeing it work.
 
 | Minute | Step |
@@ -65,7 +65,7 @@ the test, and tells you what it ran and what it did not. A passed test and a
 test that could not run are reported as different outcomes.
 
 To try it on a ready-made project, copy `greet.py` and `focused_test.py.txt`
-from the [demo files](tools/release/fixtures/first-journey/) into an empty folder,
+from the [demo files](../tools/release/fixtures/first-journey/) into an empty folder,
 rename `focused_test.py.txt` to `test_greet.py`, and commit both in a new Git
 repository. The test fails until `greet.py` returns `Hello` instead of `Helo`;
 the expected change is one line:
@@ -109,7 +109,7 @@ body itself, works, and reports; a partial report keeps the request open, and
 a final report closes it and wakes the first session. Neither herdr nor tmux is
 needed. In a terminal without the panel, an idle Claude Code or OpenCode
 session is reached at its next turn rather than at once
-([details](docs/session-panel.md#requests-and-messages)).
+([details](session-panel.md#requests-and-messages)).
 
 ## Read the result
 
@@ -126,7 +126,7 @@ next stage reads the evidence it holds.
 ## What to expect
 
 One measured run per task, not a promise. The numbers below come from
-[`tools/release/first-journey.py`](tools/release/first-journey.md): published
+[`tools/release/first-journey.py`](../tools/release/first-journey.md): published
 release v3.82.17 installed into an isolated Linux environment on 2026-11-06,
 one session per runtime, no confirmation card answered. That release predates
 the panel and requests, which these runs did not measure. Times are model work

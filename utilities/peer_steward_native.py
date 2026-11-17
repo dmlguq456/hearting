@@ -47,7 +47,9 @@ def native_agent(harness, session_id, *, pane=None, server=None):
                         and item.get("harness") == harness and item.get("sid") == session_id), None)
             if row is None:
                 return None
-            pane = pane or row.get("env", {}).get("TMUX_PANE")
+            # The same window value the census row below reads: a shell-attached
+            # session in a Herdr window has HERDR_PANE_ID, not TMUX_PANE.
+            pane = pane or row.get("env", {}).get("HERDR_PANE_ID") or row.get("env", {}).get("TMUX_PANE")
         else:
             matches = [item for item in rows if item.get("harness") == harness
                        and item.get("sid") == session_id]

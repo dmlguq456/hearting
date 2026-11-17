@@ -64,8 +64,8 @@ repeat.
   artifacts and check spec drift, then route implementation through
   `autopilot-code` instead of applying an ungrounded edit.
 
-See [`core/WORKFLOW.md`](core/WORKFLOW.md) for routing rules and
-[`roles/response-policy.md`](roles/response-policy.md) for response behavior.
+See [`core/WORKFLOW.md`](../core/WORKFLOW.md) for routing rules and
+[`roles/response-policy.md`](../roles/response-policy.md) for response behavior.
 
 ---
 
@@ -100,9 +100,9 @@ outside sessions: loops/ ──inspect and maintain──┘
 - **Loops** describe when recurring inspection and maintenance run outside the
   interactive capability pipeline.
 
-See [capabilities/README.md](capabilities/README.md),
-[roles/README.md](roles/README.md), and
-[`core/CONVENTIONS.md`](core/CONVENTIONS.md).
+See [capabilities/README.md](../capabilities/README.md),
+[roles/README.md](../roles/README.md), and
+[`core/CONVENTIONS.md`](../core/CONVENTIONS.md).
 
 ---
 
@@ -124,7 +124,7 @@ may run unattended and be reported; decisions requiring interpretation remain
 for agent or user review. Drill is never run automatically during ordinary
 maintenance because it can launch headless runtime sessions and spend tokens.
 
-See [`loops/README.md`](loops/README.md).
+See [`loops/README.md`](../loops/README.md).
 
 ---
 
@@ -140,7 +140,7 @@ See [`loops/README.md`](loops/README.md).
 | **Unified memory lifecycle** | DESIGN §7 / MEMORY §7 | `mem.py` DB plus adapter lifecycle bridges |
 | **Behavioral self-tests** | loops §L4 | `loops/drill/` fixtures, assertions, and token accounting |
 
-See [`core/DESIGN_PRINCIPLES.md`](core/DESIGN_PRINCIPLES.md).
+See [`core/DESIGN_PRINCIPLES.md`](../core/DESIGN_PRINCIPLES.md).
 
 ---
 
@@ -148,18 +148,18 @@ See [`core/DESIGN_PRINCIPLES.md`](core/DESIGN_PRINCIPLES.md).
 
 | Document | Authority |
 |---|---|
-| [`core/CORE.md`](core/CORE.md) and [`adapters/`](adapters/README.md) | Shared harness contract and runtime adapter boundary |
+| [`core/CORE.md`](../core/CORE.md) and [`adapters/`](../adapters/README.md) | Shared harness contract and runtime adapter boundary |
 | [`INSTALL_LAYOUT.md`](INSTALL_LAYOUT.md) | Runtime-home projections and activation ownership |
-| [`adapters/claude/CLAUDE.md`](adapters/claude/CLAUDE.md) | Claude Code adapter bootstrap |
-| [`adapters/codex/AGENTS.md`](adapters/codex/AGENTS.md) | Codex adapter bootstrap |
-| [`adapters/opencode/AGENTS.md`](adapters/opencode/AGENTS.md) | OpenCode adapter bootstrap |
-| [`core/WORKFLOW.md`](core/WORKFLOW.md) | Request-to-capability routing |
-| [`core/CONVENTIONS.md`](core/CONVENTIONS.md) | QA, artifacts, roles, and family conventions |
-| [`core/OPERATIONS.md`](core/OPERATIONS.md) | Git, worktrees, dispatch, and push behavior |
-| [`core/MEMORY.md`](core/MEMORY.md) | Unified memory contract |
-| [`core/DESIGN_PRINCIPLES.md`](core/DESIGN_PRINCIPLES.md) | Architecture and behavioral principles |
-| [`README.md`](README.md) | Public product overview and quick start |
-| [`loops/README.md`](loops/README.md) | Recurring loop catalog |
+| [`adapters/claude/CLAUDE.md`](../adapters/claude/CLAUDE.md) | Claude Code adapter bootstrap |
+| [`adapters/codex/AGENTS.md`](../adapters/codex/AGENTS.md) | Codex adapter bootstrap |
+| [`adapters/opencode/AGENTS.md`](../adapters/opencode/AGENTS.md) | OpenCode adapter bootstrap |
+| [`core/WORKFLOW.md`](../core/WORKFLOW.md) | Request-to-capability routing |
+| [`core/CONVENTIONS.md`](../core/CONVENTIONS.md) | QA, artifacts, roles, and family conventions |
+| [`core/OPERATIONS.md`](../core/OPERATIONS.md) | Git, worktrees, dispatch, and push behavior |
+| [`core/MEMORY.md`](../core/MEMORY.md) | Unified memory contract |
+| [`core/DESIGN_PRINCIPLES.md`](../core/DESIGN_PRINCIPLES.md) | Architecture and behavioral principles |
+| [`README.md`](../README.md) | Public product overview and quick start |
+| [`loops/README.md`](../loops/README.md) | Recurring loop catalog |
 
 This manual is the flow map; the linked source documents are the precision
 layer. If they disagree, the source contract wins and this map should be

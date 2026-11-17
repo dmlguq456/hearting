@@ -1947,7 +1947,7 @@ def _resolve_commands(prompt, model=None):
     """
     if os.environ.get("FLEET_TITLE_COMMAND"):
         return [(worker_argv(prompt, model=model), None, None)]
-    # `FLEET_TITLE_MODEL` is documented in INSTALL_LAYOUT.md as a per-run override, but
+    # `FLEET_TITLE_MODEL` is documented in docs/INSTALL_LAYOUT.md as a per-run override, but
     # it only ever reached `worker_argv` above — the provider path re-resolved the model
     # from models.conf and ignored it, so on every normal run the variable was dead.
     # It is honoured here, and ONLY for a provider the operator also pinned: a model id
