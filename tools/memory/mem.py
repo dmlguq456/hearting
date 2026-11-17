@@ -2040,17 +2040,25 @@ def candidates(query, *, limit=CANDIDATE_MAX_RESULTS,
     return shown_rows
 
 
+_BOOTSTRAP_LABEL_RANK = {"unit": 0, "field": 1}
+_BOOTSTRAP_LOOKUP_SECONDS = 3.0
+
+
 def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
-                      per_record_bytes=1600):
+                      per_record_bytes=1600, topics=None):
     """Return bounded preference bodies for a unit-declared worker bootstrap.
 
     Runtime-only and read-only: it opens the database with ``mode=ro`` and never
     calls ``get_con``, ``_touch_records``, ``_append_recall_event`` or
     ``_write_recall_receipt``. Query groups rank in the given order; the type
     fence selects instruction-bearing records by purpose, not by content
-    relevance. Any failure returns an empty string.
+    relevance. ``topics`` are exact capsule labels (``unit:<family/name>``,
+    ``field:<name>``): records carrying one come first, unit labels before
+    field labels, then strength and update order; query groups fill what is
+    left. Any failure, or a lookup past three seconds, returns an empty string.
     """
     limit = max(1, min(int(limit), BOOTSTRAP_MAX_RESULTS))
+    labels = [t.casefold() for t in _normalize_capsule_list(list(topics or []))]
     max_bytes = max(1, min(int(max_bytes), BOOTSTRAP_MAX_UTF8_BYTES))
     groups = []
     for q in queries or []:
@@ -2059,20 +2067,44 @@ def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
         ]
         if terms:
             groups.append(" OR ".join(terms))
-    if not groups or not DB.is_file():
+    if not (groups or labels) or not DB.is_file():
         return ""
     con = None
     rows = []
     try:
         project = project_key(Path(cwd) if cwd else Path.cwd())
         con = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
-        if not con.execute(
+        if labels:
+            stop_at = time.monotonic() + _BOOTSTRAP_LOOKUP_SECONDS
+            con.set_progress_handler(lambda: int(time.monotonic() > stop_at), 10000)
+        if groups and not con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='records_capsule_fts'"
         ).fetchone():
             return ""
         today_s = datetime.date.today().isoformat()
         seen = set()
+        if labels:
+            marks = ",".join("?" * len(labels))
+            labelled = {}
+            for row in con.execute(
+                "SELECT r.id,r.tier,r.type,r.scope,r.body,t.topic "
+                "FROM record_topics t JOIN records r ON r.id=t.record_id "
+                f"WHERE t.topic IN ({marks}) AND r.status='active' "
+                "AND (r.injection_flag=0 OR r.injection_flag IS NULL) "
+                "AND (r.scope='global' OR r.cwd_origin=?) "
+                "AND (r.expires IS NULL OR r.expires='' OR r.expires>=?) "
+                f"AND {BOOTSTRAP_TYPE_FENCE} "
+                "ORDER BY r.strength DESC,r.updated DESC,r.id",
+                (*labels, project, today_s),
+            ).fetchall():
+                rank = _BOOTSTRAP_LABEL_RANK.get(row[5].split(":", 1)[0], 2)
+                if row[0] not in labelled or rank < labelled[row[0]][0]:
+                    labelled[row[0]] = (rank, row[:5])
+            # dict order keeps the strength/updated order; the sort is stable.
+            for _rank, row in sorted(labelled.values(), key=lambda item: item[0])[:limit]:
+                seen.add(row[0])
+                rows.append(row)
         for expression in groups:
             if len(rows) >= limit:
                 break
@@ -8591,6 +8623,8 @@ def _cli_main():
     bc = sub.add_parser("bootstrap-context",
                         help="Runtime-only read-only preference bodies for declared unit bootstrap")
     bc.add_argument("--query", action="append", default=[])
+    bc.add_argument("--topic", action="append", default=[],
+                    help="Exact capsule label such as unit:<family/name> or field:<name>")
     bc.add_argument("--cwd")
     bc.add_argument("--limit", type=int, default=4)
     bc.add_argument("--max-bytes", type=int, default=6144)
@@ -8839,7 +8873,7 @@ def _cli_main():
     elif args.cmd == "bootstrap-context":
         try:
             out = bootstrap_context(args.query, cwd=args.cwd, limit=args.limit,
-                                    max_bytes=args.max_bytes)
+                                    max_bytes=args.max_bytes, topics=args.topic)
         except Exception:
             out = ""
         if out:

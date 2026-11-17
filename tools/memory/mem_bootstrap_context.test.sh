@@ -92,4 +92,64 @@ PY
 out=$(MEM_STORE="$NOFTS" python3 "$MEM" bootstrap-context --cwd "$TMP/project-a" --query firstgroupmarker)
 [ -z "$out" ]
 
+# 6) exact label lookup: only labelled records, unit before field, fences and caps
+before=$(snapshot)
+lu=$(add_a durable preference 'unitlabelmarker unit-level way of working.' --headline 'unit way' --topic 'unit:qa/code-review')
+lf=$(add_a durable preference 'fieldlabelmarker field-level way of working.' --headline 'field way' --topic 'field:code')
+lb=$(add_a durable user-correction 'bothlabelmarker covers unit and field.' --headline 'both way' --topic 'Field:Code' --topic 'unit:qa/code-review')
+lx=$(add_a durable preference 'otherlabelmarker belongs to another field.' --headline 'other way' --topic 'field:docs')
+lfact=$(add_a durable fact 'factlabelmarker is not an instruction record.' --headline 'fact way' --topic 'field:code')
+lforeign=$(add_b durable preference 'foreignlabelmarker other project way.' --headline 'foreign way' --topic 'field:code')
+(cd "$TMP/project-a" && python3 "$MEM" add durable preference 'plainmarker has no label at all.' --headline 'plain way' >/dev/null)
+boot --topic 'field:code' --topic 'unit:qa/code-review' > "$TMP/topic.out"
+for id in "$lu" "$lf" "$lb"; do grep -q "$id" "$TMP/topic.out"; done
+if grep -Eq "$lx|$lfact|$lforeign|plainmarker" "$TMP/topic.out"; then echo "label leak" >&2; exit 1; fi
+[ "$(grep -c '^## \[' "$TMP/topic.out")" -eq 3 ]
+# both unit-labelled records come before the field-only record
+[ "$(grep -n "$lf" "$TMP/topic.out" | head -1 | cut -d: -f1)" -gt "$(grep -n "$lu" "$TMP/topic.out" | head -1 | cut -d: -f1)" ]
+[ "$(grep -n "$lf" "$TMP/topic.out" | head -1 | cut -d: -f1)" -gt "$(grep -n "$lb" "$TMP/topic.out" | head -1 | cut -d: -f1)" ]
+# the same label puts the record in and finds it: ':' and '/' survive, case folds
+[ "$(python3 - "$MEM_STORE/memory.db" "$lb" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+print(",".join(r[0] for r in con.execute("select topic from record_topics where record_id=? order by topic", (sys.argv[2],))))
+PY
+)" = "field:code,unit:qa/code-review" ]
+boot --topic 'UNIT:QA/Code-Review' | grep -q "$lu"
+# a label match outranks a query match, and a query still fills the remainder
+boot --topic 'unit:qa/code-review' --query 'firstgroupmarker' > "$TMP/mixed.out"
+[ "$(grep -n "$lu" "$TMP/mixed.out" | head -1 | cut -d: -f1)" -lt "$(grep -n "$first" "$TMP/mixed.out" | head -1 | cut -d: -f1)" ]
+# caps: four bodies at most, 6144 bytes, and the explicit limit
+for n in 1 2 3 4 5 6; do add_a durable preference "caplabelmarker number $n." --topic 'field:cap' >/dev/null; done
+boot --topic 'field:cap' > "$TMP/captopic.out"
+[ "$(grep -c '^## \[' "$TMP/captopic.out")" -eq 4 ]
+[ "$(wc -c < "$TMP/captopic.out")" -le 6144 ]
+boot --topic 'field:cap' --limit 2 | grep -c '^## \[' | grep -qx 2
+add_a durable preference "$long_body" --topic 'field:long' >/dev/null
+boot --topic 'field:long' > "$TMP/longtopic.out"
+grep -q '… (truncated)' "$TMP/longtopic.out"
+[ "$(wc -c < "$TMP/longtopic.out")" -le 1900 ]
+# unknown label: empty, rc 0; broken store with a label: empty, rc 0
+[ -z "$(boot --topic 'unit:no/such')" ]
+out=$(MEM_STORE="$BROKEN" python3 "$MEM" bootstrap-context --cwd "$TMP/project-a" --topic field:code)
+[ -z "$out" ]
+# without --topic the output is byte-identical to before the labelled records existed
+boot --query 'firstgroupmarker' --query 'secondgroupmarker' > "$TMP/order2.out"
+cmp "$TMP/order.out" "$TMP/order2.out"
+# the label path is read-only too (the new records were added after the baseline)
+snapshot_after=$(snapshot)
+boot --topic 'field:code' >/dev/null
+[ "$(snapshot)" = "$snapshot_after" ]
+[ ! -e "$MEM_RECALL_EVENTS" ]
+[ ! -e "$MEM_RECALL_RECEIPTS" ]
+# lookup time on the test store
+python3 - "$MEM" "$TMP/project-a" <<'PY'
+import subprocess, sys, time
+t = time.monotonic()
+subprocess.run([sys.executable, sys.argv[1], "bootstrap-context", "--cwd", sys.argv[2],
+                "--topic", "unit:qa/code-review", "--topic", "field:code"],
+               check=True, capture_output=True)
+print("label lookup incl. interpreter start: %.3fs" % (time.monotonic() - t))
+PY
+
 echo "mem bootstrap-context: ok"
