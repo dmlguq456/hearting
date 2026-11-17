@@ -151,6 +151,9 @@ class NativeBackgroundChainTest(unittest.TestCase):
 
 class CurrentSessionTest(unittest.TestCase):
     def setUp(self):
+        # Each case is a fresh collector: no earlier complete herdr read to carry over.
+        herdr._PANE_CLAIM_MEMORY.clear()
+        self.addCleanup(herdr._PANE_CLAIM_MEMORY.clear)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)

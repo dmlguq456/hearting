@@ -285,7 +285,7 @@ check: missing evidence can fail that check without changing resource success.
 ### Parts (SD-165)
 
 For an already verified run's same-code/config resume, epoch extension or repeat,
-select `--shape direct|solo --graph resume-run,run-verify`. This starts no frame,
+select `--capability autopilot-lab --shape direct|solo --graph resume-run,run-verify`. This starts no frame,
 scaffold, smoke, pre-run owner or new approval. Use the route's `resource-runner
 start` instruction once with the approved command; the runtime connects its
 sentinel and supervisor to the independent verification after exit. The small

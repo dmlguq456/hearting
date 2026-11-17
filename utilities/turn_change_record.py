@@ -724,7 +724,9 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
         import artifact_producer
         campaign = artifact_producer.read_campaign(Path(root), env["AGENT_ARTIFACT_CAMPAIGN_ID"])
     selection = ["--campaign-key", campaign["key"]] if campaign and campaign.get("key") != "_unassigned" else ["--unassigned"]
-    composed = _run(_route_command("compose", "--shape", "direct", "--cwd", str(top), *selection,
+    # Nobody names this automatic record's kind; it stays what compose used to default to.
+    composed = _run(_route_command("compose", "--shape", "direct", "--capability", "autopilot-code",
+                                   "--cwd", str(top), *selection,
                                    "--slug", slug, "--parent-harness", harness,
                                    "--prompt-file", str(work / "request.md"),
                                    "--spec-read", GATE_VALUE, "--drift-verdict", GATE_VALUE,

@@ -34,6 +34,11 @@ from ..refresh import background_read
 
 _TIMEOUT_S = 2.0
 _OBSERVATION_WAIT_MAX_S = 0.75
+# Per socket operation of the off-thread read. The read never blocks a pass, so this only decides
+# how slow a herdr server may answer and still produce a view. Measured against a fake server:
+# a snapshot slower than this timeout never completes (0.15 s timeout: no view at 0.2 s latency).
+# First view takes about twice the snapshot latency, so 0.3 s keeps it inside the 0.75 s first wait.
+_OBSERVATION_OP_TIMEOUT_S = 0.3
 _OBSERVATION_LOCK = threading.RLock()
 _OBSERVATION_TRANSPORTS = {}
 _OBSERVATION_FUTURES = {}
@@ -46,6 +51,39 @@ _OBSERVATION_FIRST_WAIT_SPENT = set()
 _OBSERVATION_MIN_REFRESH_S = 0.25
 _PANE_INFO_CACHE = OrderedDict()
 _PANE_INFO_CACHE_LIMIT = 512
+# A process's last pane identity that a complete herdr read confirmed, so one failed
+# read does not turn every row's session id unknown. pid -> (proc_start, claim, seen).
+_PANE_CLAIM_MEMORY = {}
+_PANE_CLAIM_CARRY_S = 60.0
+
+
+def _session_claims(sessions, panes, bindings, *, complete):
+    """``pane_process_claims`` that lets one failed herdr read keep a confirmed identity.
+
+    Only a process whose pane this read could not observe (verdict ``unobserved``) gets its
+    earlier complete-read claim back, and only for the same pid and process start within
+    ``_PANE_CLAIM_CARRY_S``. A new session id from a read replaces it; a process that is gone,
+    restarted or reports no claim in a complete read keeps nothing.
+    """
+    from ..process_identity import pane_process_claims
+    claims = pane_process_claims(sessions, panes, bindings, complete=complete)
+    now = time.monotonic()
+    with _OBSERVATION_LOCK:
+        alive = {s.pid for s in sessions}
+        for pid in [pid for pid in _PANE_CLAIM_MEMORY if pid not in alive]:
+            del _PANE_CLAIM_MEMORY[pid]
+        for s in sessions:
+            claim = claims.get(s.pid)
+            if complete:
+                if claim and claim.get("session_id"):
+                    _PANE_CLAIM_MEMORY[s.pid] = (s.proc_start, dict(claim), now)
+                else:
+                    _PANE_CLAIM_MEMORY.pop(s.pid, None)
+            elif claim and claim.get("verdict") == "unobserved":
+                kept = _PANE_CLAIM_MEMORY.get(s.pid)
+                if kept and kept[0] == s.proc_start and now - kept[2] <= _PANE_CLAIM_CARRY_S:
+                    claims[s.pid] = dict(kept[1])
+    return claims
 
 
 def _observation_module():
@@ -73,7 +111,7 @@ def observation_view(session=None, *, refresh=False, wait_timeout=0.0):
                 # process/NOW/resource publication. Transport work is bounded
                 # off-thread and reused by the next collector lifetime.
                 transport = observation.ObservationTransport(
-                    endpoint, socket_path, timeout=0.15)
+                    endpoint, socket_path, timeout=_OBSERVATION_OP_TIMEOUT_S)
                 _OBSERVATION_TRANSPORTS[key] = transport
             future = _OBSERVATION_FUTURES.get(key)
             completed_now = False
@@ -135,7 +173,10 @@ def _store_observation_value(key, value):
         _OBSERVATION_VIEWS[key] = value
         _OBSERVATION_ERRORS.pop(key, None)
     else:
-        _OBSERVATION_ERRORS[key] = "herdr returned no complete snapshot"
+        transport = _OBSERVATION_TRANSPORTS.get(key)
+        why = getattr(transport, "last_failure", None)
+        _OBSERVATION_ERRORS[key] = ("herdr returned no complete snapshot"
+                                    + (" (%s)" % why if isinstance(why, str) and why else ""))
 
 
 def _store_observation_result(key, future):
@@ -174,8 +215,9 @@ def _observation_error(session=None):
             future = _OBSERVATION_FUTURES.get(key)
             if error:
                 return error
-            if future is not None and not future.done() and key in _OBSERVATION_VIEWS:
-                return "herdr refresh pending"
+            if future is not None and not future.done():
+                return ("herdr refresh pending" if key in _OBSERVATION_VIEWS
+                        else "herdr first read pending")
     except Exception:
         return None
     return None
@@ -877,6 +919,11 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
         session._herdr_alias_pane = None
     observation = None
     if agents is None and panes is None:
+        # A process's first view needs two subscribe + snapshot round trips (measured: about twice
+        # the snapshot latency), so the usual short wait misses it. The first pass that waits at
+        # all may wait as long as ``list_agents`` does, once; later passes keep their own wait.
+        if wait_timeout > 0 and _spend_first_observation_wait():
+            wait_timeout = max(wait_timeout, _OBSERVATION_WAIT_MAX_S)
         observation = observation_view(wait_timeout=wait_timeout)
         if observation is not None:
             agents = [dict(agent) for agent in observation.agents]
@@ -893,8 +940,7 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
         # Agent-list failure does not erase a supplied foreground observation.
         # For a known herdr process, an absent pane observation cannot confirm
         # its older native registry identity either. Do not issue another probe.
-        from ..process_identity import pane_process_claims
-        claims = pane_process_claims(sessions, panes, pane_bindings or {}, complete=False)
+        claims = _session_claims(sessions, panes, pane_bindings or {}, complete=False)
         for s in sessions:
             s._pane_session_claim = claims.get(s.pid)
         return {"complete": False, "last_error": _observation_error() or "herdr 조회 불가"}
@@ -917,9 +963,8 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
     fresh_shells = getattr(pids, "fresh_shells", shells if probe_ok else set())
     fresh_fg = getattr(pids, "fresh_foreground", fg if probe_ok else set())
     positive_shells, positive_fg = (shells, fg) if probe_ok else (fresh_shells, fresh_fg)
-    from ..process_identity import pane_process_claims
-    claims = pane_process_claims(sessions, panes, bindings,
-                                 complete=pids is not None and getattr(pids, "complete", True))
+    claims = _session_claims(sessions, panes, bindings,
+                             complete=pids is not None and getattr(pids, "complete", True))
     for session in sessions:
         session._pane_session_claim = claims.get(session.pid)
     # A native resume can run inside the still-live foreground runtime. Keep

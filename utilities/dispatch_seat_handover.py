@@ -181,6 +181,11 @@ def trust_unchanged_ledgers() -> None:
     _TRUST_LEDGER_GENERATIONS.set(True)
 
 
+def trusting_unchanged_ledgers() -> bool:
+    """Whether this thread already reuses unchanged-generation ledger reads."""
+    return _TRUST_LEDGER_GENERATIONS.get()
+
+
 # Readable ledger bytes per lineage directory, keyed by each file's full stat
 # generation (inode, ctime, mtime, size, mode). Ledgers are append-only or
 # replaced whole, so an unchanged generation means unchanged bytes.
