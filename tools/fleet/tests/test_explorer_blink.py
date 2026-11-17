@@ -433,7 +433,7 @@ class FramePhaseTests(BlinkAssertions):
         self.assert_structure(on, off)
         # The long session list forces the closing ROUTES/RECENT block to be pinned.
         y = next(y for y, line in enumerate(on.text_rows())
-                 if "execute ●" in line[34:])
+                 if ": execute" in line[34:] and "staged" in line[34:])
         self.assertGreater(y, 25)
         x = on.text_rows()[y].index("execute", 34)
         self.assertEqual((on.cells[y][x][1], off.cells[y][x][1]), ("hb_claude", "h_claude"))

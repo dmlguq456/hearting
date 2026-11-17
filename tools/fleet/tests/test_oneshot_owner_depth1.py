@@ -94,7 +94,9 @@ class OneShotOwnerTests(unittest.TestCase):
         line = next(row for row in overview.splitlines() if "Fixture solo" in row)
         self.assertIn("[s1]", line)
         self.assertIn("codex Opus 5.5 high", line)
-        self.assertIn("one-shot", line)
+        # 11-17 (route row 5): a route its owner does alone reads its kind and intensity, no stage word.
+        self.assertIn("code(quick)", line)
+        self.assertNotIn("one-shot", line)
         page = draw(vm, NavState(view="ROUTES", scope="-"), 150, 40).text_rows()
         index = next(i for i, row in enumerate(page) if "Fixture solo" in row)
         self.assertIn("codex", page[index])
@@ -151,13 +153,14 @@ console.log(JSON.stringify(out));'''
             # rules 24, 36, 38, 43, 57; 11-15 the route box again): its glyph, role and harness, then its
             # context row carrying its time (here, the context unknown, the time alone), then its title.
             lines = side.splitlines()
-            rows = [(lines[i - 2], lines[i - 1], line) for i, line in enumerate(lines)
-                    if i > 1 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("owner" in who and "codex" in who and "5m" in ctx and "5m" not in title
-                                for who, ctx, title in rows), side)
-            # The staged route: its owner first, its live worker under it.
+            # 11-17 (route row 5): kind and intensity / title / owner / its context row carrying the time.
+            rows = [(lines[i - 1], line, lines[i + 1], lines[i + 2]) for i, line in enumerate(lines)
+                    if 0 < i < len(lines) - 2 and "│ │ " in line and "Fixture solo route" in line]
+            self.assertTrue(any("● code(quick)" in kind and "owner" in who and "codex" in who and "5m" in ctx
+                                and "5m" not in title for kind, title, who, ctx in rows), side)
+            # The staged route: its owner first, its live worker hung under it by `↳`.
             self.assertIn("owner  claude Opus 5.5 high", side)
-            self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)
+            self.assertIn("↳ ⠋ worker codex", side)
             self.assertIn("codex Opus 5.5 high", bottom)
             rows_seen.append([row for row in side.splitlines() if "Fixture" in row])
             self.assertNotIn("hb_", side + bottom)

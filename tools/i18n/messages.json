@@ -1522,6 +1522,10 @@
    "en": "Session details",
    "ko": "세션 상세"
   },
+  "fleet.session_panel.direction_wait": {
+   "en": "waiting for direction",
+   "ko": "방향 확인 대기"
+  },
   "fleet.session_panel.evidence_brief": {
    "en": "Report",
    "ko": "보고"

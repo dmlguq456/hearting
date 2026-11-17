@@ -126,6 +126,15 @@ def route_kind(row):
         shown["after"] = sanitize_title(str(row["after"]))[:200]
     if type(row.get("legs")) is int and row["legs"] > 0:
         shown["legs"] = row["legs"]
+    # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
+    intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
+    if intensity:
+        shown["intensity"] = intensity
+    chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
+             for leg in (row.get("chain") or ())[:6]
+             if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]
+    if chain:
+        shown["chain"] = chain
     return shown
 
 
@@ -805,7 +814,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-16 (the person: "PEER REQUEST라고 할까?"): the route box's request name tag, and its one shorter form.
-        "peer_request", "peer_request_short")}
+        "peer_request", "peer_request_short",
+        # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
+        "direction_wait")}
     # Fixed words are English in every language (spec rule 3).
     labels.update(settings="Settings", routes="route", context="context", route_line="route line",
                   rule_motion="rule motion")

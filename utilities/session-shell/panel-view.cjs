@@ -927,29 +927,47 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (a live worker's stage row, the kind row's stage) wears the color Fleet gives that stage of its route (the backend's
     // `key`/`stage_key`: Fleet's `route_stage_key`, one table for both screens); mono, eight colors and NO_COLOR read as before.
     const stageInk=key=>key&&model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256?key:'loc_repo';
-    const markOf=stage=>stage.mark==='●'?pulse('●'):stage.mark==='✓'?text('✓','lvl_g'):stage.mark==='✕'?text('✕','g_dead'):text('·','dim');
-    // Spec rule 34 (d): the bottom layout's route row names its kind too, in the words and
-    // values of the side layout's third row and Fleet's ROUTES (`one-shot`, `staged 3/7
-    // execute ●`, a failed one `staged 2/3 execute ✕`); short of cells `3/7 execute ●`.
-    // Spec rule 36 (b): the route's kind word leads it (`code · staged 3/7 execute ●`) and goes first.
+    // 11-17 (route row 5): a stage's mark. The one thing that blinks in a route with a stage line is the current stage's
+    // name (Fleet's beat: lit in its color, dark in the off color), so the `●` after it is gone; `✓` and `✕` stay.
+    const markOf=stage=>stage.mark==='✓'?text('✓','lvl_g'):stage.mark==='✕'?text('✕','g_dead'):null;
+    const stageName=(stage,key)=>stage.mark==='●'?{...text(clean(stage.name||'·'),beat?key:'g_work_off'),beat:true}:text(clean(stage.name||'·'),key);
+    const stageCell=(stage,key)=>[stageName(stage,key),...(markOf(stage)?[text(' '),markOf(stage)]:[])];
+    // The kind word leads a route, the one bold word of its first line (the body color, never dim, in mono and NO_COLOR too);
+    // its intensity follows in dim brackets. Nothing else goes in the brackets.
+    const kindText=word=>({text:clean(word),foreground:null,bold:true,dim:false});
+    const framed=r=>String(r.shape||'')==='framed';
+    // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
+    const intensityOf=r=>{
+      const word=clean(r.intensity||'').trim();
+      if(word||framed(r))return word;
+      const shape=clean(r.shape||'').trim(),stages=Array.isArray(r.stages)?r.stages:[];
+      return shape&&!/^(staged|one-shot-owner|unknown)/.test(shape)&&!stages.length?shape:'';
+    };
+    const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
+      return word?[kindText(word),...(inten?[text('('+inten+')','dim')]:[])]:[];};
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
+    // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
     function kindCell(r){
-      const cell=shapeCell(r),word=clean(r.kind_word||'').trim();
-      return cell&&{...cell,kind:word?[text(word,'dim'),text(' · ','dim'),...cell.full]:cell.full};
+      const cell=shapeCell(r),head=kindHead(r);
+      if(!head.length)return cell&&{...cell,kind:cell.full};
+      if(!cell)return {full:[],short:[],kind:head};
+      return {...cell,kind:[...head,text(' · ','dim'),...cell.full]};
     }
+    // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
+    // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
+    // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
+    const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
+    const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
+      return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
-      if(shape==='one-shot-owner'){const word=[text('one-shot','dim')];return {full:word,short:word};}
-      if(/^staged/.test(shape)&&stages.length){
-        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length;
-        const stage=[text(stages[at].name||'·','loc_repo'),...(current>=0?[text(' '),markOf(stages[at])]:[])];
-        return {full:[text('staged '+position+' ','dim'),...stage],short:[text(position+' ','dim'),...stage]};
+      if(stageLined(r)){
+        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageWord(shape);
+        const stage=stageCell(stages[at],'loc_repo');
+        return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],short:[text(position+': ','dim'),...stage]};
       }
-      if(shape&&shape!=='unknown'){
-        const stage=current>=0?[text(stages[current].name||'·','loc_repo'),text(' '),markOf(stages[current])]:[];
-        return {full:[text(shape,'dim'),...(stage.length?[text(' '),...stage]:[])],short:stage.length?stage:[text(shape,'dim')]};
-      }
-      return r.step?{full:[text(r.step)],short:[text(r.step)]}:null;
+      return r.step&&!shape?{full:[text(r.step)],short:[text(r.step)]}:null;
     }
     // Which of the kind and tool columns the bottom rows keep, the same for every row: the
     // kind word goes first, then the tool, then the `staged` word; the title keeps ten cells (or its
@@ -1063,38 +1081,57 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // keeps its one doer and the rows as they were.
     const treeOf=r=>side&&Array.isArray(r.workers_live);
     const leadPaint=r=>r.owner_paint&&typeof r.owner_paint==='object'?r.owner_paint:(r.paint||{});
-    const leadRole=r=>r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
+    // A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
+    const leadRole=r=>framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
     const workersOf=r=>treeOf(r)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
     // The one-row form's percent and time columns, shared by owners and their workers (rule 48 (c)).
     const allWorkers=listed.flatMap(r=>workersOf(r));
     const ctxWidth=Math.max(0,...listed.map(r=>leadPaint(r).ctx?size([leadPaint(r).ctx]):0),...allWorkers.map(w=>w.paint?.ctx?size([w.paint.ctx]):0));
     const timeWidth=Math.max(elapsedWidth,...allWorkers.map(w=>measure(w.elapsed||'')));
-    const ROLE=new Set(['owner','frame','worker']);
-    const roleWidth=side?Math.max(0,...listed.map(r=>ROLE.has(leadRole(r))?measure(leadRole(r)):0),
-      ...listed.flatMap(r=>workersOf(r).map(w=>ROLE.has(w.role)?measure(w.role):0))):0;
+    const ROLE=new Set(['owner','frame','frame-alt','worker']);
+    // A frame leg is `frame`, its alternative `frame-alt`; any other stage worker is `worker`.
+    const workerRole=w=>w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
+    // The role column's width is the route's own (11-17: a frame route's `frame-alt` does not widen another route's rows).
+    let roleWidth=0;
+    const setRoles=r=>{roleWidth=side?Math.max(0,ROLE.has(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>measure(workerRole(w)))):0;};
     const roleCell=role=>roleWidth?[text((ROLE.has(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
     const rolePart=r=>roleCell(leadRole(r));
-    // (A one-shot route's kind row carries its tool; any other one-step route shows it here.)
-    const oneStepTool=r=>r.tool&&!r.flow&&!(Array.isArray(r.stages)&&r.stages.length>1)&&String(r.shape||'')!=='one-shot-owner'?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[];
+    // (A one-step route's open tool stands on its owner's row, `· Edit host.cjs`: the tool and its file name, then the tool.)
+    const oneStepTool=r=>{
+      if(r.flow||Array.isArray(r.stages)&&r.stages.length>1)return [];
+      // An owner at rest names the tool it ended on: `after Bash`.
+      if(!r.tool)return r.after_tool?[[text('after '+r.after_tool,'dim')]]:[];
+      const base=String(r.target||'').replace(/\/+$/,'').split('/').pop(),tool=[text(r.tool,'loc_repo')];
+      return base?[[...tool,text(' '+base,'loc_repo')],tool]:[tool];
+    };
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
     // (A worker's open tool is on its stage row, so the owner's row names none.)
     const leadTool=r=>r.owner_paint?[]:oneStepTool(r);
-    const whoRow=r=>whoOf([routeGlyph(r),text(' '),...rolePart(r)],leadPaint(r),leadRole(r),leadTool(r));
+    // The owner's own mark: it spins while it does the work itself, stands as a dim `●` while its workers run, and keeps the
+    // route's state mark when nothing runs.
+    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r)}):routeGlyph(r);
+    const ownerLead=(r,supervising)=>[text('  '),ownerGlyph(r,supervising),text(' '),...rolePart(r)];
+    const whoRow=(r,supervising)=>whoOf(ownerLead(r,supervising),leadPaint(r),leadRole(r),leadTool(r));
     function whoOf(lead,p,role,T,room=inner){
       const value=x=>x?[x]:[];
       const H=value(p.harness),M=value(p.model_text),F=value(p.effort),keep=M.length?M:H;
+      const Ts=T.length&&Array.isArray(T[0])?T:[T];
       if(!ROLE.has(role)&&!H.length&&!M.length&&!F.length&&!T.length)return null;
-      // Effort goes first, then the tool, then the harness; the role and the model stay.
-      for(const [h,m,f,t] of [[H,M,F,T],[H,M,[],T],[H,M,[],[]],[[],keep,[],[]]]){
+      // Effort goes first, then the tool (its file name, then the tool alone), then the harness; the role and the model stay.
+      const tries=[];
+      for(const [h,m,f] of [[H,M,F],[H,M,[]]])for(const t of Ts)tries.push([h,m,f,t]);
+      tries.push([H,M,[],[]],[[],keep,[],[]]);
+      for(const [h,m,f,t] of tries){
         const left=spaced([h,m,f]),row=[...lead,...left,...(t.length?[...(left.length?[text(' · ')]:[]),...t]:[])];
         if(size(row)<=room)return row;
       }
       return cut(lead,room);
     }
-    const leadRow=r=>foldRow([routeGlyph(r),text(' '),...rolePart(r)],leadPaint(r),leadRole(r),r.elapsed?[text(r.elapsed)]:[],leadTool(r));
+    const leadRow=(r,supervising)=>foldRow(ownerLead(r,supervising),leadPaint(r),leadRole(r),r.elapsed?[text(r.elapsed)]:[],leadTool(r));
     // The one-row form (an owner's, and since spec rule 48 (c) its workers' too, two cells in):
     // who, then the percent and the time at the right in columns shared by every route and worker.
     function foldRow(lead,p,role,E,tool=[]){
+      if(tool.length&&Array.isArray(tool[0]))tool=tool[0];
       const value=x=>x?[x]:[];
       const M=value(p.model_text),H=value(p.harness),K=M.length?M:H,F=value(p.effort),C=value(p.ctx);
       const build=(h,m,f,withContext,e,t=[])=>{
@@ -1131,7 +1168,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const {bar,pct}=gaugeOf(r),E=r.elapsed?[text(r.elapsed)]:[];
       if(!pct.length&&!E.length)return null;
       const cell=[...(bar.length?bar:[pad(barWidth)]),...(barWidth?[text(' ')]:[]),pad(pctWidth-size(pct)),...pct];
-      const row=[text('  '),...cell];
+      const row=[text('    '),...cell];
       return E.length?[...row,pad(inner-size(row)-size(E)),...E]:row;
     }
     // Spec rule 43 (d): `CTX` in the role column (one space after it with no role column); an
@@ -1152,99 +1189,82 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       };
       const row=(n,t)=>[...label,...(n?[...cells(n),text(' '),pad(pctWidth-size(pct))]:[]),...pct,...t];
       for(let n=full;n>=Math.min(4,full);n--){if(!n)break;const r=row(n,time);if(size(r)<=room)return r;}
-      const bare=row(0,time);
-      return size(bare)<=room?bare:row(0,[]);
+      const bare=row(0,time),plain=row(0,[]);
+      // Not even the label and the percent fit: the percent alone, never a percent cut in the middle.
+      return size(bare)<=room?bare:size(plain)<=room?plain:size(pct)<=room?pct:[];
     }
-    // Spec rule 48 (a-1), (b), (d): a worker's rows read as the owner's: who (its own mark,
-    // role, harness, model, effort) stands in the top line of the workers' box (`╭─ … ─╮`, a
-    // later worker's in the line between, `├─ … ─┤`); inside the box, `CTX` under the role word
-    // with the gauge under the harness and the worker's time after its percent (spec rule 57),
-    // then the stage, the open tool and its target (the path, the file name, the tool, then
-    // none). Spec rule 57 (c): the box stands two cells further in (its left line under the
-    // owner's text, its right line where it was), six cells narrower inside than the route's
-    // rows. Short of cells the who loses its effort, then its harness, and `─` fills. Short of
-    // rows (rule 48 (c)) the worker takes the owner's one-row form, two cells in.
-    const boxLine=s=>({...text(s,'dim'),role:'messages'});
-    function workerBlock(w){
-      const p=w.paint||{},glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
-      const lead=[glyph,text(' '),...roleCell(w.role)],body=[],room=inner-6;
-      // (At least one `─` after the who while its model fits so; the narrowest panel gives that up first.)
-      let who=whoOf(lead,p,w.role,[],inner-8)||cut(lead,inner-8);
-      // (A value kept is worth more than the `─`: the who may run up to the corner, as rule 57 draws it.)
-      const wide=whoOf(lead,p,w.role,[],inner-6);if(wide&&size(wide)>size(who))who=wide;
-      if(size(who)<=size(lead))who=whoOf(lead,p,w.role,[],inner-7)||cut(lead,inner-7);
+    // 11-17 (route row 5): a worker hangs under its owner by a `↳`, with no box: its who (its own mark, role, harness, model,
+    // effort), `CTX` under the role word with the gauge under the harness and the worker's time after its percent (spec rule
+    // 57), then its stage, the open tool and its target (the path, the file name, the tool, then none). A frame leg (the
+    // route has no owner yet) hangs straight under the route and has no stage row. Short of cells the who loses its effort,
+    // then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
+    function workerBlock(w,base){
+      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
+      const gap=base+4,room=inner-gap;
+      const lead=[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
       // A model name longer than the line itself is cut with `…` rather than left out.
-      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner-7);
-      const c=ctxTimed(p,E,room-3);
-      if(c)body.push([text('   '),...c]);
-      const stage=w.stage?[text(w.stage,stageInk(w.stage_key))]:[],tool=w.tool?[text(w.tool,'loc_repo')]:[];
-      const base=String(w.target||'').replace(/\/+$/,'').split('/').pop(),what=room-3;
-      for(const t of [[...tool,...(w.target?[text(' '+w.target,'loc_repo')]:[])],[...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool,[]]){
+      let who=whoOf(lead,p,role,[])||cut(lead,inner);
+      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
+      const rows=[who],c=ctxTimed(p,E,room);
+      if(c)rows.push([text(' '.repeat(gap)),...c]);
+      const stage=w.stage&&role==='worker'?[text(w.stage,stageInk(w.stage_key))]:[],tool=w.tool&&role==='worker'?[text(w.tool,'loc_repo')]:[];
+      const name=String(w.target||'').replace(/\/+$/,'').split('/').pop();
+      for(const t of [[...tool,...(w.target?[text(' '+w.target,'loc_repo')]:[])],[...tool,...(name?[text(' '+name,'loc_repo')]:[])],tool,[]]){
         const row=[...stage,...(stage.length&&t.length?[text(' · ','dim')]:[]),...t];
-        if(t.length&&size(row)>what)continue;
-        if(row.length)body.push([text('   '),...cut(row,Math.max(0,what))]);
+        if(t.length&&size(row)>room)continue;
+        if(row.length)rows.push([text(' '.repeat(gap)),...cut(row,Math.max(0,room))]);
         break;
       }
-      const lead1=[text('  '),glyph,text(' '),...roleCell(w.role)];
-      return {who,body,one:foldRow(lead1,p,w.role,E)||cut(lead1,inner)};
+      return {rows,one:foldRow(lead,p,role,E)||cut(lead,inner)};
     }
-    function workerBox(blocks){
-      const out=[],indent=text('  ');
-      blocks.forEach((b,i)=>{
-        const [l,r]=i?['├','┤']:['╭','╮'];
-        const dashes=inner-7-size(b.who);
-        out.push([indent,boxLine(l+'─ '),...b.who,boxLine(dashes>=0?' '+'─'.repeat(dashes)+r:r)]);
-        for(const row of b.body)out.push([indent,boxLine('│'),text(' '),...row,pad(inner-6-size(row)),text(' '),boxLine('│')]);
-      });
-      out.push([indent,boxLine('╰'+'─'.repeat(Math.max(0,inner-4))+'╯')]);
-      return out;
-    }
-    // Spec rule 24 (11-12), 36 (b): the third row says which kind of route it is and where it
-    // stands: Fleet's kind word (`code`, `lab`, `frame`, dim), then the route's shape
-    // (`one-shot`: the owner does the work itself, and what it is on now; `staged N/M`: a
-    // worker per stage, and the current stage with its mark, then `owner <model>` when a stage
-    // worker leads the first row; with no stage running, the next stage and what it waits
-    // for). A route with neither kind nor shape draws no third row. Short of cells the values
-    // go from the back, whole: the tool's target, the tool, `owner <model>`; kind and shape stay.
+    // Spec rule 24 (11-12), 36 (b), 11-17: the stage line under the owner: `staged 3/6: execute`, the current stage's name
+    // the one thing that blinks (a failed one keeps `✕`, a done one `✓`); with no stage running, the next stage and what it
+    // waits for. A route with no stage list (one-shot, direct, frame) has none: its first line says what it is. Short of
+    // cells the values go from the back, whole: `owner <model>`, then the word `staged` (`3/6: execute`).
     function placeRow(r,workers=0){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
+      if(!stageLined(r))return null;
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
-      const kind=clean(r.kind_word||'').trim();
-      let word,pieces=[];
-      if(shape==='one-shot-owner'){
-        word='one-shot';
-        if(r.tool){
-          const base=String(r.target||'').replace(/\/+$/,'').split('/').pop();
-          const age=r.tool_age?[text(' '+r.tool_age,'dim')]:[],tool=[text(r.tool,'loc_repo')];
-          pieces.push([[...tool,...(r.target?[text(' '+r.target,'loc_repo')]:[]),...age],[...tool,...(base?[text(' '+base,'loc_repo')]:[]),...age],
-            [...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool]);
-        }else if(r.after_tool)pieces.push([[text('after '+r.after_tool,'dim')]]);
-      }else if(/^staged/.test(shape)&&stages.length){
-        const at=current>=0?current:next>=0?next:stages.length-1;
-        word='staged '+(at+1)+'/'+stages.length;
-        if(current>=0){
-          pieces.push([[text(stages[current].name||'·',stageInk(stages[current].key)),text(' '),markOf(stages[current])]]);
-          if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([[text('owner '+r.owner_model,'dim')]]);
-        }else{
-          pieces.push([[text(stages[at].name||'·',stageInk(stages[at].key))]]);
-          if(r.visibility?.next)pieces.push([[text(r.visibility.next,'dim')]]);
-        }
-      }else if(shape&&shape!=='unknown'){
-        word=shape;
-        if(current>=0)pieces.push([[text(stages[current].name||'·',stageInk(stages[current].key)),text(' '),markOf(stages[current])]]);
-      }else if(!kind)return null;
-      const lead=[text('  '),...(kind?[text(kind,'dim')]:[]),...(kind&&word?[text(' · ','dim')]:[]),...(word?[text(word,'dim')]:[])];
-      // Spec rule 43 (g): the workers gone for rows, the kind row ends with their count (it
-      // stays while the values before it go).
-      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(let n=pieces.length;n>=0;n--){
-        const kept=pieces.slice(0,n);
-        // The last kept piece may take a shorter whole form (path → file name → tool).
-        for(const last of n?kept[n-1]:[[]]){
-          const row=[...lead,...kept.slice(0,Math.max(0,n-1)).flatMap(choices=>[text(' · ','dim'),...choices[0]]),...(n?[text(' · ','dim'),...last]:[]),...end];
-          if(size(row)<=inner)return row;
-        }
+      const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length;
+      const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=[];
+      if(current>=0){if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([text('owner '+r.owner_model,'dim')]);}
+      else if(r.visibility?.next)pieces.push([text(r.visibility.next,'dim')]);
+      const limit=inner-4;
+      // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
+      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
+        const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
+        if(size(row)<=limit)return row;
       }
-      return size(lead)<=inner?lead:null;
+      return cut([text(position,'dim'),text(': ','dim'),...stage],limit);
+    }
+    // The first line: a state mark, then the chain of kinds the route continues (`frame ✓ → code(standard)`: what is behind
+    // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
+    function chainParts(r,{past=true,inten=true}={}){
+      const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
+      const own=name=>[kindText(name),...(word?[text('('+word+')','dim')]:[])];
+      const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
+      if(!legs.length)return kind?own(kind):[];
+      const out=[];
+      legs.forEach((l,i)=>{
+        if(i<legs.length-1&&!past)return;
+        if(out.length)out.push(text(' → ','dim'));
+        out.push(...(i<legs.length-1?[text(clean(l.name)+(l.state==='done'?' ✓':''),'dim')]:own(clean(l.name))));
+      });
+      if(framed(r))out.push(text(' → ??','dim'));
+      return out;
+    }
+    // A frame route whose legs are not running waits for the person's direction (its mark `◑`, not blinking).
+    const directionWait=r=>framed(r)&&!live(r)&&['idle','blocked'].includes(r.kind);
+    function headRow(r){
+      const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
+      if(!chains[0].length)return null;
+      const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
+      const room=inner-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
+      return blink=>{
+        const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?(blink?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
+        for(const tail of wait.length?[wait,[]]:[[]])for(const chain of chains)if(size(chain)+size(tail)<=room)return [mark,text(' '),...chain,...tail];
+        return [mark,text(' '),...cut(chains.at(-1),room)];
+      };
     }
     const routeRows=[];
     within(()=>{
@@ -1253,11 +1273,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // Spec rule 36 (c): the title takes at most two rows, the second ending in `…`.
         let names=side?wrapAll(title,inner-2):[];
         if(names.length>2)names=[names[0],ellipsis(names[1],inner-2)];
-        const tree=treeOf(r),workers=tree?workersOf(r).map(workerBlock):[];
-        routeRows.push({parts:folded(r),two:side,who:side?whoRow(r):null,lead:side?leadRow(r):null,ctx:side?ctxRow(r):null,
-          names,name:[cut(title,inner-2)],glyph,place:side?placeRow(r):null,action:key,kind:r.kind,
-          ...(tree?{tree,workers,box:workers.length?workerBox(workers):[],gauge:ctxTimed(leadPaint(r),r.elapsed?[text(r.elapsed)]:[],inner-2),
-            counted:workers.length?placeRow(r,workers.length):null}:{})});
+        setRoles(r);
+        const tree=treeOf(r),open=framed(r)&&tree,base=open?2:4,workers=tree?workersOf(r).map(w=>workerBlock(w,base)):[];
+        const supervising=workers.length>0,E=r.elapsed?[text(r.elapsed)]:[];
+        const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
+        const running=stages.find(stage=>stage.current||stage.mark==='✕');
+        routeRows.push({parts:folded(r),two:side,first:side?headRow(r):null,
+          who:side&&!open?whoRow(r,supervising):null,lead:side&&!open?leadRow(r,supervising):null,
+          ctx:side&&!open?(tree?(()=>{const g=ctxTimed(leadPaint(r),E,inner-4);return g?[text('    '),...g]:null;})():ctxRow(r)):null,
+          names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
+          // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
+          stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
+          ...(tree?{tree,workers,counted:workers.length?placeRow(r,workers.length):null}:{})});
       }
       for(const q of requestList){
         // A request row opens the MESSAGES popup, where the requests read whole (as their MESSAGES rows did).
@@ -1302,24 +1329,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(!(twoRows&&x.two))return [x.parts];
       // A request: who and age / title / status; the kind rows gone, the title and the status share a row.
       if(x.request)return [x.head,...(keepPlace&&x.statusRow?[x.titleRow,x.statusRow]:[x.titled])];
-      if(x.tree)return treeForm(x);
-      const head=keepCtx?x.who:x.lead,names=keepMulti?x.names:x.name,out=[];
-      if(head){out.push(head);if(keepCtx&&x.ctx)out.push(x.ctx);out.push(...names.map(row=>[text('  '),...row]));}
-      else{out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[text('  '),...row]));if(keepCtx&&x.ctx)out.push(x.ctx);}
-      if(keepPlace&&x.place)out.push(x.place);
-      return out;
+      return routeRowsOf(x);
     };
-    // Spec rule 48: the owner's rows as any route's, its workers' box under them; short of rows
-    // the owner and its workers fold to one row together (rule 48 (c)), never one without the other.
-    function treeForm(x){
-      const workers=keepWorkers?x.workers:[],bar=[text('  ')],out=[];
-      // Spec rule 57 (b): the title takes its rows whole; the time is on the `CTX` row (or, folded, the first row).
-      const head=keepCtx?x.who:x.lead,names=keepMulti?x.names:x.name;
-      if(head){out.push(head);if(keepCtx&&x.gauge)out.push([...bar,...x.gauge]);out.push(...names.map(row=>[...bar,...row]));}
-      else{out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[...bar,...row]));if(keepCtx&&x.gauge)out.push([...bar,...x.gauge]);}
-      const place=!keepWorkers&&x.counted?x.counted:x.place;
-      if(keepPlace&&place)out.push(place);
-      if(workers.length)out.push(...(keepCtx?x.box:workers.map(w=>w.one)));
+    // 11-17 (route row 5): the kind and its intensity / the title / the owner / its `CTX` / the stage line / the workers
+    // under it by `↳`. Short of rows (rule 48 (c)) the `CTX` rows fold into the owner's and the workers' first rows, the
+    // stage line goes (counting the workers), then the workers go, then the route takes one row.
+    function routeRowsOf(x){
+      const workers=x.tree&&keepWorkers?x.workers:[],names=keepMulti?x.names:x.name,out=[],indent=text('  ');
+      const owner=keepCtx?x.who:x.lead,place=!keepWorkers&&x.counted?x.counted:x.place,showPlace=keepPlace&&place;
+      if(x.first){out.push(x.first(!(showPlace&&x.stageBlinks)));out.push(...names.map(row=>[indent,...row]));}
+      else out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[indent,...row]));
+      // A route whose owner is not known keeps its time and `CTX` row under the title all the same.
+      if(owner)out.push(owner);
+      if(keepCtx&&x.ctx)out.push(x.ctx);
+      if(showPlace)out.push([text(owner?'    ':'  '),...place]);
+      for(const w of workers)out.push(...(keepCtx?w.rows:[w.one]));
       return out;
     }
     const routeSize=x=>routeForm(x).length;

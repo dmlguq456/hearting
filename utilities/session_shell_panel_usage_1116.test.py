@@ -423,7 +423,9 @@ const direct={id:'rt-d',title:'작은 수정',kind:'working',state:'working',sha
 const v=draw({routes:[direct],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),L=inside(v);
 const a=L.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l));assert(a>=0,L.join('\n'));
 const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
-assert(/작은 수정/.test(box)&&/code · 직접/.test(box),box);
+// (11-17, route row 5: the first line names the kind with its intensity in brackets, the title two cells in.)
+const rows=box.split('\n');
+assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ● code\(직접\) +│$/.test(rows[1])&&/^│   작은 수정 +│$/.test(rows[2])&&!/code · 직접/.test(box),box);
 """)
 
 
@@ -505,13 +507,13 @@ const route={id:'rt-s',title:'패널 손질',kind:'working',state:'working',shap
 const opt={routes:[route],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1},question:false};
 const v=draw({...opt,height:60});
 const L=lines(v);
-const place=v.rows.find(r=>/^\│?\s*code · staged 3\/6/.test(str(r).replace(/^│ │ /,'').replace(/^│ /,'')));
 // The worker's stage row in the worker box: the name in the color Fleet gives the stage `execute` (its 3rd, running: index 2, lit).
 const row=v.rows.find(r=>/│ +execute · Edit/.test(str(r)));assert(row,L.join('\n'));
 const name=row.find(p=>p.text==='execute');assert.equal(name.foreground,150);assert.equal(name.bold,true,'lit like Fleet\'s running stage');
 assert.equal(row.find(p=>p.text.includes('Edit')).foreground,253);
-// The kind row names the current stage in the same color; a finished/waiting stage would be dimmed.
-const kind=v.rows.find(r=>/code · staged 3\/6/.test(str(r)));assert(kind,L.join('\n'));
+// The owner's stage line (11-17, route row 5: `staged 3/6: execute`, four cells in, no kind word) names the current stage
+// in the same color; a finished/waiting stage would be dimmed.
+const kind=v.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
 const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true);
 // Other states by Fleet's rule: a finished stage dim of its hue, a failed one the failure red, a waiting one dim.
 const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
@@ -529,6 +531,7 @@ for(const o of [{theme:'mono'},{model:{...opt.model,colors:8}},{model:{...opt.mo
 }
 // The folded one-row form (a bottom-layout row) keeps its name color.
 const one=draw({...opt,side:false,width:100,height:14}),oneRow=one.rows.find(r=>/staged/.test(str(r)));assert(oneRow,lines(one).join('\n'));
+assert(str(oneRow).includes('code · staged 3/6: execute'),str(oneRow));   // (the bottom layout's kind cell, 11-17: `code · staged 3/6: execute`)
 assert(oneRow.filter(p=>p.text==='execute').every(p=>p.foreground===253||p.foreground===undefined||p.foreground===null),JSON.stringify(oneRow));
 """)
 
