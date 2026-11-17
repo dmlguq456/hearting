@@ -634,7 +634,8 @@ needed. The bounded pass shares the resumable candidate delivery observation wit
 HOME retention, rechecks identity and settlement immediately before removal, and
 holds all bound attempt/child/successor reference admissions through quarantine
 and unlink. It resumes on the next normal cadence after
-interruption; examining and removing have separate time budgets, and the next
+interruption; examining and removing have separate time budgets (it examines
+only the logs and prompt sidecars still present), and the next
 pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The same pass retires two state-root leftovers untouched for seven days: a
@@ -653,7 +654,8 @@ pass also starts these post-exit retention passes (homes, logs, reusable
 runtimes, archive) in a short-lived process. A group of rows that
 share an attempt or route id moves only as a whole, when every row ended (the
 last write of its attempt log, else its registration) at least 14 days ago,
-belongs to a route closed at least 14 days ago, owes no parent delivery, has no
+belongs to a route closed at least 14 days ago (a row bound to no route has none
+to wait for), owes no parent delivery, has no
 attempt log left and, if it started, left its route's completion markers. Rows
 go byte-exact to `<state root>/archive/registry-<YYYY-MM>/` (read by
 `dispatch-registry.py inventory --include-archive`) and are synced there before

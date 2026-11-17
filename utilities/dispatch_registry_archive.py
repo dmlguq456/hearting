@@ -11,7 +11,8 @@ whole, when each of its rows
   - is terminal and ended at least ARCHIVE_AFTER_NS ago (its end is the last write of its
     attempt log, remembered while the log exists; the registration time when no later
     write was seen),
-  - is bound to a route whose exact closure is at least ARCHIVE_AFTER_NS old,
+  - is bound to a route whose exact closure is at least ARCHIVE_AFTER_NS old (a row bound
+    to no route has no closure to wait for),
   - owes no parent delivery (none, or resolved),
   - if it ever started, has its route's completion markers on disk (whether a continuation
     ran is read from its started rows or its markers; the markers then still answer),
@@ -199,7 +200,8 @@ def _route_closure(jobs: Path, proven: dict):
                 state, mtime, _cause = _route_evidence(jobs, metadata)
             except Exception:  # noqa: BLE001 -- unreadable evidence keeps the row
                 state, mtime = "unknown", 0
-            seen[key] = mtime if state == "closed" and mtime > 0 else None
+            # state "none": the row is bound to no route, so there is no closure to wait for.
+            seen[key] = 0 if state == "none" else mtime if state == "closed" and mtime > 0 else None
         return seen[key]
 
     return closed, seen
