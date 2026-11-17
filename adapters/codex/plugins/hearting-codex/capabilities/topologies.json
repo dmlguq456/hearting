@@ -67,9 +67,43 @@
       "unavailable_reason": "extension-unavailable"
     }
   },
+  "fields": [
+    "plan",
+    "design",
+    "code",
+    "lab",
+    "research",
+    "docs",
+    "admin",
+    "other"
+  ],
+  "field_default_recipes": {
+    "plan": {
+      "capability": "autopilot-spec"
+    },
+    "design": {
+      "capability": "autopilot-design"
+    },
+    "code": {
+      "capability": "autopilot-code"
+    },
+    "lab": {
+      "capability": "autopilot-lab",
+      "mode": "setup"
+    },
+    "research": {
+      "capability": "autopilot-research"
+    },
+    "docs": {
+      "capability": "autopilot-draft"
+    },
+    "admin": null,
+    "other": null
+  },
   "recipes": [
     {
       "capability": "autopilot-apply",
+      "field": "docs",
       "modes": [
         "default"
       ],
@@ -261,6 +295,7 @@
     },
     {
       "capability": "autopilot-code",
+      "field": "code",
       "modes": [
         "audit",
         "debug",
@@ -799,6 +834,7 @@
     },
     {
       "capability": "autopilot-design",
+      "field": "design",
       "modes": [
         "default"
       ],
@@ -1213,6 +1249,7 @@
     },
     {
       "capability": "autopilot-draft",
+      "field": "docs",
       "modes": [
         "doc",
         "paper",
@@ -1717,6 +1754,7 @@
     },
     {
       "capability": "autopilot-lab",
+      "field": "lab",
       "modes": [
         "setup"
       ],
@@ -2033,6 +2071,7 @@
     },
     {
       "capability": "autopilot-lab",
+      "field": "lab",
       "modes": [
         "eval"
       ],
@@ -2392,6 +2431,7 @@
     },
     {
       "capability": "autopilot-refine",
+      "field": "docs",
       "modes": [
         "default"
       ],
@@ -2660,6 +2700,7 @@
     },
     {
       "capability": "autopilot-research",
+      "field": "research",
       "modes": [
         "academic",
         "market",
@@ -2945,6 +2986,7 @@
     },
     {
       "capability": "autopilot-ship",
+      "field": "code",
       "modes": [
         "default"
       ],
@@ -3255,6 +3297,7 @@
     },
     {
       "capability": "autopilot-ship",
+      "field": "code",
       "modes": [
         "package"
       ],
@@ -3340,6 +3383,7 @@
     },
     {
       "capability": "autopilot-spec",
+      "field": "plan",
       "modes": [
         "api",
         "app",
@@ -3685,6 +3729,11 @@
     },
     {
       "capability": "analyze-project",
+      "field": {
+        "code": "code",
+        "doc": "docs",
+        "paper": "docs"
+      },
       "modes": [
         "code",
         "doc",
@@ -3804,6 +3853,7 @@
     },
     {
       "capability": "analyze-user",
+      "field": "other",
       "modes": [
         "init",
         "update"
@@ -3921,6 +3971,7 @@
     },
     {
       "capability": "audit",
+      "field": "code",
       "modes": [
         "default"
       ],

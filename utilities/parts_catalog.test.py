@@ -941,6 +941,7 @@ class ResourceShareTest(CatalogBase):
                                                         checked_worktree=str(repo.resolve()))]}))
         composed = subprocess.run([
             sys.executable, str(HERE / "capability-route.py"), "compose", "--shape", "staged",
+            "--capability", "autopilot-code",
             "--graph", CODE_RESOURCE, "--slug", "sd165-resource", "--unassigned", "--cwd", str(repo),
             "--artifact-root", str(artifacts), "--dispatch-evidence", str(evidence),
             "--parent-harness", "claude", "--spec-read", "not-applicable"],

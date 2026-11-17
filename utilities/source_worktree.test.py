@@ -402,7 +402,8 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
             "failure_class": "", "checked_worktree": str(project.resolve()),
             "failure_scope": "none", "codex_command": "ok", "retry_on_isolated_worktree": 0,
         }], "native_subagent": []}), encoding="utf-8")
-        for extra in (["--shape", "solo"], ["--shape", "staged"]):
+        for extra in (["--shape", "solo", "--capability", "autopilot-code"],
+                      ["--shape", "staged", "--capability", "autopilot-code"]):
             with self.subTest(extra=extra):
                 argv = ["capability-route.py", "compose", "--start", "--slug", "refused",
                         *extra, "--prompt-file", str(prompt), "--cwd", str(project),

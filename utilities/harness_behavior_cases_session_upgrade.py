@@ -1087,7 +1087,8 @@ class RouteResumeScenario(Scenario):
                 if run is not None else "capability-route.py"
             repo = shlex.quote(str(self.repos[k - 1]))
             self.state.setdefault("shapes", {})[k] = shape
-            return (f"python3 {cr} compose --shape {shape} --campaign-key other{k} --slug resume{k} "
+            return (f"python3 {cr} compose --shape {shape} --capability autopilot-code "
+                    f"--campaign-key other{k} --slug resume{k} "
                     f"--cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
 
         def answer(record, earlier):

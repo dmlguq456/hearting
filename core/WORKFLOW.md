@@ -324,9 +324,9 @@ observed command outcomes and the final reply.
 `COMPLETE` for that automatic route means the record was saved, not that the
 work or its tests passed. Missing, interrupted and running results stay unknown.
 
-Explicit `compose --start --shape direct --prompt-file <task>` still prepares
-an isolated worktree and an inline route; `compose --shape direct` records work
-already made in place. Their receipt and explicit finish contracts are unchanged.
+Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
+still prepares an isolated worktree and an inline route; `compose --shape direct
+--field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
@@ -338,8 +338,8 @@ light check of a direct change may use the harness's own native subagent
 | Main decision | Command | Result |
 |---|---|---|
 | One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
-| Explicit direct source change needing preparation | `compose --start --shape direct --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
-| One reversible local completion unit already made in place | `compose --shape direct` | records the in-place change as an inline node |
+| Explicit direct source change needing preparation | `compose --start --shape direct --field <field> --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
+| One reversible local completion unit already made in place | `compose --shape direct --field <field>` | records the in-place change as an inline node |
 | Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
 Examples of the same boundary:
@@ -351,9 +351,38 @@ Examples of the same boundary:
   security or data risk, even when the edit is short.
 
 `solo` means one registered owner; `staged` means separate stages. Shape
-omission starts a framed route. `--capability`, `--capability-mode`, `--graph`,
-and `--profile` without a shape are routing hints recorded for the frame, not
-sealed choices. `--pin` applies as usual.
+omission starts a framed route. `--capability`, `--capability-mode`, `--field`,
+`--graph`, and `--profile` without a shape are routing hints recorded for the
+frame, not sealed choices. `--pin` applies as usual.
+
+**Fields** (`routing/prd.md` R5, R8). Every route records the field of its work
+beside its kind (the preset recipe, `capability`): the route's `field` and
+`field_source` — `explicit` when named with `--field`, `preset` when taken from
+the kind's default, `frame` when a frame proposal's leg names it or its proposed
+kind supplies it. A `direct`, `solo` or `staged` compose names `--capability`,
+`--field`, or both; naming neither is refused with the missing option named,
+and nothing silently becomes code. A field alone opens its default kind;
+`admin` and `other` have none and come with a kind (`--capability
+autopilot-draft --field admin`). A framed route records no field of its own; its
+frame proposes one per leg. A route sealed before fields reads its kind's
+default field below; its record is not rewritten. Field names are the same
+English words in every language.
+
+| Field | Opens alone | Default field of |
+|---|---|---|
+| `plan` | `autopilot-spec` | `autopilot-spec` |
+| `design` | `autopilot-design` | `autopilot-design` |
+| `code` | `autopilot-code` | `autopilot-code`, `autopilot-ship`, `audit`, `analyze-project` code |
+| `lab` | `autopilot-lab` setup | `autopilot-lab` |
+| `research` | `autopilot-research` | `autopilot-research` |
+| `docs` | `autopilot-draft` | `autopilot-draft`, `autopilot-refine`, `autopilot-apply`, `analyze-project` doc and paper |
+| `admin` | — (name a kind) | — |
+| `other` | — (name a kind) | `analyze-user` |
+
+`capabilities/topologies.json` (`fields`, `field_default_recipes`, each recipe's
+`field`) is the only source of these pairs. `capability-route.py stages` prints
+each kind's field on its first line, and the `[경로]` card shows one line
+`field <field> (<field_source>)` under its `cwd · slug` line.
 
 Skip a new frame only when a frame or the person already decided the shape:
 resume a stopped route, follow the runtime-printed `next_leg`, continue within
@@ -361,7 +390,7 @@ an approved frame decision of the same campaign, or follow the person's
 explicit capability and stages. The main session judges whether follow-up
 stays within that approved scope. Its own judgment that work is already
 decided is not an exception. Use the decided shape explicitly; a person-named
-stage list uses `--shape staged --graph <stage,…>`. A route made from a
+stage list uses `--shape staged --capability <kind> --graph <stage,…>`. A route made from a
 proposal (`compose --route-plan <record>#<i>`, a command the runtime prints)
 has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
@@ -511,7 +540,7 @@ budget and start approval) and writing under
 
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with no `--shape` for framed work or an explicit decided shape. Use
-`--shape direct` only for one reversible local completion unit (§0.2.1). The slug comes from the task; the
+`--shape direct` (with its `--field` or `--capability`) only for one reversible local completion unit (§0.2.1). The slug starts with the route's field and comes from the task; the
 campaign defaults to this session's latest stream in the same artifact root
 (including temporary directories and returning from a prepared worktree to
 the primary checkout; another session or artifact root supplies no default),
@@ -1642,7 +1671,8 @@ entry composes its own route from the same catalog (**compose-on-demand**, §0.2
 `capability-route.py compose` defaults to `framed`; `--shape direct` selects
 inline work. Explicit `solo` and `staged` shapes remain available for decisions
 already made by a frame or the person; `--shape staged --graph <stage,…>`
-selects that decided subgraph. Both use the same
+selects that decided subgraph. Each decided shape names its kind, its field, or
+both (Fields, §0.2.1). Both use the same
 validator and seal; a subgraph embeds its recipe as `composed: true`. Confirmation
 follows §0.4 (`[경로]` for small work, the card or SD-123 pair otherwise).
 Composition changes route *shape only* — it never bypasses the §0.1

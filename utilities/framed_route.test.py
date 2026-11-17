@@ -457,8 +457,15 @@ class FramedRouteCompileTest(FramedBase):
         route = json.loads(Path(receipt["route_file"]).read_text(encoding="utf-8"))
         self.assertEqual((route["selection"]["shape"], route["capability"]), ("framed", "route-frame"))
 
-        direct = subprocess.run(omitted + ["--shape", "direct", "--slug", "direct-shape", "--explain"],
-                                text=True, capture_output=True, env=env, check=False)
+        # A decided shape names its kind or field: naming neither is refused, naming what is missing.
+        unnamed = subprocess.run(omitted + ["--shape", "direct", "--slug", "direct-shape", "--explain"],
+                                 text=True, capture_output=True, env=env, check=False)
+        self.assertEqual(unnamed.returncode, 64, unnamed.stderr)
+        self.assertIn("compose-capability-required:direct", unnamed.stderr)
+        self.assertIn("--capability", unnamed.stderr)
+        self.assertIn("--field", unnamed.stderr)
+        direct = subprocess.run(omitted + ["--shape", "direct", "--field", "code", "--slug", "direct-shape",
+                                           "--explain"], text=True, capture_output=True, env=env, check=False)
         self.assertEqual(direct.returncode, 0, direct.stderr)
         direct_result = json.loads(direct.stdout.strip().splitlines()[-1])
         self.assertEqual((direct_result["shape"], direct_result["capability"]),
@@ -504,7 +511,28 @@ class RegistryRegistrationTest(unittest.TestCase):
         layout = restore(registry)
         self._assert_audit_report_delta_and_restore(layout)
         self._assert_draft_project_scope_delta_and_restore(layout)
+        self._assert_field_delta_and_restore(layout)
         return layout
+
+    def _assert_field_delta_and_restore(self, registry):
+        # Routing redesign piece 4 intentionally adds the field vocabulary, each
+        # field's default recipe and each recipe's default field; nothing else.
+        self.assertEqual(registry.pop("fields"),
+                         ["plan", "design", "code", "lab", "research", "docs", "admin", "other"])
+        defaults = registry.pop("field_default_recipes")
+        self.assertEqual({field: (row or {}).get("capability") for field, row in defaults.items()}, {
+            "plan": "autopilot-spec", "design": "autopilot-design", "code": "autopilot-code",
+            "lab": "autopilot-lab", "research": "autopilot-research", "docs": "autopilot-draft",
+            "admin": None, "other": None})
+        for recipe in registry["recipes"]:
+            if recipe["capability"] == "route-frame":
+                self.assertNotIn("field", recipe)
+                continue
+            field = recipe.pop("field")
+            if isinstance(field, dict):
+                self.assertEqual(set(field), set(recipe["modes"]))
+            else:
+                self.assertIn(field, CT.FIELDS)
 
     def _assert_draft_project_scope_delta_and_restore(self, registry):
         # Authenticate the intentional project-document placement delta before

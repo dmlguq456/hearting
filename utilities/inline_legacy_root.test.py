@@ -71,7 +71,8 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
         prompt = base / "task.md"
         prompt.write_text("Fix the README.\n", encoding="utf-8")
         self.compose = CLI + ["compose", "--slug", "legacy-direct", "--campaign-key", "legacy-direct",
-                              "--shape", "direct", "--cwd", str(self.repo), "--artifact-root", str(self.root),
+                              "--shape", "direct", "--capability", "autopilot-code",
+                              "--cwd", str(self.repo), "--artifact-root", str(self.root),
                               "--prompt-file", str(prompt), "--spec-read", "fixture",
                               "--drift-verdict", "within-spec", "--artifact-guard", "fixture",
                               "--parent-harness", "codex"]
