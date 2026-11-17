@@ -17,6 +17,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+from route_plan import is_depth0_leg
 SCHEMA_VERSION = 4
 ATTRIBUTION_VERSION = 1
 COUNT_KEYS = ("open_routes", "open_jobs", "open_dispatch_attempts")
@@ -210,12 +211,7 @@ def _sealed_route(
         or referenced.get("unit") != "_kernel/owner"
     ):
         raise ValueError("quick-owner-route-axis-invalid")
-    if binding == "frame-route" and (
-        referenced is None
-        or referenced.get("dispatch_depth") != 1
-        or referenced.get("worker_type") != "frame"
-        or referenced.get("unit") != "plan/frame"
-    ):
+    if binding == "frame-route" and not is_depth0_leg(referenced):
         raise ValueError("frame-route-axis-invalid")
     digest = route.get("route_hash")
     if not isinstance(digest, str) or digest != ROUTES.route_hash(route):

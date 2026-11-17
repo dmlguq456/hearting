@@ -91,11 +91,22 @@ def is_framed_route(route) -> bool:
             and nodes[-1].get("kind") == "runtime-terminal" and nodes[-1].get("terminal") is True)
 
 
+def is_depth0_leg(node) -> bool:
+    """The one judgment for "a depth-1 worker the depth-0 session launches itself, with no owner":
+    a sealed node that carries `launch_authority: depth-0` at dispatch depth 1. Only the frame legs
+    are sealed that way today, so this is true for them alone; an owner, a stage node, an unsealed
+    node, or anything that is not a node reads false. What the leg runs (worker type, unit) is read
+    from the sealed node itself, never inferred from this answer."""
+    depth = node.get("dispatch_depth") if isinstance(node, dict) else None
+    return (isinstance(depth, int) and not isinstance(depth, bool) and depth == 1
+            and node.get("launch_authority") == "depth-0")
+
+
 def frame_legs(route) -> tuple:
     """The frame legs a route declares, in order: both legs of a pair, or the one leg of a framed
     route that runs one."""
     ids = {n.get("id") for n in (route or {}).get("nodes") or [] if isinstance(n, dict)
-           and n.get("worker_type") == "frame" and n.get("dispatch_depth") == 1}
+           and n.get("worker_type") == "frame" and is_depth0_leg(n)}
     return tuple(node for node in FRAME_PAIR if node in ids)
 
 
