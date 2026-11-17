@@ -602,6 +602,52 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(sleeps, [30.0, 30.0])   # back on the live cadence
         self.assertEqual(refreshes, 2)
 
+    def test_producer_follows_the_installed_release_only_when_the_pointer_moved(self):
+        import parent_next_directive
+        import peer_obligations
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        os.set_inheritable(write_fd, False)
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=False), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            state._follow_installed_release(write_fd)
+        follow.assert_not_called()
+        self.assertFalse(os.get_inheritable(write_fd))
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            state._follow_installed_release(write_fd)
+        follow.assert_called_once_with(state.__file__, ["--refresh-cache", "--lock-fd", str(write_fd)])
+        self.assertTrue(os.get_inheritable(write_fd), "the lock descriptor must survive the exec")
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release", side_effect=OSError("x")):
+            state._follow_installed_release(write_fd)   # a failed move keeps this code, quietly
+
+    def test_producer_offers_itself_to_the_installed_release_before_any_pass_and_between_passes(self):
+        class Stop(BaseException):
+            pass
+        events = []
+        passes = []
+
+        def refresh():
+            events.append("refresh")
+            passes.append(1)
+            if len(passes) > 1:
+                raise Stop()
+            return (), 0.0
+
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".demand").touch()
+        with mock.patch.object(state, "_follow_installed_release", side_effect=lambda fd: events.append(("follow", fd))), \
+             mock.patch.object(state, "_timed_refresh", side_effect=refresh), \
+             mock.patch.object(state, "_read_cache", return_value={"items": []}), \
+             mock.patch.object(state, "_sleep_until_registry_change"), \
+             mock.patch.object(state.fcntl, "flock"), mock.patch.object(state.os, "close"):
+            with self.assertRaises(Stop):
+                state._producer_loop(77)
+        self.assertEqual(events, [("follow", 77), "refresh", ("follow", 77), "refresh"])
+
     def _run_producer_with(self, *, during_refresh=None, during_sleep=None):
         """Run the real producer loop with an instant observation and an injected wait.
 
