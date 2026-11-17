@@ -64,6 +64,8 @@ unit, the three legacy sources: `roles/modes/<f>/<m>.md` (EN), the
 `adapters/claude/agent-modes/<f>/<m>.md` divergent copy (KO), and any load-bearing blocks
 from the retired team agent file. Nothing load-bearing drops silently → `_NOTES.md`.
 
+The `stance:` text is carried by the runtime into the worker prompt, just before the body.
+
 ## Floor guidance (from the investigation gradient)
 
 - `near-zero`: material/*, qa/test, design/verifier, research/fact-check — kernel +
