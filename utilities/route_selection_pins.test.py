@@ -610,7 +610,7 @@ class CliComposeTest(IsolatedCase):
         with tempfile.TemporaryDirectory() as artifacts:
             command = [
                 sys.executable, str(ROOT / "utilities" / "capability-route.py"), "compose",
-                "--slug", "cli-pins", "--unassigned", "--shape", "staged",
+                "--slug", "cli-pins", "--unassigned", "--shape", "staged", "--capability", "autopilot-code",
                 "--graph", "execute,test,report", "--cwd", str(ROOT), "--artifact-root", artifacts,
                 "--spec-read", "fixture", "--drift-verdict", "fixture",
                 "--dispatch-evidence", str(evidence_path), "--prompt-file", str(prompt), *extra,
@@ -719,7 +719,8 @@ class DispatchNodePinRowTest(unittest.TestCase):
         (self.home / "evidence.json").write_text(json.dumps(tuples), encoding="utf-8")
         (self.home / "task.md").write_text("do the small thing\n", encoding="utf-8")
         command = [sys.executable, str(ROOT / "utilities" / "capability-route.py"), "compose",
-                   "--slug", "pin-row", "--unassigned", "--shape", "staged", "--graph", "execute,test,report",
+                   "--slug", "pin-row", "--unassigned", "--shape", "staged", "--capability", "autopilot-code",
+                   "--graph", "execute,test,report",
                    "--cwd", str(self.repo), "--artifact-root", str(self.artifacts), "--spec-read", "fixture",
                    "--drift-verdict", "fixture", "--dispatch-evidence", str(self.home / "evidence.json"),
                    "--prompt-file", str(self.home / "task.md"), "--jobs", str(self.jobs)]

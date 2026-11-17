@@ -709,6 +709,43 @@ class NonGitDocumentPlanTest(PlanFixture):
         self.assertFalse(list(self.project.parent.glob(self.project.name + "-wt*")))
 
 
+class FieldPlanTest(PlanFixture):
+    """A frame proposal names a leg's field (`field_source=frame`); without one, the proposed kind's."""
+
+    LEGS = [{"capability": "autopilot-draft", "mode": "doc", "field": "admin", "shape": "direct",
+             "why": "fill in the form the office sent"},
+            {"capability": "autopilot-code", "shape": "staged", "graph": ["execute", "test", "report"]}]
+
+    def leg(self, index, **kw):
+        leg = self.record_data["decision"]["proposal"]["legs"][index]
+        arguments = dict(**RP.leg_arguments(leg), slug=f"field-leg{index}", cwd=R.ROOT, artifact_root=self.root,
+                         spec_read="fixture", campaign_key="framed-key",
+                         parent_cycle_id=self.record_data["decision"]["frame_route"]["cycle_id"],
+                         dispatch_evidence={"tuples": [T.nested("claude", "codex")]},
+                         registered_headless_evidence=T.registered_headless(),
+                         work_request={"text": "do it", "owner_harness": None}, route_plan=self.binding(index))
+        arguments.update(kw)
+        return R.compose_route(**arguments)
+
+    def test_a_proposed_field_or_the_proposed_kinds_field_is_recorded_as_frame(self):
+        self.assertEqual(self.record_data["decision"]["proposal"]["legs"][0]["field"], "admin")
+        first = self.leg(0)
+        self.assertEqual((first["capability"], first["field"], first["field_source"]),
+                         ("autopilot-draft", "admin", "frame"))
+        R.verify_route(json.loads(json.dumps(first)), R.ROOT)
+        second = self.leg(1)
+        self.assertEqual((second["capability"], second["field"], second["field_source"]),
+                         ("autopilot-code", "code", "frame"))
+        # A field typed beside the plan reference is the person's own choice.
+        typed = self.leg(1, field="docs")
+        self.assertEqual((typed["field"], typed["field_source"]), ("docs", "explicit"))
+        # The printed next-leg command carries no --field, so the leg's own field stays `frame`.
+        argv = RP.compose_argv(self.record_data["decision"]["proposal"]["legs"][0],
+                               context={"cwd": str(R.ROOT), "artifact_root": str(self.root), "prompt_file": "t.md"},
+                               route_plan_arg="r.json#0", parent_cycle="c", slug="s")
+        self.assertNotIn("--field", argv)
+
+
 class RoutePlanArgumentTest(PlanFixture):
     def test_the_argument_reads_a_selected_record_and_its_leg(self):
         binding = self.binding(1)

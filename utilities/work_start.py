@@ -517,7 +517,7 @@ def validate_request(value):
         # What a framed compose was given for the ordinary shapes: recorded only, never sealed.
         hints = value["routing_hints"]
         if (not isinstance(hints, dict) or not hints
-                or set(hints) - {"capability", "capability_mode", "graph", "profile"}
+                or set(hints) - {"capability", "capability_mode", "field", "graph", "profile"}
                 or any(not isinstance(item, str) or not item.strip() or len(item) > 512
                        for item in hints.values())):
             raise ValueError("work-request-routing-hints-invalid")
@@ -2493,7 +2493,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                     "next_step": f"A framed route reads its frame proposals with PyYAML, which {python} cannot "
                         "import, so this start launched no frame leg and read no proposal. Install it for that "
                         f"Python (e.g. `{python} -m pip install --user pyyaml`) and run resume_command. For one atomic, "
-                        "reversible inline change, compose again with --shape direct."}
+                        "reversible inline change, compose again with --shape direct and the work's --field."}
         in_force = route_authority.route_in_force(route)   # with the parent's later pin changes
         harnesses = sorted(route_authority.depth1_supported_harnesses(route, worker_type="frame"))
         if not harnesses:
@@ -2958,6 +2958,8 @@ def _compose_again(route) -> str:
     # A framed compose names no capability: the shape is the route.
     named = [] if shape == "framed" else ["--capability", route["capability"],
                                           "--capability-mode", str(route.get("capability_mode") or "default")]
+    if named and route.get("field_source") == "explicit" and isinstance(route.get("field"), str):
+        named += ["--field", route["field"]]  # a field the person named stays with the work
     argv = [sys.executable, entrypoint(ROOT, "utilities/capability-route.py"), "compose",
             "--slug", str(route.get("slug") or route["route_id"]), *named, "--shape", shape,
             "--cwd", route["cwd"], "--artifact-root", route["artifact_root"],
