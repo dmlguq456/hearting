@@ -45,6 +45,8 @@ def _observation_health(key, source, error=None):
             _OBSERVATION_SUCCESSES.pop(next(iter(_OBSERVATION_SUCCESSES)))
     success = _OBSERVATION_SUCCESSES.get(cache_key)
     return {"state": "failed" if error else "idle", "last_error": error,
+            # The persisted observation record carries ``reason``, not ``last_error``.
+            **({"reason": str(error)[:160]} if error else {}),
             "last_success_at": success, "age": None if success is None else now - success}
 
 
