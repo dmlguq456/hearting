@@ -1227,9 +1227,18 @@ def _blinking_stage(stages, at, lit):
     return [(parts[0][0], _PLAIN_WEIGHT.get(parts[0][1], parts[0][1]))] + [part for part in parts[1:] if part[0] != " ●"]
 
 
+def _stage_word(route):
+    """The word before the stage line's position: ``staged`` for a staged shape, else the route's own shape (``map-reduce``,
+    ``transactional-owner``), none when the record names none. One rule with the shell panel's stage line."""
+    shape = str(route.get("shape") or "")
+    if shape.startswith("staged"):
+        return "staged"
+    return "" if shape in ("", "unknown", "framed", "direct", "one-shot-owner") else shape
+
+
 def _staged_cells(route, earlier, stages, at, lit):
     """``frame ✓ → code(standard) · staged 3/6: execute``, widest first; short of cells the earlier legs go, then the
-    intensity, then the kind, then the word ``staged``, then the position; the stage stays."""
+    intensity, then the kind, then the shape word, then the position; the stage stays."""
     kind, bare = _kind_cell(route), _kind_cell({**route, "intensity": ""})
     position = f"{at + 1}/{len(stages)}"
     stage = _blinking_stage(stages, at, lit)
@@ -1240,7 +1249,7 @@ def _staged_cells(route, earlier, stages, at, lit):
         if word:
             out += ([(" · ", "dim")] if kind_cell else []) + [(word + ": ", "dim")]
         return out + stage
-    word = "staged " + position
+    word = (_stage_word(route) + " " if _stage_word(route) else "") + position
     cells = [build(earlier, kind, word)] if earlier else []
     return cells + [build([], kind, word), build([], bare, word), build([], [], word), build([], [], position),
                     build([], [], "")]
@@ -1327,7 +1336,8 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
     # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(standard) · staged 3/7: execute`
     # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
     # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
-    if str(route.get("shape") or "").startswith("staged") and len(stages) > 1:
+    # Any route with a stage list reads so, whatever its shape (`map-reduce 2/3: analyze`; no word when none is named).
+    if len(stages) > 1:
         at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
                   next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
         earlier = _fold_items(items[:-1], max(8, (end - x) // 3), sep=" → ") if not same and items[:-1] else []

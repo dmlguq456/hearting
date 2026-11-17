@@ -1702,14 +1702,15 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS
  // routes carry no kind word, owner or workers), in the producer's order; short of rows a window of them, the
  // working first, the border counting the rest.
  const box=sec.ROUTE.rows,routeRows=box.filter(s=>/^│ │ [⠏⠋✕✓] /.test(s));
- if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   staged 2\/2: execute/.test(s)).length===1&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
+ // (Each route keeps its time too: these routes carry no owner, and a route does not lose its time for that.)
+ if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   staged 2\/2: execute/.test(s)).length===1&&['23m','54m','14m','31m'].every(m=>box.filter(s=>new RegExp('│ │ .*'+m+' +│ │$').test(s)).length===1)&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
  else assert(routeRows.length>=1&&routeRows.length<4&&/↓\d+ ─╯/.test(box.at(-1))&&routeRows[0].includes('질문 팝업'),label);
  // Press actions: the question's head and rows open it; every head and row of MESSAGES its popup;
  // the box's top line the route popup and a route's rows the popup with that route unfolded; MEM opens nothing.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
  for(let i=sec.QUESTIONS.head;i<=sec.QUESTIONS.head+sec.QUESTIONS.rows.length;i++)assert.deepEqual(act(i),['question'],'question '+i+label);
  assert.deepEqual(act(sec.ROUTE.head),['popup:ROUTE']);assert.deepEqual(act(sec.ROUTE.from),['popup:ROUTE:a']);
- if(height===46)assert.deepEqual(box.slice(0,-1).map((_,k)=>act(sec.ROUTE.from+k)[0]),['a','a','b','c','d'].map(id=>'popup:ROUTE:'+id),label);
+ if(height===46)assert.deepEqual(box.slice(0,-1).map((_,k)=>act(sec.ROUTE.from+k)[0]),['a','a','a','b','b','c','c','d','d'].map(id=>'popup:ROUTE:'+id),label);
  assert.deepEqual(act(sec.ROUTE.from+box.length-1),[],'the bottom line opens nothing');
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);sec.MESSAGES.rows.forEach((_,k)=>assert.deepEqual(act(sec.MESSAGES.from+k),['popup:MESSAGES']));
  assert.deepEqual(act(sec.MEM.head),[]);sec.MEM.rows.forEach((_,k)=>assert.deepEqual(act(sec.MEM.from+k),[]));

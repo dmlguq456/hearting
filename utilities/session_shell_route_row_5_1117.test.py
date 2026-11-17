@@ -224,6 +224,51 @@ assert(mid.some(s=>/3\/6: execute/.test(s))&&!mid.join('').includes('code('),mid
 for(const s of [...wide,...mid])assert([140,80].includes(cells(s)),s);
 """)
 
+    def test_every_route_with_a_stage_list_reads_the_stage_line_under_its_owner(self):
+        # Research (map-reduce), refine, ship and spec (transactional-owner) and a resumed route (resource+verification) read
+        # the stage line a staged route does, with their own shape word (never translated); none when the record names none.
+        self.node(r"""
+const three=['search','analyze','report'].map((n,i)=>i<1?{name:n,mark:'✓'}:i===1?{name:n,mark:'●',current:true,key:'stg2_on'}:{name:n,mark:''});
+const mk=(shape,o={})=>({...R.staged,id:'m',shape,stages:three,kind_word:'research',chain:[{name:'research',state:'active'}],workers_live:[],...o});
+const want=(shape,line,o)=>{const rows=only(mk(shape,o),50);
+ assert.deepEqual(rows,['● research(standard)','  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh','    CTX   ━━━───── 40% · 42m',line],rows.join('\n'));};
+want('map-reduce','    map-reduce 2/3: analyze');
+want('transactional-owner','    transactional-owner 2/3: analyze');
+want('resource+verification','    resource+verification 2/3: analyze',{chain:[{name:'research',state:'active'}]});
+want('unknown','    2/3: analyze');
+// One blinking thing, the stage's name; the first line's dot stands still.
+for(const shape of ['map-reduce','transactional-owner','resource+verification']){
+ const own=beats(mk(shape));assert.equal(own.length,1,shape);assert.equal(own[0].text,'analyze',shape);
+}
+// Short of cells the shape word goes first, the position and the stage stay; every row keeps its width.
+assert(only(mk('transactional-owner'),30).includes('    2/3: analyze'),only(mk('transactional-owner'),30).join('\n'));
+for(const width of [22,26,30,36,44])for(const shape of ['map-reduce','transactional-owner','resource+verification']){
+ const rows=draw([mk(shape)],width,60);assert(rows.every(s=>cells(s)===width),width+shape+'\n'+rows.join('\n'));
+ assert(box(rows).some(s=>/2\/3: anal/.test(s)),width+shape+'\n'+rows.join('\n'));
+}
+// A frame route and a route its owner does alone keep no stage line.
+assert(!only(R.frame,50).some(s=>/\d\/\d/.test(s))&&!only(R.solo,50).some(s=>/\d\/\d/.test(s)));
+// The bottom layout names the shape word in its one cell.
+const wide=draw([mk('map-reduce'),mk('transactional-owner')],140,16,{side:false});
+assert(wide.some(s=>/research\(standard\) · map-reduce 2\/3: analyze/.test(s))&&wide.some(s=>/transactional-owner 2\/3: analyze/.test(s)),wide.join('\n'));
+""")
+
+    def test_a_route_with_no_known_owner_keeps_its_time_and_context_and_a_resting_owner_its_last_tool(self):
+        self.node(r"""
+const none=(o={})=>({id:'n',title:'소유자를 모르는 route',kind:'working',state:'working',elapsed:'23m',shape:'one-shot-owner',stages:[{name:'one-shot',current:true,mark:'●'}],
+ kind_word:'code',intensity:'quick',paint:{glyph:P('⠋'),ctx:P('40%'),gauge_row:[P('━━━'),D('─────'),D(' '),P('40%')]},...o});
+// The time and the context are drawn though no owner is named (with the row's gauge, or the time alone).
+const a=only(none(),50);assert(a.some(s=>/━━━─+ 40%\s+23m$/.test(s)),a.join('\n'));
+const b=only(none({paint:{glyph:P('⠋')}}),50);assert(b.some(s=>/^\s+23m$/.test(s)),b.join('\n'));
+const c=only(none({shape:'map-reduce',stages:[{name:'search',mark:'✓'},{name:'analyze',mark:'●',current:true}],paint:{glyph:P('⠋')}}),50);
+assert(c.some(s=>/^\s+23m$/.test(s))&&c.some(s=>/map-reduce 2\/2: analyze/.test(s)),c.join('\n'));
+// An owner at rest names the tool it ended on, at the end of its row; a running one names its open tool.
+const rest={...R.solo,kind:'idle',state:'idle',tool:undefined,after_tool:'Bash',paint:{glyph:P('●'),...doer('codex','GPT-5.5','high','63%','━━━━━')}};
+assert.equal(only(rest,50)[2],'  ● owner codex GPT-5.5 high · after Bash');
+assert.equal(only({...rest,after_tool:undefined},50)[2],'  ● owner codex GPT-5.5 high');
+assert.equal(only(R.solo,50)[2],'  ⠋ owner codex GPT-5.5 high · Bash');
+""")
+
     def test_the_three_harness_panels_draw_the_same_rows(self):
         self.node(r"""
 for(const route of [R.staged,R.frame,R.solo]){

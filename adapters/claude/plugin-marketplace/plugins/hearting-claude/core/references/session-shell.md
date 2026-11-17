@@ -474,8 +474,11 @@ popup; a request row the MESSAGES popup).
   open tool, `· Edit host.cjs`: `⠸ owner  codex GPT-5.5 high · Bash`), its `CTX` row four cells in
   under the role word (the gauge under the harness and the route's time right after the percent,
   `CTX    ━━━━──── 52% · 2h 10m`; short of cells the bar shortens, then goes, then the time; the
-  percent stays), and, for a staged route, the stage line (`staged 3/7: execute`; a failed stage
-  keeps `✕`, a done one `✓`; with no stage running the next stage and what it waits for). The
+  percent stays), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
+  `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
+  position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
+  what it waits for). A route whose owner is not known keeps its time and `CTX` row under the title;
+  an owner at rest ends its row with the tool it ended on (`· after Bash`). The
   owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
   does alone has no stage line. An owner's live workers (`workers_live`) hang under it by `↳`, with
   no box, four cells in: each worker's first row (its mark, `worker`, harness, model, effort), its
@@ -516,7 +519,7 @@ popup; a request row the MESSAGES popup).
   not confirmed yet stays with `not confirmed`. The
   bottom layout keeps one row per route: title, harness·model·effort, context, then the
   kind (`code(standard) · staged 3/7: execute`, a failed one `code(standard) · staged 2/3:
-  execute ✕`, a route with no stage list `lab(quick)`), then the open tool, and the elapsed
+  execute ✕`, `research(standard) · map-reduce 2/3: analyze`, a route with no stage list `lab(quick)`), then the open tool, and the elapsed
   time at the right edge (short of cells the kind word goes, then the tool, then the word
   `staged`). The box's line is the route line's color (the
   failure color while a current route has failed), its count pulses while a route

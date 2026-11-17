@@ -114,6 +114,29 @@ class FleetRouteCell(unittest.TestCase):
         chained = solo(legs=(("frame", "done", None), ("code", "active", None)))
         self.assertEqual(cell(chained, 40)[0], "frame ✓ → code(quick)")
 
+    def test_every_route_with_a_stage_list_reads_the_stage_line_with_its_own_shape_word(self):
+        # A research route (map-reduce), refine, ship and spec (transactional-owner) and a resumed route read as a staged one does:
+        # kind(intensity), the shape's own word (never translated), the position and the blinking stage; the old `(a ✓ › b ●)` is gone.
+        three = [{"name": "search", "st": "done"}, {"name": "analyze", "st": "active"}, {"name": "report", "st": "todo"}]
+        route = lambda shape, **kw: {"state": "working", "shape": shape, "capability": "research", "intensity": "standard",
+                                     "stages": three, "legs": (("research", "active", None),), **kw}
+        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(standard) · map-reduce 2/3: analyze")
+        self.assertEqual(cell({**route("transactional-owner"), "capability": "refine"}, 70)[0],
+                         "refine(standard) · transactional-owner 2/3: analyze")
+        resumed = route("resource+verification", resume="2m", legs=(("code", "done", None), ("code", "active", None)))
+        self.assertEqual(cell(resumed, 90)[0], "code ✓ → research(standard) · resource+verification 2/3: analyze  resume 2m")
+        self.assertEqual(cell(route(""), 70)[0], "research(standard) · 2/3: analyze")      # no shape named: the position and the stage
+        self.assertEqual(cell(route("unknown"), 70)[0], "research(standard) · 2/3: analyze")
+        for old in ("›", "analyze ●", "search ✓"):
+            self.assertNotIn(old, cell(route("map-reduce"), 70)[0])
+        for width in range(14, 70):                      # the stage stays at every width
+            self.assertIn("analyze", cell(route("map-reduce"), width)[0], width)
+        _text, lit = cell(route("map-reduce"), 70, beat=1)
+        _text, dark = cell(route("map-reduce"), 70, beat=0)
+        at = "".join(c[0] for c in lit).index("analyze")
+        self.assertNotEqual(lit[at][1], dark[at][1])      # the stage name blinks, nothing else does
+        self.assertEqual([c for i, c in enumerate(lit) if not at <= i < at + 7], [c for i, c in enumerate(dark) if not at <= i < at + 7])
+
     def test_a_one_step_rows_tool_follows_its_kind(self):
         grid = CellGrid(60, 1)
         route = solo(doer={"tool": "Bash", "target": "tools/run-tests.py"})
