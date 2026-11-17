@@ -48,15 +48,53 @@ def _observation_health(key, source, error=None):
             "last_success_at": success, "age": None if success is None else now - success}
 
 
-def _enrich_steward(sessions, *, fast_first=False):
+def _enrich_steward(sessions, *, fast_first=False, record_supervision=True):
     """Keep the optional steward badge out of the fast required observation."""
     if fast_first:
         return
     try:
         from . import steward
-        steward.enrich(sessions)
+        steward.enrich(sessions, record_supervision=record_supervision)
     except Exception:
         pass
+
+
+def _route_stem(path):
+    return os.path.splitext(os.path.basename(path))[0] if isinstance(path, str) and path else None
+
+
+def _scoped_resource_keep(sessions, jobs):
+    """Which experiment runs a scoped (one-session) pass can show: the runs of a kept
+    job's attempt (`projection._attach_resource_children`) and of a kept route
+    (`explorer.live` run children by route id / route file stem). Any other run is not
+    read. Fail-open: a run the test cannot judge is read, and an unbuildable test reads all."""
+    try:
+        from .. import route_chain
+        attempts, routes = set(), set()
+        for job in jobs:
+            attempt = getattr(job, "attempt_id", None)
+            if attempt and attempt != "-":
+                attempts.add(attempt)
+            for name in ("route_id", "owner_route_id"):
+                value = getattr(job, name, None)
+                if value:
+                    routes.add(value)
+        for session in sessions:
+            for line in route_chain.session_lines(session):
+                if line.get("route_id"):
+                    routes.add(line["route_id"])
+    except Exception:
+        return None
+
+    def keep(run):
+        try:
+            return (run.get("parent_attempt_id") in attempts
+                    or run.get("route_id") in routes
+                    or _route_stem(run.get("route")) in routes
+                    or _route_stem(run.get("route_file")) in routes)
+        except Exception:
+            return True
+    return keep
 
 
 def _usage_cache_observation(snapshot, *, refresh_pending=False):
@@ -586,7 +624,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     for s in sessions:
         if s.harness == "claude" and enrichers.get("claude"):
             try:
-                enrichers["claude"](s, tick={s.pid: getattr(s, "_pane_session_claim", None)})
+                enrichers["claude"](s, tick={s.pid: getattr(s, "_pane_session_claim", None)},
+                                    **({"defer_subagents": True} if route_sessions is not None else {}))
             except Exception:
                 pass
     # Session directories describe work; the foreground observation above used
@@ -686,7 +725,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
     # F-100c: the badge is optional for first-screen readiness. The detail
     # worker attaches it after the required screen has completed.
-    _enrich_steward(sessions, fast_first=fast_first)
+    _enrich_steward(sessions, fast_first=fast_first,
+                    record_supervision=route_sessions is None)
 
     # F-51d: JSON telemetry projection — cache-only lookup (never schedules a background
     # `git rev-list`; the live render path's own ahead_behind() calls are what populate the
@@ -910,6 +950,14 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         if not sessions:
             return LiveSnapshot(sessions=[], jobs=[], resources=[],
                                 observations={"basic": {"all_new": True}})
+        # The sub-agent tail was deferred for every Claude row; read it for the ones kept.
+        fill = getattr(modules.get("claude"), "fill_subagents", None)
+        for session in sessions:
+            if fill is not None and session.harness == "claude":
+                try:
+                    fill(session)
+                except Exception:
+                    pass
 
     # --- dispatch section ---
     herdr_session_observation = _session_census_observation(sessions, herdr_observed)
@@ -1028,7 +1076,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     resource_collection_error = None
     try:
         from . import resource_runs as resource_collector
-        resource_jobs = resource_collector.collect()
+        resource_keep = _scoped_resource_keep(sessions, jobs) if route_sessions is not None else None
+        resource_jobs = resource_collector.collect(
+            **({"keep": resource_keep} if resource_keep is not None else {}))
     except Exception as exc:
         resource_collection_error = "%s: %s" % (type(exc).__name__, str(exc)[:160])
     collect_all.last_resource_jobs = resource_jobs
@@ -1098,6 +1148,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     display_snapshot = build_display_snapshot(sessions, jobs, resource_jobs)
     basic_identity = "fleet:%d:%d" % (os.getpid(), _time.time_ns())
     basic_observed_at = _time.time()
+    resource_skipped = (getattr(resource_collector.collect, "last_skipped", 0)
+                        if route_sessions is not None and resource_collector is not None else 0)
+    resource_skipped = resource_skipped if isinstance(resource_skipped, int) else 0
     resource_source_failed = (resource_collection_error is not None or any(
         not (isinstance(item, dict)
              and item.get("kind") == "missing-registry"
@@ -1107,7 +1160,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     ))
     observations["resource-runs"] = {
         "state": ("failed" if resource_source_failed else
-                  "ok" if resource_jobs else "absent"),
+                  "ok" if resource_jobs or resource_skipped else "absent"),
         "attempted": True,
         "all_new": not resource_source_failed,
         "generation_identity": basic_identity,

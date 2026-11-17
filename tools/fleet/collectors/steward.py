@@ -1085,7 +1085,7 @@ def _record_supervision(context, markers, relations, *, observation=None):
         _last_supervision = None
 
 
-def enrich(sessions, markers=None):
+def enrich(sessions, markers=None, *, record_supervision=True):
     for s in sessions:
         s.steward = False
         s.steward_targets = s.steward_parents = None
@@ -1093,7 +1093,8 @@ def enrich(sessions, markers=None):
         markers = read_markers()
     relations = read_relations()
     if not markers and not relations:
-        _record_supervision((), markers, relations)
+        if record_supervision:
+            _record_supervision((), markers, relations)
         return
     # Reuse registry history for ended targets, but never overrule current rows.
     current_keys = {key for s in sessions for key in _session_keys(s)}
@@ -1101,7 +1102,8 @@ def enrich(sessions, markers=None):
                                 if not current_keys.intersection(_session_keys(s))]
     context += _native_role_sessions(markers, context, relations)
     observation = end_observation()
-    _record_supervision(context, markers, relations, observation=observation)
+    if record_supervision:
+        _record_supervision(context, markers, relations, observation=observation)
     mod = _peer_message_module()
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     if evidence is None:
