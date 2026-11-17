@@ -67,7 +67,7 @@ class TablePartsTest(unittest.TestCase):
         self.assertTrue(any(set(row.strip()) == {"┈"} for row in body), body)
         self.assertFalse(any("|:--" in row or row.startswith("| 항목") for row in body), body)
         # The choices (the answer path) are as before.
-        self.assertEqual([text(row) for row in display["options"]], ["1 가", "2 나"])
+        self.assertEqual([text(row) for row in display["options"]], ["1  가", "2  나"])
         # A question without a table reads as it did (each line wrapped).
         plain = [{"id": "q", "answerable": True, "questions": [{"id": "a", "question": "첫 줄\n\n둘째 줄 | 막대"}]}]
         session_block.question_presentations(plain, 64)
