@@ -1207,10 +1207,6 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     grid.put(x1 - _seg_width(age), y, age, "dim")
 
 
-# The same hue at plain weight, for a lit stage name's bold keys (existing keys; no new color).
-_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
-
-
 def _draw_route_progress(grid, x, end, y, route, card=True):
     if route.get("state") == "wait":
         # Not known: its stages are to come ("details wait"), or were tried and not read (·).
@@ -1264,8 +1260,8 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
-    # Spec E9 rule 24: a route that runs a worker per stage reads `code(staged 3/7): execute ●`
-    # (short of cells `staged 3/7: execute ●`, `3/7: execute ●`), the shell panel's third row; earlier legs stay in
+    # Spec E9 rule 24: a route that runs a worker per stage reads `staged 3/7 execute ●`
+    # (short of cells `3/7 execute ●`), the shell panel's third row; earlier legs stay in
     # front of it. A one-step route's own word (`one-shot`) is its stage rail already.
     staged_parts = None
     if str(route.get("shape") or "").startswith("staged") and len(stages) > 1:
@@ -1277,8 +1273,6 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
                   next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
         stage_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at][0]
-        # 11-17: the stage's name keeps its hue but not its weight; the kind word is the one bold word of the line.
-        stage_parts = [(stage_parts[0][0], _PLAIN_WEIGHT.get(stage_parts[0][1], stage_parts[0][1])), *stage_parts[1:]]
         cursor = x
         earlier = items[:-1] if not same else []
         if earlier:
@@ -1286,19 +1280,12 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
             cursor = grid.put(cursor, y, " › ", "dim", limit=end)
         need = sum(_seg_width(text) for text, _key in stage_parts)
         position = f"{at + 1}/{len(stages)}"
-        # 11-17 (the person: "code(staged 3/6): execute 이런식으로"): the kind word leads, the one bold word, then the
-        # shape in brackets and the stage after a colon, as the shell panel's route row reads it. Short of cells the
-        # kind goes, then the word `staged`, then the position; the stage and its mark stay.
+        # Short of cells the word goes, then the position; the stage and its mark stay.
         room = end - cursor
-        kind = str(route.get("capability") or "").strip()
-        shape = "staged " + position
-        if kind and room >= need + len(kind) + len(shape) + 4:
-            cursor = grid.put(cursor, y, kind, "grp", limit=end)
-            cursor = grid.put(cursor, y, "(" + shape + "): ", "dim", limit=end)
-        elif room >= need + len(shape) + 2:
-            cursor = grid.put(cursor, y, shape + ": ", "dim", limit=end)
-        elif room >= need + len(position) + 2:
-            cursor = grid.put(cursor, y, position + ": ", "dim", limit=end)
+        word = ("staged " + position if room >= need + len(position) + 8
+                else position if room >= need + len(position) + 1 else "")
+        if word:
+            cursor = grid.put(cursor, y, word + " ", "dim", limit=end)
         cursor = _put_segments(grid, cursor, y, stage_parts, end)
         cursor = _put_segments(grid, cursor, y, after, end)
         if card:

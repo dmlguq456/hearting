@@ -795,11 +795,11 @@ SHOTS = {
     "overview": (1440, 810, "Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, "
                  "Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run "
                  "for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with "
-                 "their stage lines, code(staged 2/4): execute and lab(staged 2/4): eval-asr."),
+                 "their stage lines, staged 2/4 execute and staged 2/4 eval-asr."),
     "peers": (1440, 810, "Fleet's PEERS: one card per session, grouped by project, with each owner's route and stage "
               "marks; below, the five links with their kind and time: a reply from [e8] to [d1], a steer from [4f] to [9c], "
               "a steer from [d1] to [e8], the PEER REQUEST from [4f] to [b2], and a reply from [b2] to [4f]."),
-    "routes": (1440, 900, "Fleet's ROUTES with the web-api route opened in place: Rate limiting, code(staged 2/4): "
+    "routes": (1440, 900, "Fleet's ROUTES with the web-api route opened in place: Rate limiting, staged 2/4 with "
                "execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, "
                "execute running, test and report pending, each with who runs it, when, its gate, and its output; under "
                "it the ml-train route at eval-asr."),
