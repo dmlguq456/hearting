@@ -232,12 +232,15 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   if(cfg.scenario==='empty'){
     // No question waits: Ctrl+] opens a popup all the same, whose keys name `p` (the panel's fold):
     // a folded panel opens by the keyboard alone; `r` is the messages' popup.
-    await until(has('READY_'+cfg.harness),'the native');
-    await resize(90,24);await sleep(500);frames.folded=await screen();
-    await key('\x1d',500);frames.popup=await screen();
-    await key('p',600);frames.opened=await screen();
-    await key('\x1d',400);await key('r',600);frames.read=await screen();
-    await key('\x1b',300);frames.closed=await screen();
+    // Each step waits for the frame it names, not for a time: the host's first read of the panel's facts
+    // (a backend started cold) takes as long as the machine is busy (about 1.5 s here, 4 s under load),
+    // and a popup opened before it brings the fallback key words, a messages popup before its read none.
+    await until(s=>has('READY_'+cfg.harness)(s)&&has('REPO')(s),'the native and the panel');
+    await resize(90,24);frames.folded=await until(s=>has('READY_'+cfg.harness)(s)&&!has('REPO')(s),'the panel folded');await sleep(300);
+    await key('\x1d',0);frames.popup=await until(has('p 패널 펼치기'),'the popup naming `p`');
+    await key('p',0);frames.opened=await until(s=>has('REPO')(s)&&!box(s),'the panel opened by `p`');
+    await key('\x1d',0);await until(s=>!!box(s),'the popup again');await key('r',0);frames.read=await until(s=>has('✉')(s)&&has('MESSAGES')(s),'the messages popup');
+    await key('\x1b',0);frames.closed=await until(s=>has('REPO')(s)&&!box(s),'the popup closed');
     fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
   }
   await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');

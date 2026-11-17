@@ -1318,15 +1318,18 @@ class BoundedPromptPathTest(_BaseTest):
             "    time.sleep(120)  # a seat lock some other process holds",
         ]) + "\n", encoding="utf-8")
         hook = self._hook()
+        # The child's end is measured from the hook's start, and no ACK is spawned with under 0.5 s left: at
+        # 1.0 s a busy machine (the CI shard runs four suites on four cores) spent it before the child
+        # imported, and "the ACK never started". 6 s leaves it room and still ends far inside the stub's 120 s.
         with mock.patch.object(hook, "_PEER_STEWARD_PY", stub), \
-                mock.patch.object(hook, "_ACK_END_S", 1.0):
+                mock.patch.object(hook, "_ACK_END_S", 6.0):
             output, elapsed = self._prompt_in_process(hook, sid, budget=self._ROOMY_BUDGET_S)
         context = self._context(output)
         self.assertIn(text, context)
         self.assertIn("watch_id=w-blocked", context)
         self.assertEqual(self._state(ref)[0], "received")
         self.assertTrue(entered.exists(), "the ACK never started")
-        # Unbounded, this waits the full 120 s; bounded, about one second.
+        # Unbounded, this waits the full 120 s; bounded, about six seconds.
         self.assertLess(elapsed, 30.0)
 
     def test_a_flushed_script_run_exits_before_the_harness_would_cancel_it(self):
