@@ -1104,6 +1104,19 @@ def _proc_start_for_store(pid: int):
         return None
 
 
+def _pending_name_writer_gone(name: str) -> bool:
+    """True when ``.pending-<pid>-<start>-<hex>`` names a writer that has ended.
+
+    Same assumption as the content check in ``_active_names``: a pid whose
+    start time no longer matches is gone. An ``unknown`` start or any other
+    name shape is not judged, so the marker keeps counting as live.
+    """
+    parts = name[len(".pending-"):].split("-")
+    if len(parts) != 3 or not parts[0].isdecimal() or not parts[1].isdecimal():
+        return False
+    return _proc_start_for_store(int(parts[0])) != parts[1]
+
+
 def _read_record(path: Path) -> dict | None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -2457,14 +2470,24 @@ class ObligationStore:
                              sort_keys=True, separators=(",", ":")).encode("ascii")
         fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                      | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Keep the marker visible before the record changes. Readers that see a
-        # live pending writer use the active names without trusting generation.
-        self._write_active_marker(active_fd, name)
-        os.fsync(active_fd)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Keep the marker visible before the record changes. Readers that
+            # see a live pending writer use the active names without trusting
+            # generation.
+            self._write_active_marker(active_fd, name)
+            os.fsync(active_fd)
+        except BaseException:
+            # The caller never learns this marker's name, so a failure here
+            # must not leave it behind as a writer that looks alive forever.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(pending, dir_fd=active_fd)
+            with contextlib.suppress(OSError):
+                self._mark_active_rebuild(active_fd)
+            raise
         return pending
 
     def _finish_active_mutation(self, root_fd, active_fd, duty_id, record, pending_name):
@@ -2605,7 +2628,14 @@ class ObligationStore:
                             os.unlink(name, dir_fd=active_fd)
                             stale_pending = True
                     except (OSError, UnicodeError, ValueError, TypeError):
-                        live_pending = True
+                        # An empty or torn marker (its writer died between
+                        # create and write) still names its writer.
+                        if _pending_name_writer_gone(name):
+                            with contextlib.suppress(FileNotFoundError):
+                                os.unlink(name, dir_fd=active_fd)
+                            stale_pending = True
+                        else:
+                            live_pending = True
                     continue
                 if name.startswith("."):
                     continue
