@@ -232,9 +232,9 @@ long-lived observer follows the same rule at its own
 checkpoint boundary, before it projects or delivers and while it holds its duty
 lease: the completion observer hands the lease to the installed release's
 observer. A detached helper that can outlive its work, such as the per-attempt
-orphan watcher once its attempt has ended and a capacity resume wait,
-re-executes itself in place on the installed release at an idle point of its
-own loop: same PID, arguments and record, decided under the installer's shared
+orphan watcher once its attempt has ended, a capacity resume wait and the
+shared wait-display cache producer, re-executes itself in place on the
+installed release at an idle point of its own loop: same PID, arguments and record, decided under the installer's shared
 lock so an install still in flight is not entered. Only an argument naming the
 old code root is renamed; state paths stay where they are. Their argument
 vectors are therefore a contract between releases: a later release accepts what
