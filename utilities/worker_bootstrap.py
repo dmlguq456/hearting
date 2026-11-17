@@ -175,6 +175,39 @@ def unit_persona_body(root: Path, unit: str | None) -> str | None:
     return _FRONTMATTER_RE.sub("", text, count=1).strip()
 
 
+_STANCE_LINE_RE = re.compile(r"^stance:[ \t]*(.*?)[ \t]*(?:#.*)?$", re.MULTILINE)
+
+
+def unit_stance_text(root: Path, unit: str | None) -> str | None:
+    """Return the review-stance text a unit's ``stance:`` ref names, or None.
+
+    The ref resolves under ``roles/units/`` (catalog root first, then the unit's own
+    folder). ``none``, an absent or unresolvable ref, or a file outside the catalog
+    yields None so the persona body alone is rendered. The leading ``# `` title and
+    ``>`` quote header are dropped; only the operational text remains.
+    """
+    try:
+        path = unit_persona_path(root, unit)
+        if path is None:
+            return None
+        front = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
+        found = _STANCE_LINE_RE.search(front.group(0)) if front else None
+        ref = found.group(1).strip("\"' ") if found else ""
+        if not ref or ref == "none":
+            return None
+        units_dir = (root / "roles" / "units").resolve()
+        for base in (units_dir, path.parent):
+            target = (base / ref).resolve()
+            if target.is_relative_to(units_dir) and target.is_file():
+                lines = target.read_text(encoding="utf-8").strip().splitlines()
+                while lines and (not lines[0].strip() or lines[0].startswith(("#", ">"))):
+                    lines.pop(0)
+                return "\n".join(lines).strip() or None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 _BOOTSTRAP_BLOCK_RE = re.compile(r"^bootstrap:[ \t]*(?:#.*)?\n((?:[ \t]+\S.*\n?)+)", re.MULTILINE)
 
 
@@ -2158,7 +2191,9 @@ def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = Non
 
     When the assigned route node carries a catalog ``unit``, the unit BODY from
     ``roles/units/<unit>.md`` is appended as the worker persona (kernel +
-    worker-type overlay + unit body); kernel and overlay mechanics are unchanged.
+    worker-type overlay + [review stance] + unit body); a unit whose ``stance:``
+    resolves under ``roles/units/`` gets that text just before its body. Kernel
+    and overlay mechanics are unchanged.
     """
     if worker_type not in WORKER_TYPES:
         raise ValueError(f"invalid worker type: {worker_type}")
@@ -2175,6 +2210,9 @@ def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = Non
         if line not in {_TERMINAL_CONTRACT_START, _TERMINAL_CONTRACT_END})
     persona = unit_persona_body(root, unit)
     if persona:
+        stance = unit_stance_text(root, unit)
+        if stance and stance not in persona:
+            fragments.append(stance)
         fragments.append(persona)
     return "\n\n".join(fragments) + "\n"
 
