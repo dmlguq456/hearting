@@ -3242,11 +3242,33 @@ def _run_main(argv: list[str]) -> int:
         # the counts cannot be diagnosed without the report artifact
         # (2026-08-30, six CI-only failures with no suite names).
         print(f"HARD-FAIL={len(hard_failures)}")
+        tailed: set[str] = set()
         for key, verdict, kind, signature in hard_failures[:100]:
             print(f"hard-fail: {key} verdict={verdict} kind={kind} signature={signature}")
+            suite_path = key.split("::", 1)[0]
+            if suite_path not in tailed:  # one tail per suite: its report is the same for each test in it
+                tailed.add(suite_path)
+                for line in _failure_tail(results_by_suite.get(suite_path, [])):
+                    print(f"  | {line}")
     if args.report_only:
         return 0
     return 1 if hard_failures else 0
+
+
+_FAILURE_TAIL_LINES = 12
+_FAILURE_TAIL_WIDTH = 300
+
+
+def _failure_tail(attempts) -> list[str]:
+    """The last lines of the last failed attempt's stderr (a unittest report ends with the
+    traceback and the assertion's own text), each cut to a readable width, so a hard-fail in
+    a CI log names what failed without the report artifact."""
+    for attempt in reversed(list(attempts)):
+        if attempt.passed:
+            continue
+        lines = [line.rstrip() for line in (attempt.stderr or "").splitlines() if line.strip()]
+        return [line[:_FAILURE_TAIL_WIDTH] for line in lines[-_FAILURE_TAIL_LINES:]]
+    return []
 
 
 def _flaky_name_lines(relpath: str, attempts) -> list[str]:
