@@ -39,6 +39,7 @@ family: design
 role: fast reviewer
 worker_type: review
 floor: near-zero
+field: design
 read_only: true
 stance: _shared/stance.md
 io:

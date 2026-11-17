@@ -1,11 +1,11 @@
 """11-16 (panel peer request 1116): the panel's route box lines for peer requests.
 
-1. A thin rule of the box's own line (`├──┤`) parts the routes from the requests, only where both stand; short of
-   rows it goes before any content row.
+1. Named rules of the box's own line (`─ dispatch ───`, `─ request ───`, 11-17: route zones) open the routes' zone and the
+   requests' zone, each only where it has rows; short of rows they go before any content row.
 2. A request reads like a route's doer: its mark, the other session's Fleet number, then that session's harness, model
    and effort in the colors a route's doer takes; unknown values leave out (`[6c] claude`); the age, then the effort,
    then the model give way first.
-3. The tag is `PEER REQUEST` (`REQUEST` only where the title's line does not hold the whole one; never a count
+3. The box's title counts the routes alone (`2 ROUTE`, 11-17: the requests are a zone, no tab of the title; never a count
    without its name); one word list line for the panel, the Fleet session page and the Fleet links.
 4. A request this session received stays after it is answered, as long as a sent one does (15 minutes), closed and dim.
 5. A message whose other end is this session itself (the tidy notice) is no message: MESSAGES, its popup, the folded
@@ -50,8 +50,10 @@ const base=(o={})=>({styles,colors:o.colors??256,no_color:o.no_color===true,tag:
 const draw=(o={})=>view.render({width:o.width??40,height:o.height??50,side:o.side??true,model:base(o),state:'working',frame:1000,since:990,cellWidth:cells,
   configuration:{side_width:o.width??40,theme:o.theme||'terminal'},background:''});
 const lines=v=>v.rows.map(str);
-const boxOf=v=>{const rows=lines(v),a=rows.findIndex(s=>/^│ ╭─ (?:\d+ (ROUTE|PEER REQUEST|REQUEST)|route|peer request|request)/.test(s));if(a<0)return null;
+const boxOf=v=>{const rows=lines(v),a=rows.findIndex(s=>/^│ ╭─ (?:\d+ (ROUTE|PEER REQUEST|REQUEST)|ROUTE|route|peer request|request)/.test(s));if(a<0)return null;
   const b=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));return {a,b,rows};};
+// 11-17 (route zones): a zone's named rule inside the box (`│ │ ─ dispatch ──── │ │`); `zone` is its name or any.
+const zoneRule=(s,zone='(?:direct|dispatch|request)')=>new RegExp('^│ │ ─ '+zone+' ─+ │ │$').test(s);
 """
 
 
@@ -65,40 +67,65 @@ class RouteBoxRequestLines(unittest.TestCase):
     # 1 --------------------------------------------------------------------------------------------------------
     def test_a_thin_rule_parts_routes_from_requests_only_where_both_stand(self):
         _node(self, r"""
-const rule=v=>lines(v).filter(s=>/^│ │?├─+┤│? │$|^│ ├─+┤ │$/.test(s)).length;
+const rule=(v,zone)=>lines(v).filter(s=>zoneRule(s,zone)).length;
 const both=draw(),b=boxOf(both);
-assert.equal(rule(both),1,lines(both).join('\n'));
-// The rule stands between the last route row and the first request row, on the box's own line (`├` `┤`).
-const rows=lines(both),at=rows.findIndex(s=>s.includes('├'));
-assert(at>b.a&&at<b.b&&/^│ ├─+┤ │$/.test(rows[at]),rows[at]);
+// Both zones stand: `─ dispatch ───` under the top line (the routes carry no zone), `─ request ───` before the requests; no `direct`.
+const rows=lines(both),d=rows.findIndex(s=>zoneRule(s,'dispatch')),at=rows.findIndex(s=>zoneRule(s,'request'));
+assert.equal(rule(both),2,rows.join('\n'));assert.equal(rule(both,'direct'),0);
+assert(d===b.a+1&&at>d&&at<b.b,rows.join('\n'));
 assert(/route 1|Opus/.test(rows[at-1])||rows.slice(b.a,at).some(s=>s.includes('route 1')),rows.join('\n'));
 assert(/^│ │ ◂ \[a3\]/.test(rows[at+1])||/^│ │ → \[6c\]/.test(rows[at+1]),rows[at+1]);
-// Only routes, only requests: no rule.
-assert.equal(rule(draw({requests:[]})),0);assert.equal(rule(draw({routes:[]})),0);
-assert(boxOf(draw({routes:[]})),'a request alone still draws the box');
-// The rule is the box's color, not a new one: the cells carry the line's own style (the route box's `plain` line).
-const v=draw(),row=v.rows[at],ln=row.find(p=>p.text.includes('─'));
-const edge=v.rows[b.a].find(p=>p.text.includes('╭'));
-assert.deepEqual([ln.foreground,ln.dim,ln.role],[edge.foreground,edge.dim,edge.role]);
+// Only routes: the one `dispatch` rule, none for requests. Only requests: the one `request` rule alone (the title `ROUTE`).
+const routesOnly=draw({requests:[]}),requestsOnly=draw({routes:[]});
+assert.equal(rule(routesOnly,'dispatch'),1);assert.equal(rule(routesOnly,'request'),0);
+assert.equal(rule(requestsOnly,'dispatch'),0);assert.equal(rule(requestsOnly,'request'),1);
+assert(boxOf(requestsOnly),'a request alone still draws the box');
+assert(/^│ ╭─ ROUTE ─+╮ │$/.test(lines(requestsOnly)[boxOf(requestsOnly).a]),lines(requestsOnly).join('\n'));
+// A route of the `direct` zone stands first, under its own rule: direct, dispatch, request.
+const zoned=draw({routes:[{...routes[1],id:'rt-d',zone:'direct'},...routes]}),zr=lines(zoned);
+const order=['direct','dispatch','request'].map(z=>zr.findIndex(s=>zoneRule(s,z)));
+assert(order.every(i=>i>0)&&order[0]<order[1]&&order[1]<order[2],zr.join('\n'));
+// No rule has a press; the rule is the box's own line in the zone's own name: the dashes dim on the `messages` role, the name `zone`.
+const v=draw(),row=v.rows[at],ln=row.find(p=>p.text.includes('─')&&!p.text.includes('request'));
+assert.deepEqual([ln.dim,ln.role],[true,'messages']);
+assert(row.some(p=>p.text==='request'&&p.role==='zone'),JSON.stringify(row));
+assert.equal(v.hits.filter(h=>h.row===at||h.row===d).length,0);
 """)
 
-    def test_short_of_rows_the_rule_goes_before_any_content_row(self):
+    def test_short_of_rows_content_gives_way_first_and_a_zone_rule_stays_while_a_row_of_its_zone_shows(self):
         _node(self, r"""
-// Heights from tall to short: the box's content rows (routes and requests, whatever form) only shrink once the rule is gone.
-const content=v=>{const b=boxOf(v);return b?b.rows.slice(b.a+1,b.b).filter(s=>!s.includes('├')).length:0;};
+// 11-17 (route zones): a zone's rule is not the first thing to go. Heights from tall to short: content rows give way by the
+// existing steps (folds, then rows scrolled out), and a rule stands exactly where a row of its zone shows, also when the box
+// is scrolled to fewer rows: never a rule over nothing, never a row of a zone without its rule.
+const zones=v=>{const b=boxOf(v);if(!b)return null;const out=[];
+  // (The last step before the box itself would go: one route stands without any rule, a route without its name rather than no route.)
+  if(!b.rows.slice(b.a+1,b.b).some(s=>/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s)))return [];
+  for(const s of b.rows.slice(b.a+1,b.b)){
+    const m=/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.exec(s);
+    if(m){out.push({zone:m[1],rows:[]});continue;}
+    assert(out.length,'a row stands above every zone rule '+s+'\n'+b.rows.join('\n'));
+    out[out.length-1].rows.push(s);
+  }
+  return out;};
+const marker={dispatch:/route \d|owner|code\(/,request:/\[(?:6c|a3)\]|partial answer|popup c|review the popup|open/};
 for(const width of [30,40,50,60]){
- const tall=content(draw({width,height:60}));let sawRuleOff=false;
- assert(lines(draw({width,height:60})).some(s=>/^│ ├─+┤ │$/.test(s)),'the rule stands where there is room '+width);
+ const full=zones(draw({width,height:60}));
+ assert.deepEqual(full.map(z=>z.zone),['dispatch','request'],'both rules stand where there is room '+width);
+ let shown=2,fewest=99,nameless=false;
  for(let h=60;h>=12;h--){
-  const v=draw({width,height:h}),b=boxOf(v);if(!b)break;
-  const has=lines(v).some(s=>/^│ ├─+┤ │$/.test(s)),n=content(v);
-  if(!has)sawRuleOff=true;
-  if(n<tall&&!sawRuleOff)assert(!has,'a content row left while the rule still stands '+width+'x'+h+'\n'+lines(v).join('\n'));
-  // (11-17, route row 5: a route folding from three rows to one frees several rows at once, so the rule may stand again on
-  // the spare row; it comes back only where it takes no content row from the height below.)
-  if(has&&sawRuleOff)assert.equal(n,content(draw({width,height:h-1})),'the rule came back at the cost of a content row '+width+'x'+h+'\n'+lines(v).join('\n'));
+  const v=draw({width,height:h}),z=zones(v);if(!z)break;
+  const label=width+'x'+h+'\n'+lines(v).join('\n');
+  if(!z.length){nameless=true;continue;}                       // the last resort: it comes only after every rule row would not fit
+  assert(!nameless,'a rule came back at a lower height '+label);
+  assert.deepEqual(z.map(g=>g.zone),['dispatch','request'].slice(0,z.length),'the zones keep their order '+label);
+  // A rule stands over a row of its zone (the routes' rows under `dispatch`, the requests' under `request`), never over nothing.
+  for(const g of z)assert(g.rows.some(s=>marker[g.zone].test(s)),'a rule stands over no row of its zone '+g.zone+' '+label);
+  // A zone with no row showing has no rule, and a zone that went does not come back at a lower height.
+  assert(z.length<=shown,'a rule came back at a lower height '+label);shown=z.length;
+  fewest=Math.min(fewest,z.reduce((n,g)=>n+g.rows.length,0));
  }
- assert(sawRuleOff,'the rule gives way at some height '+width);
+ assert(fewest<full.reduce((n,g)=>n+g.rows.length,0),'content gives way at some height '+width);
+ assert(shown===1||nameless,'the request zone scrolls out before the routes\' rule '+width);
 }
 """)
 
@@ -155,19 +182,20 @@ assert(order.includes('age')&&order.includes('effort')&&order.includes('model'),
     # 3 --------------------------------------------------------------------------------------------------------
     def test_the_title_reads_peer_request_and_short_only_where_the_line_does_not_hold_it(self):
         _node(self, r"""
+// 11-17: the title is the route count alone at every width (the requests are the box's `request` zone, not a tab).
 for(const width of [30,34,38,40,50,60]){
  const rows=lines(draw({width})),b=boxOf(draw({width})),top=rows[b.a];
  // Never a count without its name.
  const words=top.replace(/[╭╮─│]/g,' ').trim().split(/\s+/);
  assert(!/^\d+$/.test(words.at(-1)),'a count without its name: '+top);
  assert(words.includes('ROUTE'),top);
- if(width>=40)assert(top.includes('2 PEER REQUEST'),top);
- else assert(/2 (PEER )?REQUEST|^│ ╭─ 2 ROUTE ─+╮ │$/.test(top),top);
+ assert(/^│ ╭─ 2 ROUTE ─+╮ │$/.test(top)&&!/REQUEST/.test(top),top);
 }
-// Beside the native area `peer request 2`, below it the folded forms keep the lower case word.
+// Below the native area the lower case form `route 2` stands alone too.
 const below=lines(draw({width:120,height:20,side:false}));
-assert(below.some(s=>s.includes('route 2 │ peer request 2')),below.join('\n'));
-// Where even `REQUEST` does not fit with the routes, the route count stands alone (never a bare count).
+assert(below.some(s=>/route 2/.test(s)&&!/request/.test(s)),below.join('\n'));
+// A request alone reads `ROUTE`, never a bare count.
+assert(lines(draw({routes:[]})).some(s=>/^│ ╭─ ROUTE ─+╮ │$/.test(s)),lines(draw({routes:[]})).join('\n'));
 const tight=lines(draw({width:24,height:50})).find(s=>/^│ ╭─/.test(s));
 assert(!/│ \d+ ─|│ \d+╮|│ \d+ *$/.test(tight.replace(/ │$/,'')),tight);
 """)
@@ -183,13 +211,13 @@ for(const width of [30,31,33,36,40,45,50,55,60])for(let height=20;height<=60;hei
   assert(b.b>b.a,'the box closes '+label);
   // Every row inside the box is the box's own, a rule or content; a press on it is the box's (a request row, the MESSAGES popup).
   for(let i=b.a+1;i<b.b;i++){
-   assert(/^│ (│ .* │|├─+┤) │$/.test(rows[i]),'a row outside the box line '+i+'\n'+label);
+   assert(/^│ │ .* │ │$/.test(rows[i]),'a row outside the box line '+i+'\n'+label);
    const acts=v.hits.filter(h=>h.row===i);
-   if(rows[i].includes('├')){assert.equal(acts.length,0,'the rule has no press '+label);continue;}
+   if(zoneRule(rows[i])){assert.equal(acts.length,0,'the rule has no press '+label);continue;}
    assert.equal(acts.length,1,'one press per row '+i+'\n'+label);
    assert(acts[0].left>=2&&acts[0].right<=width-3,JSON.stringify(acts[0])+label);
    if(/^│ │ [→◂✓✕] \[/.test(rows[i]))assert.equal(acts[0].action,'popup:MESSAGES',rows[i]);
-   else if(i>b.a&&rows.slice(b.a,i).some(s=>s.includes('├')))assert.equal(acts[0].action,'popup:MESSAGES','below the rule every row is a request\'s: '+rows[i]);
+   else if(i>b.a&&rows.slice(b.a,i).some(s=>zoneRule(s,'request')))assert.equal(acts[0].action,'popup:MESSAGES','below the request rule every row is a request\'s: '+rows[i]);
   }
   // The title row presses the ROUTE popup, over the cells it was drawn on.
   const top=v.hits.filter(h=>h.row===b.a);assert.deepEqual(top.map(h=>h.action),['popup:ROUTE'],label);
@@ -218,7 +246,7 @@ const spec=JSON.parse(process.argv[2]);
 const sent2={...sent,paint:spec.paint};
 const m={...base({requests:[sent2],colors:spec.colors,no_color:spec.no_color}),styles:spec.styles,colors:spec.colors,no_color:spec.no_color};
 const v=view.render({width:40,height:50,side:true,model:m,state:'working',frame:1000,since:990,cellWidth:cells,configuration:{side_width:40,theme:spec.theme},background:''});
-const r=lines(v),rule=r.findIndex(s=>s.includes('├')),b=boxOf(v);
+const r=lines(v),rule=r.findIndex(s=>zoneRule(s,'request')),b=boxOf(v);
 assert(r.some(s=>s.includes('[6c] claude')&&s.includes(spec.paint.model_text.text)),r.join('\n'));
 const parts=v.rows.slice(rule>0?rule+1:b.a+1,b.b).flat().filter(p=>/\S/.test(p.text)&&!/^[│├┤╭╮╰╯─]+$/.test(p.text));
 const hues=parts.map(p=>p.foreground).filter(f=>Number.isInteger(f)&&f>=0);

@@ -74,6 +74,30 @@ def _frame_node(node):
             and node.get("worker_type") == "frame")
 
 
+# The model grade of a unit leg, from the `floor` its unit head declares (roles/units/_schema.md).
+# `--profile` and `--explicit-profiles` still override it through the ordinary profile sealing;
+# `top` is not reachable here: it is for the owner and the frame legs only.
+UNIT_FLOOR_PROFILE = {"near-zero": "light", "low": "light", "moderate": "balanced",
+                      "high": "balanced-deep", "highest": "deep"}
+
+
+def unit_leg_node(recipe, unit):
+    """The one depth-0 leg of a `unit` route: the recipe's template filled from the unit head.
+
+    ONE function for the compiler and `verify_route`: the unit, role and worker type are the
+    head's, the floor picks the model grade, everything else is the recipe's. A unit that is not
+    in the catalog, or whose head lacks what a leg needs, raises."""
+
+    head = TOPO._unit_frontmatter(unit)
+    profile = UNIT_FLOOR_PROFILE.get(head.get("floor"))
+    if profile is None:
+        raise ValueError(f"unit-floor-invalid:{unit}")
+    node = json.loads(json.dumps(recipe["standard_plus"]["nodes"][0]))
+    node.update({"role": head["role"], "unit": unit, "worker_type": head["worker_type"],
+                 "model_profile": profile})
+    return node
+
+
 def _quick_frame_diversity(candidates):
     """ONE definition of a quick frame pair's harness diversity, shared by the
     compiler and `verify_route` (they used to count supported harnesses

@@ -6,7 +6,7 @@ from ..config import ui_text
 from .grid import cell_width
 from .grid import clip_cells as clip
 from .tables import repo_rule_label
-from .tables import _clip, _put_wrapped, _tint_row, draw_overview, draw_routes, route_is_history
+from .tables import _clip, _put_wrapped, _tint_row, draw_overview, draw_routes, route_is_history, route_zone, zone_rule
 
 
 def draw_scope(grid, vm, state):
@@ -293,7 +293,7 @@ def request_line_parts(request):
     was opened and its work state in the shell panel's words."""
     glyph = str(request.get("glyph") or request.get("way") or "→")
     way = str(request.get("way") or "→")
-    parts = [(glyph, "lvl_r" if glyph == "✕" else "lvl_g" if glyph == "✓" else "loc_repo")]
+    parts = [(glyph, "lvl_r" if glyph == "✕" else "lvl_g" if glyph == "✓" else "zone_request")]
     if glyph in ("✓", "✕"):
         parts.append((" " + way, "loc_repo"))
     if request.get("who"):
@@ -319,6 +319,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     clock = getattr(vm, "clock", None)
     y = _page_title(grid, x, right, 3, "[" + tag + "] " + str(session.get("title") or "·"),
                     " · ".join(part for part in (repo_rule_label(session.get("repo")), str(branch)) if part))
+    y, named, tabbed = _peers_line(grid, vm, tag, x, y, right)
     model = tuple(session.get("model") or ())
     value_x = _field(grid, x, y, "MODEL", right)
     cursor = grid.put(value_x, y, harness, "hb_" + harness, limit=right)
@@ -390,26 +391,22 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     messages, requests = _session_peer_view(vm, tag)
     routes = tuple(route for route in vm.routes if route.get("session_tag") == tag)
     head = section_parts("ROUTES", len(routes)) if routes else (
-        [] if requests else section_parts("ROUTES", detail="none"))
-    if requests:
-        # ``2 ROUTES │ 1 PEER REQUEST``: the requests this session sent or received, counted as the
-        # shell panel counts them (the same request rows), beside the routes; the shell panel's word
-        # (11-16), its shorter ``REQUEST`` only where the whole head does not fit.
-        joint = [(" │ ", "dim")] if head else []
-        named = joint + section_parts(ui_text("fleet.session_panel.peer_request"), len(requests))
-        if sum(cell_width(text) for text, _key in head + named) + 2 > right - x:
-            named = joint + section_parts(ui_text("fleet.session_panel.peer_request_short"), len(requests))
-        head += named
+        section_parts("ROUTES") if requests else section_parts("ROUTES", detail="none"))
     y = section_rule(grid, x, right, y + 1, head)
     if routes:
-        end = _draw_route_subset(grid, vm, routes, x, y, bottom, view_key=tag, state=state)
+        end = _draw_route_subset(grid, vm, routes, x, y, bottom, view_key=tag, state=state, zones=True)
         # An opened route unfolds its detail in place, so the next section starts below what was drawn.
-        fixed = y + len(routes) * 2 + 2
+        # (The zones' named rules take a row each: one for every kind of route this session has.)
+        zone_rows = len({route_zone(route) for route in routes})
+        fixed = y + len(routes) * 2 + 2 + zone_rows
         # The requests stand right under what the route table drew (an unfolded route's detail too).
-        below = end if end else y + len(routes) + 2
+        below = end if end else y + len(routes) + 2 + zone_rows
         y = end if end and end > fixed else fixed
     else:
         below = y
+    if requests:
+        # 11-17 (route zones): the requests this session sent or received are the third zone, `request`, under the routes.
+        below = zone_rule(grid, x, right, below, "request")
     for request in requests:
         # A request stands under the route rows, one row each, its title after its state.
         parts = request_line_parts(request)
@@ -439,11 +436,14 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     if not shown:
         grid.put(x + FIELD_X, y, "none", "dim", limit=right)
         y += 1
-    linked = _linked_sessions(vm, tag)
-    if linked:
-        # ``PEERS  [09] ⚑ steward · [e4] · [a3]   PEERS tab ›``: the sessions this one is linked
-        # with, and the way to their tab with this session's card picked.
-        cursor = grid.put(x + FIELD_X, y, "PEERS  ", "label", limit=right)
+    # The older PEERS row, as it stood under MESSAGES: ``PEERS  [09] ⚑ steward · [e4] · [a3]   PEERS tab ›``, the sessions
+    # this one is linked with (a message link too, not only a supervision) and the way to their tab. The top PEERS line
+    # (supervision only) names its own sessions, so this row leaves those off, and where the top line has the tab link
+    # and nothing else is left it is not drawn. A window with no supervision shows it whole, as it always did.
+    all_linked = _linked_sessions(vm, tag)
+    linked = [(other, steward) for other, steward in all_linked if other not in named]
+    if linked or all_linked and not tabbed:
+        cursor = grid.put(x + FIELD_X, y, "PEERS  ", "label", limit=right) if linked else x + FIELD_X
         for index, (other, steward) in enumerate(linked):
             if index:
                 cursor = grid.put(cursor, y, " · ", "dim", limit=right)
@@ -451,7 +451,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
             if steward:
                 cursor = grid.put(cursor, y, " ⚑ " + ui_text("fleet.peers.steward"), "steward", limit=right)
         go = ui_text("fleet.session_page.peers_tab")
-        start = cursor + 3
+        start = cursor + (3 if linked else 0)
         end = grid.put(start, y, go, "hearting", limit=right)
         if end <= right - 1:
             grid.add_hit(y, start, end, ("tab", "PEERS", tag))
@@ -506,6 +506,77 @@ def _linked_sessions(vm, tag):
                 steward = index == 0 and str(link[2]).startswith("watch")
                 found[str(end[0])] = found.get(str(end[0]), False) or steward
     return sorted(found.items(), key=lambda item: not item[1])
+
+
+def _peer_groups(vm, tag):
+    """``[(supervisor tag, [supervised tags])]`` for the PEERS line of ``tag``'s window: each supervisor with this session as
+    the supervised one, then this session with the sessions it supervises. The relation is the registered steward
+    one between live sessions of one repository, as the steward columns read it (``peer_edges["supervision"]``)."""
+    edges = vm.peer_edges if isinstance(vm.peer_edges, Mapping) else {}
+    supervision = edges.get("supervision") if isinstance(edges.get("supervision"), Mapping) else {}
+    groups = [(str(steward), [tag]) for steward, targets in supervision.items()
+              if tag in tuple(targets or ()) and str(steward) != tag]
+    below = [str(other) for other in supervision.get(tag) or () if str(other) != tag]
+    return groups + ([(tag, below)] if below else [])
+
+
+def _peers_line(grid, vm, tag, x, y, right):
+    """``PEERS  [c7] ⚑ ─ [d4] [3b]``: the one line of who supervises whom (11-17), the same order from every window: the
+    supervising session, its flag, a dash, the supervised ones; two groups share the line (`` · ``). A number wears its
+    harness's color (this window's own bold), the flag the steward pink, the dash dim; no session state. A number that is
+    not this window's opens that session's page. Short of cells the last numbers go from the back and the count a group
+    lost stands inside that group. Returns the next row (or this one where the window has no relation), the other
+    sessions named, and whether the tab link stands at its end."""
+    groups = _peer_groups(vm, tag)
+    if not groups:
+        return y, set(), False
+    harness_of = {str(item.get("tag")): str(item.get("harness") or "") for item in vm.sessions}
+    key_of = lambda other: ("hbb_" if other == tag else "hb_") + (harness_of.get(other) if harness_of.get(other) in
+                                                                  ("claude", "codex", "opencode") else "other")
+    value_x = _field(grid, x, y, "PEERS", right)
+    total = sum(len(members) for _steward, members in groups)
+
+    width = lambda parts: sum(cell_width(text) for text, _key, _go in parts)
+    room = right - 1 - value_x
+
+    def cells(keep):
+        """The line's cells with ``keep`` numbers, taken from the front; the numbers a group lost are counted inside that
+        group (``[3b] ⚑ ─ +2``). A group with no number left stands only where its head and its count fit."""
+        out, rest = [], keep
+        for steward, members in groups:
+            take, lost = min(rest, len(members)), len(members) - min(rest, len(members))
+            rest -= take
+            piece = [("[" + steward + "]", key_of(steward), steward), (" ", None, None), ("⚑", "steward", None),
+                     (" ", None, None), ("─", "dim", None)]
+            for member in members[:take]:
+                piece += [(" ", None, None), ("[" + member + "]", key_of(member), member)]
+            if lost:
+                piece.append((" +%d" % lost, "dim", None))
+            joined = out + ([(" · ", "dim", None)] if out else []) + piece
+            if not take and width(joined) > room:
+                break
+            out = joined
+        return out
+    shown = cells(1)
+    for keep in range(total, 0, -1):
+        parts = cells(keep)
+        if width(parts) <= room:
+            shown = parts
+            break
+    cursor = value_x
+    for text, key, go in shown:
+        end = grid.put(cursor, y, text, "branch_s" if key is None else key, limit=right)
+        if go and go != tag and end <= right - 1:           # only a number drawn whole is a target
+            grid.add_hit(y, cursor, end, ("page", "session", go))
+        cursor = end
+    # The way to the PEERS tab with this session's card picked (the line's old tail), only where all of it fits.
+    start, go = cursor + 3, ui_text("fleet.session_page.peers_tab")
+    tabbed = start + cell_width(go) <= right - 1
+    if tabbed:
+        grid.add_hit(y, start, grid.put(start, y, go, "hearting", limit=right), ("tab", "PEERS", tag))
+    # The sessions this line names (the older row below leaves them off; one the line cut for room is not named) and whether it
+    # carries the tab link.
+    return y + 1, {go for _text, _key, go in shown if go} - {tag}, tabbed
 
 
 def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
@@ -578,8 +649,8 @@ def _route_visibility_lines(grid, visibility, x, right, y, bottom, whole=False):
 class _SubsetState:
     """The view-local state a route table reads: a fixed fold key, everything else from the real state."""
 
-    def __init__(self, base, view, opened="", no_repo_group=False):
-        self.base, self.view, self.no_repo_group = base, view, no_repo_group
+    def __init__(self, base, view, opened="", no_repo_group=False, zones=False):
+        self.base, self.view, self.no_repo_group, self.zones = base, view, no_repo_group, zones
         self.opened = opened
         self.scroll = tuple(getattr(base, "scroll", ()) or ())
 
@@ -592,11 +663,11 @@ class _SubsetState:
 
 
 def _draw_route_subset(grid, vm, routes, x, y, bottom, opened="", no_repo_group=False,
-                       view_key="ROUTES", state=None):
+                       view_key="ROUTES", state=None, zones=False):
     # Reuse the exact corrected table renderer with a view-model carrying only these routes.
     from dataclasses import replace
     subset = replace(vm, routes=tuple(routes))
-    return draw_routes(grid, subset, _SubsetState(state, view_key, opened, no_repo_group), x=x, y=y)
+    return draw_routes(grid, subset, _SubsetState(state, view_key, opened, no_repo_group, zones), x=x, y=y)
 
 
 _BAND_W, _BAND_H, _BAND_GAP = 44, 4, 4

@@ -755,7 +755,7 @@ def route_doer(route, jobs, get, live):
                 "role": ((_worker_role(route) if shared.get("worker") is True else "owner")),
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
                 "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
-                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
+                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool", "now")
                    if shared.get(key)}}
     stage = (route or {}).get("worker_stage")
     owners = live._owner_jobs(jobs)
@@ -785,10 +785,12 @@ def route_doer(route, jobs, get, live):
             "agents": sum(1 for agent in agents if get(agent, "active") is True)
                       if working and isinstance(agents, (list, tuple)) else 0,
             **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
-               if key in activity}}
+               if key in activity},
+            # The session's own NOW (Fleet's session row value, already on the job).
+            **({"now": live._text(get(job, "summary", "now"))} if live._text(get(job, "summary", "now")) else {})}
 
 
-_DOER_LIMITS = (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64), ("target", 120), ("tool_age", 16))
+_DOER_LIMITS = (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64), ("target", 120), ("tool_age", 16), ("now", 160))
 
 
 def _doer_values(doer):
@@ -918,7 +920,7 @@ def route_details(snapshot, panels, routes=None, now=None):
             if not doer:
                 continue
             for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
-                               ("target", 120), ("tool_age", 16), ("after_tool", 160)):
+                               ("target", 120), ("tool_age", 16), ("after_tool", 160), ("now", 160)):
                 if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit:
                     row[key] = doer[key]
             if doer.get("idle_tool") is True:
@@ -936,7 +938,7 @@ def route_details(snapshot, panels, routes=None, now=None):
     return panels
 
 
-def session_route_status(snapshot, now=None, *, include_details=False):
+def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):
     """Fleet's question-free route labels, with the row values the shell panel paints.
 
     Fleet's own route records are read from the same interpretation pass (no
@@ -944,7 +946,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
     """
     from .explorer import live
     if not include_details:
-        return live.session_route_status(snapshot, now)
+        return live.session_route_status(snapshot, now, records_out=records_out)
     captured = []
     original = live._route_records
 
@@ -955,7 +957,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
 
     live._route_records = observed
     try:
-        labels, panels = live.session_route_status(snapshot, now, include_details=True)
+        labels, panels = live.session_route_status(snapshot, now, include_details=True, records_out=records_out)
     finally:
         live._route_records = original
     try:

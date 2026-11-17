@@ -132,10 +132,10 @@ def _normalize(text, case):
 
 
 def _recipes():
-    """The recipes a person can compose or preset; the compiler-internal framed recipe is reached
-    only through `--shape framed` and has its own scenario."""
+    """The recipes a person can compose or preset; the compiler-internal recipes are reached only
+    through `--shape framed` (own scenario below) or `--unit` (route_unit.test.py)."""
     return [(r["capability"], sorted(r["modes"])[0], [n["id"] for n in r["standard_plus"]["nodes"]])
-            for r in TOPO.load_registry()["recipes"] if r["capability"] != R.ROUTE_FRAME_CAPABILITY]
+            for r in TOPO.load_registry()["recipes"] if r["capability"] not in TOPO.COMPILER_INTERNAL_CAPABILITIES]
 
 
 def _historical_setup_projection(recipe, case):
@@ -305,8 +305,10 @@ def golden_payload(case):
     registry = json.loads(json.dumps(registry))
     registry["recipes"] = [_historical_code_recipe_projection(
         _historical_setup_projection(recipe, case), case) for recipe in registry["recipes"]]
+    # The golden pins the routes that existed before the `unit` kind; that kind has route_unit.test.py.
     digests = {capability: TOPO.capability_registry_digest(registry, capability)
-               for capability in sorted({r["capability"] for r in registry["recipes"]})}
+               for capability in sorted({r["capability"] for r in registry["recipes"]})
+               if capability != TOPO.UNIT_CAPABILITY}
     return _normalize(json.dumps({"scenarios": scenarios, "capability_registry_digest": digests},
                                  sort_keys=True, indent=1, ensure_ascii=False), case)
 

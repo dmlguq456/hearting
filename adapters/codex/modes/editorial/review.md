@@ -35,6 +35,7 @@ family: editorial
 role: fast reviewer
 worker_type: review
 floor: low
+field: docs
 read_only: true
 stance: _shared/stance.md
 io:

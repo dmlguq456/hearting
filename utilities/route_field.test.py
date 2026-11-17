@@ -54,7 +54,7 @@ class FieldRegistryTest(unittest.TestCase):
         for (capability, mode), field in defaults.items():
             expected = {"autopilot-spec": "plan", "autopilot-design": "design", "autopilot-lab": "lab",
                         "autopilot-research": "research", "autopilot-draft": "docs", "autopilot-refine": "docs",
-                        "autopilot-apply": "docs", "analyze-user": "other", "route-frame": None,
+                        "autopilot-apply": "docs", "analyze-user": "other", "route-frame": None, "unit": None,
                         "analyze-project": "code" if mode == "code" else "docs"}.get(capability, "code")
             with self.subTest(capability=capability, mode=mode):
                 self.assertEqual(field, expected)

@@ -4,6 +4,7 @@ family: design
 role: deep maker
 worker_type: stage
 floor: highest
+field: design
 read_only: false
 stance: none
 io:

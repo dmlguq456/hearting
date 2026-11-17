@@ -123,6 +123,29 @@ def stages_block(registry, recipe):
             "frame_brief_inputs":TOPO.frame_brief_inputs(registry,capability)}
 
 
+def unit_stages_block(registry, recipe):
+    """The `unit` recipe as `stages` shows it: one leg whose unit is any read-only unit.
+
+    The leg's unit is chosen at compose (`--unit`), so the unit list rides `unit_choices` and each
+    unit's default field (from its head) is named in the summary; a unit without one needs `--field`."""
+    units=[]
+    for name in TOPO.unit_names():
+        head=TOPO._unit_frontmatter(name)
+        if head["read_only"]=="true":
+            units.append((name,head["field"]))
+    node=recipe["standard_plus"]["nodes"][0]
+    summary=("one read-only unit leg the depth-0 session launches, no owner; compose --unit <family/name>; field: "
+             +", ".join(f"{name}={field or 'needs --field'}" for name,field in units))
+    view={"id":node["id"],"unit":"<family/name>","unit_choices":[name for name,_ in units],
+          "parallel_group":None,"human_gates":[],"terminal":node.get("terminal") is True,
+          "part":f"{recipe['capability']}:{node['id']}","summary":summary,"kind":node["kind"],
+          "inputs":list(node["inputs"]),"external_inputs":list(node["inputs"]),"optional_inputs":[],
+          "outputs":list(node["outputs"]),"shareable":False,"start_approval":None,"optional":False,
+          "after":[],"before":[],"frame_alias":False}
+    return {"capability":recipe["capability"],"modes":list(recipe["modes"]),"field":None,
+            "topology_class":recipe["topology_class"],"nodes":[view],"borrowable":[],"frame_brief_inputs":[]}
+
+
 def _isolates_worktree(route):
     """Whether the selected route changes source, independent of artifact-root location."""
     return any(_node_mutates_worktree(node) for node in route.get("nodes") or [])
@@ -1242,7 +1265,7 @@ def _resolve_compose_plan(a, route_plan=None):
         if rc is None:
             raise ValueError("compose-plan-invalid:route-chain-unavailable")
         known = {r["capability"] for r in TOPO.load_registry()["recipes"]
-                 if r["capability"] != ROUTE_FRAME_CAPABILITY}
+                 if r["capability"] not in TOPO.COMPILER_INTERNAL_CAPABILITIES}
         return rc.parse_plan(a.plan, known), "explicit"
     if route_plan is not None:
         # Display only: the approved legs' capability order, never a permission or a hash input.

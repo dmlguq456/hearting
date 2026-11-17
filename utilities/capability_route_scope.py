@@ -145,7 +145,8 @@ def declared_start_approvals(leg, registry=None):
     """
     registry = registry or TOPO.load_registry()
     capability = leg["capability"]
-    recipes = [r for r in registry["recipes"] if r["capability"] == capability and capability != ROUTE_FRAME_CAPABILITY]
+    recipes = [r for r in registry["recipes"] if r["capability"] == capability
+               and capability not in TOPO.COMPILER_INTERNAL_CAPABILITIES]
     if not recipes:
         return []
     mode = leg.get("mode")
@@ -166,7 +167,7 @@ def declared_start_approvals(leg, registry=None):
         }
         selected = internal.get((capability, mode)) or internal.get((capability, None))
         return [selected] if selected and TOPO.part_row(registry, selected[1]).get("start_approval") else []
-    known = {r["capability"] for r in registry["recipes"]} - {ROUTE_FRAME_CAPABILITY}
+    known = {r["capability"] for r in registry["recipes"]} - set(TOPO.COMPILER_INTERNAL_CAPABILITIES)
     tokens = leg.get("graph") or [n["id"] for n in base["standard_plus"]["nodes"] if not _frame_node(n)]
     rows = []
     for token in tokens:

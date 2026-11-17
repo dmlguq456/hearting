@@ -72,6 +72,7 @@ REQUIRED_KEYS = ("unit", "family", "role", "worker_type", "floor", "read_only", 
 FORBIDDEN_KEYS = ("write_scope",)
 WORKER_TYPES = {"owner", "stage", "review", "support", "frame"}
 FLOORS = {"near-zero", "low", "moderate", "high", "highest"}
+FIELDS = {"plan", "design", "code", "lab", "research", "docs", "admin", "other"}
 BOOLS = {"true", "false"}
 
 TOP_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$")
@@ -169,6 +170,10 @@ def check_unit_file(path: Path, violations: list[str]) -> None:
         value, ln = fields["floor"]
         if value not in FLOORS:
             violations.append(f"{rel(path)}:{ln}: floor '{value}' not in {sorted(FLOORS)}")
+    if "field" in fields:
+        value, ln = fields["field"]
+        if value not in FIELDS:
+            violations.append(f"{rel(path)}:{ln}: field '{value}' not in {sorted(FIELDS)}")
     if "read_only" in fields:
         value, ln = fields["read_only"]
         if value not in BOOLS:
