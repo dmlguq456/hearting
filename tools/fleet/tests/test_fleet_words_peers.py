@@ -322,7 +322,12 @@ class SessionMessages(unittest.TestCase):
         start = next(i for i, line in enumerate(text) if line.startswith("MESSAGES "))
         self.assertEqual(text[start + 1], "  ← [e4] claude · %s   compare the session window" % clock(NOW - 3 * 3600))
         self.assertEqual(text[start + 2], "  → [a3] codex · %s · steer · delivered   please compare" % clock(NOW - 5000))
-        self.assertTrue(text[start + 3].startswith("  PEERS  [09] ⚑ steward · [a3]   PEERS tab ›"))
+        # The older PEERS row still ends the page, as it did: the sessions a link joins to this one, leaving off [09], whom the
+        # top line below already names (11-17: the top line is the supervision; this row keeps the message links and the tab link).
+        self.assertTrue(text[start + 3].startswith("  PEERS  [a3]   PEERS tab ›"), text[start + 3])
+        top = next(i for i, line in enumerate(text) if line.startswith("── [f5]"))
+        self.assertRegex(text[top + 1], r"^  PEERS +\[09\] ⚑ ─ \[f5\]   PEERS tab ›")   # it stands under the title, before MODEL
+        self.assertTrue(text[top + 2].lstrip().startswith("MODEL"))
         self.assertNotIn("+", text[start])                              # all kept messages are drawn
         joined = "\n".join(text)
         self.assertNotIn("route finished", joined)                      # the runtime notice is no message
@@ -401,7 +406,9 @@ class OneRequest(unittest.TestCase):
         self.assertEqual(len(mine), len(panel))
         self.assertEqual([row["status"] for row in mine], [row["status"] for row in panel])
         text = body(rows(vm, NavState(scope="session:f5")))
-        self.assertTrue(any(re.fullmatch(r"1 PEER REQUEST ─+", line) for line in text), text)
+        self.assertTrue(any(re.fullmatch(r"ROUTES ─+", line) for line in text), text)    # the head no longer counts requests
+        self.assertTrue(any(re.fullmatch(r" ─ request ─+", line) for line in text), text)   # they stand under a named rule
+        self.assertFalse(any("PEER REQUEST" in line for line in text), text)
         line = next(line for line in text if "→ [a3] codex" in line)
         self.assertIn("✓ → [a3] codex · %s · final answer %s   review the popup keys"
                       % (clock(NOW - 6000), clock(NOW - 300)), line)

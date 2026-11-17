@@ -1137,6 +1137,7 @@ def _observe_session(observe, harness, sid, pid, start):
 # the steward mark's two beats); the rest arrive already styled.
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
+                    "zone_direct", "zone_dispatch", "zone_request",
                     "hb_claude", "hb_codex", "hb_opencode", "hb_other",
                     # Fleet's stage colors (`render_stages.route_stage_key`): a running stage lit, the others dimmed.
                     *("stg%d_%s" % (i, on) for i in range(5) for on in ("on", "off")))
@@ -1325,6 +1326,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         for name in ("gauge", "gauge5", "gauge_row"):
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
+        if isinstance(row.get("now"), str) and row["now"]:
+            paint["now"] = row["now"]
         return paint
     for row in panel["routes"]:
         row["paint"] = route_paint(row)
@@ -1362,6 +1365,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         found = doers.get(str(other_harness) + "\0" + str(other_sid))
         return found if isinstance(found, dict) else None
     panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of) if request_views else []
+    # The PEERS line: who supervises whom (the steward records the shared producer already read, `session_peers` in the
+    # cache read above; no read of its own), this window's own group first when it is supervised, then the one it leads.
+    panel["peers"] = peer_groups((view.get("session_peers") or {}).get(harness + "\0" + sid), tag, harness)
     for request in panel["requests"]:
         # Painted as a route's doer is: the same harness, model and effort keys.
         request["paint"] = route_paint(request)
@@ -1422,6 +1428,23 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
             "panel": panel, "help": ui_text("fleet.session_block.editor_help")}
+
+
+def peer_groups(entry, own, harness):
+    """``{"me", "groups": [{"steward", "members"}]}`` for the PEERS line: each supervisor with this window (it as one
+    of the supervised), then this window with the sessions it supervises. Each session is its Fleet number and the
+    style key of its harness. None where this window has no supervision relation."""
+    if not isinstance(entry, dict):
+        return None
+
+    def end(pair):
+        harness = pair[1] if pair[1] in ("claude", "codex", "opencode") else "other"
+        return {"tag": str(pair[0]), "key": "hb_" + harness}
+    me = {"tag": str(own).strip("[]"), "key": end([own, harness])["key"]}
+    groups = [{"steward": end(pair), "members": [{**me, "me": True}]} for pair in entry.get("supervisors") or ()]
+    if entry.get("targets"):
+        groups.append({"steward": {**me, "me": True}, "members": [end(pair) for pair in entry["targets"]]})
+    return {"me": me["tag"], "groups": groups} if groups else None
 
 
 def _runs(row, colors, no_color):

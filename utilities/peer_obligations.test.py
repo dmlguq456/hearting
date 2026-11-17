@@ -741,6 +741,68 @@ class ObligationStoreTest(unittest.TestCase):
         return {path.name for path in (self.store.root / "active").iterdir()
                 if not path.name.startswith(".")}
 
+    @staticmethod
+    def _gone_pid():
+        pid = 4_190_000
+        while os.path.exists(f"/proc/{pid}"):
+            pid += 1
+        return pid
+
+    def test_rebuild_finishes_past_an_empty_marker_of_a_gone_writer(self):
+        active = self._fresh_rebuild_store()
+        marker = active / (".pending-%d-281641292-%012x" % (self._gone_pid(), 0xabc))
+        marker.write_bytes(b"")
+        reader = obligations.ObligationStore(self.root)
+        reader.reset_discovery_metrics()
+        rows = reader.list()
+        self.assertEqual(reader.discovery_metrics()["active_full_scans"], 1)
+        self.assertFalse(marker.exists())
+        self.assertFalse((active / ".rebuild").exists())
+        self.assertEqual({row["id"] for row in rows}, self._direct_active_ids())
+        self.assertEqual(self._index_ids(), self._direct_active_ids())
+        reader.reset_discovery_metrics()
+        reader.list()
+        self.assertEqual(reader.discovery_metrics()["active_full_scans"], 0)
+
+    def test_empty_marker_of_a_live_writer_stays_live(self):
+        active = self._fresh_rebuild_store()
+        start = obligations._proc_start_for_store(os.getpid())
+        live = active / (".pending-%d-%s-%012x" % (os.getpid(), start, 1))
+        unknown = active / (".pending-%d-unknown-%012x" % (os.getpid(), 2))
+        live.write_bytes(b"")
+        unknown.write_bytes(b"")
+        reader = obligations.ObligationStore(self.root)
+        reader.reset_discovery_metrics()
+        reader.list()
+        self.assertTrue(live.exists())
+        self.assertTrue(unknown.exists())
+        self.assertTrue((active / ".rebuild").exists())
+        self.assertEqual(reader.discovery_metrics()["active_full_scans"], 0)
+
+    def test_pending_name_writer_gone_judges_only_the_known_shape(self):
+        gone = obligations._pending_name_writer_gone
+        self.assertFalse(gone(".pending-abc"))
+        self.assertFalse(gone(".pending-1-2-3-4"))
+        self.assertFalse(gone(".pending-%d-unknown-ab" % os.getpid()))
+        start = obligations._proc_start_for_store(os.getpid())
+        self.assertFalse(gone(".pending-%d-%s-ab" % (os.getpid(), start)))
+        self.assertTrue(gone(".pending-%d-1-ab" % self._gone_pid()))
+        # Same assumption as the content check: an unreadable /proc entry
+        # (start time None) counts as an ended writer.
+        with mock.patch.object(obligations, "_proc_start_for_store", return_value=None):
+            self.assertTrue(gone(".pending-%d-%s-ab" % (os.getpid(), start)))
+
+    def test_failed_pending_write_leaves_no_marker(self):
+        duty = self.store.create("pw-fail", "message", {}, {"ref": "%032x" % 7})
+        active = self.store.root / "active"
+        with mock.patch.object(obligations.ObligationStore, "_write_active_marker",
+                               side_effect=OSError(errno.ENOSPC, "no space")):
+            with self.assertRaises(OSError):
+                self.store.update(duty["id"], observation={"tick": 1})
+        self.assertEqual([n.name for n in active.iterdir()
+                          if n.name.startswith(".pending-")], [])
+        self.assertTrue((active / ".rebuild").exists())
+
     def test_rebuild_finishes_while_lock_files_appear(self):
         active = self._fresh_rebuild_store()
         reader = obligations.ObligationStore(self.root)
