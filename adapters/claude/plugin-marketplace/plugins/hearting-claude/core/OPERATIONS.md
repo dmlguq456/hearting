@@ -3621,7 +3621,10 @@ writes one receipt; working, unreadable, and unknown states write none. `join`/`
 report the stored duty and observation; a fulfilled duty allows a new watch. A pane is only a
 location hint, not identity. Shared readiness remains target-bound and cannot settle a watch
 by itself. Unknown observations remain pending and reconnect through the same watch id.
-A target with no session id cannot arm a new watch (`target-session-unresolved`). A
+A target with no session id cannot arm a new watch (`target-session-unresolved`). The
+location is the window value the target's own native process carries (`HERDR_PANE_ID` or
+`TMUX_PANE`), however its window was opened; a target with none cannot arm a watch
+(`watch-target-window-unknown`). A
 protocol-2 arm without native PID birth remains unknown; the observer does not adopt the
 first session later reported in that pane. `prompt` and `retire` keep their existing
 native-turn and screen guards for a pane that has no session yet. A message cancelled

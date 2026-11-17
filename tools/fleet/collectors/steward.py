@@ -89,9 +89,22 @@ def _relations_generation():
             tidy._read_ledger_lines, Path.read_text, Path.open)
 
 
+def _trusts_unchanged_ledgers():
+    """Whether this reader opted into reusing unchanged ledger generations (else False)."""
+    try:
+        import sys
+        utilities = _utilities_dir()
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import dispatch_seat_handover
+        return bool(dispatch_seat_handover.trusting_unchanged_ledgers())
+    except Exception:
+        return False
+
+
 def read_relations():
     from . import dispatch
-    if dispatch._COLLECTION_INPUTS.get() is None:
+    if dispatch._COLLECTION_INPUTS.get() is None and not _trusts_unchanged_ledgers():
         return _read_relations_uncached()
     global _RELATIONS_OBSERVATION
     try:

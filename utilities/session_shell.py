@@ -1024,6 +1024,9 @@ def _request_views(harness, sid, now, errors=None):
     return views, watched
 
 
+_SEALED_TRANSFERS: dict = {}
+
+
 def _without_request_transfers(received, sent):
     """The recent messages without the transfers of a request (the request itself, a follow-up,
     a report, a cancel notice, a late answer): the route box's request line and its opened
@@ -1034,15 +1037,24 @@ def _without_request_transfers(received, sent):
     peer = _peer_message()
 
     def sealed(ref):
+        # A transfer record never changes once written, so a read one is remembered.
+        if ref in _SEALED_TRANSFERS:
+            return _SEALED_TRANSFERS[ref]
         try:
             record = peer._read_transfer_record(ref)
-            return bool(record) and peer_request.valid_seal(record.get("request"))
+            found = bool(record) and peer_request.valid_seal(record.get("request"))
         except Exception:  # noqa: BLE001 - an unreadable record stays an ordinary message
             return False
+        if record:
+            _SEALED_TRANSFERS[ref] = found
+            if len(_SEALED_TRANSFERS) > 256:
+                _SEALED_TRANSFERS.pop(next(iter(_SEALED_TRANSFERS)))
+        return found
 
+    # Only a peer message is looked up: a runtime notice never reaches the message list.
     kept_received = [row for row in received or ()
-                     if not (isinstance(row, dict) and isinstance(row.get("ref"), str)
-                             and sealed(row["ref"]))]
+                     if not (isinstance(row, dict) and row.get("source") == "peer"
+                             and isinstance(row.get("ref"), str) and sealed(row["ref"]))]
     kept_sent = [row for row in sent or ()
                  if not peer_request.delivery_ref_refs({"refs": row.get("refs")})]
     return kept_received, kept_sent
@@ -1980,6 +1992,13 @@ def _backend_operation(request: dict) -> dict:
 
 
 def _backend() -> int:
+    try:
+        # The panel backend re-reads the same ledgers at every projection; reuse
+        # unchanged ones, as the obligation runner does.
+        import dispatch_seat_handover
+        dispatch_seat_handover.trust_unchanged_ledgers()
+    except Exception:
+        pass
     for line in sys.stdin:
         request = {}
         try:

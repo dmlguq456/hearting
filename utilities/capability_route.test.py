@@ -8106,11 +8106,15 @@ class ComposeRouteTest(TestRoute):
      else:
       launch.assert_not_called();self.assertEqual(payload["parallel_groups"],[])
  def test_compose_decisions_replay_input_sources_without_changing_profiles_or_receipt_keys(self):
-  default=self.compose(capability=None,capability_mode=None)
+  # A decided shape names its kind or field; naming neither no longer becomes code silently.
+  with self.assertRaisesRegex(ValueError,r"^compose-capability-required:staged .*--capability.*--field"):
+   self.compose(capability=None,capability_mode=None)
+  default=self.compose(capability=None,capability_mode=None,field="code")
   self.assertEqual((default["capability"],default["capability_mode"]),("autopilot-code","dev"))
+  self.assertEqual((default["field"],default["field_source"]),("code","explicit"))
   lines="\n".join(R.compose_decision_lines(default))
   self.assertIn("intensity=standard (source=shape-default, 지정 안 됨)",lines)
-  self.assertIn("고정 기본값, 과제 문장 분류 없음",lines)
+  self.assertIn("capability=autopilot-code (source=field-default)",lines)
   self.assertEqual(lines.count("--intensity strong 검토"),1)
   R.verify_route(default,R.ROOT)
   strong=self.compose(intensity="strong")
@@ -8569,7 +8573,7 @@ class ComposeRouteTest(TestRoute):
    seen=[]
    def capture(**kwargs):
     seen.append(kwargs); return route
-   base=[str(P),"compose","--shape","direct","--cwd",str(R.ROOT),"--artifact-root",tmp,"--prompt-file",str(prompt),"--explain"]
+   base=[str(P),"compose","--shape","direct","--field","code","--cwd",str(R.ROOT),"--artifact-root",tmp,"--prompt-file",str(prompt),"--explain"]
    for extra,session,folder,note in ((["--campaign-key","2026-09-14_tts-v6-release"],None,[],"campaign_key_resolved=tts-v6-release"),
                                      ([],"tts-v6-release",[],"campaign_key_default=tts-v6-release"),
                                      ([],None,["tts-v6-release"],"campaign_key_default=tts-v6-release source=this-folder-only-active-stream")):
@@ -8579,7 +8583,8 @@ class ComposeRouteTest(TestRoute):
          patch_split(R,"cwd_campaign_keys",return_value=folder), \
          contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
      self.assertEqual(R.main(),0)
-    self.assertRegex(seen[-1]["slug"],r"^autopilot-code-fix-streaming-window-[0-9a-f]{10}$")
+    self.assertRegex(seen[-1]["slug"],r"^code-fix-streaming-window-[0-9a-f]{10}$")
+    self.assertEqual(seen[-1]["field"],"code")
     self.assertEqual(seen[-1]["campaign_key"],"tts-v6-release")
     self.assertIn(note,err.getvalue())
  def test_graph_spec_parsing(self):
@@ -10350,7 +10355,7 @@ class RouteChainWriterTest(ComposeRouteTest):
      return subprocess.run([sys.executable,str(P),*args],env=environment,cwd=project,
                            capture_output=True,text=True,timeout=90)
     def compose(slug,*extra,environment=env):
-     return cli("compose","--shape","direct","--slug",slug,"--cwd",str(project),
+     return cli("compose","--shape","direct","--field","code","--slug",slug,"--cwd",str(project),
                 "--artifact-root",str(artifacts),"--jobs",str(jobs),
                 "--prompt-file",str(task),*extra,environment=environment)
     first=compose("first-fix","--start")

@@ -66,8 +66,8 @@ from the first draft; keep plans, reviews, versions and target references in
 
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
 `AGENT_HOME`, else the installed release. Flags are hints unless the person
-or a frame already chose the shape; honor it, using `--shape staged --graph
-<stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
+or a frame already chose the shape; honor it, using `--shape staged --capability
+<kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
 destructive or external-facing work. Dispatch depth 3 is forbidden.

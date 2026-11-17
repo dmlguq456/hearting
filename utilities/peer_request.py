@@ -318,7 +318,7 @@ def _index():
 
 # --- identity following (N3) ------------------------------------------------
 
-def follow(endpoint):
+def follow(endpoint, *, read_context=None):
     """The session now answerable for ``endpoint``: a confirmed successor or itself.
 
     Only the lineage Hearting already confirms moves a request. A read that fails
@@ -328,7 +328,8 @@ def follow(endpoint):
     harness, sid = endpoint["harness"], endpoint["session_id"]
     try:
         import dispatch_seat_handover as handover
-        new_sid, new_harness = handover.session_successor(sid, harness=harness)
+        new_sid, new_harness = handover.session_successor(
+            sid, harness=harness, read_context=read_context)
     except Exception:  # noqa: BLE001 - an unconfirmed observation never moves the request
         return {"harness": harness, "session_id": sid}
     if new_sid and new_harness in _HARNESSES and _SAFE.fullmatch(new_sid):
@@ -352,7 +353,11 @@ def _predecessors(harness, sid):
     """Sessions whose confirmed successor is ``sid`` (reverse lineage, verified forward)."""
     try:
         import dispatch_seat_handover as handover
-        graph = handover.lineage_graph()
+        from peer_read_context import PeerReadContext
+        # The runner-published compact rows stand in for unchanged ledgers; a
+        # missing or unusable file falls back to the full read.
+        context = PeerReadContext(compact_lineage=True)
+        graph = handover.lineage_graph(read_context=context)
         reverse = {}
         for edge_harness, origin, target in graph.edges:
             if edge_harness == harness:
@@ -364,7 +369,8 @@ def _predecessors(harness, sid):
             if origin in seen or not _SAFE.fullmatch(origin or ""):
                 continue
             seen.add(origin)
-            if follow({"harness": harness, "session_id": origin}).get("session_id") == sid:
+            if follow({"harness": harness, "session_id": origin},
+                      read_context=context).get("session_id") == sid:
                 found.append(origin)
             pending.extend(reverse.get(origin, ()))
         return found

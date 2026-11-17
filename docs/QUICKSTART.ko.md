@@ -4,7 +4,7 @@
 다르면 영어판이 맞습니다. 명령, 경로, 설정 키는 번역하지 않았습니다.
 
 작은 수정 하나를 설치부터 완료까지 따라가 보고, 이어서 한 세션의 일을 다른
-세션에 넘겨 봅니다. 하팅이 무엇인지는 [README.ko.md](README.ko.md)에 있고, 이
+세션에 넘겨 봅니다. 하팅이 무엇인지는 [README.ko.md](../README.ko.md)에 있고, 이
 문서는 동작을 확인하는 가장 짧은 길입니다.
 
 | 시각 | 단계 |
@@ -62,7 +62,7 @@ bypass 모드로 돌고, 같은 안내가 allowlist로 바꾸는 파일을 알�
 무엇을 실행했고 무엇은 못 했는지 알려 줍니다. 시험 통과와 시험을 돌리지 못한
 경우는 서로 다른 결과로 보고됩니다.
 
-바로 해 볼 프로젝트가 없다면 [데모 파일](tools/release/fixtures/first-journey/)에서
+바로 해 볼 프로젝트가 없다면 [데모 파일](../tools/release/fixtures/first-journey/)에서
 `greet.py`와 `focused_test.py.txt`를 빈 폴더에 복사하고, `focused_test.py.txt`의
 이름을 `test_greet.py`로 바꾼 뒤 새 Git 저장소에 commit하세요. `greet.py`가
 `Helo` 대신 `Hello`를 돌려줄 때까지 시험이 실패합니다. 기대하는 변경은 한 줄입니다.
@@ -102,7 +102,7 @@ Fleet가 열리고 두 세션이 번호(`[4f]`, `[b2]`)와 함께 보입니다. 
 맡은 세션에는 `◂`입니다. 둘째 세션은 요청 본문을 스스로 열고 일한 뒤 보고합니다. 일부 보고는
 요청을 열어 두고, 최종 보고는 요청을 닫으며 첫 세션을 깨웁니다. herdr도 tmux도
 필요 없습니다. 패널이 없는 터미널에서는 쉬고 있는 Claude Code나 OpenCode 세션에
-바로가 아니라 그 세션의 다음 턴에 닿습니다([자세히](docs/session-panel.md#requests-and-messages), 영어).
+바로가 아니라 그 세션의 다음 턴에 닿습니다([자세히](session-panel.md#requests-and-messages), 영어).
 
 ## 결과 읽기
 
@@ -116,7 +116,7 @@ Fleet가 열리고 두 세션이 번호(`[4f]`, `[b2]`)와 함께 보입니다. 
 ## 기대할 수 있는 것
 
 약속이 아니라 과업마다 한 번 잰 결과입니다. 아래 수치는
-[`tools/release/first-journey.py`](tools/release/first-journey.md)로 잰 것입니다.
+[`tools/release/first-journey.py`](../tools/release/first-journey.md)로 잰 것입니다.
 게시된 v3.82.17을 2026-11-06에 격리된 Linux 환경에 설치하고, 하네스마다 세션 하나를
 돌렸으며, 확인 카드에는 답하지 않았습니다. 이 판은 패널과 요청보다 앞서므로 이
 실측에는 그 둘이 없습니다. 시간은 모델이 일한 시간뿐입니다. 로그인과

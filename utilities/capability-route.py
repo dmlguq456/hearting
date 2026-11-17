@@ -931,7 +931,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
                   registered_headless_evidence=None, slug=None,
                          route_origin="preset", shape=None, profile_demands=None,
                          explicit_profiles=None, campaign_key=None, parent_cycle_id=None, profile=None,
-                         route_plan=None, frameless=False, frame_legs=2):
+                         route_plan=None, frameless=False, frame_legs=2, field=None, field_source=None):
     registry=TOPO.load_registry(); TOPO.validate_registry(registry)
     recipe=TOPO.resolve_recipe(registry, capability, capability_mode)
     return _compile_from_recipe(
@@ -944,7 +944,32 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
         campaign_key=campaign_key, parent_cycle_id=parent_cycle_id,
         route_origin=route_origin, shape=shape, profile_demands=profile_demands,
         explicit_profiles=explicit_profiles, profile=profile,
-        route_plan=route_plan, frameless=frameless, frame_legs=frame_legs)
+        route_plan=route_plan, frameless=frameless, frame_legs=frame_legs,
+        field=field, field_source=field_source)
+
+
+def _compose_default_mode(candidates):
+    """The mode compose picks when none is named: `dev` where the kind has it, else its first mode."""
+    base = next((r for r in candidates if "dev" in r["modes"]), candidates[0])
+    return "dev" if "dev" in base["modes"] else sorted(base["modes"])[0]
+
+
+def _compose_slug_field(a, shape, route_plan_binding=None):
+    """The field a default slug starts with: the named one, a proposal leg's, or the kind's default."""
+    registry = TOPO.load_registry()
+    fields = TOPO.field_vocabulary(registry)
+    if a.field in fields:
+        return a.field
+    leg = (route_plan_binding or {}).get("leg") or {}
+    if leg.get("field") in fields:
+        return leg["field"]
+    candidates = [r for r in registry["recipes"] if r["capability"] == a.capability
+                  and r["capability"] != ROUTE_FRAME_CAPABILITY]
+    if not candidates:
+        return None
+    mode = a.capability_mode or _compose_default_mode(candidates)
+    recipe = next((r for r in candidates if mode in r["modes"]), None)
+    return TOPO.recipe_field(recipe, mode) if recipe is not None else None
 
 
 def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artifact_root,
@@ -954,15 +979,22 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None,
                   campaign_key=None, parent_cycle_id=None, profile=None, work_request=None, unassigned=False,
                   selection_pins=None, route_plan=None, frameless=False, execution_scope=None,
-                  extra_stages=None, selection_only=False, capability_source=None):
+                  extra_stages=None, selection_only=False, capability_source=None, field=None):
     """Resolve every default, then compile through the ordinary sealer.
 
     `route_plan` (a binding read by `route_plan.read_route_plan`) seals `{decision, digest, index}`
     and compiles without frame nodes; `frameless` alone is the same compile without the seal, the form
     a proposal leg is validated in. A `solo` or `staged` shape is chosen for work that is already
     decided, so it compiles without the recipe's frame pair too; `framed` is where a frame runs.
+
+    Every decided shape names its kind, its field, or both (routing/prd.md R8): a field alone
+    opens that field's default recipe; neither is refused, naming what is missing.
     """
     import route_plan as RP
+    registry = TOPO.load_registry()
+    fields = TOPO.field_vocabulary(registry)
+    if field is not None and field not in fields:
+        raise ValueError(f"compose-field-unknown:{field} (fields: {','.join(fields)})")
     if route_plan is not None and shape == "framed":
         leg = route_plan["leg"]
         shape = leg["shape"]
@@ -971,8 +1003,22 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         graph = graph or (",".join(leg["graph"]) if leg.get("graph") else None)
         intensity = intensity or leg.get("intensity")
     given_intensity, given_capability = intensity, capability
+    field_source = "explicit" if field is not None else None
+    if route_plan is not None and field is None:
+        # A frame proposal's leg may name its field; otherwise the proposed kind's default one.
+        leg_field = route_plan["leg"].get("field")
+        field, field_source = (leg_field if leg_field in fields else None), "frame"
     if capability is None and shape != "framed":
-        capability = COMPOSE_DEFAULT_CAPABILITY
+        if field is None:
+            raise ValueError(f"compose-capability-required:{shape} (name --capability <capability> "
+                             f"or --field <field>; fields: {','.join(fields)})")
+        default = TOPO.field_default_recipe(registry, field)
+        if default is None:
+            raise ValueError(f"compose-capability-required:--field {field} (field {field} has no default "
+                             f"recipe; also name --capability, e.g. --capability autopilot-draft --field {field})")
+        capability, default_mode = default
+        capability_mode = capability_mode or default_mode
+        capability_source = capability_source or "field-default"
     sealed_plan = RP.sealed_form(route_plan) if route_plan is not None else None
     frameless = frameless or route_plan is not None or shape in DECIDED_SHAPES
     if execution_scope is None and route_plan is not None:
@@ -989,8 +1035,9 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         # route's capability, never refused as an argument conflict, never applied to a model.
         routing_hints = {key: value for key, value in (
             ("capability", capability), ("capability_mode", capability_mode),
-            ("graph", graph), ("profile", profile)) if value}
+            ("field", field), ("graph", graph), ("profile", profile)) if value}
         capability, capability_mode, graph, profile = ROUTE_FRAME_CAPABILITY, "default", None, None
+        field, field_source = None, None  # the frame proposes the field of the work it routes
         if intensity is not None and intensity not in ORDER:
             raise ValueError("invalid intensity")
         # The framed route stays standard; its declared frame width is sealed separately.
@@ -1002,7 +1049,6 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         capability, capability_mode or "setup", graph.split(",") if graph else None))
     if shape != "staged" and graph and not resume_graph:
         raise ValueError(f"compose-graph-only-staged:{shape}")
-    registry = TOPO.load_registry()
     # A capability may own several recipes (autopilot-lab: setup, eval); the
     # requested mode picks the recipe that declares it. The internal framed
     # capability exists only for the framed shape.
@@ -1010,9 +1056,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   and (capability != ROUTE_FRAME_CAPABILITY or shape == "framed")]
     if not candidates:
         raise ValueError(f"compose-capability-unknown:{capability}")
-    if capability_mode is None:
-        base = next((r for r in candidates if "dev" in r["modes"]), candidates[0])
-        capability_mode = "dev" if "dev" in base["modes"] else sorted(base["modes"])[0]
+    capability_mode = capability_mode or _compose_default_mode(candidates)
     base = next((r for r in candidates if capability_mode in r["modes"]), None)
     if base is None:
         modes = sorted({mode for r in candidates for mode in r["modes"]})
@@ -1176,7 +1220,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         registered_headless_evidence=registered_headless_evidence,
         route_origin="compose", shape=shape,
         profile_demands=profile_demands, explicit_profiles=explicit_profiles, profile=profile,
-        route_plan=sealed_plan, frameless=frameless,
+        route_plan=sealed_plan, frameless=frameless, field=field, field_source=field_source,
         **({"frame_legs": frame_legs} if shape == "framed" else {}),
     )
     if graph_spec is not None:
@@ -1304,6 +1348,32 @@ def _compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wo
     return route
 
 
+def _sealed_field(registry, recipe, capability, capability_mode, field=None, field_source=None):
+    """`{field, field_source}` beside the selection record; empty for route-frame (its frame proposes one).
+
+    A field the caller named is `explicit`; otherwise the recipe's default field, which
+    is `preset` unless the caller says it came from a frame proposal (`frame`)."""
+    if field is None:
+        base = recipe
+        if "field" not in recipe and capability != ROUTE_FRAME_CAPABILITY:
+            # A composed recipe is cut from its registry recipe and carries no field of its own.
+            origin = (recipe.get("compose") or {}).get("base_capability") or capability
+            try:
+                base = TOPO.resolve_recipe(registry, origin, capability_mode)
+            except TOPO.TopologyError:
+                base = recipe
+        field = TOPO.recipe_field(base, capability_mode)
+        if field is None:
+            return {}
+        field_source = field_source or "preset"
+    if field not in TOPO.field_vocabulary(registry):
+        raise ValueError(f"compose-field-unknown:{field} (fields: {','.join(TOPO.field_vocabulary(registry))})")
+    field_source = field_source or "explicit"
+    if field_source not in TOPO.FIELD_SOURCES:
+        raise ValueError(f"invalid field source: {field_source}")
+    return {"field": field, "field_source": field_source}
+
+
 def compile_composed_route(composed_recipe, capability_mode, requested_intensity, cwd, artifact_root,
                            **kwargs):
     """Compile a compose-on-demand recipe through the SAME validate/seal path (composed: true)."""
@@ -1331,7 +1401,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                          registered_headless_evidence=None, slug=None, composed=False,
                   route_origin="preset", shape=None, profile_demands=None,
                   explicit_profiles=None, campaign_key=None, parent_cycle_id=None, profile=None,
-                  route_plan=None, frameless=False, frame_legs=2):
+                  route_plan=None, frameless=False, frame_legs=2, field=None, field_source=None):
     dispatch_terminal_commit.require_current_cleanup("route-compile")
     if route_origin not in ROUTE_ORIGINS: raise ValueError("invalid route origin")
     if (capability==ROUTE_FRAME_CAPABILITY) != (shape=="framed"):
@@ -1611,6 +1681,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     if GPU_SANDBOX.fresh_gpu_resource_nodes(payload):
         payload["codex_execution_sandbox"] = GPU_SANDBOX.select_fresh(payload)
     payload.update(slug_fields)
+    payload.update(_sealed_field(registry, recipe, capability, capability_mode, field, field_source))
     for key, value in (("campaign_key", campaign_key), ("parent_cycle_id", parent_cycle_id)):
         if value is not None:
             _validate_campaign_selection(key, value)
@@ -1699,7 +1770,8 @@ def main():
     cp.add_argument("--graph",default=None,help="optional staged subgraph in your order (see `capability-route.py stages --capability <cap>` for valid ids); incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--execution-scope", choices=("complete", "report"), default=None,
                     help="optional scope already selected in the existing start confirmation; it is not approval evidence")
-    cp.add_argument("--capability",default=None,help=f"default {COMPOSE_DEFAULT_CAPABILITY}; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
+    cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or staged shape names it, --field, or both; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
+    cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
     cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; staged accepts strong+")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
     cp.add_argument("--signal",action="append",default=[],
@@ -1856,7 +1928,10 @@ def main():
                         f"{approval} in={','.join(node['inputs'])}{extra} out={','.join(node['outputs'])}"
                         f" -- {node['summary']}")
             for block in blocks:
-                print(f"capability={block['capability']} modes={','.join(block['modes'])} "
+                field=block.get("field")
+                if isinstance(field,dict):  # one field per mode, e.g. analyze-project
+                    field=",".join(f"{mode}:{field[mode]}" for mode in block["modes"] if mode in field)
+                print(f"capability={block['capability']} field={field or '-'} modes={','.join(block['modes'])} "
                       f"topology={block['topology_class']}")
                 for node in block["nodes"]:
                     print("  "+line(node))
@@ -1887,10 +1962,7 @@ def main():
             a.campaign_key,given=compose_resolve_campaign_key(artifact_root,a.campaign_key)
             if given is not None:
                 print(f"campaign_key_resolved={a.campaign_key} given={given}",file=sys.stderr)
-        if a.slug is None:
-            a.slug=compose_default_slug(compose_task,
-                                        capability=a.capability or (None if shape=="framed" else COMPOSE_DEFAULT_CAPABILITY),
-                                        shape=shape)
+        slug_named = a.slug is not None
         route_plan_binding = None
         if a.route_plan:
             # An explicit approved plan must never become an unrelated default route.
@@ -1948,6 +2020,8 @@ def main():
                 original_mode_hint = a.capability_mode
                 if a.capability is not None:
                     capability_source = "explicit"
+                elif a.field is not None:
+                    pass  # a named field opens its own default recipe in compose; nothing to classify
                 else:
                     classified = _classify_non_git_task(compose_task)
                     if classified is None:
@@ -1967,10 +2041,13 @@ def main():
                 a.intensity = a.intensity or "direct"
                 a._non_git_mode_hint = (original_mode_hint if capability_unresolved else None)
                 non_git_decision["capability_unresolved"] = capability_unresolved
+        if not slug_named:
+            a.slug=compose_default_slug(compose_task,field=_compose_slug_field(a, shape, route_plan_binding),
+                                        shape=shape)
         pins,pin_warnings=_filter_top_pins(pins)
         owner_pin=(pins.get("owner") or {}).get("harness")
         compose_args=dict(
-            capability=a.capability,
+            capability=a.capability,field=a.field,
             capability_mode=a.capability_mode,shape=shape,graph=a.graph,
             slug=a.slug,cwd=cwd,artifact_root=artifact_root,intensity=a.intensity,signals=a.signal,
             campaign_key=a.campaign_key,parent_cycle_id=a.parent_cycle,unassigned=a.unassigned,

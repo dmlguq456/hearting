@@ -50,6 +50,10 @@ SHAPE_INTENSITY = ROUTE_PLAN.SHAPE_INTENSITY
 ROUTE_FRAME_CAPABILITY = TOPO.ROUTE_FRAME_CAPABILITY
 INTENSITY_SHAPE = {"direct": "direct", "quick": "solo"}
 ROUTE_ORIGINS = ("preset", "compose")
+# No longer the default of a decided shape: compose opens a named field's default recipe
+# (`field_default_recipes`) and refuses a direct/solo/staged shape naming neither kind nor
+# field. It remains only the existing non-Git explicit-direct fallback when the task
+# classification finds no single kind (`capability-route.py` compose, `non-git-unresolved`).
 COMPOSE_DEFAULT_CAPABILITY = "autopilot-code"
 # Fallback when the user's policy names no enabled harnesses (no file, unreadable):
 # the shipped default enables all three.

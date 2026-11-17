@@ -533,7 +533,10 @@ popup; a request row the MESSAGES popup).
   popup reads both whole, the requests first (a request's numbers, reports and
   sealed body; a markdown table in the body drawn as aligned columns by Fleet's one table rule,
   `transcript.table_parts`, its other lines wrapped as before). A received message comes as one line
-  (the backend joins its text), so it has no table.
+  (the backend joins its text), so it has no table. A received peer message is listed whatever carried it in (its own
+  prompt, a hook comment added to another prompt, a tool boundary, a native queue): the receive path keeps its one
+  display line in `peer-received/<key>.json` beside the prompt frontier (11-17), and runtime notices keep their own
+  eight places, so a run of completion notices never pushes it out.
 - MEM: the newest saved memory records of this repository and the global ones
   together (11-15), newest first, five at most (`MEM_MAX`; 11-16, the person: "메모리도
   메시지랑 같은 맥락이야"), from the journal Fleet reads (the newest `add`/`supersede`

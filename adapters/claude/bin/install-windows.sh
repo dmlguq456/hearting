@@ -44,7 +44,7 @@ log "CLAUDE_DIR=$CLAUDE_DIR"
 log "HOME_DIR=$HOME_DIR"
 
 # --- 1. Project the harness-owned top-level entry files from adapters/claude/ ---
-# On Linux the INSTALL_LAYOUT step symlinks these into the runtime home; Windows
+# On Linux the docs/INSTALL_LAYOUT.md step symlinks these into the runtime home; Windows
 # cannot follow git symlinks (see header), so we copy the real content from the
 # single source of truth (adapters/claude/<name>) when the runtime file is
 # missing or is an unresolved symlink-pointer-text file. Idempotent.

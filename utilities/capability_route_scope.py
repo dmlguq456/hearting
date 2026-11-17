@@ -320,9 +320,10 @@ def compose_resolve_campaign_key(artifact_root, key):
 COMPOSE_SLUG_WORDS = 6
 
 
-def compose_default_slug(task_text, *, capability=None, shape=None):
+def compose_default_slug(task_text, *, field=None, capability=None, shape=None):
     """The slug a compose names from its own task, so `--slug` is optional.
 
+    The stem starts with the route's field (compose passes it), else the given kind or shape.
     The readable stem comes from request wording. A digest of the complete
     nonempty request remains at the end, even when the display stem is clipped,
     so similar and non-Latin requests retain separate deterministic names."""
@@ -343,8 +344,8 @@ def compose_default_slug(task_text, *, capability=None, shape=None):
         if len(words) >= COMPOSE_SLUG_WORDS:
             break
     base = ARTIFACT_LOCATOR.slugify("-".join(words[:COMPOSE_SLUG_WORDS]))[0] if words else ""
-    if capability or shape:
-        prefix = ARTIFACT_LOCATOR.slugify(str(capability or shape))[0]
+    if field or capability or shape:
+        prefix = ARTIFACT_LOCATOR.slugify(str(field or capability or shape))[0]
         stem = "-".join(part for part in (prefix, base) if part)
     else:
         stem = base or "work"
@@ -504,6 +505,8 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         lines.append("  " + t("route.capability.non_git_unresolved", capability=route['capability']))
     elif capability.get("source") == "non-git-task-classification":
         lines.append(f"  capability={route['capability']} (source=non-git-task-classification)")
+    elif capability.get("source") == "field-default":
+        lines.append(f"  capability={route['capability']} (source=field-default)")
     elif capability.get("source") == "frame-shape":
         lines.append("  " + t("route.capability.frame_pending"))
     elif not capability:
@@ -550,6 +553,12 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     return lines + compose_omission_lines(route)
 
 
+def _compose_field_line(route):
+    """The card's field line, e.g. `  field code (preset)`; an older route reads its recipe's default."""
+    field, source = TOPO.route_field(route)
+    return f"  field {field} ({source})\n" if field else ""
+
+
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
                  campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None,
                  launches=None):
@@ -567,6 +576,7 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
         t("route.card.header", capability=route['capability'], shape=shape,
           intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
         + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
+        + _compose_field_line(route)
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
