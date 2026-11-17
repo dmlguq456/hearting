@@ -5480,6 +5480,8 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_state",
                         return_value=CompletionState("pending")), \
              mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                               return_value=(self.jobs_path,)), \
              mock.patch.object(peer_steward.peer_obligations,
                                "_registered_terminal_state", return_value=None), \
              mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):

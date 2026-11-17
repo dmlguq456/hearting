@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import importlib.util
@@ -114,6 +115,41 @@ CURRENT_ROUTE_STATUSES = frozenset({
 })
 
 
+# One owner pass (``record_walk_scope``): directory components that are only ancestors of a
+# record, and the resolved jobs path, are read once. The record itself and everything under
+# the jobs directory is always looked at afresh.
+_RECORD_WALK: contextvars.ContextVar = contextvars.ContextVar(
+    "owner_route_record_walk", default=None)
+
+
+@contextlib.contextmanager
+def record_walk_scope():
+    """Observe-only pass scope: ancestors of the jobs directory are checked once.
+
+    Nested scopes join the outer one; the memo is dropped on the way out, so a
+    path that changes between passes is seen by the next pass."""
+    if _RECORD_WALK.get() is not None:
+        yield
+        return
+    token = _RECORD_WALK.set({})
+    try:
+        yield
+    finally:
+        _RECORD_WALK.reset(token)
+
+
+def _jobs_parent_resolved(jobs: Path) -> Path:
+    """``Path(jobs).resolve(strict=False).parent`` (memoized per ``record_walk_scope``)."""
+    memo = _RECORD_WALK.get()
+    if memo is None:
+        return jobs.resolve(strict=False).parent
+    key = ("resolve", os.fspath(jobs))
+    resolved = memo.get(key)
+    if resolved is None:
+        resolved = memo[key] = jobs.resolve(strict=False).parent
+    return resolved
+
+
 def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
     """The one absence rule for a binding record beside the jobs registry.
 
@@ -124,6 +160,10 @@ def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
     missing, a non-directory where a directory belongs, a permission or other
     lookup error) is a read error, never absence.  A link whose target exists
     is followed as normal.
+
+    Inside ``record_walk_scope`` a component that is a plain directory on the way
+    to the jobs directory (the directory itself included) is not looked at again;
+    anything below it, and any absence, link or error, is always read afresh.
     """
     jobs_path = Path(jobs).expanduser()
     if not jobs_path.is_absolute():
@@ -131,8 +171,12 @@ def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
     target = jobs_path.parent.joinpath(*parts)
     walked = Path(target.anchor)
     names = target.parts[1:]
+    memo = _RECORD_WALK.get()
+    stable = min(len(jobs_path.parent.parts) - 1, len(names) - 1) if memo is not None else 0
     for index, name in enumerate(names):
         walked = walked / name
+        if index < stable and ("dir", walked) in memo:
+            continue
         try:
             entry = os.lstat(walked)
         except FileNotFoundError:
@@ -144,6 +188,8 @@ def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
                 entry = os.stat(walked)
             except OSError as exc:
                 raise OwnerRouteBindingError(reason) from exc
+        elif index < stable and stat.S_ISDIR(entry.st_mode):
+            memo[("dir", walked)] = True
         if index < len(names) - 1 and not stat.S_ISDIR(entry.st_mode):
             raise OwnerRouteBindingError(reason)
     return True
@@ -153,14 +199,14 @@ def _attachment_root(jobs: str | Path) -> Path:
     path = Path(jobs).expanduser()
     if not path.is_absolute():
         raise OwnerRouteBindingError("owner-route-jobs-path-must-be-absolute")
-    return path.resolve(strict=False).parent / OWNER_ROUTE_ATTACHMENT_DIR
+    return _jobs_parent_resolved(path) / OWNER_ROUTE_ATTACHMENT_DIR
 
 
 def _advance_root(jobs: str | Path) -> Path:
     path = Path(jobs).expanduser()
     if not path.is_absolute():
         raise OwnerRouteBindingError("owner-route-jobs-path-must-be-absolute")
-    return path.resolve(strict=False).parent / OWNER_ROUTE_ADVANCE_DIR
+    return _jobs_parent_resolved(path) / OWNER_ROUTE_ADVANCE_DIR
 
 
 @contextlib.contextmanager
