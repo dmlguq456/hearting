@@ -137,7 +137,7 @@ running, stuck, or waiting for you.
 | Screen | What it tells you |
 |---|---|
 | **OVERVIEW** | Every session, grouped by project, with each project's open requests, questions waiting for you, and latest result. Each session shows runtime, model, context left, what it is doing now, and its age; expand it for your last input and the messages it received. |
-| **ROUTES** | Each request: who does it now and where it stands (`one-shot`, or `staged 3/7 execute ●` for one worker per stage), with the workers running under it. |
+| **ROUTES** | Each request: who does it now and where it stands (`code(quick)` when its owner does it alone, or `code(standard) · staged 3/7: execute` for one worker per stage), with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval, since when, and how to answer. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover, and the newest link of each kind. |

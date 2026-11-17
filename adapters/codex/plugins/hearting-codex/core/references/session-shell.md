@@ -462,35 +462,41 @@ popup; a request row the MESSAGES popup).
   requests both stand, one thin rule of the box's own line (`├────┤`) parts them (11-16, the
   person: "블록 안에서 구분선을 하나 긋고"); short of rows it goes before any content row, and a
   box that scrolls draws none. Beside the
-  native area a folded route reads who / context and time / what / which kind. Who:
-  the glyph, the doer's recorded role as a dim label in one column (`owner`, `frame`
-  for a frame or frame-alternative leg, `worker` for a stage worker; empty when the
-  record names none), then harness, model, effort and a one-step route's open tool
-  (only where it fits), in the colors of Fleet's ROUTES row (`⠏ owner  claude Opus 5.5
-  xhigh`). Context and time, two cells in: the context gauge (the head's gauge and
-  level colors, about eight cells in 40) and percent, and the elapsed time at the right
-  edge, each in its own column; an unknown context leaves its cells empty, and with
-  neither value the row is left out. What: two cells in, its title on at most two rows,
-  the second ending in `…`. Short of cells effort goes first, then the tool, then the
-  harness; the role and the model stay, and a value is shown whole or not at all. When
-  the producer names the owner and the stage workers running now apart
-  (`workers_live`), the first row is always the owner's, the context row starts with a
-  dim `CTX` in the role column with the gauge under the harness and the route's time
-  right after the percent (`CTX    ━━━━──── 52% · 2h 10m`; short of cells the bar
-  shortens, then goes, then the time; the percent stays), and the owner's live workers
-  stand in one rounded box under its rows, two cells further in (its left line under
-  the owner's `CTX` and title, its right line where the route's rows end): each
-  worker's first row (its mark, `worker`, harness, model, effort) in the box's top line
-  (`╭─ ⠸ worker claude Sonnet 5.5 ─╮`, a later worker's in the line between, `├─ … ─┤`),
-  then its `CTX` row (its own time after its percent) and its stage (11-16, the person: "staged stage 펼쳤을떄 stage 이름은 좀
-  눈에 띄게 ... fleet 처럼": the name in the color Fleet gives that stage of its route, the backend's `stage_key` from
-  `render_stages.route_stage_key`, the one table both screens use: stage `i` is `stg{i % 5}`, lit while it runs, dimmed
-  once done or while it waits, the failure red when failed, the warning yellow on attention; the kind row's current
-  stage the same; the folded one-row forms and mono, eight colors and `NO_COLOR` keep the body color), open tool and
-  target. A fourth row says which kind of route it is and where it stands, dim:
-  Fleet's kind word (`code`, `lab`, `frame`), then `one-shot` and what it is on now
-  (`Edit host.cjs 3m`), or `staged 3/7` with the current stage and its mark, or with no
-  stage running the next stage and what it waits for (`code · staged 3/7 · execute ●`).
+  native area a route reads, by who set each row (11-17, the person's route row sketch 5):
+  its first row is a state mark and the kind of work with its intensity (`● code(standard)`: the
+  kind word is the one bold word of the route, in the body color and never dim, also in mono, eight
+  colors and `NO_COLOR`; the intensity stands in dim brackets and nothing else goes in them; a
+  direct route's word stands there when the record names no intensity), the chain of kinds it
+  continues leading it (`frame ✓ → code(standard)`: what is behind dim with `✓`, this one bold;
+  `research ✓ → draft ✓ → code(standard)`), then its title two cells in on at most two rows
+  (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
+  a dim label in one column, then harness, model, effort and, for an owner that works alone, its
+  open tool, `· Edit host.cjs`: `⠸ owner  codex GPT-5.5 high · Bash`), its `CTX` row four cells in
+  under the role word (the gauge under the harness and the route's time right after the percent,
+  `CTX    ━━━━──── 52% · 2h 10m`; short of cells the bar shortens, then goes, then the time; the
+  percent stays), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
+  `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
+  position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
+  what it waits for). A route whose owner is not known keeps its time and `CTX` row under the title;
+  an owner at rest ends its row with the tool it ended on (`· after Bash`). The
+  owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
+  does alone has no stage line. An owner's live workers (`workers_live`) hang under it by `↳`, with
+  no box, four cells in: each worker's first row (its mark, `worker`, harness, model, effort), its
+  `CTX` row eight cells in (its own time after its percent) and its stage (11-16: the name in the
+  color Fleet gives that stage of its route, the backend's `stage_key` from
+  `render_stages.route_stage_key`; stage `i` is `stg{i % 5}`, lit while it runs, dimmed once done
+  or while it waits, the failure red when failed) with the open tool and its target (the path, the
+  file name, the tool). A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
+  `frame-alt`) hung straight under it two cells in, and, once both are done and the direction
+  is asked for, `◑ frame → ?? · waiting for direction` (not blinking); the person's choice
+  continues the same route in the same place (`frame ✓ → code(standard)`), no new route stands
+  beside it. Exactly one thing blinks per route, on Fleet's beat: the current stage's name while a
+  stage line stands (so no `●` follows it), else the first row's mark. The role column is the
+  route's own width. Short of cells the values go from the back, whole: the chain behind, then the
+  intensity (`● code`), the stage line's word `staged` (`3/7: execute`), effort, the tool, the
+  harness; the role and the model stay. Short of rows the `CTX` rows fold into the owner's and the
+  workers' first rows, the stage line goes (the workers' count, `· worker 2`, ends it), then the
+  workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
   closed), the other session's Fleet number, then that session's harness, model and effort in
@@ -512,9 +518,10 @@ popup; a request row the MESSAGES popup).
   has been seen (at most 7 days), and then only `show` lists it; a request whose message is
   not confirmed yet stays with `not confirmed`. The
   bottom layout keeps one row per route: title, harness·model·effort, context, then the
-  kind (`code · staged 3/7 execute ●`, a failed one `staged 2/3 execute ✕`), then the
-  open tool, and the elapsed time at the right edge (short of cells the kind word goes,
-  then the tool, then the word `staged`). The box's line is the route line's color (the
+  kind (`code(standard) · staged 3/7: execute`, a failed one `code(standard) · staged 2/3:
+  execute ✕`, `research(standard) · map-reduce 2/3: analyze`, a route with no stage list `lab(quick)`), then the open tool, and the elapsed
+  time at the right edge (short of cells the kind word goes, then the tool, then the word
+  `staged`). The box's line is the route line's color (the
   failure color while a current route has failed), its count pulses while a route
   runs, and no empty row parts two routes; with no rows yet the producer's own label
   stands over a `Checking` row, and a known empty list draws no box. The `route line`

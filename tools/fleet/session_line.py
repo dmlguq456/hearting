@@ -813,10 +813,11 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
     earlier form. A finished stage's worker is not live, so not listed.
     """
     lead_works = bool(doer) and (doer.get("worker") is True or doer.get("role") in ("frame", "worker"))
-    if lead_works and owner is None:
+    # A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
+    if lead_works and owner is None and doer.get("role") != "frame":
         return {}
     tree = {"workers_live": []}
-    if lead_works:
+    if lead_works and owner is not None:
         values = route_doer({"state": state}, [owner], get, live)
         if values:
             tree["owner_doer"] = _doer_values(values)
