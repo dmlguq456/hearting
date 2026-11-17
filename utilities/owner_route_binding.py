@@ -30,6 +30,7 @@ if _spec is None or _spec.loader is None:
 ROUTE = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ROUTE)
 from hearting_gates import note_same_work_drift
+from route_plan import is_depth0_leg
 
 
 class OwnerRouteBindingError(ValueError):
@@ -1212,7 +1213,9 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
     except (OSError, TypeError, ValueError) as exc:
         raise OwnerRouteBindingError("owner-route-verification-failed") from exc
     if frame:
-        if route_node not in {"frame", "frame-alternative"}:
+        # A frame launch binds a depth-0 leg: the node must be sealed as one.
+        leg = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
+        if not is_depth0_leg(leg):
             raise OwnerRouteBindingError("frame-node-tuple-invalid")
         if (route.get("capability"), route.get("capability_mode"),
                 route.get("effective_intensity")) != (capability, capability_mode, intensity):
