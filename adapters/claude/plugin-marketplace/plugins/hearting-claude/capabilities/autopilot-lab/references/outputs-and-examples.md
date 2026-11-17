@@ -33,6 +33,8 @@ New checkpoints live at `$AGENT_RAW_DATA_DIR/experiments/<slug>/runs/<run>/ckpt/
 the artifact-side `run.json` keeps compatible `ckpt_path` plus optional
 `ckpt_sha256` and `ckpt_byte_size` after the file exists.
 
+`run.json` may also carry an optional `seeds` field: the list of seeds the run used (for example `"seeds": [0, 1, 2]`). Omit it when the seeds are unknown; no reader requires it, and the report's "Seeds and variation" line does not depend on it.
+
 When project convention keeps variants beside each model, as with TF_Enhancer, use:
 
 ```text
