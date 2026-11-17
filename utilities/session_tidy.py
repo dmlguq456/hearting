@@ -3101,17 +3101,22 @@ def prompt_first_line(text: str) -> str:
     return line if len(line) <= PROMPT_LINE_CHARS else line[:PROMPT_LINE_CHARS - 1] + "…"
 
 
-def _received_prompt_line(prompt_text: str, origin: dict) -> str:
-    """Resolve a verified large-message preview once at arrival, never in Fleet."""
+def _received_prompt_line(prompt_text: str, origin: dict, read_payload=None) -> str:
+    """Resolve a verified large-message preview once at arrival, never in Fleet.
+
+    ``read_payload`` is ``peer-message``'s own ``read_peer_payload`` when the caller already
+    runs inside it, so that module is not loaded a second time."""
     ref = origin.get("transfer_ref")
     if isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{32}", ref):
         try:
-            import importlib.util
-            path = Path(__file__).resolve().with_name("peer-message.py")
-            spec = importlib.util.spec_from_file_location("_prompt_display_payload", path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            payload = module.read_peer_payload(ref)
+            if read_payload is None:
+                import importlib.util
+                path = Path(__file__).resolve().with_name("peer-message.py")
+                spec = importlib.util.spec_from_file_location("_prompt_display_payload", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                read_payload = module.read_peer_payload
+            payload = read_payload(ref)
             if (isinstance(payload, dict) and isinstance(payload.get("body"), str)
                     and (payload.get("descriptor") or {}).get("presentation_mode") != "request-body"):
                 # A request's sealed body is not a preview: the display keeps the
@@ -3163,6 +3168,92 @@ def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, t
     titles.append_timeline(sid, row, harness=harness)
 
 
+def _latest_by_class(rows, order) -> list:
+    """The newest ``RECEIVED_INPUTS_LIMIT`` peer rows and the newest as many other rows, by ``order``."""
+    kept = []
+    for peer in (True, False):
+        kept += sorted((item for item in rows if (item.get("source") == "peer") is peer),
+                       key=order)[-RECEIVED_INPUTS_LIMIT:]
+    return sorted(kept, key=order)
+
+
+def _row_sequence(item) -> int:
+    return item["sequence"] if type(item.get("sequence")) is int else 0
+
+
+def _received_peers_path(seat: Seat) -> Path:
+    """The peer messages a session received, in a small file of their own beside its prompt
+    frontier (same key). A message may reach the session as no prompt of its own (a hook
+    comment added to a person's prompt, or to a tool result), and the prompt hook's frontier
+    is written by other hooks at the same time, so the receive path keeps its lines here."""
+    return state_root() / "peer-received" / _prompt_seq_path(seat).name
+
+
+def _received_peer_valid(row, harness: str, sid: str) -> bool:
+    return (isinstance(row, dict) and row.get("source") == "peer"
+            and row.get("harness") == harness and row.get("sid") == sid
+            and isinstance(row.get("ref"), str) and bool(row["ref"])
+            and isinstance(row.get("at"), (int, float)) and not isinstance(row["at"], bool)
+            and math.isfinite(row["at"]) and row["at"] >= 0
+            and isinstance(row.get("text"), str) and bool(row["text"])
+            and len(row["text"]) <= PROMPT_LINE_CHARS
+            and all(char.isprintable() for char in row["text"]))
+
+
+def read_received_peers(seat: Seat, harness: str, sid: str) -> list:
+    """The kept received peer lines of one exact session, oldest first (one small file read)."""
+    data = read_json(_received_peers_path(session_seat(seat, harness, sid)))
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [dict(item) for item in rows if _received_peer_valid(item, harness, sid)][-RECEIVED_INPUTS_LIMIT:]
+
+
+def received_peer_sidecar_path(harness: str, sid: str) -> Path:
+    """Where ``harness``/``sid``'s received peer lines live (for a reader that caches by file)."""
+    return _received_peers_path(session_seat(Seat("native", "", harness=harness, sid=sid), harness, sid))
+
+
+def record_received_peer(harness: str, sid: str, text: str, origin: dict, now: Optional[float] = None,
+                         read_payload=None) -> bool:
+    """Keep the one display line of a peer message this session has just received.
+
+    Called by the receive path every harness goes through, whatever carried the message in (its
+    own prompt, a hook comment added to another prompt, a tool boundary). ``text`` is the
+    delivered text and ``origin`` the verified ``peer-message.prompt_origin`` of it; only a
+    message from another session counts. Only the one-line display text is kept, never the
+    body. A message already kept (its ``ref``) is left as it is. Returns whether a line was written."""
+    if (harness not in HARNESSES or not isinstance(sid, str) or not sid or not isinstance(origin, dict)
+            or origin.get("kind") != "peer" or origin.get("sender_harness") not in HARNESSES
+            or not isinstance(origin.get("sender_session_id"), str)):
+        return False
+    ref = origin.get("transfer_ref")
+    if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
+        return False
+    body = runtime_prompt_text(text or "")
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(body.strip())
+    body = wrapped.group("body") if wrapped else body
+    body = re.sub(r"^\s*<cross-session-message\b[^>]*>", "", body)
+    line = _received_prompt_line(body, origin, read_payload)
+    if not line:
+        return False
+    seat = session_seat(Seat("native", "", harness=harness, sid=sid), harness, sid)
+    path = _received_peers_path(seat)
+    row = {"harness": harness, "sid": sid, "at": time.time() if now is None else now, "text": line,
+           "source": "peer", "ref": ref,
+           "sender": prompt_first_line(str(origin.get("name") or "peer"))[:96],
+           "sender_harness": origin["sender_harness"],
+           "sender_session_id": origin["sender_session_id"][:160]}
+    ensure_dir(path.parent)
+    with seat_lock("peer-received-" + path.stem, wait=2.0):
+        rows = read_received_peers(seat, harness, sid)
+        if any(item.get("ref") == ref for item in rows):
+            return False
+        atomic_write_json(path, {"schema": 1, "harness": harness, "sid": sid,
+                                 "rows": (rows + [row])[-RECEIVED_INPUTS_LIMIT:]})
+    return True
+
+
 def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
                           prompt_text: str, now: float, answered: bool = False,
                           transcript: str = "", prompt_meta: Optional[dict] = None) -> None:
@@ -3199,7 +3290,10 @@ def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
         rows = current.get("received_inputs")
         rows = [item for item in rows if isinstance(item, dict) and item.get("sequence") != sequence] \
             if isinstance(rows, list) else []
-        current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
+        rows.append(row)
+        # A peer message and a runtime notice keep their own eight places: a run of completion
+        # notices never pushes a received peer message out.
+        current["received_inputs"] = _latest_by_class(rows, _row_sequence)
     atomic_write_json(path, current)
     meta = prompt_meta if isinstance(prompt_meta, dict) else {}
     if source == "real" and meta.get("child") is not True:
@@ -3208,10 +3302,14 @@ def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
                                     answered, transcript, lines=meta.get("lines"))
 
 
-def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
-    """Read exact-session display facts, never a conversation or a new prompt judgment."""
+def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD, peers=None) -> dict:
+    """Read exact-session display facts, never a conversation or a new prompt judgment.
+
+    ``peers`` is the session's received peer lines when the caller has read them already (a
+    reader that caches by file passes ``[]`` for a file it saw is not there)."""
     current = prompt_state(session_seat(seat, harness, sid)) if current is _PROMPT_DISPLAY_UNREAD else current
-    empty = {"human": None, "human_state": "unknown", "received": []}
+    peers = read_received_peers(seat, harness, sid) if peers is None else peers
+    empty = {"human": None, "human_state": "unknown", "received": peers}
     if (not isinstance(current, dict) or current.get("schema") != SCHEMA or current.get("harness") != harness
             or current.get("sid") != sid or type(current.get("seq")) is not int):
         return empty
@@ -3248,9 +3346,15 @@ def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLA
                 or not isinstance(item.get("sender_session_id"), str)):
             item.pop("sender_harness", None)
             item.pop("sender_session_id", None)
+    # A peer message and a runtime notice keep their own places: the newest eight of each, by time.
+    # The receive path's own line of a message stands for the prompt's line of the same one (its ref).
+    kept = {item["ref"] for item in peers}
+    received = [item for item in received if not (item.get("source") == "peer" and isinstance(item.get("ref"), str)
+                                                  and item["ref"] in kept)] + peers
+    received = _latest_by_class(received, lambda item: item["at"])
     return {"human": dict(human) if human else None,
             "human_state": "known" if human else "none" if human_seq == 0 else "unknown",
-            "received": received[-RECEIVED_INPUTS_LIMIT:]}
+            "received": received}
 
 
 def runtime_turn_source(prompt_text: str) -> str:

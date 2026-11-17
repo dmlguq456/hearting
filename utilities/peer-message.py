@@ -2973,6 +2973,7 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             if rc:
                 _save_pending(dict(current, rpc_claim=None))
                 return {"status": "unverified", "reason": "peer-receive-ledger-unavailable"}
+            _note_received_peer(current.get("text") or row.get("text"), recipient)
             received = dict(current, state="received", text=_received_delivery_text(current), rpc_claim=None,
                             receipt="exact-native-history",
                             actual_message_id=native_message_id,
@@ -4170,6 +4171,24 @@ def settle_watch_transfers(watch_id, harness, sid):
         return False
 
 
+def _note_received_peer(text, recipient):
+    """Keep the display line of a peer message this session has just received.
+
+    Every way a message reaches a session ends in one of the receipts below, whatever carried it:
+    the session's own prompt, a hook comment added to another prompt, a tool boundary, a native
+    queue. The line is read from the delivered text with the same ``prompt_origin`` the prompt
+    hook classifies by, so only a message from another session counts. Display only: it never
+    costs a receipt."""
+    try:
+        import session_tidy
+        harness, sid = recipient.get("harness"), recipient.get("session_id")
+        origin = prompt_origin(text, harness, sid) if isinstance(text, str) else None
+        if origin:
+            session_tidy.record_received_peer(harness, sid, text, origin, read_payload=read_peer_payload)
+    except Exception:  # noqa: BLE001 - a display line never costs a receipt
+        pass
+
+
 def receive_peer_message(text, recipient, project="", *, summary_text=""):
     try:
         return _receive_peer_message(text, recipient, project, summary_text=summary_text)
@@ -4270,6 +4289,7 @@ def _receive_peer_message(text, recipient, project="", *, summary_text=""):
                 trailer, recipient, project, summary_text, refs, proof)
             if rc:
                 return rc
+        _note_received_peer(text, recipient)
         received_at = proof["received_at"]
         if pending:
             received = dict(pending, state="received", text=_received_delivery_text(pending, text), rpc_claim=None,
@@ -4766,6 +4786,7 @@ def cmd_pending(args):
                     producer_binding=row.get("producer_binding")))
                 if rc:
                     return rc
+            _note_received_peer(row.get("text"), recipient)
             received = dict(row, state="received", text=_received_delivery_text(row), rpc_claim=None,
                             receipt="exact-native-history", received_at=time.time(),
                             actual_message_id=message_id,

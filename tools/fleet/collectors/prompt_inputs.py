@@ -39,7 +39,14 @@ def read(harness, sid):
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_size > _MAX_BYTES):
             return None
-        generation = _generation(info)
+        # The session's received peer lines sit in a file of their own: a change there is a change here.
+        side = tidy.received_peer_sidecar_path(harness, sid)
+        try:
+            side_info = side.lstat()
+            kept = stat.S_ISREG(side_info.st_mode)
+        except OSError:
+            kept = False
+        generation = (_generation(info), _generation(side_info) if kept else None)
         with _LOCK:
             cached = _CACHE.get(key)
             if cached is not None and cached[0] == generation:
@@ -47,12 +54,13 @@ def read(harness, sid):
                 return copy.deepcopy(cached[1])
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as stream:
-            if _generation(os.fstat(stream.fileno())) != generation:
+            if _generation(os.fstat(stream.fileno())) != generation[0]:
                 return None
             raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES or _generation(path.lstat()) != generation:
+        if len(raw) > _MAX_BYTES or _generation(path.lstat()) != generation[0]:
             return None
-        value = tidy.prompt_display(seat, harness, sid, current=json.loads(raw))
+        peers = tidy.read_received_peers(seat, harness, sid) if kept else []
+        value = tidy.prompt_display(seat, harness, sid, current=json.loads(raw), peers=peers)
         with _LOCK:
             _CACHE[key] = (generation, value)
         return copy.deepcopy(value)
