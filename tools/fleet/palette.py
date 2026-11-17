@@ -35,9 +35,11 @@ _HUE_OF = {
     # F-100c: a STEWARD session (depth −1: `steward on`, or it watched/started a session) wears
     # bright pink text: distinct from white/yellow, without a special background.
     "tag_steward": ("p", _A_B),
-    # 11-17 (route zones): the ROUTE box's three zone names and their marks, each its own color, none a harness
-    # hue (cyan, magenta, blue) or the steward pink: direct orange, dispatch green, request yellow.
-    "zone_direct": ("o", 0), "zone_dispatch": ("g", 0), "zone_request": ("y", 0),
+    # 11-17 (route zones): the ROUTE box's three zone names and their marks, each its own color, none a status color
+    # (green, yellow, red), a harness hue (cyan, magenta, blue) or the steward pink: direct orange, dispatch violet,
+    # request aqua. (An 8-color terminal has no color left over: there the zones read in the default color and the white,
+    # still apart from every status and harness color; the names say which zone it is.)
+    "zone_direct": ("zd", 0), "zone_dispatch": ("zv", 0), "zone_request": ("zq", 0),
     # This window's own number on the PEERS line: its harness hue, bold.
     "hbb_claude": ("c", _A_B), "hbb_codex": ("m", _A_B), "hbb_opencode": ("l", _A_B), "hbb_other": ("d", _A_B),
     "tag_steward_dim": ("p", _A_D),
@@ -125,11 +127,19 @@ _HUE_PALETTE = {
     "y": ("yellow", 3), "v": ("vanilla", 3), "r": ("red", 1),
     "c": ("cyan", 6), "m": ("magenta", 5), "o": ("orange", 3),
     "p": ("steward_pink", 5), "l": ("blue", 4),
+    "zd": ("zone_direct", -1), "zv": ("zone_dispatch", 7), "zq": ("zone_request", 7),
 }
 
 
+# 11-17 (route zones): the ROUTE box's three zone names. They are the one place the board needs hues that are none of its
+# status colors (green, yellow, red, vanilla), harness colors (cyan, magenta, blue), the steward pink or the body white, so
+# they stand outside the muted set above and are more saturated than it is: orange, violet and aqua.
+_ZONE_256 = {"zone_direct": 208, "zone_dispatch": 99, "zone_request": 43}
+
+
 def hue_colors(colors=256):
-    return {hue: (_MUTED_256[name] if colors >= 256 and name else fallback)
+    named = {**_MUTED_256, **_ZONE_256}
+    return {hue: (named[name] if colors >= 256 and name else fallback)
             for hue, (name, fallback) in _HUE_PALETTE.items()}
 
 

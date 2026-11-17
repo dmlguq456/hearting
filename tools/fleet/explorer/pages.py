@@ -319,7 +319,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     clock = getattr(vm, "clock", None)
     y = _page_title(grid, x, right, 3, "[" + tag + "] " + str(session.get("title") or "·"),
                     " · ".join(part for part in (repo_rule_label(session.get("repo")), str(branch)) if part))
-    y = _peers_line(grid, vm, tag, x, y, right)
+    y, named, tabbed = _peers_line(grid, vm, tag, x, y, right)
     model = tuple(session.get("model") or ())
     value_x = _field(grid, x, y, "MODEL", right)
     cursor = grid.put(value_x, y, harness, "hb_" + harness, limit=right)
@@ -436,6 +436,26 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     if not shown:
         grid.put(x + FIELD_X, y, "none", "dim", limit=right)
         y += 1
+    # The older PEERS row, as it stood under MESSAGES: ``PEERS  [09] ⚑ steward · [e4] · [a3]   PEERS tab ›``, the sessions
+    # this one is linked with (a message link too, not only a supervision) and the way to their tab. The top PEERS line
+    # (supervision only) names its own sessions, so this row leaves those off, and where the top line has the tab link
+    # and nothing else is left it is not drawn. A window with no supervision shows it whole, as it always did.
+    all_linked = _linked_sessions(vm, tag)
+    linked = [(other, steward) for other, steward in all_linked if other not in named]
+    if linked or all_linked and not tabbed:
+        cursor = grid.put(x + FIELD_X, y, "PEERS  ", "label", limit=right) if linked else x + FIELD_X
+        for index, (other, steward) in enumerate(linked):
+            if index:
+                cursor = grid.put(cursor, y, " · ", "dim", limit=right)
+            cursor = grid.put(cursor, y, "[" + other + "]", "steward" if steward else "soft", limit=right)
+            if steward:
+                cursor = grid.put(cursor, y, " ⚑ " + ui_text("fleet.peers.steward"), "steward", limit=right)
+        go = ui_text("fleet.session_page.peers_tab")
+        start = cursor + (3 if linked else 0)
+        end = grid.put(start, y, go, "hearting", limit=right)
+        if end <= right - 1:
+            grid.add_hit(y, start, end, ("tab", "PEERS", tag))
+        y += 1
     gpu_rows = tuple(session.get("gpu") or ())
     if gpu_rows:
         y = _section(grid, x, right, y + 1, "GPU", "in use", count=len(gpu_rows))
@@ -472,6 +492,22 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
                              harness)
 
 
+def _linked_sessions(vm, tag):
+    """``[(tag, watches this session)]``: the live sessions a LINK joins to ``tag``, in LINKS order."""
+    edges = vm.peer_edges if isinstance(vm.peer_edges, Mapping) else {}
+    live = {str(item.get("tag")) for item in vm.sessions}
+    found = {}
+    for link in tuple(edges.get("links", ())):
+        ends = [end for end in link[:2]]
+        if not any(isinstance(end, (list, tuple)) and end and str(end[0]) == tag for end in ends):
+            continue
+        for index, end in enumerate(ends):
+            if isinstance(end, (list, tuple)) and end and str(end[0]) != tag and str(end[0]) in live:
+                steward = index == 0 and str(link[2]).startswith("watch")
+                found[str(end[0])] = found.get(str(end[0]), False) or steward
+    return sorted(found.items(), key=lambda item: not item[1])
+
+
 def _peer_groups(vm, tag):
     """``[(supervisor tag, [supervised tags])]`` for the PEERS line of ``tag``'s window: each supervisor with this session as
     the supervised one, then this session with the sessions it supervises. The relation is the registered steward
@@ -488,36 +524,43 @@ def _peers_line(grid, vm, tag, x, y, right):
     """``PEERS  [c7] ⚑ ─ [d4] [3b]``: the one line of who supervises whom (11-17), the same order from every window: the
     supervising session, its flag, a dash, the supervised ones; two groups share the line (`` · ``). A number wears its
     harness's color (this window's own bold), the flag the steward pink, the dash dim; no session state. A number that is
-    not this window's opens that session's page. Short of cells the last numbers go as ``+N``. The row after it, or none
-    where this window has no relation."""
+    not this window's opens that session's page. Short of cells the last numbers go from the back and the count a group
+    lost stands inside that group. Returns the next row (or this one where the window has no relation), the other
+    sessions named, and whether the tab link stands at its end."""
     groups = _peer_groups(vm, tag)
     if not groups:
-        return y
+        return y, set(), False
     harness_of = {str(item.get("tag")): str(item.get("harness") or "") for item in vm.sessions}
     key_of = lambda other: ("hbb_" if other == tag else "hb_") + (harness_of.get(other) if harness_of.get(other) in
                                                                   ("claude", "codex", "opencode") else "other")
     value_x = _field(grid, x, y, "PEERS", right)
     total = sum(len(members) for _steward, members in groups)
 
+    width = lambda parts: sum(cell_width(text) for text, _key, _go in parts)
+    room = right - 1 - value_x
+
     def cells(keep):
+        """The line's cells with ``keep`` numbers, taken from the front; the numbers a group lost are counted inside that
+        group (``[3b] ⚑ ─ +2``). A group with no number left stands only where its head and its count fit."""
         out, rest = [], keep
         for steward, members in groups:
-            take = min(rest, len(members))
+            take, lost = min(rest, len(members)), len(members) - min(rest, len(members))
             rest -= take
-            if not take:
-                break
-            if out:
-                out.append((" · ", "dim", None))
-            out += [("[" + steward + "]", key_of(steward), steward), (" ", None, None), ("⚑", "steward", None),
-                    (" ", None, None), ("─", "dim", None)]
+            piece = [("[" + steward + "]", key_of(steward), steward), (" ", None, None), ("⚑", "steward", None),
+                     (" ", None, None), ("─", "dim", None)]
             for member in members[:take]:
-                out += [(" ", None, None), ("[" + member + "]", key_of(member), member)]
+                piece += [(" ", None, None), ("[" + member + "]", key_of(member), member)]
+            if lost:
+                piece.append((" +%d" % lost, "dim", None))
+            joined = out + ([(" · ", "dim", None)] if out else []) + piece
+            if not take and width(joined) > room:
+                break
+            out = joined
         return out
-    width = lambda parts: sum(cell_width(text) for text, _key, _go in parts)
     shown = cells(1)
     for keep in range(total, 0, -1):
-        parts = cells(keep) + ([(" +%d" % (total - keep), "dim", None)] if keep < total else [])
-        if value_x + width(parts) <= right - 1:
+        parts = cells(keep)
+        if width(parts) <= room:
             shown = parts
             break
     cursor = value_x
@@ -528,9 +571,12 @@ def _peers_line(grid, vm, tag, x, y, right):
         cursor = end
     # The way to the PEERS tab with this session's card picked (the line's old tail), only where all of it fits.
     start, go = cursor + 3, ui_text("fleet.session_page.peers_tab")
-    if start + cell_width(go) <= right - 1:
+    tabbed = start + cell_width(go) <= right - 1
+    if tabbed:
         grid.add_hit(y, start, grid.put(start, y, go, "hearting", limit=right), ("tab", "PEERS", tag))
-    return y + 1
+    # The sessions this line names (the older row below leaves them off; one the line cut for room is not named) and whether it
+    # carries the tab link.
+    return y + 1, {go for _text, _key, go in shown if go} - {tag}, tabbed
 
 
 def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):

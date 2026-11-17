@@ -322,7 +322,9 @@ class SessionMessages(unittest.TestCase):
         start = next(i for i, line in enumerate(text) if line.startswith("MESSAGES "))
         self.assertEqual(text[start + 1], "  ← [e4] claude · %s   compare the session window" % clock(NOW - 3 * 3600))
         self.assertEqual(text[start + 2], "  → [a3] codex · %s · steer · delivered   please compare" % clock(NOW - 5000))
-        self.assertFalse(any(line.lstrip().startswith("PEERS ") for line in text[start:]))   # the PEERS line no longer ends the page
+        # The older PEERS row still ends the page, as it did: the sessions a link joins to this one, leaving off [09], whom the
+        # top line below already names (11-17: the top line is the supervision; this row keeps the message links and the tab link).
+        self.assertTrue(text[start + 3].startswith("  PEERS  [a3]   PEERS tab ›"), text[start + 3])
         top = next(i for i, line in enumerate(text) if line.startswith("── [f5]"))
         self.assertRegex(text[top + 1], r"^  PEERS +\[09\] ⚑ ─ \[f5\]   PEERS tab ›")   # it stands under the title, before MODEL
         self.assertTrue(text[top + 2].lstrip().startswith("MODEL"))

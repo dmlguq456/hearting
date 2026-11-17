@@ -4820,6 +4820,11 @@ def session_doers(snapshot):
     return doers
 
 
+def _bounded(value):
+    """At most as many keys as the cache keeps (`_valid_doers`, `_valid_peers`): a longer map would leave every panel with none."""
+    return dict(list(value.items())[:_SESSION_DOERS]) if isinstance(value, dict) else {}
+
+
 def _refresh_cache() -> bool:
     """Run one observational refresh. Caller owns the single-flight lock."""
     try:
@@ -4848,15 +4853,17 @@ def _refresh_cache() -> bool:
                                        route_sessions=requested, include_report_verification=False)
                 wake_snapshot = snapshot
                 if snapshot.observations.get("basic", {}).get("all_new") is True:
-                    labels, panels = session_route_status(snapshot, include_details=True)
+                    records = []
+                    labels, panels = session_route_status(snapshot, include_details=True, records_out=records)
                     result["route_status"] = {key: label for key, label in labels.items() if key in demands}
                     result["route_panels"] = {key: panel for key, panel in panels.items() if key in demands}
                     # The displayed sessions' own model and effort from this same pass: a panel names
                     # the other session of a peer request with them (no second read or collection).
                     result["session_doers"] = session_doers(snapshot)
                     # Who supervises whom (the steward records this pass already holds): the panel's PEERS line.
+                    # (The session records the pass worked out for the route rows are used again, not worked out twice.)
                     from tools.fleet.explorer.live import session_peers
-                    result["session_peers"] = session_peers(snapshot)
+                    result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):

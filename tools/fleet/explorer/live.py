@@ -1001,6 +1001,10 @@ def _route_doer(worker, owner, dead, now=None):
             **({"worker": True} if worker is not None and worker is not owner else {}),
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
+    # 11-17 (panel route row, CTX and NOW): the session's own NOW, the value Fleet's session rows carry (`_session_records`),
+    # already attached to the job; nothing is read for it.
+    if _text(_get(job, "summary", "now")):
+        doer["now"] = _text(_get(job, "summary", "now"))
     doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
     return doer
 
@@ -2085,11 +2089,13 @@ def _steward_targets(session_rows, session_index, tag_by_sid):
     return steward_targets
 
 
-def session_peers(snapshot, now=None):
+def session_peers(snapshot, now=None, records=None):
     """``{"<harness>\\0<session id>": {"tag", "supervisors": [[tag, harness]], "targets": [[tag, harness]]}}`` for each
-    session in a supervision relation, from the steward records the snapshot already holds (no read of its own)."""
+    session in a supervision relation, from the steward records the snapshot already holds (no read of its own).
+    ``records`` is the ``(rows, index)`` pair a pass has already worked out (``session_route_status``'s
+    ``records_out``); with it the session records are not worked out a second time."""
     clock = time.time() if now is None else now
-    rows, index = _session_records(snapshot, clock, _resolver(snapshot))
+    rows, index = records if records is not None else _session_records(snapshot, clock, _resolver(snapshot))
     tag_by_sid = {known: tag for tag, info in index.items() for known in info["ids"]}
     joined = _get(_get(snapshot, "observations", default={}) or {}, "replay_sources", default={}) or {}
     tag_by_sid.update(_get(joined, "historical_tags", default={}) or {})
@@ -3804,11 +3810,14 @@ def _panel_stage(stage, box=None):
     return row
 
 
-def session_route_status(snapshot, now=None, *, include_details=False):
-    """Question-free labels from the same route records OVERVIEW consumes."""
+def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):
+    """Question-free labels from the same route records OVERVIEW consumes. ``records_out`` (a list) receives the
+    ``(rows, index)`` session records this call worked out, for a caller that needs them again in the same pass."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
     rows, index = _session_records(snapshot, now, resolver)
+    if records_out is not None:
+        records_out.append((rows, index))
     routes, route_nodes = _route_records(snapshot, rows, index, resolver, now)
     # In place: the caller that observes this list (session_line) reads the same rows.
     routes.extend(_direct_routes(routes, rows, index, now))

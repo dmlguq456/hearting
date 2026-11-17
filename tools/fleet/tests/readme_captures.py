@@ -63,9 +63,9 @@ SEAT_TALK, SEAT_ROWS = 80, 43
 FOCUS_TALK, FOCUS_ROWS = 80, 30
 # The status button pressed: the [4f] window with the status popup (as wide as the first picture).
 POPUP_ROWS = 43
-# The request on both sides: the two panels. (46 rows: the route box keeps the named rules of its zones, `dispatch` and
-# `request`, which it gives up first when rows are short.)
-REQUEST_ROWS = 46
+# The request on both sides: the two panels (the same height as the first picture: the route box keeps the named rules of
+# its zones, `dispatch` and `request`, while any row of the zone shows).
+REQUEST_ROWS = 43
 
 
 def isolate():

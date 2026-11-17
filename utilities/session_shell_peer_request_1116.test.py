@@ -92,24 +92,40 @@ assert(row.some(p=>p.text==='request'&&p.role==='zone'),JSON.stringify(row));
 assert.equal(v.hits.filter(h=>h.row===at||h.row===d).length,0);
 """)
 
-    def test_short_of_rows_the_rule_goes_before_any_content_row(self):
+    def test_short_of_rows_content_gives_way_first_and_a_zone_rule_stays_while_a_row_of_its_zone_shows(self):
         _node(self, r"""
-// Heights from tall to short: the box's content rows (routes and requests, whatever form) only shrink once the rule is gone.
-const content=v=>{const b=boxOf(v);return b?b.rows.slice(b.a+1,b.b).filter(s=>!zoneRule(s)).length:0;};
-const ruled=v=>lines(v).some(s=>zoneRule(s));
+// 11-17 (route zones): a zone's rule is not the first thing to go. Heights from tall to short: content rows give way by the
+// existing steps (folds, then rows scrolled out), and a rule stands exactly where a row of its zone shows, also when the box
+// is scrolled to fewer rows: never a rule over nothing, never a row of a zone without its rule.
+const zones=v=>{const b=boxOf(v);if(!b)return null;const out=[];
+  // (The last step before the box itself would go: one route stands without any rule, a route without its name rather than no route.)
+  if(!b.rows.slice(b.a+1,b.b).some(s=>/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s)))return [];
+  for(const s of b.rows.slice(b.a+1,b.b)){
+    const m=/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.exec(s);
+    if(m){out.push({zone:m[1],rows:[]});continue;}
+    assert(out.length,'a row stands above every zone rule '+s+'\n'+b.rows.join('\n'));
+    out[out.length-1].rows.push(s);
+  }
+  return out;};
+const marker={dispatch:/route \d|owner|code\(/,request:/\[(?:6c|a3)\]|partial answer|popup c|review the popup|open/};
 for(const width of [30,40,50,60]){
- const tall=content(draw({width,height:60}));let sawRuleOff=false;
- assert(ruled(draw({width,height:60})),'the rules stand where there is room '+width);
+ const full=zones(draw({width,height:60}));
+ assert.deepEqual(full.map(z=>z.zone),['dispatch','request'],'both rules stand where there is room '+width);
+ let shown=2,fewest=99,nameless=false;
  for(let h=60;h>=12;h--){
-  const v=draw({width,height:h}),b=boxOf(v);if(!b)break;
-  const has=ruled(v),n=content(v);
-  if(!has)sawRuleOff=true;
-  if(n<tall&&!sawRuleOff)assert(!has,'a content row left while the rule still stands '+width+'x'+h+'\n'+lines(v).join('\n'));
-  // (11-17, route row 5: a route folding from three rows to one frees several rows at once, so the rule may stand again on
-  // the spare row; it comes back only where it takes no content row from the height below.)
-  if(has&&sawRuleOff)assert.equal(n,content(draw({width,height:h-1})),'the rule came back at the cost of a content row '+width+'x'+h+'\n'+lines(v).join('\n'));
+  const v=draw({width,height:h}),z=zones(v);if(!z)break;
+  const label=width+'x'+h+'\n'+lines(v).join('\n');
+  if(!z.length){nameless=true;continue;}                       // the last resort: it comes only after every rule row would not fit
+  assert(!nameless,'a rule came back at a lower height '+label);
+  assert.deepEqual(z.map(g=>g.zone),['dispatch','request'].slice(0,z.length),'the zones keep their order '+label);
+  // A rule stands over a row of its zone (the routes' rows under `dispatch`, the requests' under `request`), never over nothing.
+  for(const g of z)assert(g.rows.some(s=>marker[g.zone].test(s)),'a rule stands over no row of its zone '+g.zone+' '+label);
+  // A zone with no row showing has no rule, and a zone that went does not come back at a lower height.
+  assert(z.length<=shown,'a rule came back at a lower height '+label);shown=z.length;
+  fewest=Math.min(fewest,z.reduce((n,g)=>n+g.rows.length,0));
  }
- assert(sawRuleOff,'the rule gives way at some height '+width);
+ assert(fewest<full.reduce((n,g)=>n+g.rows.length,0),'content gives way at some height '+width);
+ assert(shown===1||nameless,'the request zone scrolls out before the routes\' rule '+width);
 }
 """)
 

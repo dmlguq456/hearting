@@ -367,9 +367,12 @@ glyph. Directly under `GIT` stands `PEERS` (11-17, the person's PEERS sketch; th
 supervises, in that order from every window; a supervised window shows only its own group
 (`[c7] ⚑ ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
 harness color (this window's own bold), the flag is Fleet's steward pink, the dash and the dot dim; it shows no
-session state. Short of cells the last numbers become `+N`; a window with no relation has no row. The relation
+session state. Short of cells the last numbers go from the back and the count of the ones a group lost stands
+inside that group (`[3b] ⚑ ─ +2`), never after another group's; a group keeps its head (`[x] ⚑ ─`) while that fits, else the
+group goes whole and no count is put on the groups left; a window with no relation has no row. The relation
 is the one Fleet already uses (registered steward relations between live sessions of the same repository), handed
-over by the shared cache producer as `session_peers`: no new read and no new file. The numbers are plain text, no
+over by the shared cache producer as `session_peers` (at most as many keys as the cache keeps, cut at the producer):
+no new read and no new file. The numbers are plain text, no
 press. The bottom layout carries the row after Git and gives it up with the optional rows. Only `↑N` and `↓N` take a color, Fleet's own (`lvl_g` green, `lvl_r`
 red), on the Git row, the bottom layout's head and Claude's statusline alike;
 mono and eight colors paint them dim as the other Git words, and `NO_COLOR`
@@ -472,15 +475,19 @@ popup; a request row the MESSAGES popup).
   itself (its route line has no `(direct)` bracket: `● code  title`), `dispatch` the routes this
   session started (lines as before: owner, stage line, workers), `request` the peer requests it sent
   or received (lines and presses as before). A zone's name and its mark (dot or arrow) have their own
-  color: direct orange, dispatch green, request yellow, none a harness color or the steward pink. A
+  color: direct orange, dispatch violet, request aqua, none a harness color, a status color of the box (working green,
+  idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
+  the default color and the white there). A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
   direct or dispatch like any other. Fleet's session page lists its routes in the same zones and order
   (` ─ direct ─`, ` ─ dispatch ─`, ` ─ request ─`; its section head counts routes alone), has the PEERS
   line directly under its title row, before MODEL (the numbers of other sessions open that session's page;
-  the panel's are plain text), where its old bottom `PEERS … steward` line stood, and reads a route staged
+  the panel's are plain text), keeps its older bottom row (`PEERS  [e4] · [a3]   PEERS tab ›`: the sessions a link joins to
+  this one, messages too, and the way to their tab) whole where the window has no supervision and, where it has, leaves off the
+  numbers the top line names (the tab link stays on it where the top line has no room for it), and reads a route staged
   into a single stage as the panel does (`code(standard) · staged 1/1: execute`, was `code (execute ●)`);
-  Fleet's ROUTES and OVERVIEW tables are unchanged. Short of rows the rules go before any content row, and a
-  box that scrolls draws none. Beside the
+  Fleet's ROUTES and OVERVIEW tables are unchanged. Short of rows the content rows give way first (the steps
+  below) and a zone's rule stays while one row of that zone shows, also in a box that scrolls. Beside the
   native area a route reads, by who set each row (11-17, the person's route row sketch 5):
   its first row is a state mark and the kind of work with its intensity (`● code(standard)`: the
   kind word is the one bold word of the route, in the body color and never dim, also in mono, eight
@@ -489,32 +496,30 @@ popup; a request row the MESSAGES popup).
   continues leading it (`frame ✓ → code(standard)`: what is behind dim with `✓`, this one bold;
   `research ✓ → draft ✓ → code(standard)`), then its title two cells in on at most two rows
   (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
-  a dim label in one column, then harness, model, effort and, for an owner that works alone, its
-  open tool, `· Edit host.cjs`: `⠸ owner  codex GPT-5.5 high · Bash`), its `CTX` row four cells in
-  under the role word (the gauge under the harness and the route's time right after the percent,
-  `CTX    ━━━━──── 52% · 2h 10m`; short of cells the bar shortens, then goes, then the time; the
-  percent stays), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
+  a dim label in one column, then harness, model, effort and, beside them, `CTX 52% · 2h 10m` with no
+  gauge and no tool: `● owner  claude Opus 5.5 xhigh  CTX 52% · 2h 10m`; 11-17, the person: "라우트 내부의 CTX는
+  하네스, 모델 옆에 붙이고 게이지는 없애자. 명령어는 안띄워도 될것 같고, 대신 NOW를 아래줄에"; short of cells the time
+  goes first, then the word `CTX` (the number stays), then the effort, then the harness), under it the
+  session's NOW on one row four cells in (the value Fleet's session rows carry for that session, handed over by
+  the cache producer from the job it already read: no read of its own; cut with `…` where it runs over; none, no
+  row, where the session has none), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
   `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
   position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
-  what it waits for). A route whose owner is not known keeps its time and `CTX` row under the title;
-  an owner at rest ends its row with the tool it ended on (`· after Bash`). The
-  owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
+  what it waits for). A route whose owner is not known keeps its time alone on its row under the title.
+  The owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
   does alone has no stage line. An owner's live workers (`workers_live`) hang under it by `↳`, with
-  no box, four cells in: each worker's first row (its mark, `worker`, harness, model, effort), its
-  `CTX` row eight cells in (its own time after its percent) and its stage (11-16: the name in the
-  color Fleet gives that stage of its route, the backend's `stage_key` from
-  `render_stages.route_stage_key`; stage `i` is `stg{i % 5}`, lit while it runs, dimmed once done
-  or while it waits, the failure red when failed) with the open tool and its target (the path, the
-  file name, the tool). A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
+  no box, four cells in: each worker's first row (its mark, `worker`, harness, model, effort and `CTX 22% · 12m`)
+  and its NOW under it eight cells in (the stage name and the open tool are not drawn: the owner's stage line
+  has the stage, 11-16's stage color is that line's). A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
   `frame-alt`) hung straight under it two cells in, and, once both are done and the direction
   is asked for, `◑ frame → ?? · waiting for direction` (not blinking); the person's choice
   continues the same route in the same place (`frame ✓ → code(standard)`), no new route stands
   beside it. Exactly one thing blinks per route, on Fleet's beat: the current stage's name while a
   stage line stands (so no `●` follows it), else the first row's mark. The role column is the
   route's own width. Short of cells the values go from the back, whole: the chain behind, then the
-  intensity (`● code`), the stage line's word `staged` (`3/7: execute`), effort, the tool, the
-  harness; the role and the model stay. Short of rows the `CTX` rows fold into the owner's and the
-  workers' first rows, the stage line goes (the workers' count, `· worker 2`, ends it), then the
+  intensity (`● code`), the stage line's word `staged` (`3/7: execute`), effort, the
+  harness; the role and the model stay. Short of rows the NOW rows go and the owner's and the
+  workers' first rows take the one-row fold (percent and time at the right edge), the stage line goes (the workers' count, `· worker 2`, ends it), then the
   workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
@@ -615,9 +620,9 @@ then its summary keeps one row and the guidance line goes); the
 structural rows (the empty row inside the metadata, the head's rule); then every message takes the
 one-row form (`← [e7] text`; 11-16, v4.36.4's places and order: a body keeps its one row, then the one-row
 form, then fewer messages); then the
-route box's own steps (its zone rules first, 11-17), every route at the same step (v4.36.4, spec rules 34 (b), 38,
-48 (c)): the context rows fold into the first rows (percent and time at the right,
-no gauge) and the workers take one row each, the workers go (the kind row ends with
+route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
+route at the same step (v4.36.4, spec rules 34 (b), 38,
+48 (c)): the NOW rows go and the first rows fold (percent and time at the right) and the workers take one row each, the workers go (the kind row ends with
 `· worker N`), the kind rows go, every route takes one row; then fewer messages show, the
 newest staying, down to one; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting

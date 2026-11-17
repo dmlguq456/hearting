@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자(dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자(각자의 문맥과 지금 하는 일이 함께, dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. route는 이 세션이 띄운 단계별 일입니다. 데모 데이터이며 대화는 예시입니다.</sub></p>
 

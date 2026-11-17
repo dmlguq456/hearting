@@ -8,6 +8,11 @@ scenes must match them cell for cell (text, color, weight, ground) and press cel
 press now opening a popup). 11-17 (route row 5): the route rows in the golden are drawn again in the new
 grammar (the kind and intensity first, the owner's lines two cells in, a worker hanging by `↳`, no worker
 box); its top and bottom lines and the request rows stay v4.36.4's. Everything here is synthetic.
+11-17 (route zones, two-row session lines): a session's lines are now its who row with `CTX 52% · 2h 10m` beside the model
+(no gauge) and, only where the session has a NOW, that NOW under it; the golden's gauge rows and the worker's `execute · Edit`
+rows are not drawn any more. The comparison therefore takes the session rows out of both sides (the golden's old ones, the
+drawn ones) except the head of each who row (mark and role word, with their colors and press cells), and compares the rest
+of the box cell for cell; the session rows' own grammar is `session_shell_route_row_5_1117.test.py`'s.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -48,7 +53,7 @@ const styleOf=p=>JSON.stringify([p.foreground??null,!!p.dim,!!p.bold,p.backgroun
 const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.push([c,styleOf(p)]);
  const inner=all.slice(2,-2),out=[];for(const [c,s] of inner){const last=out.at(-1);if(last&&last[1]===s)last[0]+=c;else out.push([c,s]);}return out;};
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
-let n=0,same=0,folded=0;
+let n=0,same=0,folded=0,soloSame=0,soloFolded=0;
 for(const c of golden.cases){
  const model=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
  const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:c.cfg,background:c.background});
@@ -63,6 +68,17 @@ for(const c of golden.cases){
  // with those rule rows (they have no press of their own) taken out of the drawn box, the golden having none.
  const drawn=model.requests&&model.requests.length;
  const zoneRule=r=>/^│ ─ (?:direct|dispatch|request) ─+\s*│$/.test(txt(r.map(([t])=>({text:t}))));
+ // A who row (mark, role word, harness, model, effort, `CTX`) keeps only its head `● owner` / `↳ ⠋ worker`; the lines that
+ // only a session has under it (the golden's gauge and tool rows, a drawn NOW) leave; a stage line stays whole.
+ const textOf=r=>r.map(([t])=>t).join('');
+ const whoHead=r=>{const t=textOf(r),m=/^(│ +(?:↳ )?\S+ (?:owner|worker|frame-alt|frame)\b)/.exec(t);if(!m)return null;
+  const out=[];let n=0;const want=[...m[1]].length;
+  for(const [t2,st] of r)for(const ch of t2){if(n>=want)return out;n++;const last=out.at(-1);if(last&&last[1]===st)last[0]+=ch;else out.push([ch,st]);}
+  return out;};
+ const stageLine=r=>/^│ +(?:staged )?\d+\/\d+: /.test(textOf(r));
+ const sessionExtra=r=>!stageLine(r)&&!whoHead(r)&&/^│ {5,}\S/.test(textOf(r));   // indented four or more under the box's own edge: a gauge, a tool, a NOW
+ const sessions=(rows,hs)=>{const keep=rows.map(r=>!sessionExtra(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
+  return {rows:at.map(i=>whoHead(rows[i])||rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  const unzone=(rows,hs)=>{const keep=rows.map(r=>!zoneRule(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));
@@ -70,11 +86,16 @@ for(const c of golden.cases){
   const at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  if(!drawn){
-  const got=unzone(v.rows.slice(b.a,b.b+1).map(runs),hits);
-  assert.deepEqual(got.rows,want,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
-  assert.deepEqual(got.hits,c.hits,label);
+  const own=unzone(v.rows.slice(b.a,b.b+1).map(runs),hits),got=sessions(own.rows,own.hits),exp=sessions(want,c.hits);
+  // A box with no requests folds its routes one step sooner as well where the zone's rule row now takes one of its rows (the
+  // rule stays while a row of its zone shows): then it draws fewer rows than the golden and the golden's rows no longer apply.
+  if(got.rows.length<exp.rows.length&&c.side&&c.height<=16)soloFolded++;
+  else{
+   assert.deepEqual(got.rows,exp.rows,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
+   assert.deepEqual(got.hits,exp.hits,label);soloSame++;
+  }
  }else{
-  const own=unzone(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),got=mine(own.rows,own.hits),exp=mine(want,c.hits);
+  const own0=unzone(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),own=sessions(own0.rows,own0.hits),oldSide=sessions(want,c.hits),got=mine(own.rows,own.hits),exp=mine(oldSide.rows,oldSide.hits);
   // The requests now take more rows than the one row v4.36.4 gave each, so a short box folds its routes one step
   // sooner: where it still draws the routes in the same form, they are v4.36.4's rows cell for cell (and their
   // press cells); where it folds them, the golden's rows no longer apply (the fold's own tests are below).
@@ -85,7 +106,8 @@ for(const c of golden.cases){
  }
  n++;
 }
-console.log('cases',n);assert(same>=12&&folded<=4&&same+folded===17,JSON.stringify({same,folded}));
+console.log('cases',n,JSON.stringify({same,folded,soloSame,soloFolded}));assert(same>=12&&folded<=4&&same+folded===17,JSON.stringify({same,folded}));
+assert(soloSame>=45&&soloFolded<=3&&soloSame+soloFolded===51,JSON.stringify({soloSame,soloFolded}));
 """)
         self.assertIn("cases 68", out)
 

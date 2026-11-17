@@ -28,14 +28,14 @@ const P=t=>({text:t}),D=t=>({text:t,dim:true});
 const names=['plan','plan-check','execute','impl-review','test','report'];
 const six=at=>names.map((name,i)=>i<at?{name,mark:'✓'}:i===at?{name,mark:'●',current:true,key:'stg2_on'}:{name,mark:''});
 const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
-const worker=(h,m,e,pct,bar,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',...o,paint:{glyph:P('⠸'),...doer(h,m,e,pct,bar)}});
+const worker=(h,m,e,pct,bar,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',...o,paint:{glyph:P('⠸'),...doer(h,m,e,pct,bar),now:'route 기록에 갈래 칸을 더하는 중'}});
 const direct={id:'d1',zone:'direct',title:'README 넷째 줄 고침',kind:'working',state:'working',elapsed:'2m',shape:'직접',intensity:'direct',kind_word:'code',stages:[],paint:{glyph:P('⠸')}};
 const directQuick={...direct,id:'d2',intensity:'quick'};
 const dispatch={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
-  paint:{glyph:P('⠸'),...doer('claude','Opus 5.5','xhigh','41%','━━━━')},workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'backend'})]};
+  paint:{glyph:P('⠸'),...doer('claude','Opus 5.5','xhigh','41%','━━━━'),now:'검토 지적 둘을 고치고 시험을 다시 돌리는 중'},workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'backend'})]};
 const bare={...dispatch,id:'b',zone:undefined,title:'zone-less route'};
 const requests=[{id:'q1',kind:'request-out',way:'→',who:'[c2]',title:'보낸 요청의 제목',status:'open'},{id:'q2',kind:'request-in',way:'◂',who:'[6c]',title:'받은 요청의 제목',status:'partial'}];
-const STYLES={dim:{dim:true},loc_repo:{foreground:253},zone_direct:{foreground:137},zone_dispatch:{foreground:150},zone_request:{foreground:186},
+const STYLES={dim:{dim:true},loc_repo:{foreground:253},zone_direct:{foreground:208},zone_dispatch:{foreground:99},zone_request:{foreground:43},
   tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true},hb_claude:{foreground:116},hb_codex:{foreground:176},hb_opencode:{foreground:147},
   g_work:{foreground:150,bold:true},g_work_off:{foreground:150,dim:true},lvl_g:{foreground:114},g_spin:{foreground:150}};
 const render=(routes,reqs,width,height,{side=true,peers,model={},styles=STYLES,configuration={}}={})=>view.render({width,height,side,fill:side,harness:'claude',frame:0,
@@ -72,12 +72,11 @@ assert.deepEqual(rows,[
  zr('dispatch'),
  '● code(standard)',
  '  갈래를 route에 기록',
- '  ● owner  claude Opus 5.5 xhigh',
- '    CTX    ━━━━──── 41% · 1h52m',
+ '  ● owner  claude Opus 5.5 xhigh 41%',
+ '    검토 지적 둘을 고치고 시험을 다…',
  '    staged 3/6: execute',
- '    ↳ ⠋ worker claude Sonnet 5.5',
- '        CTX    ━━────── 22% · 12m',
- '        execute · Edit backend',
+ '    ↳ ⠋ worker claude Sonnet 5.5 22%',
+ '        route 기록에 갈래 칸을 더하…',
  zr('request'),
  '→ [c2]',
  '  보낸 요청의 제목',
@@ -127,39 +126,57 @@ const bottom=draw([direct,dispatch],[],110,16,{side:false}).join('\n');
 assert(!/code\(direct\)|code\(직접\)/.test(bottom)&&/│ code +2m/.test(bottom),bottom);
 """)
 
-    def test_short_of_rows_the_rules_go_before_any_content_row_and_the_requests_come_last(self):
+    def test_short_of_rows_content_rows_go_first_and_a_zone_keeps_its_rule_while_one_of_its_rows_shows(self):
         self.node(r"""
-let seen=0;
-for(let h=60;h>=12;h--){
+// A zone's rule stands for as long as one row of that zone shows: every row has its zone's rule above it, a rule has a row
+// under it, the zones keep their order, and a rule that goes does not come back at a lower height.
+const zones=['direct','dispatch','request'];
+let was=3,shrunk=false,lines=0;
+for(let h=70;h>=12;h--){
  const rows=draw([direct,dispatch],requests,44,h);
  const inner=box(rows);
  if(!inner.length)break;
- const ruled=rules(inner).length;
- assert(ruled===0||ruled===3,h+'\n'+rows.join('\n'));     // all the rules or none: never one zone named and another not
- if(ruled===0){seen++;assert(inner.some(s=>/README/.test(s)),h+'\n'+inner.join('\n'));}
+ const named=rules(inner).map(s=>s.split(' ')[1]);
+ assert.deepEqual(named,zones.filter(z=>named.includes(z)),h+'\n'+inner.join('\n'));
+ assert(inner[0]&&/^─ \w+ ─/.test(inner[0]),h+'\n'+inner.join('\n'));
+ inner.forEach((s,i)=>{if(/^─ \w+ ─/.test(s))assert(i+1<inner.length&&!/^─ \w+ ─/.test(inner[i+1]),h+' a rule with no row under it\n'+inner.join('\n'));});
+ assert(named.length<=was,h);was=named.length;
+ // The content rows are what shrink first: the box has all three rules while it still has a row of every zone.
+ if(inner.some(s=>/README/.test(s))&&inner.some(s=>/code\(standard\)|갈래/.test(s))&&inner.some(s=>/\[c2\]/.test(s)))assert.equal(named.length,3,h+'\n'+inner.join('\n'));
+ if(inner.length<lines)shrunk=true;lines=inner.length;
 }
-assert(seen>0);
+assert(shrunk);
+// The README demo's size (a 40-cell panel, 43 rows) names all three zones, whichever kind of rows the box has.
+const demo=box(draw([direct,dispatch],requests,40,43));
+assert.deepEqual(rules(demo).map(s=>s.split(' ')[1]),zones,demo.join('\n'));
 // Beside the native area at a width of the narrowest labelled layout the rules still hold their zone's name.
 const narrow=box(draw([direct],[],32,40));
 assert(rules(narrow).length===1&&/^─ direct ─+$/.test(narrow[0]),narrow.join('\n'));
-// (A scrolled box, fewer routes than there are, names no zone.)
+// Only where one route with its rule would no longer fit, and the box would go whole, the rule goes: the route stays without it.
+const last=[];for(let h=14;h>=7;h--){const inner=box(draw([direct],[],44,h));last.push([h,inner.length,rules(inner).length]);}
+assert(last.some(([h,n,r])=>n>0&&r===0),JSON.stringify(last));                  // a route without its name rather than no route
+assert(last.every(([h,n,r],i)=>i===0||r<=last[i-1][2]),JSON.stringify(last));     // and a rule that went does not come back lower
+// A box scrolled to fewer routes than there are keeps the rule of each zone it shows a row of.
+const tight=box(draw([direct,dispatch],requests,44,14));
+assert(rules(tight).length>=1&&/^─ \w+ ─/.test(tight[0]),tight.join('\n'));
 """)
 
     def test_each_zone_wears_its_own_color_and_a_working_direct_dot_wears_its_zone(self):
         self.node(r"""
 const v=render([direct,dispatch],requests,44,60);
 const name=n=>v.rows.flat().find(p=>p.text===n);
-assert.equal(name('direct').foreground,137);assert.equal(name('dispatch').foreground,150);assert.equal(name('request').foreground,186);
-// Three different colors, none a harness color or the steward pink.
-const used=new Set([137,150,186]);assert.equal(used.size,3);
-for(const other of [116,176,147,219])assert(!used.has(other));
+assert.equal(name('direct').foreground,208);assert.equal(name('dispatch').foreground,99);assert.equal(name('request').foreground,43);
+// Three different colors, none a harness color, the steward pink or a status color of the box (working green, idle yellow, coral,
+// the spinner's vanilla).
+const used=new Set([208,99,43]);assert.equal(used.size,3);
+for(const other of [116,176,147,219,150,186,217,230,114,253])assert(!used.has(other));
 // The direct route's mark is its zone's color; a dispatch route's is the working green; a request's arrow the request color.
 const mark=v.rows.find(r=>/● code\s+│ │$/.test(text(r)));
 assert(mark,'no direct first line');
 const dot=mark.find(p=>p.text==='●');
-assert.equal(dot.foreground,137);
+assert.equal(dot.foreground,208);
 const arrow=v.rows.flat().find(p=>p.text==='→');
-assert.equal(arrow.foreground,186);
+assert.equal(arrow.foreground,43);
 // The rule's dashes stay dim (the zone name alone has the color).
 const rule=v.rows.find(r=>/─ direct ─/.test(text(r)));
 assert(rule.filter(p=>/^─+$/.test(p.text)).every(p=>p.dim===true));
@@ -177,6 +194,11 @@ for(const o of [{configuration:{theme:'mono'},styles:{dim:{dim:true},loc_repo:{}
             zone = {key: style_components(key, colors=colors)["foreground"] for key in ("zone_direct", "zone_dispatch", "zone_request")}
             other = {style_components(key, colors=colors)["foreground"]
                      for key in ("hb_claude", "hb_codex", "hb_opencode", "tag_steward")}
+            if colors == 256:
+                # ... nor a status color the box draws inside it (working, idle, dead and blocked, done, the spinner).
+                other |= {style_components(key, colors=colors)["foreground"]
+                          for key in ("g_work", "g_work_off", "g_idle", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r", "g_spin",
+                                      "loc_repo", *("stg%d_%s" % (i, on) for i in range(5) for on in ("on", "off")))}
             if colors == 256:
                 self.assertEqual(len(set(zone.values())), 3, zone)
             self.assertFalse(set(zone.values()) & other, (colors, zone, other))
@@ -229,19 +251,34 @@ assert(!/working|idle|blocked|●|⠋|◑/.test(text(row)));
 assert(row.find(p=>/^PEERS/.test(p.text)).dim===true);
 """)
 
-    def test_short_of_cells_the_last_numbers_go_as_plus_n_and_a_group_left_with_none_goes_whole(self):
+    def test_short_of_cells_the_last_numbers_go_and_the_count_stands_inside_the_group_that_lost_them(self):
         self.node(r"""
 const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const many=['a1','a2','a3','a4','a5'].map(t=>end(t,'hb_claude'));
 const peers={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:many}]};
-const line=w=>draw([],[],w,30,{peers}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
+const line=(w,p=peers)=>draw([],[],w,30,{peers:p}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
 assert.equal(line(80),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2] [a3] [a4] [a5]');
 assert.equal(line(54),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2] [a3] +2');
-assert.equal(line(40),'PEERS  [c7] ⚑ ─ [3b] +5');
-assert(/^PEERS  \[c7\] ⚑ ─ \[3b\] \+5$/.test(line(34)),line(34));
-for(let w=34;w<=90;w++){
- const l=line(w);assert(l,w);
- const room=w-4;assert([...l].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=room,w+' '+l);
+// The count stands inside the group whose numbers went (never after [3b] of the first group, which would read as that group's).
+assert.equal(line(46),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] +4');
+assert.equal(line(40),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ +5');       // the person's third sketch at the default panel width
+// Where the second group's head and count do not fit, the group goes whole and no count is put on the group left.
+assert.equal(line(36),'PEERS  [c7] ⚑ ─ [3b]');
+assert.equal(line(34),'PEERS  [c7] ⚑ ─ [3b]');
+// Two supervisors of one window: the second one's head with its count, else it goes whole (never `[c7] ⚑ ─ [3b] +1`).
+const two={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('e1','hb_claude'),members:[end('3b','hb_codex',true)]}]};
+assert.equal(line(60,two),'PEERS  [c7] ⚑ ─ [3b] · [e1] ⚑ ─ [3b]');
+assert.equal(line(36,two),'PEERS  [c7] ⚑ ─ [3b]');
+// One group: its own count after its own numbers.
+const one={me:'c7',groups:[{steward:end('c7','hb_claude',true),members:['d4','3b','a1','a2'].map(t=>end(t,'hb_claude'))}]};
+assert.equal(line(36,one),'PEERS  [c7] ⚑ ─ [d4] [3b] +2');
+// No width draws a `+N` that follows the numbers of another group, or a row wider than the room.
+const cells=l=>[...l].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+for(const p of [peers,two,one])for(let w=34;w<=90;w++){
+ const l=line(w,p);assert(l,w);
+ assert(cells(l)<=w-4,w+' '+l);
+ assert(!/\] \+\d+ · /.test(l),w+' a count before another group: '+l);
+ if(/ \+\d+$/.test(l))assert(/─( \[[0-9a-f]{2}\])* \+\d+$/.test(l)&&!/\] · \[[0-9a-f]{2}\] \+\d+$/.test(l),w+' '+l);
 }
 // Narrower than the labelled layout the row has no label, as REPO and GIT have none.
 const bareRow=draw([],[],30,30,{peers}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^\[c7\] ⚑/.test(s));
@@ -288,6 +325,13 @@ class FeedTest(unittest.TestCase):
                     {"claude\0s1": {"tag": 7, "supervisors": [], "targets": []}}, [], None):
             self.assertEqual(human_wait_state._valid_peers(bad), {})
         self.assertEqual(human_wait_state._valid_peers({"claude\0s%d" % i: good["claude\0s1"] for i in range(65)}), {})
+        # The producer cuts a longer map to the cache's bound (the first keys stay), so the panels keep their lines.
+        many = {"claude\0s%d" % i: good["claude\0s1"] for i in range(75)}
+        cut = human_wait_state._bounded(many)
+        self.assertEqual(len(cut), 64)
+        self.assertEqual(list(cut), list(many)[:64])
+        self.assertEqual(human_wait_state._valid_peers(cut), cut)
+        self.assertEqual(human_wait_state._bounded(None), {})
 
     def test_a_route_of_the_direct_shape_is_the_direct_zone_and_every_other_is_dispatch(self):
         from fleet import session_panel

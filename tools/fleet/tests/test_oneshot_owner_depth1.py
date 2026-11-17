@@ -153,11 +153,12 @@ console.log(JSON.stringify(out));'''
             # rules 24, 36, 38, 43, 57; 11-15 the route box again): its glyph, role and harness, then its
             # context row carrying its time (here, the context unknown, the time alone), then its title.
             lines = side.splitlines()
-            # 11-17 (route row 5): kind and intensity / title / owner / its context row carrying the time.
-            rows = [(lines[i - 1], line, lines[i + 1], lines[i + 2]) for i, line in enumerate(lines)
+            # 11-17 (route row 5): kind and intensity / title / the owner's row, its time beside its model (no context is
+            # known here, so no `CTX`; 11-17, the person: the context beside the model, no gauge).
+            rows = [(lines[i - 1], line, lines[i + 1]) for i, line in enumerate(lines)
                     if 0 < i < len(lines) - 2 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("● code(quick)" in kind and "owner" in who and "codex" in who and "5m" in ctx
-                                and "5m" not in title for kind, title, who, ctx in rows), side)
+            self.assertTrue(any("● code(quick)" in kind and "owner" in who and "codex" in who and "5m" in who
+                                and "5m" not in title and "CTX" not in who for kind, title, who in rows), side)
             # The staged route: its owner first, its live worker hung under it by `↳`.
             self.assertIn("owner  claude Opus 5.5 high", side)
             self.assertIn("↳ ⠋ worker codex", side)

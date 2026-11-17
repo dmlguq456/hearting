@@ -1326,6 +1326,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         for name in ("gauge", "gauge5", "gauge_row"):
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
+        if isinstance(row.get("now"), str) and row["now"]:
+            paint["now"] = row["now"]
         return paint
     for row in panel["routes"]:
         row["paint"] = route_paint(row)

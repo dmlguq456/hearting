@@ -790,7 +790,7 @@ SHOTS = {
              "conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report "
              "from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model "
              "Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the "
-             "Rate limiting route at 2/4 execute, its owner and its execute worker under the dispatch rule, and, under the request rule, the peer request Test run to [b2] "
+             "Rate limiting route at 2/4 execute, its owner and its execute worker, each with its context and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] "
              "at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a "
              "global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line "
              "the working folder and hearting v4.46.0."),
@@ -1709,7 +1709,7 @@ SCREENS = [
      ["Older waits stay listed until you answer or the work ends. Nothing drops off for its age.",
       "Answer from Fleet when the runtime offers a reply path. Otherwise Fleet points you to the session."]),
     ("session", "SESSION PAGE", "One session, in full.",
-     "State, context left, what it is doing now, its routes and requests, the messages it sent and received and the sessions it is linked with, and the GPU it holds, in the session panel's words.",
+     "State, context left, what it is doing now, its routes and requests, the messages it sent and received, who supervises whom (its PEERS row) and the sessions it is linked with, and the GPU it holds, in the session panel's words.",
      ["Select any session in the tree to open its page."]),
     ("resources", "RESOURCES", "What is using the machine.",
      "CPU, memory, and per-GPU use on this machine and on any hosts you configured, with the session that owns "
