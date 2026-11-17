@@ -2918,5 +2918,165 @@ class OwnerScanResumeOrderProofTest(unittest.TestCase):
         self.assertEqual(sorted(run.proofs[proofs:]), ["att-0", "att-2", "att-4"])
         self.assertEqual(run.settled.count("att-0"), 1)
 
+class ObserverBackoffTest(unittest.TestCase):
+    """A relaunched batch observer that ended without progress waits 60 s, doubling to 600 s."""
+
+    def setUp(self):
+        obligations._OBSERVER_RETRY.clear()
+        self.addCleanup(obligations._OBSERVER_RETRY.clear)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.jobs = self.base / "jobs.log"
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        self.args = Namespace(
+            jobs=self.jobs, sealed_batch_id="batch-fixture",
+            parent_attempt_id="att-parent", parent_session_id=None,
+            attempt_id=["att-child"], delivery_parent_id="att-parent",
+            control_socket=self.base / "control.sock", queue_socket=None,
+            thread_id=None, interval=0.1, timeout=1.0,
+        )
+        self.clock = [1000.0]
+        self._real_view = registry_cache.registry_view
+        self.rows = {}
+        self.popen_calls = []
+        patches = (
+            mock.patch.object(obligations, "_OBSERVER_CLOCK", lambda: self.clock[0]),
+            mock.patch.object(obligations.subprocess, "Popen", side_effect=self._popen),
+            mock.patch("dispatch_registry_cache.registry_view",
+                       side_effect=self._view),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.duty_id, _record = obligations.create(self.args)
+
+    def _view(self, *args, **kwargs):
+        real = self._real_view(*args, **kwargs)
+        rows = self.rows
+
+        class Proxy:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def handover_attempt(self, attempt):
+                return rows.get(attempt)
+
+        return Proxy()
+
+    def _popen(self, *args, **kwargs):
+        self.popen_calls.append(args)
+
+        class Launched:
+            pid = 901234
+
+        return Launched()
+
+    def _pass(self):
+        return obligations.ensure_observers(self.jobs)
+
+    def _finish_without_progress(self):
+        # The observer's own end-of-life write: only updated_at/observer move.
+        record = obligations.read(self.jobs, self.duty_id)
+        record["observer"] = {"pid": 1, "pid_start": "1"}
+        record["updated_at"] = record["updated_at"] + 1
+        obligations._write(obligations._record_path(self.jobs, self.duty_id), record)
+
+    def test_no_progress_end_waits_60_120_240_480_then_600(self):
+        self.assertEqual(self._pass(), 1)
+        for wait in (60, 120, 240, 480, 600, 600):
+            self._finish_without_progress()
+            self.assertEqual(self._pass(), 0)
+            self.clock[0] += wait - 1
+            self.assertEqual(self._pass(), 0, f"still inside the {wait} s wait")
+            self.clock[0] += 1
+            self.assertEqual(self._pass(), 1, f"relaunched after the {wait} s wait")
+        self.assertEqual(obligations._backoff_seconds(0), 60.0)
+        self.assertEqual(obligations._backoff_seconds(99), 600.0)
+
+    def test_each_progress_field_relaunches_at_once_and_resets_the_wait(self):
+        key = str(obligations._record_path(self.jobs, self.duty_id))
+        changes = (
+            ("state", "delivery-pending"), ("reason", "other-reason"), ("delivery", "other-delivery"),
+            ("outcome", "submitted"), ("effective_attempts", ["att-child", "att-more"]),
+            ("replacement_lineage", ["old-parent"]),
+        )
+        self.assertEqual(self._pass(), 1)
+        for field, value in changes:
+            with self.subTest(field=field):
+                self._finish_without_progress()
+                self.assertEqual(self._pass(), 0, "unchanged: still waiting")
+                self.assertIsNotNone(obligations._OBSERVER_RETRY[key][1])
+                obligations.update(self.jobs, self.duty_id, **{field: value})
+                self.assertEqual(self._pass(), 1, field)
+                self.assertEqual(obligations._OBSERVER_RETRY[key][2], 0)
+                self._finish_without_progress()
+                self.assertEqual(self._pass(), 0)
+                self.clock[0] += 60
+                self.assertEqual(self._pass(), 1, "the wait restarted at 60 s")
+
+    def test_observer_and_updated_at_alone_never_count_as_progress(self):
+        self.assertEqual(self._pass(), 1)
+        # Order one: the observer writes its end state after the launch.
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+        # Order two: an unrelated rewrite of the volatile fields between passes.
+        obligations.update(self.jobs, self.duty_id)
+        self.assertEqual(self._pass(), 0)
+        self.clock[0] += 60
+        self.assertEqual(self._pass(), 1)
+
+    def test_progress_written_between_the_snapshot_and_the_launch_relaunches_once_more(self):
+        self.assertEqual(self._pass(), 1)
+        obligations.update(self.jobs, self.duty_id, reason="changed-during-launch")
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+
+    def test_attempt_row_change_relaunches_at_once(self):
+        self.rows["att-child"] = ("running", {"attempt_id": "att-child"})
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+        self.rows["att-child"] = ("done", {"attempt_id": "att-child"})
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+
+    def test_unknowable_progress_keeps_the_old_relaunch_path(self):
+        with mock.patch.object(obligations, "_observer_progress", return_value=None):
+            for _ in range(3):
+                self.assertEqual(self._pass(), 1)
+                self._finish_without_progress()
+        self.assertEqual(obligations._OBSERVER_RETRY, {})
+
+    def test_leaving_pending_drops_the_key_and_the_table_is_bounded(self):
+        self.assertEqual(self._pass(), 1)
+        self.assertEqual(len(obligations._OBSERVER_RETRY), 1)
+        obligations.update(self.jobs, self.duty_id, state="complete")
+        self.assertEqual(self._pass(), 0)
+        self.assertEqual(obligations._OBSERVER_RETRY, {})
+        with mock.patch.object(obligations, "_UNSETTLED_OWNERS_LIMIT", 3):
+            for number in range(6):
+                obligations._observer_backoff_launched(f"key-{number}", ("p", number), 0)
+        self.assertEqual(list(obligations._OBSERVER_RETRY), ["key-3", "key-4", "key-5"])
+
+    def test_a_restart_forgets_the_wait_and_relaunches_at_once(self):
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+        obligations._OBSERVER_RETRY.clear()
+        self.assertEqual(self._pass(), 1)
+
+    def test_a_live_observer_is_untouched_by_the_backoff(self):
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        held = obligations.acquire(self.jobs, self.duty_id)
+        self.addCleanup(obligations.release, held)
+        before = dict(obligations._OBSERVER_RETRY)
+        self.assertEqual(self._pass(), 0)  # live lease, no replace binding: same as today
+        self.assertEqual(obligations._OBSERVER_RETRY, before)
+
+
 if __name__ == "__main__":
     unittest.main()

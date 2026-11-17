@@ -45,12 +45,79 @@ class BatchObligationError(ValueError):
     pass
 
 
+def _backoff_seconds(attempts):
+    """60, 120, 240, 480, then 600 seconds (the shared retry cap)."""
+    return min(_OWNER_RETRY_MAX_SECONDS,
+               _OWNER_RETRY_FIRST_SECONDS * 2 ** min(attempts, 4))
+
+
 def _owner_retry_delay(state, attempts):
     """Seconds an unchanged unsettled owner waits before its next observation."""
     if state == "unknown":
-        return min(_OWNER_RETRY_MAX_SECONDS,
-                   _OWNER_RETRY_FIRST_SECONDS * 2 ** min(attempts, 4))
+        return _backoff_seconds(attempts)
     return _OWNER_RETRY_MAX_SECONDS
+
+
+# Runner-process memory only: record path -> (progress fingerprint, next_at, attempts).
+# A restart forgets it, so the first pass after an install relaunches as before.
+_OBSERVER_RETRY: dict[str, tuple] = {}
+_OBSERVER_CLOCK = time.monotonic
+_OBSERVER_VOLATILE_FIELDS = frozenset({"updated_at", "observer"})
+
+
+def _observer_progress(jobs_path: Path, record: dict):
+    """Fingerprint of what an observer could have advanced; None when unknowable.
+
+    ``updated_at`` and ``observer`` are rewritten by every spawn and every
+    same-value finish, so they never count as progress. The registry rows of the
+    record's attempts do count: a new status row can unblock the delivery.
+    """
+    try:
+        from dispatch_registry_cache import registry_view
+        identity = record.get("identity") or {}
+        attempts = record.get("effective_attempts") or identity.get("attempt_ids") or []
+        view = registry_view(Path(jobs_path))
+        rows = []
+        for attempt in attempts:
+            latest = view.handover_attempt(attempt)
+            rows.append((attempt, None) if latest is None
+                        else (attempt, latest[0], _digest_value(latest[1])))
+        body = {key: value for key, value in record.items()
+                if key not in _OBSERVER_VOLATILE_FIELDS}
+        return (_digest_value(body), tuple(rows))
+    except Exception:
+        return None
+
+
+def _observer_backoff_decision(key: str, progress):
+    """(launch_now, attempts) for a record with no live observer.
+
+    The same fingerprint as the one remembered at the last launch means that
+    observer ended without moving anything: wait ``_backoff_seconds`` first.
+    """
+    if progress is None:
+        _OBSERVER_RETRY.pop(key, None)
+        return True, 0
+    prior = _OBSERVER_RETRY.get(key)
+    if prior is None or prior[0] != progress:
+        return True, 0
+    _fingerprint, next_at, attempts = prior
+    now = _OBSERVER_CLOCK()
+    if next_at is None:
+        next_at = now + _backoff_seconds(attempts)
+        _OBSERVER_RETRY[key] = (progress, next_at, attempts)
+    if now < next_at:
+        return False, attempts
+    return True, attempts + 1
+
+
+def _observer_backoff_launched(key: str, progress, attempts: int):
+    if progress is None:
+        return
+    _OBSERVER_RETRY.pop(key, None)  # re-insert last so the oldest key trims first
+    _OBSERVER_RETRY[key] = (progress, None, attempts)
+    while len(_OBSERVER_RETRY) > _UNSETTLED_OWNERS_LIMIT:
+        _OBSERVER_RETRY.pop(next(iter(_OBSERVER_RETRY)))
 
 
 def _root(jobs: str | Path) -> Path:
@@ -660,6 +727,7 @@ def ensure_observers(jobs: str | Path | None = None, *, service_current=None,
                 # exact durable row before acquiring or replacing its owner.
                 record = _read(path)
                 if not record or record.get("state") not in _PENDING:
+                    _OBSERVER_RETRY.pop(str(path), None)
                     continue
                 if (record.get("state") == "unknown"
                         and record.get("reason") == "parent-session-ended"
@@ -667,6 +735,7 @@ def ensure_observers(jobs: str | Path | None = None, *, service_current=None,
                     continue
                 duty_id = record["id"]
                 fd = acquire(jobs_path, duty_id)
+                fresh_lease = fd is not None
                 if fd is None:
                     observer = record.get("observer") or {}
                     if (not isinstance(observer, dict) or not binding
@@ -695,8 +764,16 @@ def ensure_observers(jobs: str | Path | None = None, *, service_current=None,
                     if fd is None:
                         continue
                 try:
+                    if fresh_lease:
+                        retry_key = str(path)
+                        progress = _observer_progress(jobs_path, record)
+                        due, retry_attempts = _observer_backoff_decision(retry_key, progress)
+                        if not due:
+                            continue
                     if _spawn_observer(jobs_path, duty_id, fd, (script, child_env, binding)) is not None:
                         launched += 1
+                        if fresh_lease:
+                            _observer_backoff_launched(retry_key, progress, retry_attempts)
                 finally:
                     # This also safely releases a failed pre-spawn acquisition;
                     # after a spawn it preserves the child's inherited flock.
@@ -728,7 +805,8 @@ def request_runner(jobs: str | Path) -> bool:
     """Return a pending duty to the existing obligation runner.
 
     The carrier uses the common detached recovery request; the runner's
-    ``ensure_observers`` pass relaunches the duty under its bounded backoff.
+    ``ensure_observers`` pass relaunches the duty under its bounded backoff
+    (60 s doubling to 600 s while the record and its attempt rows stand still).
     A request made while that runner is alive changes nothing.
     """
     try:
