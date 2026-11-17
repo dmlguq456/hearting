@@ -172,9 +172,9 @@ class ComputeRunLauncherIdentityTest(unittest.TestCase):
                  mock.patch("sys.stdout"):
                 self.assertEqual(module.cmd_run(args), 0)
 
-            launched = remote.call_args.args[1]
-            self.assertIn("export CLAUDE_CODE_SESSION_ID=route-parent", launched)
-            script = shlex.split(launched)[2]
+            self.assertEqual(remote.call_args.args[1], "python3 -")
+            script = remote.call_args.kwargs["input"]
+            self.assertIn("export CLAUDE_CODE_SESSION_ID=route-parent", script)
             self.assertIn("'owner': {'kind': 'session', 'harness': 'claude', 'id': 'route-parent'", script)
             run_dirs = list(run_root.iterdir())
             self.assertEqual(len(run_dirs), 1)
@@ -245,7 +245,7 @@ class ComputeRunLauncherIdentityTest(unittest.TestCase):
             self.assertEqual(meta["provenance"]["agent_home_status"], "published")
             self.assertTrue(meta["execution_contract"]["share"])
             self.assertEqual(meta["execution_contract"]["resource_parent"], parent_contract)
-            launch_script = shlex.split(remote.call_args.args[1])[2]
+            launch_script = remote.call_args.kwargs["input"]
             self.assertIn("'HEARTING_RESOURCE_RUN_ID': 'parent-run'", launch_script)
 
 
@@ -413,7 +413,7 @@ class RunGPUObservationTest(unittest.TestCase):
         receipt = json.loads(output.getvalue())
         meta = json.loads((self.run_root / receipt["run_id"] / "meta.json").read_text())
         self.assertEqual(meta["provenance"]["session"], receipt["provenance"]["session"])
-        return receipt["provenance"]["session"], launch.call_args.args[1]
+        return receipt["provenance"]["session"], launch.call_args.kwargs["input"]
 
     def test_clear_alias_conflict_records_and_exports_the_route_writer_session(self):
         tools = str(ROOT.parent / "tools")
@@ -631,7 +631,7 @@ class RunGPUObservationTest(unittest.TestCase):
         self.assertEqual(observed["suggested_gpu"], 0)
         self.assertEqual(observed["gpus"][2]["utilization_gpu_pct"], None)
         self.assertEqual(receipt["gpus"], "0")
-        self.assertIn("launch_compute", launch.call_args.args[1])
+        self.assertIn("launch_compute", launch.call_args.kwargs["input"])
         meta = json.loads((self.run_root / receipt["run_id"] / "meta.json").read_text())
         self.assertEqual(meta["gpu_observation"], observed)
 
@@ -1345,8 +1345,9 @@ class ComputeHostsTest(unittest.TestCase):
         }
         captured = {}
 
-        def fake_remote(_host, script, *, timeout):
-            captured["script"] = script
+        def fake_remote(_host, command, *, timeout, input):
+            captured["command"] = command
+            captured["script"] = input
             captured["timeout"] = timeout
             payload = {"hostname": "remote", "gpus": [], "observed_at": 1.0}
             return subprocess.CompletedProcess([], 0, json.dumps(payload), "")
@@ -3980,7 +3981,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
              mock.patch.object(self.module, "remote", return_value=launch_result) as remote, \
              mock.patch("sys.stdout", output):
             self.assertEqual(self.module.cmd_run(args), 0)
-        script = remote.call_args.args[1]
+        script = remote.call_args.kwargs["input"]
         self.assertIn("launch_compute_namespaced", script)
         self.assertIn("path_namespace", script)
         self.assertIn(str(run_root), script)
@@ -4028,8 +4029,8 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         plain = {"ssh_host": "fixture.example"}
         mapped = {**plain, "path_namespace": {"/mnt/shared": "/mnt/shared_alt"}}
         captured = []
-        def capture(_host, script, **_kwargs):
-            captured.append(script)
+        def capture(_host, script, **kwargs):
+            captured.append(kwargs.get("input") or script)
             if "HEARTING_CLAIM_PID" in script:
                 return subprocess.CompletedProcess([], 0, json.dumps(
                     {"pid": 7, "start": 11, "cmdline_sha256": "fixture"}), "")

@@ -816,6 +816,7 @@ class LeasesTest(unittest.TestCase):
         real_run = subprocess.run
         def local_remote(_host, script, **kwargs):
             return real_run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
+                            input=kwargs.get("input"),
                             env={**os.environ, "PATH": str(self.no_tmux_bin)})
         output, warning = io.StringIO(), io.StringIO()
         with mock.patch.object(tool, "load_config", return_value={"run_root": self.root / "managed-runs",
@@ -849,8 +850,8 @@ class LeasesTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("_gpu_test_compute", Path(G.__file__).with_name("compute-hosts.py"))
         tool = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(tool)
-        def check_script(_host, script, **kwargs):
-            body = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        def check_script(_host, _command, *, input, **kwargs):
+            body = input.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
             compile(body, "composed-probe", "exec")
             return subprocess.CompletedProcess([], 0, json.dumps({"gpus": [], "gpu_leases": []}), "")
         with mock.patch.object(tool, "remote", side_effect=check_script), \
