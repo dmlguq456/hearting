@@ -4221,6 +4221,73 @@
         ],
         "map_anchor": "shards"
       }
+    },
+    {
+      "capability": "unit",
+      "modes": [
+        "default"
+      ],
+      "topology_class": "staged",
+      "direct_predicates": [
+        "atomic-outcome"
+      ],
+      "promotion_signals": [],
+      "quick": {
+        "topology": "one-shot-owner",
+        "worker_kind": "map-worker",
+        "write_scope": [
+          "units/unit/**"
+        ],
+        "owner_dispatch_depth": 1,
+        "max_dispatch_depth": 1,
+        "model_profile": "balanced-deep"
+      },
+      "standard_plus": {
+        "topology": "staged",
+        "nodes": [
+          {
+            "id": "unit",
+            "kind": "map-worker",
+            "depends_on": [],
+            "inputs": [
+              "task"
+            ],
+            "outputs": [
+              "units/unit/report.md"
+            ],
+            "write_scope": [
+              "units/unit/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "unit-complete",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "model_profile": "light",
+            "execution_surface": "registered-headless",
+            "registered_worker": true,
+            "terminal": true,
+            "terminal_gate": "unit-complete",
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          }
+        ],
+        "owner_dispatch_depth": 1,
+        "max_dispatch_depth": 1
+      },
+      "completion_gates": [
+        "unit-complete"
+      ],
+      "human_gates": [],
+      "human_gate_bindings": [],
+      "resume_retry_boundaries": [
+        "unit"
+      ],
+      "artifact_scope": {
+        "cycle_anchors": [
+          "campaigns/<campaign-locator>/<cycle-locator>/artifacts"
+        ],
+        "map_anchor": "units"
+      }
     }
   ],
   "execution_surfaces": [
@@ -4531,6 +4598,10 @@
     "route-decision": {
       "kind": "custom",
       "doc": "capabilities/route-frame.md: runtime terminal record route_decision_v1, fixed by the runtime after the single frame interview; no model attempt"
+    },
+    "unit-complete": {
+      "kind": "custom",
+      "doc": "capabilities/unit.md: the one unit leg ends with its unit-io verdict and a report under units/unit/"
     },
     "resource-exit": {
       "kind": "custom",

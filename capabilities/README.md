@@ -83,6 +83,7 @@ Runtime-specific details stay out of portable capability meaning:
 | `draft-strategy` | sub | rebuttal, paper, review, report, proposal, presentation | [`draft-strategy.md`](draft-strategy.md) | Create an initial document strategy and evidence-based writing plan. | `adapters/claude/skills/draft-strategy/SKILL.md` | `adapters/codex/skills/draft-strategy/SKILL.md` | `adapters/opencode/skills/draft-strategy/SKILL.md`; `adapters/opencode/commands/draft-strategy.md` |
 | `route-frame` | sub | - | [`route-frame.md`](route-frame.md) | Compiler-internal framed front end: two independent top-tier frame legs by default; an explicit quick/direct request may use one deep leg when no protected path, multiple adapter paths, or spec/ship hint requires both; ends at a model-less route-decision terminal. | compiler-internal: none | compiler-internal: none | compiler-internal: none |
 | `session-tidy` | ops | - | [`session-tidy.md`](session-tidy.md) | Write a handoff card; tidy memory; compact the same session. | `adapters/claude/skills/session-tidy/SKILL.md` | `adapters/codex/skills/session-tidy/SKILL.md` | `adapters/opencode/skills/session-tidy/SKILL.md`; `adapters/opencode/commands/session-tidy.md` |
+| `unit` | sub | - | [`unit.md`](unit.md) | Compiler-internal one-unit route: one read-only unit runs as a single leg the depth-0 session launches itself, with no owner; its kind is `unit`, its field comes from the unit head or --field. | compiler-internal: none | compiler-internal: none | compiler-internal: none |
 
 ## Adapter Requirements
 

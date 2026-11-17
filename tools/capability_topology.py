@@ -91,7 +91,7 @@ def route_field(route, registry=None):
     if isinstance(route.get("field"), str):
         return route["field"], route.get("field_source")
     capability = route.get("capability")
-    if capability == ROUTE_FRAME_CAPABILITY or not isinstance(capability, str):
+    if capability in COMPILER_INTERNAL_CAPABILITIES or not isinstance(capability, str):
         return None, None
     try:
         registry = registry or load_registry()
@@ -115,9 +115,10 @@ def _validate_fields(registry):
         raise TopologyError("field_default_recipes must name every field (null when it has no default recipe)")
     for recipe in registry["recipes"]:
         capability, value = recipe["capability"], recipe.get("field")
-        if capability == ROUTE_FRAME_CAPABILITY:
+        if capability in COMPILER_INTERNAL_CAPABILITIES:
             if "field" in recipe:
-                raise TopologyError(f"{capability}: the frame proposes a field; its recipe declares none")
+                raise TopologyError(f"{capability}: its field comes from the route's own proposal or unit head; "
+                                    "its recipe declares none")
             continue
         if isinstance(value, dict):
             if set(value) != set(recipe["modes"]) or any(item not in FIELDS for item in value.values()):
@@ -131,7 +132,7 @@ def _validate_fields(registry):
                 or set(row) - {"capability", "mode"} or ("mode" in row and not isinstance(row["mode"], str))):
             raise TopologyError(f"field_default_recipes[{field}] must be null or {{capability, mode?}}")
         rows = [r for r in registry["recipes"] if r["capability"] == row["capability"]
-                and r["capability"] != ROUTE_FRAME_CAPABILITY and ("mode" not in row or row["mode"] in r["modes"])]
+                and r["capability"] not in COMPILER_INTERNAL_CAPABILITIES and ("mode" not in row or row["mode"] in r["modes"])]
         if not rows:
             raise TopologyError(f"field_default_recipes[{field}]: unknown recipe {row['capability']}/{row.get('mode') or '-'}")
         if any(recipe_field(r, mode) != field for r in rows for mode in r["modes"]
@@ -223,6 +224,11 @@ def recipe_keys(registry):
 
 
 ROUTE_FRAME_CAPABILITY = "route-frame"
+# `unit`: a route that is one unit leg the depth-0 session launches itself, no owner (design 5).
+UNIT_CAPABILITY = "unit"
+UNIT_NODE_ID = "unit"
+# Recipes the compiler reaches by shape or `--unit`, never by a person's capability name.
+COMPILER_INTERNAL_CAPABILITIES = (ROUTE_FRAME_CAPABILITY, UNIT_CAPABILITY)
 ROUTE_DECISION_KIND = "runtime-terminal"
 ROUTE_FRAME_NODE_IDS = ["frame", "frame-alternative", "route-decision"]
 # A framed route that runs one frame leg seals this projection of the same recipe.
@@ -271,6 +277,48 @@ def _validate_route_frame_shape(recipe):
             or recipe["human_gate_bindings"] != [{"gate": "frame-review", "node": "route-decision",
                                                   "position": "entry"}]):
         raise TopologyError(f"{cap}: exactly one frame-review binding at the terminal entry is required")
+    if graph.get("parallel_groups") or recipe.get("conditional_extensions"):
+        raise TopologyError(f"{cap}: no parallel groups or extensions")
+
+
+def unit_names():
+    """Every unit of the catalog (`<family>/<name>`), in order; shared fragments (`_shared/`, `_*.md`) are not units."""
+    return sorted(path.relative_to(UNITS).with_suffix("").as_posix() for path in UNITS.glob("*/*.md")
+                  if not path.name.startswith("_") and not path.parent.name.startswith("_"))
+
+
+def is_unit_template_node(recipe, node):
+    """Whether ``node`` is the `unit` recipe's one leg template.
+
+    Its unit, role and worker type are not in the recipe: each route fills them from the
+    unit head it was opened for (`capability_route_nodes.unit_leg_node`), so the registry
+    cannot name a unit ref for it and the ordinary unit-ref check is skipped for exactly this node."""
+    return (isinstance(recipe, dict) and recipe.get("capability") == UNIT_CAPABILITY
+            and isinstance(node, dict) and node.get("id") == UNIT_NODE_ID)
+
+
+def _validate_unit_shape(recipe):
+    """Exact shape of the compiler-internal `unit` recipe: one depth-0 leg, nothing else."""
+    cap = UNIT_CAPABILITY
+    graph = recipe["standard_plus"]
+    nodes = graph.get("nodes", [])
+    if [n.get("id") for n in nodes] != [UNIT_NODE_ID]:
+        raise TopologyError(f"{cap}: nodes must be exactly {[UNIT_NODE_ID]}")
+    leg = nodes[0]
+    scope = [f"units/{UNIT_NODE_ID}/**"]
+    if (leg.get("kind") != "map-worker" or leg.get("depends_on") != []
+            or leg.get("dispatch_depth") != 1 or leg.get("launch_authority") != "depth-0"
+            or leg.get("terminal") is not True or leg.get("terminal_gate") != "unit-complete"
+            or leg.get("completion_gate") != "unit-complete" or leg.get("write_scope") != scope
+            or leg.get("execution_surface") != "registered-headless"
+            or leg.get("registered_worker") is not True):
+        raise TopologyError(f"{cap}:{UNIT_NODE_ID}: unit leg shape mismatch")
+    if any(key in leg for key in ("unit", "role", "worker_type", "fallback_hops", "continuation")):
+        raise TopologyError(f"{cap}:{UNIT_NODE_ID}: the unit, role and worker type come from the unit head")
+    if (recipe["modes"] != ["default"] or recipe["completion_gates"] != ["unit-complete"]
+            or recipe["human_gates"] != [] or recipe["human_gate_bindings"] != []
+            or recipe["quick"].get("write_scope") != scope):
+        raise TopologyError(f"{cap}: one default mode, one gate, no human gate, quick scope {scope}")
     if graph.get("parallel_groups") or recipe.get("conditional_extensions"):
         raise TopologyError(f"{cap}: no parallel groups or extensions")
 
@@ -583,7 +631,7 @@ def _parse_unit_frontmatter(unit, text):
         found = re.search(rf"^{name}:\s*([^#\n]+?)\s*(?:#.*)?$", block, re.MULTILINE)
         return found.group(1).strip() if found else None
 
-    fields = {name: scalar(name) for name in ("unit", "role", "worker_type", "read_only")}
+    fields = {name: scalar(name) for name in ("unit", "role", "worker_type", "read_only", "floor", "field")}
     if fields["unit"] != unit:
         raise TopologyError(f"unit {unit}: frontmatter unit id mismatch ({fields['unit']!r})")
     if not fields["role"]:
@@ -592,6 +640,8 @@ def _parse_unit_frontmatter(unit, text):
         raise TopologyError(f"unit {unit}: invalid worker_type {fields['worker_type']!r}")
     if fields["read_only"] not in ("true", "false"):
         raise TopologyError(f"unit {unit}: read_only must be true or false")
+    if fields["field"] is not None and fields["field"] not in FIELDS:
+        raise TopologyError(f"unit {unit}: field must be one of {','.join(FIELDS)}")
     verdict = re.search(r"^io:\s*\n\s+verdict:\s*\[([^\]]*)\]", block, re.MULTILINE)
     fields["verdict"] = (
         [token.strip() for token in verdict.group(1).split(",") if token.strip()]
@@ -1031,6 +1081,8 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     by_id = {n["id"]: n for n in nodes}
     if recipe["capability"] == ROUTE_FRAME_CAPABILITY:
         _validate_route_frame_shape(recipe)
+    if recipe["capability"] == UNIT_CAPABILITY:
+        _validate_unit_shape(recipe)
     actual_max_dispatch_depth = max(
         (
             node.get("dispatch_depth", 0)
@@ -1059,7 +1111,7 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
         runtime_terminal = is_route_frame_terminal(recipe, node)
         if node.get("kind") not in registry["worker_kinds"] and not runtime_terminal:
             raise TopologyError(f"{recipe['capability']}:{node['id']}: invalid worker kind")
-        if not runtime_terminal:
+        if not runtime_terminal and not is_unit_template_node(recipe, node):
             _validate_unit_ref(recipe, node, registry)
         if "profile_demand" in node:
             PROFILE.resolve_profile_demand(node["profile_demand"])
@@ -1750,7 +1802,7 @@ def _validate_part_catalog(registry, owner_profile):
     capabilities = {recipe["capability"] for recipe in registry["recipes"]}
     node_ids = {}
     for recipe in registry["recipes"]:
-        if recipe["capability"] == ROUTE_FRAME_CAPABILITY:
+        if recipe["capability"] in COMPILER_INTERNAL_CAPABILITIES:
             continue  # compiler-internal: never composable, so it has no catalog parts
         for node in recipe["standard_plus"]["nodes"]:
             key = f"{recipe['capability']}:{node['id']}"
@@ -1867,7 +1919,7 @@ def _validate_part_catalog(registry, owner_profile):
         raise TopologyError("part_catalog.frame.template lacks a template field")
     aliases = frame["aliases"]
     framed = {recipe["capability"] for recipe in registry["recipes"]
-              if recipe["capability"] != ROUTE_FRAME_CAPABILITY
+              if recipe["capability"] not in COMPILER_INTERNAL_CAPABILITIES
               and any(node["id"] in aliases for node in recipe["standard_plus"]["nodes"])}
     if not isinstance(frame["briefs"], dict) or set(frame["briefs"]) != framed:
         raise TopologyError("part_catalog.frame.briefs must cover exactly the recipes that carry a frame")

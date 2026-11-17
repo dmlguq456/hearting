@@ -65,8 +65,13 @@ class Depth0LegTest(unittest.TestCase):
         nodes = list(_shipped_nodes())
         legs = [n for n in nodes if RP.is_depth0_leg(n)]
         self.assertTrue(legs)
-        self.assertEqual({n.get("worker_type") for n in legs}, {"frame"})
-        self.assertEqual({n.get("unit") for n in legs}, {"plan/frame"})
+        # The frame legs, and the `unit` recipe's one template leg (no worker type or unit of its own:
+        # a route fills them from the unit head, so a shipped recipe never names one).
+        frame_legs = [n for n in legs if n.get("worker_type") == "frame"]
+        template = [n for n in legs if n.get("worker_type") is None]
+        self.assertEqual(len(frame_legs) + len(template), len(legs))
+        self.assertEqual([n["id"] for n in template], ["unit"])
+        self.assertEqual({n.get("unit") for n in frame_legs}, {"plan/frame"})
         self.assertEqual([n["id"] for n in nodes if n.get("worker_type") == "frame" and not RP.is_depth0_leg(n)], [])
 
     def test_frame_legs_still_reads_the_pair(self):

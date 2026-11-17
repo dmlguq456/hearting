@@ -136,13 +136,15 @@ class CensusFixture(unittest.TestCase):
         # +3 nodes / +3 runtime-eligible / +2 continuations / +1 terminal / +1 capability: the
         # compiler-internal `route-frame` recipe (two `human-gate` frame legs and the model-less
         # runtime terminal, which is runtime-eligible and is not a model owner).
-        self.assertEqual(recipe["nodes_total"], 66)
+        # +1 node / +1 terminal / +1 runtime-eligible / +1 capability: the compiler-internal `unit` recipe
+        # (one terminal depth-0 leg template, no continuation).
+        self.assertEqual(recipe["nodes_total"], 67)
         self.assertEqual(recipe["nodes_with_continuation"], 51)
-        self.assertEqual(recipe["terminal_nodes"], 15)
-        self.assertEqual(recipe["advance_class"]["runtime-eligible"], 47)
+        self.assertEqual(recipe["terminal_nodes"], 16)
+        self.assertEqual(recipe["advance_class"]["runtime-eligible"], 48)
         self.assertEqual(recipe["advance_class"]["model-required"], 19)
-        self.assertEqual(recipe["capabilities_with_staged_nodes"], 13)
-        self.assertEqual(recipe["capabilities_total"], 15)
+        self.assertEqual(recipe["capabilities_with_staged_nodes"], 14)
+        self.assertEqual(recipe["capabilities_total"], 16)
 
     # --- --topologies is really consumed ----------------------------------
 

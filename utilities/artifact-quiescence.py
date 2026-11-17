@@ -130,6 +130,7 @@ def _sealed_route(
     expected_hash: object = None,
     expected_node: object = None,
     binding: object = None,
+    expected_worker_type: object = None,
 ) -> dict:
     logical = _absolute_path(route_file, "route-file")
     if logical.is_symlink():
@@ -211,7 +212,11 @@ def _sealed_route(
         or referenced.get("unit") != "_kernel/owner"
     ):
         raise ValueError("quick-owner-route-axis-invalid")
-    if binding == "frame-route" and not is_depth0_leg(referenced):
+    if binding == "frame-route" and (
+        not is_depth0_leg(referenced)
+        # The row names the leg's worker type; a depth-0 leg of another kind is not that row's node.
+        or (expected_worker_type is not None and referenced.get("worker_type") != expected_worker_type)
+    ):
         raise ValueError("frame-route-axis-invalid")
     digest = route.get("route_hash")
     if not isinstance(digest, str) or digest != ROUTES.route_hash(route):
@@ -306,6 +311,7 @@ def _dispatch_route_references(metadata: dict) -> list[dict]:
             "expected_hash": metadata["route_hash"],
             "expected_node": metadata["route_node"],
             "binding": binding,
+            **({"expected_worker_type": metadata["worker_type"]} if binding == "frame-route" else {}),
         })
     return references
 

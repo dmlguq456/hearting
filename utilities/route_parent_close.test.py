@@ -833,7 +833,9 @@ class ParentCloseTest(unittest.TestCase):
             # release tree at test time.
             old_registry_digest = "sha256:67471577db7a8f65d3c1ae24df920d33031882ae214c938db8d1a628b26bfc2a"
             old_capability_digest = "sha256:bd146b5b0abf97788e9695cf9c70d5f956677d837712688c9fad811035495643"
-            old_unit_digest = "sha256:bbdaa2cef3e5759be7d71772c7baebe08d69e575d967973280a0ba9ad6760b5a"
+            # The unit heads now carry a default `field:`, so today's unit digest is no longer the one
+            # v3.47.0 sealed; this fixture needs only the unit axis to read current beside a stale registry.
+            old_unit_digest = ROUTE.unit_catalog_digest()
             historical_release_root = fixture.base / "sealed-release-v3.47.0"
             historical_release_root.mkdir()
             (historical_release_root / "release-provenance.json").write_text(json.dumps({

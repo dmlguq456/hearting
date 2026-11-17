@@ -4,6 +4,7 @@ family: editorial
 role: deep editor
 worker_type: stage
 floor: low
+field: docs
 read_only: false
 stance: none
 io:
