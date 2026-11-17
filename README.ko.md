@@ -8,12 +8,13 @@
 
 <h1 align="center">Hearting</h1>
 
-<p align="center"><strong>에이전트가 달라도, 일하는 방식은 하나.</strong></p>
+<p align="center"><strong>에이전트가 달라도, 일하는 방식은 일관되게.</strong></p>
 
 <p align="center">
 <strong>내 방식대로.</strong> 맡긴 일을 시작하기 전에 뜻을 확인하고, 고쳐 준 것과 정한 것을 기억해 다음 세션과 다른 에이전트(Claude Code, Codex, OpenCode)에도 이어 줍니다.<br>
 <strong>어디서든 같게.</strong> 하팅은 이 셋 위에 얹는 층이라, 어디서든 같은 요청, 단계, 검증으로 일합니다.<br>
-<strong>넘나들며, 보이게.</strong> Claude Code, Codex, OpenCode 세션이 서로 일을 맡기고, 한 세션이 셋 중 어느 쪽으로든 작업자를 띄웁니다. 그 과정이 패널과 Fleet(터미널의 전체 현황판)에 보여 언제든 바로잡을 수 있습니다.
+<strong>넘나들며, 보이게.</strong> Claude Code, Codex, OpenCode 세션이 서로 일을 맡기고, 한 세션이 셋 중 어느 쪽으로든 작업자를 띄웁니다. 그 과정이 패널과 Fleet(터미널의 전체 현황판)에 보여 언제든 바로잡을 수 있습니다.<br>
+<strong>기본은 단단히, 방식은 자유롭게.</strong> 분야마다 꼭 지킬 기본은 지키고, 일을 풀어 가는 방식은 묶어 두지 않습니다.
 </p>
 
 <p align="center">
@@ -352,7 +353,7 @@ hearting model set claude context-window 800000
 
 ## 설계 원칙
 
-맨 위 세 줄 뒤에 세 가지가 더 있습니다.
+맨 위 네 줄 뒤에 세 가지가 더 있습니다.
 
 - **저비용 에이전트의 목발.** 하팅이 약한 모델을 똑똑하게 만들 수는 없습니다.
   대신 약한 모델도 사용자의 의도를 끝까지 수행하게 합니다. 강한 모델이 의도와
