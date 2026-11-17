@@ -65,10 +65,16 @@ class RequestRowsTest(unittest.TestCase):
 
     def test_delivery_and_work_are_two_columns_and_no_progress_word_is_invented(self):
         view = _request()
-        for delivered, word in (('pending', '보냄'), ('queued', '전달됨')):
+        # 11-17: a message the other window has not taken in reads `전달 대기` (and why, as `peer-steward show` does), not `보냄`.
+        for delivered, word in (('pending', '전달 대기'), ('unverified', '보냄'), ('queued', '전달됨')):
             view['rows'] = {'r1': {'state': delivered}}
             row, = self.rows([view])
             self.assertEqual((row['glyph'], row['status'], row['kind']), ('→', word, 'request-out'))
+        view['rows'] = {'r1': {'state': 'pending', 'held': {'reason': 'draft'}}}
+        row, = self.rows([view])
+        self.assertEqual(row['status'], '전달 대기 · 입력창에 글 있음 · 보내거나 지우면 받음')
+        self.assertEqual(row['status_head'], '전달 대기')
+        self.assertIn(['DELIVERY', row['status'], 'dim'], row['details'])
         # Once seen, the line says the work; delivery stays in its own detail row.
         view['rows'] = {'r1': {'state': 'received'}}
         row, = self.rows([view])

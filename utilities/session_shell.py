@@ -1328,7 +1328,14 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     watched.extend(sent_paths)
     received_plain, sent_plain = _without_request_transfers(received, sent)
     # A message to this session itself (a tidy notice to its own seat) is no message between two sessions.
-    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8, own=(harness, sid))
+    # 11-17: a sent message whose pending row has not gone in reads `awaiting delivery` and why, as
+    # `peer-steward show` words it; the visible rows' pending rows are read once, and watched.
+    def pending_of(ref):
+        peer = _peer_message()
+        watched.append(str(peer._pending_path(ref)))
+        return peer._read_pending(ref)
+    panel["messages"] = peer_message_rows(received_plain, sent_plain, assigned_tag, limit=8, own=(harness, sid),
+                                          pending_of=pending_of)
     panel["messages_new"] = messages_since_input(panel["messages"], display)
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).

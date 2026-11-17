@@ -749,6 +749,22 @@ def _peer_requests(sessions, records, now=None):
                      if isinstance(record.get("refs"), list) else []})
     observed = {"sent": {key: rows[-_SENT_LIMIT:] for key, rows in sent.items()},
                 "requests": {}, "sides": {}, "rows": {}, "refs": []}
+    # 11-17: a sent message the transport took but the receiving window has not taken in reads `awaiting
+    # delivery` and why, as the shell panel's MESSAGES do: the pending row of each kept (at most
+    # ``_SENT_LIMIT`` a session) message still `sent`, read once here with the requests' own.
+    try:
+        reader = peer_messages._load_peer_message()
+    except Exception:  # noqa: BLE001 -- no reader: the word stays `sent`
+        reader = None
+    if reader is not None:
+        for kept in observed["sent"].values():
+            for item in kept:
+                ref = item.get("message_id")
+                if item.get("status") == "sent" and isinstance(ref, str) and ref and ref not in observed["rows"]:
+                    try:
+                        observed["rows"][ref] = reader._read_pending(ref)
+                    except Exception:  # noqa: BLE001 -- an unreadable row reads as sent
+                        observed["rows"][ref] = None
     try:
         peer_request = utility("peer_request")
         parties, ids = peer_request._index_load(), peer_request._record_ids()
