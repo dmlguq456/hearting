@@ -2160,6 +2160,10 @@ class ObligationStore:
         self._directory_stamp = None
         # record file name -> (stat signature, is-active) from the last rebuild.
         self._rebuild_verdicts: dict[str, tuple[tuple, bool]] = {}
+        # record file name -> (stat signature, eligible-at ns or None) from the
+        # retention sweep; records only change by replace, so an equal signature
+        # means the record need not be read again.
+        self._retention_memo: dict[str, tuple[tuple, int | None]] = {}
         self._discovery_metrics = {"directory_scans": 0, "directory_entries": 0,
                                    "terminal_cache_hits": 0, "stat_calls": 0,
                                    "json_reads": 0, "json_parses": 0,
@@ -3003,26 +3007,27 @@ class ObligationStore:
                     == "complete")
         return False
 
-    def _retention_candidate(self, name, now_ns):
-        """Cheap necessary condition for pruning, read without the duty lock.
+    def _retention_eligible_ns(self, name):
+        """Time a record becomes old enough to prune, read without the duty lock.
 
-        The authoritative decision stays under the lock in
-        ``prune_terminal_obligations``; this only skips records that cannot be
-        old enough, so a young terminal record costs one read, not a flock.
+        ``None`` means it cannot be pruned as it stands (not terminal, no
+        terminal time, or unreadable). The authoritative decision stays under
+        the lock in ``prune_terminal_obligations``; this only lets a young or
+        unfinished record be skipped without a flock.
         """
         try:
             record = _read_record(self.root / name)
         except ObligationError:
-            return False
+            return None
         if not record or record.get("state") not in {"complete", "cancelled"}:
-            return False
+            return None
         ended_ns = self._terminal_time_ns(record)
         if ended_ns is None:
-            return False
+            return None
         kind = (record.get("intent") or {}).get("kind")
         retention = (_READINESS_RETENTION_NS if kind == "readiness-observation"
                      else _OBLIGATION_RETENTION_NS)
-        return now_ns - ended_ns >= retention
+        return ended_ns + retention
 
     def prune_terminal_obligations(self, *, now=None, time_budget=0.1):
         """Prune terminal records within a time budget, resuming from a cursor.
@@ -3065,6 +3070,8 @@ class ObligationStore:
             pending_names = [name for name in names if name > state.get("cursor", "")]
             if not pending_names:
                 pending_names = names
+            for gone in set(self._retention_memo) - set(names):
+                self._retention_memo.pop(gone, None)
             removed = 0
             examined = 0
             last_name = None
@@ -3083,8 +3090,17 @@ class ObligationStore:
                     examined += 1
                     continue
                 examined += 1
-                if (not stat.S_ISREG(before.st_mode)
-                        or not self._retention_candidate(name, now_ns)):
+                if not stat.S_ISREG(before.st_mode):
+                    continue
+                signature = (before.st_dev, before.st_ino, before.st_mtime_ns,
+                             before.st_ctime_ns, before.st_size)
+                memo = self._retention_memo.get(name)
+                if memo is not None and memo[0] == signature:
+                    eligible_ns = memo[1]
+                else:
+                    eligible_ns = self._retention_eligible_ns(name)
+                    self._retention_memo[name] = (signature, eligible_ns)
+                if eligible_ns is None or now_ns < eligible_ns:
                     continue
                 lock_fd = None
                 try:
@@ -3111,6 +3127,7 @@ class ObligationStore:
                         os.close(live_fd)
                     self._list_cache.pop(str(self.root / name), None)
                     self._rebuild_verdicts.pop(name, None)
+                    self._retention_memo.pop(name, None)
                     if self._directory_snapshot is not None:
                         self._directory_snapshot.pop(name, None)
                 except (OSError, ObligationError):

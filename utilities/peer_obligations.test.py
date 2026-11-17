@@ -656,6 +656,45 @@ class ObligationStoreTest(unittest.TestCase):
         for index in range(5):
             self.assertIsNotNone(self.store.get(f"young-{index}"))
 
+    def test_retention_rest_pass_does_not_reread_unchanged_records(self):
+        now = time.time()
+        ids = []
+        for index in range(4):
+            duty = self.store.create(f"memo-{index}", "readiness-observation",
+                                     {"consumer": {"pid": 2_000_000_400 + index,
+                                                    "pid_start": "1"}}, {})
+            self.store.update(duty["id"], state="complete", result="consumer-exited")
+            ids.append(duty["id"])
+        first = self.store.prune_terminal_obligations(now=now)
+        self.assertEqual((first["removed"], first["backlog"]), (0, False))
+
+        with mock.patch.object(obligations, "_read_record",
+                               wraps=obligations._read_record) as reads:
+            again = self.store.prune_terminal_obligations(now=now + 301)
+        self.assertEqual(again["status"], "complete")
+        self.assertEqual(again["examined"], 4)
+        self.assertEqual(reads.call_count, 0)
+
+        # A replaced record is read again; the untouched ones are not.
+        path = self.store._record_path(ids[0])
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        persisted["observation"] = {"touched": True}
+        replacement = path.with_name(path.name + ".new")
+        replacement.write_text(json.dumps(persisted), encoding="utf-8")
+        os.replace(replacement, path)
+        with mock.patch.object(obligations, "_read_record",
+                               wraps=obligations._read_record) as reads:
+            changed = self.store.prune_terminal_obligations(now=now + 602)
+        self.assertEqual(changed["removed"], 0)
+        self.assertEqual(reads.call_count, 1)
+
+        # Past the retention deadline the remembered records are pruned.
+        later = self.store.prune_terminal_obligations(now=now + 602 + 2 * 86400)
+        self.assertEqual(later["removed"], 4)
+        for duty_id in ids:
+            self.assertIsNone(self.store.get(duty_id))
+        self.assertEqual(self.store._retention_memo, {})
+
     def test_retention_reads_legacy_cursor_without_backlog(self):
         now = time.time()
         duty = self.store.create("legacy-cursor-old", "readiness-observation",
