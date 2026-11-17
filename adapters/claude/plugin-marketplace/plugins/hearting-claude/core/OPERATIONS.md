@@ -634,7 +634,8 @@ needed. The bounded pass shares the resumable candidate delivery observation wit
 HOME retention, rechecks identity and settlement immediately before removal, and
 holds all bound attempt/child/successor reference admissions through quarantine
 and unlink. It resumes on the next normal cadence after
-interruption; examining and removing have separate time budgets, and the next
+interruption; examining and removing have separate time budgets (it examines
+only the logs and prompt sidecars still present), and the next
 pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The same pass retires two state-root leftovers untouched for seven days: a
@@ -653,7 +654,8 @@ pass also starts these post-exit retention passes (homes, logs, reusable
 runtimes, archive) in a short-lived process. A group of rows that
 share an attempt or route id moves only as a whole, when every row ended (the
 last write of its attempt log, else its registration) at least 14 days ago,
-belongs to a route closed at least 14 days ago, owes no parent delivery, has no
+belongs to a route closed at least 14 days ago (a row with no route keys has none
+to wait for, unless its owner bound a route after launch), owes no parent delivery, has no
 attempt log left and, if it started, left its route's completion markers. Rows
 go byte-exact to `<state root>/archive/registry-<YYYY-MM>/` (read by
 `dispatch-registry.py inventory --include-archive`) and are synced there before
@@ -661,7 +663,10 @@ the registry is replaced under its lock; uncertain evidence keeps a row live.
 A closed-route replay puts its rows back first, and
 `python3 <AGENT_HOME>/utilities/dispatch_registry_archive.py restore [--id <id>]`
 puts archived rows back in time order; rows that still qualify move again at
-the next pass.
+the next pass. `dispatch-wait.sh --attempt-id` on a moved attempt answers from its
+last archived row: a done row the shared attempt policy reads as success is
+complete, any other end (including a finished review or audit with findings) a
+terminal result to inspect.
 
 Preflight doctors share the same failure presentation: preserve the check's
 exit status, report a bounded cause excerpt when available (favoring explicit
