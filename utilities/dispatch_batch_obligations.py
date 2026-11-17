@@ -2308,7 +2308,13 @@ class _OwnerProofWalk:
 
 def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
     """One owner pass: its path reads (jobs key, record ancestors) are taken once."""
-    from owner_route_binding import record_walk_scope
+    try:
+        from owner_route_binding import record_walk_scope
+    except Exception:
+        # The scope is only a read memo. A release that cannot import the route
+        # modules (an install without its tools) runs the pass unscoped, as before;
+        # the lazy route resolution that needs them reports its own failure.
+        record_walk_scope = contextlib.nullcontext
     with record_walk_scope():
         if context is None:
             return _resume_owner_settlements_pass(jobs, context=None)

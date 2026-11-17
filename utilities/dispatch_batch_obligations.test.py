@@ -69,6 +69,21 @@ class BatchObligationTest(unittest.TestCase):
             obligations._resume_owner_settlements(self.jobs)
         settle.assert_called_once_with(self.jobs, "att-owner")
 
+    def test_a_pass_runs_unscoped_when_the_route_modules_cannot_be_imported(self):
+        # A release without its tools cannot import owner_route_binding. The path-read
+        # scope is only a memo: the pass still settles and never reports the whole
+        # registry as unavailable (a runner would then never idle or reach its exec).
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        with split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", return_value=PENDING), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             mock.patch.dict(sys.modules, {"owner_route_binding": None}):
+            signatures = obligations._resume_owner_settlements(self.jobs, context=context)
+        settle.assert_called_once_with(self.jobs, "att-owner")
+        self.assertNotIn((str(self.jobs), "owner-settlement-unavailable"), signatures)
+
     def test_owner_settlement_keeps_partial_registry_retryable_until_complete(self):
         self.jobs.write_text(self._runtime_owner_row(), encoding="utf-8")
         before = self.jobs.read_bytes()
