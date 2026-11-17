@@ -1644,7 +1644,7 @@ def render_index(d: dict) -> str:
   </div>
   <div class="note"><b>Read Permissions first.</b> Background Claude Code workers run in bypass mode by
   default, because nobody is there to answer a permission prompt. Sessions you start yourself keep your own
-  settings. <a href="{REPO_URL}/blob/main/FAQ.md#what-permissions-do-background-workers-have">Permissions in the FAQ &rarr;</a></div>
+  settings. <a href="{REPO_URL}/blob/main/docs/FAQ.md#what-permissions-do-background-workers-have">Permissions in the FAQ &rarr;</a></div>
 </div></section>
 
 <section class="sec" id="map"><div class="wrap">
@@ -1662,7 +1662,7 @@ def render_index(d: dict) -> str:
     <a href="{REPO_URL}#readme"><b>README</b><span>Install, permissions, memory, models, and limits.</span></a>
     <a href="fleet.html"><b>Fleet tour</b><span>Every screen, and why you can trust it.</span></a>
     <a href="map.html"><b>Capability catalog</b><span>Every entry point and stage, with its summary.</span></a>
-    <a href="{REPO_URL}/blob/main/MANUAL.md"><b>Manual</b><span>How the parts fit together.</span></a>
+    <a href="{REPO_URL}/blob/main/docs/MANUAL.md"><b>Manual</b><span>How the parts fit together.</span></a>
     <a href="{REPO_URL}/blob/main/AGENTS.md"><b>Purpose and principles</b><span>Why Hearting exists, and how it is maintained.</span></a>
     <a href="{REPO_URL}/releases"><b>Releases</b><span>Versions, notes, and the installer.</span></a>
   </div>

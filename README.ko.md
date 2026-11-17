@@ -32,7 +32,7 @@
   <a href="#한-자리에서-모든-세션">한 자리에서</a> ·
   <a href="https://dmlguq456.github.io/hearting/fleet.html">Fleet 둘러보기 ↗</a> ·
   <a href="https://dmlguq456.github.io/hearting/">웹사이트 ↗</a> ·
-  <a href="FAQ.ko.md">자주 묻는 질문</a>
+  <a href="docs/FAQ.ko.md">자주 묻는 질문</a>
 </p>
 
 <p align="center">
@@ -205,7 +205,7 @@ fleet --json       # 같은 상태를 JSON으로(스크립트용)
 예산(`deep`, `balanced-deep`, `balanced`, `light`, `mini`)을 쓰고, 각 예산에 어떤
 실제 모델을 쓸지는 사용자가 정합니다([하네스와 모델](#하네스와-모델)). 하팅이 직접
 찍는 고정 문구는 한국어를 한 번 선언하기 전까지 영어입니다([자주 묻는
-질문](FAQ.ko.md#언어-설정이-모든-문구를-번역하나요)). 전체 진입점은
+질문](docs/FAQ.ko.md#언어-설정이-모든-문구를-번역하나요)). 전체 진입점은
 [capabilities/README.md](capabilities/README.md), 경로 선택 규칙은
 [core/WORKFLOW.md](core/WORKFLOW.md)에 있습니다.
 
@@ -229,7 +229,7 @@ Claude Code만 쓰려면 `sh` 뒤에 `-s -- --runtime claude`를 붙이고 `runt
 등록합니다. 하네스의 자격 증명, 세션, 로그, 데이터베이스, 셸 시작 파일은 건드리지
 않으므로, `~/.local/bin`을 `PATH`에 넣기 전까지는 `~/.local/bin/...` 경로를 쓰세요.
 설치기가 작업자 기본 권한에 대한 안내를 출력합니다.
-[자주 묻는 질문](FAQ.ko.md#백그라운드-작업자는-어떤-권한을-갖나요)에 설명이 있습니다.
+[자주 묻는 질문](docs/FAQ.ko.md#백그라운드-작업자는-어떤-권한을-갖나요)에 설명이 있습니다.
 
 ### 처음 5분
 
@@ -252,7 +252,7 @@ Claude Code만 쓰려면 `sh` 뒤에 `-s -- --runtime claude`를 붙이고 `runt
 기록합니다. 바뀐 파일, 확인으로 돌린 명령, 마지막 답이 남습니다. 이 기록은 수정이나
 시험이 통과했는지 판단하지 않으며, 끄려면 `HEARTING_AUTO_RECORD=off`를 설정하세요.
 더 큰 변경은 프로젝트 옆의 별도 git worktree `<project>-wt/<name>`에서 자기
-브랜치로 하므로, 사용자의 폴더는 그대로입니다. [빠른 시작 안내](QUICKSTART.ko.md)는
+브랜치로 하므로, 사용자의 폴더는 그대로입니다. [빠른 시작 안내](docs/QUICKSTART.ko.md)는
 작은 데모 파일로 이 과정을 따라가며 실측 시간을 보여 줍니다.
 
 ### 업데이트와 상태
@@ -294,7 +294,7 @@ worktree가 함께 씁니다. 계획이 필요한 일은 `campaigns/<campaign>/<
 - **이미 해 둔 것 — 이미 있는 것부터.** 계획 전에 싼 읽기 전용 탐색이 코드, 이전
   산출물, 메모리, git 기록에 이미 정해진 것을 추려, 계획이 거기서 시작합니다.
 
-기억은 [교환](INSTALL_LAYOUT.md#shared-memory-exchange)에 참여하기 전까지 로컬에
+기억은 [교환](docs/INSTALL_LAYOUT.md#shared-memory-exchange)에 참여하기 전까지 로컬에
 머물고, `mem recall "naming convention"`으로 바로 찾을 수 있습니다. 쉬는 세션은 다음
 세션을 위한 짧은 카드를 남기고 하네스 자체의 압축으로 대화를 줄입니다. Claude Code에서는
 둘이 겹치지 않도록 설치가 Claude 자체의 쉬는 동안 압축을 끄고(`idleCompaction: false`),
@@ -334,7 +334,7 @@ hearting model set claude context-window 800000
 토큰입니다(선택한 모델의 최대치를 넘지 않음). 새 세션부터 바뀐 설정을 씁니다.
 하팅이 더하는 몫은 작지만 공짜는 아닙니다. Codex에서 한 기계로 세 번씩 잰 결과,
 첫 반응이 약 0.7초 늦었고 요청마다 입력이 약 2.4K 토큰 늘었습니다. 자세한 내용은
-[INSTALL_LAYOUT.md](INSTALL_LAYOUT.md#user-model-configuration)에 있습니다.
+[INSTALL_LAYOUT.md](docs/INSTALL_LAYOUT.md#user-model-configuration)에 있습니다.
 
 ## 선택 기능
 
@@ -396,11 +396,11 @@ git config core.hooksPath tools/git-hooks
 | 목적 | 문서 |
 |---|---|
 | 목적과 유지보수 원칙 | [AGENTS.md](AGENTS.md) |
-| 첫 작업, 자주 묻는 질문, 기여 | [QUICKSTART.ko.md](QUICKSTART.ko.md), [FAQ.ko.md](FAQ.ko.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
+| 첫 작업, 자주 묻는 질문, 기여 | [QUICKSTART.ko.md](docs/QUICKSTART.ko.md), [FAQ.ko.md](docs/FAQ.ko.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 세션 패널: 키, 설정, 배치, 하네스별 세부 | [docs/session-panel.md](docs/session-panel.md)(영어) |
-| 전체 구조 한눈에 | [MANUAL.md](MANUAL.md) |
-| 설치와 하네스별 투영 | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
-| 릴리스와 버전 | [RELEASE_POLICY.md](RELEASE_POLICY.md) |
+| 전체 구조 한눈에 | [MANUAL.md](docs/MANUAL.md) |
+| 설치와 하네스별 투영 | [INSTALL_LAYOUT.md](docs/INSTALL_LAYOUT.md) |
+| 릴리스와 버전 | [RELEASE_POLICY.md](docs/RELEASE_POLICY.md) |
 | Capability와 role | [capabilities/README.md](capabilities/README.md), [roles/README.md](roles/README.md), [roles/MODES.md](roles/MODES.md) |
 | 경로 선택과 산출물 | [core/WORKFLOW.md](core/WORKFLOW.md), [core/CONVENTIONS.md](core/CONVENTIONS.md) |
 | Git, worktree, 분사, Fleet, 세션 간 요청 | [core/OPERATIONS.md](core/OPERATIONS.md) |

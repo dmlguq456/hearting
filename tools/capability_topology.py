@@ -49,10 +49,94 @@ _BLOCKING_VERDICT_TOKENS = frozenset({
 _UNIT_CACHE: dict = {}
 _UNIT_CONTRACT_VIEW: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "unit_contract_view", default=None)
+# routing/prd.md R5, R8: the closed field vocabulary (one English name each).
+# Which recipe each field opens, and which field each recipe carries, lives
+# only in `capabilities/topologies.json` (`field_default_recipes`, recipe `field`).
+FIELDS = ("plan", "design", "code", "lab", "research", "docs", "admin", "other")
+FIELD_SOURCES = ("explicit", "preset", "frame")
 
 
 class TopologyError(ValueError):
     pass
+
+
+def field_vocabulary(registry):
+    return list(registry.get("fields") or [])
+
+
+def recipe_field(recipe, mode=None):
+    """The default field a recipe (or one of its modes) records; None for route-frame."""
+    value = (recipe or {}).get("field")
+    if isinstance(value, dict):
+        return value.get(mode)
+    return value if isinstance(value, str) else None
+
+
+def field_default_recipe(registry, field):
+    """`(capability, mode-or-None)` a field alone opens, or None when it has no default recipe."""
+    row = (registry.get("field_default_recipes") or {}).get(field)
+    if not isinstance(row, dict):
+        return None
+    return row["capability"], row.get("mode")
+
+
+def route_field(route, registry=None):
+    """`(field, field_source)` of a sealed route.
+
+    A route sealed before fields existed carries neither key; read it from its
+    recipe's default field (a route made from a frame proposal reads as `frame`).
+    The old record itself is never rewritten."""
+    if not isinstance(route, dict):
+        return None, None
+    if isinstance(route.get("field"), str):
+        return route["field"], route.get("field_source")
+    capability = route.get("capability")
+    if capability == ROUTE_FRAME_CAPABILITY or not isinstance(capability, str):
+        return None, None
+    try:
+        registry = registry or load_registry()
+        composed = route.get("composed_recipe") if route.get("composed") else None
+        base = ((composed or {}).get("compose") or {}).get("base_capability") or capability
+        recipe = resolve_recipe(registry, base, route.get("capability_mode") or "default")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+    field = recipe_field(recipe, route.get("capability_mode"))
+    if field is None:
+        return None, None
+    return field, ("frame" if route.get("route_plan") is not None else "preset")
+
+
+def _validate_fields(registry):
+    """Registry check only: the vocabulary, each recipe's default field, each field's default recipe."""
+    if registry.get("fields") != list(FIELDS):
+        raise TopologyError("fields must declare exactly " + ",".join(FIELDS))
+    defaults = registry.get("field_default_recipes")
+    if not isinstance(defaults, dict) or set(defaults) != set(FIELDS):
+        raise TopologyError("field_default_recipes must name every field (null when it has no default recipe)")
+    for recipe in registry["recipes"]:
+        capability, value = recipe["capability"], recipe.get("field")
+        if capability == ROUTE_FRAME_CAPABILITY:
+            if "field" in recipe:
+                raise TopologyError(f"{capability}: the frame proposes a field; its recipe declares none")
+            continue
+        if isinstance(value, dict):
+            if set(value) != set(recipe["modes"]) or any(item not in FIELDS for item in value.values()):
+                raise TopologyError(f"{capability}: a per-mode field must name one field for each mode")
+        elif value not in FIELDS:
+            raise TopologyError(f"{capability}: field must be one of {','.join(FIELDS)}")
+    for field, row in defaults.items():
+        if row is None:
+            continue
+        if (not isinstance(row, dict) or not isinstance(row.get("capability"), str)
+                or set(row) - {"capability", "mode"} or ("mode" in row and not isinstance(row["mode"], str))):
+            raise TopologyError(f"field_default_recipes[{field}] must be null or {{capability, mode?}}")
+        rows = [r for r in registry["recipes"] if r["capability"] == row["capability"]
+                and r["capability"] != ROUTE_FRAME_CAPABILITY and ("mode" not in row or row["mode"] in r["modes"])]
+        if not rows:
+            raise TopologyError(f"field_default_recipes[{field}]: unknown recipe {row['capability']}/{row.get('mode') or '-'}")
+        if any(recipe_field(r, mode) != field for r in rows for mode in r["modes"]
+               if "mode" not in row or mode == row["mode"]):
+            raise TopologyError(f"field_default_recipes[{field}]: {row['capability']} does not default to {field}")
 
 
 def load_registry(path: Path | str = REGISTRY):
@@ -1891,6 +1975,7 @@ def validate_registry(registry, manifest=None):
     actual, expected = recipe_keys(registry), expected_recipe_keys(manifest)
     if actual != expected:
         raise TopologyError(f"coverage mismatch missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
+    _validate_fields(registry)
     for recipe in registry["recipes"]:
         _validate_recipe(recipe, registry, standard_plus_owner_profile)
         _validate_gate_contracts(recipe, registry)

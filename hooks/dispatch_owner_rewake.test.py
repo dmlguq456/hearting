@@ -6048,6 +6048,111 @@ class BoundaryWaitOverSeveralRowsTest(CarrierOneClaimGateTest):
         self.assertEqual((self._state("att-owner-2"), self._state("att-owner-3")), ("ended", "ended"))
 
 
+class SettledArmClaimLoopTest(unittest.TestCase):
+    """A settled arm (`ended`, or `arms` at the limit) refuses before the ledger lock.
+
+    2026-11-17: every ended arm of a long session re-took the shared `rewake-arms/.lock`
+    and re-read the registry row and lineage under it (~40ms each), so one hook held the
+    lock ~700 times for ~23s of CPU and the session's other hooks queued behind it."""
+
+    PAYLOAD = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": "session-1",
+               "tool_input": {"command": "true"}, "tool_response": {"stdout": "", "stderr": ""}}
+
+    def _fixture(self, settled: int, *, live: bool = True) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        tmp = Path(temporary.name)
+        jobs = tmp / "jobs.log"
+        row = DispatchOwnerRewakeTest.row
+        rows = [row(attempt_id=f"att-done-{i}", status="done", age_seconds=300 + i) for i in range(1, settled + 1)]
+        if live:
+            rows.append(row(attempt_id="att-lapsed", status="done", age_seconds=120))
+            rows.append(row(attempt_id="att-fresh", status="open", age_seconds=0))
+        jobs.write_text("".join(rows), encoding="utf-8")
+
+        def arm(attempt_id: str, **fields) -> None:
+            path = rewake.arm_path(jobs, attempt_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"schema": 1, "attempt_id": attempt_id, "session_id": "session-1",
+                                        "holder": DEAD_HOLDER, "gate_delivery_id": None, **fields}), encoding="utf-8")
+
+        for i in range(1, settled + 1):
+            if i % 2 == 0:
+                arm(f"att-done-{i}", state="ended", arms=1)
+            else:
+                arm(f"att-done-{i}", state="lapsed", arms=rewake.ARM_LIMIT)
+        if live:
+            arm("att-lapsed", state="lapsed", arms=1)
+        environment = mock.patch.dict(os.environ, {
+            "AGENT_DISPATCH_JOBS": str(jobs), "XDG_STATE_HOME": str(tmp / "state"), "HOME": str(tmp / "home")},
+            clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+        child = mock.patch.dict(os.environ)
+        child.start()
+        self.addCleanup(child.stop)
+        os.environ.pop("AGENT_DISPATCH_CHILD", None)
+        return jobs
+
+    @staticmethod
+    def _counted(call):
+        with mock.patch.object(rewake, "claim_arm", wraps=rewake.claim_arm) as claims, \
+                mock.patch.object(rewake, "_row_metadata", wraps=rewake._row_metadata) as metadata, \
+                mock.patch.object(rewake.seat_handover, "owns", wraps=rewake.seat_handover.owns) as owns:
+            result = call()
+        # The scan (`_session_owner_states`) passes a shared `read_context` to `owns` for every
+        # row; that cost is bounded by #935 and follows the row count. The lock path
+        # (`_handed_to`, `_reclaim_refusal`) passes none, and that is what must not grow.
+        lock_path_owns = sum(1 for c in owns.call_args_list if c.kwargs.get("read_context") is None)
+        return result, (claims.call_count, metadata.call_count, lock_path_owns)
+
+    def test_settled_arms_take_no_lock_or_lineage_read_however_many_on_a_bash_call(self) -> None:
+        counts, armed = {}, {}
+        for settled in (2, 20):
+            self._fixture(settled)
+            first, counts[settled] = self._counted(lambda: rewake.registry_launch(dict(self.PAYLOAD)))
+            self.assertIsInstance(first, tuple)
+            self.assertEqual((first[0].attempt_id, first[0].armed), ("att-lapsed", "registry-rearm"))
+            second = rewake.registry_launch(dict(self.PAYLOAD))   # this live process now holds the lapsed arm
+            self.assertIsInstance(second, tuple)
+            armed[settled] = (second[0].attempt_id, second[0].armed, second[1].arms)
+        self.assertEqual(counts[2], counts[20])
+        self.assertEqual(counts[20][0], 1, "only the lapsed row is claimed under the lock")
+        self.assertEqual(armed[2], ("att-fresh", "registry", 1))
+        self.assertEqual(armed[20], ("att-fresh", "registry", 1))
+
+    def test_settled_arms_take_no_lock_or_lineage_read_however_many_at_a_turn_end(self) -> None:
+        counts, taken = {}, {}
+        for settled in (2, 20):
+            self._fixture(settled)
+            seen: list = []
+
+            def first_due(claims):
+                seen.extend(claims)
+                return claims[0]
+
+            with mock.patch.object(rewake, "_first_due", side_effect=first_due):
+                result, counts[settled] = self._counted(
+                    lambda: rewake.boundary_launch({"hook_event_name": "Stop", "session_id": "session-1"}))
+            self.assertIsInstance(result, tuple)
+            taken[settled] = {launch.attempt_id: launch.armed for launch, _claim in seen}
+        self.assertEqual(counts[2], counts[20])
+        self.assertEqual(counts[20][0], 2, "only the lapsed and the fresh row are claimed under the lock")
+        for settled in (2, 20):
+            self.assertEqual(taken[settled], {"att-lapsed": "registry-rearm", "att-fresh": "registry"})
+
+    def test_a_session_with_only_settled_arms_still_gets_the_same_refusal(self) -> None:
+        for settled in (2, 20):
+            self._fixture(settled, live=False)
+            for call in (lambda: rewake.registry_launch(dict(self.PAYLOAD)),
+                         lambda: rewake.boundary_launch({"hook_event_name": "Stop", "session_id": "session-1"})):
+                with self.subTest(settled=settled):
+                    result, counts = self._counted(call)
+                    self.assertIsInstance(result, rewake.ArmRefusal)
+                    self.assertIn(result.reason, {"ended", "exhausted"})
+                    self.assertEqual(counts, (0, 0, 0))
+
+
 if __name__ == "__main__":
     # Unit fixtures exercise records without observers racing their cleanup;
     # runner startup is exercised by peer_obligations.test.py.

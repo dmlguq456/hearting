@@ -344,8 +344,16 @@ def _text(value, *, name, required=False):
     return value.strip()
 
 
-_LEG_FIELDS = frozenset({"capability", "mode", "shape", "size", "graph", "intensity", "cwd", "why",
+_LEG_FIELDS = frozenset({"capability", "mode", "field", "shape", "size", "graph", "intensity", "cwd", "why",
                          "done_when", "verify", "hands_over", "parallel", "extra_stages"})
+
+
+def field_vocabulary() -> tuple:
+    """The registry's field names (`capabilities/topologies.json` `fields`)."""
+    try:
+        return tuple(json.loads((ROOT / "capabilities" / "topologies.json").read_text(encoding="utf-8"))["fields"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
 MAX_DONE_WHEN = 5
 MAX_PLAN_NOTES = 8
 
@@ -448,6 +456,12 @@ def _normal_leg(raw, index, notes=None):
     mode, intensity = raw.get("mode"), raw.get("intensity")
     if mode is not None and (not isinstance(mode, str) or not _MODE.fullmatch(mode)):
         raise ProposalError(f"schema-invalid:legs[{index}].mode")
+    field = raw.get("field")
+    if field is not None and field not in field_vocabulary():
+        # Optional: an unknown field is left out and named; the leg keeps its kind's default field.
+        if notes is not None:
+            notes.append(f"ignored:legs[{index}].field")
+        field = None
     if intensity is not None and (not isinstance(intensity, str) or not _MODE.fullmatch(intensity)):
         raise ProposalError(f"schema-invalid:legs[{index}].intensity")
     if intensity in INTENSITIES and intensity != SHAPE_INTENSITY[shape]:
@@ -471,7 +485,8 @@ def _normal_leg(raw, index, notes=None):
                 raise ProposalError(f"schema-invalid:legs[{index}].graph")
             if set(token.split(":")[:2]) & set(_FRAME_NODES):
                 raise ProposalError(f"leg-invalid:{index}:frame-stage-not-allowed")
-    return {"capability": capability, "mode": mode, "shape": shape, "graph": list(graph) if graph else None,
+    return {"capability": capability, "mode": mode, **({"field": field} if field is not None else {}),
+            "shape": shape, "graph": list(graph) if graph else None,
             "intensity": intensity, "why": _text(raw.get("why"), name=f"legs[{index}].why"),
             **({"size": size} if size is not None else {}),
             **({"cwd": _text(raw["cwd"], name=f"legs[{index}].cwd", required=True)} if "cwd" in raw else {}),

@@ -313,7 +313,9 @@ class CompletionTest(turns.EndToEndTest):
         (work / "evidence.md").write_text("Checks: synthetic command exit 0; scope verified\n")
         (work / "summary.md").write_text("Completed " + slug)
         env = turns.T._child_env(self.env, "claude", turns.SID)
-        selection = (["--capability", capability, "--capability-mode", mode] if capability else [])
+        # A direct compose names its kind (or field); these fixtures record code work.
+        selection = (["--capability", capability, "--capability-mode", mode] if capability
+                     else ["--capability", "autopilot-code"])
         result = turns.T._run(turns.T._route_command("compose", "--shape", "direct", *selection, "--cwd", str(self.repo),
             "--artifact-root", str(self.root), "--campaign-key", "journal-example", "--slug", slug,
             "--parent-harness", "claude", "--prompt-file", str(work / "task.md"),

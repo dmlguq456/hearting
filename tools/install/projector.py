@@ -1,4 +1,4 @@
-"""Build symlink projection plans from ``INSTALL_LAYOUT.md``.
+"""Build symlink projection plans from ``docs/INSTALL_LAYOUT.md``.
 
 Portable capabilities, roles, and core remain the source of truth. This module
 only computes links, copies, and delegated actions; runtime drivers apply them.
@@ -256,7 +256,7 @@ def opencode_guard_owned(entry, home, scope="global"):
 
 
 # ---------------------------------------------------------------------------
-# Claude Code projection (INSTALL_LAYOUT.md "Claude Code Projection")
+# Claude Code projection (docs/INSTALL_LAYOUT.md "Claude Code Projection")
 # ---------------------------------------------------------------------------
 
 _CLAUDE_SYMLINK_NAMES = [
@@ -271,7 +271,7 @@ _CLAUDE_COPY_ONCE_NAMES = ["settings.json", "keybindings.json"]
 
 
 def claude_installer_owned_names():
-    """Public owner-name-set for `harness install claude` (INSTALL_LAYOUT.md
+    """Public owner-name-set for `harness install claude` (docs/INSTALL_LAYOUT.md
     "owner-name-set reconciliation"). Runtime activation unions this with its
     own native discovery names so the two legitimate owners of
     ``$HOME/.claude`` symlinks converge on one set instead of drifting apart.
@@ -382,7 +382,7 @@ _CLAUDE_TABLE = (
 
 
 # ---------------------------------------------------------------------------
-# Codex projection (INSTALL_LAYOUT.md "Codex Projection")
+# Codex projection (docs/INSTALL_LAYOUT.md "Codex Projection")
 # ---------------------------------------------------------------------------
 
 # (destination under runtime_home, source relpath); an empty source points to AGENT_HOME.
@@ -443,7 +443,7 @@ _CODEX_TABLE = (
 
 
 # ---------------------------------------------------------------------------
-# OpenCode projection (INSTALL_LAYOUT.md "OpenCode Projection")
+# OpenCode projection (docs/INSTALL_LAYOUT.md "OpenCode Projection")
 # Keep the locally validated singular OpenCode wiring; INST-OPEN-4 remains open.
 # ---------------------------------------------------------------------------
 

@@ -164,6 +164,7 @@ created: {YYYY-MM-DD}
      legs:                       # 1-4 legs in run order; only legs[0] starts on approval
        - capability: autopilot-lab
          mode: eval              # only when the capability has several modes
+         field: lab              # optional: plan | design | code | lab | research | docs | admin | other; omitted, the capability's default field
          size: multi-stage       # one-change | one-pass | multi-stage, judged before the shape
          shape: staged           # direct | solo | staged; omitted, it follows size
          graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage

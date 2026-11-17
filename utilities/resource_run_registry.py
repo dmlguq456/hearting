@@ -1112,9 +1112,12 @@ def observe_run_if_due(run_id: str, run: dict, registry: Path, *, now=None,
 
 
 def scan(index_path=None, identity_reader=proc_identity, now=None,
-         observed_sources: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+         observed_sources: list[dict] | None = None, keep=None) -> tuple[list[dict], list[dict]]:
+    """``keep(run)`` skips normalizing runs a scoped caller will not show (the count is
+    left on ``scan.last_skipped``); ``keep=None`` reads every run."""
     paths, diagnostics = indexed_paths(index_path)
     rows = []
+    skipped = 0
     for registry in paths:
         try:
             source, data = read_registry_source(registry)
@@ -1137,11 +1140,18 @@ def scan(index_path=None, identity_reader=proc_identity, now=None,
             try:
                 if not isinstance(run_id, str) or not isinstance(run, dict):
                     raise ValueError("invalid-run-row")
+                if keep is not None and not keep(run):
+                    skipped += 1
+                    continue
                 rows.append(normalize_run(run_id, run, registry, identity_reader, now))
             except Exception as exc:
                 diagnostics.append({"kind": "malformed-run", "path": str(registry),
                                     "run_id": str(run_id), "error": str(exc)})
+    scan.last_skipped = skipped
     return rows, diagnostics
+
+
+scan.last_skipped = 0
 
 
 def counts(index_path=None) -> dict:

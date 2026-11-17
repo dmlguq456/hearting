@@ -32,7 +32,7 @@
   <a href="#one-seat-for-every-session">One seat</a> ·
   <a href="https://dmlguq456.github.io/hearting/fleet.html">Fleet tour ↗</a> ·
   <a href="https://dmlguq456.github.io/hearting/">Website ↗</a> ·
-  <a href="FAQ.md">FAQ</a>
+  <a href="docs/FAQ.md">FAQ</a>
 </p>
 
 <p align="center">
@@ -217,7 +217,7 @@ Each stage runs on a model budget chosen for it — `deep`, `balanced-deep`,
 `balanced`, `light`, or `mini` — and you decide which real model each budget
 uses ([Runtimes and models](#runtimes-and-models)). The fixed text Hearting
 prints itself is English unless you declare Korean once
-([FAQ](FAQ.md#does-the-language-setting-translate-every-label)). See
+([FAQ](docs/FAQ.md#does-the-language-setting-translate-every-label)). See
 [capabilities/README.md](capabilities/README.md) for every entry point and
 [core/WORKFLOW.md](core/WORKFLOW.md) for the routing rules.
 
@@ -243,7 +243,7 @@ first. It puts `hearting`, `fleet`, `fleet-monitor`, `mem`, and
 OS supports it. It does not touch runtime credentials, sessions, logs,
 databases, or shell startup files, so use the `~/.local/bin/...` paths until
 that directory is on your `PATH`. It prints a note about the default worker
-permissions; the [FAQ](FAQ.md#what-permissions-do-background-workers-have)
+permissions; the [FAQ](docs/FAQ.md#what-permissions-do-background-workers-have)
 explains them.
 
 ### Your first five minutes
@@ -269,7 +269,7 @@ recorded automatically: the changed files, the check commands it saw run, and
 the final reply. That record does not judge whether the fix or its tests
 passed; set `HEARTING_AUTO_RECORD=off` to stop it. Larger changes go to a
 separate git worktree beside your project, `<project>-wt/<name>`, on its own
-branch, so your folder stays as it was. The [Quickstart](QUICKSTART.md) walks
+branch, so your folder stays as it was. The [Quickstart](docs/QUICKSTART.md) walks
 this on small demo files with measured times.
 
 ### Update and status
@@ -318,7 +318,7 @@ holds.
   history already settled, so the plan starts from that.
 
 Memory stays local unless you join an
-[exchange](INSTALL_LAYOUT.md#shared-memory-exchange); `mem recall "naming
+[exchange](docs/INSTALL_LAYOUT.md#shared-memory-exchange); `mem recall "naming
 convention"` searches it directly. Idle sessions save a short card for the next
 one and compact their conversation with the runtime's own compaction; on Claude
 Code the install turns off Claude's own idle compaction (`idleCompaction:
@@ -361,7 +361,7 @@ The context budget defaults to 800,000 tokens for Claude Code and OpenCode and
 changed settings. What Hearting adds is small but not free: on Codex, three
 measured pairs on one machine found the first response about 0.7 s slower and
 about 2.4K more input tokens per request. Details are in
-[INSTALL_LAYOUT.md](INSTALL_LAYOUT.md#user-model-configuration).
+[INSTALL_LAYOUT.md](docs/INSTALL_LAYOUT.md#user-model-configuration).
 
 ## Optional features
 
@@ -425,11 +425,11 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | Purpose | Document |
 |---|---|
 | Purpose and maintenance principles | [AGENTS.md](AGENTS.md) |
-| First task, common questions, contributing | [QUICKSTART.md](QUICKSTART.md), [FAQ.md](FAQ.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
+| First task, common questions, contributing | [QUICKSTART.md](docs/QUICKSTART.md), [FAQ.md](docs/FAQ.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | The session panel: keys, settings, layouts, per-runtime details | [docs/session-panel.md](docs/session-panel.md) |
-| How the parts fit together | [MANUAL.md](MANUAL.md) |
-| Installation and runtime projections | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
-| Releases and versioning | [RELEASE_POLICY.md](RELEASE_POLICY.md) |
+| How the parts fit together | [MANUAL.md](docs/MANUAL.md) |
+| Installation and runtime projections | [INSTALL_LAYOUT.md](docs/INSTALL_LAYOUT.md) |
+| Releases and versioning | [RELEASE_POLICY.md](docs/RELEASE_POLICY.md) |
 | Capabilities and roles | [capabilities/README.md](capabilities/README.md), [roles/README.md](roles/README.md), [roles/MODES.md](roles/MODES.md) |
 | Routing and artifacts | [core/WORKFLOW.md](core/WORKFLOW.md), [core/CONVENTIONS.md](core/CONVENTIONS.md) |
 | Git, worktrees, dispatch, Fleet, and peer requests | [core/OPERATIONS.md](core/OPERATIONS.md) |

@@ -971,7 +971,7 @@ def _linked_entries(
             (source_root / "adapters/claude/utilities", home / "utilities", "hook_config"),
             (source_root / "adapters/claude/scaffolds", home / "scaffolds", "hook_config"),
             (source_root / "adapters/claude/statusline.sh", home / "statusline.sh", "hook_config"),
-            # Owner-name-set union (INSTALL_LAYOUT.md "owner-name-set
+            # Owner-name-set union (docs/INSTALL_LAYOUT.md "owner-name-set
             # reconciliation"): `harness install claude` also projects these
             # three names (projector._CLAUDE_SYMLINK_NAMES). Once activation
             # exists it takes over the union so the same active_root/bundle
@@ -3373,7 +3373,7 @@ def _journal_dest_allowed(runtime: str, dest: Path, scope: str) -> bool:
         # owner-name-set `_linked_entries()` unions in). A journal recording a
         # union-only name such as README.md/manifest.json/loops must stay
         # recoverable after a crash, or a partial reprojection can never be
-        # repaired (INSTALL_LAYOUT.md "owner-name-set reconciliation").
+        # repaired (docs/INSTALL_LAYOUT.md "owner-name-set reconciliation").
         "claude": (
             {
                 "hearting", "CLAUDE.md", "core", "capabilities", "roles",
@@ -4280,7 +4280,7 @@ def _capture_replaced_installer_targets(
     previous: Optional[dict], desired: List[dict]
 ) -> dict:
     """Durable, write-once-per-dest record of what a dest pointed at before
-    activation first took it over (INSTALL_LAYOUT.md "owner-name-set
+    activation first took it over (docs/INSTALL_LAYOUT.md "owner-name-set
     reconciliation"). Must run before `_apply_transaction` mutates any dest.
 
     Carries every prior entry forward byte-for-byte -- a refresh or
@@ -4929,7 +4929,7 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
             # Restore the installer's exact prior target only when the link
             # activation put there is still exactly what activation put
             # there -- a user who repointed it after activation keeps their
-            # change untouched (INSTALL_LAYOUT.md owner-name-set
+            # change untouched (docs/INSTALL_LAYOUT.md owner-name-set
             # reconciliation, deactivate/uninstall restore condition).
             desired_entry = desired_by_dest.get(value)
             try:

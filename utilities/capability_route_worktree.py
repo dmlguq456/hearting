@@ -118,7 +118,7 @@ def stages_block(registry, recipe):
         origin,node=TOPO.part_recipe(registry,part_id)
         borrowable.append(part_view(part_id,node,origin,optional="optional" in TOPO.part_row(registry,part_id),
                                     local=False))
-    return {"capability":capability,"modes":list(recipe["modes"]),
+    return {"capability":capability,"modes":list(recipe["modes"]),"field":recipe.get("field"),
             "topology_class":recipe["topology_class"],"nodes":nodes,"borrowable":borrowable,
             "frame_brief_inputs":TOPO.frame_brief_inputs(registry,capability)}
 
