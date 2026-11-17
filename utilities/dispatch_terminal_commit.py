@@ -730,7 +730,7 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str,
             # the derived tuple must come from the node the row actually names --
             # assuming `one-shot` made every frame leg's termination fail as
             # `route-identity-unverified: quick-owner-tuple`.
-            named = next((n for n in route.get("nodes", []) if isinstance(n, dict)
+            named = next((n for n in route.get("nodes") or [] if isinstance(n, dict)
                           and n.get("id") == meta.get("route_node")), None)
             if (route.get("effective_intensity") != "quick"
                     or not (meta.get("worker_type") == "owner" or (

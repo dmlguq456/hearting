@@ -4,6 +4,7 @@ family: qa
 role: deep reviewer
 worker_type: review
 floor: moderate
+field: code
 read_only: true
 stance: _shared/stance.md
 io:

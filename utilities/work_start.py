@@ -179,7 +179,7 @@ def frame_task_text(route, prior_art=""):
     module = _route_module()
     registry = module.TOPO.load_registry()
     blocks = [module.stages_block(registry, recipe) for recipe in registry["recipes"]
-              if recipe["capability"] != module.ROUTE_FRAME_CAPABILITY]
+              if recipe["capability"] not in module.TOPO.COMPILER_INTERNAL_CAPABILITIES]
     request = route["work_request"]
     lines = [request["text"].rstrip(), "", "## Routing hints (suggestions, never orders)", ""]
     hints = request.get("routing_hints") or {}

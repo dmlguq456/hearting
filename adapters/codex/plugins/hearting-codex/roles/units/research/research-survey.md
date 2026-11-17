@@ -4,6 +4,7 @@ family: research
 role: deep maker
 worker_type: stage
 floor: high
+field: research
 read_only: false
 stance: none
 io:

@@ -1704,6 +1704,16 @@ class QuickWorkerTypeAxesTest(unittest.TestCase):
                 self.assertEqual((caught.exception.code, caught.exception.detail),
                                  ("route-identity-unverified", "quick-owner-axes"))
 
+    def test_a_record_with_a_null_node_list_is_a_typed_refusal_not_a_type_error(self):
+        """The quick axis reads the record's nodes before verification; a broken record (`"nodes": null`)
+        is refused in the typed form, never a TypeError out of the commit."""
+        attempt = self.registered_row("one-shot", "owner", "att-quick-null-nodes")
+        broken = json.loads(self.route_file.read_text(encoding="utf-8"))
+        broken["nodes"] = None
+        self.route_file.write_text(json.dumps(broken), encoding="utf-8")
+        with self.assertRaises(T.TerminalCommitError):
+            T.validate_owner_route(jobs=self.jobs, route_file=self.route_file, owner_attempt_id=attempt)
+
     def test_a_frame_row_naming_the_wrong_node_is_a_tuple_refusal(self):
         """The row's `route_node` is what the tuple is derived from, so a frame
         row whose sealed gate/scope belong to another node cannot pass."""

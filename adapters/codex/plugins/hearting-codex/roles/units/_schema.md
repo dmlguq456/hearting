@@ -39,6 +39,10 @@ worker_type: review           # owner | stage | review | support | frame → dis
                               # it in another, which is worse than not starting.
 floor: moderate               # near-zero | low | moderate | high | highest — persona-minimization
                               # floor; graded per UNIT (never per family, never per (role,kind))
+field: code                   # OPTIONAL default field (plan|design|code|lab|research|docs|admin|other):
+                              # written only where the field is clear (dev/* -> code, qa/ml-debug -> lab);
+                              # common or ambiguous units leave it out and `compose --unit` then needs --field.
+                              # The one home of this pairing (the `unit` route reads it).
 read_only: true               # the unit's NATURE; the concrete write_scope stays NODE-owned
 stance: _shared/stance.md     # ref, or `none` for non-review units
 io:

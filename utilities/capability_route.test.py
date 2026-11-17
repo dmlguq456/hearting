@@ -270,7 +270,7 @@ class TestRoute(unittest.TestCase):
    R.compile_route(**self.args(predicates=[],transport="interactive",inline_reason=None,registered_headless_evidence=self.registered_headless()))
  def test_every_recipe_mode_has_one_registered_headless_quick_owner(self):
   for recipe in R.TOPO.load_registry()["recipes"]:
-   if recipe["capability"]==R.ROUTE_FRAME_CAPABILITY:
+   if recipe["capability"] in R.TOPO.COMPILER_INTERNAL_CAPABILITIES:
     continue  # compiler-internal: reached only through `compose --shape framed`, never as a preset
    for mode in recipe["modes"]:
     with self.subTest(capability=recipe["capability"],mode=mode):
@@ -323,7 +323,7 @@ class TestRoute(unittest.TestCase):
   evidence=self.dispatch(self.nested())
   compiled=0
   for recipe in registry["recipes"]:
-   if recipe["capability"]==R.ROUTE_FRAME_CAPABILITY:
+   if recipe["capability"] in R.TOPO.COMPILER_INTERNAL_CAPABILITIES:
     continue  # compiler-internal: owner-less by design, covered by framed_route.test.py
    expected_owner_ids=[
     node["id"] for node in recipe["standard_plus"]["nodes"]
@@ -9944,7 +9944,7 @@ class FrameBootstrapLayerTest(unittest.TestCase):
   registry=R.TOPO.load_registry()
   framed=[]
   for recipe in registry["recipes"]:
-   if recipe["capability"]==R.ROUTE_FRAME_CAPABILITY:
+   if recipe["capability"] in R.TOPO.COMPILER_INTERNAL_CAPABILITIES:
     continue  # compiler-internal: no quick shape
    route=self.quick(capability=recipe["capability"],capability_mode=recipe["modes"][0])
    R.verify_route(route,R.ROOT)

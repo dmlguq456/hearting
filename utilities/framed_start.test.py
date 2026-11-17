@@ -1978,11 +1978,13 @@ class CatalogueInputTest(F.FramedBase):
         self.assertIn("- graph: plan,execute", text)
         block = text.split("```json\n", 1)[1].split("\n```", 1)[0]
         registry = R.TOPO.load_registry()
-        expected = [R.stages_block(registry, r) for r in registry["recipes"] if r["capability"] != "route-frame"]
+        expected = [R.stages_block(registry, r) for r in registry["recipes"]
+                    if r["capability"] not in R.TOPO.COMPILER_INTERNAL_CAPABILITIES]
         self.assertEqual(json.loads(block), json.loads(json.dumps(expected)))
         self.assertIn("autopilot-lab", block)
         self.assertIn('"start_approval":"full-run"', block)
         self.assertNotIn("route-frame", block)
+        self.assertNotIn('"capability":"unit"', block)
         self.assertIn("do not read another leg's brief", text)
         self.assertEqual(text, W.frame_task_text(route))
 

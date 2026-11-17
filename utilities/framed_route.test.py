@@ -525,8 +525,8 @@ class RegistryRegistrationTest(unittest.TestCase):
             "lab": "autopilot-lab", "research": "autopilot-research", "docs": "autopilot-draft",
             "admin": None, "other": None})
         for recipe in registry["recipes"]:
-            if recipe["capability"] == "route-frame":
-                self.assertNotIn("field", recipe)
+            if recipe["capability"] in ("route-frame", "unit"):
+                self.assertNotIn("field", recipe)   # the frame proposes it; a unit's comes from its head
                 continue
             field = recipe.pop("field")
             if isinstance(field, dict):
@@ -585,7 +585,8 @@ class RegistryRegistrationTest(unittest.TestCase):
     def test_the_internal_recipe_is_registered_with_the_smallest_surface(self):
         registry = self.registry()
         summary = CT.validate_registry(registry)
-        self.assertEqual((summary["capabilities"], summary["recipes"]), (13, 29))
+        # 13/29 before the `unit` recipe (route_unit.test.py).
+        self.assertEqual((summary["capabilities"], summary["recipes"]), (14, 30))
         self.assertIn(("route-frame", "default"), CT.recipe_keys(registry))
         manifest = json.loads((HERE.parent / "harness-manifest.json").read_text(encoding="utf-8"))
         row = manifest["capabilities"]["route-frame"]
@@ -649,7 +650,7 @@ class RegistryRegistrationTest(unittest.TestCase):
         self.assertFalse(any(n["completion_gate"] == "compose-owner-close"
                              for r in after["recipes"] for n in r["standard_plus"]["nodes"]))
         rest = {k: v for k, v in after["completion_gate_contracts"].items()
-                if k not in ("route-frame", "route-decision", "compose-owner-close")}
+                if k not in ("route-frame", "route-decision", "compose-owner-close", "unit-complete")}
         self.assertEqual(_frozen_digest(rest), FROZEN_GATE_CONTRACT_DIGEST)
 
     def test_other_capabilities_keep_their_registry_digest(self):
@@ -660,7 +661,7 @@ class RegistryRegistrationTest(unittest.TestCase):
                 self.assertEqual(recipe["promotion_signals"].count("gpu"), 1)
                 recipe["promotion_signals"].remove("gpu")
         self.assertEqual(
-            sorted({r["capability"] for r in registry["recipes"]} - {"route-frame"}),
+            sorted({r["capability"] for r in registry["recipes"]} - {"route-frame", "unit"}),
             sorted(FROZEN_CAPABILITY_REGISTRY_DIGESTS),
         )
         for capability, digest in FROZEN_CAPABILITY_REGISTRY_DIGESTS.items():

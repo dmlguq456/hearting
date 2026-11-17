@@ -37,7 +37,7 @@ from capability_route_nodes import (
     _expected_nodes_under_frame_policy, _frame_node, _frameless_recipe, _load_sd160_snapshots,
     _no_model_node, _one_leg_frame_recipe, _owner_node, _quick_frame_diversity,
     _quick_gate_bindings, _recipe_has_frame, _resolve_owner_profile, _verify_profile_contract,
-    SD160_REGISTRY_DIGEST, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
+    unit_leg_node, SD160_REGISTRY_DIGEST, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
 )
 
 from capability_route_compose import (
@@ -741,6 +741,33 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             or node.get("fallback_hops")
         ):
             raise ValueError("direct node axes mismatch")
+    elif effective=="quick" and route.get("capability")==TOPO.UNIT_CAPABILITY:
+        # A unit route is one depth-0 leg and no owner. The leg is rebuilt from the recipe template and
+        # the unit head it names, exactly as the compiler builds it; only the sealed profile choice,
+        # the harness policy and the model-grade fields are the route's own.
+        nodes=route.get("nodes") or []
+        if (
+            route.get("owner_dispatch_depth") != 1
+            or route.get("max_dispatch_depth") != 1
+            or selection.get("transport") != "headless"
+            or selection.get("inline_reason") is not None
+            or route.get("registered_headless_policy") != "serial-attempt"
+            or len(nodes) != 1
+        ):
+            raise ValueError("unit route shape mismatch")
+        candidates=_validate_registered_headless_evidence({
+            "candidates":route.get("registered_headless_candidates")
+        })
+        if candidates != route.get("registered_headless_candidates"):
+            raise ValueError("unit registered-headless evidence is not canonical")
+        leg=nodes[0]
+        expected=unit_leg_node(route_recipe, leg.get("unit"))
+        own=("model_profile","profile_demand","profile_selection","profile_explicit",
+             "harness_policy","harness_affinity","fallback_hops")
+        if ({k: v for k, v in leg.items() if k not in own}
+                != {k: v for k, v in expected.items() if k not in own}
+                or leg.get("fallback_hops") or not is_depth0_leg(leg)):
+            raise ValueError("unit node axes mismatch")
     elif effective=="quick":
         resume_recipe = RESOURCE_RESUME.route_selected(route)
         if (
