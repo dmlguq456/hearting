@@ -937,7 +937,8 @@ def _draw_route_now(grid, x, end, y, route, texts):
     agent_text = f" · +{agents} agent" if agents else ""
     lit = bool(getattr(grid, "beat", 1))
     stages = route.get("stages") or ()
-    lead = _stage_items(stages[:1], lit=lit)[0][0] if stages else [("●", "work" if lit else "g_work_off")]
+    # 11-17 (route row 5): the kind and its intensity lead (`code(quick) Bash …`); the row's own spinner is what moves.
+    lead = _kind_cell(route) or (_stage_items(stages[:1], lit=lit)[0][0] if stages else [("●", "work" if lit else "g_work_off")])
     room = end - x - sum(_seg_width(text) for text, _key in lead) - 1
     for text in texts:
         for extras in ((age, agent_text), (age, ""), ("", "")):
@@ -1207,6 +1208,44 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     grid.put(x1 - _seg_width(age), y, age, "dim")
 
 
+# 11-17 (route row 5): the kind word is the one bold word of a route's cell; a lit stage name keeps its hue at plain weight.
+_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
+
+
+def _kind_cell(route):
+    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets."""
+    kind = str(route.get("capability") or "").strip()
+    intensity = str(route.get("intensity") or "").strip()
+    if not kind:
+        return []
+    return [(kind, "grp")] + ([("(" + intensity + ")", "dim")] if intensity else [])
+
+
+def _blinking_stage(stages, at, lit):
+    """The stage's name and its done/failed mark; the one thing that blinks (its name, on the beat) carries no ``●``."""
+    parts = _stage_items(stages, lit=lit)[at][0]
+    return [(parts[0][0], _PLAIN_WEIGHT.get(parts[0][1], parts[0][1]))] + [part for part in parts[1:] if part[0] != " ●"]
+
+
+def _staged_cells(route, earlier, stages, at, lit):
+    """``frame ✓ → code(standard) · staged 3/6: execute``, widest first; short of cells the earlier legs go, then the
+    intensity, then the kind, then the word ``staged``, then the position; the stage stays."""
+    kind, bare = _kind_cell(route), _kind_cell({**route, "intensity": ""})
+    position = f"{at + 1}/{len(stages)}"
+    stage = _blinking_stage(stages, at, lit)
+
+    def build(chain, kind_cell, word):
+        out = (chain + [(" → ", "dim")]) if chain else []
+        out += kind_cell
+        if word:
+            out += ([(" · ", "dim")] if kind_cell else []) + [(word + ": ", "dim")]
+        return out + stage
+    word = "staged " + position
+    cells = [build(earlier, kind, word)] if earlier else []
+    return cells + [build([], kind, word), build([], bare, word), build([], [], word), build([], [], position),
+                    build([], [], "")]
+
+
 def _draw_route_progress(grid, x, end, y, route, card=True):
     if route.get("state") == "wait":
         # Not known: its stages are to come ("details wait"), or were tried and not read (·).
@@ -1222,10 +1261,21 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         # this route's mark; the first one may belong to a predecessor frame route.
         frame_leg = next((leg for leg in reversed(legs) if str(leg[0]) == "frame"), None)
         status = str(frame_leg[1]) if frame_leg else ""
-        mark, mark_key = {"done": ("✓", "done"), "active": ("●", "work"),
-                          "failed": ("✕", "lvl_r")}.get(status, ("·", "dim"))
-        cursor = grid.put(x, y, "frame", "title_dim", limit=end)
-        cursor = grid.put(cursor, y, " " + mark, mark_key, limit=end)
+        # 11-17 (route row 5): `frame → ??` until the direction is chosen (then the route continues as its next kind in the
+        # same place); the two legs are the stage name's own `(frame ✓)` detail. Done legs wait for the person's direction.
+        cursor = grid.put(x, y, "frame", "grp", limit=end)
+        # (A finished leg keeps its `✓`, a failed one its `✕`; a running one has none: the row's own spinner moves. Done legs
+        # that wait for the person's direction read `frame → ?? · waiting for direction`, the sketch's line.)
+        waiting = status == "done" and route.get("state") in ("idle", "blocked")
+        mark = {"done": (" ✓", "done"), "failed": (" ✕", "lvl_r")}.get(status)
+        if mark and not waiting:
+            cursor = grid.put(cursor, y, mark[0], mark[1], limit=end)
+        if status != "failed" and end - cursor >= 5:           # whole or not at all: never `frame →`
+            cursor = grid.put(cursor, y, " → ??", "dim", limit=end)
+        if waiting:
+            word = " · " + ui_text("fleet.session_panel.direction_wait")
+            if end - cursor >= _seg_width(word):
+                cursor = grid.put(cursor, y, word, "dim", limit=end)
         stages = tuple(route.get("stages") or ())
         if end - cursor > 55 and stages:
             stage_name = str(stages[-1].get("name") or "·")
@@ -1233,7 +1283,8 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
                           "failed": "✕"}.get(str(stages[-1].get("st") or ""), "·")
             cursor = grid.put(cursor, y, "  (" + stage_name + " " + stage_mark + ")", "dim",
                               limit=end)
-        cursor = grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
+        if end - cursor >= len("  ∥ frame 2-way"):             # whole or not at all
+            cursor = grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
         if card:
             _put_route_card(grid, cursor, end, y, route)
         return
@@ -1255,42 +1306,38 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
     lead = items[:-1] if duplicate else items
     after = []
     if current < len(legs) - 1:
-        after.append((f" › +{len(legs) - current - 1}", "dim"))
+        after.append((f" → +{len(legs) - current - 1}", "dim"))
     if route.get("resume"):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
-    # Spec E9 rule 24: a route that runs a worker per stage reads `staged 3/7 execute ●`
-    # (short of cells `3/7 execute ●`), the shell panel's third row; earlier legs stay in
-    # front of it. A one-step route's own word (`one-shot`) is its stage rail already.
-    staged_parts = None
-    if str(route.get("shape") or "").startswith("staged") and len(stages) > 1:
-        at_stage = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
-                        next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
-        staged_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at_stage][0]
-    # Only where the stage keeps its whole name and mark; else the rail as before.
-    if staged_parts is not None and end - x - (sum(_seg_width(t) for t, _k in _fold_items(items[:-1], max(8, (end - x) // 3))) + 3 if not same and items[:-1] else 0) >= sum(_seg_width(t) for t, _k in staged_parts):
-        at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
-                  next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
-        stage_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at][0]
-        cursor = x
-        earlier = items[:-1] if not same else []
-        if earlier:
-            cursor = _put_segments(grid, cursor, y, _fold_items(earlier, max(8, (end - x) // 3)), end)
-            cursor = grid.put(cursor, y, " › ", "dim", limit=end)
-        need = sum(_seg_width(text) for text, _key in stage_parts)
-        position = f"{at + 1}/{len(stages)}"
-        # Short of cells the word goes, then the position; the stage and its mark stay.
-        room = end - cursor
-        word = ("staged " + position if room >= need + len(position) + 8
-                else position if room >= need + len(position) + 1 else "")
-        if word:
-            cursor = grid.put(cursor, y, word + " ", "dim", limit=end)
-        cursor = _put_segments(grid, cursor, y, stage_parts, end)
+    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(quick)`, after the chain it continues; the
+    # row's own mark (the spinner in front) is what moves.
+    if (str(route.get("shape") or "") == "one-shot-owner" and len(stages) <= 1 and not route.get("resume")
+            and _kind_cell(route)):
+        earlier = _fold_items(items[:-1], max(8, (end - x) // 3), sep=" → ") if items[:-1] else []
+        cells = (earlier + [(" → ", "dim")] if earlier else []) + _kind_cell(route)
+        if sum(_seg_width(text) for text, _key in cells) > end - x:
+            cells = _kind_cell(route)
+        cursor = _put_segments(grid, x, y, cells, end)
         cursor = _put_segments(grid, cursor, y, after, end)
         if card:
             _put_route_card(grid, cursor, end, y, route)
         return
+    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(standard) · staged 3/7: execute`
+    # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
+    # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
+    if str(route.get("shape") or "").startswith("staged") and len(stages) > 1:
+        at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
+                  next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
+        earlier = _fold_items(items[:-1], max(8, (end - x) // 3), sep=" → ") if not same and items[:-1] else []
+        for cells in _staged_cells(route, earlier, stages, at, bool(getattr(grid, "beat", 1))):
+            if sum(_seg_width(text) for text, _key in cells) <= end - x:
+                cursor = _put_segments(grid, x, y, cells, end)
+                cursor = _put_segments(grid, cursor, y, after, end)
+                if card:
+                    _put_route_card(grid, cursor, end, y, route)
+                return
     stage_index = next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1)
     current_stage = str(stages[stage_index].get("name", "·")) if stages else str(name)
     after_width = sum(_seg_width(text) for text, _key in after)
@@ -1379,15 +1426,15 @@ def _stage_items(stages, lit=True):
     return result
 
 
-def _fold_items(items, room):
+def _fold_items(items, room, sep=" › "):
     def build(low, high):
         out = [(f"+{low}✓ ", "dim")] if low else []
         for index, (parts, _status) in enumerate(items[low:len(items) - high]):
             if index:
-                out.append((" › ", "dim"))
+                out.append((sep, "dim"))
             out.extend(parts)
         if high:
-            out.append((f" › +{high}", "dim"))
+            out.append((sep + f"+{high}", "dim"))
         return out
     low = high = 0
     while sum(_seg_width(text) for text, _key in build(low, high)) > room:
