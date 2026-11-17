@@ -11,9 +11,11 @@
 
 ``unit-route-blocking``
     The same, but the worker's review finds a blocking issue and ends ``verdict: FAIL`` (the most
-    common end of a PR review). Its work is finished: the resting session is woken with the same
-    summary (its result line says the review completed with findings), and ``start --route`` reports
-    the verdict instead of offering the same review again.
+    common end of a PR review). The runtime reads that end as finished work: the row is a success
+    whose terminal reading carries the negative assessment, the route closes like a pass's, the
+    resting session is woken with the same sealed summary (its result line says the review completed
+    with findings), no further follow-up reaches it afterwards (watched on every harness), the
+    supervisor reads the route as closed and ``start --route`` reports it completed.
 
 The oracle reads what the three harnesses share: the registry row (one depth-1 attempt, the
 unit's worker type, ``workflow_completion=runtime-v1``), the closed route, and the request the
@@ -71,6 +73,7 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
     needs_tui = True
     WAIT = 240
     blocking = False   # the worker ends FAIL with its blocking findings instead of PASS
+    QUIET = 45         # seconds the woken session is watched for a further follow-up (blocking scenario)
 
     def side_script(self, run):
         return None
@@ -100,7 +103,8 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                 return self.final_reply(target)
             if record["last_kind"] == "tool":
                 return Reply("The unit route runs; I will continue when its result arrives.")
-            if BLOCKER in text and not any(NEXT in str(r["reply"].get("shell") or "") for r in earlier):
+            if (not self.blocking and BLOCKER in text
+                    and not any(NEXT in str(r["reply"].get("shell") or "") for r in earlier)):
                 return Reply(shell=f"echo {NEXT}-$((20+22))")
             if START in last and not any(r["reply"].get("shell") for r in earlier):
                 return Reply(shell=" ".join([
@@ -169,7 +173,29 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
         return {"state": receipt.get("state"), "reason": receipt.get("reason"),
                 "required_action": receipt.get("required_action"), "next_step": receipt.get("next_step"),
                 "has_summary": bool(receipt.get("summary")), "mentions_compose_again": "compose-again" in text,
-                "exit": done.returncode}
+                "exit": done.returncode, "output": text[:1800]}
+
+    def supervisor_status(self, run, route):
+        """`workflow-supervisor status` for the route, as a watcher would read it."""
+        done = subprocess.run([sys.executable, str(_base().SOURCE / "utilities" / "workflow-supervisor.py"), "status",
+                               "--route", route["route_id"], "--jobs", str(self.jobs), "--json"],
+                              env=dict(run.home.env), cwd=str(run.home.workspace), text=True, capture_output=True,
+                              timeout=120)
+        try:
+            view = json.loads(done.stdout)
+        except ValueError:
+            return {"exit": done.returncode}
+        return {"exit": done.returncode, "workflow_state": view.get("workflow_state"),
+                "next_stage": view.get("next_stage"), "route_closed": view.get("route_closed"),
+                "terminal_gate": view.get("terminal_gate")}
+
+    def terminal_reading(self, run, row, route):
+        """What the runtime reads from the leg's own exact end: the verdict it acts on and the negative assessment."""
+        import codex_dispatch_terminal as terminal
+        view = terminal.inspect_terminal_attempt(
+            row.get("log_file"), worktree=route.get("cwd"), artifact_root_metadata=route.get("artifact_root"),
+            worker_type=row.get("worker_type"), artifact_binding=row)
+        return {key: view.get(key) for key in ("state", "verdict", "assessment_verdict", "failure_class", "failure_note")}
 
     def drive(self, run):
         ev = run.evidence
@@ -214,6 +240,7 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                                                   "failure_class") } if rows else None
         ev["route_nodes"] = [(n.get("id"), n.get("unit"), n.get("launch_authority")) for n in route.get("nodes", [])]
         ev["route_closed"] = bool(outcome and outcome.exists())
+        ev["route_outcome"] = outcome.read_text(encoding="utf-8")[:600] if ev["route_closed"] else None
         ev["worker_done"] = bool(done)
         # The summary reached the session either as a wake after it rested, or (when the worker ended before the
         # start command returned) inside the start result; both are the delivery. Which one is evidence.
@@ -226,36 +253,47 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
             ev["wake_request_tail"] = first["last_text"][-1800:]
             ev["summary_in_wake"] = {name: name in first["text"] for name in
                                      (BLOCKER, "issues", "report.md", "route rt-")}
-            ran = any(f"{NEXT}-42" in r["text"] for r in requests[requests.index(first):])
-            ev["next_action_ran"] = ran
+            ev["next_action_ran"] = any(f"{NEXT}-42" in r["text"] for r in requests[requests.index(first):])
         ok = (rows and len(rows) == 1 and rows[-1].get("worker_type") == "review"
               and rows[-1].get("workflow_completion") == "runtime-v1" and carriers
               and ev["summary_in_wake"]["report.md"] and ev["summary_in_wake"][BLOCKER])
         if self.blocking:
             tail = first["last_text"] if carriers else ""
-            ev["blocking_row_note"] = rows[-1].get("note") if rows else None
+            ev["row_note"] = rows[-1].get("note") if rows else None
+            ev["terminal_reading"] = self.terminal_reading(run, rows[-1], route) if rows and route else {}
             ev["result_line"] = next((line for line in tail.splitlines() if line.startswith("Result:")), "")
             ev["wake_has_dead_or_frame_words"] = [w for w in ("current frame results", "a failed frame", "compose-again",
-                                                              "start --route") if w in tail]
+                                                              "inspect-done-failure") if w in tail]
+            # The end is finished work, so nothing more is owed afterwards: the woken session answers in text
+            # and its turn ends, so any later request of it is a follow-up the runtime pushed (watched for a while).
+            wait_for(lambda: False, self.QUIET, 1)
+            ev["followups_after_wake"] = [r["last_text"][:200] for r in resting_session_requests(run)
+                                          if first and r["at"] > first["at"]]
             ev["start_route_after"] = self.start_route_again(run, route) if route else {}
-            ok = (ok and ev["blocking_row_note"] == "completed-review-blocking"
+            ev["supervisor_status"] = self.supervisor_status(run, route) if route else {}
+            reading = ev["terminal_reading"]
+            ok = (ok and ev["route_closed"] and ev["row"]["failure_class"] == "pass"
+                  and ev["row_note"] != "completed-review-blocking"
+                  and (reading.get("verdict"), reading.get("assessment_verdict")) == ("PASS", "FAIL")
                   and "completed with findings" in ev["result_line"] and not ev["wake_has_dead_or_frame_words"]
-                  and ev["start_route_after"].get("reason") == "unit-review-blocking"
-                  and ev["start_route_after"].get("has_summary")
-                  and not ev["start_route_after"].get("mentions_compose_again"))
+                  and not ev["followups_after_wake"]
+                  and ev["start_route_after"].get("state") == "completed"
+                  and not ev["start_route_after"].get("mentions_compose_again")
+                  and ev["supervisor_status"].get("workflow_state") not in (None, "CREATED")
+                  and not ev["supervisor_status"].get("next_stage"))
         else:
             ok = ok and ev["route_closed"]
         run.note(f"unit rows={len(rows)}; closed={ev['route_closed']}; delivered_by={ev['delivered_by']}"
                  + (f" after {ev['wake_seconds']}s" if woke else ""))
         if not rows or not done:
             return "inconclusive"
-        return "pass" if ok and ev.get("next_action_ran") else "fail"
+        return "pass" if ok and (ev.get("next_action_ran") or self.blocking) else "fail"
 
 
 class UnitRouteBlockingScenario(UnitRouteScenario):
     name = "unit-route-blocking"
-    summary = ("A unit route whose review finds a blocking issue and ends FAIL: the end is finished work; the "
-               "resting session gets the same summary, and `start --route` reports it instead of re-running it.")
+    summary = ("A unit route whose review finds a blocking issue and ends FAIL: the end is finished work like a "
+               "pass's: the route closes, the resting session gets the sealed summary and no follow-up after it.")
     blocking = True
 
 

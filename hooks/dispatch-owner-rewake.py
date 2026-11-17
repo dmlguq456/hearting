@@ -1278,20 +1278,6 @@ def _sealed_summary(row, attempt_id: str) -> str:
     return work_intent.sealed_summary(row.metadata, attempt_id)
 
 
-def _blocked_review_summary(row, launch: Launch) -> str:
-    """The summary of a unit leg's finished review that ended FAIL; "" for any other end."""
-    if row is None:
-        return ""
-    try:
-        import work_intent
-        from dispatch_contract import finishes_route
-        if not finishes_route(row.metadata) or row.metadata.get("worker_type") == "owner":
-            return ""
-        return work_intent.blocked_review_summary(row.metadata, launch.jobs)
-    except ImportError:
-        return ""
-
-
 def classified_receipt(
     launch: Launch, state: str, reason: str, root: Path
 ) -> tuple[str, str]:
@@ -1376,11 +1362,6 @@ def classified_receipt(
             from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
             summary = _sealed_summary(row, launch.attempt_id)
             instruction = RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)] + ("\n" + summary if summary else "")
-        elif required_action == "inspect-done-failure" and (finished := _blocked_review_summary(row, launch)):
-            # A unit leg's review that ended FAIL with its report is finished work: the same close line
-            # and summary as a pass, whose result line says the review completed with findings.
-            from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
-            instruction = RUNTIME_V1_FOLLOWUP_PREFIXES[True] + "\n" + finished
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate

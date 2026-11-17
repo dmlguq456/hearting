@@ -575,6 +575,15 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
                 row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
             if row.get("reconcile_reason") == "completed-audit-with-findings":
                 assessment = "FAIL"
+            elif row.get("worker_type") != "owner":
+                # A unit route's leg: its FAIL handoff with a readable report reads as PASS plus this
+                # assessment (the same reading as an audit's), left in the exact log and the row.
+                from codex_dispatch_terminal import inspect_terminal_attempt
+                view = inspect_terminal_attempt(row.get("log_file"), worktree=route["cwd"],
+                    artifact_root_metadata=route.get("artifact_root"), worker_type=row.get("worker_type"),
+                    artifact_binding=row)
+                if view.get("assessment_verdict") == "FAIL":
+                    assessment = "FAIL"
         except Exception:  # noqa: BLE001 -- an unreadable row only leaves the assessment unnamed
             assessment = None
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,

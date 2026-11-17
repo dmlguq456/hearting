@@ -1035,6 +1035,7 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
         worker_type == REVIEW_WORKER_TYPE
         and parsed.get("artifact_state") == "readable"
         and parsed.get("artifact_shape") == "file"
+        and "assessment_verdict" not in parsed   # a finished review's negative judgment is no PASS envelope
     ):
         declared = artifact_declared_verdict(artifact_path)
         parsed["review_artifact_verdict"] = declared
@@ -1065,20 +1066,24 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
 
 
 def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None):
-    """A negative subject judgment is not a failed audit execution.
+    """A negative subject judgment is not a failed execution of the review.
 
-    Only an exact registered audit owner with a completed negative review report
-    qualifies. Native success or a readable file alone cannot prove that review
-    work happened. Stage reviews and ordinary code work do not qualify.
+    Two registered depth-1 ends qualify, each only with a completed FAIL handoff naming a readable
+    report file: an exact audit owner, and the one leg that finishes a unit route (its review ends
+    FAIL when it found blocking issues, the most common end of a PR review). Native success or a
+    readable file alone cannot prove that review work happened. Stage reviews, a frame leg and
+    ordinary code work do not qualify.
     """
-    if (worker_type != "owner" or not isinstance(binding, Mapping)
-            or binding.get("worker_type") != "owner" or binding.get("dispatch_depth") != "1"
+    if (not isinstance(binding, Mapping) or binding.get("worker_type") != worker_type
+            or worker_type not in {"owner", REVIEW_WORKER_TYPE} or binding.get("dispatch_depth") != "1"
             or binding.get("workflow_completion") != "runtime-v1"
             or str(binding.get("note", "")).startswith("dead-")
             or parsed.get("state") != "valid" or parsed.get("verdict") != "FAIL"
             or parsed.get("artifact_state") != "readable"
             or parsed.get("artifact_shape") != "file"):
         return False
+    if worker_type == REVIEW_WORKER_TYPE:
+        return _is_unit_route_leg(binding)
     if parsed.get("disposition"):
         # The owner wrote a closed review disposition (e.g. `수정 후 병합`) as its verdict:
         # a finished review of any capability only when its report opens on a closed
@@ -1086,15 +1091,33 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
         return (pass_blocker_note(parsed.get("blocker")) is not None
                 and closed_review_kind(artifact_path) in {"fix", "hold"})
     try:
-        import route_identity
-        path = binding.get("owner_route_file") or binding.get("route_file")
-        route = json.loads(Path(path).read_text())
-        digest = binding.get("owner_route_hash") or binding.get("route_hash")
-        rid = binding.get("owner_route_id") or binding.get("route_id")
+        route, rid = _sealed_route(binding)
         return (route.get("capability") == "audit" and route.get("route_id") == rid
-                and bool(digest) and route.get("route_hash") == digest
-                and route_identity.route_hash(route) == digest
                 and _completed_negative_audit_report(artifact_path))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _sealed_route(binding):
+    """The binding's sealed route record and its id, or ValueError when the file is not that exact route."""
+    import route_identity
+    path = binding.get("owner_route_file") or binding.get("route_file")
+    route = json.loads(Path(path).read_text())
+    digest = binding.get("owner_route_hash") or binding.get("route_hash")
+    rid = binding.get("owner_route_id") or binding.get("route_id")
+    if not (digest and route.get("route_hash") == digest and route_identity.route_hash(route) == digest):
+        raise ValueError("route-not-sealed")
+    return route, rid
+
+
+def _is_unit_route_leg(binding) -> bool:
+    """Whether the registered row is the one leg that finishes a unit route, read from the sealed route."""
+    try:
+        route, rid = _sealed_route(binding)
+        from route_plan import is_depth0_leg
+        leg = next((n for n in route.get("nodes") or [] if isinstance(n, dict) and n.get("id") == binding.get("route_node")), None)
+        return bool(route.get("capability") == "unit" and route.get("route_id") == rid
+                    and is_depth0_leg(leg) and leg.get("terminal") is True)
     except (OSError, ValueError, TypeError):
         return False
 
@@ -1266,7 +1289,7 @@ def carrier_terminal_note(
     if not compat:
         return None, {}
     extra: dict[str, str] = {}
-    if compat.get("failure_note") == "dead-worker-fail" and worker_type == "owner":
+    if compat.get("failure_note") == "dead-worker-fail" and worker_type in {"owner", REVIEW_WORKER_TYPE}:
         view = inspect_terminal_attempt(path, worktree=worktree,
             artifact_root_metadata=artifact_root_metadata, worker_type=worker_type,
             artifact_binding=artifact_binding)
@@ -1274,15 +1297,7 @@ def carrier_terminal_note(
             compat = {**compat, "verdict": "PASS", "blocker": "none", "failure_note": "",
                       "failure_class": "pass"}
             extra["reconcile_reason"] = "completed-audit-with-findings"
-    if compat.get("failure_note") == "dead-worker-fail" and worker_type == REVIEW_WORKER_TYPE:
-        view = inspect_terminal_attempt(
-            path,
-            worktree=worktree,
-            artifact_root_metadata=artifact_root_metadata,
-            worker_type=REVIEW_WORKER_TYPE,
-            artifact_binding=artifact_binding,
-        )
-        if review_blocking_handoff(view, REVIEW_WORKER_TYPE):
+        elif worker_type == REVIEW_WORKER_TYPE and review_blocking_handoff(view, REVIEW_WORKER_TYPE):
             compat = {**compat, "failure_note": REVIEW_BLOCKING_NOTE}
             encoded = str(view.get("artifact_path_b64") or "")
             if encoded:

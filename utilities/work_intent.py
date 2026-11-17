@@ -618,12 +618,36 @@ _SECTION_FIELDS = (
                          "change overview", "changes", "what changed")),
 )
 # A review's blocking-findings headings. Only these get the two readings below: a heading that
-# itself says "none" or "already fixed" opens no section, and a line in one that starts with a
-# none marker is none (the section's own words, so no other heading's lines change).
+# itself says there is nothing opens no section, and a line in one that says "none" is none (the
+# section's own words, so no other heading's lines change). When in doubt a finding stays open:
+# calling an existing blocker absent is worse than listing one that is not.
 _BLOCKING_WORDS = ("막는 지적", "막는 것", "막는 문제", "병합을 막는", "blocking", "blockers")
-_NO_BLOCKING_HEADING = re.compile(r"(?:없음|없다|없습니다)\s*$|^(?:no|none|zero|without)\b"
-                                  r"|고쳤|고침|수정했|수정함|해결했|해결함|해결됨|해결 완료"
-                                  r"|\b(?:fixed|resolved|addressed|corrected|closed)\b", re.I)
+_NO_BLOCKING_HEADING = re.compile(r"(?:없음|없다|없습니다)\s*[.。]?\s*$|^(?:no|zero)\b"
+                                  r"|[:：]\s*(?:none|없음)\s*[.。]?\s*$", re.I)
+_NONE_MARKER = re.compile(r"(?:없음|해당 없음|없습니다|none|n/a|not applicable)", re.I)
+_CONTRAST = re.compile(r"\b(?:but|however|yet|although|except)\b|다만|그러나|하지만|그렇지만|그런데", re.I)
+_PAREN_NOTE = re.compile(r"[(（][^.,，。;；()（）]*[)）]")
+
+
+def _says_none(text: str) -> bool:
+    """A blocking-section line that only says there is nothing: the none marker alone, or followed by a
+    plain parenthetical note, or (Korean marker) by one closing sentence. A word, hyphen, colon, comma or
+    dash right after the marker ("None of the callers…", "None-check is missing…", "N/A values crash…") is
+    a finding, and so is anything that turns with "but"/"however"/"다만" after the marker."""
+    text = text.strip()
+    marker = _NONE_MARKER.match(text)
+    if not marker:
+        return False
+    rest = text[marker.end():].strip()
+    if _CONTRAST.search(rest):
+        return False
+    if not rest or _PAREN_NOTE.fullmatch(rest):
+        return True
+    if rest[0] in ".。":
+        after = rest[1:].strip()
+        korean = marker.group(0)[0] in "없해"
+        return not after or (korean and not re.search(r"[.。]\s*\S", after))
+    return False
 
 
 def _blocking_heading(title: str) -> str | None:
@@ -743,7 +767,7 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             current = _section_field(label, numbered=numbered)
             blocking = current == "remaining" and bool(_blocking_heading(label))
             value = bold["value"].strip()
-            if current and value and not (blocking and _NONE_LEAD.match(value)):
+            if current and value and not (blocking and _says_none(value)):
                 sections.setdefault(current, []).append(value)
             continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
@@ -758,13 +782,13 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             field = _section_field(label, numbered=numbered) if label else None
             if field:
                 value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
-                if value and not (field == "remaining" and _blocking_heading(label) and _NONE_LEAD.match(value)):
+                if value and not (field == "remaining" and _blocking_heading(label) and _says_none(value)):
                     sections.setdefault(field, []).append(value)
                 current = None
                 continue
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
                 and not any(marker in line for marker in _CARRIER_MARKERS)
-                and not (blocking and _NONE_LEAD.match(line.strip("|").strip()))):
+                and not (blocking and _says_none(line.strip("|").strip()))):
             # A verification section can explicitly say a check was not run.
             # Preserve that declaration as unverified; never call it a pass.
             field = "remaining" if current == "verified" and _UNRUN_CHECK.search(line) else current
@@ -990,6 +1014,7 @@ def _review_degraded(route_file) -> list[str]:
 
 
 _NONE_ITEMS = {"없음", "해당 없음", "없습니다", "none", "n/a", "not applicable"}
+_NONE_WORD_LEAD = re.compile(r"(?:none|n/a|not applicable)[ -]\S", re.I)
 _NONE_LEAD = re.compile(r"^(?:없음|해당 없음|없습니다|none|n/a|not applicable)(?=$|[\s.:：,;()（）—–-])", re.I)
 # What a failed/skipped, unverified or remaining-work line says went wrong or was not done.
 _FAILURE_TEXT = re.compile(
@@ -1048,8 +1073,8 @@ def _failure_kind(line, *, verified=False) -> str | None:
     if not _FAILURE_TEXT.search(rest):
         if rest != text and not re.search(r"[\w가-힣]", rest):
             return None  # "실패한 단계 없음 (errors: 0)": only a statement that nothing failed
-        if _NONE_LEAD.match(text):
-            return None  # "없음 — 모든 단계 수행"
+        if _NONE_LEAD.match(text) and not _NONE_WORD_LEAD.match(text) and not _CONTRAST.search(text):
+            return None  # "없음 — 모든 단계 수행"; "None of the callers…" is a statement, not a none marker
         return "check"
     if _UNSURE_FAILURE.search(rest) and not _STILL_FAILING.search(rest):
         return "check"
@@ -1189,11 +1214,7 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     sections = report_sections(text, numbered=code_report)
     result = _result_line(route, t, sections.get("remaining") or [], limits=sections.get("limits") or [],
                           follow_up=sections.get("follow_up") or [], verified=sections.get("verified") or [])
-    if assessment == "blocking":
-        # A finished review whose verdict is its blocking findings: the work is done, the subject is
-        # not cleared. The findings are listed below; they are not a failure of the work itself.
-        result = t("completion.result_audit_findings")
-    elif assessment == "FAIL":
+    if assessment == "FAIL":
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
     lines.append(t("completion.result", result=result))
@@ -1258,42 +1279,9 @@ def sealed_summary(metadata, attempt_id: str) -> str:
         text = path.read_text(encoding="utf-8").strip()
     except Exception:  # noqa: BLE001 -- a missing summary leaves the existing delivery text as it was
         return ""
-    return text if _carriable(text) else ""
-
-
-def _carriable(text: str) -> bool:
-    return text.startswith(summary_heads()) and "\n\n" not in text and not any(m in text for m in _CARRIER_MARKERS)
-
-
-def blocked_review_summary(metadata, jobs) -> str:
-    """The summary for a finished review that ended FAIL (blocking findings) with a readable report.
-
-    Such an end is finished work, not a dead worker: its route is not closed (the close transaction
-    settles a PASS), so nothing is sealed; the same summary lines are read from the report now.
-    Empty when the row is not that end or the report cannot be read."""
-    try:
-        from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
-        if metadata.get("note") != REVIEW_BLOCKING_NOTE:
-            return ""
-        route_file = Path(metadata.get("owner_route_file") or metadata.get("route_file"))
-        route = json.loads(route_file.read_text(encoding="utf-8"))
-        from codex_dispatch_terminal import inspect_terminal_attempt
-        terminal = inspect_terminal_attempt(
-            metadata.get("log_file"), worktree=route["cwd"], artifact_root_metadata=route.get("artifact_root"),
-            worker_type=metadata.get("worker_type"), artifact_binding=metadata)
-        encoded = terminal.get("artifact_path_b64")
-        if (terminal.get("state") != "valid" or terminal.get("verdict") != "FAIL"
-                or terminal.get("artifact_state") != "readable" or not encoded):
-            return ""
-        import base64
-        primary = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
-        from dispatch_terminal_commit import TerminalCommitRequest, _completion_cost
-        request = TerminalCommitRequest(route_file, metadata["attempt_id"], Path(jobs), Path(route["artifact_root"]))
-        text = completion_summary(route, primary, route_file=route_file, cost=_completion_cost(request, route),
-                                  assessment="blocking").strip()
-    except Exception:  # noqa: BLE001 -- no summary leaves the notice as it was
+    if not text.startswith(summary_heads()) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
         return ""
-    return text if _carriable(text) else ""
+    return text
 
 
 # ---------------------------------------------------------------------------

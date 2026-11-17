@@ -2889,26 +2889,12 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
         outcome = _outcome(jobs, aid)
         if outcome["classification"] == "success":
             return {**result, "state": "completed", "result": outcome}
-        status, metadata = _rows(jobs).get(aid, rows[aid])
-        import work_intent
-        from dispatch_attempt_policy import committed_outcome
-        summary = work_intent.blocked_review_summary(metadata, jobs) if committed_outcome(status, metadata) == "review-blocked" else ""
-        if summary:
-            # The review finished and its verdict is its blocking findings: report them; running it again
-            # would only repeat the same review of the same code.
-            for waiting in ("parent_next", "parent_next_command"):
-                result.pop(waiting, None)    # it has ended: nothing to wait for
-            return {**result, "state": "completed", "reason": "unit-review-blocking", "result": outcome,
-                    "summary": summary,
-                    "next_step": "The unit worker finished its review and found blocking issues. Report the verdict "
-                        "and the blocking findings from the summary and its report. Do not run the same review again; "
-                        "a fix and a new review are a new request."}
-        # A leg that died without a readable report: the same work goes out again as a new unit route.
+        # The one leg ended without a pass: the same work goes out again as a new unit route.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
                 "result": outcome, "required_action": "compose-again", "parent_next": "compose",
                 "parent_next_command": command,
-                "next_step": "The unit worker ended without a readable report. Read its result and report; to run the "
+                "next_step": "The unit worker ended without a pass. Read its result and report; to run the "
                     "same unit again, run parent_next_command (a new route; this one stays as it ended)."}
     if wait:
         return _wait_expired(result)

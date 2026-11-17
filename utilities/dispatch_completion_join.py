@@ -1388,16 +1388,6 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                         if summary and summary not in summaries:
                             summaries.append(summary)
                     continue  # Already sealed; successful work has no extra command obligation.
-                if (finishes_route(meta) and meta.get("worker_type") != "owner"
-                        and child["required_action"] == "inspect-done-failure"):
-                    # A review that ended FAIL with its report is finished work: its summary goes out like a pass's.
-                    import work_intent
-                    summary = work_intent.blocked_review_summary(meta, jobs)
-                    if summary:
-                        completed_work.add(child["attempt_id"])
-                        if summary not in summaries:
-                            summaries.append(summary)
-                        continue
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
                 if (not route.get("work_request") or route.get("route_hash") != route_hash(route)

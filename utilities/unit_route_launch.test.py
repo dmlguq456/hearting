@@ -37,6 +37,7 @@ T, R, L = F.T, F.R, F.L
 import dispatch_contract as DC  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 import dispatch_terminal_commit as DTC  # noqa: E402
+import codex_dispatch_terminal as TERMINAL  # noqa: E402
 import owner_route_binding as BINDING  # noqa: E402
 import work_intent  # noqa: E402
 import work_start as W  # noqa: E402
@@ -213,7 +214,8 @@ class UnitTupleTest(UnitLegBase):
 
 
 class BlockingReviewEndTest(UnitLegBase):
-    """A review that ended FAIL with its report is finished work (the most common end of a PR review)."""
+    """A review that ended FAIL with its report is finished work (the most common end of a PR review):
+    the runtime reads it as a pass whose judgment on the subject is negative, as it does for an audit."""
     REPORT = ("# Review\n\nFinal verdict: issues\n\n## Blocking findings\n\n- HB-BLOCKER: empty list ignored\n\n"
               "## Verification\n\n- Read the diff\n")
 
@@ -224,66 +226,90 @@ class BlockingReviewEndTest(UnitLegBase):
         self.attempt = W.attempt_id(self.route, "unit")
         self.report = Path(self.root) / "report.md"
         self.report.write_text(self.REPORT)
-        encoded = base64.urlsafe_b64encode(str(self.report).encode()).decode().rstrip("=")
-        terminal = {"state": "valid", "verdict": "FAIL", "artifact_state": "readable", "artifact_path_b64": encoded}
-        patch = mock.patch("codex_dispatch_terminal.inspect_terminal_attempt", return_value=terminal)
-        patch.start()
-        self.addCleanup(patch.stop)
+        self.worktree = Path(self.route["cwd"])
 
-    def row(self, **extra):
-        return self.leg_row(self.route, self.path, status="done", note="completed-review-blocking",
-                            log_file=str(self.report), **extra)
+    def log(self, verdict="FAIL", blocker="HB-BLOCKER empty list ignored", artifact=None):
+        text = f"artifact: {artifact or self.report}\nverdict: {verdict}\nblocker: {blocker}"
+        log = Path(self.root) / "leg.jsonl"
+        log.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text}) + "\n")
+        return log
 
-    def test_the_summary_says_the_review_completed_with_findings_not_that_the_work_died(self):
+    def binding(self, **extra):
+        meta = DC.parse_registry_metadata(self.leg_row(self.route, self.path, status="done",
+                                                        log_file=str(self.log()), **extra).split("\t")[5].strip())
+        return meta
+
+    def terminal(self, binding=None, **log):
+        binding = binding or self.binding()
+        return TERMINAL.inspect_terminal_attempt(
+            self.log(**log), worktree=self.worktree, artifact_root_metadata=self.route["artifact_root"],
+            worker_type=binding["worker_type"], artifact_binding=binding)
+
+    def test_the_end_leg_with_a_report_reads_as_a_pass_with_a_negative_assessment(self):
+        view = self.terminal()
+        self.assertEqual((view["verdict"], view["assessment_verdict"], view["failure_class"]), ("PASS", "FAIL", "pass"))
+        self.assertEqual((view["failure_note"], view["blocker_reason"]), ("", "none"))
+        self.assertNotIn("review_verdict_conflict", view)      # the envelope said FAIL: no PASS contradicts its report
+        carrier, extra = TERMINAL.carrier_terminal_note(
+            self.log(), worktree=self.worktree, artifact_root_metadata=self.route["artifact_root"],
+            worker_type="review", artifact_binding=self.binding())
+        self.assertEqual((carrier["verdict"], extra["reconcile_reason"]), ("PASS", "completed-audit-with-findings"))
+
+    def test_every_other_end_keeps_the_reading_it_had(self):
+        cases = {
+            "a staged review worker (no leg seal)": ({"workflow_completion": ""}, {}),
+            "a depth-2 review": ({"dispatch_depth": "2"}, {}),
+            "a frame leg": ({"worker_type": "frame"}, {}),
+            "a dead leg": ({"note": "dead-worker-fail"}, {}),
+            "the leg did not work (BLOCKED)": ({}, {"verdict": "BLOCKED", "blocker": "cannot read the diff"}),
+            "no report named": ({}, {"artifact": "-"}),
+            "a report that is not there": ({}, {"artifact": Path(self.root) / "absent.md"}),
+        }
+        for name, (extra, log) in cases.items():
+            with self.subTest(name):
+                view = self.terminal(self.binding(**extra), **log)
+                self.assertNotIn("assessment_verdict", view)
+                self.assertNotEqual(view.get("failure_class"), "pass")
+
+    def test_a_review_of_another_route_is_not_promoted(self):
+        # The route record is read from the sealed file: a staged route's review (not a unit route) stays a failure.
+        staged = json.loads(self.path.read_text())
+        staged["capability"] = "autopilot-code"
+        other = Path(self.root) / "other-route.json"
+        other.write_text(json.dumps(staged))
+        view = self.terminal(self.binding(route_file=str(other)))
+        self.assertNotIn("assessment_verdict", view)
+
+    def test_the_sealed_summary_says_the_review_completed_with_findings(self):
         t = work_intent.ui_translator()
-        text = work_intent.blocked_review_summary(
-            DC.parse_registry_metadata(self.row().split("\t")[5].strip()), self.jobs)
-        self.assertIn(t("completion.result", result=t("completion.result_audit_findings")), text)
-        self.assertNotIn(t("completion.result_with_remaining"), text)
-        self.assertIn(t("completion.verdict", verdict="issues"), text)
-        self.assertIn(t("completion.remaining", items="HB-BLOCKER: empty list ignored"), text)
-        self.assertIn(str(self.report), text)
-
-    def test_the_notice_carries_that_summary_and_no_frame_words(self):
-        t = work_intent.ui_translator()
-        self.jobs.write_text(self.row())
-        text = JOIN.completion_followup_text(
-            {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]}, jobs=str(self.jobs))
-        self.assertIn("Owner finished; no harvest.", text)
+        meta = self.binding()
+        slot = DTC.terminal_slot(Path(self.route["artifact_root"]), self.route["route_id"], self.attempt)
+        slot.mkdir(parents=True)
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="done", log_file=str(self.log())))
+        request = SimpleNamespace(route_file=self.path, jobs=self.jobs, owner_attempt_id=self.attempt)
+        with mock.patch.object(DTC, "_completion_cost", return_value=None):
+            DTC._seal_completion_summary(request, self.route, str(self.report), slot)
+        text = work_intent.sealed_summary(meta, self.attempt)
         self.assertIn(t("completion.result_audit_findings"), text)
-        self.assertIn("HB-BLOCKER", text)
-        for frame_word in ("current frame results", "a failed frame", "Continue the existing work", "start --route"):
-            self.assertNotIn(frame_word, text)
+        self.assertIn(t("completion.verdict", verdict="issues"), text)
+        self.assertIn("HB-BLOCKER: empty list ignored", text)
+        self.assertIn(str(self.report), text)
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="done", log_file=str(self.log())))
+        body = JOIN.completion_followup_text(
+            {"children": [{"attempt_id": self.attempt, "required_action": "advance-completed"}]}, jobs=str(self.jobs))
+        self.assertIn(text, body)
+        self.assertNotIn("inspect-done-failure", body)
+        for frame_word in ("current frame results", "a failed frame", "start --route"):
+            self.assertNotIn(frame_word, body)
 
-    def test_the_same_end_of_other_workers_is_unchanged(self):
-        # A staged review worker, a frame leg and an owner: no runtime-v1 leg seal, so no summary is made.
-        for extra in ({"workflow_completion": ""}, {"worker_type": "frame", "workflow_completion": ""}):
-            with self.subTest(extra=extra):
-                self.jobs.write_text(self.row(**extra))
-                with mock.patch.object(work_intent, "blocked_review_summary", side_effect=AssertionError("read")):
-                    text = JOIN.completion_followup_text(
-                        {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]},
-                        jobs=str(self.jobs))
-                self.assertNotIn(work_intent.ui_translator()("completion.result_audit_findings"), text)
-
-    def test_a_dead_leg_without_a_readable_report_keeps_the_notice_it_had(self):
+    def test_a_dead_leg_still_offers_the_same_work_again(self):
         self.jobs.write_text(self.leg_row(self.route, self.path, status="done", note="dead-worker-fail"))
-        text = JOIN.completion_followup_text(
-            {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]}, jobs=str(self.jobs))
-        self.assertNotIn(work_intent.ui_translator()("completion.result_audit_findings"), text)
-
-    def test_start_route_reports_the_verdict_and_does_not_offer_the_same_review_again(self):
-        self.jobs.write_text(self.row())
-        outcome = {"attempt_id": self.attempt, "classification": "failure", "required_action": "inspect-done-failure"}
+        outcome = {"attempt_id": self.attempt, "classification": "failure"}
         with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
                 mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready", "children": []}), \
                 mock.patch.object(W, "_outcome", return_value=outcome):
-            result = W.start_work(self.route, self.path, self.jobs,
-                                  run=lambda *a, **k: self.fail("a finished leg is never launched"))
-        self.assertEqual((result["state"], result["reason"]), ("completed", "unit-review-blocking"))
-        self.assertIn(work_intent.ui_translator()("completion.result_audit_findings"), result["summary"])
-        self.assertNotIn("compose-again", json.dumps(result))
-        self.assertNotIn("parent_next_command", result)
+            result = W.start_work(self.route, self.path, self.jobs, run=lambda *a, **k: self.fail("never launched"))
+        self.assertEqual((result["state"], result["required_action"]), ("needs-attention", "compose-again"))
 
 
 class UnitFinishTest(UnitLegBase):
@@ -360,28 +386,81 @@ class ReviewSectionTest(unittest.TestCase):
         clean = "# 검토\n\n최종 판정: 병합 가능\n\n## 병합을 막는 것\n\n없음\n"
         self.assertNotIn("remaining", work_intent.report_sections(clean))   # a none line is no remaining item
 
-    ROWS = (   # (report, the result line after the fix); each read "완료" or worse before (see the cycle report)
-        ("## 막는 지적 없음\n\n막는 문제는 찾지 못했다.\n", "완료"),
-        ("## 막는 지적\n\n없음. 막는 문제를 찾지 못했다.\n", "완료"),
-        ("## 병합을 막는 것\n\n없음. 확인하지 못한 것은 아래에 따로 적었다.\n", "완료"),
-        ("## Blocking\n\n- none (could not reproduce the reported failure)\n", "완료"),
-        ("## Blocking issues fixed in this round\n\n- race in Y fixed\n", "완료"),
-        ("## No blocking issues\n\nThe change is fine.\n", "완료"),
-        ("**Blocking**: none\n", "완료"),
-        ("## 막는 지적\n\n없음\n", "완료"),
+    def result(self, text):
+        t = work_intent.ui_translator()
+        sections = work_intent.report_sections("# Review\n\n" + text)
+        return sections, work_intent._result_line({}, t, sections.get("remaining") or [],
+                                                  limits=sections.get("limits") or [],
+                                                  follow_up=sections.get("follow_up") or [],
+                                                  verified=sections.get("verified") or [])
+
+    NONE_ROWS = (   # a review that says it blocks nothing: no "미검증·남은 것: none/없음" line, result "완료"
+        "## 막는 지적 없음\n\n막는 문제는 찾지 못했다.\n",
+        "## 막는 지적\n\n없음. 막는 문제를 찾지 못했다.\n",
+        "## 병합을 막는 것\n\n없음. 확인하지 못한 것은 아래에 따로 적었다.\n",
+        "## Blocking\n\n- none (could not reproduce the reported failure)\n",
+        "## No blocking issues\n\nThe change is fine.\n",
+        "**Blocking**: none\n",
+        "## 막는 지적\n\n없음\n",
+        "## Blocking\n\n- None.\n",
+        "## Blocking: none\n\n- A: this heading says there is none\n",
+        "## Blocking findings\n\n| Blocking | none |\n",
     )
 
     def test_a_review_that_says_it_blocks_nothing_is_not_read_as_failed(self):
         t = work_intent.ui_translator()
-        for text, expected in self.ROWS:
+        for text in self.NONE_ROWS:
             with self.subTest(text=text):
-                sections = work_intent.report_sections("# Review\n\n" + text)
-                self.assertNotIn("remaining", sections)      # no "미검증·남은 것: none/없음" line is made of it
-                result = work_intent._result_line({}, t, sections.get("remaining") or [],
-                                                  limits=sections.get("limits") or [],
-                                                  follow_up=sections.get("follow_up") or [],
-                                                  verified=sections.get("verified") or [])
+                sections, result = self.result(text)
+                self.assertNotIn("remaining", sections)
                 self.assertEqual(result, t("completion.result_done"))
+
+    # When in doubt a finding stays: each of these reads as remaining, and none reads as "완료".
+    OPEN_ROWS = (
+        # the nine forms the closure check named
+        ("## Blocking issues not fixed\n\n- A: the parser drops the last token\n", "A: the parser drops the last token"),
+        ("## Blocking — not yet addressed\n\n- A: the parser drops the last token\n", "A: the parser drops the last token"),
+        ("## Blockers still open (2 were fixed earlier)\n\n- A: the parser drops the last token\n", "A: the parser drops the last token"),
+        ("## Blocking findings (none resolved)\n\n- A: the parser drops the last token\n", "A: the parser drops the last token"),
+        ("## 막는 지적 — 수정했다고 했으나 그대로\n\n- 빈 목록을 무시한다\n", "빈 목록을 무시한다"),
+        ("## Blocking findings\n\n- None of the callers handle the empty list\n", "None of the callers handle the empty list"),
+        ("## Blocking findings\n\n- None-check is missing in parse()\n", "None-check is missing in parse()"),
+        ("## Blocking findings\n\n- N/A values crash the importer\n", "N/A values crash the importer"),
+        ("## Blocking findings\n\n- None found in parse(); but A: render() breaks on empty input\n",
+         "None found in parse(); but A: render() breaks on empty input"),
+        ("**Blocking**: None of the callers handle the empty list\n", "None of the callers handle the empty list"),
+        ("| Blocking | None of the callers check it |\n", "None of the callers check it"),
+        # what the closure check confirmed already stayed open
+        ("## Unresolved blockers\n\n- A: bad\n", "A: bad"),
+        ("## 해결하지 못한 막는 지적\n\n- A: bad\n", "A: bad"),
+        ("## 막는 지적 (고쳐야 함)\n\n- A: bad\n", "A: bad"),
+        ("## Blocking findings\n\n- No test covers the failure path\n", "No test covers the failure path"),
+        ("## Blocking findings\n\n- 없음을 돌려주는 대신 예외를 던진다\n", "없음을 돌려주는 대신 예외를 던진다"),
+        ("## Blocking findings\n\n- Without the lock the counter races\n", "Without the lock the counter races"),
+        # a none marker that turns, or one with a sentence of English after it (these two stay in the
+        # remaining list; the result line is the general reader's: "완료" for the last)
+        ("## Blocking findings\n\n- none, however the cache is stale\n", "none, however the cache is stale"),
+        ("## 막는 지적\n\n- 없음. 다만 캐시가 오래됐다.\n", "없음. 다만 캐시가 오래됐다."),
+        ("## Blocking findings\n\n- None. The parser drops the last token.\n", "None. The parser drops the last token."),
+    )
+
+    def test_a_blocking_finding_is_never_read_as_none(self):
+        t = work_intent.ui_translator()
+        for text, item in self.OPEN_ROWS:
+            with self.subTest(text=text):
+                sections, result = self.result(text)
+                self.assertEqual(sections.get("remaining"), [item])
+                if not text.endswith("The parser drops the last token.\n"):
+                    self.assertNotEqual(result, t("completion.result_done"))
+
+    def test_the_first_review_tables_rows_after_the_fix(self):
+        t = work_intent.ui_translator()
+        done = t("completion.result_done")
+        for text in self.NONE_ROWS[:4] + self.NONE_ROWS[4:7]:         # rows 1-4, 6, 7 (7 has two shapes)
+            self.assertEqual(self.result(text)[1], done)
+        sections, result = self.result("## Blocking issues fixed in this round\n\n- race in Y fixed\n")   # row 5
+        self.assertIn(result, {done, done + " — " + t("completion.result_check")})   # either; never a failure
+        self.assertNotEqual(result, t("completion.result_with_remaining"))
 
     def test_a_real_blocking_finding_still_counts_and_the_none_reading_is_this_sections_alone(self):
         sections = work_intent.report_sections("# R\n\n## Blocking findings\n\n- A: bad\n- 없는 파일을 읽는다\n")
