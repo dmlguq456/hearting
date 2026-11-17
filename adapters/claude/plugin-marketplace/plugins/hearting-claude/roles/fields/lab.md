@@ -9,7 +9,7 @@ Lab is the work of designing and running research and experiments, and of readin
 ## Fundamentals (not dropped)
 
 - Keep confirming and exploring apart. — Tell the analyses planned in advance (confirming) from the ones done afterwards (exploring). Exploring is not forbidden; it is labeled as exploring. [1–3]
-- Plan before looking at the data. — Settle the hypothesis and the analysis plan before seeing the results. [1–3]
+- Plan before looking at the data. — Settle the hypothesis and the analysis plan before seeing the data. [1–3]
 - Make it reproducible. — Leave the methods, data, and code so that someone else can get the same result. [1–3]
 - Start small. — Check the setup small and cheap before running it large. [4–6]
 - Set a baseline and change one thing at a time. — Keep a baseline to compare against, and change only the one thing you want to learn about. [4–6]

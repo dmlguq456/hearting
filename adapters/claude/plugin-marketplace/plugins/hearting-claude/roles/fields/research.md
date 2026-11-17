@@ -20,7 +20,7 @@ These differ from person to person and team to team, and this page leaves them o
 
 ## Boundaries with other fields
 
-- Finding out from outside sources is research. Weighing what you already hold is analysis, which is a different job and which each field guides in its own way. This page does not cover analysis.
+- Finding out from outside sources is research. Weighing what you already hold is analysis, which is a different job, and the guidance for it differs from field to field. This page does not cover analysis.
 - Research answers a question that is already set, by collecting evidence and giving a judgment. Making up the question itself and its method, and measuring on your own, is `lab`.
 - Writing the answer up as a paper or a report is `docs`.
 
