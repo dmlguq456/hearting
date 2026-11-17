@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import frame_repository
+from route_plan import is_depth0_leg
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
@@ -198,8 +199,11 @@ def _route_defaults(path, route_node=None):
     if route_node is not None:
         values.update(_node_model_settings(route, route_node))
         node = next(row for row in route["nodes"] if row.get("id") == route_node)
-        if node.get("unit") == "plan/frame" and node.get("dispatch_depth") == 1:
-            values.update({"--worker-type": "frame", "--unit": "plan/frame", "--assigned-contract": "plan/frame"})
+        if is_depth0_leg(node):
+            # A leg the depth-0 session launches itself (a frame leg, or the one unit of a unit route):
+            # its tuple is the sealed node's, never the owner's.
+            values.update({"--worker-type": node.get("worker_type"), "--unit": node.get("unit"),
+                           "--assigned-contract": node.get("unit")})
     return {flag: (str(value) if value not in (None, "") else None) for flag, value in values.items()}
 
 
@@ -248,8 +252,8 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
     harnesses &= _defaults.DISPATCHABLE_HARNESSES
     if not harnesses:
         raise OwnerError("route-evidence-no-supported-owner-harness")
-    if worker_type == "frame":
-        # A frame leg reads the bands its own node was sealed with (a route
+    if worker_type == "frame" or route_node:
+        # A leg reads the bands its own node was sealed with (a route
         # sealed before nodes carried them has none and keeps reading the live
         # policy, as before).
         node = next(
@@ -505,7 +509,7 @@ def _parse(argv):
     worker_type = values["--worker-type"]
     if values["--dispatch-depth"] != "1" or worker_type not in _LAUNCHABLE_WORKER_TYPES:
         raise OwnerError("owner-tuple-required")
-    if route_node and worker_type != "frame":
+    if route_node and worker_type == "owner":
         raise OwnerError("route-node-worker-type-forbidden")
     unit = (values.get("--unit") or "").strip()
     if worker_type == "owner":
@@ -529,7 +533,7 @@ def _parse(argv):
         # than a shape that `foo/bar` also satisfies.
         if not (ROOT / "roles" / "units" / f"{unit}.md").is_file():
             raise OwnerError("unknown-review-worker-unit")
-        if worker_type == "review" and route_evidence:
+        if worker_type == "review" and route_evidence and not route_node:
             # A route node's review worker is launched by the stage dispatcher
             # with its node binding, not by this selector. Accepting route
             # evidence here would let one node be claimed by two launch paths.
@@ -860,7 +864,7 @@ def main(argv):
         # request outside the route evidence is replaced rather than refused; the usage state is known
         # only below, where a limited pin gives the request back to the checks it always had.
         requested, pin_doc, pinned = explicit, None, None
-        if route_evidence and values["--worker-type"] in {"owner", "frame"}:
+        if route_evidence and (values["--worker-type"] in {"owner", "frame"} or values.get("--route-node")):
             pin_doc = route_in_force(json.loads(Path(route_evidence).read_text(encoding="utf-8")))
             pinned = sealed_pin_harness(pin_doc, worker_type=values["--worker-type"])
             if pinned and pinned != explicit and (sealed is None or pinned in sealed):
@@ -1162,12 +1166,12 @@ def main(argv):
         child_env["AGENT_DISPATCH_OWNER_HARNESS"] = selected
         if route_evidence:
             route_data = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
-            if values["--worker-type"] == "frame" or route_data.get("effective_intensity") == "quick":
+            leg_launch = bool(values.get("--route-node")) and values["--worker-type"] != "owner"
+            if leg_launch or route_data.get("effective_intensity") == "quick":
                 # W3: quick is a three-node route, so the caller's own
                 # `--route-node` selects which node this launch binds to. The
                 # default keeps every existing quick OWNER launch identical.
-                derive = (derive_frame_route_binding if values["--worker-type"] == "frame"
-                          else derive_quick_owner_binding)
+                derive = derive_frame_route_binding if leg_launch else derive_quick_owner_binding
                 binding = derive(
                     route_evidence, worktree=values["--worktree"],
                     capability=values["--capability"], capability_mode=values["--capability-mode"],
@@ -1180,7 +1184,7 @@ def main(argv):
                               "--completion-gate", binding.completion_gate]
                 if pair_model_profile:
                     forwarded += ["--pair-model-profile", pair_model_profile]
-                if values["--worker-type"] == "frame":
+                if leg_launch:
                     from artifact_producer import prepare_route_artifact_env, ProducerError
                     try:
                         child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source

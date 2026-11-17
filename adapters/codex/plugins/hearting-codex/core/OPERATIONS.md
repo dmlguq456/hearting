@@ -1632,6 +1632,23 @@ from closure and replacement. A process reobserved as a zombie after an environm
 denial has exited; a still-live denied environment remains unobservable.
 `start` distinguishes running, exited and unobservable owners.
 
+### §5.10c. Unit Route — One Unit, No Owner
+
+`capability-route.py compose --start --unit <family/name> --prompt-file <brief>` opens one
+read-only unit as a route of its own (kind `unit`, quick, one leg, no owner). The depth-0 session
+launches the leg through the path that launches a frame leg: the route seals the leg
+(`launch_authority: depth-0`), `dispatch-owner.py --start --route-evidence <route> --route-node unit`
+starts one registered depth-1 attempt, and `capability-route.py start --route <id>` follows it again
+without launching a second. The worker's first instruction is the unit's text, the dispatch facts, the
+brief and how to end. Its model grade is the one a staged route gives that unit (`--profile` wins).
+
+The launch seals `workflow_completion=runtime-v1` on the leg. When the worker ends, the completion
+controller closes the route and seals the cycle, and the completion notice that returns to the launching
+session carries the route's sealed summary (verdict line, blocking findings, report path); no close or
+finalize command is run by hand. The same notice path serves all three harnesses. The launching session
+need not be an owner: this section does not change which work is direct, solo or staged
+(`core/WORKFLOW.md` §0.2.1).
+
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
 Fleet's two-hex session numbers have one shared resolver,

@@ -28,7 +28,7 @@ The node's unit, role and worker type are the unit head's. The recipe holds only
 - `--unit <family/name>` names the kind itself. Nothing else has to be typed; an argument that contradicts it (`--capability` other than `unit`, `--shape` other than `solo`, `--intensity` other than `quick`, `--graph`, `--route-plan`, `--signal`, `--execution-scope`) is refused by name (`compose-unit-conflict`).
 - A name that is not a unit of the catalog is refused with the list (`compose-unit-unknown`).
 - v1 opens read-only units (`read_only: true`). A unit that writes is refused with its reason (`compose-unit-writes`).
-- `--start` is not available yet: the route is planned and sealed, and `--unit` with `--start` is refused by name (`compose-unit-start-unavailable`).
+- `--start --prompt-file <brief>` starts the unit's one worker with the brief (see Launch and end). Without `--start` the route is only planned and sealed.
 
 ## Field
 
@@ -38,6 +38,12 @@ The route records a field like every route. It is the unit head's `field:` (`fie
 
 The node writes only under the cycle's `units/unit/**` (one report). A read-only unit creates no new worktree: it reads the caller's.
 
+## Launch and end
+
+- **Launch.** The depth-0 session (no owner above it) starts the leg through the same path that starts a frame leg: `compose --start --unit <family/name> --prompt-file <brief>` seals the route and starts the one attempt, `capability-route.py start --route <id>` starts or follows it again, and a second start launches nothing twice. The worker's first instruction is the unit's text (stance and body), the dispatch facts, the brief as written, the node's declared scope and how to end; nothing the owner reads is added. The model grade is the one a staged route gives that unit (the grade the shipped recipes declare for it; `--profile` wins).
+- **End.** The launch seals `workflow_completion=runtime-v1` on the leg, so the completion controller closes the route and seals the cycle when the worker ends, as it does for an owner. No close or finalize command is run by hand.
+- **Result.** The completion notice that wakes the launching session carries the route's sealed summary: the verdict line, the review's blocking findings (a `Blocking findings` or `병합을 막는 것` section reads as remaining items) and the report path.
+
 ## Completion
 
-The `unit-complete` completion gate is the existing `custom` contract row: the unit's own `io.verdict` and its report. Launching and closing a unit route are not part of this contract yet.
+The `unit-complete` completion gate is the existing `custom` contract row: the unit's own `io.verdict` and its report. A unit route's worker ends with the three-line handoff of the worker kernel; the report is `units/unit/report.md` in the cycle.

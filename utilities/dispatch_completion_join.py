@@ -97,6 +97,7 @@ from dispatch_contract import (  # noqa: E402
     detached_review_outcome_from_pipe,
     attempt_raw_row_sha256,
     attempt_process_quiescence,
+    finishes_route,
     foreground_review_eligible,
     validate_review_output_binding,
     close_attempt_row,
@@ -299,7 +300,8 @@ def pending_record_identity(
     # terminal was refused as identity-incomplete, no record existed, and
     # the asyncRewake carrier exited 0 without waking the session -- the
     # 2026-08-29 owner defect reproduced on the frame layer added 2026-09-10.
-    if (metadata.get("worker_type") == "frame"
+    # The one leg of a unit route is launched the same way (any worker type but the owner's).
+    if (metadata.get("worker_type") in {"frame", "review", "stage", "support"}
             and metadata.get("dispatch_depth") == "1"
             and route_id and route_node):
         return route_id, route_node, parent_attempt_id or NO_PARENT_ATTEMPT
@@ -1375,9 +1377,10 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                 import route_parent_close
                 if route_parent_close.row_requested(meta, Path(jobs)):
                     continue
-                if meta.get("dispatch_depth") != "1" or meta.get("worker_type") not in {"frame", "owner"}:
+                if meta.get("dispatch_depth") != "1" or not (
+                        meta.get("worker_type") in {"frame", "owner"} or finishes_route(meta)):
                     continue
-                if meta["worker_type"] == "owner" and child["required_action"] == "advance-completed":
+                if finishes_route(meta) and child["required_action"] == "advance-completed":
                     if meta.get("workflow_completion") == "runtime-v1":
                         completed_work.add(child["attempt_id"])
                         import work_intent

@@ -1841,7 +1841,7 @@ def main():
     cp.add_argument("--execution-scope", choices=("complete", "report"), default=None,
                     help="optional scope already selected in the existing start confirmation; it is not approval evidence")
     cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or staged shape names it, --field, or both; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
-    cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, quick, no owner); its field is the unit head's `field:`, or name --field; planned and sealed here, not launched yet")
+    cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, quick, no owner); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
     cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
     cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; staged accepts strong+")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
@@ -2012,9 +2012,6 @@ def main():
                     print("  borrow "+line(node))
         return 0
     if a.command=="compose":
-        if a.unit is not None and a.start:
-            raise ValueError("compose-unit-start-unavailable: a unit route is planned and sealed here but not "
-                             "launched yet; run compose --unit <family/name> --prompt-file <brief> without --start")
         shape=a.shape or ("solo" if a.unit is not None else "framed")
         if a.start and (a.explain or a.prompt_file is None):
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")

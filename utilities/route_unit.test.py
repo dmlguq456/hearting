@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The `unit` route (design 2a): compose one read-only unit as a sealed route with no owner.
 
-Real compose, real registry, real unit heads. The route is planned and sealed here; launching it
-is refused by name until the launch PR. The four compose cases (unit alone, unit with a field, a
+Real compose, real registry, real unit heads. The route is planned and sealed here; its launch and end
+are `unit_route_launch.test.py`'s. The four compose cases (unit alone, unit with a field, a
 unit with no default field and no `--field`, a unit that writes), the recipe's shape check, the
 verifier's one extra branch and the `stages` view.
 """
@@ -120,7 +120,7 @@ class UnitComposeTest(F.FramedBase):
                          ("unit", "qa/code-review", "review", 1, "depth-0", "map-worker"))
         self.assertTrue(is_depth0_leg(node))
         self.assertEqual(node["write_scope"], ["units/unit/**"])
-        self.assertEqual(node["model_profile"], "balanced")          # floor: moderate
+        self.assertEqual(node["model_profile"], "light")             # the grade a staged route gives qa/code-review
         self.assertNotIn("owner", [n.get("worker_type") for n in route["nodes"]])
         self.assertEqual(route["workflow_contract"]["terminal_nodes"], ["unit"])
         self.sealed(route)
@@ -261,13 +261,12 @@ class UnitCliTest(F.FramedBase):
                                   env={**F.clean_environment(), "AGENT_HOME": str(R.ROOT)})
         self.assertEqual(verified.returncode, 0, verified.stderr + verified.stdout)
 
-    def test_start_is_refused_by_name_until_the_launch_exists(self):
-        for extra in (["--unit", "qa/code-review", "--start"], ["--unit", "qa/code-review", "--start", "--explain"]):
-            with self.subTest(extra=extra):
-                refused = self.run_cli(*extra)
-                self.assertEqual(refused.returncode, 64, refused.stderr)
-                self.assertIn("capability-route: compose-unit-start-unavailable:", refused.stderr)
-                self.assertIn("not launched yet", refused.stderr)
+    def test_start_needs_the_brief_like_every_start(self):
+        # `--unit --start` is no longer refused by name: the leg launches, so it asks for what any start asks for.
+        refused = self.run_cli("--unit", "qa/code-review", "--start", "--explain")
+        self.assertEqual(refused.returncode, 64, refused.stderr)
+        self.assertIn("capability-route: compose-start-requires-task:", refused.stderr)
+        self.assertNotIn("compose-unit-start-unavailable", refused.stderr)
 
     def test_stages_shows_the_unit_route_only_when_asked(self):
         shown = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "stages", "--capability", "unit"],

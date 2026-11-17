@@ -30,6 +30,7 @@ from dispatch_supervisor_terminal import (
 # readable artifact earns it; every other FAIL keeps the dead-worker note.
 from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
 from route_authority import HANDOFF_RE, handoff_search, pass_blocker_note, pass_blocker_violation
+from route_plan import is_depth0_leg
 REVIEW_WORKER_TYPE = "review"
 
 
@@ -772,9 +773,9 @@ def _bound_terminal_output(
         producer_attempt_id = parent_attempt
         require_producer_binding = True
     else:
-        # The one legacy shape without a parent owner is a registered depth-1
-        # frame. Its exact sealed route and admitted cycle are its authority.
-        if (worker_type != "frame"
+        # The one shape without a parent owner is a registered depth-1 leg (a frame leg, or the one
+        # leg of a unit route). Its exact sealed route and admitted cycle are its authority.
+        if (worker_type not in {"frame", "review", "stage", "support"}
                 or str(binding.get("dispatch_depth", "")) != "1"):
             return None, None
         producer_attempt_id = None
@@ -795,7 +796,7 @@ def _bound_terminal_output(
                 or context.node_id != node_id):
             return None, None
         if not require_producer_binding and (
-                not context.node or context.node.get("worker_type") != "frame"
+                not is_depth0_leg(context.node) or context.node.get("worker_type") != worker_type
                 or str(context.node.get("dispatch_depth", "")) != "1"):
             return None, None
         return context.resolve_terminal_artifact(artifact), None

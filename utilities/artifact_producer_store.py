@@ -129,7 +129,7 @@ STAGE_CAPABILITIES = (
 )
 # Compiler-internal capabilities: no Skill and no person invokes them, but the route
 # compiler seals routes for them and a producer cycle must be issuable for that route.
-INTERNAL_CAPABILITIES = ("route-frame",)
+INTERNAL_CAPABILITIES = ("route-frame", "unit")
 CANONICAL_ROOTS = ("campaigns", "shared")
 # Legacy capability buckets (CORE.md §3 C-DUR) plus the undeclared containers.
 LEGACY_TOP_LEVEL = (

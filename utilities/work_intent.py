@@ -602,8 +602,10 @@ _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
 # other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
+    # A review's blocking findings (`## 병합을 막는 것`, `## Blocking findings`) are what its reader must still deal with.
     ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "해결하지", "필수", "unverified", "failed",
-                           "skipped", "remaining", "unresolved")),
+                           "skipped", "remaining", "unresolved", "막는 지적", "막는 것", "막는 문제", "병합을 막는", "blocking",
+                           "blockers")),
     # Limits, residual risks and follow-ups are shown with the rest, but only a failed/skipped,
     # unverified or remaining-work heading (and the checks) can say that something failed.
     ("limits", (), ("한계", "limitation", "limits", "open risk")),

@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""A unit route, launched and finished on the three harnesses (`harness_behavior_scenarios.py`).
+
+``unit-route``
+    The depth-0 session (the TUI, with no ``AGENT_DISPATCH_JOBS`` in its environment, as in
+    operation) runs ``capability-route.py compose --start --unit qa/code-review --prompt-file
+    <brief>`` and ends its turn. The route has no owner: the harness's dispatch wrapper starts the
+    one unit worker on the fixture model, the worker writes its review report and ends, the
+    completion controller closes the route, and the resting session is woken with the route's
+    sealed summary (the verdict line, the blocking findings and the report path).
+
+The oracle reads what the three harnesses share: the registry row (one depth-1 attempt, the
+unit's worker type, ``workflow_completion=runtime-v1``), the closed route, and the request the
+woken session sent to its model. Synthetic data stays under the fixture root.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import harness_behavior_scenarios as base  # noqa: E402
+from harness_behavior_scenarios import Reply, wait_for  # noqa: E402
+from harness_behavior_cases_a import _carrying  # noqa: E402
+from harness_behavior_cases_e import (  # noqa: E402
+    OwnerPublishRegisteredScenario, TERMINAL_STATES, fixture_model_id, fixture_models_conf, registry_rows,
+    _base,
+)
+
+WORK = "SCENARIO-UNIT-WORK"
+START = "SCENARIO-UNIT start the unit route and end your turn"
+BLOCKER = "HB-UNIT-BLOCKER-42"
+NEXT = "HB-UNIT-NEXT"
+REPORT = (
+    "# Review of the fixture change\n\n"
+    "Final verdict: issues\n\n"
+    "## Blocking findings\n\n"
+    f"- {BLOCKER}: the fixture function ignores an empty list\n\n"
+    "## Verification\n\n"
+    "- Read the fixture diff; no command was run\n"
+)
+
+
+def resting_session_requests(run):
+    """The model requests of the depth-0 session: the unit worker's own requests carry its dispatch prompt."""
+    return [r for r in run.main_requests() if "Dispatch metadata:" not in r["text"]]
+
+
+class UnitRouteScenario(OwnerPublishRegisteredScenario):
+    name = "unit-route"
+    summary = ("A unit route (`compose --start --unit qa/code-review`) starts one registered worker with no "
+               "owner; its end closes the route and the sealed summary wakes the resting session.")
+    needs_tui = True
+    WAIT = 240
+
+    def side_script(self, run):
+        return None
+
+    # -- the fixture model ----------------------------------------------------------------------
+    def script(self, run):
+        def answer(record, earlier):
+            text, last = record["text"], record["last_text"]
+            if "Dispatch metadata:" in text and WORK in text:          # the unit worker
+                output = re.search(r"artifact_output_dir: (\S+)", text)
+                target = (output.group(1) if output else "/nonexistent") + "/units/unit/report.md"
+                wrote = any("report.md" in str(r["reply"].get("shell") or "") for r in earlier)
+                if record["last_kind"] != "tool" and not wrote:
+                    run.evidence["worker_first_request_chars"] = len(text)
+                    return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && cat > '{target}' <<'HB_EOF'\n"
+                                       f"{REPORT}HB_EOF\n")
+                return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none")
+            if record["last_kind"] == "tool":
+                return Reply("The unit route runs; I will continue when its result arrives.")
+            if BLOCKER in text and not any(NEXT in str(r["reply"].get("shell") or "") for r in earlier):
+                return Reply(shell=f"echo {NEXT}-$((20+22))")
+            if START in last and not any(r["reply"].get("shell") for r in earlier):
+                return Reply(shell=" ".join([
+                    sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
+                    "--unit", "qa/code-review", "--pin", f"worker={run.harness}",
+                    "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),
+                    "--artifact-root", run.home.env["AGENT_ARTIFACT_ROOT"], "--unassigned",
+                    "--slug", "hb-unit-route"]))
+            return Reply("Nothing new.")
+        return answer
+
+    # -- fixture --------------------------------------------------------------------------------
+    def prepare(self, run):
+        root, ws, env = run.home.root, run.home.workspace, run.home.env
+        for args in (["config", "user.email", "fixture@example.invalid"],
+                     ["config", "user.name", "fixture"], ["checkout", "-q", "-b", "hb-task"]):
+            subprocess.run(["git", "-C", str(ws), *args], check=True, env=env, capture_output=True)
+        (ws / "README.md").write_text("unit fixture\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(ws), "add", "README.md"], check=True, env=env, capture_output=True)
+        subprocess.run(["git", "-C", str(ws), "commit", "-q", "-m", "fixture"], check=True, env=env,
+                       capture_output=True)
+        (root / "brief.md").write_text(f"{WORK}: review the fixture change and report your findings.\n",
+                                       encoding="utf-8")
+        # The depth-0 session has no AGENT_DISPATCH_JOBS: the canonical registry is the one every carrier reads.
+        self.jobs = Path(env.pop("AGENT_DISPATCH_JOBS"))
+        env["HEARTING_PRIOR_ART"] = "off"
+        # In operation the shared obligation runner is already up when a worker starts (a session's own
+        # steward duty keeps it). Started by the worker's launch it would be counted in the worker's
+        # process group and hold its row open until the runner idles out.
+        ran = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+                              "import peer_obligations, steward_check; store = peer_obligations.ObligationStore(sys.argv[2]); "
+                              "print(bool(steward_check.register(sys.argv[3], 'hb-unit-fixture', store=store)))",
+                              str(_base().SOURCE / "utilities"), str(self.jobs.parent), run.harness],
+                             env={**env, "AGENT_DISPATCH_JOBS": str(self.jobs)}, cwd=str(ws), text=True,
+                             capture_output=True, timeout=60)
+        run.evidence["steward_duty"] = ran.stdout.strip() or ran.stderr[-200:]
+        sys.path.insert(0, str(_base().SOURCE / "utilities"))
+        import model_config
+        model = fixture_model_id(run.harness)
+        user = model_config.user_path(run.harness, environ=env)
+        user.parent.mkdir(parents=True, exist_ok=True)
+        shipped = _base().SOURCE / "adapters" / run.harness / "config" / "models.conf"
+        user.write_text(fixture_models_conf(shipped.read_text(encoding="utf-8"), model), encoding="utf-8")
+        if run.harness == "codex":
+            auth = Path(env["CODEX_HOME"]) / "auth.json"
+            if not auth.exists():
+                auth.write_text(json.dumps({"OPENAI_API_KEY": "sk-hearting-fixture-not-a-key"}), encoding="utf-8")
+                auth.chmod(0o600)
+            run.evidence["runtime_projection"] = self.complete_codex_projection(run)
+        if run.harness == "opencode":
+            run.evidence["fixture_auth"] = self.opencode_fixture_auth(run)
+            run.evidence["guard_render"] = self.render_opencode_guard(run)
+        wrong = {name: value for name, value in self.resolved_models(run).items() if value != model}
+        if wrong:
+            raise RuntimeError(f"worker model would leave the fixture: {wrong}")
+
+    def unit_rows(self):
+        return [row for row in registry_rows(self.jobs) if "hb-unit-route" in row.get("slug", "")]
+
+    def route_files(self, run):
+        return sorted((Path(run.home.env["AGENT_ARTIFACT_ROOT"]) / ".runtime" / "routes").glob("rt-*.json"))
+
+    # -- the run --------------------------------------------------------------------------------
+    def drive(self, run):
+        ev = run.evidence
+        run.prompt(START)
+        started = wait_for(lambda: self.unit_rows(), 120, 1)
+        ev["rows_after_start"] = [{k: r.get(k) for k in ("status", "worker_type", "unit", "route_node", "dispatch_depth",
+                                                          "workflow_completion", "harness", "model_profile")}
+                                  for r in self.unit_rows()]
+        if not started:
+            run.note("the unit worker never registered")
+            return "inconclusive"
+        time.sleep(4)   # the worker has answered; what is still alive in the fixture
+        ev["alive_after_worker_answer"] = [
+            line.strip()[:260] for line in subprocess.run(["ps", "-eo", "pid,ppid,pgid,etimes,args"], text=True,
+                                                          capture_output=True).stdout.splitlines()
+            if str(run.home.root) in line and "ps -eo" not in line and "tmux" not in line][:25]
+        before = len(resting_session_requests(run))
+        ev["requests_before_completion"] = before
+        done = wait_for(lambda: (lambda rows: rows and rows[-1]["status"] in TERMINAL_STATES)(self.unit_rows()),
+                        self.WAIT, 2)
+        completed_at = time.time()
+        woke = wait_for(lambda: _carrying(resting_session_requests(run), BLOCKER, before), self.WAIT, 1)
+        run.wait_idle(8, 60)
+        requests = resting_session_requests(run)
+        rows = self.unit_rows()
+        route_file = next(iter(self.route_files(run)), None)
+        route = json.loads(route_file.read_text(encoding="utf-8")) if route_file else {}
+        outcome = route_file.with_name(route_file.stem + ".outcome.json") if route_file else None
+        ev["unit_rows"] = len(rows)
+        ev["row"] = {k: rows[-1].get(k) for k in ("status", "worker_type", "unit", "route_node", "workflow_completion",
+                                                  "harness", "note", "dispatch_depth", "model_profile",
+                                                  "failure_class")} if rows else None
+        ev["route_nodes"] = [(n.get("id"), n.get("unit"), n.get("launch_authority")) for n in route.get("nodes", [])]
+        ev["route_closed"] = bool(outcome and outcome.exists())
+        ev["worker_done"] = bool(done)
+        if woke:
+            first = woke[0]
+            ev["wake_seconds"] = round(first["at"] - completed_at, 1)
+            ev["wake_request_tail"] = first["last_text"][-1500:]
+            ev["summary_in_wake"] = {name: name in first["text"] for name in
+                                     (BLOCKER, "issues", "report.md", "route rt-")}
+            ran = any(f"{NEXT}-42" in r["text"] for r in requests[requests.index(first):])
+            ev["next_action_ran"] = ran
+        ok = (rows and len(rows) == 1 and rows[-1].get("worker_type") == "review"
+              and rows[-1].get("workflow_completion") == "runtime-v1" and ev["route_closed"] and woke
+              and ev["summary_in_wake"]["report.md"] and ev["summary_in_wake"][BLOCKER])
+        run.note(f"unit rows={len(rows)}; closed={ev['route_closed']}; woke={'yes' if woke else 'no'}"
+                 + (f" after {ev['wake_seconds']}s" if woke else ""))
+        if not rows or not done:
+            return "inconclusive"
+        return "pass" if ok and ev.get("next_action_ran") else "fail"
+
+
+SCENARIOS = [UnitRouteScenario]

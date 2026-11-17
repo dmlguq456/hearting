@@ -417,8 +417,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         from dispatch_attempt_policy import verdict_pass
         applicable = not facts.get("closing") and metadata.get("workflow_completion") == "runtime-v1"
         applicable = applicable and (status in {"open", "running"} if facts.get("executing") else
-            metadata.get("worker_type") == "owner" and metadata.get("dispatch_depth") == "1"
-            and status == "done" and verdict_pass(metadata))
+            metadata.get("dispatch_depth") == "1" and status == "done" and verdict_pass(metadata))
         return ContinuationDecision(bool(applicable), "applicable" if applicable else "not-applicable")
     if action == "completion-state":
         reason, state = facts.get("error", ""), "unknown"
