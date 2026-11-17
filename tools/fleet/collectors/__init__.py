@@ -54,7 +54,7 @@ def _enrich_steward(sessions, *, fast_first=False, record_supervision=True):
         return
     try:
         from . import steward
-        steward.enrich(sessions, record_supervision=record_supervision)
+        steward.enrich(sessions, **({} if record_supervision else {"record_supervision": False}))
     except Exception:
         pass
 
