@@ -4001,10 +4001,12 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
             return False
         if not recovery_lock_is_current():
             return False
+        from dispatch_contract_base import governance_environment
         process = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, pass_fds=(fd,), start_new_session=True, env=child_env,
+            # The runner is a shared service, not the starting worker's descendant: without its attempt tag.
+            close_fds=True, pass_fds=(fd,), start_new_session=True, env=governance_environment(child_env),
         )
         end_with_test(process)
         _RUNNERS.append(process)

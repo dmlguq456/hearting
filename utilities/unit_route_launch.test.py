@@ -9,9 +9,11 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse
+import base64
 import importlib.util
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -210,6 +212,80 @@ class UnitTupleTest(UnitLegBase):
                 harness="claude", route_node="unit")
 
 
+class BlockingReviewEndTest(UnitLegBase):
+    """A review that ended FAIL with its report is finished work (the most common end of a PR review)."""
+    REPORT = ("# Review\n\nFinal verdict: issues\n\n## Blocking findings\n\n- HB-BLOCKER: empty list ignored\n\n"
+              "## Verification\n\n- Read the diff\n")
+
+    def setUp(self):
+        super().setUp()
+        self.route, self.path = self.unit_route()
+        self.jobs = Path(self.root) / "jobs.log"
+        self.attempt = W.attempt_id(self.route, "unit")
+        self.report = Path(self.root) / "report.md"
+        self.report.write_text(self.REPORT)
+        encoded = base64.urlsafe_b64encode(str(self.report).encode()).decode().rstrip("=")
+        terminal = {"state": "valid", "verdict": "FAIL", "artifact_state": "readable", "artifact_path_b64": encoded}
+        patch = mock.patch("codex_dispatch_terminal.inspect_terminal_attempt", return_value=terminal)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def row(self, **extra):
+        return self.leg_row(self.route, self.path, status="done", note="completed-review-blocking",
+                            log_file=str(self.report), **extra)
+
+    def test_the_summary_says_the_review_completed_with_findings_not_that_the_work_died(self):
+        t = work_intent.ui_translator()
+        text = work_intent.blocked_review_summary(
+            DC.parse_registry_metadata(self.row().split("\t")[5].strip()), self.jobs)
+        self.assertIn(t("completion.result", result=t("completion.result_audit_findings")), text)
+        self.assertNotIn(t("completion.result_with_remaining"), text)
+        self.assertIn(t("completion.verdict", verdict="issues"), text)
+        self.assertIn(t("completion.remaining", items="HB-BLOCKER: empty list ignored"), text)
+        self.assertIn(str(self.report), text)
+
+    def test_the_notice_carries_that_summary_and_no_frame_words(self):
+        t = work_intent.ui_translator()
+        self.jobs.write_text(self.row())
+        text = JOIN.completion_followup_text(
+            {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]}, jobs=str(self.jobs))
+        self.assertIn("Owner finished; no harvest.", text)
+        self.assertIn(t("completion.result_audit_findings"), text)
+        self.assertIn("HB-BLOCKER", text)
+        for frame_word in ("current frame results", "a failed frame", "Continue the existing work", "start --route"):
+            self.assertNotIn(frame_word, text)
+
+    def test_the_same_end_of_other_workers_is_unchanged(self):
+        # A staged review worker, a frame leg and an owner: no runtime-v1 leg seal, so no summary is made.
+        for extra in ({"workflow_completion": ""}, {"worker_type": "frame", "workflow_completion": ""}):
+            with self.subTest(extra=extra):
+                self.jobs.write_text(self.row(**extra))
+                with mock.patch.object(work_intent, "blocked_review_summary", side_effect=AssertionError("read")):
+                    text = JOIN.completion_followup_text(
+                        {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]},
+                        jobs=str(self.jobs))
+                self.assertNotIn(work_intent.ui_translator()("completion.result_audit_findings"), text)
+
+    def test_a_dead_leg_without_a_readable_report_keeps_the_notice_it_had(self):
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="done", note="dead-worker-fail"))
+        text = JOIN.completion_followup_text(
+            {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]}, jobs=str(self.jobs))
+        self.assertNotIn(work_intent.ui_translator()("completion.result_audit_findings"), text)
+
+    def test_start_route_reports_the_verdict_and_does_not_offer_the_same_review_again(self):
+        self.jobs.write_text(self.row())
+        outcome = {"attempt_id": self.attempt, "classification": "failure", "required_action": "inspect-done-failure"}
+        with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
+                mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready", "children": []}), \
+                mock.patch.object(W, "_outcome", return_value=outcome):
+            result = W.start_work(self.route, self.path, self.jobs,
+                                  run=lambda *a, **k: self.fail("a finished leg is never launched"))
+        self.assertEqual((result["state"], result["reason"]), ("completed", "unit-review-blocking"))
+        self.assertIn(work_intent.ui_translator()("completion.result_audit_findings"), result["summary"])
+        self.assertNotIn("compose-again", json.dumps(result))
+        self.assertNotIn("parent_next_command", result)
+
+
 class UnitFinishTest(UnitLegBase):
     def launch_args(self, route, path, **overrides):
         values = dict(capability="unit", dispatch_depth=1, route_file=str(path), route_node="unit",
@@ -282,7 +358,36 @@ class ReviewSectionTest(unittest.TestCase):
         self.assertEqual(work_intent.report_sections(korean)["remaining"], ["빈 목록을 무시한다"])
         self.assertEqual(work_intent.report_verdict(korean), "병합 불가")
         clean = "# 검토\n\n최종 판정: 병합 가능\n\n## 병합을 막는 것\n\n없음\n"
-        self.assertEqual(work_intent.report_sections(clean)["remaining"], ["없음"])   # a none item, read as none
+        self.assertNotIn("remaining", work_intent.report_sections(clean))   # a none line is no remaining item
+
+    ROWS = (   # (report, the result line after the fix); each read "완료" or worse before (see the cycle report)
+        ("## 막는 지적 없음\n\n막는 문제는 찾지 못했다.\n", "완료"),
+        ("## 막는 지적\n\n없음. 막는 문제를 찾지 못했다.\n", "완료"),
+        ("## 병합을 막는 것\n\n없음. 확인하지 못한 것은 아래에 따로 적었다.\n", "완료"),
+        ("## Blocking\n\n- none (could not reproduce the reported failure)\n", "완료"),
+        ("## Blocking issues fixed in this round\n\n- race in Y fixed\n", "완료"),
+        ("## No blocking issues\n\nThe change is fine.\n", "완료"),
+        ("**Blocking**: none\n", "완료"),
+        ("## 막는 지적\n\n없음\n", "완료"),
+    )
+
+    def test_a_review_that_says_it_blocks_nothing_is_not_read_as_failed(self):
+        t = work_intent.ui_translator()
+        for text, expected in self.ROWS:
+            with self.subTest(text=text):
+                sections = work_intent.report_sections("# Review\n\n" + text)
+                self.assertNotIn("remaining", sections)      # no "미검증·남은 것: none/없음" line is made of it
+                result = work_intent._result_line({}, t, sections.get("remaining") or [],
+                                                  limits=sections.get("limits") or [],
+                                                  follow_up=sections.get("follow_up") or [],
+                                                  verified=sections.get("verified") or [])
+                self.assertEqual(result, t("completion.result_done"))
+
+    def test_a_real_blocking_finding_still_counts_and_the_none_reading_is_this_sections_alone(self):
+        sections = work_intent.report_sections("# R\n\n## Blocking findings\n\n- A: bad\n- 없는 파일을 읽는다\n")
+        self.assertEqual(sections["remaining"], ["A: bad", "없는 파일을 읽는다"])
+        other = work_intent.report_sections("# R\n\n## 남은 것\n\n없음. 다만 하나는 못 했다.\n")
+        self.assertEqual(other["remaining"], ["없음. 다만 하나는 못 했다."])            # other headings read as before
 
 
 class UnitPromptTest(UnitLegBase):
@@ -318,9 +423,18 @@ class UnitPromptTest(UnitLegBase):
         self.assertIn("Assignment:\n" + BRIEF.rstrip(), prompt)               # the brief, unchanged
         self.assertIn("exactly these three newline-delimited", prompt)         # how to end
         self.assertIn("units/unit/report.md", prompt)                          # where the report goes
+        # The kernel's safety lines are in; the kernel document, the owner's rules and the route steps are not.
+        for line in ("bounded worker, not the user-facing main session", "Preserve permission, safety and git-state guards",
+                     "write only inside the assigned scope", "merge, release, installation, cleanup or UI/status publication",
+                     "do not publish task branches or PRs", "retire only your own scratch",
+                     "authorize cleanup of user worktrees, native HOME", "Do not implement fixes or widen the review"):
+            self.assertIn(line, prompt)
+        self.assertNotIn("dispatch another worker", prompt)     # a later route lets a worker call this one
         for owner_only in ("Portable Worker Kernel", "Worker Type", "supervised owner", "owner-execution",
                            "Route steps", "runtime_wait"):
             self.assertNotIn(owner_only, prompt)
+        import worker_bootstrap
+        self.assertLess(len(worker_bootstrap.unit_safety_prompt("review").encode()), 2048)
         self.assertLess(len(prompt), 14_000)
 
 

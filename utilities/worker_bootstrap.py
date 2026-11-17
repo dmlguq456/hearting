@@ -2180,6 +2180,27 @@ _TERMINAL_CONTRACT_START = "<!-- worker-terminal-contract:start -->"
 _TERMINAL_CONTRACT_END = "<!-- worker-terminal-contract:end -->"
 
 
+def unit_safety_prompt(worker_type: str) -> str:
+    """The kernel's safety lines for a unit route's worker, whose first instruction is not the whole kernel.
+
+    Only what keeps a bounded worker inside its node: its role, its guards and scope, what it leaves to
+    the supervisor, and where its scratch goes. (It may call other workers: a later route lets it.)"""
+    lines = ["You are a bounded worker, not the user-facing main session. Treat the assigned route, node "
+             "scope and completion gate as fixed. Preserve permission, safety and git-state guards, and write "
+             "only inside the assigned scope.",
+             "Do not perform merge, release, installation, cleanup or UI/status publication, and do not publish "
+             "task branches or PRs; integration and cleanup stay with the supervisor.",
+             "Bind fixtures you create to their command lifetime (a private `TMPDIR`, `TemporaryDirectory` or "
+             "shell trap), keep needed output in the artifact, and retire only your own scratch. That does not "
+             "authorize cleanup of user worktrees, native HOME, existing experiments, parent or sibling roots, "
+             "or shared runtime state."]
+    if worker_type == "review":
+        lines.append("Inspect only the assigned question and evidence; source is read-only unless the node's scope "
+                     "says otherwise. Record prioritized findings, locations, checks and uncertainty in the review "
+                     "artifact. Do not implement fixes or widen the review.")
+    return "\n".join(lines) + "\n"
+
+
 def worker_terminal_contract(root: Path) -> str:
     """The kernel's short completion contract, reusable after native compaction."""
     kernel = (root / "roles" / "worker-bootstrap.md").read_text(encoding="utf-8")

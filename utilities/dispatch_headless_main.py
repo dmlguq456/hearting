@@ -195,9 +195,10 @@ def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause:
 def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | None:
     """The whole first instruction of a unit route's worker, or None when this launch is not one.
 
-    The unit's text (its stance and body), the dispatch facts, the brief, the node's declared scope and
-    how to end: nothing the owner reads. A unit route has no owner above its worker and no stage after
-    it, so the kernel's owner and stage rules, the capability contract and the route steps stay out."""
+    The unit's text (its stance and body), the dispatch facts, a few of the kernel's safety lines, the brief,
+    the node's declared scope and how to end: nothing the owner reads. A unit route has no owner above its
+    worker and no stage after it, so the kernel's owner and stage rules, the capability contract and the
+    route steps stay out."""
     if (getattr(args, "capability", None) != "unit" or int(getattr(args, "dispatch_depth", 0)) != 1
             or not getattr(args, "route_file", None)):
         return None
@@ -216,6 +217,7 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
     return (f"{unit_text}\n\n"
             f"{dispatch_metadata_prompt(h, args)}\n"
             f"{commit_clause}"
+            f"{wb.unit_safety_prompt(args.worker_type)}\n"
             f"Assignment:\n{task.rstrip()}\n\n"
             f"{wb.node_scope_prompt(scope)}\n"
             f"{contract}\n\n"

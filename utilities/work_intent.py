@@ -617,6 +617,25 @@ _SECTION_FIELDS = (
     ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
+# A review's blocking-findings headings. Only these get the two readings below: a heading that
+# itself says "none" or "already fixed" opens no section, and a line in one that starts with a
+# none marker is none (the section's own words, so no other heading's lines change).
+_BLOCKING_WORDS = ("막는 지적", "막는 것", "막는 문제", "병합을 막는", "blocking", "blockers")
+_NO_BLOCKING_HEADING = re.compile(r"(?:없음|없다|없습니다)\s*$|^(?:no|none|zero|without)\b"
+                                  r"|고쳤|고침|수정했|수정함|해결했|해결함|해결됨|해결 완료"
+                                  r"|\b(?:fixed|resolved|addressed|corrected|closed)\b", re.I)
+
+
+def _blocking_heading(title: str) -> str | None:
+    """The heading's words when it names the review's blocking findings (`막는 지적`, `Blocking findings`)."""
+    number = _NUMBER.match(title)
+    lowered = (title[number.end():] if number else title).lower()
+    leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
+    if any(leading.startswith(word) and _has_word(leading, word) for word in _BLOCKING_WORDS):
+        return lowered
+    return None
+
+
 _FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "해결하지", "unverified", "failed", "skipped",
                      "unresolved")
 # The report's own first line when it states the verdict (`최종 판정: …`, `Final verdict: …`).
@@ -682,6 +701,9 @@ def _section_field(title: str, *, numbered: bool) -> str | None:
     if not any(leading.startswith(word) and _has_word(leading, word)
                for _field, _numbers, words in _SECTION_FIELDS for word in words):
         return None
+    blocking = _blocking_heading(title)
+    if blocking and _NO_BLOCKING_HEADING.search(blocking):
+        return None
     matches = [field for field, _numbers, words in _SECTION_FIELDS
                if any(_has_word(lowered, word) for word in words)]
     if matches and set(matches) <= {"remaining", "limits", "follow_up"}:
@@ -701,6 +723,7 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
     Mixed/unknown headings and code fences cannot populate a guessed field."""
     sections: dict[str, list[str]] = {}
     current = None
+    blocking = False   # the open section is the review's blocking findings
     fence = None
     for raw in (text or "").splitlines():
         if raw.lstrip().startswith(('```', '~~~')):
@@ -712,13 +735,15 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
         match = _SECTION.match(raw)
         if match:
             current = _section_field(match["title"].strip(), numbered=numbered)
+            blocking = current == "remaining" and bool(_blocking_heading(match["title"].strip()))
             continue
         bold = _BOLD_FIELD.match(raw)
         if bold:
             label = bold["title"].strip().rstrip(":：")
             current = _section_field(label, numbered=numbered)
+            blocking = current == "remaining" and bool(_blocking_heading(label))
             value = bold["value"].strip()
-            if current and value:
+            if current and value and not (blocking and _NONE_LEAD.match(value)):
                 sections.setdefault(current, []).append(value)
             continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
@@ -733,12 +758,13 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             field = _section_field(label, numbered=numbered) if label else None
             if field:
                 value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
-                if value:
+                if value and not (field == "remaining" and _blocking_heading(label) and _NONE_LEAD.match(value)):
                     sections.setdefault(field, []).append(value)
                 current = None
                 continue
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
-                and not any(marker in line for marker in _CARRIER_MARKERS)):
+                and not any(marker in line for marker in _CARRIER_MARKERS)
+                and not (blocking and _NONE_LEAD.match(line.strip("|").strip()))):
             # A verification section can explicitly say a check was not run.
             # Preserve that declaration as unverified; never call it a pass.
             field = "remaining" if current == "verified" and _UNRUN_CHECK.search(line) else current
@@ -1163,7 +1189,11 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     sections = report_sections(text, numbered=code_report)
     result = _result_line(route, t, sections.get("remaining") or [], limits=sections.get("limits") or [],
                           follow_up=sections.get("follow_up") or [], verified=sections.get("verified") or [])
-    if assessment == "FAIL":
+    if assessment == "blocking":
+        # A finished review whose verdict is its blocking findings: the work is done, the subject is
+        # not cleared. The findings are listed below; they are not a failure of the work itself.
+        result = t("completion.result_audit_findings")
+    elif assessment == "FAIL":
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
     lines.append(t("completion.result", result=result))
@@ -1228,9 +1258,42 @@ def sealed_summary(metadata, attempt_id: str) -> str:
         text = path.read_text(encoding="utf-8").strip()
     except Exception:  # noqa: BLE001 -- a missing summary leaves the existing delivery text as it was
         return ""
-    if not text.startswith(summary_heads()) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
+    return text if _carriable(text) else ""
+
+
+def _carriable(text: str) -> bool:
+    return text.startswith(summary_heads()) and "\n\n" not in text and not any(m in text for m in _CARRIER_MARKERS)
+
+
+def blocked_review_summary(metadata, jobs) -> str:
+    """The summary for a finished review that ended FAIL (blocking findings) with a readable report.
+
+    Such an end is finished work, not a dead worker: its route is not closed (the close transaction
+    settles a PASS), so nothing is sealed; the same summary lines are read from the report now.
+    Empty when the row is not that end or the report cannot be read."""
+    try:
+        from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
+        if metadata.get("note") != REVIEW_BLOCKING_NOTE:
+            return ""
+        route_file = Path(metadata.get("owner_route_file") or metadata.get("route_file"))
+        route = json.loads(route_file.read_text(encoding="utf-8"))
+        from codex_dispatch_terminal import inspect_terminal_attempt
+        terminal = inspect_terminal_attempt(
+            metadata.get("log_file"), worktree=route["cwd"], artifact_root_metadata=route.get("artifact_root"),
+            worker_type=metadata.get("worker_type"), artifact_binding=metadata)
+        encoded = terminal.get("artifact_path_b64")
+        if (terminal.get("state") != "valid" or terminal.get("verdict") != "FAIL"
+                or terminal.get("artifact_state") != "readable" or not encoded):
+            return ""
+        import base64
+        primary = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        from dispatch_terminal_commit import TerminalCommitRequest, _completion_cost
+        request = TerminalCommitRequest(route_file, metadata["attempt_id"], Path(jobs), Path(route["artifact_root"]))
+        text = completion_summary(route, primary, route_file=route_file, cost=_completion_cost(request, route),
+                                  assessment="blocking").strip()
+    except Exception:  # noqa: BLE001 -- no summary leaves the notice as it was
         return ""
-    return text
+    return text if _carriable(text) else ""
 
 
 # ---------------------------------------------------------------------------

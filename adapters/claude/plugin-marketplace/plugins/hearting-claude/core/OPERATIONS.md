@@ -1650,7 +1650,10 @@ brief and how to end. Its model grade is the one a staged route gives that unit 
 The launch seals `workflow_completion=runtime-v1` on the leg. When the worker ends, the completion
 controller closes the route and seals the cycle, and the completion notice that returns to the launching
 session carries the route's sealed summary (verdict line, blocking findings, report path); no close or
-finalize command is run by hand. The same notice path serves all three harnesses. The launching session
+finalize command is run by hand. A review that ends FAIL with its readable report is finished work: the
+notice carries the same summary (its result line says the review completed with findings) and `start --route`
+reports the verdict; that route is not closed (the close transaction settles a pass). The same notice path
+serves all three harnesses. The launching session
 need not be an owner: this section does not change which work is direct, solo or staged
 (`core/WORKFLOW.md` §0.2.1).
 

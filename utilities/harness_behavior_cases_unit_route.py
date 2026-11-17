@@ -9,6 +9,12 @@
     completion controller closes the route, and the resting session is woken with the route's
     sealed summary (the verdict line, the blocking findings and the report path).
 
+``unit-route-blocking``
+    The same, but the worker's review finds a blocking issue and ends ``verdict: FAIL`` (the most
+    common end of a PR review). Its work is finished: the resting session is woken with the same
+    summary (its result line says the review completed with findings), and ``start --route`` reports
+    the verdict instead of offering the same review again.
+
 The oracle reads what the three harnesses share: the registry row (one depth-1 attempt, the
 unit's worker type, ``workflow_completion=runtime-v1``), the closed route, and the request the
 woken session sent to its model. Synthetic data stays under the fixture root.
@@ -16,10 +22,12 @@ woken session sent to its model. Synthetic data stays under the fixture root.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,9 +53,15 @@ REPORT = (
 )
 
 
+def side_request(record) -> bool:
+    """A session-title/summary side request (the TUI asks for `TITLE:`/`NOW:` lines). OpenCode sends it with
+    tool definitions, so the fixture counts it among the main requests; it is not a turn of the session."""
+    return "after the NOW: line" in record["last_text"]
+
+
 def resting_session_requests(run):
     """The model requests of the depth-0 session: the unit worker's own requests carry its dispatch prompt."""
-    return [r for r in run.main_requests() if "Dispatch metadata:" not in r["text"]]
+    return [r for r in run.main_requests() if "Dispatch metadata:" not in r["text"] and not side_request(r)]
 
 
 class UnitRouteScenario(OwnerPublishRegisteredScenario):
@@ -56,14 +70,25 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                "owner; its end closes the route and the sealed summary wakes the resting session.")
     needs_tui = True
     WAIT = 240
+    blocking = False   # the worker ends FAIL with its blocking findings instead of PASS
 
     def side_script(self, run):
         return None
 
+    def final_reply(self, target) -> Reply:
+        if self.blocking:
+            return Reply(f"artifact: {target}\nverdict: FAIL\nblocker: {BLOCKER} the fixture function ignores an empty list",
+                         gate=self.worker_end)
+        return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none", gate=self.worker_end)
+
     # -- the fixture model ----------------------------------------------------------------------
     def script(self, run):
+        self.worker_end = threading.Event()   # the worker's last answer waits until the session rests
+
         def answer(record, earlier):
             text, last = record["text"], record["last_text"]
+            if side_request(record):                                   # a title request is no turn: answer it as one
+                return Reply("TITLE: fixture unit route\nNOW: fixture")
             if "Dispatch metadata:" in text and WORK in text:          # the unit worker
                 output = re.search(r"artifact_output_dir: (\S+)", text)
                 target = (output.group(1) if output else "/nonexistent") + "/units/unit/report.md"
@@ -72,7 +97,7 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                     run.evidence["worker_first_request_chars"] = len(text)
                     return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && cat > '{target}' <<'HB_EOF'\n"
                                        f"{REPORT}HB_EOF\n")
-                return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none")
+                return self.final_reply(target)
             if record["last_kind"] == "tool":
                 return Reply("The unit route runs; I will continue when its result arrives.")
             if BLOCKER in text and not any(NEXT in str(r["reply"].get("shell") or "") for r in earlier):
@@ -102,16 +127,6 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
         # The depth-0 session has no AGENT_DISPATCH_JOBS: the canonical registry is the one every carrier reads.
         self.jobs = Path(env.pop("AGENT_DISPATCH_JOBS"))
         env["HEARTING_PRIOR_ART"] = "off"
-        # In operation the shared obligation runner is already up when a worker starts (a session's own
-        # steward duty keeps it). Started by the worker's launch it would be counted in the worker's
-        # process group and hold its row open until the runner idles out.
-        ran = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
-                              "import peer_obligations, steward_check; store = peer_obligations.ObligationStore(sys.argv[2]); "
-                              "print(bool(steward_check.register(sys.argv[3], 'hb-unit-fixture', store=store)))",
-                              str(_base().SOURCE / "utilities"), str(self.jobs.parent), run.harness],
-                             env={**env, "AGENT_DISPATCH_JOBS": str(self.jobs)}, cwd=str(ws), text=True,
-                             capture_output=True, timeout=60)
-        run.evidence["steward_duty"] = ran.stdout.strip() or ran.stderr[-200:]
         sys.path.insert(0, str(_base().SOURCE / "utilities"))
         import model_config
         model = fixture_model_id(run.harness)
@@ -139,8 +154,31 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
         return sorted((Path(run.home.env["AGENT_ARTIFACT_ROOT"]) / ".runtime" / "routes").glob("rt-*.json"))
 
     # -- the run --------------------------------------------------------------------------------
+    def start_route_again(self, run, route):
+        """`start --route` for the route, as the resting session would run it after the end (its receipt's fields)."""
+        env = dict(run.home.env)
+        done = subprocess.run([sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "start",
+                               "--route", route["route_id"]], env=env, cwd=str(run.home.workspace), text=True,
+                              capture_output=True, timeout=120)
+        text = done.stdout + done.stderr
+        try:
+            start = text.index("{")
+            receipt, _ = json.JSONDecoder().raw_decode(text[start:])
+        except ValueError:
+            receipt = {}
+        return {"state": receipt.get("state"), "reason": receipt.get("reason"),
+                "required_action": receipt.get("required_action"), "next_step": receipt.get("next_step"),
+                "has_summary": bool(receipt.get("summary")), "mentions_compose_again": "compose-again" in text,
+                "exit": done.returncode}
+
     def drive(self, run):
         ev = run.evidence
+        try:
+            return self.run_unit_route(run, ev)
+        finally:
+            self.worker_end.set()
+
+    def run_unit_route(self, run, ev):
         run.prompt(START)
         started = wait_for(lambda: self.unit_rows(), 120, 1)
         ev["rows_after_start"] = [{k: r.get(k) for k in ("status", "worker_type", "unit", "route_node", "dispatch_depth",
@@ -149,13 +187,17 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
         if not started:
             run.note("the unit worker never registered")
             return "inconclusive"
-        time.sleep(4)   # the worker has answered; what is still alive in the fixture
-        ev["alive_after_worker_answer"] = [
+        # The worker has not ended (its last answer is held): wait until the session has its start result
+        # and rests, so the end reaches a resting session through the wake path as it does in operation.
+        wait_for(lambda: any(r["last_kind"] == "tool" for r in resting_session_requests(run)), 90, 1)
+        run.wait_idle(6, 60)
+        before = len(resting_session_requests(run))
+        ev["requests_before_completion"] = before
+        ev["alive_before_end"] = [
             line.strip()[:260] for line in subprocess.run(["ps", "-eo", "pid,ppid,pgid,etimes,args"], text=True,
                                                           capture_output=True).stdout.splitlines()
             if str(run.home.root) in line and "ps -eo" not in line and "tmux" not in line][:25]
-        before = len(resting_session_requests(run))
-        ev["requests_before_completion"] = before
+        self.worker_end.set()
         done = wait_for(lambda: (lambda rows: rows and rows[-1]["status"] in TERMINAL_STATES)(self.unit_rows()),
                         self.WAIT, 2)
         completed_at = time.time()
@@ -169,26 +211,52 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
         ev["unit_rows"] = len(rows)
         ev["row"] = {k: rows[-1].get(k) for k in ("status", "worker_type", "unit", "route_node", "workflow_completion",
                                                   "harness", "note", "dispatch_depth", "model_profile",
-                                                  "failure_class")} if rows else None
+                                                  "failure_class") } if rows else None
         ev["route_nodes"] = [(n.get("id"), n.get("unit"), n.get("launch_authority")) for n in route.get("nodes", [])]
         ev["route_closed"] = bool(outcome and outcome.exists())
         ev["worker_done"] = bool(done)
-        if woke:
-            first = woke[0]
-            ev["wake_seconds"] = round(first["at"] - completed_at, 1)
-            ev["wake_request_tail"] = first["last_text"][-1500:]
+        # The summary reached the session either as a wake after it rested, or (when the worker ended before the
+        # start command returned) inside the start result; both are the delivery. Which one is evidence.
+        carriers = woke or [r for r in requests if BLOCKER in r["text"]]
+        ev["delivered_by"] = "wake" if woke else "start-receipt" if carriers else "none"
+        if carriers:
+            first = carriers[0]
+            if woke:
+                ev["wake_seconds"] = round(first["at"] - completed_at, 1)
+            ev["wake_request_tail"] = first["last_text"][-1800:]
             ev["summary_in_wake"] = {name: name in first["text"] for name in
                                      (BLOCKER, "issues", "report.md", "route rt-")}
             ran = any(f"{NEXT}-42" in r["text"] for r in requests[requests.index(first):])
             ev["next_action_ran"] = ran
         ok = (rows and len(rows) == 1 and rows[-1].get("worker_type") == "review"
-              and rows[-1].get("workflow_completion") == "runtime-v1" and ev["route_closed"] and woke
+              and rows[-1].get("workflow_completion") == "runtime-v1" and carriers
               and ev["summary_in_wake"]["report.md"] and ev["summary_in_wake"][BLOCKER])
-        run.note(f"unit rows={len(rows)}; closed={ev['route_closed']}; woke={'yes' if woke else 'no'}"
+        if self.blocking:
+            tail = first["last_text"] if carriers else ""
+            ev["blocking_row_note"] = rows[-1].get("note") if rows else None
+            ev["result_line"] = next((line for line in tail.splitlines() if line.startswith("Result:")), "")
+            ev["wake_has_dead_or_frame_words"] = [w for w in ("current frame results", "a failed frame", "compose-again",
+                                                              "start --route") if w in tail]
+            ev["start_route_after"] = self.start_route_again(run, route) if route else {}
+            ok = (ok and ev["blocking_row_note"] == "completed-review-blocking"
+                  and "completed with findings" in ev["result_line"] and not ev["wake_has_dead_or_frame_words"]
+                  and ev["start_route_after"].get("reason") == "unit-review-blocking"
+                  and ev["start_route_after"].get("has_summary")
+                  and not ev["start_route_after"].get("mentions_compose_again"))
+        else:
+            ok = ok and ev["route_closed"]
+        run.note(f"unit rows={len(rows)}; closed={ev['route_closed']}; delivered_by={ev['delivered_by']}"
                  + (f" after {ev['wake_seconds']}s" if woke else ""))
         if not rows or not done:
             return "inconclusive"
         return "pass" if ok and ev.get("next_action_ran") else "fail"
 
 
-SCENARIOS = [UnitRouteScenario]
+class UnitRouteBlockingScenario(UnitRouteScenario):
+    name = "unit-route-blocking"
+    summary = ("A unit route whose review finds a blocking issue and ends FAIL: the end is finished work; the "
+               "resting session gets the same summary, and `start --route` reports it instead of re-running it.")
+    blocking = True
+
+
+SCENARIOS = [UnitRouteScenario, UnitRouteBlockingScenario]
