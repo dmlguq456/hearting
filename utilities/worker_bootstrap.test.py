@@ -807,6 +807,43 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertEqual(rendered.count("# Portable Worker Kernel"), 1)
         self.assertEqual(rendered.count("# Worker Type:"), 1)
 
+    def test_review_stance_is_carried_once_just_before_the_unit_body(self):
+        rendered = W.render_worker_bootstrap(ROOT, "review", unit="qa/code-review")
+        self.assertEqual(rendered.count("Refute first"), 1)
+        self.assertNotIn("# Shared Fragment: Review Stance", rendered)
+        self.assertNotIn("> Referenced by every review", rendered)
+        stance_at = rendered.index("Review adversarially by default")
+        self.assertLess(stance_at, rendered.index("# Unit: qa/code-review"))
+        self.assertLess(rendered.index("# Worker Type:"), stance_at)
+
+    def test_review_stance_reaches_the_five_auxiliary_checks(self):
+        for unit in ("assumption-check", "edge-case-check", "failure-mode-check",
+                     "simplicity-check", "test-gap-check"):
+            with self.subTest(unit=unit):
+                text = W.render_worker_bootstrap(ROOT, "review", unit=f"qa/{unit}")
+                self.assertEqual(text.count("Refute first"), 1)
+
+    def test_unit_without_stance_renders_its_body_only(self):
+        body = W.unit_persona_body(ROOT, "dev/backend")
+        bare = W.render_worker_bootstrap(ROOT, "stage")
+        self.assertEqual(W.render_worker_bootstrap(ROOT, "stage", unit="dev/backend"),
+                         bare + "\n" + body + "\n")
+        self.assertNotIn("Refute first", bare + body)
+
+    def test_unresolvable_stance_ref_renders_body_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "roles" / "worker-types").mkdir(parents=True)
+            (root / "roles" / "units" / "qa").mkdir(parents=True)
+            (root / "roles" / "worker-bootstrap.md").write_text("kernel\n")
+            (root / "roles" / "worker-types" / "review.md").write_text("type\n")
+            for name, ref in (("a", "_shared/missing.md"), ("b", "../../../outside.md")):
+                (root / "roles" / "units" / "qa" / f"{name}.md").write_text(
+                    f"---\nunit: qa/{name}\nstance: {ref}\n---\n\n# Unit: qa/{name}\nbody\n")
+                (root / "outside.md").write_text("# T\n\nleaked stance\n")
+                self.assertEqual(W.render_worker_bootstrap(root, "review", unit=f"qa/{name}"),
+                                 f"kernel\n\ntype\n\n# Unit: qa/{name}\nbody\n")
+
     def test_reserved_and_absent_units_render_unchanged(self):
         bare = W.render_worker_bootstrap(ROOT, "owner")
         self.assertEqual(W.render_worker_bootstrap(ROOT, "owner", unit="_kernel/owner"), bare)

@@ -480,9 +480,14 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     # may have finished between the release and this call (top review M1).
     for attempt_id, age, _status in rows:
         fresh = attempt_id in open_rows and age <= window
-        if attempt_id not in open_rows and not arm_path(jobs, attempt_id).exists():
+        path = arm_path(jobs, attempt_id)
+        if attempt_id not in open_rows and not path.exists():
             continue
-        claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
+        # A settled record refuses without the ledger lock or any lineage read: under the
+        # lock every one of a long session's ended arms re-read the registry row and
+        # re-observed the lineage, ~40ms each, so one Bash call held the shared lock
+        # ~700 times for ~23s of CPU and the session's hooks queued behind it (2026-11-17).
+        claim = _settled_arm(path) or claim_arm(jobs, attempt_id, session, fresh=fresh)
         if isinstance(claim, ArmRefusal):
             # Keep the receipt-named attempt's reason above any other's
             # (review R2 M2): the notice must say why *that* start did not arm.
@@ -529,9 +534,10 @@ def boundary_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     refusal: ArmRefusal | None = None
     for attempt_id, age, status in _session_owner_states(jobs, session, RECEIPT_ROW_STATUSES):
         fresh = status in ARM_ROW_STATUSES and age <= window
-        if not fresh and not arm_path(jobs, attempt_id).exists():
+        path = arm_path(jobs, attempt_id)
+        if not fresh and not path.exists():
             continue
-        claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
+        claim = _settled_arm(path) or claim_arm(jobs, attempt_id, session, fresh=fresh)  # see `registry_launch`
         if isinstance(claim, ArmRefusal):
             refusal = refusal or claim
             continue
@@ -818,13 +824,50 @@ def _holds_arm(claim: "ArmClaim") -> bool:
     return bool(held) and held.get("holder") == list(claim.holder) and held.get("session_id") == claim.session_id
 
 
-def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str | None:
-    """None when the existing record may be re-taken, else the typed reason."""
+# Reasons a record settles by itself: no later read can make it claimable
+# (`ended` is permanent, `arms` only grows), so the claim loops refuse it
+# without the ledger lock (2026-11-17).
+SETTLED_ARM_REASONS = frozenset({"ended", "exhausted"})
 
-    if existing.get("state") == "unreadable":
+
+def _record_refusal(existing: dict[str, Any]) -> str | None:
+    """The refusal the record alone decides, before any registry or lineage read."""
+
+    if existing.get("state") == "unreadable" or existing.get("schema") != ARM_SCHEMA:
         return "unreadable"
-    if existing.get("schema") != ARM_SCHEMA:
+    arms = existing.get("arms")
+    if not isinstance(arms, int):
         return "unreadable"
+    if arms >= ARM_LIMIT:
+        return "exhausted"
+    state = existing.get("state")
+    if state == "ended":
+        return "ended"
+    if state not in ARM_STATES:
+        return "unreadable"
+    return None
+
+
+def _settled_arm(path: Path) -> ArmRefusal | None:
+    """The claim refusal for a record that settled for good, read without the lock.
+
+    Only `SETTLED_ARM_REASONS` count: a missing, unreadable, or unknown record
+    goes through `claim_arm`, so a transient read failure never costs an arm."""
+
+    existing = _read_arm(path)
+    reason = None if existing is None else _record_refusal(existing)
+    return ArmRefusal(reason) if reason in SETTLED_ARM_REASONS else None
+
+
+def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str | None:
+    """None when the existing record may be re-taken, else the typed reason.
+
+    The record's own refusals come first; the registry and lineage are read
+    only for a record that may still be claimable."""
+
+    refusal = _record_refusal(existing)
+    if refusal is not None:
+        return refusal
     # The session that armed it may have been cleared; its same-seat successor takes the wait over.
     handed = existing.get("session_id") != session and _handed_to(jobs, existing.get("attempt_id"), session)
     if handed is None:
@@ -837,16 +880,7 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
         return "foreign-session"       # the arming session handed the owner on and no longer answers for it
     if metadata is not None and owned is None:
         return "handover-unreadable"   # unknown, not another session: the next call looks again
-    arms = existing.get("arms")
-    if not isinstance(arms, int):
-        return "unreadable"
-    if arms >= ARM_LIMIT:
-        return "exhausted"
     state = existing.get("state")
-    if state == "ended":
-        return "ended"
-    if state not in ARM_STATES:
-        return "unreadable"
     # A `lapsed` arm is one its holder stopped waiting on (a timeout, or a row a
     # boundary wait holding several did not wake for); that holder may still
     # live while it carries another row's wake (`_first_due`).
