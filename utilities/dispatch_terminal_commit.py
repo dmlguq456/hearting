@@ -23,6 +23,7 @@ from contextlib import ExitStack, contextmanager
 import artifact_lifecycle
 import route_identity
 import route_lineage
+from route_plan import is_depth0_leg
 import dispatch_contract
 import dispatch_lock_order
 from dispatch_attempt_policy import verdict_pass
@@ -725,12 +726,15 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str,
                 Path(jobs), owner_attempt_id, rows=registry_rows)
             route = json.loads(Path(route_file).read_text())
             # Quick is a three-node route: `one-shot` plus two depth-1 frame
-            # legs. Both worker types terminate through here, and the derived
-            # tuple must come from the node the row actually names -- assuming
-            # `one-shot` made every frame leg's termination fail as
+            # legs. The owner and a depth-0 leg both terminate through here, and
+            # the derived tuple must come from the node the row actually names --
+            # assuming `one-shot` made every frame leg's termination fail as
             # `route-identity-unverified: quick-owner-tuple`.
+            named = next((n for n in route.get("nodes", []) if isinstance(n, dict)
+                          and n.get("id") == meta.get("route_node")), None)
             if (route.get("effective_intensity") != "quick"
-                    or meta.get("worker_type") not in {"owner", "frame"}
+                    or not (meta.get("worker_type") == "owner" or (
+                        is_depth0_leg(named) and meta.get("worker_type") == named.get("worker_type")))
                     or meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
                     or fields[1] not in {"open", "running", "done"}
                     or (fields[1] == "done" and not verdict_pass(meta))):

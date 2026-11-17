@@ -12,6 +12,7 @@ from pathlib import Path
 from hearting_gates import note_same_work_drift
 import artifact_locator as ARTIFACT_LOCATOR
 import route_format
+from route_plan import is_depth0_leg
 import model_profile as PROFILE
 import resource_resume as RESOURCE_RESUME
 from dispatch_contract import EXECUTION_SURFACES, FALLBACK_HOPS, agent_home_equivalent
@@ -795,7 +796,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 leg.get("execution_surface") != "registered-headless"
                 or leg.get("registered_worker") is not True
                 or leg.get("fallback_hops")
-                or leg.get("launch_authority") != "depth-0"
+                or not is_depth0_leg(leg)
             ):
                 raise ValueError("quick frame leg axes mismatch")
     dd_digest=route.get("dispatch_defaults_digest")
