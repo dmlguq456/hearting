@@ -183,15 +183,34 @@ def select(lines, *, now_ns, route_closed_ns, delivery_settled, deadline=None, e
     return [index for index, group in enumerate(groups) if group not in blocked]
 
 
+def _owner_route_attached(jobs: Path, attempt: str) -> bool:
+    """An owner may bind its first route after launch; that record lives beside the
+    registry (`owner-route-bindings/`), not in the row. Unreadable evidence counts as bound."""
+    if not attempt:
+        return False
+    try:
+        from owner_route_binding import (OWNER_ROUTE_ATTACHMENT_DIR, _attachment_key,
+                                         _record_present)
+        return _record_present(Path(jobs).expanduser().resolve(strict=False),
+                               OWNER_ROUTE_ATTACHMENT_DIR, _attachment_key(attempt),
+                               reason="owner-route-attachment-record-invalid")
+    except Exception:  # noqa: BLE001 -- unreadable evidence keeps the row
+        return True
+
+
 def _route_closure(jobs: Path, proven: dict):
     """Closure time of the row's exact route; proven closures are kept across passes."""
-    from worker_home_retention import _route_evidence
+    from worker_home_retention import ROUTE_KEYS, _route_evidence
     seen = {}
 
     def closed(metadata):
-        binding = "\x1f".join(metadata.get(name, "") for name in (
-            "route_file", "route_id", "route_hash", "owner_route_file", "owner_route_id", "owner_route_hash"))
-        key = (f"{metadata.get('route_id') or metadata.get('owner_route_id') or '-'}:"
+        if not any(name in metadata for name in ROUTE_KEYS):
+            # A row with no route keys has no closure to wait for, unless its owner bound a
+            # route after launch. Judged per row, never through the shared memo below: an empty
+            # or batch-only binding hashes like "no route" there and must stay unknown.
+            return None if _owner_route_attached(jobs, metadata.get("attempt_id", "")) else 0
+        binding = "\x1f".join(metadata.get(name, "") for name in ROUTE_KEYS)
+        key = (f"{metadata.get('route_id') or metadata.get('owner_route_id') or metadata.get('batch_route_id') or '-'}:"
                + hashlib.sha256(binding.encode("utf-8", "surrogatepass")).hexdigest()[:32])
         if key in proven:
             seen[key] = proven[key]
@@ -200,8 +219,7 @@ def _route_closure(jobs: Path, proven: dict):
                 state, mtime, _cause = _route_evidence(jobs, metadata)
             except Exception:  # noqa: BLE001 -- unreadable evidence keeps the row
                 state, mtime = "unknown", 0
-            # state "none": the row is bound to no route, so there is no closure to wait for.
-            seen[key] = 0 if state == "none" else mtime if state == "closed" and mtime > 0 else None
+            seen[key] = mtime if state == "closed" and mtime > 0 else None
         return seen[key]
 
     return closed, seen

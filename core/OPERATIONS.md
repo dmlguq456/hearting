@@ -654,8 +654,8 @@ pass also starts these post-exit retention passes (homes, logs, reusable
 runtimes, archive) in a short-lived process. A group of rows that
 share an attempt or route id moves only as a whole, when every row ended (the
 last write of its attempt log, else its registration) at least 14 days ago,
-belongs to a route closed at least 14 days ago (a row bound to no route has none
-to wait for), owes no parent delivery, has no
+belongs to a route closed at least 14 days ago (a row with no route keys has none
+to wait for, unless its owner bound a route after launch), owes no parent delivery, has no
 attempt log left and, if it started, left its route's completion markers. Rows
 go byte-exact to `<state root>/archive/registry-<YYYY-MM>/` (read by
 `dispatch-registry.py inventory --include-archive`) and are synced there before
@@ -663,7 +663,9 @@ the registry is replaced under its lock; uncertain evidence keeps a row live.
 A closed-route replay puts its rows back first, and
 `python3 <AGENT_HOME>/utilities/dispatch_registry_archive.py restore [--id <id>]`
 puts archived rows back in time order; rows that still qualify move again at
-the next pass.
+the next pass. `dispatch-wait.sh --attempt-id` on a moved attempt answers from its
+last archived row: a `completed-*` end is complete, any other end a terminal
+failure to inspect.
 
 Preflight doctors share the same failure presentation: preserve the check's
 exit status, report a bounded cause excerpt when available (favoring explicit

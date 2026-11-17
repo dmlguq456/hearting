@@ -345,7 +345,7 @@ class RetentionPassesTest(unittest.TestCase):
 
 
 class RouteLessRowTest(unittest.TestCase):
-    """The real `_route_closure` and `_delivery_settled` run: a row bound to no route has no closure to wait for."""
+    """The real `_route_closure` and `_delivery_settled` run: a row with no route keys has no closure to wait for."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -383,6 +383,29 @@ class RouteLessRowTest(unittest.TestCase):
         owed = self.bare("att-n3", delivery_intent="1")   # no recipient digest or record: unknown
         self.assertEqual(self.sweep([owed])["removed"], 0)
         self.assertEqual(self.live(), [owed])
+
+    def test_a_route_less_row_does_not_settle_later_rows_with_route_keys(self):
+        # Same pass, route-less row first: an empty route binding is unknown evidence and a
+        # batch-only binding has no proven closure, so both stay.
+        settled = self.bare("att-n6")
+        empty = self.bare("att-n7", route_id="")
+        batch = self.bare("att-n8", batch_route_id="rt-00000000deadbeef")
+        keep = self.bare("att-n0", days_ago=0, status="running")
+        self.assertEqual(self.sweep([settled, empty, batch, keep])["removed"], 1)
+        self.assertEqual(self.live(), [empty, batch, keep])
+        # And the other order: an unknown row first does not hold the route-less row back.
+        self.assertEqual(self.sweep([empty, batch, self.bare("att-n6"), keep])["removed"], 1)
+        self.assertEqual(self.live(), [empty, batch, keep])
+
+    def test_an_owner_that_bound_a_route_after_launch_stays(self):
+        from owner_route_binding import OWNER_ROUTE_ATTACHMENT_DIR, _attachment_key
+        owner = self.bare("att-n9", worker_type="owner")
+        keep = self.bare("att-n0", days_ago=0, status="running")
+        records = self.root / OWNER_ROUTE_ATTACHMENT_DIR
+        records.mkdir()
+        (records / _attachment_key("att-n9")).write_text("{}", encoding="utf-8")
+        self.assertEqual(self.sweep([owner, keep])["removed"], 0)
+        self.assertEqual(self.live(), [owner, keep])
 
     def test_a_route_less_row_linked_to_an_open_row_stays_with_it(self):
         settled = self.bare("att-n4")
