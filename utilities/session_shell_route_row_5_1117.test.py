@@ -46,6 +46,8 @@ const STYLES={dim:{dim:true},loc_repo:{foreground:253},stg2_on:{foreground:150,b
 const base={repo:[P('hearting/')],messages:[],styles:STYLES};
 const render=(routes,width,height,{side=true,model={},configuration={},harness='claude',frame=0}={})=>view.render({width,height,side,fill:side,harness,frame,
  model:{...base,routes,route_count:routes.length,route_total:routes.length,...model},state:'working',configuration,questions:()=>[]});
+// (11-18: a route's time stands at the right end of its first line: `tm(line,time,width)` is that line.)
+const tm=(s,time,w=44)=>s+' '.repeat(Math.max(1,w-8-cells(s)-cells(time)))+time;
 const text=r=>r.map(p=>p.text).join('');
 const plain=v=>v.rows.map(text);
 const draw=(routes,width,height,o)=>plain(render(routes,width,height,o));
@@ -70,7 +72,7 @@ class RouteRow5Test(unittest.TestCase):
 // (11-17, two-row session lines: each session is its who row, `CTX 40%` beside its model with no gauge, and under it its NOW, one row;
 // a worker's stage and open tool are not drawn: the owner's stage line has the stage.)
 assert.deepEqual(only(R.staged),[
- '● frame ✓ → code(standard)',
+ tm('● frame ✓ → code(standard)','42m'),
  '  패널 route 줄 다시 짜기',
  '  ● owner  claude Opus 5.5 xhigh 40%',
  '    Waiting on two workers',
@@ -105,7 +107,7 @@ assert(only({...R.staged,paint:{...R.staged.paint,now:'a very long NOW that cann
     def test_a_frame_route_hangs_its_two_legs_under_it_and_waits_for_the_direction(self):
         self.node(r"""
 assert.deepEqual(only(R.frame,50),[
- '● frame → ??',
+ tm('● frame → ??','4m',50),
  '  보류된 메시지 조사',
  '  ↳ ⠋ frame     claude Opus 5.5 xhigh 18%',
  '      Reading the held messages',
@@ -117,17 +119,17 @@ assert.deepEqual(only(R.frame,60).slice(2),[
  '  ↳ ⠋ frame-alt codex GPT-5.5 xhigh  CTX 11% · 4m',
 ]);
 // Done, the two legs gone and the answer asked for: the mark `◑`, no legs, the word; it does not blink.
-assert.deepEqual(only(R.wait,50),['◑ frame → ?? · waiting for direction','  보류된 메시지 조사']);
+assert.deepEqual(only(R.wait,50),[tm('◑ frame → ?? · waiting for direction','4m',50),'  보류된 메시지 조사']);
 assert.equal(beats(R.wait).length,0);
 // In the person's language the word is the word list's (the backend's labels).
 const ko=only(R.wait,50,{model:{labels:{direction_wait:'방향 확인 대기'}}});
-assert.equal(ko[0],'◑ frame → ?? · 방향 확인 대기');
+assert.equal(ko[0],tm('◑ frame → ?? · 방향 확인 대기','4m',50));
 // Short of rows the NOW rows go and the legs fold into one row each (percent and time at the right edge); the first line and the title stay.
 let folded=false;
 for(let h=40;h>=12;h--){
  const rows=box(draw([R.frame],50,h));
  if(!rows.length)break;
- assert(rows[0]==='● frame → ??'&&rows[1]==='  보류된 메시지 조사',h+'\n'+rows.join('\n'));
+ assert(rows[0]===tm('● frame → ??','4m',50)&&rows[1]==='  보류된 메시지 조사',h+'\n'+rows.join('\n'));
  if(!rows.some(s=>/Reading the held/.test(s))){assert(rows.filter(s=>/↳/.test(s)).length===2&&rows.length===4,h+'\n'+rows.join('\n'));folded=true;break;}
 }
 assert(folded,'the legs fold into one row each at some height');
@@ -136,7 +138,7 @@ assert(folded,'the legs fold into one row each at some height');
     def test_a_route_its_owner_does_alone_has_no_stage_line_and_its_now_stands_under_the_owner_row(self):
         self.node(r"""
 assert.deepEqual(only(R.solo),[
- '● code(quick)',
+ tm('● code(quick)','18m'),
  '  보류된 메시지 조사',
  '  ⠋ owner codex GPT-5.5 high 63%',
  '    Bash run-tests.py',
@@ -160,13 +162,13 @@ for(const [label,o] of [['256',{}],['light',{configuration:{theme:'light'}}],['m
  }
 }
 // The brackets carry the intensity and nothing else: no mode, no scope, no shape.
-assert.equal(only({...R.staged,mode:'debug',visibility:{next:'x'}})[0],'● frame ✓ → code(standard)');
+assert.equal(only({...R.staged,mode:'debug',visibility:{next:'x'}})[0],tm('● frame ✓ → code(standard)','42m'));
 // A route whose record names no intensity has no brackets; a direct route's word stands where the record names none.
-assert.equal(only({...R.solo,intensity:undefined})[0],'● code');
-assert.equal(only({id:'d',title:'작은 수정',kind:'working',state:'working',elapsed:'3m',shape:'direct',stages:[],kind_word:'code',paint:{glyph:P('⠋')}})[0],'● code(direct)');
-assert.equal(only({id:'e',title:'작은 수정',kind:'working',state:'working',elapsed:'3m',shape:'direct',stages:[],kind_word:'code',intensity:'direct',paint:{glyph:P('⠋')}})[0],'● code(direct)');
+assert.equal(only({...R.solo,intensity:undefined})[0],tm('● code','18m'));
+assert.equal(only({id:'d',title:'작은 수정',kind:'working',state:'working',elapsed:'3m',shape:'direct',stages:[],kind_word:'code',paint:{glyph:P('⠋')}})[0],tm('● code(direct)','3m'));
+assert.equal(only({id:'e',title:'작은 수정',kind:'working',state:'working',elapsed:'3m',shape:'direct',stages:[],kind_word:'code',intensity:'direct',paint:{glyph:P('⠋')}})[0],tm('● code(direct)','3m'));
 // Several kinds in one plan: what is behind is dim with `✓`, this one bold, what is left is not drawn (the chain is what the record holds).
-assert.equal(only({...R.staged,chain:[{name:'research',state:'done'},{name:'draft',state:'done'},{name:'code',state:'active'}]},60)[0],'● research ✓ → draft ✓ → code(standard)');
+assert.equal(only({...R.staged,chain:[{name:'research',state:'done'},{name:'draft',state:'done'},{name:'code',state:'active'}]},60)[0],tm('● research ✓ → draft ✓ → code(standard)','42m',60));
 """)
 
     def test_exactly_one_thing_blinks_per_route(self):
@@ -197,22 +199,22 @@ assert.deepEqual(lit.filter(p=>p.text!=='execute'),dark.filter(p=>p.text!=='exec
     def test_failed_and_finished_routes_keep_the_grammar(self):
         self.node(r"""
 assert.deepEqual(only(R.failed),[
- '✕ frame ✓ → code(standard)',
+ tm('✕ frame ✓ → code(standard)','42m'),
  '  패널 route 줄 다시 짜기',
  '  ✕ owner claude Opus 5.5 xhigh 40%',
  '    staged 2/3: execute ✕',
 ]);
 const done=only(R.done);
-assert.equal(done[0],'✓ code(quick)');assert.equal(done[1],'  PASS · 보류된 메시지 조사');
+assert.equal(done[0],tm('✓ code(quick)','18m'));assert.equal(done[1],'  PASS · 보류된 메시지 조사');
 """)
 
     def test_narrow_widths_drop_values_from_the_back_and_keep_every_row_in_its_width(self):
         self.node(r"""
 // The chain goes first (what is behind), then the intensity; the kind and the stage stay.
-assert.equal(only(R.staged,60)[0],'● frame ✓ → code(standard)');
-assert.equal(only(R.staged,30)[0],'● code(standard)');
-assert.equal(only(R.staged,24)[0],'● code(standard)');
-assert.equal(only(R.staged,22)[0],'● code');
+assert.equal(only(R.staged,60)[0],tm('● frame ✓ → code(standard)','42m',60));
+assert.equal(only(R.staged,30)[0],tm('● code(standard)','42m',30));
+assert.equal(only(R.staged,24)[0],tm('● code','42m',24));
+assert.equal(only(R.staged,22)[0],tm('● code','42m',22));
 for(const width of [22,24,26,30,36,44,60]){
  for(const route of [R.staged,R.frame,R.wait,R.solo,R.failed,R.done]){
   const rows=draw([route],width,60);
@@ -246,7 +248,7 @@ for(const s of [...wide,...mid])assert([140,80].includes(cells(s)),s);
 const three=['search','analyze','report'].map((n,i)=>i<1?{name:n,mark:'✓'}:i===1?{name:n,mark:'●',current:true,key:'stg2_on'}:{name:n,mark:''});
 const mk=(shape,o={})=>({...R.staged,id:'m',shape,stages:three,kind_word:'research',chain:[{name:'research',state:'active'}],workers_live:[],paint:{...R.staged.paint,now:'Reading the sources'},...o});
 const want=(shape,line,o)=>{const rows=only(mk(shape,o),50);
- assert.deepEqual(rows,['● research(standard)','  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh  CTX 40%','    Reading the sources',line],rows.join('\n'));};
+ assert.deepEqual(rows,[tm('● research(standard)','42m',50),'  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh  CTX 40%','    Reading the sources',line],rows.join('\n'));};
 want('map-reduce','    map-reduce 2/3: analyze');
 want('transactional-owner','    transactional-owner 2/3: analyze');
 want('resource+verification','    resource+verification 2/3: analyze',{chain:[{name:'research',state:'active'}]});
@@ -272,14 +274,14 @@ assert(wide.some(s=>/research\(standard\) · map-reduce 2\/3: analyze/.test(s))&
         self.node(r"""
 const none=(o={})=>({id:'n',title:'소유자를 모르는 route',kind:'working',state:'working',elapsed:'23m',shape:'one-shot-owner',stages:[{name:'one-shot',current:true,mark:'●'}],
  kind_word:'code',intensity:'quick',paint:{glyph:P('⠋'),ctx:P('40%')},...o});
-// The time and the context are drawn though no owner is named (`CTX 40% · 23m` after the mark, or the time alone on its own row).
+// The time and the context are drawn though no owner is named (`CTX 40% · 23m` after the mark; with no context the time is only on the first line, 11-18).
 const a=only(none(),50);assert(a.some(s=>/^ {2}⠋ CTX 40% · 23m$/.test(s)),a.join('\n'));
-const b=only(none({paint:{glyph:P('⠋')}}),50);assert(b.some(s=>/^\s+23m$/.test(s)),b.join('\n'));
+const b=only(none({paint:{glyph:P('⠋')}}),50);assert.equal(b[0],tm('● code(quick)','23m',50),b.join('\n'));assert(!b.some(s=>/^\s+23m$/.test(s)),b.join('\n'));
 const c=only(none({shape:'map-reduce',stages:[{name:'search',mark:'✓'},{name:'analyze',mark:'●',current:true}],paint:{glyph:P('⠋')}}),50);
-assert(c.some(s=>/^\s+23m$/.test(s))&&c.some(s=>/map-reduce 2\/2: analyze/.test(s)),c.join('\n'));
-// Its NOW, where it has one, stands under the first line, the time alone on its row after it; no NOW, no empty row.
+assert(c[0]===tm('● code(quick)','23m',50)&&c.some(s=>/map-reduce 2\/2: analyze/.test(s)),c.join('\n'));
+// Its NOW, where it has one, stands under the first line (the time is on that line); no NOW, no empty row.
 const d=only(none({paint:{glyph:P('⠋'),now:'Bash run-tests.py'}}),50);
-assert.equal(d[2],'    Bash run-tests.py',d.join('\n'));assert(/^\s+23m$/.test(d[3]),d.join('\n'));
+assert.equal(d[2],'    Bash run-tests.py',d.join('\n'));assert(!d.some(s=>/^\s+23m$/.test(s)),d.join('\n'));
 assert(!b.some(s=>s.trim()===''),b.join('\n'));
 // An owner at rest draws no tool at all (no `after Bash`, no open tool): its row is its who row, its NOW under it where it has one.
 const rest={...R.solo,kind:'idle',state:'idle',tool:undefined,after_tool:'Bash',paint:{glyph:P('●'),...doer('codex','GPT-5.5','high','63%')}};

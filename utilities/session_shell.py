@@ -1138,6 +1138,9 @@ def _observe_session(observe, harness, sid, pid, start):
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
                     "zone_direct", "zone_dispatch", "zone_request",
+                    # 11-18: the five fields' hues for a route's kind word (`kind_`) and its bracket (dim, plain, bold).
+                    *("kind%s_%s" % (weight, field) for field in ("code", "lab", "design", "docs", "research")
+                      for weight in ("", "q", "s", "b")),
                     "hb_claude", "hb_codex", "hb_opencode", "hb_other",
                     # Fleet's stage colors (`render_stages.route_stage_key`): a running stage lit, the others dimmed.
                     *("stg%d_%s" % (i, on) for i in range(5) for on in ("on", "off")))

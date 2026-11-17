@@ -490,9 +490,14 @@ popup; a request row the MESSAGES popup).
   below) and a zone's rule stays while one row of that zone shows, also in a box that scrolls. Beside the
   native area a route reads, by who set each row (11-17, the person's route row sketch 5):
   its first row is a state mark and the kind of work with its intensity (`● code(standard)`: the
-  kind word is the one bold word of the route, in the body color and never dim, also in mono, eight
-  colors and `NO_COLOR`; the intensity stands in dim brackets and nothing else goes in them; a
-  direct route's word stands there when the record names no intensity), the chain of kinds it
+  kind word is the one bold word of the route, in the color of its field (11-18: `code` 69, `lab` 214,
+  `design` 205, `docs` 180, `research` 38 in 256 colors; the dark counterparts 26, 130, 162, 94, 24 on the light face;
+  a route with no such field hue keeps the body color), never dim, in mono, eight colors and `NO_COLOR`
+  as the bold body word; the intensity stands in brackets in the same hue at its weight (`quick` dim, `standard` plain,
+  `strong`, `thorough`, `adversarial` bold; as dim brackets where no hue is shown) and nothing else goes in them; a
+  direct route's word stands there when the record names no intensity; the route's time stands at the right end of this
+  row, the middle text going first short of cells, then the chain behind and the intensity, the kind word and the time
+  staying), the chain of kinds it
   continues leading it (`frame ✓ → code(standard)`: what is behind dim with `✓`, this one bold;
   `research ✓ → draft ✓ → code(standard)`), then its title two cells in on at most two rows
   (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
@@ -505,7 +510,7 @@ popup; a request row the MESSAGES popup).
   row, where the session has none), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
   `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
   position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
-  what it waits for). A route whose owner is not known keeps its time alone on its row under the title.
+  what it waits for). A route whose owner is not known keeps its time and `CTX` row; its time is on the first row.
   The owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
   does alone has no stage line. An owner's live workers (`workers_live`) hang under it by `↳`, with
   no box, four cells in: each worker's first row (its mark, `worker`, harness, model, effort and `CTX 22% · 12m`)

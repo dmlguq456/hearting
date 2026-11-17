@@ -266,7 +266,7 @@
 <text x="756" y="414" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">34%</text>
 <text x="810" y="414" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
 <text x="891" y="414" textLength="117" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">Rate limiting</text>
-<text x="1062" y="414" textLength="36" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">code</text>
+<text x="1062" y="414" textLength="36" lengthAdjust="spacing" fill="#5f87ff" font-weight="700" xml:space="preserve">code</text>
 <text x="1107" y="414" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· staged 2/4:</text>
 <text x="1233" y="414" textLength="63" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">execute</text>
 <text x="1395" y="414" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">31m</text>
@@ -290,7 +290,7 @@
 <text x="756" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">22%</text>
 <text x="810" y="432" textLength="81" lengthAdjust="spacing" fill="#858689" xml:space="preserve">ml-train/</text>
 <text x="900" y="432" textLength="135" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">Checkpoint eval</text>
-<text x="1062" y="432" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">lab</text>
+<text x="1062" y="432" textLength="27" lengthAdjust="spacing" fill="#ffaf00" font-weight="700" xml:space="preserve">lab</text>
 <text x="1098" y="432" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· staged 2/4:</text>
 <text x="1224" y="432" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">eval-asr</text>
 <text x="1395" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">24m</text>

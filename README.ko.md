@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자(각자의 문맥과 지금 하는 일이 함께, dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route(파란 `code(standard)`, 걸린 시간은 첫 줄 오른쪽 끝)와 그 owner와 execute 작업자(각자의 문맥과 지금 하는 일이 함께, dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. route는 이 세션이 띄운 단계별 일입니다. 데모 데이터이며 대화는 예시입니다.</sub></p>
 
@@ -51,7 +51,7 @@
 새 설치에서는 새로 여는 Claude Code, Codex, OpenCode 터미널마다 오른쪽에 40칸
 패널이 열립니다. 프로젝트와 Git 상태(세션이 감독하거나 감독받으면 `PEERS` 줄: `[c7] ⚑ ─ [d4]`), 모델과 문맥, 세션 제목과 지금 하는 일 아래로
 구획마다 몇 줄씩 보입니다: 사용자의 답을 기다리는 질문, 이 세션의 route와 요청을 세 영역(`direct`, `dispatch`, `request`)으로
-나눈 한 상자에, 메시지, 저장된 기억(`MEM`), 세 에이전트의 사용량 창(`USAGE`). 질문,
+나눈 한 상자에(route 첫 줄은 유형 낱말을 갈래 색으로 읽습니다: `code` 파랑, `lab` 호박색, `design` 장미색, `docs` 모래색, `research` 하늘색이고, 뒤따르는 강도는 같은 색에 `quick`은 흐리게 `strong` 이상은 굵게 쓰며, 걸린 시간은 줄 오른쪽 끝에 놓입니다), 메시지, 저장된 기억(`MEM`), 세 에이전트의 사용량 창(`USAGE`). 질문,
 route 상자, `MESSAGES`를 누르면 그 표 전부가 창 가운데 팝업으로 뜨고, 뒤는 회색으로 가라앉습니다.
 `MEM`과 `USAGE`는 누르면 열리는 것이 없습니다.
 여기서 답할 질문은 장미색 테두리 상자에 섭니다. **Ctrl+]** 키는 늘 팝업을 열고 그

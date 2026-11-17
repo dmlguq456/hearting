@@ -341,6 +341,11 @@ def route_row(row, now=None, *, cells=None):
     kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
     if kind_word:
         shown["kind_word"] = kind_word
+        # 11-18: the field whose hue the kind word and its bracket wear (one of five); none = the body color.
+        from .palette import route_field
+        field = route_field(sanitize_title(str(row.get("field") or ""))[:16], kind_word)
+        if field:
+            shown["kind_field"] = field
     shown.update(doer_paint(row, cells))
     minutes = None
     if _number(row.get("since")) is not None:

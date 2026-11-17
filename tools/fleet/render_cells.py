@@ -124,6 +124,7 @@ _HDR_BAR_PAIR = 19
 _HDR_WARN_PAIR = 20
 _HDR_BLK_PAIR = 21
 _TINT_PAIR_START = 22
+_KIND_PAIR_START = 160       # the five field hues (above the tint pairs: 22 + 6 levels × 22 hues)
 
 
 def _live_key(state):

@@ -92,7 +92,12 @@ const FACES={
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
 // instead of the earlier strong substitutes; the dark face changes only the
 // failure red, and only on a shade.
-const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
+// 11-18: the three zone hues (orange, violet, aqua) and the five field hues (code blue, lab amber, design rose, docs sand,
+// research sky) take their dark counterparts on the light face: the same hue at a contrast of 4.5 or more on white
+// (130 4.7, 55 10, 29 4.5; 26 5.8, 130 4.7, 162 5.0, 94 5.7, 24 7.0), set apart from each other and the state hues
+// (Lab distance 20 or more; lab 130 and docs 94 are the closest pair, as amber and sand are in the dark set).
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94,
+  208:130,99:55,43:29,69:26,214:130,205:162,180:94,38:24}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
 // A moving frame cell's color: an arc or lit-frame shade from its face's ramp (0 the brightest); a wave
@@ -960,7 +965,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // A route whose record names its kind: its stage stands in the kind column, never as
     // the older `execute ✕ 2/3` step text (that stays for a record that names no kind).
     const shaped=r=>{const shape=String(r.shape||'');return shape==='one-shot-owner'||!!shape&&shape!=='unknown'&&(!/^staged/.test(shape)||Array.isArray(r.stages)&&r.stages.length>0);};
-    const third=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:r.step&&!shaped(r)?[text(r.step)]:[];
+    const third=r=>r.step&&!shaped(r)?[text(r.step)]:[];
     // 11-16 (the person: "staged stage 펼쳤을떄 stage 이름은 좀 눈에 띄게 ... fleet 처럼"): a stage's name in the expanded rows
     // (a live worker's stage row, the kind row's stage) wears the color Fleet gives that stage of its route (the backend's
     // `key`/`stage_key`: Fleet's `route_stage_key`, one table for both screens); mono, eight colors and NO_COLOR read as before.
@@ -972,7 +977,19 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const stageCell=(stage,key)=>[stageName(stage,key),...(markOf(stage)?[text(' '),markOf(stage)]:[])];
     // The kind word leads a route, the one bold word of its first line (the body color, never dim, in mono and NO_COLOR too);
     // its intensity follows in dim brackets. Nothing else goes in the brackets.
-    const kindText=word=>({text:clean(word),foreground:null,bold:true,dim:false});
+    // 11-18 (route kind color; the person: "code, lab 같은 라우트 유형에 컬러를 넣어줘" / "강도도 컬러를 넣어주자"): the kind word wears
+    // its field's hue (the backend's `kind_field`: one of five; an older route that records none, its own kind's name when that is
+    // a field's), and its bracket the same hue stepped by weight (quick dim, standard plain, strong and beyond bold). Where no
+    // hue is shown (mono, NO_COLOR, under 256 colors) or the route has no field, both read as they did.
+    const hued=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+    const FIELDS=['code','lab','design','docs','research'],WEIGHT={quick:'q',light:'q',standard:'s',strong:'b',thorough:'b',adversarial:'b'};
+    const kindField=(r,name)=>{
+      const word=clean(name).trim(),own=word===clean(r.kind_word||'').trim();
+      const field=own?clean(r.kind_field||'').trim():['code','lab','design','research'].includes(word)&&!clean(r.field||r.kind_field||'').trim()?word:'';
+      return hued&&FIELDS.includes(field)&&styles['kind_'+field]?field:'';
+    };
+    const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
+    const bracket=(word,field='')=>field?text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field):text('('+word+')','dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -988,7 +1005,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
     const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
-      return word?[kindText(word),...(inten?[text('('+inten+')','dim')]:[])]:[];};
+      const field=kindField(r,word);
+      return word?[kindText(word,field),...(inten?[bracket(inten,field)]:[])]:[];};
     // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
     // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
     function kindCell(r){
@@ -1013,41 +1031,40 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return r.step&&!shape?{full:[text(r.step)],short:[text(r.step)]}:null;
     }
-    // Which of the kind and tool columns the bottom rows keep, the same for every row: the
-    // kind word goes first, then the tool, then the `staged` word; the title keeps ten cells (or its
-    // whole width) through both. Short of that the rows keep the earlier columns (title,
-    // owner, context, then the tool or the stage).
+    // Which of the kind column's forms the bottom rows keep, the same for every row: the kind with its stage word first, then
+    // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
+    // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
+    // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
     let bottomPlan;
     const planBottom=(ow,gw)=>{
-      const kinds=listed.map(kindCell),tools=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[];
+      const kinds=listed.map(kindCell);
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
-      const tw=columnWidth(tools),longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
-      const levels=widths.kind>widths.full?[['kind',true],['full',true],['full',false],['short',false]]:[['full',true],['full',false],['short',false]];
-      for(const [level,tool] of levels){
+      const longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
+      for(const level of widths.kind>widths.full?['kind','full','short']:['full','short']){
         if(!widths[level])break;
-        const room=avail-(3+widths[level])-(tool&&tw?3+tw:0);
-        if(room>=Math.min(longest,10))return {level,tool:tool&&tw>0,width:widths[level],title:Math.min(longest,room),kinds,tools};
+        const room=avail-(3+widths[level]);
+        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds};
       }
       return {level:''};
     };
     function folded(r){
       const p=r.paint||{},lead=[routeGlyph(r),text(' ')];
       if(!side){
-        const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]),tw3=columnWidth(third);
+        const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]);
         const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
         if(plan.level){
           const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
           const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
-            ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell,...(plan.tool?[pad(plan.width-size(cell)),text(' │ '),...plan.tools(r)]:[])];
+            ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell];
           const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
-        // The title gives way first, but keeps half of what the tool or stage column would take.
-        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-tw3,Math.floor(avail/2)));
+        // The title gives way first, but keeps half of what the stage column would take.
+        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-columnWidth(third),Math.floor(avail/2)));
         const name=cut(titleOf(r),titleWidth);
         const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
-        // The elapsed time keeps the right edge; the tool or stage gives way first, whole (spec rule 30 (d)).
+        // The elapsed time keeps the right edge; the stage gives way first, whole (spec rule 30 (d)).
         const end=r.elapsed?[text(' '),text(r.elapsed)]:[],whole=[...base,text(' │ '),...third(r)];
         const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));
         return [...left,pad(inner-size(left)-size(end)),...end];
@@ -1240,7 +1257,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
     function chainParts(r,{past=true,inten=true}={}){
       const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>[kindText(name),...(word?[text('('+word+')','dim')]:[])];
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field)]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];
@@ -1254,15 +1271,29 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // A frame route whose legs are not running waits for the person's direction (its mark `◑`, not blinking).
     const directionWait=r=>framed(r)&&!live(r)&&['idle','blocked'].includes(r.kind);
+    // 11-18 (the person, on the first line: "route 첫 줄 오른쪽 끝에 둔다"): the route's elapsed time stands at the right end of this
+    // line, whatever the width, and the kind word with it. Short of cells the middle text (`· waiting for direction`) goes first
+    // (cut with `…`, then whole), then the earlier legs of the chain, then the intensity. A route with no time leaves the end empty.
     function headRow(r){
       const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
-      const room=inner-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
+      const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
+      const time=clean(r.elapsed||'').trim(),end=time?measure(time)+1:0;
       return blink=>{
         const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,blink?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
-        for(const tail of wait.length?[wait,[]]:[[]])for(const chain of chains)if(size(chain)+size(tail)<=room)return [mark,text(' '),...chain,...tail];
-        return [mark,text(' '),...cut(chains.at(-1),room)];
+        const finish=body=>{
+          const row=[mark,text(' '),...body];
+          return time?[...row,pad(Math.max(1,width-size(row)-measure(time))),text(time,'dim')]:row;
+        };
+        for(const chain of chains){
+          const left=room-end-size(chain);
+          if(left<0)continue;
+          if(wait.length&&size(wait)<=left)return finish([...chain,...wait]);
+          if(wait.length&&left>=5)return finish([...chain,...cut(wait,left)]);
+          return finish(chain);
+        }
+        return finish(cut(chains.at(-1),Math.max(1,room-end)));
       };
     }
     const routeRows=[];
@@ -1277,11 +1308,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const supervising=workers.length>0;
         const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
         const running=stages.find(stage=>stage.current||stage.mark==='✕');
-        routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,first:side?headRow(r):null,
+        routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,bnow:side?null:nowRow(leadPaint(r),r.kind,2),first:side?headRow(r):null,
           who:side&&!open?whoRow(r,supervising):null,lead:side&&!open?leadRow(r,supervising):null,
           // A route with no session values (a direct one) keeps its time alone on the row it always had, at the right edge.
           now:side&&!open?nowRow(leadPaint(r),r.kind,4):null,
-          time:side&&!open&&r.elapsed&&!whoRow(r,supervising)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
+          time:side&&!open&&r.elapsed&&!whoRow(r,supervising)&&!headRow(r)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
           // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
           stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
@@ -1322,7 +1353,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     let twoRows=twoFull;
     // Spec rule 38: who / context and time / what (two rows, then one) / which kind.
     const routeForm=x=>{
-      if(!(twoRows&&x.two))return [x.parts];
+      // Under the native area (11-18) the route's NOW stands on the row under its one row (the first to go short of rows).
+      if(!(twoRows&&x.two))return [x.parts,...(keepCtx&&x.bnow?[x.bnow]:[])];
       // A request: who and age / title / status; the kind rows gone, the title and the status share a row.
       if(x.request)return [x.head,...(keepPlace&&x.statusRow?[x.titleRow,x.statusRow]:[x.titled])];
       return routeRowsOf(x);
@@ -1387,7 +1419,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
         before=item;
         // A press on any row of a route opens the route popup with it unfolded.
-        for(const parts of item.two?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
+        for(const parts of item.two||item.bnow?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
       });
       block.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};

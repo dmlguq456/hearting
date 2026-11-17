@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, each with its context and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.46.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route (`code(standard)` in blue, its time at the right end of the first line) at 2/4 execute, its owner and its execute worker, each with its context and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. A route is the staged work this session started. Demo data; the conversation is illustrative.</sub></p>
 
@@ -53,7 +53,7 @@ New installations open a 40-column panel on the right of every new Claude Code,
 Codex, and OpenCode terminal. Under the project and Git state (and, when the session supervises or is supervised, a `PEERS` row: `[c7] ⚑ ─ [d4]`), the model and
 context, and the session's title and what it is doing now, each section keeps a
 few rows: questions waiting for you, this session's routes and requests in one
-box of three zones (`direct`, `dispatch`, `request`), messages, saved memory (`MEM`), and the usage windows of the three agents
+box of three zones (`direct`, `dispatch`, `request`; a route's first line reads its kind in the color of its field, `code` blue, `lab` amber, `design` rose, `docs` sand, `research` sky, with the intensity after it in the same color, dim for `quick` up to bold for `strong` and beyond, and its time at the right end), messages, saved memory (`MEM`), and the usage windows of the three agents
 (`USAGE`). Press the questions, the route box, or `MESSAGES` and its whole table opens in a popup in the middle
 of the window, the rest gray behind it; `MEM` and `USAGE` open nothing. A question you can answer here stands
 in a rose-bordered box. **Ctrl+]** always opens a popup, that question first:

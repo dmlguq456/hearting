@@ -66,11 +66,10 @@ const rows=box(draw([direct,dispatch],requests,44,60));
 assert.deepEqual(rules(rows),[zr('direct'),zr('dispatch'),zr('request')]);
 assert.deepEqual(rows,[
  zr('direct'),
- '● code',
+ '● code                            2m',
  '  README 넷째 줄 고침',
- '                                  2m',
  zr('dispatch'),
- '● code(standard)',
+ '● code(standard)               1h52m',
  '  갈래를 route에 기록',
  '  ● owner  claude Opus 5.5 xhigh 41%',
  '    검토 지적 둘을 고치고 시험을 다…',
@@ -98,7 +97,7 @@ assert(mixed.indexOf(zr('direct'))<mixed.findIndex(s=>/code\(standard\)/.test(s)
         self.node(r"""
 const one=box(draw([direct],[],44,60));
 assert.deepEqual(rules(one),[zr('direct')]);
-assert.equal(one.length,4,one.join('\n'));
+assert.equal(one.length,3,one.join('\n'));      // (11-18: the time stands on the first line, no row of its own)
 const disp=box(draw([dispatch],[],44,60));
 assert.deepEqual(rules(disp).map(s=>s.split(' ')[1]),['dispatch']);
 const reqs=draw([],requests,44,60);
@@ -114,13 +113,13 @@ assert.deepEqual(rules(box(draw([bare],[],44,60))).map(s=>s.split(' ')[1]),['dis
     def test_the_direct_zone_drops_the_direct_word_and_keeps_a_real_intensity(self):
         self.node(r"""
 const rows=box(draw([direct,directQuick,dispatch],[],44,60));
-assert(rows.includes('● code'),rows.join('\n'));
-assert(rows.includes('● code(quick)'),rows.join('\n'));
-assert(rows.includes('● code(standard)'));
+assert(rows.includes('● code                            2m'),rows.join('\n'));
+assert(rows.includes('● code(quick)                     2m'),rows.join('\n'));
+assert(rows.includes('● code(standard)               1h52m'));
 assert(!rows.some(s=>/\(direct\)|\(직접\)|직접/.test(s)));
 // With no intensity recorded the shape's word stood in the brackets; in the direct zone it is gone too.
 const noIntensity=box(draw([{...direct,intensity:undefined}],[],44,60));
-assert(noIntensity.includes('● code'),noIntensity.join('\n'));
+assert(noIntensity.includes('● code                            2m'),noIntensity.join('\n'));
 // The bottom layout reads `code` for it as well.
 const bottom=draw([direct,dispatch],[],110,16,{side:false}).join('\n');
 assert(!/code\(direct\)|code\(직접\)/.test(bottom)&&/│ code +2m/.test(bottom),bottom);
@@ -171,7 +170,7 @@ assert.equal(name('direct').foreground,208);assert.equal(name('dispatch').foregr
 const used=new Set([208,99,43]);assert.equal(used.size,3);
 for(const other of [116,176,147,219,150,186,217,230,114,253])assert(!used.has(other));
 // The direct route's mark is its zone's color; a dispatch route's is the working green; a request's arrow the request color.
-const mark=v.rows.find(r=>/● code\s+│ │$/.test(text(r)));
+const mark=v.rows.find(r=>/● code\s+2m\s+│ │$/.test(text(r)));
 assert(mark,'no direct first line');
 const dot=mark.find(p=>p.text==='●');
 assert.equal(dot.foreground,208);

@@ -95,9 +95,12 @@ def palette(render):
         named[name] = rgb(index)
     for name, (r, g, b) in render._RICHER_RGB_1000.items():
         named[name] = (round(r * 255 / 1000), round(g * 255 / 1000), round(b * 255 / 1000))
+    from fleet.palette import KIND_FIELDS, _KIND_256
     return {"d": DEFAULT_FG, "w": named["soft"], "g": named["green"], "y": named["yellow"],
             "v": named["vanilla"], "r": named["red"], "c": named["cyan"], "m": named["magenta"],
-            "l": named["blue"], "p": named["steward_pink"]}, {
+            "l": named["blue"], "p": named["steward_pink"],
+            # 11-18: the five field hues of a route's kind word and its bracket.
+            **{"k" + field: rgb(_KIND_256["kind_" + field]) for field in KIND_FIELDS}}, {
         tint: tuple(round(v * 255 / 1000) for v in rgb1000)
         for tint, rgb1000 in render._TINT_RGB_1000.items()}
 

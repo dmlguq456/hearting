@@ -426,11 +426,11 @@ const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
 // (11-17, route row 5: the first line names the kind with its intensity in brackets, the title two cells in.)
 const rows=box.split('\n');
 // (11-17, route zones: a route with no zone is a `dispatch` one, its rule the box's first row.)
-assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ─ dispatch ─+ │$/.test(rows[1])&&/^│ ● code\(직접\) +│$/.test(rows[2])&&/^│   작은 수정 +│$/.test(rows[3])&&!/code · 직접/.test(box),box);
+assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ─ dispatch ─+ │$/.test(rows[1])&&/^│ ● code\(직접\) +3m │$/.test(rows[2])&&/^│   작은 수정 +│$/.test(rows[3])&&!/code · 직접/.test(box),box);
 // In the `direct` zone the zone's name says it: the word `(직접)` (the shape's) is left out of the kind.
 const own=draw({routes:[{...direct,zone:'direct'}],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),M=inside(own),c=M.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l)),
  zoned=M.slice(c,M.findIndex((l,i)=>i>c&&/^╰/.test(l))+1);
-assert(/^│ ─ direct ─+ │$/.test(zoned[1])&&/^│ ● code +│$/.test(zoned[2])&&!zoned.join('\n').includes('직접')&&!zoned.some(l=>/dispatch/.test(l)),zoned.join('\n'));
+assert(/^│ ─ direct ─+ │$/.test(zoned[1])&&/^│ ● code +3m │$/.test(zoned[2])&&!zoned.join('\n').includes('직접')&&!zoned.some(l=>/dispatch/.test(l)),zoned.join('\n'));
 """)
 
 
