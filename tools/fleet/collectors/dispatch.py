@@ -2355,7 +2355,7 @@ def _jobs_path(override=None):
 
 
 def _opencode_config_home():
-    """OpenCode global config home (INSTALL_LAYOUT.md target layout)."""
+    """OpenCode global config home (docs/INSTALL_LAYOUT.md target layout)."""
     return os.path.expanduser("~/.config/opencode")
 
 
@@ -2371,7 +2371,7 @@ def _installed_registry_paths():
     """Installed per-runtime-home dispatch registries that exist as files.
 
     An activated harness install roots its agent home at `<runtime-home>/.harness/`
-    (INSTALL_LAYOUT.md activation record), so that install's SD-49 canonical registry
+    (docs/INSTALL_LAYOUT.md activation record), so that install's SD-49 canonical registry
     is `<runtime-home>/.harness/dispatch/jobs.log`, NOT the maintainer checkout's
     `<agent-home>/.dispatch/jobs.log`. A managed Codex parent therefore registers its
     dispatch children under ~/.codex/.harness/; without reading these, fleet reports
