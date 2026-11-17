@@ -664,8 +664,9 @@ A closed-route replay puts its rows back first, and
 `python3 <AGENT_HOME>/utilities/dispatch_registry_archive.py restore [--id <id>]`
 puts archived rows back in time order; rows that still qualify move again at
 the next pass. `dispatch-wait.sh --attempt-id` on a moved attempt answers from its
-last archived row: a `completed-*` end is complete, any other end a terminal
-failure to inspect.
+last archived row: a done row the shared attempt policy reads as success is
+complete, any other end (including a finished review or audit with findings) a
+terminal result to inspect.
 
 Preflight doctors share the same failure presentation: preserve the check's
 exit status, report a bounded cause excerpt when available (favoring explicit

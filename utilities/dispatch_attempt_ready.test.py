@@ -412,6 +412,15 @@ class ArchivedAttemptTest(unittest.TestCase):
         code, receipt = self.main([self.line("att-old", "done", "completed-marker")])
         self.assertEqual((code, receipt["state"]), (0, "ready"))
         self.assertEqual(receipt["children"][0]["readiness"], "ready")
+        code, receipt = self.main([self.line("att-old", "done", "completed-review", failure_class="pass")])
+        self.assertEqual((code, receipt["state"]), (0, "ready"))
+
+    def test_an_archived_finished_review_or_audit_with_findings_is_not_complete(self):
+        for note in ("completed-review-blocking", "completed-audit-with-findings"):
+            with self.subTest(note=note):
+                code, receipt = self.main([self.line("att-old", "done", note)])
+                self.assertEqual((code, receipt["state"]), (3, "terminal"))
+                self.assertEqual(receipt["children"][0]["note"], note)
 
     def test_the_last_archived_row_of_that_exact_attempt_decides(self):
         rows = [self.line("att-old", "done", "completed-marker"),

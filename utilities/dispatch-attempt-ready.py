@@ -94,9 +94,11 @@ def classify_selection(jobs: Path, rows, *, settle: bool = False,
 def archived_receipt(jobs: Path, attempt_id: str) -> dict[str, object] | None:
     """An explicitly named attempt whose rows the registry archive moved (settled for over
     14 days): answer from its last archived row, not from an empty selection, which reads as
-    ready. Only a `completed-*` done row is ready; any other archived end is a terminal
-    failure to inspect. None when the archive does not hold it."""
+    ready. Only a done row the shared policy reads as success is ready; any other archived
+    end (a death, a cancel, a finished review or audit with findings) is a terminal result
+    to inspect. None when the archive does not hold it."""
     try:
+        from dispatch_attempt_policy import success_note, verdict_pass
         from dispatch_contract import parse_registry_metadata
         from dispatch_registry_archive import archived_rows
         lines = archived_rows(jobs, attempt_id)
@@ -113,7 +115,7 @@ def archived_receipt(jobs: Path, attempt_id: str) -> dict[str, object] | None:
         return None
     fields, metadata = last
     note = metadata.get("note", "-")
-    ready = fields[1] == "done" and note.startswith("completed")
+    ready = fields[1] == "done" and (success_note(metadata) or verdict_pass(metadata))
     child = {"attempt_id": attempt_id, "slug": fields[4], "status": fields[1], "note": note,
              "readiness": "ready" if ready else "terminal-failure", "reason": "archived-row"}
     return {"schema_version": 1, "state": "ready" if ready else "terminal", "children": [child]}
