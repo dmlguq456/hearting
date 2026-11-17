@@ -473,10 +473,10 @@ assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].sta
 assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ 3 ROUTE'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES')),rb=rows.findIndex(s=>s.startsWith('│ ╰'));
 assert(r>0&&m>rb&&rb>r&&rows.slice(r,rb).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
-// Spec rules 24, 38: beside the native area a folded route reads who (the glyph with its
-// harness), then its context and time two cells in, then its title two cells in.
+// Spec rules 24, 38 (11-17, route row 5): beside the native area a route reads its title (with the route's mark; this
+// fixture names no kind), then who two cells in (the glyph with its harness), then its context and time four cells in.
 const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
-assert(/│ │ \S codex +│ │/.test(rows[t0-2])&&/│ │   72% +42m │ │/.test(rows[t0-1])&&rows[t0].includes('│ │   ROUTE_0'),rows.join('\n'));
+assert(/^│ │ \S ROUTE_0 +│ │$/.test(rows[t0])&&/^│ │   \S codex +│ │$/.test(rows[t0+1])&&/^│ │ {5}72% +42m │ │$/.test(rows[t0+2]),rows.join('\n'));
 // Each message takes two rows (a head `← [e7]`, the text two cells in), the head `MESSAGES` carries no count of rows shown.
 assert(rows.at(-2).includes('7d 60%')&&/^│ MESSAGES ─+ › │$/.test(rows[m]),rows.join('\n'));
 assert(rows[m+1].startsWith('│ ← [e7]')&&rows[m+2].startsWith('│   MESSAGE_1')&&rows[m+3].startsWith('│ ← [e7]')&&rows[m+4].startsWith('│   MESSAGE_2')&&rows[m+5].startsWith('│ ← [e7]')&&rows[m+6].startsWith('│   MESSAGE_3'),rows.join('\n'));
@@ -488,7 +488,7 @@ for(const s of rows)assert.equal(cells(s),40,s);
 const asked=paint({state:'working',q:question,model:{answerable:true},height:36});rows=text(asked);
 const qTop=rows.findIndex(s=>/^│ ╭─ 1 QUESTIONS › ─+╮ │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 assert(qTop>0&&rows[qTop+1].startsWith('│ │ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(rows[qTop+3])&&ra===qTop+4&&mq>ra&&rows.at(-2).includes('7d 60%')
- &&rows.includes('│ │   ROUTE_0                        │ │'),rows.join('\n'));
+ &&rows.some(s=>/^│ │ \S ROUTE_0 {24}│ │$/.test(s)),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
 assert.equal(asked.rows[qTop].find(x=>x.text==='1').foreground,174);assert.equal(asked.rows[qTop].find(x=>x.text==='QUESTIONS').dim,true);
 assert.equal(asked.rows[qTop+1].find(x=>x.text==='◑').foreground,174);
@@ -502,7 +502,7 @@ for(const s of rows)assert.equal(cells(s),40,s);
 // before the route box scrolls in place; the messages go last.
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',brief:()=>q}));
 for(const q of [null,question])for(let h=12;h<=30;h++){
- const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   ROUTE_'));
+ const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>/^│ │   \S codex/.test(s));   // (a route in more than one row: its who under its title)
  assert(rows.length<=h,h+'\n'+all);
  // Fewer messages show from the oldest (their head counts the rest, spec rule 58), before the
  // route box scrolls; the newest message goes only with the section, last.
@@ -544,28 +544,29 @@ const model={route_count:2,routes:[
 const paint=(cfg,width=40,height=30)=>view.render({width,height,side:width<80,model,configuration:cfg,questions:()=>[]}).rows.map(r=>r.map(s=>s.text).join(''));
 const time=paint({}),byModel=paint({route_line:'model'});
 const at=(rows,title)=>rows.findIndex(s=>s.includes(title.slice(0,5)));
-// Spec rules 24, 38: who (glyph, harness, model, effort), then context and time two cells
-// in, then the title; the `route line` choice does not touch this full form.
+// Spec rules 24, 38 (11-17, route row 5): the title (with the route's mark), then who two cells in (glyph, harness,
+// model, effort), then context and time four cells in; the `route line` choice does not touch this full form.
 for(const rows of [time,byModel]){const i=at(rows,'셸 표기');
- assert(/⠋ codex gpt-6\.1-sol high +│ │/.test(rows[i-2])&&/│ │   72% +42m │ │/.test(rows[i-1])&&!rows[i].includes('codex')&&rows[i].includes('│   셸 표기'),rows.join('\n'));}
+ assert(/^│ │ \S 셸 표기 통일 +│ │$/.test(rows[i])&&!rows[i].includes('codex')&&/^│ │   ⠋ codex gpt-6\.1-sol high +│ │$/.test(rows[i+1])&&/^│ │ {5}72% +42m │ │$/.test(rows[i+2]),rows.join('\n'));}
 // Spec rule 30 (b): percent and time stand in their own columns, the same for every route.
-const ctxRows=time.filter(s=>/│ │   (72%)? +(42m|1h 27m) │ │/.test(s));
+const ctxRows=time.filter(s=>/^│ │ {5}(72%)? +(42m|1h 27m) │ │$/.test(s));
 assert(ctxRows.length===2&&ctxRows.every(s=>s.indexOf(' │ │')===ctxRows[0].indexOf(' │ │')),ctxRows.join('\n'));
 // Short of rows the context row folds into the first row (percent and time at the right,
 // right-aligned in their columns), effort going first. (13 rows: spec rule 49 (b)'s last row stays.)
-const low=paint({},40,13),lowRow=low[at(low,'셸 표기')-1];
+const low=paint({},40,13),lowRow=low[at(low,'셸 표기')+1];
 assert(/⠋ codex gpt-6\.1-sol +72% +42m │/.test(lowRow)&&lowRow.indexOf('72%')+3===lowRow.indexOf('    42m'),low.join('\n'));
 assert(low.some(s=>/✕ claude +1h 27m │/.test(s)),low.join('\n'));
 // Narrower, spec rule 36 (a): the harness goes before the model; then the `route line`
 // choice keeps its value (time: elapsed, model: context) and the other goes, whole.
-const narrowTime=paint({},28,13),narrowModel=paint({route_line:'model'},28,13);
-const lead=rows=>rows[at(rows,'셸 표기')-1];
+// (30 cells: the owner's row stands two cells in now, so the time still fits its row at 30, not at 28.)
+const narrowTime=paint({},30,13),narrowModel=paint({route_line:'model'},30,13);
+const lead=rows=>rows[at(rows,'셸 표기')+1];
 assert(/⠋ gpt-6\.1-sol +42m │/.test(lead(narrowTime))&&!lead(narrowTime).includes('codex')&&!lead(narrowTime).includes('72%'),narrowTime.join('\n'));
 assert(/⠋ gpt-6\.1-sol +72% │/.test(lead(narrowModel))&&!lead(narrowModel).includes('42m'),narrowModel.join('\n'));
 // Spec rule 29 (c), 36 (c): a long title goes on to its second row (two cells in) instead
-// of `…`; who and the time keep their rows.
+// of `…`; who and the time keep their rows (under the title now).
 const long=time.findIndex(s=>s.includes('제목만'));
-assert(!time[long].includes('…')&&time[long+1].includes('│ │   ')&&time.slice(long,long+2).join('').includes('잘림')&&time[long-2].includes('claude')&&time[long-1].includes('1h 27m'),time.join('\n'));
+assert(!time[long].includes('…')&&time[long+1].includes('│ │   ')&&time.slice(long,long+2).join('').includes('잘림')&&time[long+2].includes('claude')&&time[long+3].includes('1h 27m'),time.join('\n'));
 // Every row of a folded route opens the route popup with it unfolded (11-15: nothing opens in place).
 const v=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]});
 const hitRows=v.hits.filter(h=>h.action==='popup:ROUTE:a').map(h=>h.row);
@@ -581,9 +582,10 @@ for(const rows of [time,byModel,paint({},80)])for(const s of rows)assert([...s].
         self.node(script, "panel-view.cjs")
 
     def test_a_folded_one_step_route_adds_its_tool_only_where_the_row_has_room(self):
-        # Supervisor 2026-11-12: the first row of a folded route may add Fleet's `>_ tool`
-        # for a one-step route. Spec E9 rules 36 (a), 38: context and time take the row
-        # below; short of cells effort goes, then the tool, then the harness.
+        # Supervisor 2026-11-12: a one-step route's owner row may add its open tool (11-17, route row 5:
+        # `· python3`, the tool's name, with its file name where the row has room). Spec E9 rules 36 (a), 38:
+        # context and time take the row below, the title the row above; short of cells effort goes, then the
+        # tool, then the harness.
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const P=(c)=>({glyph:{text:'⠋'},harness:{text:'claude'},model_text:{text:'Opus 5.5'},ctx:{text:c}});
@@ -592,25 +594,27 @@ const staged={...one,id:'b',title:'staged',flow:'plan ✓ › execute ● › re
 const paint=(width)=>view.render({width,height:30,side:true,model:{routes:[one,staged],route_count:2,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 const narrow=paint(34),wide=paint(40);
-const at=wide.findIndex(x=>/⠋ claude Opus 5\.5 · >_ python3 +│/.test(x));
-assert(at>0&&/│ │   24% +47m │ │/.test(wide[at+1])&&wide[at+2].includes('one step'),wide.join('\n'));
-assert.equal(wide.filter(x=>x.includes('>_')).length,1,wide.join('\n'));
-assert(!wide.some(x=>x.includes('tools/run-tests.py')),wide.join('\n'));
-// A kind row that does not carry the tool (only a one-shot route's does) leaves it on the first row.
+const at=wide.findIndex(x=>/│ │   ⠋ claude Opus 5\.5 · python3 +│/.test(x));
+assert(at>0&&/│ │     24% +47m │ │/.test(wide[at+1])&&wide[at-1].includes('│ │ ⠋ one step'),wide.join('\n'));
+assert.equal(wide.filter(x=>x.includes('python3')).length,1,wide.join('\n'));
+assert(!wide.some(x=>x.includes('>_')||x.includes('tools/run-tests.py')),wide.join('\n'));
+// With room the tool's file name joins it (the name, never the path).
+assert(paint(52).some(x=>/│ │   ⠋ claude Opus 5\.5 · python3 run-tests\.py +│/.test(x)),paint(52).join('\n'));
+// A route with a kind word has a first line of its own above the title; the tool stays on the owner row.
 const kinded=view.render({width:40,height:30,side:true,model:{routes:[{...one,kind_word:'code'}],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
-const ki=kinded.findIndex(x=>/⠋ claude Opus 5\.5 · >_ python3 +│/.test(x));
-assert(ki>0&&kinded[ki+3].includes('│   code '),kinded.join('\n'));
+const ki=kinded.findIndex(x=>/│ │   ⠋ claude Opus 5\.5 · python3 +│/.test(x));
+assert(ki>2&&/^│ │ ● code +│ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step'),kinded.join('\n'));
 // Narrower, the tool goes before the harness; context and time stay on their own row.
-assert(narrow.some(x=>/⠋ claude Opus 5\.5 +│/.test(x))&&!narrow.some(x=>x.includes('>_'))&&narrow.some(x=>/│   24% +47m │/.test(x)),narrow.join('\n'));
+assert(narrow.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&!narrow.some(x=>x.includes('python3'))&&narrow.some(x=>/│     24% +47m │/.test(x)),narrow.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
 
     def test_a_folded_route_reads_who_context_what_and_kind(self):
-        # Spec E9 rules 36 and 38: who (the recorded role in one column, harness, model,
-        # effort) / context gauge and time / what (two rows at most) / Fleet's kind word with
-        # the route's shape; the one-row form adds neither role nor kind.
+        # Spec E9 rules 36 and 38, 11-17 (route row 5): the kind word (bold) on the first line / what (two rows at
+        # most, two cells in) / who (the recorded role in the route's own column, harness, model, effort) / context
+        # gauge and time (four cells in) / the stage line (four in); the one-row form adds neither role nor kind.
         script = self.FIXTURE + r'''
 const G=(pct,cells=8)=>{const f=Math.round(pct*cells/100);return [P('━'.repeat(f)),P('─'.repeat(cells-f)),P(' '),P(pct+'%')];};
 const one={...oneShot,role:'owner',kind_word:'code',paint:{...oneShot.paint,gauge_row:G(38)}};
@@ -621,52 +625,55 @@ const frame={id:'f',title:'셸 다듬기 방향 잡기',kind:'working',state:'wo
  paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}};
 const four=[one,stg,wait,frame];
 const box=rows=>rows.filter(s=>s.startsWith('│ │ '));
-// (a) The role words stand in one column and the harness starts in one column after them.
-const r50=draw(four,40,50),who=box(r50).filter(s=>/│ │ [⠋●] /.test(s));
-assert.deepEqual(who.map(s=>s.slice(4,-4).trimEnd()),['⠋ owner  claude Opus 5.5 xhigh','⠋ worker claude Sonnet 5.5 high',
- '● owner  claude Opus 5.5 xhigh','⠋ frame  claude Opus 5.5 xhigh'],r50.join('\n'));
-// An unrecorded role leaves its cells empty; nothing is made up.
-const unnamed=box(draw([one,{...stg,role:undefined}],40,50));
-assert(unnamed.some(s=>s.startsWith('│ │ ⠋       claude Sonnet 5.5 high'))&&!unnamed.join('').includes('worker'),unnamed.join('\n'));
+// (a) The owner row stands two cells in: its mark, the role word (the route's own column), then the harness, model, effort
+// (and the one-step route's open tool at the end of the row).
+const r50=draw(four,48,50),who=box(r50).filter(s=>/│ │   [⠋●] /.test(s));
+assert.deepEqual(who.map(s=>s.slice(4,-4).trimEnd()),['  ⠋ owner claude Opus 5.5 xhigh · Edit','  ⠋ worker claude Sonnet 5.5 high',
+ '  ● owner claude Opus 5.5 xhigh','  ⠋ frame claude Opus 5.5 xhigh'],r50.join('\n'));
+// An unrecorded role leaves no column; nothing is made up.
+const unnamed=box(draw([one,{...stg,role:undefined}],48,50));
+assert(unnamed.some(s=>s.startsWith('│ │   ⠋ claude Sonnet 5.5 high'))&&!unnamed.join('').includes('worker'),unnamed.join('\n'));
 // Short of cells effort goes, then the harness; the role and the model stay.
 const r32=box(draw(four,32,50));
-assert(r32.some(s=>s.startsWith('│ │ ⠋ worker Sonnet 5.5 '))&&r32.some(s=>s.startsWith('│ │ ⠋ owner  claude Opus 5.5 '))&&!r32.join('').includes('xhigh'),r32.join('\n'));
+assert(r32.some(s=>s.startsWith('│ │   ⠋ worker Sonnet 5.5'))&&r32.some(s=>s.startsWith('│ │   ⠋ owner Opus 5.5'))&&!r32.join('').includes('xhigh'),r32.join('\n'));
 // (38) The context row: the gauge, the percent and the time each in one column; an unknown
 // context leaves its cells empty and the time stands alone; with neither, no row.
-const ctx=box(r50).filter(s=>/│ │   (━|─| +\d)/.test(s)&&/\d(m|h 0m) │ │$/.test(s));
+const ctx=box(r50).filter(s=>/│ │     (━|─| +\d)/.test(s)&&/\d(m|h 0m) │ │$/.test(s));
 assert.equal(ctx.length,4,r50.join('\n'));
 assert(ctx[0].includes('━━━───── 38%')&&ctx[1].includes('━─────── 12%')&&!/[━─%]/.test(ctx[2].slice(4,-4))&&!/[━─%]/.test(ctx[3].slice(4,-4)),ctx.join('\n'));
 assert(ctx[0].indexOf('%')===ctx[1].indexOf('%')&&ctx.every(s=>s.endsWith('m │ │')),ctx.join('\n'));
-assert(!box(draw([one,{...frame,elapsed:''}],40,50)).some(s=>/^│ │ +│ │$/.test(s)),'no empty context row');
-// The order: who, context, what, kind.
-const at=box(r50).findIndex(s=>s.includes('owner  claude Opus 5.5 xhigh'));
-assert(box(r50)[at+1].includes('38%')&&box(r50)[at+2].includes('셸 상태·표시 고치기')&&box(r50)[at+3].includes('code · one-shot'),r50.join('\n'));
-// (b) Fleet's kind word leads the third row; the mode and intensity stay in the opened KIND.
-for(const want of ['│   code · one-shot · Edit ','│   code · staged 3/7 · execute ● ','│   code · staged 4/7 · host-run ','│   frame · staged 1/3 · frame ● '])
+assert(!box(draw([one,{...frame,elapsed:''}],48,50)).some(s=>/^│ │ +│ │$/.test(s)),'no empty context row');
+// The order: the kind word, what, who, context, then the stage line.
+const at=box(r50).findIndex(s=>s.includes('owner claude Opus 5.5 xhigh · Edit'));
+assert(/^│ │ ● code +│ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&box(r50)[at+1].includes('38%'),r50.join('\n'));
+assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high')&&box(r50)[i+1].includes('12%')&&box(r50)[i+2].includes('│ │     staged 3/7: execute')),r50.join('\n'));
+// (b) Fleet's kind word leads the first line (bold, in the body color), the stage line carries no kind word; the mode and
+// intensity stay in the opened KIND. A route with no stage line (one-shot) has none: its tool ends the owner row.
+for(const want of ['│ │ ● code ','│ │ ● frame ','│ │     staged 3/7: execute','│ │     staged 4/7: host-run','│ │     staged 1/3: frame'])
  assert(r50.some(s=>s.includes(want)),want+'\n'+r50.join('\n'));
-assert(!r50.join('').includes('(dev'),r50.join('\n'));
+assert(!r50.join('').includes('(dev')&&!r50.some(s=>/one-shot|code ·/.test(s)),r50.join('\n'));
 const r80=draw(four,80,50).join('\n');
-assert(r80.includes('code · one-shot · Edit utilities/session-shell/host.cjs 3m')&&r80.includes('code · staged 3/7 · execute ● · owner Opus 5.5'),r80);
-// The bottom layout's kind column: the kind leads it and goes first, before the tool.
+assert(r80.includes('⠋ owner claude Opus 5.5 xhigh · Edit host.cjs')&&r80.includes('staged 3/7: execute · owner Opus 5.5'),r80);
+// The bottom layout's kind column: the kind leads it (`code · staged 3/7: execute`) and goes first, before the tool.
 const kindAt=w=>draw([one,stg,wait,{...failed,role:'owner',kind_word:'code'}],w,20,{side:false}).find(s=>s.startsWith('│ │ ')&&s.includes('세션 간'));
-assert(kindAt(140).includes('│ code · staged 3/7 execute ● │ >_ Edit'),kindAt(140));
-assert(!kindAt(100).includes('code ·')&&kindAt(100).includes('│ staged 3/7 execute ● │ >_ Edit'),kindAt(100));
+assert(/│ code · staged 3\/7: execute +│ >_ Edit/.test(kindAt(140)),kindAt(140));
+assert(!kindAt(100).includes('code ·')&&/│ staged 3\/7: execute +│ >_ Edit/.test(kindAt(100)),kindAt(100));
 // (c) A title takes two rows at most, the second ending in `…`; short of rows, one.
 const long={...one,id:'l',title:'아주 긴 route 이름 — 셸 패널의 접힌 route 줄에서 이름이 세 줄을 넘으면 둘째 줄 끝에 줄임 표시가 붙는지 확인하는 이름'};
 const lr=box(draw([one,long],40,50)),li=lr.findIndex(s=>s.includes('아주 긴'));
-assert(lr[li+1].includes('…')&&lr[li+2].includes('code · one-shot')&&!lr.join('').includes('확인하는'),lr.join('\n'));
-// (d) The one-row form: title, harness, percent and time; no role, no kind.
+assert(lr[li+1].includes('…')&&lr[li+2].includes('│ │   ⠋ owner ')&&!lr.join('').includes('확인하는'),lr.join('\n'));
+// (d) The one-row form: mark, title, harness, percent and time; no role, no kind line.
 const nine=[...Array(9)].map((_,i)=>({...[one,stg,wait][i%3],id:'n'+i,title:[one,stg,wait][i%3].title+' '+(i+1)}));
 const r30=box(draw(nine,40,30)),flat=r30.filter(s=>/│ │ [⠋●] \S/.test(s));
-assert(flat.length>0&&flat.every(s=>!/owner|worker|code ·/.test(s))&&!r30.some(s=>/│ │   (━|code)/.test(s)),r30.join('\n'));
-// Short of rows: a title's second row, then the context row folds into the first row
-// (percent and time at the right, no gauge), then the kind row, then the one-row form.
+assert(flat.length>0&&flat.every(s=>!/owner|worker|code/.test(s))&&!r30.some(s=>/^│ │   /.test(s)),r30.join('\n'));
+// Short of rows: a title's second row, then the context row folds into the owner's row
+// (percent and time at the right, no gauge), then the stage line, then the one-row form.
 const r44=box(draw(nine,40,45));
-assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │ [⠋●] (owner|worker) .* \d+m │ │$/.test(s)).length===9&&r44.filter(s=>s.includes('│   code · ')).length===9,r44.join('\n'));
+assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+m │ │$/.test(s)).length===9&&r44.filter(s=>/^│ │ ● code +│ │$/.test(s)).length===9&&!r44.some(s=>s.includes('staged')),r44.join('\n'));
 for(let h=16;h<=80;h++){
- const rows=box(draw(nine,40,h)),gauges=rows.filter(s=>/│ │   ━/.test(s)).length,kinds=rows.filter(s=>s.includes('│   code · ')).length;
- const second=rows.some(s=>/│ │   넘어가기/.test(s));
- if(gauges)assert(kinds===9,h+' the context row goes before the kind row\n'+rows.join('\n'));
+ const rows=box(draw(nine,40,h)),gauges=rows.filter(s=>/│ │     ━/.test(s)).length,stages=rows.filter(s=>/│ │     staged /.test(s)).length;
+ const second=rows.some(s=>/^│ │   \d +│ │$/.test(s));
+ if(gauges)assert(stages===6,h+' the context row goes before the stage line\n'+rows.join('\n'));
  if(second)assert(gauges===6,h+' a title keeps its second row only while the context rows stand\n'+rows.join('\n'));
 }
 '''
@@ -674,14 +681,13 @@ for(let h=16;h<=80;h++){
 
 
     def test_a_route_shows_its_owner_first_and_its_live_workers_in_a_box_under_it(self):
-        # Spec E9 rules 43, 48, 57: beside the native area a route's first row is its owner (no
-        # branch, no `│` guide); its stage workers running now stand in one rounded box under it,
-        # two cells in (its left line under the owner's text, its right line where it was), each
-        # worker's who in the box's top line (`╭─ … ─╮`, a later one's in the line between,
-        # `├─ … ─┤`; N workers take 3N+1 rows), then `CTX` under the role word with the gauge
-        # under the harness and its own time right after the percent, then its stage and tool. The
-        # route's time follows the owner's percent (` · `), never at the right edge; the title
-        # takes its rows whole. An older backend's row (no `workers_live`) keeps its one doer.
+        # Spec E9 rules 43, 48, 57, 11-17 (route row 5): beside the native area a route's rows are its kind
+        # (first line), its title, its owner (two cells in, no branch, no `│` guide) and the owner's `CTX`
+        # (four in); its stage workers running now hang under the stage line by a `↳` (four in, no box), each
+        # worker's who on the `↳` row (N workers take 3N rows), then `CTX` under the role word with the gauge
+        # under the harness and its own time right after the percent, then its stage and tool (eight in). The
+        # route's time follows the owner's percent (` · `), never at the right edge; the title takes its rows
+        # whole. An older backend's row (no `workers_live`) keeps its one doer.
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
@@ -695,61 +701,63 @@ const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:fals
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m'})]};
 const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1);};
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-// No worker: owner / CTX with the route's time after its percent / title / kind; no inner box.
-let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │   CTX   ━━━───── 38% · 41m +│ │$/.test(b[at+1])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at+2])&&b[at+3].includes('│   code · one-shot · Edit'),b.join('\n'));
+// No worker: the kind / title / owner (its open tool at the end of its row) / CTX with the route's time after its
+// percent; no stage line, no `↳`.
+let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 · Edit'));
+assert(at>0&&/^│ │ ● code +│ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     CTX   ━━━───── 38% · 41m +│ │$/.test(b[at+1])&&b.length===at+3,b.join('\n'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+1],'━'),col(b[at],'claude'));
-assert(!/[└├]─|╭─ [⠋●]/.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at+2].includes('41m'),b.join('\n'));
-// One worker: the owner's four rows (no guide), then the box two cells in: who in its top line
-// (up to the corner rather than giving up a value), CTX with its time, stage and tool, bottom line.
-b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh'));
-for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   속도 3단계 +│ │$/],[3,/^│ │   code · staged 3\/7 · execute ● +│ │$/],
- [4,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[5,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[6,/^│ │   │    execute · Edit panel\.py │ │ │$/],[7,/^│ │   ╰─+╯ │ │$/]])
+assert(!/[└├]─|╭─ [⠋●]|↳/.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at-1].includes('41m'),b.join('\n'));
+// One worker: the kind, the title and the owner's rows (no guide), the stage line, then the worker hanging by a `↳` four
+// cells in: who on its row, CTX with its time under it, stage and tool eight cells in. The owner stands as a dim `●`.
+b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('● owner  claude Opus 5.5 xhigh'));
+for(const [i,want] of [[-2,/^│ │ ● code +│ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │     staged 3\/7: execute +│ │$/],
+ [3,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[4,/^│ │         CTX    ━━───── 22% · 12m +│ │$/],[5,/^│ │         execute · Edit panel\.py +│ │$/],[6,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
-// Spec rule 57 (c): the box's left line under the owner's text, its right line where the route's rows end.
-assert.equal(col(b[at+4],'╭'),col(b[at+1],'CTX'));assert.equal(b[at+4].lastIndexOf('╮'),b[at+5].lastIndexOf('│ │ │')+0);
-// (Six cells narrower inside the box: the tool's target shows where it fits, its file name first.)
-assert(box(draw([one],52,60)).some(s=>/│    execute · Edit utilities\/panel\.py +│ │ │$/.test(s)),box(draw([one],52,60)).join('\n'));
-assert.equal(col(b[at+5],'CTX'),col(b[at+4],'worker'));assert.equal(col(b[at+5],'━'),col(b[at+4],'claude'));
+// Spec rule 57 (c): the `↳` stands under the owner's CTX, its own CTX and stage row under its role word.
+assert.equal(col(b[at+3],'↳'),col(b[at+1],'CTX'));assert.equal(col(b[at+2],'staged'),col(b[at+1],'CTX'));
+// (Where the row has room the tool's target shows, its file name first.)
+assert(box(draw([one],52,60)).some(s=>/│ │         execute · Edit utilities\/panel\.py +│ │$/.test(s)),box(draw([one],52,60)).join('\n'));
+assert.equal(col(b[at+4],'CTX'),col(b[at+3],'worker'));assert.equal(col(b[at+4],'━'),col(b[at+3],'claude'));assert.equal(col(b[at+5],'execute'),col(b[at+4],'CTX'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert(!b.join('').includes('owner Opus'),b.join('\n'));
 const v1=view.render({width:40,height:60,side:true,model:{...head,routes:[one],route_count:1},configuration:{},questions:()=>[]});
 const rowOf=re=>v1.rows.find(r=>re.test(r.map(p=>p.text).join('')));
-const ownerRow=rowOf(/⠋ owner/),topLine=rowOf(/╭─ ⠋ worker/);
-assert(ownerRow.find(p=>p.text==='owner ').dim&&ownerRow.some(p=>p.text==='Opus 5.5'),JSON.stringify(ownerRow));
-assert(topLine.filter(p=>/^[╭╮─ ]*[╭╮─][╭╮─ ]*$/.test(p.text)&&p.text.trim()).every(p=>p.dim===true&&p.role==='messages')&&topLine.find(p=>p.text==='worker').dim,JSON.stringify(topLine));
-// Every row of the box opens its route (11-15: the routes popup with it unfolded), as the owner's do.
-const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),boxRows=v1.rows.map((r,i)=>/[╭│╰][─ ]/.test(r.map(p=>p.text).join('').slice(4,6))&&/worker|CTX|execute|╰─/.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);
-for(const i of boxRows)assert(area.includes(i),i+' '+JSON.stringify(area));
-// Two workers: one box, the second's who in the line between; 3N+1 rows.
-b=box(draw([two],40,60));const top=b.findIndex(s=>/╭─ ⠋ worker codex gpt-5\.5 ─+╮/.test(s));
-assert(top>0&&/^│ │   │    CTX    ━━.* 34% · 12m +│ │ │$/.test(b[top+1])&&/^│ │   │    execute · Bash +│ │ │$/.test(b[top+2])&&/^│ │   ├─ ● worker opencode glm-5\.2 ┤ │ │$/.test(b[top+3])
- &&/^│ │   │    CTX    ━━━━.* 71% · 8m +│ │ │$/.test(b[top+4])&&/^│ │   │    execute +│ │ │$/.test(b[top+5])&&/^│ │   ╰─+╯ │ │$/.test(b[top+6])&&b[top+7].startsWith('│ ╰'),b.join('\n'));
+const ownerRow=rowOf(/● owner/),workerRow=rowOf(/↳ ⠋ worker/);
+assert(ownerRow.find(p=>p.text==='●').dim&&ownerRow.find(p=>p.text==='owner ').dim&&ownerRow.some(p=>p.text==='Opus 5.5'),JSON.stringify(ownerRow));
+assert(workerRow.find(p=>p.text==='↳ ').dim&&workerRow.find(p=>p.text==='worker').dim&&workerRow.some(p=>p.text==='Sonnet 5.5'),JSON.stringify(workerRow));
+// Every row of the route opens it (11-15: the routes popup with it unfolded), the worker's as the owner's.
+const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),routeRows=v1.rows.map((r,i)=>/^│ │ /.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);
+assert.equal(routeRows.length,8,JSON.stringify(routeRows));
+for(const i of routeRows)assert(area.includes(i),i+' '+JSON.stringify(area));
+// Two workers: each hangs by its own `↳`; 3N rows, the last row the route box's bottom line.
+b=box(draw([two],40,60));const top=b.findIndex(s=>/^│ │     ↳ ⠋ worker codex gpt-5\.5 +│ │$/.test(s));
+assert(top>0&&/^│ │         CTX    ━━.* 34% · 12m +│ │$/.test(b[top+1])&&/^│ │         execute · Bash +│ │$/.test(b[top+2])&&/^│ │     ↳ ● worker opencode glm-5\.2 +│ │$/.test(b[top+3])
+ &&/^│ │         CTX    ━━━━.* 71% · 8m +│ │$/.test(b[top+4])&&/^│ │         execute +│ │$/.test(b[top+5])&&b[top+6].startsWith('│ ╰'),b.join('\n'));
 // No role recorded anywhere: no role column, `CTX` and one space.
 b=box(draw([{...solo,role:undefined}],40,60));
-assert(b.some(s=>s.includes('│ ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │   CTX ━━━───── 38% · 41m/.test(s)),b.join('\n'));
+assert(b.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh · Edit'))&&b.some(s=>/^│ │     CTX ━━━───── 38% · 41m/.test(s)),b.join('\n'));
 // An unknown context: no CTX label (owner or worker); the times stay in the value column.
 b=box(draw([{...one,owner_paint:{harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')},workers_live:[{...worker('claude','Sonnet 5.5','high','22%','━━'),paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5')}}]}],40,60));
-assert(!b.join('').includes('CTX')&&b.some(s=>/^│ │ {10}2h 10m +│ │$/.test(s))&&b.some(s=>/^│ │   │ {11}12m +│ │ │$/.test(s))&&!b.some(s=>/속도 3단계 +2h/.test(s)),b.join('\n'));
+assert(!b.join('').includes('CTX')&&b.some(s=>/^│ │ {12}2h 10m +│ │$/.test(s))&&b.some(s=>/^│ │ {16}12m +│ │$/.test(s))&&!b.some(s=>/속도 3단계 +2h/.test(s)),b.join('\n'));
 // A title on two rows: both rows the title's; the time on the CTX row.
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at-1].includes('38% · 41m')&&b[at+2].includes('code · one-shot'),b.join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code +│ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('38% · 41m'),b.join('\n'));
 // Hangul in the owner's title and the worker's target: every line keeps its cells.
 for(const width of [32,34,38,40,44])for(const s of draw([{...one,title:'한글 제목이 길게 이어지는 경우',workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'문서/한글 파일.md'})]},two],width,60))
  assert.equal(cells(s),width,width+' '+s);
-// Short of cells (rule 48 (d)): in the box's top line the effort goes, then the harness; role and model stay.
-assert(box(draw([one],48,60)).some(s=>/╭─ ⠋ worker claude Sonnet 5\.5 high ─+╮/.test(s)),box(draw([one],48,60)).join('\n'));
-assert(box(draw([one],44,60)).some(s=>/╭─ ⠋ worker claude Sonnet 5\.5 ─+╮/.test(s)));
-assert(box(draw([one],36,60)).some(s=>/╭─ ⠋ worker Sonnet 5\.5 ─+╮/.test(s)),box(draw([one],36,60)).join('\n'));
-assert(box(draw([one],34,60)).some(s=>/╭─ ⠋ worker Sonnet 5\.5 ╮/.test(s)),box(draw([one],34,60)).join('\n'));
-assert(box(draw([one],32,60)).some(s=>/╭─ ⠋ worker Sonnet …/.test(s)),box(draw([one],32,60)).join('\n'));
+// Short of cells (rule 48 (d)): on the worker's row the effort goes, then the harness; role and model stay.
+assert(box(draw([one],48,60)).some(s=>/│ │     ↳ ⠋ worker claude Sonnet 5\.5 high +│ │$/.test(s)),box(draw([one],48,60)).join('\n'));
+assert(box(draw([one],44,60)).some(s=>/│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/.test(s)));
+assert(box(draw([one],36,60)).some(s=>/│ │     ↳ ⠋ worker Sonnet 5\.5 +│ │$/.test(s)),box(draw([one],36,60)).join('\n'));
+assert(box(draw([one],34,60)).some(s=>/│ │     ↳ ⠋ worker Sonnet 5\.5 +│ │$/.test(s)),box(draw([one],34,60)).join('\n'));
+assert(box(draw([one],32,60)).some(s=>/│ │     ↳ ⠋ worker Sonnet 5…/.test(s)),box(draw([one],32,60)).join('\n'));
 b=box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],40,60));
-assert(b.some(s=>/╭─ ⠋ worker deepseek-v4\.1-\S*… ─*╮/.test(s))&&b.some(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh')),b.join('\n'));
-assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],48,60)).some(s=>/╭─ ⠋ worker deepseek-v4\.1-flash ─+╮/.test(s)));
-assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],52,60)).some(s=>/╭─ ⠋ worker opencode deepseek-v4\.1-flash ╮/.test(s)));
-// An older backend's row: one doer, its context row keeps the time, no CTX, no box.
+assert(b.some(s=>/│ │     ↳ ⠋ worker deepseek-v4\.1-\S*… +│ │$/.test(s))&&b.some(s=>s.includes('● owner  claude Opus 5.5 xhigh')),b.join('\n'));
+assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],48,60)).some(s=>/↳ ⠋ worker deepseek-v4\.1-flash +│ │$/.test(s)));
+assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],52,60)).some(s=>/↳ ⠋ worker opencode deepseek-v4\.1-flash +│ │$/.test(s)));
+// An older backend's row: one doer, its context row keeps the time, no CTX, no `↳`.
 const older={...one,owner_paint:undefined,workers_live:undefined};
 b=box(draw([older],60,60));
-assert(!/CTX|╭─ [⠋●]|└─/.test(b.join(''))&&b.some(s=>/⠋ worker claude Sonnet 5\.5 high/.test(s))&&b.some(s=>/━━────── 22% +2h 10m │ │$/.test(s))
+assert(!/CTX|↳|└─/.test(b.join(''))&&b.some(s=>/⠋ worker claude Sonnet 5\.5 high/.test(s))&&b.some(s=>/━━────── 22% +2h 10m │ │$/.test(s))
  &&b.some(s=>s.includes('owner Opus 5.5')),b.join('\n'));
 // The bottom layout keeps its rows whatever the route carries.
 assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},older,{...two,workers_live:undefined}],120,20,{side:false}));
@@ -758,12 +766,12 @@ assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers
 
 
     def test_a_route_box_carries_its_time_on_the_ctx_row_and_its_workers_two_cells_further_in(self):
-        # Spec E9 rule 57: owners and workers keep their `CTX` row (label, bar, percent) with the
-        # time right after the percent (` · `, dim), not at the right edge; the title and the
-        # worker's stage row carry no time. The workers' box stands two cells further in. Short of
-        # cells the bar shortens, then goes, then the time; the percent stays. Widths 32-48 with the
-        # rows running short: every row keeps the panel's width, the steps of rule 48 (c) hold
-        # (owners and workers fold together; folded, percent and time end the first row).
+        # Spec E9 rule 57, 11-17 (route row 5): owners and workers keep their `CTX` row (label, bar, percent)
+        # with the time right after the percent (` · `, dim), not at the right edge; the title and the
+        # worker's stage row carry no time. The workers hang by a `↳` four cells in (their own rows four cells
+        # further in than the owner's, no box). Short of cells the bar shortens, then goes, then the time; the
+        # percent stays. Widths 32-48 with the rows running short: every row keeps the panel's width, the
+        # steps of rule 48 (c) hold (owners and workers fold together; folded, percent and time end the owner row).
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)]});
@@ -780,35 +788,38 @@ for(let width=32;width<=48;width++){
   const rows=v.rows.map(text),where=width+'x'+h+'\n'+rows.join('\n');
   for(const s of rows)assert.equal(cells(s),width,where);
   // (a), (b) The time follows a percent on a CTX row, never ends a title or a stage row.
-  for(const s of rows.filter(s=>/^│ │ +(│ +)?CTX /.test(s))){if(/ · \d/.test(s))assert(/\d+% · (\d+h )?\d+m +(│ )?│ │$/.test(s),where);}
-  assert(!rows.some(s=>/(고치기|재계산|두 갈래|execute · Edit|execute · Bash|execute) +(\d+h )?\d+m +(│ )?│ │$/.test(s)),where);
-  // (c) The box two cells in: its left line under the owner's CTX label, its right line at the route's edge.
-  const tops=rows.map((s,i)=>/^│ │   [╭├]─ /.test(s)?i:-1).filter(i=>i>=0);
-  for(const i of tops)assert(/[╮┤] │ │$/.test(rows[i]),where);
-  if(tops.length)assert(!rows.some(s=>/^│ │ [╭├]─ [⠋●]/.test(s)),where);
+  for(const s of rows.filter(s=>/^│ │ +CTX /.test(s))){if(/ · \d/.test(s))assert(/\d+% · (\d+h )?\d+m +│ │$/.test(s),where);}
+  assert(!rows.some(s=>/(고치기|재계산|두 갈래|execute · Edit|execute · Bash|execute) +(\d+h )?\d+m +│ │$/.test(s)),where);
+  // (c) The worker hangs four cells in, under the owner's CTX label, with no box around it: each `↳` row (whole or folded)
+  // starts there; its CTX and stage rows stand four cells further in.
+  for(const s of rows.filter(s=>s.includes('↳')))assert(/^│ │     ↳ [⠋●] /.test(s),where);
+  for(const s of rows.filter(s=>/^│ │ +CTX /.test(s)))assert(/^│ │( {5}| {9})CTX /.test(s),where);
+  for(const s of rows.filter(s=>/^│ │ +execute\b/.test(s)))assert(/^│ │ {9}execute/.test(s),where);
+  assert(!rows.some(s=>/[╭├]─ [⠋●]/.test(s)),where);
  }
 }
 // At 40 cells, the picture of rule 57.
-const b=draw([one],40,60),at=b.findIndex(s=>s.includes('⠋ owner'));
-for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[3,/^│ │   재계산 +│ │$/],
- [4,/^│ │   code · staged 3\/7 · execute ● +│ │$/],[5,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[6,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[7,/^│ │   │    execute · Edit +│ │ │$/],[8,/^│ │   ╰─+╯ │ │$/]])
+const b=draw([one],40,60),at=b.findIndex(s=>s.includes('● owner'));
+for(const [i,want] of [[-3,/^│ │ ● code +│ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[1,/^│ │     CTX    ━━━━──── 52% · 2h 10m +│ │$/],
+ [2,/^│ │     staged 3\/7: execute +│ │$/],[3,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[4,/^│ │         CTX    ━━───── 22% · 12m +│ │$/],[5,/^│ │         execute · Edit +│ │$/],[6,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
 // (d) Short of cells: the bar shortens, then goes; then the time; the percent stays.
 const at32=draw([one],32,60);
-assert(at32.some(s=>/^│ │   CTX    52% · 2h 10m +│ │$/.test(s))&&at32.some(s=>/^│ │   │    CTX    22% +│ │ │$/.test(s)),at32.join('\n'));
-assert(draw([solo],32,60).some(s=>/^│ │   CTX   ━+─+ 38% · 41m │ │$/.test(s)&&s.replace(/[^━─]/g,'').length<8),draw([solo],32,60).join('\n'));
-// Folded (rule 48 (c)): percent and time end the first row together, as before.
-const folded=view.render({width:40,height:22,side:true,fill:true,model:{...head,routes:[one,two],route_count:2},state:'working',configuration:{},questions:()=>[]}).rows.map(text);
-assert(folded.some(s=>/^│ │ ⠋ owner .* 52% +2h 10m │ │$/.test(s))&&!folded.some(s=>/^│ │ .*CTX/.test(s)),folded.join('\n'));
+assert(at32.some(s=>/^│ │     CTX    52% · 2h 10m +│ │$/.test(s))&&at32.some(s=>/^│ │         CTX    22% · 12m +│ │$/.test(s)),at32.join('\n'));
+assert(draw([solo],32,60).some(s=>/^│ │     CTX   ━+─+ 38% · 41m │ │$/.test(s)&&s.replace(/[^━─]/g,'').length<8),draw([solo],32,60).join('\n'));
+// Folded (rule 48 (c)): percent and time end the owner's row together, as before.
+const folded=view.render({width:40,height:26,side:true,fill:true,model:{...head,routes:[one,two],route_count:2},state:'working',configuration:{},questions:()=>[]}).rows.map(text);
+assert(folded.some(s=>/^│ │   [⠋●] owner .* 52% +2h 10m │ │$/.test(s))&&!folded.some(s=>/^│ │ .*CTX/.test(s)),folded.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
 
     def test_a_four_cell_context_keeps_the_worker_box_line_at_the_narrowest_panel(self):
         # #1583 review follow-up (가): at 32 cells a four-cell percent (`100%`, or a token count
-        # `250K` with no window) made the box's `CTX` row one cell too wide and its right `│`
-        # fell off. Short of cells the row keeps `CTX` and the percent and lets the bar go, as
-        # the owner's row does; every row of the box keeps the panel's width and its right line.
+        # `250K` with no window) made the worker's `CTX` row one cell too wide and its route's right `│`
+        # fell off (11-17, route row 5: the worker hangs by a `↳`, with no box of its own, so the line
+        # that must hold is the route box's). Short of cells the row keeps `CTX` and the percent and lets
+        # the bar go, as the owner's row does; every row of the worker keeps the panel's width and its right line.
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 // The gauge at the panel's width, as the backend lays it out (`max(5, min(10, (width-8)//4))` cells).
@@ -821,9 +832,10 @@ for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
    paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P(pct),gauge_row:gauge(width,pct)}}]};
  const rows=draw([route],width,60),seen=width+' '+pct+'\n'+rows.join('\n');
  for(const s of rows)assert.equal(cells(s),width,seen);
- const top=rows.findIndex(s=>/^│ │   ╭─ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ │   ╰─+╯ │ │$/.test(s));
+ const top=rows.findIndex(s=>/^│ │     ↳ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ ╰─+╯ │$/.test(s));
  assert(top>0&&bottom>top+1,seen);
- for(const s of rows.slice(top+1,bottom))assert(/^│ │   │ .* │ │ │$/.test(s),seen);
+ for(const s of rows.slice(top,bottom))assert(/^│ │ .* │ │$/.test(s),seen);
+ for(const s of rows.slice(top+1,bottom))assert(/^│ │         \S/.test(s),seen);
  const ctx=rows.slice(top+1,bottom).find(s=>s.includes('CTX'));
  assert(ctx&&ctx.includes(pct),seen);
 }
@@ -832,28 +844,31 @@ for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
 
 
     def test_a_bottom_route_row_names_its_kind_before_its_tool(self):
-        # Spec E9 rule 34 (d): after model and context, before the tool, the side layout's
-        # and Fleet's words: `one-shot`, `staged 3/7 execute ●`, a failed `staged 2/3 execute ✕`;
-        # short of cells the tool goes, then `staged`, then the whole column.
+        # Spec E9 rule 34 (d), 11-17 (route row 5): after model and context, before the tool, the side
+        # layout's and Fleet's words: the kind with its intensity (`lab(quick)`, `code(standard) · staged
+        # 3/7: execute`), a failed `staged 2/3: execute ✕`; short of cells the kind word goes, then the
+        # tool, then `staged`, then the whole column.
         script = self.FIXTURE + r'''
-const four=[oneShot,staged,waiting,failed];
+const four=[{...oneShot,kind_word:'lab',intensity:'quick'},{...staged,kind_word:'code',intensity:'standard'},waiting,failed];
 const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
 const r140=draw(four,140,20,{side:false});
-for(const [title,kind] of [['셸 상태','one-shot'],['세션 간','staged 3/7 execute ●'],['새 판으로','staged 4/7 host-run'],['PG-50','staged 2/3 execute ✕']]){
+for(const [title,kind] of [['셸 상태','lab(quick)'],['세션 간','code(standard) · staged 3/7: execute'],['새 판으로','staged 4/7: host-run'],['PG-50','staged 2/3: execute ✕']]){
  const s=row(r140,title);assert(s&&s.includes('│ '+kind),title+'\n'+r140.join('\n'));
  assert(s.indexOf('claude')<s.indexOf(kind),s);
  for(const s of r140)assert.equal(cells(s),140,s);
 }
-for(const title of ['셸 상태','세션 간']){const s=row(r140,title);assert(s.indexOf(s.includes('one-shot')?'one-shot':'staged')<s.indexOf('>_ Edit'),s);}
+for(const [title,word] of [['셸 상태','lab('],['세션 간','code(']]){const s=row(r140,title);assert(s.indexOf(word)<s.indexOf('>_ Edit'),s);}
 assert(!r140.some(s=>/execute ✕ 2\/3/.test(s)),r140.join('\n'));
-// 80 cells: the tool goes first, then the `staged` word; the stage and its mark stay.
+// 100 cells: the kind word goes first (its intensity with it), the tool stays; the stage and its mark stay.
+const r100=draw(four,100,20,{side:false});
+assert(row(r100,'세션 간').includes('│ staged 3/7: execute')&&row(r100,'세션 간').includes('>_ Edit')&&!r100.join('').includes('code(')&&!r100.join('').includes('lab('),r100.join('\n'));
+// 80 cells: the tool goes next, then the `staged` word; the stage and its mark stay.
 const r80=draw(four,80,20,{side:false});
-assert(row(r80,'세션 간').includes('│ 3/7 execute ●')&&row(r80,'PG-50').includes('│ 2/3 execute ✕')&&row(r80,'셸 상태').includes('│ one-shot')
- &&!r80.join('').includes('staged')&&!r80.join('').includes('>_'),r80.join('\n'));
+assert(row(r80,'세션 간').includes('│ 3/7: execute')&&row(r80,'PG-50').includes('│ 2/3: execute ✕')&&!r80.join('').includes('staged')&&!r80.join('').includes('>_'),r80.join('\n'));
 // Narrower still the whole column goes; the earlier columns stay.
 const r64=draw(four,64,20,{side:false});
-assert(!r64.join('').includes('one-shot')&&!r64.join('').includes('3/7')&&/claude Opus 5\.5 xhigh +│ ━━─── 38%/.test(row(r64,'셸')),r64.join('\n'));
-// At every width the tool shows whole or not at all, and a route that names its kind never reads the older `execute ✕ 2/3`.
+assert(!r64.join('').includes('lab(')&&!r64.join('').includes('3/7')&&/claude Opus 5\.5 xhigh +│ ━━─── 38%/.test(row(r64,'셸')),r64.join('\n'));
+// At every width the tool shows whole or not at all, and a route never reads the older `execute ✕ 2/3`.
 for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:false}).filter(s=>s.startsWith('│ │ ')))
  assert(!/>_ ?\S*…|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
 '''
@@ -877,23 +892,28 @@ const one={id:'w',title:'속도 3단계 — 남은 재계산',kind:'working',sta
  paint:{glyph:P('⠋'),...doer('claude','Sonnet 5.5','high','22%','━━')},owner_paint:doer('claude','Opus 5.5','xhigh','52%','━━━━'),workers_live:[worker('claude','Sonnet 5.5','22%')]};
 const two={...one,id:'t',title:'검토 두 갈래',workers_live:[worker('codex','gpt-5.5','34%'),worker('opencode','glm-5.2','71%',{elapsed:'8m'})]};
 const reviewer=[one,...[1,2,3].map(i=>({...solo,id:'s'+i}))];
-const order=['box','one','gone','flat'];let checked=0;
+const order=['box','one','counted','stage','owner','flat'];let checked=0;
 for(const [width,routes,model] of [[38,reviewer,{}],[38,reviewer,{messages:[],wait:'',now:''}],[40,reviewer,{}],[40,[two,solo],{}],[34,[one,two],{}],[32,[one],{}]]){
  const seen=[];
  for(let h=40;h>=12;h--){
   const rows=view.render({width,height:h,side:true,fill:true,model:{...head,...model,routes,route_count:routes.length},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-  const all=rows.join('\n'),ctx=rows.filter(s=>/^│ │   CTX /.test(s)).length,owners=rows.filter(s=>/^│ │ [⠋●] owner /.test(s)).length;
-  const inBox=rows.some(s=>/^│ │   [╭├]─ [⠋●] worker/.test(s)),oneRow=rows.filter(s=>/^│ │   [⠋●] worker /.test(s)),counted=/· worker \d/.test(all);
-  const state=inBox?'box':oneRow.length?'one':counted?'gone':owners?'':'flat';
+  // (11-17, route row 5: the owner's lines stand two cells in, its CTX and stage line four; a worker hangs by `↳` four cells
+  // in, its own CTX eight; no box.) The steps: the whole form, the one-row workers, the workers gone with the stage line
+  // counting them, the stage line alone, the owner's row alone, then the routes in one row.
+  const all=rows.join('\n'),ctx=rows.filter(s=>/^│ │ {5}CTX /.test(s)).length,owners=rows.filter(s=>/^│ │   [⠋●] owner /.test(s)).length;
+  const hung=rows.filter(s=>/^│ │ {5}↳ [⠋●] worker/.test(s)),wholeWorker=rows.filter(s=>/^│ │ {9}CTX /.test(s)).length,stageRows=rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length;
+  const oneRow=wholeWorker?[]:hung,counted=/· worker \d/.test(all);
+  const state=wholeWorker?'box':oneRow.length?'one':counted?'counted':stageRows?'stage':owners?'owner':'flat';
   const where=width+'x'+h+'\n'+all;
-  // Never a middle form: the box only with every owner's context row, the one-row workers only without any.
-  if(inBox)assert(ctx>0&&ctx===owners&&!oneRow.length&&!counted,where);
-  if(oneRow.length)assert(ctx===0&&!inBox&&!counted,where);
-  if(counted)assert(ctx===0&&!inBox&&!oneRow.length,where);
+  assert(!rows.some(s=>/^│ │ +[╭├╰]─/.test(s)),where);   // no worker box any more
+  // Never a middle form: the whole workers only with every owner's context row, the one-row workers only without any.
+  if(wholeWorker)assert(ctx>0&&ctx===owners&&!counted,where);
+  if(oneRow.length)assert(ctx===0&&!counted,where);
+  if(counted)assert(ctx===0&&!hung.length,where);
   if(ctx)assert.equal(ctx,owners,where);
-  // The one-row worker: two cells in, its percent and time in the owners' columns.
-  for(const s of oneRow){const owner=rows.find(r=>/^│ │ [⠋●] owner .*%/.test(r));if(owner&&/%/.test(s))assert.equal(s.lastIndexOf('%'),owner.lastIndexOf('%'),where);}
-  if(state&&!seen.includes(state))seen.push(state);checked++;
+  // The one-row worker: four cells in, its percent and time in the owners' columns.
+  for(const s of oneRow){const owner=rows.find(r=>/^│ │   [⠋●] owner .*%/.test(r));if(owner&&/%/.test(s))assert.equal(s.lastIndexOf('%'),owner.lastIndexOf('%'),where);}
+  if(!seen.includes(state))seen.push(state);checked++;
  }
  assert.deepEqual(seen,order.filter(x=>seen.includes(x)),width+' '+JSON.stringify(seen));
  assert(seen.includes('box')&&seen.includes('one'),width+' '+JSON.stringify(seen));
@@ -1254,14 +1274,17 @@ const draw=(routes,width,height,{side=true,open=[]}={})=>view.render({width,heig
 '''
 
     def test_a_value_breaks_only_between_tokens_after_its_lesser_pieces_go(self):
-        # Spec E9 rule 34 (a), 36 (11-15: the route box again, nothing opens in place): a folded route
-        # keeps each value whole (a model name with its version, the tool's file name) and lets the
-        # lesser pieces go first; TITLE and NOW fold only between tokens.
+        # Spec E9 rule 34 (a), 36 (11-15: the route box again, nothing opens in place; 11-17 route row 5: the
+        # title, the owner row two cells in, the stage line four in): a folded route keeps each value whole (a
+        # model name with its version, the tool's file name) and lets the lesser pieces go first; TITLE and NOW
+        # fold only between tokens.
         script = self.FIXTURE + r"""
 const rows=draw([oneShot,staged,failed],40,76),all=rows.join('\n');
 for(const s of rows)assert.equal(cells(s),40,s);
-for(const want of ['│ │ ⠋ claude Opus 5.5 xhigh ','│ │   one-shot · Edit host.cjs 3m ','│ │ ⠋ claude Sonnet 5.5 high ','│ │   staged 3/7 · execute ● ','│ │   staged 2/3 · execute ✕ '])
+// (An owner alone shows its open tool at the end of its own row, `· Edit`; the file name joins it where the row has room.)
+for(const want of ['│ │   ⠋ claude Opus 5.5 xhigh · Edit ','│ │   ⠋ claude Sonnet 5.5 high ','│ │     staged 3/7: execute ','│ │     staged 2/3: execute ✕ '])
  assert(all.includes(want),want+'\n'+all);
+assert(draw([oneShot,staged,failed],52,76).some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh · Edit host.cjs ')),'the tool keeps its file name whole where the row has room');
 // No model name, version or path is cut apart, and nothing opens in place under a route.
 for(const s of rows)assert(!/\((Opus|Sonnet) *│|│ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
 for(const gone of ['OWNER','DOER','KIND','┆','impl-review','lines ›'])assert(!all.includes(gone),gone+'\n'+all);
@@ -1269,37 +1292,39 @@ for(const gone of ['OWNER','DOER','KIND','┆','impl-review','lines ›'])assert
 for(const width of [28,32,36]){
  const narrow=draw([oneShot,staged,failed],width,76);
  for(const s of narrow){assert.equal(cells(s),width,s);assert(!/│ +5\.5|(Opus|Sonnet) *│|Sonne…|Opu…/.test(s),s+'\n'+narrow.join('\n'));}
- assert(narrow.some(s=>/│ │ ⠋ (claude )?Sonnet 5\.5/.test(s)),narrow.join('\n'));
+ assert(narrow.some(s=>/│ │   ⠋ (claude )?Sonnet 5\.5/.test(s)),narrow.join('\n'));
 }
 // The same function breaks TITLE and NOW at word boundaries, as before (11-17: the NOW's last row ends in `›`, the mark of a row a press opens).
 const title=rows.findIndex(s=>s.includes('TITLE'));
 assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TITLE  하팅 v4-open 감독 — 셸','       상태·표시 고치기와 Fleet 세션',
  '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음 ›'],all);
 // With room the whole values stand on one row each.
-const wide=draw([oneShot,staged,failed],80,76,{side:false}).join('\n');
-for(const want of ['PG-50 휠','2/3 execute ✕','54m','3/7 execute ●','one-shot','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
+const wide=draw([oneShot,staged,failed],140,76,{side:false}).join('\n');
+for(const want of ['PG-50 휠 입력','staged 2/3: execute ✕','54m','staged 3/7: execute','>_ Edit','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
 """
         self.node(script, "panel-view.cjs")
 
     def test_route_rows_outlast_message_bodies_and_the_rule_outlasts_empty_rows(self):
         # Spec E9 rule 34 (b), (c), 11-15 (the route box again): empty rows, then a value's extra rows,
         # then the structural rows go before the route box gives up anything; 11-16: then every message
-        # folds from its two rows (head, body) to one; then the route box's context rows fold, its kind
-        # rows go, its title rows go, and only then it scrolls in place. The rule under the metadata
+        # folds from its two rows (head, body) to one; then the route box's context rows fold, its stage
+        # rows go, its owner rows go (11-17: the title row stands alone), and only then it scrolls in place. The rule under the metadata
         # stays while TITLE or NOW takes more than one row; the messages fold all together.
         script = self.FIXTURE + r"""
 const nine=[...Array(9)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'n'+i,title:r.title+' '+(i+1)};});
-const place=rows=>rows.filter(s=>/│ │   (one-shot|staged)/.test(s)).length,names=rows=>rows.filter(s=>/│ │   (셸|세션|새 판)/.test(s)).length;
-const ctx=rows=>rows.filter(s=>/│ │   ━/.test(s)).length,shown=rows=>rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length;
+// (11-17, route row 5: a route's title stands first, the owner's row two cells in, its context and stage row four; the owner's
+// rows go before the one-row form, whose title row it shares.)
+const place=rows=>rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length,names=rows=>rows.filter(s=>/^│ │   [⠋●✕] /.test(s)).length,titles=rows=>rows.filter(s=>/^│ │ [⠋●✕] (셸|세션|새 판)/.test(s)).length;
+const ctx=rows=>rows.filter(s=>/^│ │ {5}━/.test(s)).length,shown=rows=>rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length;
 const section=rows=>{const m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));return m<0?[]:rows.slice(m+1).filter(s=>/^│ [←→] /.test(s));};
-// 40×60: every route in its whole form (who, context and time, title, kind) and the five messages, two rows each.
+// 40×60: every route in its whole form (title, who, context and time, stage; the one-shot route has no stage row) and the five messages, two rows each.
 const c60=draw(nine,40,60);
-assert(place(c60)===9&&names(c60)===9&&ctx(c60)===6&&section(c60).length===5&&c60.filter(s=>/^│   \S/.test(s)).length===5,c60.join('\n'));
+assert(place(c60)===6&&titles(c60)===9&&names(c60)===9&&ctx(c60)===6&&section(c60).length===5&&c60.filter(s=>/^│   \S/.test(s)).length===5,c60.join('\n'));
 // The first height (from 72 down) each step is taken.
 const first={};
 for(let h=72;h>=16;h--){
  const rows=draw(nine,40,h),all=rows.join('\n'),title=rows.findIndex(s=>s.startsWith('│ TITLE'));
- const f={msg:section(rows).length>0&&!rows.some(s=>/^│   \S/.test(s)),rule:!(title>0&&/^│ [─━]+ │$/.test(rows[title-1])),ctx:ctx(rows)<6,place:place(rows)<9,names:names(rows)<9,scroll:shown(rows)<9};
+ const f={msg:section(rows).length>0&&!rows.some(s=>/^│   \S/.test(s)),rule:!(title>0&&/^│ [─━]+ │$/.test(rows[title-1])),ctx:ctx(rows)<6,place:place(rows)<6,names:names(rows)<9,scroll:shown(rows)<9};
  for(const [k,v] of Object.entries(f))if(v&&first[k]===undefined)first[k]=h;
  // The messages fold all together: a body row stands under every head or under none.
  {const bodies=rows.filter(s=>/^│   \S/.test(s)).length;assert(!bodies||bodies===section(rows).length,h+'\n'+all);}
@@ -1368,10 +1393,10 @@ const none=paint([],30,{model:{routes_known:true}});
 assert(none.filter(s=>s.includes('╭')).length===0&&/1 QUESTIONS/.test(none[first(none)])&&!none.join('').includes('ROUTE')&&blank(none[first(none)-1])&&first(none)>0&&rule(none)>first(none),none.join('\n'));
 // (d) Short of rows: the parting row goes first, then the thin rule above the last row, then values on
 // several rows, then the metadata row and the rule under it, then every message folds to one row; only then
-// does the route box fold (its context rows, then its kind rows) and scroll.
+// does the route box fold (its context rows, then its stage rows) and scroll.
 const flags=h=>{const rows=paint(six,h),at=first(rows),git=rows.findIndex(s=>s.includes('(fix/')),title=rows.findIndex(s=>s.startsWith('│ TITLE'));
  return {spacer:at>0&&blank(rows[at-1]),meta:git>0&&blank(rows[git+1]),ruled:title>0&&/^│ ─+ │$/.test(rows[title-1]),multi:title>0&&/^│ {8}\S/.test(rows[title+1]),
-  ctx:rows.filter(s=>/│ │   ━/.test(s)).length,place:rows.filter(s=>/│ │   (one-shot|staged)/.test(s)).length,shown:rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length,
+  ctx:rows.filter(s=>/^│ │ {5}━/.test(s)).length,place:rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length,shown:rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length,
   foot:/^│ ─+ │$/.test(rows.at(-3)),msgfold:rows.some(s=>/^│ [←→] \[/.test(s))&&!rows.some(s=>/^│   \S/.test(s))};};
 const gone={};
 for(let h=72;h>=14;h--){
@@ -1379,7 +1404,7 @@ for(let h=72;h>=14;h--){
  // The metadata row goes before the rule under it; neither goes while a value takes several rows.
  if(f.meta)assert(f.ruled,h+' the metadata row goes before the rule\n'+all);
  if(f.multi)assert(f.meta&&f.ruled,h+' values on several rows go before either row\n'+all);
- for(const [k,v] of Object.entries({spacer:!f.spacer,foot:!f.foot,multi:!f.multi,msgfold:f.msgfold,meta:!f.meta,ruled:!f.ruled,ctx:f.ctx<4,place:f.place<6,shown:f.shown<6}))
+ for(const [k,v] of Object.entries({spacer:!f.spacer,foot:!f.foot,multi:!f.multi,msgfold:f.msgfold,meta:!f.meta,ruled:!f.ruled,ctx:f.ctx<4,place:f.place<4,shown:f.shown<6}))   // (four context rows, four stage rows: the one-shot route has none)
   if(v&&gone[k]===undefined)gone[k]=h;
 }
 assert(gone.spacer>=gone.foot&&gone.foot>=gone.multi&&gone.multi>=gone.meta&&gone.meta>=gone.ruled&&gone.ruled>=gone.msgfold&&gone.msgfold>=gone.ctx&&gone.ctx>gone.place&&gone.place>gone.shown,JSON.stringify(gone));
@@ -1537,7 +1562,8 @@ const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fi
 const v=at(),rows=plain(v),all=rows.join('\n');
 assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s))&&!/\broute \d|messages/.test(all),all);
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
-assert(all.includes('⠋ owner')&&all.includes('code · one-shot'),all);
+// (11-17, route row 5: the kind stands alone in the route's first line, `● code`; the owner's line under its title.)
+assert(all.includes('⠋ owner')&&rows.some(s=>/^│ │ \S code +│ │$/.test(s))&&!all.includes('code · one-shot'),all);
 // The producer's label alone (no rows yet): its count first too.
 const label=plain(at({model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}}));
 assert(label.some(s=>s.includes('╭─ 3 ROUTE ⠏2 ─')),label.join('\n'));
@@ -1565,7 +1591,7 @@ for(const height of [50,70,90]){
  assert(r>0&&/^│ 1 QUESTIONS /.test(rows[r-1])&&blank(rows[r-2]),height+'\n'+rows.join('\n'));
  // MESSAGES keeps its rows (five at most, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
  const last=rows.findLastIndex(s=>/^│ [←→] /.test(s));
- assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb>r+8&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
+ assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+8&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
  assert(blank(rows[m-1])&&rows.slice(rb+1,m).every(blank)&&rows.slice(r+1,rb).every(s=>/^│ │ /.test(s)),height+'\n'+rows.join('\n'));
  // The press targets went with their rows.
  const v=view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged],route_count:2},state:'idle',configuration:{},questions:()=>[]});
@@ -1672,17 +1698,19 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS
  assert.equal(rows[sec.QUESTIONS.head].startsWith('│ ╭'),boxed,label);assert.equal(sec.QUESTIONS.rows.at(-1).startsWith('│ ╰'),boxed,label);
  assert.equal(sec.QUESTIONS.rows.some(s=>/입력창에 답/.test(s)),height===46,label);
  for(const name of ['MESSAGES','MEM'])assert.equal(sec[name].rows.length,rowsOf[name],name+' '+label);
- // The route box: with room every route whole (its glyph and title, its time, its kind row), in the producer's
- // order; short of rows a window of them, the working first, the border counting the rest.
+ // The route box: with room every route whole (its glyph and title, and the stage line a staged route has: these
+ // routes carry no kind word, owner or workers), in the producer's order; short of rows a window of them, the
+ // working first, the border counting the rest.
  const box=sec.ROUTE.rows,routeRows=box.filter(s=>/^│ │ [⠏⠋✕✓] /.test(s));
- if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   (one-shot|staged)/.test(s)).length===4&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
+ // (Each route keeps its time too: these routes carry no owner, and a route does not lose its time for that.)
+ if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   staged 2\/2: execute/.test(s)).length===1&&['23m','54m','14m','31m'].every(m=>box.filter(s=>new RegExp('│ │ .*'+m+' +│ │$').test(s)).length===1)&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
  else assert(routeRows.length>=1&&routeRows.length<4&&/↓\d+ ─╯/.test(box.at(-1))&&routeRows[0].includes('질문 팝업'),label);
  // Press actions: the question's head and rows open it; every head and row of MESSAGES its popup;
  // the box's top line the route popup and a route's rows the popup with that route unfolded; MEM opens nothing.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
  for(let i=sec.QUESTIONS.head;i<=sec.QUESTIONS.head+sec.QUESTIONS.rows.length;i++)assert.deepEqual(act(i),['question'],'question '+i+label);
  assert.deepEqual(act(sec.ROUTE.head),['popup:ROUTE']);assert.deepEqual(act(sec.ROUTE.from),['popup:ROUTE:a']);
- if(height===46)assert.deepEqual(box.slice(0,-1).map((_,k)=>act(sec.ROUTE.from+k)[0]),['a','a','a','b','b','b','c','c','c','d','d','d'].map(id=>'popup:ROUTE:'+id),label);
+ if(height===46)assert.deepEqual(box.slice(0,-1).map((_,k)=>act(sec.ROUTE.from+k)[0]),['a','a','a','b','b','c','c','d','d'].map(id=>'popup:ROUTE:'+id),label);
  assert.deepEqual(act(sec.ROUTE.from+box.length-1),[],'the bottom line opens nothing');
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);sec.MESSAGES.rows.forEach((_,k)=>assert.deepEqual(act(sec.MESSAGES.from+k),['popup:MESSAGES']));
  assert.deepEqual(act(sec.MEM.head),[]);sec.MEM.rows.forEach((_,k)=>assert.deepEqual(act(sec.MEM.from+k),[]));
@@ -2035,7 +2063,7 @@ const sections=(height,o={})=>plain(view.render({width:40,height,side:true,fill:
 const n=(rows,re)=>rows.filter(s=>re.test(s)).length;
 const above=rows=>{const i=rows.findIndex(s=>/^│ MEM ─/.test(s));return i<0?rows:rows.slice(0,i);};
 const state=rows=>({body:n(above(rows),/^│   \S/),msg:rows.some(s=>/^│ MESSAGES/.test(s))?n(rows,/^│ [←→] \[/):-1,mem:rows.some(s=>/^│ MEM ─/.test(s))?n(rows,/^│ ◆/):-1,
- box:rows.some(s=>s.startsWith('│ ╭─ 3 ROUTE'))?n(rows,/^│ │ [⠋●✕] /):-1,whole:n(rows,/│ │   (one-shot|staged)/)});
+ box:rows.some(s=>s.startsWith('│ ╭─ 3 ROUTE'))?n(rows,/^│ │ [⠋●✕] /):-1,whole:n(rows,/^│ │ {5}━/)});   // (11-17: a route's whole form carries its context row four cells in)
 // The first height (from 90 down) each step is taken.
 const first={};const seen=[];
 for(let h=90;h>=8;h--){

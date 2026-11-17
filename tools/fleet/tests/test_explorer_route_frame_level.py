@@ -355,6 +355,13 @@ class FrameOwnerLevelTests(unittest.TestCase):
                     if view == "ROUTES":
                         self.assertIn("⠏ [z9]", row)
 
+    def _two_way(self, row, cols):
+        # 11-17: the `∥ frame 2-way` detail stands whole or not at all (never `∥ frame 2-w`).
+        if cols >= 180:
+            self.assertIn("∥ frame 2-way", row)
+        else:
+            self.assertNotRegex(row, r"∥ frame 2-w(?!ay)")
+
     def test_framed_progress_mark_follows_the_frame_legs(self):
         _view_value, _record_value, _route, running = _vm(running=True)
         _view_value, _record_value, _route, finished = _vm()
@@ -364,13 +371,13 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 text = "\n".join(draw(running, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
-                self.assertIn("frame ●", row)
-                self.assertIn("∥ frame 2-way", row)
+                self.assertIn("frame → ??", row)   # 11-17 (route row 5): running, no mark; the row's spinner moves
+                self._two_way(row, cols)
                 text = "\n".join(draw(finished, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
                 self.assertIn("frame ✓", row)
-                self.assertIn("∥ frame 2-way", row)
+                self._two_way(row, cols)
                 text = "\n".join(draw(failed, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
@@ -379,7 +386,7 @@ class FrameOwnerLevelTests(unittest.TestCase):
     def test_framed_progress_marks_the_routes_own_frame_leg_after_a_predecessor(self):
         chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
                  {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active"}]
-        for kwargs, expected in (({"running": True}, "frame ●"),
+        for kwargs, expected in (({"running": True}, "frame → ??"),
                                  ({"node_state": "failed"}, "frame ✕")):
             with self.subTest(expected=expected):
                 _view_value, _record_value, route, vm = _vm(chain=chain, **kwargs)
@@ -404,14 +411,14 @@ class FrameOwnerLevelTests(unittest.TestCase):
         grid = CellGrid(120, 1)
         tables._draw_route_progress(grid, 0, 120, 0, route)
         text = grid.rows_text()[0]
-        self.assertIn("frame ●", text)
+        self.assertIn("frame → ??", text)
         self.assertIn("(frame-alternative ✓)", text)
 
         route["stages"] = [{"name": "frame-alternative", "st": "failed"}]
         grid = CellGrid(120, 1)
         tables._draw_route_progress(grid, 0, 120, 0, route)
         text = grid.rows_text()[0]
-        self.assertIn("frame ●", text)
+        self.assertIn("frame → ??", text)
         self.assertIn("(frame-alternative ✕)", text)
 
     def test_a_resumed_route_with_two_owner_jobs_does_not_borrow_a_frame_leg(self):

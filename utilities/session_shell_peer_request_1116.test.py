@@ -93,8 +93,10 @@ for(const width of [30,40,50,60]){
   const v=draw({width,height:h}),b=boxOf(v);if(!b)break;
   const has=lines(v).some(s=>/^│ ├─+┤ │$/.test(s)),n=content(v);
   if(!has)sawRuleOff=true;
-  if(n<tall)assert(!has,'a content row left while the rule still stands '+width+'x'+h+'\n'+lines(v).join('\n'));
-  if(sawRuleOff)assert(!has,'the rule came back '+width+'x'+h);
+  if(n<tall&&!sawRuleOff)assert(!has,'a content row left while the rule still stands '+width+'x'+h+'\n'+lines(v).join('\n'));
+  // (11-17, route row 5: a route folding from three rows to one frees several rows at once, so the rule may stand again on
+  // the spare row; it comes back only where it takes no content row from the height below.)
+  if(has&&sawRuleOff)assert.equal(n,content(draw({width,height:h-1})),'the rule came back at the cost of a content row '+width+'x'+h+'\n'+lines(v).join('\n'));
  }
  assert(sawRuleOff,'the rule gives way at some height '+width);
 }
