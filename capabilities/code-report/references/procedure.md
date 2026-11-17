@@ -58,7 +58,8 @@ Procedure:
    git diff --stat -- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/
    Report a documentation update only when the relevant diff proves it happened. If the expected diff is empty, re-read and correct the update.
 7. Read pipeline_summary.md. Summarize its Decision Points in section 4.5. If no events exist, write the natural equivalent of "No autonomous decision events (clean run)" in the selected artifact language.
-8. Synthesize causes, effects, and durable lessons; do not merely enumerate steps.
+8. Fill the Post-Incident Record (section 5.5) from the checklist, reviews, `test_logs/`, and `pipeline_summary.md`: when this work had a redo, a revert, a review FAIL, or a CI fix, write two things in one or two lines — the contributing factors (the structure and process, not people) and what will keep it from recurring. When there was none, write "None". When a debug-mode Root Cause already covers it, point to that instead of repeating it. An empty or "None" record is valid; nothing checks it.
+9. Synthesize causes, effects, and durable lessons; do not merely enumerate steps.
 
 Report structure:
 
@@ -73,6 +74,7 @@ Report structure:
 ## 4. QA Summary
 ## 4.5 Decision Record
 ## 5. Failed or Skipped Steps
+## 5.5 Post-Incident Record
 ## 6. Follow-Ups
 
 Localize headings naturally. Preserve code identifiers, paths, commands, numbers, and technical terms where translation would reduce precision. Aim for 1–3 pages: about one page for at most five steps and up to three pages for more than twenty.
