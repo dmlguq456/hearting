@@ -2043,6 +2043,13 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         values = tuple(values) if isinstance(values, (list, tuple)) else ()
         choices = _question_choices(spec)
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
+        if choices:
+            # 11-17: the question's words end, then one empty row and a thin line, then the choices (as the
+            # shell's question popup does); short of rows the empty row goes first, never a choice's row.
+            if bottom - y >= len(choices) + 2:
+                y += 1
+            if bottom - y >= len(choices) + 1:
+                line("─" * width, "line")
         for number, (value, label) in enumerate(choices, 1):
             if y >= bottom:
                 break
@@ -2050,8 +2057,8 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             selectable = can_draft and question_choice_click_allowed(envelope, qid, value, values)
             mark = ("●" if chosen else "○") if (selectable or chosen) else " "
             cursor = grid.put(indent, y, mark, "hearting" if chosen else "dim", limit=right)
-            cursor = grid.put(cursor + 1, y, f"{number}  ", "dim" if not selectable else "soft",
-                              limit=right)
+            # The number is the question's rose and bold, as `◑` and the popup's numbers are (11-17).
+            cursor = grid.put(cursor + 1, y, f"{number}  ", "lvl_r", limit=right)
             cursor = grid.put(cursor, y, _clip(str(label), max(1, right - cursor)),
                               "soft" if selectable or chosen else "dim", limit=right)
             if spec.get("recommended") == number - 1:

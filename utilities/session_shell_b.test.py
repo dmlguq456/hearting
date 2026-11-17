@@ -41,7 +41,7 @@ b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.len
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
 const item=(id,extra={})=>({id,revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one','two','three'],...extra}]});
-const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='▸').map(row=>row.slice(2).map(p=>p.text).join('').replace(/^\d+ /,''));
+const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='▸').map(row=>row.slice(2).map(p=>p.text).join('').replace(/^\d+  /,''));
 for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\r','two'],['\r','one'],['\x1b[A\x1b[A\r','one'],['\x1b[B\x1b[B\x1b[B\x1b[B\r','three']]){
  let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([item('id')]);b.enter();
@@ -298,7 +298,7 @@ for(const selected of [false,true]){
         view=item['questions'][0]['display']
         self.assertGreater(len(view['body']),1)
         options=''.join(t for row in view['options'] for t,_ in row)
-        self.assertIn('2 two',options);self.assertNotIn('✓',options)
+        self.assertIn('2  two',options);self.assertNotIn('✓',options)
         self.assertEqual(capacity(24),10)
         self.assertGreaterEqual(24-capacity(24),6)
 

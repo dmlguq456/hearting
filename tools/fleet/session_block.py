@@ -133,13 +133,13 @@ def _choice_brief(labels, room):
     size = lambda parts: sum(cell_width(text) for text, _key in parts)
     for at, parts in enumerate(labels):
         gap = [(" · ", "dim")] if out else []
-        item = [*gap, (str(at + 1) + " ", "dim"), *parts]
+        item = [*gap, (str(at + 1) + " ", "g_blocked"), *parts]
         rest = len(labels) - at - 1
         tail = size([(" · +" + str(rest), "dim")]) if rest else 0
         if used + size(item) + tail <= room:
             out += item; used += size(item); shown += 1
             continue
-        lead = [*gap, (str(at + 1) + " ", "dim")]
+        lead = [*gap, (str(at + 1) + " ", "g_blocked")]
         left = room - used - size(lead) - (size([(" · +" + str(rest), "dim")]) if rest else 0)
         if left >= 4:
             kept = lead + _cut(parts, left)
@@ -197,13 +197,14 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
         # The choice's own number; `number` stays the box's `i` of `i/N`.
         for choice_number, choice in enumerate(choices, 1):
             label = choice.get("label", choice.get("value", "?")) if isinstance(choice, dict) else choice
-            prefix = str(choice_number) + " "
+            # 11-17: the number in the question's rose, two cells before the words (the popup bolds it).
+            prefix = str(choice_number) + "  "
             parts = [(str(label), "loc_repo")]
             if question.get("recommended") == choice_number - 1:
                 parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
             # Two cells stay free before the number for the editor's mark column (spec E9 rule 53).
             for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix) - 2))):
-                options.append([(prefix if line_index == 0 else " " * cell_width(prefix), "dim"), *line])
+                options.append([(prefix, "g_blocked") if line_index == 0 else (" " * cell_width(prefix), "dim"), *line])
         body = []
         # 11-15: a markdown table in the question's text reads as aligned columns (the documents' one
         # table rule, ``transcript.table_parts``); every other line wraps as before.

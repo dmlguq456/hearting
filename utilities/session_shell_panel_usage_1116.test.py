@@ -199,7 +199,7 @@ for(let y=a;y<=b;y++)assert(v.hits.some(h=>h.row===y&&h.action==='question'&&h.l
 const first=v.rows[a+1].find(p=>p.text.startsWith('MESSAGES'));assert.equal(first.foreground,253);assert(!first.role&&!first.blink&&first.dim===false);
 assert.equal(v.rows[a+1].find(p=>p.text==='◑').foreground,253);
 assert(v.rows[a+2].filter(p=>/건/.test(p.text)).every(p=>p.foreground===253));
-assert(v.rows[a+2].filter(p=>/^\d $/.test(p.text)).every(p=>p.foreground===253));
+assert(v.rows[a+2].filter(p=>/^\d $/.test(p.text)).every(p=>p.role==='accent'&&p.foreground===174));
 assert(v.rows.flat().every(p=>p.background===undefined));
 """)
 
@@ -439,9 +439,13 @@ for(const [opt,body,rose] of [[{},F.dark.body===253?253:253,F.dark.accent],[{lig
   assert(top.filter(p=>/[╭─╮]/.test(p.text)&&p.role==='accent-line').every(p=>painted(p).foreground===rose));
   // The words and the choices' row in the box: the body color and nothing else red.
   const pick=y=>v.rows[y].filter(p=>p.text.trim()&&!/^[│ ]+$/.test(p.text));
-  const words=pick(a+1).concat(pick(a+2).filter(p=>!/ · |\(추천\)/.test(p.text)));
-  assert(words.length>=4);
+  const words=pick(a+1).concat(pick(a+2).filter(p=>!/ · |\(추천\)|^\d+ $/.test(p.text)));
+  assert(words.length>=3);
   for(const p of words)assert.equal(painted(p).foreground,body,JSON.stringify(p));
+  // 11-17: the choices' numbers are the question's rose, inside the box too.
+  const numbers=pick(a+2).filter(p=>/^\d+ $/.test(p.text));
+  assert(numbers.length>=2);
+  for(const p of numbers)assert.equal(painted(p).foreground,rose,JSON.stringify(p));
   // The rose is left on `↵ answer · Ctrl+]` (as it was; only the words became the body color) and on the count in the label.
   assert(pick(a+3).every(p=>p.role==='accent'),JSON.stringify(pick(a+3)));
 }
