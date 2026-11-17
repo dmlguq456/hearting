@@ -57,22 +57,23 @@ class OneStepFoldedNowTest(unittest.TestCase):
         ]
 
     def test_the_progress_cell_carries_the_open_tool_summary_once(self):
-        # Review RV-PR1560 follow-up 10 (spec E9 rule 24): the kind word leads the cell
-        # while the tool shows, as on the shell panel's third row.
+        # Review RV-PR1560 follow-up 10 (spec E9 rule 24), 11-17 (route row 5): the kind word (and its
+        # intensity) leads the cell while the tool shows, as on the shell panel's first row.
         wide = _rows(self.jobs(), 150)
-        self.assertIn("one-shot ● python3 tools/run-tests.py  3m", wide["t-run"])
-        self.assertIn("one-shot ● Edit host.cjs", wide["t-edit"])
+        self.assertIn("code python3 tools/run-tests.py  3m", wide["t-run"])
+        self.assertIn("code Edit utilities/session-shell/host.cjs", wide["t-edit"])  # (more room than the `one-shot ●` lead left)
         for title in ("t-run", "t-edit"):
             self.assertNotIn(">_", wide[title])          # not again in the tool cell
-            self.assertEqual(wide[title].count("one-shot"), 1)
+            self.assertEqual(wide[title].count("code"), 1)
+            self.assertNotIn("one-shot", wide[title])
             self.assertIn("47m", wide[title])
 
     def test_a_narrow_row_cuts_whole_values(self):
         narrow = _rows(self.jobs(), 120)
-        self.assertIn("one-shot ● Edit", narrow["t-edit"])
-        self.assertIn("one-shot ● python3", narrow["t-run"])
+        self.assertIn("code Edit", narrow["t-edit"])
+        self.assertIn("code python3", narrow["t-run"])
         for title in ("t-run", "t-edit"):
-            self.assertNotIn("…", narrow[title].split("●", 1)[1])
+            self.assertNotIn("…", narrow[title].split("code ", 1)[1])
             self.assertIn("47m", narrow[title])
 
     def test_nothing_observed_keeps_the_stage_and_a_staged_row_is_unchanged(self):
