@@ -1022,13 +1022,16 @@ def _ui_text(key):
     return ui_text(key)
 
 
-def hold_words(row):
-    """Why a still-pending row waits (its ``held``), in words; "" when nothing is known."""
+def hold_words(row, text=None):
+    """Why a still-pending row waits (its ``held``), in words; "" when nothing is known.
+
+    ``text`` is the caller's own ``ui_text`` (the panel and Fleet pass theirs, so the words and the language are one
+    reading); without it the catalog is read here, as `peer-steward show` does."""
     row = row or {}
     if row.get("state") != "pending":
         return ""
     keys = _HOLD_WORDS.get(str((row.get("held") or {}).get("reason") or ""), ())
-    return " · ".join(_ui_text(key) for key in keys)
+    return " · ".join((text or _ui_text)(key) for key in keys)
 
 
 def delivery_word(row):
