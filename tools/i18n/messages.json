@@ -1658,6 +1658,98 @@
    "en": "No record",
    "ko": "기록 없음"
   },
+  "fleet.session_panel.now_answer": {
+   "en": "answer",
+   "ko": "답"
+  },
+  "fleet.session_panel.now_current": {
+   "en": "now",
+   "ko": "지금"
+  },
+  "fleet.session_panel.now_divider_clear": {
+   "en": "cleared",
+   "ko": "정리"
+  },
+  "fleet.session_panel.now_divider_compact": {
+   "en": "compacted",
+   "ko": "압축"
+  },
+  "fleet.session_panel.now_divider_handover": {
+   "en": "handed over",
+   "ko": "이어받음"
+  },
+  "fleet.session_panel.now_earlier": {
+   "en": "… {count} earlier lines",
+   "ko": "… 이전 {count}줄"
+  },
+  "fleet.session_panel.now_empty": {
+   "en": "Nothing is recorded for this session yet",
+   "ko": "이 세션에는 아직 남은 기록이 없습니다"
+  },
+  "fleet.session_panel.now_folded": {
+   "en": "+{count} folded",
+   "ko": "+{count} 접음"
+  },
+  "fleet.session_panel.now_question": {
+   "en": "question",
+   "ko": "질문"
+  },
+  "fleet.session_panel.now_question_answered": {
+   "en": "answered",
+   "ko": "답함"
+  },
+  "fleet.session_panel.now_question_closed": {
+   "en": "closed",
+   "ko": "닫힘"
+  },
+  "fleet.session_panel.now_reason_cursor_unit_changed": {
+   "en": "The record changed its way of counting, so this part cannot be placed",
+   "ko": "기록의 세는 방식이 바뀌어 이 대목의 자리를 알 수 없습니다"
+  },
+  "fleet.session_panel.now_reason_invalid_target": {
+   "en": "This line has no part of the conversation to read",
+   "ko": "이 줄에는 읽을 대화 대목이 없습니다"
+  },
+  "fleet.session_panel.now_reason_no_cursor": {
+   "en": "Where this part starts was not recorded",
+   "ko": "이 대목이 어디서 시작하는지 기록이 없습니다"
+  },
+  "fleet.session_panel.now_reason_no_transcript": {
+   "en": "The conversation record of this session was not found",
+   "ko": "이 세션의 대화 기록을 찾지 못했습니다"
+  },
+  "fleet.session_panel.now_reason_prompt_not_found": {
+   "en": "The prompt of this part is not in the conversation record",
+   "ko": "이 대목의 프롬프트를 대화 기록에서 찾지 못했습니다"
+  },
+  "fleet.session_panel.now_reason_span_reversed": {
+   "en": "The record of this part is out of order, so it cannot be read",
+   "ko": "이 대목의 기록 순서가 맞지 않아 읽을 수 없습니다"
+  },
+  "fleet.session_panel.now_reason_transcript_shorter": {
+   "en": "The conversation record is shorter than this part (it may have been compacted)",
+   "ko": "대화 기록이 이 대목보다 짧습니다(압축되었을 수 있습니다)"
+  },
+  "fleet.session_panel.now_reason_unreadable": {
+   "en": "This part of the conversation could not be read",
+   "ko": "이 대목의 대화를 읽지 못했습니다"
+  },
+  "fleet.session_panel.now_route_passed": {
+   "en": "PASS",
+   "ko": "PASS"
+  },
+  "fleet.session_panel.now_route_unproven": {
+   "en": "unproven",
+   "ko": "증명 안 됨"
+  },
+  "fleet.session_panel.now_title_counts": {
+   "en": "{prompts} prompts · {nows} NOW",
+   "ko": "프롬프트 {prompts} · NOW {nows}"
+  },
+  "fleet.session_panel.now_today": {
+   "en": "today",
+   "ko": "오늘"
+  },
   "fleet.session_panel.open_fleet": {
    "en": "open in Fleet",
    "ko": "Fleet에서 열기"
@@ -1677,6 +1769,14 @@
   "fleet.session_panel.popup_keys": {
    "en": "←→ section · PgUp/PgDn · {panel} · f Fleet · Esc/Ctrl+] back",
    "ko": "←→ 구획 · PgUp/PgDn 읽기 · {panel} · f Fleet · Esc/Ctrl+] 돌아가기"
+  },
+  "fleet.session_panel.popup_now": {
+   "en": "↑↓ · Enter read that part",
+   "ko": "↑↓ · Enter 그 대목 읽기"
+  },
+  "fleet.session_panel.popup_now_page": {
+   "en": "Enter back to the list",
+   "ko": "Enter 목록으로 돌아가기"
   },
   "fleet.session_panel.popup_route": {
    "en": "↑↓ route · Enter its page",

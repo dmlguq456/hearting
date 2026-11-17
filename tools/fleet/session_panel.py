@@ -794,6 +794,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium",
         # 11-15: the table popups' keys (the question popup's are the editor's own).
         "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page",
+        # 11-17: the NOW popup's keys.
+        "popup_now", "popup_now_page",
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-16 (the person: "PEER REQUEST라고 할까?"): the route box's request name tag, and its one shorter form.

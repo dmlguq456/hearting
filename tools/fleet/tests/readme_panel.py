@@ -427,7 +427,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
   dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
 const cellWidth=s=>[...String(s)].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-const SECTIONS=['STATUS','QUESTIONS','ROUTE','MESSAGES'];
+const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
 // host.cjs: tableParts, statusDoc, sectionLabel, sections, label, tableGuide, wrapGuide, tableTitle
 // (the same code, over the job's model and table instead of the host's globals).
 function tableParts(result){
@@ -439,7 +439,7 @@ const statusDoc=m=>m.status_doc&&typeof m.status_doc.word==='string'?m.status_do
 const sectionLabel=(m,name)=>name==='STATUS'?String(statusDoc(m)?.word||'STATUS'):name;
 function sections(m,block,table){
   const list=v=>Array.isArray(v)&&v.length>0;
-  const has={STATUS:!!statusDoc(m),QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+  const has={STATUS:!!statusDoc(m),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
     MESSAGES:list(m.messages)||list(m.requests)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);

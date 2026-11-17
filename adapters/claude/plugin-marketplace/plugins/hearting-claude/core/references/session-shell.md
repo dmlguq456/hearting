@@ -392,7 +392,9 @@ in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title (bold,
 in the session's harness color, Fleet's `hb_*`, on every row; plain without
 color, the weight kept without color as the steward's `⚑`) and NOW (bright
-while the session works or waits), each on as many rows as it needs, then a
+while the session works or waits; 11-17: a press on any row of it opens the NOW popup, in the bottom layout the
+row it shares with the title; its last row ends in ` ›` only where that row has the room, else the row's end is
+`…›`, so the mark never adds a row, folds a title or moves another row), each on as many rows as it needs, then a
 tidy notice (11-16, the person: "알림이 알림이 아니라 경고 같아서": a result that ended well and leaves the
 person nothing to do, which its writer marks `done`, is one or two dim rows without `⚠`, the machine's
 own words left out of the panel's line (the `[tidy]` tag, the batch id, the undo command, a byte or rowid
@@ -868,7 +870,7 @@ the panel together; above the folded strip, never over it): the question popup
 while a question waits to be answered here, else the first section with
 something in it. A press on a panel section (its head or a row) or on a group of
 the folded strip opens that section's popup, and a new question or a failed
-route never opens one. The popups are four
+route never opens one. The popups are five
 kinds over one frame and one set of keys: STATUS (11-15, design 2: the REPO row's button; the table
 popup's frame, width and keys; its title `현황 <campaign> · <age>`, `현황` alone without a document;
 Fleet's status lines for the project as its project page draws them, an empty row, then the whole
@@ -885,10 +887,10 @@ stands at once, and its lines are kept only for the width and value they were as
 ROUTE (Fleet's own table: the backend's `popup` reading draws
 Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid of
 the popup's width and sends the painted cells, Fleet's row tints left out; narrow,
-Fleet's columns leave as Fleet leaves them), and MESSAGES (the requests and messages whole, then
+Fleet's columns leave as Fleet leaves them), NOW (11-17, below) and MESSAGES (the requests and messages whole, then
 the peer delivery reading `r`). The bottom line lists the sections with
-something in them in the panel's order, `현황 · QUESTIONS · ROUTE · MESSAGES` (STATUS by its button's
-word, there while the button stands), the current one bright; ←→ (or a press on a name) moves to
+something in them in the panel's order, `현황 · NOW · QUESTIONS · ROUTE · MESSAGES` (STATUS by its button's
+word, there while the button stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
 the next or previous one. A popup row reaches the terminal with every control character (C0, DEL and
 C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the
@@ -904,6 +906,31 @@ table is read again at the events that change it, never on a timer: the routes
 when this session's route rows change (the shared answer-wait cache's existing
 watch); one reading at a time, in its own worker (a
 person's read never takes the answer's action slot; a read past its 12 seconds ends then, an answer's does not).
+NOW popup (11-17): this session's story, read in its own worker when the popup opens (never per paint, no
+poller, no new file read by the projection): the backend's `popup` reading of kind `now` draws only what
+`tools/fleet/explorer/timeline.py` gives (`rows`, `fold`, `passage`; `scroll_steps` is not called) in the
+panel's own style keys and sends the painted cells with a note per row. It opens at once, with the NOW the panel
+holds on its own row until the list arrives. The list is oldest first and opens on the current NOW, the bottom
+row; a line is the time (5 cells), two cells, the mark and the text: a prompt `>` in its harness color (`hb_*`)
+and bright text, `> 답 ·` for a prompt that answered a question; a NOW two cells further in, dim, the current one
+bright with `지금` at the right; a route `⠏` start, `✓` or `✕` end with its time, a question `◑`, a message `←`
+`→`, each in the mark and color the panel already uses; a date row `오늘 11-16 ───` and a dim mark for a clear,
+compaction or handover (`●` `○` `◆`). A line's text is the layer's own masked, bounded one; a text too long for
+the popup's inside is cut with `…` and the time, mark and `지금` stay. A list taller than the popup's rows is folded
+by `timeline.fold` (each prompt its last NOW and `+N 접음`, the prompt stood on open, date and divider rows
+never folded; the list is read again as the row stood on moves, by the one backend the popup holds while it
+stands: it ends with the popup, another section or the window, and a read it cannot answer is made the one-shot way,
+so a key starts no process; keys that come while a folded list is read again wait for it and step over it in order);
+one that fits is whole; no record is one dim line. The event marks (`route`, the screen's word for a question,
+a message's kind) are filled to the widest one so the text of every event row starts in one column. An answer
+past the host's 60 KB leaves its oldest rows off at a group's start (a date, a divider or a prompt) and says so on
+its first row (`… 이전 N줄`, dim). ↑↓ move the row stood on (the chosen tint, reversed where there is no hue), PgUp/PgDn a page of rows;
+Enter on a prompt or NOW row reads that part of the conversation in the popup (`timeline.passage`, drawn as the
+harness draws it; a part that cannot be read is one dim line in words from the layer's reason) and Enter again is
+back on that row (keys `Enter 목록으로 돌아가기`); on a route, question or message row Enter opens that
+section's popup (the route unfolded). No key or press goes to the native window and the window never
+moves. Keys row: `↑↓ · Enter 그 대목 읽기 · ←→ 구획 · …`. The folded strip and a window too small for the panel's NOW row
+reach it as every popup is reached: `Ctrl+]`, then ←→.
 The question popup answers this session's own questions; another session's wait is answered in
 its own window or through Fleet (`f`), which also goes to that session, restarts or tidies it. While it
 stands every key and press is its own (none reaches the native, a native that
