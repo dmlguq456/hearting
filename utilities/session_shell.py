@@ -1992,6 +1992,13 @@ def _backend_operation(request: dict) -> dict:
 
 
 def _backend() -> int:
+    try:
+        # The panel backend re-reads the same ledgers at every projection; reuse
+        # unchanged ones, as the obligation runner does.
+        import dispatch_seat_handover
+        dispatch_seat_handover.trust_unchanged_ledgers()
+    except Exception:
+        pass
     for line in sys.stdin:
         request = {}
         try:
