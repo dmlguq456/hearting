@@ -287,6 +287,13 @@ class HardFailSummaryLineFixture(RunTestsFixtureBase):
             r"hard-fail: surprise_fail\.test\.py::- verdict=FAIL kind=exit-nonzero signature=",
         )
 
+    def test_hard_fail_line_is_followed_by_the_end_of_the_failing_report(self):
+        # 11-17: a CI log named the failing test but not the assertion; the end of its report follows the line.
+        write_suite(self.root, "asserting.test.py",
+                    "import sys\nprint('the cell was NEVER_SHOWN', file=sys.stderr)\nsys.exit(1)\n")
+        result, _rows = self.run_fixture([])
+        self.assertRegex(result.stdout, r"hard-fail: asserting\.test\.py::- verdict=FAIL[^\n]*\n  \| the cell was NEVER_SHOWN")
+
 
 class XPassListingAndEnvLineFixture(RunTestsFixtureBase):
     """P1: XPASS-NONFATAL must list which suites unexpectedly passed, and the
