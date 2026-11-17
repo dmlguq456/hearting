@@ -5856,6 +5856,10 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                         return
                     closed = _closed_registered_route_outcome(final_row, jobs)
                     if closed is not None:
+                        # Dropping the notice rests on the parent's absence alone, and the
+                        # pass's session table can be a pass old: re-read it fresh here.
+                        if peer_address.presence(recipient_harness, recipient_sid) != "absent":
+                            return
                         store.update(duty["id"], state="complete", delivery="not-required",
                             cleanup="complete", observation={**observation, "reason": "route-closed",
                                 **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
