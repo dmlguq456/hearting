@@ -25,12 +25,9 @@ NON_RELEASE_EXACT = {
     ".gitignore",
     "AGENTS.md",
     "CLAUDE.md",
-    "INSTALL_LAYOUT.md",
     "LICENSE",
-    "MANUAL.md",
     "README.md",
     "README.ko.md",
-    "RELEASE_POLICY.md",
 }
 NON_RELEASE_PREFIXES = (
     ".agent_reports/",

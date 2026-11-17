@@ -3459,8 +3459,12 @@ def cmd_watch(args):
         return _unavailable("native-session-unresolved")
     # An unbound fresh pane is still a valid target. Its pane lock also serializes
     # the later transition from pane identity to the first native session.
-    if any(agent.get(key) in {None, "", "-"} for key in ("harness", "pane")):
+    if agent.get("harness") in {None, "", "-"}:
         return _unavailable("watch-identity-unverified")
+    if agent.get("pane") in {None, "", "-"}:
+        # The session is exact, but its process carries no window value (HERDR_PANE_ID
+        # or TMUX_PANE) to lock the watch on: say that, and the fallback, in one line.
+        return _unavailable("watch-target-window-unknown")
 
     seat_fd = None
     if steward_seat is not None:
@@ -3527,7 +3531,8 @@ def cmd_watch(args):
         os.close(alias_fd)
         if seat_fd is not None:
             os.close(seat_fd)
-        return _unavailable("watch-identity-unverified")
+        return _unavailable("watch-identity-unverified" if current_agent.get("harness") in {None, "", "-"}
+                            else "watch-target-window-unknown")
     if any(current_agent.get(key) != agent.get(key) for key in ("harness", "pane")):
         os.close(alias_fd)
         if seat_fd is not None:
