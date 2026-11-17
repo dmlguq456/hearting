@@ -13,7 +13,7 @@
 <p align="center">
 <strong>Your way.</strong> Before work you ask for starts it confirms what you meant. What you corrected and decided is remembered and offered to your next sessions, on any of the three agents (Claude Code, Codex, OpenCode).<br>
 <strong>The same everywhere.</strong> Hearting is a layer on top of all three, so the work runs with the same requests, stages, and checks.<br>
-<strong>Across agents, in view.</strong> Sessions on any of the three agents hand work to each other, and one session can start worker sessions on any of them to do parts of its work. Every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.
+<strong>Across sessions, in view.</strong> Sessions on Claude Code, Codex, and OpenCode hand work to each other, and any session can start workers on any of them. Every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.
 </p>
 
 <p align="center">
@@ -42,19 +42,9 @@
 ## One seat for every session
 
 Every session gets a panel beside it, Fleet shows all of them at once, and
-sessions hand each other work as tracked requests. All three read the same
+sessions hand each other work as tracked requests, whichever of the three
+agents each runs on. All three read the same
 records, so what one session's panel says is what Fleet says about it.
-
-The agents can be mixed, in two ways:
-
-- **Session with session.** A Claude Code session asks a Codex session for a
-  review, and an OpenCode session reports to either. Requests, reports, and
-  notes travel the same way whichever agent the other session runs on.
-- **Session with its workers.** A session that splits work into stages starts
-  worker sessions for them, and a worker can run on any agent you have
-  installed: a Claude Code session can give the implementation to an OpenCode
-  worker and the check to a Codex worker. Name the agent for the owner or the
-  workers, or leave the choice to Hearting.
 
 ### The panel beside each session
 
@@ -103,7 +93,9 @@ one page that says where the project stands, whole in a popup; Fleet shows its
 one line at the top of the project. Writing one is optional.
 
 A session hands another session work in your own words — “Ask session [b2] to
-re-run the API tests on feat/rate-limit and report back.” The request gets a
+re-run the API tests on feat/rate-limit and report back.” The other session can
+run on any of the three agents: a Claude Code session can ask a Codex session,
+and the other way round. The request gets a
 number; the other session receives one short line and opens the body itself,
 sends partial reports while it works and a final report or a rejection when it
 is done, and each report wakes the session that asked. The asker can send a new
@@ -207,7 +199,9 @@ your request
 Before work you asked for starts, the agent shows one short card: your words
 and what it understood — intent, scope, what it will not do, and when it is
 done. You answer Proceed, Edit, or Stop, and those lines travel with the
-request to the owner and every worker. When the two frame legs agree and leave
+request to the owner and every worker. The owner and each worker are sessions
+of their own, and they can run on any agent you have installed and signed in
+to, not only the one you are typing in. When the two frame legs agree and leave
 nothing for you to choose, work starts with a one-line notice you can correct
 in your next message. When a dispatched request finishes, you get a short
 summary of the intent, the result, its cost, what changed, what was checked,

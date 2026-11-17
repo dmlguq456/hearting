@@ -44,10 +44,10 @@ THREE_LINES = (
                   "OpenCode)."),
     ("The same everywhere.", "Hearting is a layer on top of all three, so the work runs with the same requests, "
                              "stages, and checks."),
-    ("Across agents, in view.", "Sessions on any of the three agents hand work to each other, and one session "
-                                "can start worker sessions on any of them to do parts of its work. Every step "
-                                "shows in the panel and in Fleet (a terminal view of all your sessions), so you "
-                                "can correct it at any point."),
+    ("Across sessions, in view.", "Sessions on Claude Code, Codex, and OpenCode hand work to each other, and any "
+                                  "session can start workers on any of them. Every step shows in the panel and "
+                                  "in Fleet (a terminal view of all your sessions), so you can correct it at "
+                                  "any point."),
 )
 
 
