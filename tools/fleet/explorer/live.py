@@ -3829,6 +3829,9 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                 if isinstance(route.get(key), str) and route[key]:
                     row[key] = route[key][:64]
             row["legs"] = len(route.get("legs") or ())
+            # The route's chain (``frame ✓ → code``), the legs Fleet already reads: name and state only.
+            row["chain"] = [[str(leg[0])[:24], str(leg[1])[:12]] for leg in (route.get("legs") or ())[:6]
+                            if isinstance(leg, (list, tuple)) and len(leg) >= 2]
             # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
             from .pages import _route_after
             nodes = tuple((route_nodes or {}).get(route.get("id")) or ())

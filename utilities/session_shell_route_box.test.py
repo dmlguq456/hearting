@@ -5,7 +5,9 @@ what it covers (its own ground, bright words).
 The golden rows (`fixtures/session-shell-route-box-v4.36.4.json`) were drawn by v4.36.4's
 `panel-view.cjs` (8ea2f6408) from the synthetic scenes the file carries; the box drawn now from the same
 scenes must match them cell for cell (text, color, weight, ground) and press cell for press cell (the
-press now opening a popup). Everything here is synthetic.
+press now opening a popup). 11-17 (route row 5): the route rows in the golden are drawn again in the new
+grammar (the kind and intensity first, the owner's lines two cells in, a worker hanging by `↳`, no worker
+box); its top and bottom lines and the request rows stay v4.36.4's. Everything here is synthetic.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -55,8 +57,8 @@ for(const c of golden.cases){
  const want=c.rows.map(row=>row.map(([t,s])=>[t,JSON.stringify(golden.styles[s])]));
  const hits=v.hits.filter(h=>h.row>=b.a&&h.row<=b.b).map(h=>[h.row-b.a,h.left,h.right,h.action]);
  // 11-16: the request rows, the rule above them and the title/bottom lines that count them are drawn anew (peer
- // requests read as a route's doer: `peer-request-1116`); the route rows are still v4.36.4's cell for cell, and
- // so are their press cells. A scene without requests is compared whole.
+ // requests read as a route's doer: `peer-request-1116`); the route rows are the golden's (drawn again 11-17) cell for
+ // cell, and so are their press cells. A scene without requests is compared whole.
  const drawn=model.requests&&model.requests.length;
  const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));
   const keep=rows.map((r,i)=>i>0&&i<rows.length-1&&!own.has(i)&&!txt(r.map(([t])=>({text:t}))).includes('├'));
