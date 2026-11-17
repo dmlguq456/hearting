@@ -1216,6 +1216,8 @@ def _kind_cell(route):
     """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets."""
     kind = str(route.get("capability") or "").strip()
     intensity = str(route.get("intensity") or "").strip()
+    if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
+        intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
         return []
     return [(kind, "grp")] + ([("(" + intensity + ")", "dim")] if intensity else [])
@@ -1337,7 +1339,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
     # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
     # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
     # Any route with a stage list reads so, whatever its shape (`map-reduce 2/3: analyze`; no word when none is named).
-    if len(stages) > 1:
+    if len(stages) > 1 or (stages and str(route.get("shape") or "").startswith("staged")):
         at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
                   next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
         earlier = _fold_items(items[:-1], max(8, (end - x) // 3), sep=" → ") if not same and items[:-1] else []
@@ -1619,6 +1621,25 @@ def session_marker(session):
     return marker, marker_key
 
 
+ROUTE_ZONES = ("direct", "dispatch", "request")
+
+
+def route_zone(route):
+    """The zone a route stands in (11-17, route zones): ``direct`` is what the session does itself, ``dispatch`` a route it
+    started; a request is the third zone, drawn apart."""
+    return "direct" if str(route.get("shape") or "") == "direct" else "dispatch"
+
+
+def zone_rule(grid, x, right, y, zone):
+    """`` ─ direct ─────``: a zone's named rule, its name in the zone's own color; the next row."""
+    cursor = grid.put(x + 1, y, "─ ", "line", limit=right)
+    cursor = grid.put(cursor, y, zone, "zone_" + zone, limit=right)
+    cursor = grid.put(cursor, y, " ", "branch_s", limit=right)
+    for xx in range(min(right, cursor), right):
+        grid.put(xx, y, "─", "line")
+    return y + 1
+
+
 def draw_routes(grid, vm, state, x=34, y=3):
     routes = tuple(vm.routes or ())
     use = max(0, grid.cols - x - 2)
@@ -1663,7 +1684,14 @@ def draw_routes(grid, vm, state, x=34, y=3):
             for xx in range(end + 1, right):
                 grid.put(xx, y, "┈", "line")
             y += 1
+        zones = bool(getattr(state, "zones", False))
+        if zones:                       # the session page's list: its zones in order, each under its named rule
+            mine = sorted(mine, key=lambda item: ROUTE_ZONES.index(route_zone(item)))
+        zone_now = None
         for route in mine:
+            if zones and route_zone(route) != zone_now:
+                zone_now = route_zone(route)
+                y = zone_rule(grid, x, right, y, zone_now)
             ident = str(route.get("id") or "·")
             is_open = opened == ident
             history = route_is_history(route)

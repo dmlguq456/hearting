@@ -425,7 +425,12 @@ const a=L.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l));assert(a>=0,L.join('\
 const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
 // (11-17, route row 5: the first line names the kind with its intensity in brackets, the title two cells in.)
 const rows=box.split('\n');
-assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ● code\(직접\) +│$/.test(rows[1])&&/^│   작은 수정 +│$/.test(rows[2])&&!/code · 직접/.test(box),box);
+// (11-17, route zones: a route with no zone is a `dispatch` one, its rule the box's first row.)
+assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ─ dispatch ─+ │$/.test(rows[1])&&/^│ ● code\(직접\) +│$/.test(rows[2])&&/^│   작은 수정 +│$/.test(rows[3])&&!/code · 직접/.test(box),box);
+// In the `direct` zone the zone's name says it: the word `(직접)` (the shape's) is left out of the kind.
+const own=draw({routes:[{...direct,zone:'direct'}],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),M=inside(own),c=M.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l)),
+ zoned=M.slice(c,M.findIndex((l,i)=>i>c&&/^╰/.test(l))+1);
+assert(/^│ ─ direct ─+ │$/.test(zoned[1])&&/^│ ● code +│$/.test(zoned[2])&&!zoned.join('\n').includes('직접')&&!zoned.some(l=>/dispatch/.test(l)),zoned.join('\n'));
 """)
 
 
@@ -507,26 +512,26 @@ const route={id:'rt-s',title:'패널 손질',kind:'working',state:'working',shap
 const opt={routes:[route],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1},question:false};
 const v=draw({...opt,height:60});
 const L=lines(v);
-// The worker's stage row in the worker box: the name in the color Fleet gives the stage `execute` (its 3rd, running: index 2, lit).
-const row=v.rows.find(r=>/│ +execute · Edit/.test(str(r)));assert(row,L.join('\n'));
-const name=row.find(p=>p.text==='execute');assert.equal(name.foreground,150);assert.equal(name.bold,true,'lit like Fleet\'s running stage');
-assert.equal(row.find(p=>p.text.includes('Edit')).foreground,253);
-// The owner's stage line (11-17, route row 5: `staged 3/6: execute`, four cells in, no kind word) names the current stage
-// in the same color; a finished/waiting stage would be dimmed.
+// 11-17 (route row 5, the two-row session lines): a worker's `execute · Edit` stage row is gone, so the stage's name stands
+// only on the owner's stage line `staged 3/6: execute`: in the color Fleet gives the stage `execute` (its 3rd, running:
+// index 2, lit), four cells in, no kind word.
+const stageRow=(vv,name)=>vv.rows.find(r=>new RegExp('^│ │ {5}\\S* ?\\d/\\d+: '+name).test(str(r)));
+assert(!v.rows.some(r=>/│ +execute · Edit/.test(str(r))),'the worker no longer has a stage row\n'+L.join('\n'));
 const kind=v.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
-const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true);
+const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true,'lit like Fleet\'s running stage');
 // Other states by Fleet's rule: a finished stage dim of its hue, a failed one the failure red, a waiting one dim.
 const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
-const failed=draw({...opt,height:60,routes:[{...route,stages:other,workers_live:[{...worker,stage_key:'lvl_r'}]}]});
-const f=failed.rows.find(r=>/│ +execute · Edit/.test(str(r))).find(p=>p.text==='execute');assert.equal(f.foreground,217);assert.equal(f.bold,true);
-const done=draw({...opt,height:60,routes:[{...route,workers_live:[{...worker,stage:'plan',stage_key:'stg0_off'}]}]});
-const d=done.rows.find(r=>/│ +plan · Edit/.test(str(r))).find(p=>p.text==='plan');assert.equal(d.foreground,147);assert.equal(d.dim,true);
+const failed=draw({...opt,height:60,routes:[{...route,stages:other}]});
+const f=stageRow(failed,'execute').find(p=>p.text==='execute');assert.equal(f.foreground,217);assert.equal(f.bold,true);
+const allDone=stages.map(s=>({...s,mark:'✓',current:false}));   // nothing running: the line stands on the last stage, finished
+const done=draw({...opt,height:60,routes:[{...route,stages:allDone}]});
+const d=stageRow(done,'report').find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
 // No key sent (an older backend): the body color as before.
-const old=draw({...opt,height:60,routes:[{...route,workers_live:[{...worker,stage_key:undefined}],stages:stages.map(s=>({...s,key:undefined}))}]});
-assert.equal(old.rows.find(r=>/│ +execute · Edit/.test(str(r))).find(p=>p.text==='execute').foreground,253);
+const old=draw({...opt,height:60,routes:[{...route,stages:stages.map(s=>({...s,key:undefined}))}]});
+assert.equal(stageRow(old,'execute').find(p=>p.text==='execute').foreground,253);
 // Mono, eight colors and NO_COLOR read as before: the body color, no weight.
 for(const o of [{theme:'mono'},{model:{...opt.model,colors:8}},{model:{...opt.model,no_color:true}}]){
-  const m=draw({...opt,...o,model:{...opt.model,...(o.model||{})},height:60}),nm=m.rows.find(r=>/│ +execute · Edit/.test(str(r))).find(p=>p.text==='execute');
+  const m=draw({...opt,...o,model:{...opt.model,...(o.model||{})},height:60}),nm=stageRow(m,'execute').find(p=>p.text==='execute');
   assert(nm&&!(nm.foreground&&nm.foreground!==253)&&nm.bold!==true&&nm.dim!==true,JSON.stringify([o,nm]));
 }
 // The folded one-row form (a bottom-layout row) keeps its name color.

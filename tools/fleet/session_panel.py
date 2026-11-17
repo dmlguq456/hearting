@@ -298,6 +298,10 @@ def doer_paint(row, cells=None):
     effort = effort_label(row.get("effort"))
     if effort:
         shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
+    # 11-17 (panel route row, CTX and NOW): what the session is on now, one line (Fleet's NOW value).
+    now_text = sanitize_title(str(row.get("now") or ""))[:160]
+    if now_text:
+        shown["now"] = now_text
     percent = row.get("ctx_pct")
     if _percent(percent) != "?":
         shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
@@ -781,6 +785,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
                        "shape": (ui_text("fleet.session_panel.shape_direct") if row.get("shape") == "direct"
                                  else clean(row.get("shape"))[:32]), "owner_model": clean(row.get("owner_model"))[:64],
                        "doer_worker": row.get("doer_worker") is True,
+                       # 11-17 (route zones): `direct` is what this session does itself, `dispatch` the route it started.
+                       "zone": "direct" if row.get("shape") == "direct" else "dispatch",
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     if now is not None:
@@ -813,8 +819,6 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "popup_now", "popup_now_page",
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
-        # 11-16 (the person: "PEER REQUEST라고 할까?"): the route box's request name tag, and its one shorter form.
-        "peer_request", "peer_request_short",
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
         "direction_wait")}
     # Fixed words are English in every language (spec rule 3).

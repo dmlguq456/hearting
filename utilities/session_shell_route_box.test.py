@@ -8,6 +8,11 @@ scenes must match them cell for cell (text, color, weight, ground) and press cel
 press now opening a popup). 11-17 (route row 5): the route rows in the golden are drawn again in the new
 grammar (the kind and intensity first, the owner's lines two cells in, a worker hanging by `↳`, no worker
 box); its top and bottom lines and the request rows stay v4.36.4's. Everything here is synthetic.
+11-17 (route zones, two-row session lines): a session's lines are now its who row with `CTX 52% · 2h 10m` beside the model
+(no gauge) and, only where the session has a NOW, that NOW under it; the golden's gauge rows and the worker's `execute · Edit`
+rows are not drawn any more. The comparison therefore takes the session rows out of both sides (the golden's old ones, the
+drawn ones) except the head of each who row (mark and role word, with their colors and press cells), and compares the rest
+of the box cell for cell; the session rows' own grammar is `session_shell_route_row_5_1117.test.py`'s.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -48,7 +53,7 @@ const styleOf=p=>JSON.stringify([p.foreground??null,!!p.dim,!!p.bold,p.backgroun
 const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.push([c,styleOf(p)]);
  const inner=all.slice(2,-2),out=[];for(const [c,s] of inner){const last=out.at(-1);if(last&&last[1]===s)last[0]+=c;else out.push([c,s]);}return out;};
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
-let n=0,same=0,folded=0;
+let n=0,same=0,folded=0,soloSame=0,soloFolded=0;
 for(const c of golden.cases){
  const model=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
  const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:c.cfg,background:c.background});
@@ -59,16 +64,38 @@ for(const c of golden.cases){
  // 11-16: the request rows, the rule above them and the title/bottom lines that count them are drawn anew (peer
  // requests read as a route's doer: `peer-request-1116`); the route rows are the golden's (drawn again 11-17) cell for
  // cell, and so are their press cells. A scene without requests is compared whole.
+ // 11-17 (route zones): the named rules (`─ dispatch ───`, `─ request ───`) are drawn anew too: the comparison is made
+ // with those rule rows (they have no press of their own) taken out of the drawn box, the golden having none.
  const drawn=model.requests&&model.requests.length;
+ const zoneRule=r=>/^│ ─ (?:direct|dispatch|request) ─+\s*│$/.test(txt(r.map(([t])=>({text:t}))));
+ // A who row (mark, role word, harness, model, effort, `CTX`) keeps only its head `● owner` / `↳ ⠋ worker`; the lines that
+ // only a session has under it (the golden's gauge and tool rows, a drawn NOW) leave; a stage line stays whole.
+ const textOf=r=>r.map(([t])=>t).join('');
+ const whoHead=r=>{const t=textOf(r),m=/^(│ +(?:↳ )?\S+ (?:owner|worker|frame-alt|frame)\b)/.exec(t);if(!m)return null;
+  const out=[];let n=0;const want=[...m[1]].length;
+  for(const [t2,st] of r)for(const ch of t2){if(n>=want)return out;n++;const last=out.at(-1);if(last&&last[1]===st)last[0]+=ch;else out.push([ch,st]);}
+  return out;};
+ const stageLine=r=>/^│ +(?:staged )?\d+\/\d+: /.test(textOf(r));
+ const sessionExtra=r=>!stageLine(r)&&!whoHead(r)&&/^│ {5,}\S/.test(textOf(r));   // indented four or more under the box's own edge: a gauge, a tool, a NOW
+ const sessions=(rows,hs)=>{const keep=rows.map(r=>!sessionExtra(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
+  return {rows:at.map(i=>whoHead(rows[i])||rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
+ const unzone=(rows,hs)=>{const keep=rows.map(r=>!zoneRule(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
+  return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));
   const keep=rows.map((r,i)=>i>0&&i<rows.length-1&&!own.has(i)&&!txt(r.map(([t])=>({text:t}))).includes('├'));
   const at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  if(!drawn){
-  assert.deepEqual(v.rows.slice(b.a,b.b+1).map(runs),want,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
-  assert.deepEqual(hits,c.hits,label);
+  const own=unzone(v.rows.slice(b.a,b.b+1).map(runs),hits),got=sessions(own.rows,own.hits),exp=sessions(want,c.hits);
+  // A box with no requests folds its routes one step sooner as well where the zone's rule row now takes one of its rows (the
+  // rule stays while a row of its zone shows): then it draws fewer rows than the golden and the golden's rows no longer apply.
+  if(got.rows.length<exp.rows.length&&c.side&&c.height<=16)soloFolded++;
+  else{
+   assert.deepEqual(got.rows,exp.rows,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
+   assert.deepEqual(got.hits,exp.hits,label);soloSame++;
+  }
  }else{
-  const got=mine(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),exp=mine(want,c.hits);
+  const own0=unzone(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),own=sessions(own0.rows,own0.hits),oldSide=sessions(want,c.hits),got=mine(own.rows,own.hits),exp=mine(oldSide.rows,oldSide.hits);
   // The requests now take more rows than the one row v4.36.4 gave each, so a short box folds its routes one step
   // sooner: where it still draws the routes in the same form, they are v4.36.4's rows cell for cell (and their
   // press cells); where it folds them, the golden's rows no longer apply (the fold's own tests are below).
@@ -79,7 +106,8 @@ for(const c of golden.cases){
  }
  n++;
 }
-console.log('cases',n);assert(same>=12&&folded<=4&&same+folded===17,JSON.stringify({same,folded}));
+console.log('cases',n,JSON.stringify({same,folded,soloSame,soloFolded}));assert(same>=12&&folded<=4&&same+folded===17,JSON.stringify({same,folded}));
+assert(soloSame>=45&&soloFolded<=3&&soloSame+soloFolded===51,JSON.stringify({soloSame,soloFolded}));
 """)
         self.assertIn("cases 68", out)
 
@@ -97,15 +125,16 @@ for(const [side,width,height] of [[true,40,60],[true,54,46],[false,120,20]]){
  assert.deepEqual(act(b.a),['popup:ROUTE'],label);assert.deepEqual(act(b.b),[],label);
  for(let i=b.a+1;i<b.b;i++){
   const a=act(i);
-  // (11-16: the thin rule between the routes and the requests has no press of its own; a request is three rows, all of them the request's.)
-  if(rows[i].includes('├')){assert.equal(a.length,0,i+label);continue;}
+  // (11-17: the named zone rules (`─ dispatch ───`) have no press of their own; a request is three rows, all of them the request's, under the `request` rule.)
+  const rule=s=>/^│ │ ─ (?:direct|dispatch|request) ─+ │ │$/.test(s),requestAt=rows.findIndex(s=>/^│ │ ─ request ─+ │ │$/.test(s));
+  if(rule(rows[i])){assert.equal(a.length,0,i+label);continue;}
   assert.equal(a.length,1,i+label);
-  if(i>rows.findIndex(s=>s.includes('├'))&&rows.some(s=>s.includes('├')))assert.equal(a[0],'popup:MESSAGES',i+label);
+  if(requestAt>=0&&i>requestAt)assert.equal(a[0],'popup:MESSAGES',i+label);
   else assert(['popup:ROUTE:rt-1111111111111111','popup:ROUTE:rt-2222222222222222'].includes(a[0]),i+' '+a[0]+label);
  }
  // Each route's rows, from its first to its last (the workers' box with it), open that route.
  const first=id=>v.hits.find(h=>h.action==='popup:ROUTE:'+id).row,last=id=>v.hits.filter(h=>h.action==='popup:ROUTE:'+id).at(-1).row;
- assert(first('rt-1111111111111111')===b.a+1&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
+ assert(first('rt-1111111111111111')===b.a+2&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
  assert(v.hits.filter(h=>h.action==='popup:MESSAGES'&&h.row>b.a&&h.row<b.b).length>=2,label);
  assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length===2,label);
  // Nothing opens in place any more.
@@ -145,7 +174,7 @@ assert.equal(down.routeArea.offset,2);
 """)
 
     def test_the_requests_stand_once_in_the_route_box(self):
-        # Item 3: the requests stand in the route box (after the routes, `N REQUEST` in its top line), and
+        # Item 3: the requests stand in the route box (after the routes, under the `request` rule), and
         # MESSAGES draws the messages alone (its `+N` counts messages); the MESSAGES popup still reads the
         # requests whole (their numbers, reports and body) before the messages.
         self.node(self.HEAD + r"""
@@ -153,8 +182,11 @@ const scene=golden.scenes.na;
 for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const v=pv.render({width,height,side,fill:side,model:scene,state:'working',configuration:{}});
  const rows=v.rows.map(txt),b=boxOf(v),label=side+' '+width+'\n'+rows.join('\n');
- // (`PEER REQUEST` whole where the title's line holds it, `REQUEST` where it does not: 32 cells' panel.)
- assert(rows[b.a].includes(side?(width>=40?'│ 2 PEER REQUEST':'│ 2 REQUEST'):'│ peer request 2'),label);
+ // (11-17: the title counts the routes alone, the requests are the box's `request` zone, named by its rule.)
+ assert(rows[b.a].includes(side?'╭─ 2 ROUTE':'╭─ route 2')&&!/REQUEST|request \d/.test(rows[b.a]),label);
+ // (Short of rows the rules go first: the 32-cell panel here draws none, the others the one `request` rule.)
+ const rules=rows.slice(b.a+1,b.b).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length;
+ assert(rules<=1&&(width!==40&&width!==120||rules===1),label);
  // The two request rows stand in the box, once each (`◂ [e7] 검토 요청…`, `→ [52] frames…`).
  const requestRow=s=>/^│ │ (◂ \[e7\]|→ \[52\])/.test(s);
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);

@@ -250,6 +250,13 @@ def conform(live, samples, path, problems):
                     if not all(isinstance(item, dict) and set(item) == {"repo", "text"} for item in live[key]):
                         problems.append("peer_edges.watches: invalid shape")
                     continue
+                if path == "peer_edges" and key == "supervision":    # PEERS field contract: {steward tag: [watched tags]}
+                    if not (isinstance(live[key], dict) and all(
+                            isinstance(steward, str) and isinstance(watched, (list, tuple)) and watched
+                            and all(isinstance(tag, str) for tag in watched)
+                            for steward, watched in live[key].items())):
+                        problems.append("peer_edges.supervision: invalid shape")
+                    continue
                 if path == "system" and key == "gpu_processes":
                     for index, process in enumerate(live[key]):
                         if not isinstance(process, dict) or set(process) - {
