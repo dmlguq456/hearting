@@ -1101,15 +1101,37 @@ def context_line_parts(percent, tokens=None, cleared_at=None, resting_since=None
     return parts
 
 
+# What a still-pending message waits for, in the words ``peer-steward show`` uses (11-17: the sender's
+# panel and Fleet read the same pending row the same way): ``awaiting delivery · text stands in its
+# input · ...`` / ``전달 대기 · 입력창에 글 있음 · 보내거나 지우면 받음``. ``head`` is the first word alone,
+# the part a narrow row never cuts; a row from before the reason was kept has the word alone.
+def pending_wait(row):
+    """``(whole, head)`` for a pending row that has not gone in, else None."""
+    if not isinstance(row, dict) or row.get("state") != "pending":
+        return None
+    from .config import ui_text
+    head = ui_text("peer.delivery.waiting")
+    try:
+        from .explorer.output import utility
+        cause = utility("peer_request").hold_words(row, ui_text)
+    except Exception:  # noqa: BLE001 - a display word never costs the row
+        cause = ""
+    return (head + " · " + cause if cause else head), head
+
+
 # The sender's ledger status (peer-message `record --status`): the receiver's own
 # acknowledgement, the transport's acceptance, a failure, and `unknown`, written only
 # when the recipient could not be resolved (peer-steward), so it never arrives: `not
-# delivered`, with no age, in the caution color (it is not on its way).
-def _message_delivery(status, at, now):
+# delivered`, with no age, in the caution color (it is not on its way). A `sent` message whose
+# pending row has not gone in reads `awaiting delivery` and why (``pending``), as `peer-steward show` does.
+def _message_delivery(status, at, now, pending=None):
     from .config import ui_text
     if status == "received":
         return [ui_text("fleet.session_panel.message_delivered"), "dim"]
     if status == "sent":
+        waiting = pending_wait(pending)
+        if waiting:
+            return [waiting[0], "dim", waiting[1]]
         return [ui_text("fleet.session_panel.message_sent"), "dim"]
     if status == "failed":
         return [ui_text("fleet.session_panel.message_failed"), "lvl_r"]
@@ -1128,7 +1150,7 @@ def self_addressed(own, own_tag, harness, sid, tag):
     return bool(own_tag) and bool(tag) and str(tag).strip("[]") == str(own_tag).strip("[]")
 
 
-def peer_message_rows(received, sent, tag_of, limit=8, now=None, own=None):
+def peer_message_rows(received, sent, tag_of, limit=8, now=None, own=None, pending_of=None, pending_limit=8):
     """The latest ``limit`` peer messages, oldest first.
 
     Each row: ``way`` (``←`` received, ``→`` sent), ``who`` (the other session's Fleet
@@ -1142,6 +1164,11 @@ def peer_message_rows(received, sent, tag_of, limit=8, now=None, own=None):
     session itself (:func:`self_addressed`) is left out here, the one place the shell panel's
     MESSAGES (its popup and the folded strip's count) and Fleet's session page read them from,
     so a record already written reads the same as a new one.
+
+    ``pending_of(ref)`` (11-17) gives the pending row of a sent message, read once for each of the
+    (at most ``limit``) rows that stay and whose status is still ``sent``: a row that has not gone in
+    reads ``awaiting delivery`` and why. Without it, or where it gives nothing, the word is ``sent``.
+    Only the newest ``pending_limit`` such rows are read (a long list reads the few the eye is on).
     """
     now = time.time() if now is None else now
     own_tag = tag_of(*own) if own else None
@@ -1165,10 +1192,20 @@ def peer_message_rows(received, sent, tag_of, limit=8, now=None, own=None):
         rows.append({"way": "→", "who": who, "harness": _text(target.get("harness"), ""),
                      "kind": _text(record.get("kind"), ""), "text": _text(record.get("summary"), ""),
                      "at": record.get("at") or 0,
-                     "delivery": _message_delivery(record.get("status"), record.get("at"), now)})
+                     "delivery": _message_delivery(record.get("status"), record.get("at"), now),
+                     "_ref": record.get("message_id") if record.get("status") == "sent" else None})
     rows = [row for row in rows if row["text"]]
     rows.sort(key=lambda row: row["at"])
     rows = rows[-limit:]
+    reads = 0
+    for row in reversed(rows):
+        ref = row.pop("_ref", None)
+        if pending_of is not None and isinstance(ref, str) and ref and reads < pending_limit:
+            reads += 1
+            try:
+                row["delivery"] = _message_delivery("sent", row["at"], now, pending_of(ref))
+            except Exception:  # noqa: BLE001 - an unreadable row reads as before
+                pass
     for row in rows:
         row["when"] = _message_when(row["at"], now)
         row["body"] = message_body(row["text"])

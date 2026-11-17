@@ -177,10 +177,12 @@ the handover.
 In the panel, every open request has rows in the route box, after the routes and a thin rule:
 `→ [b2] codex gpt-5.5 high   2m`, its title, then `partial answer`; a request row opens the MESSAGES popup. The
 popup shows it whole, requests first: the
-parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`), `WORK`
+parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`; `awaiting delivery` and why while the other window has not taken it in, as `peer-steward show` says), `WORK`
 (`open`, `partial answer`, `final answer`, `rejected`, `cancelled`, with what is
 left), `LAST`, `REPORTS`, and the body. A closed request stays 15 minutes after it closed, sent or received (`✓` answered, `✕` rejected or cancelled); a sent one
 stays longer until its last answer has been seen.
+
+A message you sent that has not gone into the other window reads the same in `MESSAGES` (`→ [b2] · awaiting delivery · text stands in its input …`): the first words always show, the reason as far as the row reaches, and the `MESSAGES` popup shows it whole.
 
 <p align="center">
   <img src="fleet/requests.png" alt="Two panels: in its route box, under a thin rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; in its PEER REQUEST box, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">

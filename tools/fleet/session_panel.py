@@ -409,9 +409,11 @@ def _request_age(seconds):
 def _request_delivery(row, gone=False):
     """The delivery word of one message's pending row (never the work state)."""
     state = (row or {}).get("state")
-    word = {"pending": "sent", "unverified": "sent", "queued": "delivered",
+    # 11-17: a message the receiving window has not taken in is `waiting` (its words are `peer-steward show`'s:
+    # `awaiting delivery` and why), not `sent`.
+    word = {"pending": "waiting", "unverified": "sent", "queued": "delivered",
             "received": "seen"}.get(state)
-    if gone and word in ("sent", "delivered"):
+    if gone and word in ("waiting", "sent", "delivered"):
         word = "gone"
     return word
 
@@ -435,6 +437,7 @@ def request_rows(views, now, tag_of, doer_of=None):
     a route's doer (:func:`doer_paint`). A session that is gone keeps its name alone.
     """
     from .model import DONE_AFTERGLOW_MIN
+    from .session_line import pending_wait
     rows = []
     for view in views or ():
         record = view.get("record") if isinstance(view, dict) else None
@@ -481,8 +484,10 @@ def request_rows(views, now, tag_of, doer_of=None):
         # A reserved message whose seal is not there is shown, never dropped (not confirmed).
         unconfirmed = [e for e in record.get("sending") or () if isinstance(e, dict)]
         # Folded: what this session still waits to see (a sent request not yet seen), else the work.
-        status = (word("request_delivery_" + delivery)
-                  if side == "out" and state in ("open", "partial") and delivery in ("sent", "delivered")
+        waiting = pending_wait(deliveries.get(current.get("transfer_ref"))) if delivery == "waiting" else None
+        delivery_text = (waiting[0] if waiting else word("request_delivery_" + delivery)) if delivery else ""
+        status = (delivery_text
+                  if side == "out" and state in ("open", "partial") and delivery in ("waiting", "sent", "delivered")
                   else work)
         glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "◂")
         kind = ("request-rejected" if state in ("rejected", "cancelled")
@@ -499,7 +504,7 @@ def request_rows(views, now, tag_of, doer_of=None):
             revision += " · " + ", ".join("%d %s" % (r["n"], word("request_superseded")) for r in superseded[-2:])
         details.append([word("request_label_revision"), revision, "loc_repo"])
         if delivery:
-            details.append([word("request_label_delivery"), word("request_delivery_" + delivery), "dim"])
+            details.append([word("request_label_delivery"), delivery_text, "dim"])
         work_text = work
         if state in ("partial", "final", "rejected") and reports:
             tail = reports[-1]
@@ -527,6 +532,7 @@ def request_rows(views, now, tag_of, doer_of=None):
             "id": record["id"], "way": "→" if side == "out" else "◂", "glyph": glyph,
             "who": who, "title": title, "status": status, "age": _request_age(now - (record.get("updated") or now)),
             "kind": kind, "state": state, "side": side, "delivery": delivery or "",
+            **({"status_head": waiting[1]} if waiting and status == waiting[0] else {}),
             "details": details, "body": body_lines[:_REQUEST_BODY_LINES],
             "body_more": len(body_lines) > _REQUEST_BODY_LINES,
             "body_label": word("request_body"), **doer})

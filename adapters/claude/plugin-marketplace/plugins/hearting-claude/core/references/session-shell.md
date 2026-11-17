@@ -499,8 +499,8 @@ popup; a request row the MESSAGES popup).
   `[6c] claude` where they are unknown, and a session that is gone keeps its name alone), with
   the age at the right edge where a route keeps its time; two cells in, the title (`…` where it
   goes on) where a route's title stands; then the status, dim, where a route's kind row stands
-  (`open`, `partial answer`, a sent one not yet seen `sent`/`delivered`, a rejected or cancelled
-  one in the failure color). Short of rows the status joins the title's row when the kind rows
+  (`open`, `partial answer`, a sent one not yet seen `sent`/`delivered`, or `awaiting delivery` and why while its
+  message has not gone in (11-17, `peer-steward show`'s words), a rejected or cancelled one in the failure color). Short of rows the status joins the title's row when the kind rows
   go (`title · open`), and the request takes the one-row form when every route does: mark,
   number, harness, model, effort, title, ` · ` status, the age at the right edge. Short of
   cells the age goes first, then the effort, then the model; then the title is cut with `…`
@@ -523,7 +523,8 @@ popup; a request row the MESSAGES popup).
 - MESSAGES: the recent messages, two rows each as v4.36.4 drew them (spec rule 31, restored 11-16, the
   person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in
   its direction's color, the other session's number, then dim harness, time, kind and a sent one's
-  delivery state; short of cells kind, harness and time go first) and, two cells in, the text's first
+  delivery state, which for a message that has not gone in is `awaiting delivery · why` (11-17): the first word stays whole
+  and the why goes on as far as the row reaches, ending in `…`; short of cells kind, harness and time go first) and, two cells in, the text's first
   line in the body color (`…` where it goes on); five at most (`MESSAGES_MAX`), `+N` counts the rest. A message whose
   other end is this session itself (a session-tidy notice to its own seat; 11-16, the person: "메시지에 스스로 보내는
   메시지가 잡히는건 좀 불필요하지 않나?") is no message between two sessions: the MESSAGES rows, their popup, the folded
@@ -683,7 +684,8 @@ line, below); the MESSAGES popup reads each with its head (the
 arrow in its direction's color, the other session's number, then dim harness,
 `HH:MM` today or `MM-DD`, the record's kind and a sent one's delivery state:
 `delivered`/`sent` dim, `not delivered` (the recipient was never resolved; no age) in the caution color,
-`failed` red) and, two cells in, the text in the body color from its first
+`failed` red; a sent one whose pending row is still `pending` reads `awaiting delivery` and why, `peer-steward show`'s
+words, whole in the popup, on a row of its own where the head's row is too short) and, two cells in, the text in the body color from its first
 meaningful words (leading bracket frames and heading marks left out, nothing
 else changed), the newest first; the panel draws the same head and that text's first line. Five
 show in the panel at most, however many rows are left (`MESSAGES +2` counts the rest); short of
@@ -847,8 +849,11 @@ A message or request still on its way has the same kind of reason on the sender'
 courier pass keeps on its pending row (`held`) the word the receiving host gave for keeping it
 (`busy`, `form`, `draft`, `paste`, `unsettled`, `unobserved`) or that the window is outside the
 shell or on an older release, and `peer-steward show <request>` and the one-hour notice to the
-sender say `awaiting delivery` with it (`peer_request.delivery_word`). The panel's MESSAGES line
-does not show it yet.
+sender say `awaiting delivery` with it (`peer_request.delivery_word`). The panel's MESSAGES sent row and the route box's
+request line say the same (11-17): the backend reads the pending row of each visible sent message once (at most eight, no
+collection of its own, the file watched) and words it with `peer.delivery.waiting` and `peer_request.hold_words`; Fleet's
+session page and the NOW popup's message rows read the same function. A row from before the reason was kept reads the word
+alone; a message that went in, was seen or failed reads as before.
 Fleet's QUESTIONS row and the panel's line draw the same parts from the same function
 (`session_block.sent_answer_line`): a secret answer `•••`, no control or direction
 characters; nothing offers to send it again. Answering returns

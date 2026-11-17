@@ -439,7 +439,9 @@ def _message_rows(tidy, harness, sid, generation, story, now):
     received = tidy.prompt_display(_seat(tidy, harness, sid), harness, sid).get("received") or []
     oldest = min((row["at"] for row in story), default=now)
     sent = _sent_records(sid, oldest, now)
-    worded = peer_message_rows(received, sent, assigned_tag, limit=MESSAGES_MAX, now=now)
+    # 11-17: a sent message that has not gone in reads `awaiting delivery` and why, as the panel's MESSAGES do.
+    worded = peer_message_rows(received, sent, assigned_tag, limit=MESSAGES_MAX, now=now,
+                               pending_of=lambda ref: _peer_message()._read_pending(ref))
     out = []
     for row in worded:
         if row["way"] == "←":

@@ -1382,6 +1382,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const row=[arrow,text(' '),who,...pieces.flatMap((x,i)=>drop.includes(i)?[]:x),...delivery];
         if(size(row)<=inner)return row;
       }
+      // 11-17: `awaiting delivery · why` (a sent message the other window has not taken in): the first word stays whole, its
+      // why goes on as far as the row reaches and ends in `…`.
+      const word=Array.isArray(m.delivery)&&typeof m.delivery[2]==='string'&&m.delivery[2]&&String(m.delivery[0]).startsWith(m.delivery[2])?m.delivery[2]:'';
+      if(word){
+        const lead=[arrow,text(' '),who,text(' · ','dim')],room=inner-size(lead)-measure(word);
+        if(room>=0)return [...lead,text(word,m.delivery[1]||'dim'),...cut([text(String(m.delivery[0]).slice(word.length),m.delivery[1]||'dim')],room)];
+        return [...cut([arrow,text(' '),who],Math.max(1,inner-3-measure(word))),text(' · ','dim'),text(word,m.delivery[1]||'dim')];
+      }
       return cut([arrow,text(' '),who,...delivery],inner);
     };
     const messageBody=m=>{
@@ -1916,6 +1924,11 @@ function requestForms(q,{text,measure,width}){
     }
     for(const h of [H,[]]){const w=spaced([who,h]),left=width-size(body(w,[]))-1;if(left>=3)return body(w,cut(title,left));}
     if(size(body(who,[]))<=width)return body(who,[]);
+    // 11-17: a status that does not fit even with no title (`awaiting delivery · why`) keeps its first word whole and ends in `…`.
+    if(status.length&&typeof q.status_head==='string'&&q.status_head){
+      const room=width-size(lead(who))-size(joint);
+      if(room>=measure(q.status_head))return [...lead(who),...joint,...cut(status,room)];
+    }
     const left=width-size(body([],[]))-1;
     return left>=3?body([],cut(title,left)):cut([mark,text(' '),...title],width);
   })();
@@ -1961,8 +1974,12 @@ function messagesBody({model={},columns=72,cellWidth}={}){
     if(!m||typeof m!=='object')continue;
     if(out.length)out.push([]);
     const delivery=Array.isArray(m.delivery)&&m.delivery[0]?[text(' · ','dim'),text(String(m.delivery[0]),m.delivery[1]||'dim')]:[];
-    out.push([text(m.way,m.way==='←'?'lvl_g':'loc_repo'),text(' '),text(String(m.who||''),'loc_repo'),...(m.harness?[text(' '+m.harness,'dim')]:[]),
-      ...(m.when?[text(' · '+m.when,'dim')]:[]),...(m.kind?[text(' · '+m.kind,'dim')]:[]),...delivery]);
+    const head=[text(m.way,m.way==='←'?'lvl_g':'loc_repo'),text(' '),text(String(m.who||''),'loc_repo'),...(m.harness?[text(' '+m.harness,'dim')]:[]),
+      ...(m.when?[text(' · '+m.when,'dim')]:[]),...(m.kind?[text(' · '+m.kind,'dim')]:[])];
+    // 11-17: where `awaiting delivery · why` does not fit the head's row, it goes on whole on the row under it (the popup shows the why whole).
+    if(delivery.length&&head.concat(delivery).reduce((n,p)=>n+measure(clean(p.text)),0)>columns){
+      out.push(head);out.push(...wrapText(String(m.delivery[0]),m.delivery[1]||'dim',columns));
+    }else out.push([...head,...delivery]);
     out.push(...wrapText(m.text||m.body||'','loc_repo',columns));
   }
   return out.length?out:[[text('·')]];
