@@ -65,11 +65,15 @@ def _route_stem(path):
 
 def _scoped_resource_keep(sessions, jobs):
     """Which experiment runs a scoped (one-session) pass can show: the runs of a kept
-    job's attempt (`projection._attach_resource_children`) and of a kept route
-    (`explorer.live` run children by route id / route file stem). Any other run is not
-    read. Fail-open: a run the test cannot judge is read, and an unbuildable test reads all."""
+    job's attempt (`projection._attach_resource_children`), of a kept route
+    (`explorer.live` run children by route id / route file stem), and of a kept
+    session's project (the STATUS popup's `changed:` line, `explorer.live._repo_results`).
+    Any other run is not read. Fail-open: a run the test cannot judge is read, and an
+    unbuildable test reads all."""
     try:
         from .. import route_chain
+        from ..model import project_of
+        projects = {project_of(getattr(session, "cwd", None)) for session in sessions}
         attempts, routes = set(), set()
         for job in jobs:
             attempt = getattr(job, "attempt_id", None)
@@ -86,12 +90,19 @@ def _scoped_resource_keep(sessions, jobs):
     except Exception:
         return None
 
+    run_projects = {}
+
     def keep(run):
         try:
-            return (run.get("parent_attempt_id") in attempts
+            if (run.get("parent_attempt_id") in attempts
                     or run.get("route_id") in routes
                     or _route_stem(run.get("route")) in routes
-                    or _route_stem(run.get("route_file")) in routes)
+                    or _route_stem(run.get("route_file")) in routes):
+                return True
+            cwd = run.get("cwd") if isinstance(run.get("cwd"), str) else ""
+            if cwd not in run_projects:
+                run_projects[cwd] = project_of(cwd)
+            return run_projects[cwd] in projects
         except Exception:
             return True
     return keep

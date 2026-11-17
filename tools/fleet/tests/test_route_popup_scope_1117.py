@@ -2,8 +2,9 @@
 
 The route popup asks `collect_all(route_sessions=[(harness, sid)])`. That pass now defers the
 sub-agent transcript tail to the rows that survive the session filter, leaves the supervision
-census alone, and normalizes only the experiment runs the shown routes can use. The popup built
-from it must equal the popup built from a full collection. Only native observation backends are
+census alone, and normalizes only the experiment runs the shown routes or the session's project
+can use. The route popup and the STATUS popup's Fleet lines built from it must equal the ones
+built from a full collection. Only native observation backends are
 stubbed; Claude enrichment, row selection, route projection and resource normalization run.
 """
 import os, sys  # noqa: E401
@@ -109,11 +110,19 @@ class ScopedCollectionFixture(unittest.TestCase):
     def build_resource_runs(self):
         identity = resource_run_registry.proc_identity(os.getpid())
         base = {**identity, "cwd": str(self.work), "status": "running"}
+        other = self.root / "other-project"
+        other.mkdir()
         registry = self.root / "resource-runs.json"
         registry.write_text(json.dumps({"schema_version": 1, "runs": {
             "by-attempt": {**base, "parent_attempt_id": "att-popup"},
             "by-route": {**base, "route_id": self.route_id},
-            "unrelated": {**base, "parent_attempt_id": "att-elsewhere", "route_id": "rt-elsewhere"},
+            # Another job's run that finished in this session's project: the STATUS
+            # popup's `changed:` line shows it as the project's newest result.
+            "same-project-done": {**identity, "pid": 2 ** 22 + 7, "cwd": str(self.work), "status": "exited",
+                                  "exit_code": 0, "ended_at": time.time() - 60,
+                                  "parent_attempt_id": "att-elsewhere", "route_id": "rt-elsewhere"},
+            "unrelated": {**base, "cwd": str(other), "parent_attempt_id": "att-elsewhere",
+                          "route_id": "rt-elsewhere"},
         }}))
         resource_run_registry.register_registry(registry, self.index)
 
@@ -147,6 +156,15 @@ class ScopedRoutePopupTest(ScopedCollectionFixture):
             for key in ("rows", "styles", "hits", "routes"):
                 self.assertEqual(scoped.get(key), full.get(key), (key, request))
 
+    def test_status_popup_fleet_lines_match_full_collection(self):
+        request = {"kind": "status", "columns": 100, "cwd": str(self.work), "routes": [], "part": "fleet"}
+        scoped, full = self.popup_pair(request)
+        self.assertTrue(scoped.get("ok", True), scoped)
+        changed = [row for row in full.get("rows") or () if "changed:" in str(row)]
+        self.assertTrue(changed and "resource same project done" in str(changed), full.get("rows"))
+        for key in ("rows", "styles", "hits"):
+            self.assertEqual(scoped.get(key), full.get(key), key)
+
     def test_scoped_pass_reads_only_the_requested_session_subagents(self):
         if self.harness != "claude":
             self.skipTest("sub-agent tail is the Claude row's")
@@ -179,10 +197,10 @@ class ScopedRoutePopupTest(ScopedCollectionFixture):
             return {call.args[0] for call in normalize.call_args_list}, snapshot
         scoped_ids, scoped = normalized(True)
         full_ids, full = normalized(False)
-        self.assertEqual(scoped_ids, {"by-attempt", "by-route"})
-        self.assertEqual(full_ids, {"by-attempt", "by-route", "unrelated"})
+        self.assertEqual(scoped_ids, {"by-attempt", "by-route", "same-project-done"})
+        self.assertEqual(full_ids, {"by-attempt", "by-route", "same-project-done", "unrelated"})
         self.assertEqual(scoped.observations["resource-runs"]["state"], full.observations["resource-runs"]["state"])
-        self.assertEqual([r.run_id for r in scoped.resources], ["by-attempt", "by-route"])
+        self.assertEqual([r.run_id for r in scoped.resources], ["by-attempt", "by-route", "same-project-done"])
         job = next(j for j in scoped.jobs if j.attempt_id == "att-popup")
         full_job = next(j for j in full.jobs if j.attempt_id == "att-popup")
         self.assertEqual([r.run_id for r in job.resource_children], ["by-attempt"])
@@ -199,11 +217,12 @@ class ScopedRoutePopupTest(ScopedCollectionFixture):
                                wraps=resource_run_registry.normalize_run) as normalize:
             self.collect(True)
         self.assertEqual({call.args[0] for call in normalize.call_args_list},
-                         {"by-attempt", "by-route", "unrelated"})
+                         {"by-attempt", "by-route", "same-project-done", "unrelated"})
 
     def test_full_collection_still_reads_everything(self):
         snapshot = self.collect(False)
-        self.assertEqual({r.run_id for r in snapshot.resources}, {"by-attempt", "by-route", "unrelated"})
+        self.assertEqual({r.run_id for r in snapshot.resources},
+                         {"by-attempt", "by-route", "same-project-done", "unrelated"})
 
 
 class ScopedRoutePopupCodexTest(ScopedRoutePopupTest):
