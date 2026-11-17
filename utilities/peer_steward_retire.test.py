@@ -2920,7 +2920,7 @@ class _ShellHost:
         self.native(binding["harness"], binding["sid"], row["text"])
         return dict(self.result)
 
-    def presence(self, harness, sid):
+    def presence(self, harness, sid, **_kwargs):
         return "present" if (harness, sid) in self.seats else "absent"
 
     @contextlib.contextmanager

@@ -253,5 +253,32 @@ class PeerReadContextTest(unittest.TestCase):
             self.assertEqual(handover.holder_metrics(), counted)
 
 
+class NativeSessionCensusTest(unittest.TestCase):
+    def test_one_context_reads_the_census_once_and_a_new_context_reads_again(self):
+        loader = mock.Mock(side_effect=lambda: ["table"])
+        first = PeerReadContext()
+        self.assertEqual(first.native_sessions(loader), ["table"])
+        self.assertEqual(first.native_sessions(loader), ["table"])
+        self.assertEqual(loader.call_count, 1)
+        PeerReadContext().native_sessions(loader)
+        self.assertEqual(loader.call_count, 2)
+
+    def test_a_failed_reading_is_not_remembered(self):
+        loader = mock.Mock(side_effect=[OSError("proc"), []])
+        context = PeerReadContext()
+        with self.assertRaises(OSError):
+            context.native_sessions(loader)
+        self.assertEqual(context.native_sessions(loader), [])
+        self.assertEqual(context.native_sessions(loader), [])
+        self.assertEqual(loader.call_count, 2)
+
+    def test_an_empty_table_is_remembered_like_any_other_reading(self):
+        loader = mock.Mock(return_value=[])
+        context = PeerReadContext()
+        context.native_sessions(loader)
+        context.native_sessions(loader)
+        self.assertEqual(loader.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
