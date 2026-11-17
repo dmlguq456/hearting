@@ -125,4 +125,4 @@ python3 tools/release/plan.py plan --repo . --head HEAD --base-tag v3.43.6
 ```
 
 For an isolated operator first-use measurement, see
-[`tools/release/first-journey.md`](tools/release/first-journey.md).
+[`tools/release/first-journey.md`](../tools/release/first-journey.md).
