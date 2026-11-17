@@ -13,7 +13,7 @@
 <p align="center">
 <strong>Your way.</strong> Before work you ask for starts it confirms what you meant. What you corrected and decided is remembered and offered to your next sessions, on any of the three agents (Claude Code, Codex, OpenCode).<br>
 <strong>The same everywhere.</strong> Hearting is a layer on top of all three, so the work runs with the same requests, stages, and checks.<br>
-<strong>Across sessions, in view.</strong> Sessions hand work to each other, and every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.
+<strong>Across agents, in view.</strong> Sessions on any of the three agents hand work to each other, and one session can start worker sessions on any of them to do parts of its work. Every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.
 </p>
 
 <p align="center">
@@ -45,6 +45,17 @@ Every session gets a panel beside it, Fleet shows all of them at once, and
 sessions hand each other work as tracked requests. All three read the same
 records, so what one session's panel says is what Fleet says about it.
 
+The agents can be mixed, in two ways:
+
+- **Session with session.** A Claude Code session asks a Codex session for a
+  review, and an OpenCode session reports to either. Requests, reports, and
+  notes travel the same way whichever agent the other session runs on.
+- **Session with its workers.** A session that splits work into stages starts
+  worker sessions for them, and a worker can run on any agent you have
+  installed: a Claude Code session can give the implementation to an OpenCode
+  worker and the check to a Codex worker. Name the agent for the owner or the
+  workers, or leave the choice to Hearting.
+
 ### The panel beside each session
 
 New installations open a 40-column panel on the right of every new Claude Code,
@@ -65,7 +76,7 @@ layout, and per-runtime details are in
 [docs/session-panel.md](docs/session-panel.md).
 
 <p align="center">
-  <img src="docs/fleet/panel.png" alt="Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: the project status document in a popup in the middle of the window, with the one line, the decisions needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and on the popup's bottom line STATUS, ROUTE, and MESSAGES. On the window's last line the working folder and hearting v4.46.0." width="100%">
+  <img src="docs/fleet/panel.png" alt="Session [4f]'s window in project web-api with the STATUS button on its REPO row pressed: the project status document in a popup in the middle of the window, with the one line, the decisions needed, what is next, and what closed recently; behind it the conversation and the panel in gray, and on the popup's bottom line STATUS, NOW, ROUTE, and MESSAGES. On the window's last line the working folder and hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub><b>STATUS pressed</b> — the project's status document opens whole in a popup; the rest goes gray. Demo data.</sub></p>
 

@@ -44,9 +44,10 @@ THREE_LINES = (
                   "OpenCode)."),
     ("The same everywhere.", "Hearting is a layer on top of all three, so the work runs with the same requests, "
                              "stages, and checks."),
-    ("Across sessions, in view.", "Sessions hand work to each other, and every step shows in the panel and in "
-                                  "Fleet (a terminal view of all your sessions), so you can correct it at any "
-                                  "point."),
+    ("Across agents, in view.", "Sessions on any of the three agents hand work to each other, and one session "
+                                "can start worker sessions on any of them to do parts of its work. Every step "
+                                "shows in the panel and in Fleet (a terminal view of all your sessions), so you "
+                                "can correct it at any point."),
 )
 
 
@@ -1678,7 +1679,8 @@ def render_index(d: dict) -> str:
     return page(
         f"Hearting — {headline_plain().lower()}",
         f"{headline_plain()}: on Claude Code, Codex, or OpenCode the work runs the way you "
-        "meant, sessions hand work to each other, and every step shows in the panel and in Fleet.",
+        "meant, sessions on any of them hand work to each other and start workers on any of them, and every "
+        "step shows in the panel and in Fleet.",
         body, "home", scripts)
 
 
