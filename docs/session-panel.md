@@ -85,7 +85,7 @@ page with its paths), the status document for STATUS, this session's story for N
 messages whole for MESSAGES. While it stands every key and press is its own,
 everything behind it reads in one dark gray (the native's output keeps
 arriving, still gray, and the native is never told) while the popup stands on
-its own lighter ground with bright words; in the question popup the chosen
+its own lighter ground with bright words; in the question popup a thin line under the question's words (with an empty row above it) parts them from the choices, whose numbers are bold in the question's rose, and the chosen
 choice stands on its own blue ground (reversed in mono, eight colors, or
 `NO_COLOR`). **Esc**, **Ctrl+]**, its `✕`, or a press outside it closes it.
 

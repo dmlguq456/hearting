@@ -858,16 +858,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // `…`, its number kept, the rest counted `+N`; narrower still the count gives way first).
     const choiceLine=parts=>{
       const lead=parts.length&&!clean(parts[0].text).trim()?[parts[0]]:[];
-      const items=choiceItems(parts).map(c=>c.map(part=>part.dim===true&&!/^\d+ $/.test(clean(part.text))?part:ink(part)));
+      const items=choiceItems(parts).map(c=>c.map(part=>/^\d+ $/.test(clean(part.text))?red(part):part.dim===true?part:ink(part)));
       const more=Math.max(0,...parts.map(part=>{const m=/^(?: · )?\+(\d+)$/u.exec(clean(part.text));return m?Number(m[1]):0;}));
       const count=n=>n?[text(' · +'+n,'dim')]:[];
+      // The `…` of a cut name stands for its words: in their color, not the number's rose.
+      const cutItem=(item,room)=>cut(item,room).map((part,i,all)=>i===all.length-1&&part.text==='…'&&item[1]?{...item[1],text:'…'}:part);
       for(let k=items.length;k>=1;k--){
         const row=[...lead,...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' · ','dim')]:[]),...c]),...count(items.length-k+more)];
         if(size(row)<=inner)return row;
       }
       if(items.length)for(const rest of [count(items.length-1+more),[]]){
         const room=inner-size(lead)-size(rest);
-        if(room>=2||!rest.length)return [...lead,...cut(items[0],Math.max(1,room)),...rest];
+        if(room>=2||!rest.length)return [...lead,...cutItem(items[0],Math.max(1,room)),...rest];
       }
       return [...lead,...count(more)];
     };

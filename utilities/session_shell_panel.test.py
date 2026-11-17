@@ -1785,10 +1785,10 @@ const red=x=>x.foreground===174&&x.dim!==true;
  const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
  const bodyInk=x=>x.foreground===253&&x.dim!==true&&x.bold!==true&&x.role!=='accent';
  assert(first.filter(x=>x.text.trim()).every(bodyInk),JSON.stringify(first));
- // The choices: one row of words, the numbers and names in the body color, the ` · ` and `(추천)` dim.
+ // The choices: one row of words, the names in the body color, the numbers in the question's rose (11-17), the ` · ` and `(추천)` dim.
  assert(rows[at[1]].startsWith('│ │   1 파일 · 2 표준 출력 (추천) · 3 둘 다'),rows[at[1]]);
  const ch=inside(v.rows[at[1]]);
- assert(ch.filter(x=>/파일|표준 출력|둘 다|^\d $/.test(x.text)).every(bodyInk)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
+ assert(ch.filter(x=>/파일|표준 출력|둘 다/.test(x.text)).every(bodyInk)&&ch.filter(x=>/^\d $/.test(x.text)).every(x=>x.foreground===174&&x.role==='accent'&&x.dim!==true)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
  assert(ch.filter(x=>x.text===' (추천)').every(x=>x.dim===true),JSON.stringify(ch));
  // The action at the right, in rose.
  assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │ │'),rows[at[2]]);

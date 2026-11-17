@@ -38,7 +38,7 @@ class SessionBlockTest(unittest.TestCase):
         # The choices keep their own numbers and the recommended mark.
         options = [''.join(text for text, _ in line) for line in item['questions'][0]['display']['options']]
         self.assertEqual([line.split(' ')[0] for line in options], ['1', '2', '3', '4'])
-        self.assertIn('2 two (', options[1])
+        self.assertIn('2  two (', options[1])
 
     def test_question_body_preserves_decision_lines_at_wide_and_narrow_widths(self):
         from tools.fleet.session_block import question_presentations

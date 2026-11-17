@@ -142,9 +142,15 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     const body=view?.body||[[span(row.question.question||'?','loc_repo')]];
     // Spec E9 rule 54: a wait not answerable here shows the backend's whole words for its
     // reason (never the machine reason); a send state of its own shows nothing more.
-    const options=status!=='open'?(status===unanswerable(row)&&view?.options?view.options:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1} `),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
+    const options=status!=='open'?(status===unanswerable(row)&&view?.options?view.options:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1}  `,'g_blocked'),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
     const marked=status==='open'&&choices(row).length?highlight(options,choosing(row)?cursorOf(row):-1,choosing(row)):options;
-    const content=[...body,...marked,...(view?.source||[])];
+    // 11-17 (the person: "질문이랑 선지가 잘 구분되게" / "구분선 위에 여백도 하나 두고"): a question with choices
+    // ends its words with one empty row and a thin line (the frame's own color, dim where the frame is bright)
+    // before its choices; a question answered in words has neither. Short of rows the empty row goes first.
+    const split=status==='open'&&choices(row).length?[[],[{text:'─'.repeat(Math.max(0,columns)),popupLine:true,dim:true}]]:[];
+    let gap=split;
+    const lines=()=>[...body,...gap,...marked,...(view?.source||[])];
+    let content=lines();
     const tail=[];
     const picked=local.answers[id];
     if(focused&&local.typing[id]){
@@ -166,13 +172,15 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
     const footer=tail.slice(-tailLimit),space=Math.max(0,limit-1-footer.length);
+    if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
     const page=Math.max(1,space-1);
     // The highlighted choice comes onto the page when it changes (↑↓, a number);
     // PgUp/PgDn then read the body from its first row to its last, and the page
     // stays where the reading left it until the choice changes again.
-    const lit=choosing(row)?body.length+marked.findIndex(parts=>parts[0]?.text==='▸'):-1;
-    if(follow&&lit>=body.length){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
+    const mark=choosing(row)?marked.findIndex(parts=>parts[0]?.text==='▸'):-1;
+    const lit=mark>=0?body.length+gap.length+mark:-1;
+    if(follow&&lit>=0){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
     scroll=Math.max(0,Math.min(scroll,Math.max(0,content.length-page)));
     // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
     // A question with choices reads with PgUp/PgDn once focused (↑↓ choose): the hint names
@@ -192,15 +200,20 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // across it (one ground, no other inside it); the answer being typed, and an answer picked, are
   // marked alike while this question is answered here.
   const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
+  // 11-17: the number is the question's rose and bold on every row (the mark `◑`'s own color; where there is no
+  // color, its weight tells it from the words), two cells before the words.
   function highlight(options,at,choosing){
     let n=-1;
+    const bold=part=>({...part,bold:true});
     return options.map(parts=>{
-      const lead=String(parts[0]?.text??''),number=/^(\d+) $/.exec(lead);
+      const lead=String(parts[0]?.text??''),number=/^(\d+)\s+$/.exec(lead);
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
-      if(!choosing||at<0)return [span('  ',''),...parts];
-      if(n!==at)return [span('  ',''),...parts.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
-      const words=parts.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
-      return chosenRow(number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...words]:[span('  ',''),...words]);
+      const [head,...rest]=number?[bold(parts[0]),...parts.slice(1)]:[null,...parts];
+      const first=head?[head]:[];
+      if(!choosing||at<0)return [span('  ',''),...first,...rest];
+      if(n!==at)return [span('  ',''),...first,...rest.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
+      const words=rest.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
+      return chosenRow(number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...first,...words]:[span('  ',''),...words]);
     });
   }
   // Rule 5: one line per answer on its way, `✓ answer sent · <what was sent>` (11-15 panel polish
