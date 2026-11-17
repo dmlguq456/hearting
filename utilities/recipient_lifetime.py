@@ -23,6 +23,10 @@ _STATES = {ALIVE, ENDED, UNKNOWN}
 _HISTORY_MAX_BYTES = 64 * 1024 * 1024
 _HISTORY_MAX_LINE = 1024 * 1024
 _HISTORY_BUDGET_SECONDS = 1.0
+_HISTORY_CACHE_LIMIT = 4
+# path -> (file identity, session ids). An unchanged file identity means the
+# same bytes, so a later pass need not read the history file again.
+_HISTORY_IDS: dict[str, tuple[tuple, frozenset[str]]] = {}
 
 
 def _usable_session_id(session_id: str) -> bool:
@@ -58,8 +62,23 @@ def _file_identity(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _remember_history_ids(key: str, identity, found: set[str]) -> None:
+    _HISTORY_IDS.pop(key, None)
+    _HISTORY_IDS[key] = (identity, frozenset(found))
+    while len(_HISTORY_IDS) > _HISTORY_CACHE_LIMIT:
+        _HISTORY_IDS.pop(next(iter(_HISTORY_IDS)), None)
+
+
 def _read_history_session_ids(home: Path) -> set[str] | None:
-    """Read exact completed native history rows once for this recipient pass."""
+    """Read exact completed native history rows, reusing an unchanged file's ids."""
+    key = str(home / "history.jsonl")
+    ids = _read_history_session_ids_uncached(home, key)
+    if ids is None:
+        _HISTORY_IDS.pop(key, None)
+    return ids
+
+
+def _read_history_session_ids_uncached(home: Path, key: str) -> set[str] | None:
     try:
         if (not _owner_directory(home) or not _no_symlink_path(home)
                 or not is_local_path(home)):
@@ -68,10 +87,14 @@ def _read_history_session_ids(home: Path) -> set[str] | None:
         try:
             before = path.lstat()
         except FileNotFoundError:
+            _HISTORY_IDS.pop(key, None)
             return set()
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
                 or before.st_size > _HISTORY_MAX_BYTES or not is_local_path(path)):
             return None
+        cached = _HISTORY_IDS.get(key)
+        if cached is not None and cached[0] == _file_identity(before):
+            return set(cached[1])
         flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                  | getattr(os, "O_NONBLOCK", 0))
         fd = os.open(path, flags)
@@ -118,6 +141,7 @@ def _read_history_session_ids(home: Path) -> set[str] | None:
                     or not _owner_directory(home) or not _no_symlink_path(home)
                     or not is_local_path(home)):
                 return None
+            _remember_history_ids(key, identity, found)
             return found
         finally:
             os.close(fd)
