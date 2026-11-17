@@ -2042,6 +2042,14 @@ def candidates(query, *, limit=CANDIDATE_MAX_RESULTS,
 
 _BOOTSTRAP_LABEL_RANK = {"unit": 0, "field": 1}
 _BOOTSTRAP_LOOKUP_SECONDS = 3.0
+# The fence both bootstrap queries share; bind (project, today) in this order.
+_BOOTSTRAP_FENCE_SQL = (
+    "AND r.status='active' "
+    "AND (r.injection_flag=0 OR r.injection_flag IS NULL) "
+    "AND (r.scope='global' OR r.cwd_origin=?) "
+    "AND (r.expires IS NULL OR r.expires='' OR r.expires>=?) "
+    f"AND {BOOTSTRAP_TYPE_FENCE} "
+)
 
 
 def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
@@ -2090,11 +2098,7 @@ def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
             for row in con.execute(
                 "SELECT r.id,r.tier,r.type,r.scope,r.body,t.topic "
                 "FROM record_topics t JOIN records r ON r.id=t.record_id "
-                f"WHERE t.topic IN ({marks}) AND r.status='active' "
-                "AND (r.injection_flag=0 OR r.injection_flag IS NULL) "
-                "AND (r.scope='global' OR r.cwd_origin=?) "
-                "AND (r.expires IS NULL OR r.expires='' OR r.expires>=?) "
-                f"AND {BOOTSTRAP_TYPE_FENCE} "
+                f"WHERE t.topic IN ({marks}) {_BOOTSTRAP_FENCE_SQL}"
                 "ORDER BY r.strength DESC,r.updated DESC,r.id",
                 (*labels, project, today_s),
             ).fetchall():
@@ -2111,11 +2115,7 @@ def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
             found = con.execute(
                 "SELECT r.id,r.tier,r.type,r.scope,r.body "
                 "FROM records_capsule_fts c JOIN records r ON r.id=c.id "
-                "WHERE records_capsule_fts MATCH ? AND r.status='active' "
-                "AND (r.injection_flag=0 OR r.injection_flag IS NULL) "
-                "AND (r.scope='global' OR r.cwd_origin=?) "
-                "AND (r.expires IS NULL OR r.expires='' OR r.expires>=?) "
-                f"AND {BOOTSTRAP_TYPE_FENCE} "
+                f"WHERE records_capsule_fts MATCH ? {_BOOTSTRAP_FENCE_SQL}"
                 "ORDER BY bm25(records_capsule_fts),r.strength DESC,r.updated DESC "
                 "LIMIT ?",
                 (expression, project, today_s, limit + len(seen)),

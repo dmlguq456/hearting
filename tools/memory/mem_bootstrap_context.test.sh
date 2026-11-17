@@ -142,6 +142,43 @@ boot --topic 'field:code' >/dev/null
 [ "$(snapshot)" = "$snapshot_after" ]
 [ ! -e "$MEM_RECALL_EVENTS" ]
 [ ! -e "$MEM_RECALL_RECEIPTS" ]
+# 7) the label path keeps the same fence as the query path, and orders by strength then update
+# (rows are edited in the isolated test store only, to make states the CLI cannot add directly)
+setdb() { python3 - "$MEM_STORE/memory.db" "$@" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute(sys.argv[2], tuple(sys.argv[3:]))
+con.commit()
+PY
+}
+fk=$(add_a durable preference 'fencekeepmarker is active and clean.' --topic 'field:fence')
+fold=$(add_a durable preference 'fenceoldmarker will be superseded.' --topic 'field:fence')
+(cd "$TMP/project-a" && python3 "$MEM" supersede "$fold" --by "$fk" >/dev/null)
+finj=$(add_a durable preference 'fenceinjmarker carries an injection mark.' --topic 'field:fence')
+setdb "UPDATE records SET injection_flag=1 WHERE id=?" "$finj"
+fexp=$(add_a durable preference 'fenceexpmarker is past its expiry.' --topic 'field:fence')
+setdb "UPDATE records SET expires='2000-01-01' WHERE id=?" "$fexp"
+fok=$(add_a durable preference 'fencefuturemarker expires in the future.' --topic 'field:fence')
+setdb "UPDATE records SET expires='2999-01-01' WHERE id=?" "$fok"
+boot --topic 'field:fence' > "$TMP/fence.out"
+grep -q "$fk" "$TMP/fence.out"
+grep -q "$fok" "$TMP/fence.out"
+if grep -Eq "$fold|$finj|$fexp" "$TMP/fence.out"; then echo "label fence leak" >&2; exit 1; fi
+[ "$(grep -c '^## \[' "$TMP/fence.out")" -eq 2 ]
+# one label, same unit rank: higher strength first, then the more recently updated
+rlow=$(add_a durable preference 'rankmarker low strength.' --topic 'field:rank')
+rhigh=$(add_a durable preference 'rankmarker high strength.' --topic 'field:rank')
+rold=$(add_a durable preference 'rankmarker same strength, older update.' --topic 'field:rank')
+rnew=$(add_a durable preference 'rankmarker same strength, newer update.' --topic 'field:rank')
+setdb "UPDATE records SET strength=1,updated='2030-01-01' WHERE id=?" "$rlow"
+setdb "UPDATE records SET strength=9,updated='2030-01-01' WHERE id=?" "$rhigh"
+setdb "UPDATE records SET strength=5,updated='2030-01-01' WHERE id=?" "$rold"
+setdb "UPDATE records SET strength=5,updated='2030-02-01' WHERE id=?" "$rnew"
+boot --topic 'field:rank' --limit 4 > "$TMP/rank.out"
+line() { grep -n "$1" "$TMP/rank.out" | head -1 | cut -d: -f1; }
+[ "$(line "$rhigh")" -lt "$(line "$rnew")" ]
+[ "$(line "$rnew")" -lt "$(line "$rold")" ]
+[ "$(line "$rold")" -lt "$(line "$rlow")" ]
 # lookup time on the test store
 python3 - "$MEM" "$TMP/project-a" <<'PY'
 import subprocess, sys, time
