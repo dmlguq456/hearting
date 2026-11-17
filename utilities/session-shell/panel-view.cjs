@@ -927,27 +927,38 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const stageInk=key=>key&&model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256?key:'loc_repo';
     const markOf=stage=>stage.mark==='●'?pulse('●'):stage.mark==='✓'?text('✓','lvl_g'):stage.mark==='✕'?text('✕','g_dead'):text('·','dim');
     // Spec rule 34 (d): the bottom layout's route row names its kind too, in the words and
-    // values of the side layout's third row and Fleet's ROUTES (`one-shot`, `staged 3/7
-    // execute ●`, a failed one `staged 2/3 execute ✕`); short of cells `3/7 execute ●`.
-    // Spec rule 36 (b): the route's kind word leads it (`code · staged 3/7 execute ●`) and goes first.
+    // values of the side layout's third row and Fleet's ROUTES (`code(one-shot)`, `code(staged 3/7):
+    // execute ●`, a failed one `code(staged 2/3): execute ✕`); short of cells `3/7: execute ●`.
+    // Spec rule 36 (b), 11-17 (the person: "code, lab 등의 라우팅 종류를 볼드라, 그 뒤에 스테이지는 볼드 아니게끔 하고
+    // code(staged 3/6): execute 이런식으로"): the route's kind word leads it and goes first, the one bold word of the
+    // line (the body color, never dim, in mono and NO_COLOR too); the shape in brackets, the colon and the stage read as before.
+    // The stage's name keeps its color (Fleet's stage color, #1662) but not its weight: only the kind word is bold.
+    const stageName=stage=>({...text(stage.name||'·',stageInk(stage.key)),bold:false});
+    const kindText=word=>({text:clean(word),foreground:null,bold:true,dim:false});
+    const shapeBrackets=(shape,kind)=>kind?[kindText(kind),text('(','dim'),text(shape,'dim'),text(')','dim')]:[text(shape,'dim')];
     function kindCell(r){
       const cell=shapeCell(r),word=clean(r.kind_word||'').trim();
-      return cell&&{...cell,kind:word?[text(word,'dim'),text(' · ','dim'),...cell.full]:cell.full};
+      if(!word)return cell&&{...cell,kind:cell.full};
+      if(!cell)return {full:[],short:[],kind:[kindText(word)]};
+      return {...cell,kind:cell.kindForm(word)};
     }
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
-      if(shape==='one-shot-owner'){const word=[text('one-shot','dim')];return {full:word,short:word};}
+      const colon=[text(': ','dim')];
+      if(shape==='one-shot-owner'){const word=[text('one-shot','dim')];return {full:word,short:word,kindForm:kind=>shapeBrackets('one-shot',kind)};}
       if(/^staged/.test(shape)&&stages.length){
         const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length;
         const stage=[text(stages[at].name||'·','loc_repo'),...(current>=0?[text(' '),markOf(stages[at])]:[])];
-        return {full:[text('staged '+position+' ','dim'),...stage],short:[text(position+' ','dim'),...stage]};
+        return {full:[text('staged '+position,'dim'),...colon,...stage],short:[text(position,'dim'),...colon,...stage],
+          kindForm:kind=>[...shapeBrackets('staged '+position,kind),...colon,...stage]};
       }
       if(shape&&shape!=='unknown'){
         const stage=current>=0?[text(stages[current].name||'·','loc_repo'),text(' '),markOf(stages[current])]:[];
-        return {full:[text(shape,'dim'),...(stage.length?[text(' '),...stage]:[])],short:stage.length?stage:[text(shape,'dim')]};
+        return {full:[text(shape,'dim'),...(stage.length?[...colon,...stage]:[])],short:stage.length?stage:[text(shape,'dim')],
+          kindForm:kind=>[...shapeBrackets(shape,kind),...(stage.length?[...colon,...stage]:[])]};
       }
-      return r.step?{full:[text(r.step)],short:[text(r.step)]}:null;
+      return r.step?{full:[text(r.step)],short:[text(r.step)],kindForm:kind=>[kindText(kind),...colon,text(r.step)]}:null;
     }
     // Which of the kind and tool columns the bottom rows keep, the same for every row: the
     // kind word goes first, then the tool, then the `staged` word; the title keeps ten cells (or its
@@ -1208,7 +1219,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
       const kind=clean(r.kind_word||'').trim();
-      let word,pieces=[];
+      let word,position='',stage=null,pieces=[];
       if(shape==='one-shot-owner'){
         word='one-shot';
         if(r.tool){
@@ -1219,30 +1230,40 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         }else if(r.after_tool)pieces.push([[text('after '+r.after_tool,'dim')]]);
       }else if(/^staged/.test(shape)&&stages.length){
         const at=current>=0?current:next>=0?next:stages.length-1;
-        word='staged '+(at+1)+'/'+stages.length;
+        position=(at+1)+'/'+stages.length;
+        word='staged '+position;
         if(current>=0){
-          pieces.push([[text(stages[current].name||'·',stageInk(stages[current].key)),text(' '),markOf(stages[current])]]);
+          stage=[stageName(stages[current]),text(' '),markOf(stages[current])];
           if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([[text('owner '+r.owner_model,'dim')]]);
         }else{
-          pieces.push([[text(stages[at].name||'·',stageInk(stages[at].key))]]);
+          stage=[stageName(stages[at])];
           if(r.visibility?.next)pieces.push([[text(r.visibility.next,'dim')]]);
         }
       }else if(shape&&shape!=='unknown'){
         word=shape;
-        if(current>=0)pieces.push([[text(stages[current].name||'·',stageInk(stages[current].key)),text(' '),markOf(stages[current])]]);
+        if(current>=0)stage=[stageName(stages[current]),text(' '),markOf(stages[current])];
       }else if(!kind)return null;
-      const lead=[text('  '),...(kind?[text(kind,'dim')]:[]),...(kind&&word?[text(' · ','dim')]:[]),...(word?[text(word,'dim')]:[])];
+      // 11-17: `code(staged 3/7): execute ●`: the kind word bold, the shape in brackets, then the stage after a colon (with no
+      // kind word the shape stands without them); the values after it keep their ` · `. Short of cells the values go from the
+      // back, whole, then the word `staged` (`code(3/7): execute ●`), then the stage itself.
+      const head=shapeWord=>[text('  '),...(kind?[kindText(kind),...(shapeWord?[text('(','dim'),text(shapeWord,'dim'),text(')','dim')]:[])]:shapeWord?[text(shapeWord,'dim')]:[])];
+      const leads=[head(word)];
+      if(position&&kind)leads.push(head(position));
+      const order=[];
+      for(let n=pieces.length;n>=0;n--)order.push([0,n,!!stage]);
+      if(stage&&leads.length>1)order.push([1,0,true]);
+      if(stage)order.push([0,0,false]);
       // Spec rule 43 (g): the workers gone for rows, the kind row ends with their count (it
       // stays while the values before it go).
-      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(let n=pieces.length;n>=0;n--){
+      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const [which,n,withStage] of order){
         const kept=pieces.slice(0,n);
         // The last kept piece may take a shorter whole form (path → file name → tool).
         for(const last of n?kept[n-1]:[[]]){
-          const row=[...lead,...kept.slice(0,Math.max(0,n-1)).flatMap(choices=>[text(' · ','dim'),...choices[0]]),...(n?[text(' · ','dim'),...last]:[]),...end];
+          const row=[...leads[which],...(withStage&&stage?[text(': ','dim'),...stage]:[]),...kept.slice(0,Math.max(0,n-1)).flatMap(choices=>[text(' · ','dim'),...choices[0]]),...(n?[text(' · ','dim'),...last]:[]),...end];
           if(size(row)<=inner)return row;
         }
       }
-      return size(lead)<=inner?lead:null;
+      return size(leads[0])<=inner?leads[0]:null;
     }
     const routeRows=[];
     within(()=>{

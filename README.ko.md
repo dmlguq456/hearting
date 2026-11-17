@@ -121,14 +121,14 @@ Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 �
 사용자를 기다리는지가 보입니다.
 
 <p align="center">
-  <img src="docs/fleet/overview.png" alt="같은 순간의 Fleet OVERVIEW: Claude Code, Codex, OpenCode에 걸친 네 프로젝트의 세션 여덟. 세션 [4f]는 Rate limiting을 46%에서 돌리고, Codex 세션 [b2]는 [4f]를 위한 Test run에서 40개 중 31개 통과, [9c]는 답을 기다린다. 아래에는 열린 route 둘과 단계 줄 staged 2/4 execute, staged 2/4 eval-asr." width="100%">
+  <img src="docs/fleet/overview.png" alt="같은 순간의 Fleet OVERVIEW: Claude Code, Codex, OpenCode에 걸친 네 프로젝트의 세션 여덟. 세션 [4f]는 Rate limiting을 46%에서 돌리고, Codex 세션 [b2]는 [4f]를 위한 Test run에서 40개 중 31개 통과, [9c]는 답을 기다린다. 아래에는 열린 route 둘과 단계 줄 code(staged 2/4): execute, lab(staged 2/4): eval-asr." width="100%">
 </p>
 <p align="center"><sub>같은 순간의 Fleet OVERVIEW: 이 기계의 모든 세션을 프로젝트별로 봅니다.</sub></p>
 
 | 화면 | 알려 주는 것 |
 |---|---|
 | **OVERVIEW** | 프로젝트별로 묶은 모든 세션과, 프로젝트마다 열린 요청, 사용자 답을 기다리는 질문, 최근 결과. 세션마다 하네스, 모델, 남은 문맥, 지금 하는 일과 지난 시간. 펼치면 내가 마지막으로 입력한 말과 받은 메시지가 나옵니다. |
-| **ROUTES** | 요청마다 지금 하는 쪽과 지금 위치(`one-shot`, 단계마다 작업자를 띄우면 `staged 3/7 execute ●`)와 그 아래에서 도는 작업자. |
+| **ROUTES** | 요청마다 지금 하는 쪽과 지금 위치(`code(one-shot)`, 단계마다 작업자를 띄우면 `code(staged 3/7): execute ●`)와 그 아래에서 도는 작업자. |
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 모든 에이전트와 언제부터인지, 어떻게 답하는지. 하네스가 답 경로를 주면 Fleet에서 바로 답하고, 아니면 해당 세션으로 안내합니다. |
 | **RESOURCES** | 이 기계와 설정한 호스트의 CPU, 메모리, GPU별 사용량과 각 GPU 프로세스를 가진 세션. |
 | **PEERS** | 메시지, 요청, 감독, 이어받음으로 이어진 세션들과 종류마다 가장 최근의 이어짐. |
@@ -136,7 +136,7 @@ Fleet는 이 기계의 모든 Claude Code, Codex, OpenCode 세션과 하팅이 �
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/fleet/routes.png" alt="web-api route를 그 자리에서 펼친 Fleet ROUTES: Rate limiting, staged 2/4로 execute가 돌고, owner는 Opus 5.5 xhigh, execute 작업자는 Sonnet 5.5. 단계 상자 plan 끝남, execute 도는 중, test와 report 대기, 상자마다 맡은 쪽, 시각, 관문, 산출 위치. 그 아래 eval-asr의 ml-train route."><br><sub><b>ROUTES</b> — <code>[4f]</code>의 route를 그 자리에서 펼친 모습: 단계마다 누가 맡았는지.</sub></td>
+    <td width="50%"><img src="docs/fleet/routes.png" alt="web-api route를 그 자리에서 펼친 Fleet ROUTES: Rate limiting, code(staged 2/4): execute가 돌고, owner는 Opus 5.5 xhigh, execute 작업자는 Sonnet 5.5. 단계 상자 plan 끝남, execute 도는 중, test와 report 대기, 상자마다 맡은 쪽, 시각, 관문, 산출 위치. 그 아래 eval-asr의 ml-train route."><br><sub><b>ROUTES</b> — <code>[4f]</code>의 route를 그 자리에서 펼친 모습: 단계마다 누가 맡았는지.</sub></td>
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: Claude Code 세션이 7분째 기다리는 결정 하나와 언제부터인지, 답하는 법. Codex 세션의 오래된 승인 대기 하나. 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 언제부터인지, 어떻게 답하는지.</sub></td>
   </tr>
   <tr>

@@ -126,14 +126,14 @@ the machine and every worker Hearting dispatched from them: whether each one is
 running, stuck, or waiting for you.
 
 <p align="center">
-  <img src="docs/fleet/overview.png" alt="Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with their stage lines, staged 2/4 execute and staged 2/4 eval-asr." width="100%">
+  <img src="docs/fleet/overview.png" alt="Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run for [4f] with 31 of 40 suites passing, and [9c] waits for an answer; below, the two open routes with their stage lines, code(staged 2/4): execute and lab(staged 2/4): eval-asr." width="100%">
 </p>
 <p align="center"><sub>Fleet's OVERVIEW at the same moment: every session on the machine, by project.</sub></p>
 
 | Screen | What it tells you |
 |---|---|
 | **OVERVIEW** | Every session, grouped by project, with each project's open requests, questions waiting for you, and latest result. Each session shows runtime, model, context left, what it is doing now, and its age; expand it for your last input and the messages it received. |
-| **ROUTES** | Each request: who does it now and where it stands (`one-shot`, or `staged 3/7 execute ●` for one worker per stage), with the workers running under it. |
+| **ROUTES** | Each request: who does it now and where it stands (`code(one-shot)`, or `code(staged 3/7): execute ●` for one worker per stage), with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval, since when, and how to answer. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover, and the newest link of each kind. |
@@ -141,7 +141,7 @@ running, stuck, or waiting for you.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/fleet/routes.png" alt="Fleet's ROUTES with the web-api route opened in place: Rate limiting, staged 2/4 with execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, execute running, test and report pending, each with who runs it, when, its gate, and its output; under it the ml-train route at eval-asr."><br><sub><b>ROUTES</b> — <code>[4f]</code>'s route opened in place: its stages and who runs each.</sub></td>
+    <td width="50%"><img src="docs/fleet/routes.png" alt="Fleet's ROUTES with the web-api route opened in place: Rate limiting, code(staged 2/4): execute running, the owner Opus 5.5 xhigh and the execute worker Sonnet 5.5; its stage boxes plan done, execute running, test and report pending, each with who runs it, when, its gate, and its output; under it the ml-train route at eval-asr."><br><sub><b>ROUTES</b> — <code>[4f]</code>'s route opened in place: its stages and who runs each.</sub></td>
     <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and how to answer it; one older approval wait from a Codex session; and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, since when, and how to answer it.</sub></td>
   </tr>
   <tr>

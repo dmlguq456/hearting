@@ -640,31 +640,31 @@ assert(ctx[0].indexOf('%')===ctx[1].indexOf('%')&&ctx.every(s=>s.endsWith('m │
 assert(!box(draw([one,{...frame,elapsed:''}],40,50)).some(s=>/^│ │ +│ │$/.test(s)),'no empty context row');
 // The order: who, context, what, kind.
 const at=box(r50).findIndex(s=>s.includes('owner  claude Opus 5.5 xhigh'));
-assert(box(r50)[at+1].includes('38%')&&box(r50)[at+2].includes('셸 상태·표시 고치기')&&box(r50)[at+3].includes('code · one-shot'),r50.join('\n'));
+assert(box(r50)[at+1].includes('38%')&&box(r50)[at+2].includes('셸 상태·표시 고치기')&&box(r50)[at+3].includes('code(one-shot)'),r50.join('\n'));
 // (b) Fleet's kind word leads the third row; the mode and intensity stay in the opened KIND.
-for(const want of ['│   code · one-shot · Edit ','│   code · staged 3/7 · execute ● ','│   code · staged 4/7 · host-run ','│   frame · staged 1/3 · frame ● '])
+for(const want of ['│   code(one-shot) · Edit ','│   code(staged 3/7): execute ● ','│   code(staged 4/7): host-run ','│   frame(staged 1/3): frame ● '])
  assert(r50.some(s=>s.includes(want)),want+'\n'+r50.join('\n'));
 assert(!r50.join('').includes('(dev'),r50.join('\n'));
 const r80=draw(four,80,50).join('\n');
-assert(r80.includes('code · one-shot · Edit utilities/session-shell/host.cjs 3m')&&r80.includes('code · staged 3/7 · execute ● · owner Opus 5.5'),r80);
+assert(r80.includes('code(one-shot) · Edit utilities/session-shell/host.cjs 3m')&&r80.includes('code(staged 3/7): execute ● · owner Opus 5.5'),r80);
 // The bottom layout's kind column: the kind leads it and goes first, before the tool.
 const kindAt=w=>draw([one,stg,wait,{...failed,role:'owner',kind_word:'code'}],w,20,{side:false}).find(s=>s.startsWith('│ │ ')&&s.includes('세션 간'));
-assert(kindAt(140).includes('│ code · staged 3/7 execute ● │ >_ Edit'),kindAt(140));
-assert(!kindAt(100).includes('code ·')&&kindAt(100).includes('│ staged 3/7 execute ● │ >_ Edit'),kindAt(100));
+assert(kindAt(140).includes('│ code(staged 3/7): execute ● │ >_ Edit'),kindAt(140));
+assert(!kindAt(100).includes('code(')&&kindAt(100).includes('│ staged 3/7: execute ● │ >_ Edit'),kindAt(100));
 // (c) A title takes two rows at most, the second ending in `…`; short of rows, one.
 const long={...one,id:'l',title:'아주 긴 route 이름 — 셸 패널의 접힌 route 줄에서 이름이 세 줄을 넘으면 둘째 줄 끝에 줄임 표시가 붙는지 확인하는 이름'};
 const lr=box(draw([one,long],40,50)),li=lr.findIndex(s=>s.includes('아주 긴'));
-assert(lr[li+1].includes('…')&&lr[li+2].includes('code · one-shot')&&!lr.join('').includes('확인하는'),lr.join('\n'));
+assert(lr[li+1].includes('…')&&lr[li+2].includes('code(one-shot)')&&!lr.join('').includes('확인하는'),lr.join('\n'));
 // (d) The one-row form: title, harness, percent and time; no role, no kind.
 const nine=[...Array(9)].map((_,i)=>({...[one,stg,wait][i%3],id:'n'+i,title:[one,stg,wait][i%3].title+' '+(i+1)}));
 const r30=box(draw(nine,40,30)),flat=r30.filter(s=>/│ │ [⠋●] \S/.test(s));
-assert(flat.length>0&&flat.every(s=>!/owner|worker|code ·/.test(s))&&!r30.some(s=>/│ │   (━|code)/.test(s)),r30.join('\n'));
+assert(flat.length>0&&flat.every(s=>!/owner|worker|code\(/.test(s))&&!r30.some(s=>/│ │   (━|code)/.test(s)),r30.join('\n'));
 // Short of rows: a title's second row, then the context row folds into the first row
 // (percent and time at the right, no gauge), then the kind row, then the one-row form.
 const r44=box(draw(nine,40,45));
-assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │ [⠋●] (owner|worker) .* \d+m │ │$/.test(s)).length===9&&r44.filter(s=>s.includes('│   code · ')).length===9,r44.join('\n'));
+assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │ [⠋●] (owner|worker) .* \d+m │ │$/.test(s)).length===9&&r44.filter(s=>s.includes('│   code(')).length===9,r44.join('\n'));
 for(let h=16;h<=80;h++){
- const rows=box(draw(nine,40,h)),gauges=rows.filter(s=>/│ │   ━/.test(s)).length,kinds=rows.filter(s=>s.includes('│   code · ')).length;
+ const rows=box(draw(nine,40,h)),gauges=rows.filter(s=>/│ │   ━/.test(s)).length,kinds=rows.filter(s=>s.includes('│   code(')).length;
  const second=rows.some(s=>/│ │   넘어가기/.test(s));
  if(gauges)assert(kinds===9,h+' the context row goes before the kind row\n'+rows.join('\n'));
  if(second)assert(gauges===6,h+' a title keeps its second row only while the context rows stand\n'+rows.join('\n'));
@@ -697,13 +697,13 @@ const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return ro
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: owner / CTX with the route's time after its percent / title / kind; no inner box.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │   CTX   ━━━───── 38% · 41m +│ │$/.test(b[at+1])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at+2])&&b[at+3].includes('│   code · one-shot · Edit'),b.join('\n'));
+assert(at>0&&/^│ │   CTX   ━━━───── 38% · 41m +│ │$/.test(b[at+1])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at+2])&&b[at+3].includes('│   code(one-shot) · Edit'),b.join('\n'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+1],'━'),col(b[at],'claude'));
 assert(!/[└├]─|╭─ [⠋●]/.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at+2].includes('41m'),b.join('\n'));
 // One worker: the owner's four rows (no guide), then the box two cells in: who in its top line
 // (up to the corner rather than giving up a value), CTX with its time, stage and tool, bottom line.
 b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('⠋ owner  claude Opus 5.5 xhigh'));
-for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   속도 3단계 +│ │$/],[3,/^│ │   code · staged 3\/7 · execute ● +│ │$/],
+for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   속도 3단계 +│ │$/],[3,/^│ │   code\(staged 3\/7\): execute ● +│ │$/],
  [4,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[5,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[6,/^│ │   │    execute · Edit panel\.py │ │ │$/],[7,/^│ │   ╰─+╯ │ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
 // Spec rule 57 (c): the box's left line under the owner's text, its right line where the route's rows end.
@@ -732,7 +732,7 @@ b=box(draw([{...one,owner_paint:{harness:P('claude'),model_text:P('Opus 5.5'),ef
 assert(!b.join('').includes('CTX')&&b.some(s=>/^│ │ {10}2h 10m +│ │$/.test(s))&&b.some(s=>/^│ │   │ {11}12m +│ │ │$/.test(s))&&!b.some(s=>/속도 3단계 +2h/.test(s)),b.join('\n'));
 // A title on two rows: both rows the title's; the time on the CTX row.
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at-1].includes('38% · 41m')&&b[at+2].includes('code · one-shot'),b.join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at-1].includes('38% · 41m')&&b[at+2].includes('code(one-shot)'),b.join('\n'));
 // Hangul in the owner's title and the worker's target: every line keeps its cells.
 for(const width of [32,34,38,40,44])for(const s of draw([{...one,title:'한글 제목이 길게 이어지는 경우',workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'문서/한글 파일.md'})]},two],width,60))
  assert.equal(cells(s),width,width+' '+s);
@@ -791,7 +791,7 @@ for(let width=32;width<=48;width++){
 // At 40 cells, the picture of rule 57.
 const b=draw([one],40,60),at=b.findIndex(s=>s.includes('⠋ owner'));
 for(const [i,want] of [[1,/^│ │   CTX    ━━━━──── 52% · 2h 10m +│ │$/],[2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[3,/^│ │   재계산 +│ │$/],
- [4,/^│ │   code · staged 3\/7 · execute ● +│ │$/],[5,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[6,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[7,/^│ │   │    execute · Edit +│ │ │$/],[8,/^│ │   ╰─+╯ │ │$/]])
+ [4,/^│ │   code\(staged 3\/7\): execute ● +│ │$/],[5,/^│ │   ╭─ ⠋ worker claude Sonnet 5\.5╮ │ │$/],[6,/^│ │   │    CTX    ━━──── 22% · 12m │ │ │$/],[7,/^│ │   │    execute · Edit +│ │ │$/],[8,/^│ │   ╰─+╯ │ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
 // (d) Short of cells: the bar shortens, then goes; then the time; the percent stays.
 const at32=draw([one],32,60);
@@ -833,13 +833,13 @@ for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
 
     def test_a_bottom_route_row_names_its_kind_before_its_tool(self):
         # Spec E9 rule 34 (d): after model and context, before the tool, the side layout's
-        # and Fleet's words: `one-shot`, `staged 3/7 execute ●`, a failed `staged 2/3 execute ✕`;
+        # and Fleet's words: `one-shot`, `staged 3/7: execute ●`, a failed `staged 2/3: execute ✕`;
         # short of cells the tool goes, then `staged`, then the whole column.
         script = self.FIXTURE + r'''
 const four=[oneShot,staged,waiting,failed];
 const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
 const r140=draw(four,140,20,{side:false});
-for(const [title,kind] of [['셸 상태','one-shot'],['세션 간','staged 3/7 execute ●'],['새 판으로','staged 4/7 host-run'],['PG-50','staged 2/3 execute ✕']]){
+for(const [title,kind] of [['셸 상태','one-shot'],['세션 간','staged 3/7: execute ●'],['새 판으로','staged 4/7: host-run'],['PG-50','staged 2/3: execute ✕']]){
  const s=row(r140,title);assert(s&&s.includes('│ '+kind),title+'\n'+r140.join('\n'));
  assert(s.indexOf('claude')<s.indexOf(kind),s);
  for(const s of r140)assert.equal(cells(s),140,s);
@@ -848,7 +848,7 @@ for(const title of ['셸 상태','세션 간']){const s=row(r140,title);assert(s
 assert(!r140.some(s=>/execute ✕ 2\/3/.test(s)),r140.join('\n'));
 // 80 cells: the tool goes first, then the `staged` word; the stage and its mark stay.
 const r80=draw(four,80,20,{side:false});
-assert(row(r80,'세션 간').includes('│ 3/7 execute ●')&&row(r80,'PG-50').includes('│ 2/3 execute ✕')&&row(r80,'셸 상태').includes('│ one-shot')
+assert(row(r80,'세션 간').includes('│ 3/7: execute ●')&&row(r80,'PG-50').includes('│ 2/3: execute ✕')&&row(r80,'셸 상태').includes('│ one-shot')
  &&!r80.join('').includes('staged')&&!r80.join('').includes('>_'),r80.join('\n'));
 // Narrower still the whole column goes; the earlier columns stay.
 const r64=draw(four,64,20,{side:false});
@@ -1260,7 +1260,7 @@ const draw=(routes,width,height,{side=true,open=[]}={})=>view.render({width,heig
         script = self.FIXTURE + r"""
 const rows=draw([oneShot,staged,failed],40,76),all=rows.join('\n');
 for(const s of rows)assert.equal(cells(s),40,s);
-for(const want of ['│ │ ⠋ claude Opus 5.5 xhigh ','│ │   one-shot · Edit host.cjs 3m ','│ │ ⠋ claude Sonnet 5.5 high ','│ │   staged 3/7 · execute ● ','│ │   staged 2/3 · execute ✕ '])
+for(const want of ['│ │ ⠋ claude Opus 5.5 xhigh ','│ │   one-shot · Edit host.cjs 3m ','│ │ ⠋ claude Sonnet 5.5 high ','│ │   staged 3/7: execute ● ','│ │   staged 2/3: execute ✕ '])
  assert(all.includes(want),want+'\n'+all);
 // No model name, version or path is cut apart, and nothing opens in place under a route.
 for(const s of rows)assert(!/\((Opus|Sonnet) *│|│ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
@@ -1277,7 +1277,7 @@ assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TIT
  '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음 ›'],all);
 // With room the whole values stand on one row each.
 const wide=draw([oneShot,staged,failed],80,76,{side:false}).join('\n');
-for(const want of ['PG-50 휠','2/3 execute ✕','54m','3/7 execute ●','one-shot','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
+for(const want of ['PG-50 휠','2/3: execute ✕','54m','3/7: execute ●','one-shot','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
 """
         self.node(script, "panel-view.cjs")
 
@@ -1537,7 +1537,7 @@ const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fi
 const v=at(),rows=plain(v),all=rows.join('\n');
 assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s))&&!/\broute \d|messages/.test(all),all);
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
-assert(all.includes('⠋ owner')&&all.includes('code · one-shot'),all);
+assert(all.includes('⠋ owner')&&all.includes('code(one-shot)'),all);
 // The producer's label alone (no rows yet): its count first too.
 const label=plain(at({model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}}));
 assert(label.some(s=>s.includes('╭─ 3 ROUTE ⠏2 ─')),label.join('\n'));

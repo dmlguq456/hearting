@@ -6,6 +6,11 @@ The golden rows (`fixtures/session-shell-route-box-v4.36.4.json`) were drawn by 
 `panel-view.cjs` (8ea2f6408) from the synthetic scenes the file carries; the box drawn now from the same
 scenes must match them cell for cell (text, color, weight, ground) and press cell for press cell (the
 press now opening a popup). Everything here is synthetic.
+
+11-17 (the person: "code(staged 3/6): execute 이런식으로"): the route's kind row (and the bottom layout's kind cell) is
+drawn `code(staged 3/7): execute ●` and `code(one-shot) · Bash`, its kind word bold; the golden's rows that carry that
+row were re-drawn by the present renderer and only those rows differ from v4.36.4's (the diff was checked row by row:
+every changed row is a kind row or a bottom row whose kind cell moved a cell). Nothing else in the file changed.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation

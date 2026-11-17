@@ -423,7 +423,7 @@ const direct={id:'rt-d',title:'작은 수정',kind:'working',state:'working',sha
 const v=draw({routes:[direct],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),L=inside(v);
 const a=L.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l));assert(a>=0,L.join('\n'));
 const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
-assert(/작은 수정/.test(box)&&/code · 직접/.test(box),box);
+assert(/작은 수정/.test(box)&&/code\(직접\)/.test(box),box);
 """)
 
 
@@ -501,14 +501,14 @@ const route={id:'rt-s',title:'패널 손질',kind:'working',state:'working',shap
 const opt={routes:[route],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1},question:false};
 const v=draw({...opt,height:60});
 const L=lines(v);
-const place=v.rows.find(r=>/^\│?\s*code · staged 3\/6/.test(str(r).replace(/^│ │ /,'').replace(/^│ /,'')));
+const place=v.rows.find(r=>/^\│?\s*code\(staged 3\/6\)/.test(str(r).replace(/^│ │ /,'').replace(/^│ /,'')));
 // The worker's stage row in the worker box: the name in the color Fleet gives the stage `execute` (its 3rd, running: index 2, lit).
 const row=v.rows.find(r=>/│ +execute · Edit/.test(str(r)));assert(row,L.join('\n'));
 const name=row.find(p=>p.text==='execute');assert.equal(name.foreground,150);assert.equal(name.bold,true,'lit like Fleet\'s running stage');
 assert.equal(row.find(p=>p.text.includes('Edit')).foreground,253);
 // The kind row names the current stage in the same color; a finished/waiting stage would be dimmed.
-const kind=v.rows.find(r=>/code · staged 3\/6/.test(str(r)));assert(kind,L.join('\n'));
-const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true);
+const kind=v.rows.find(r=>/code\(staged 3\/6\)/.test(str(r)));assert(kind,L.join('\n'));
+const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.notEqual(stageName.bold,true,'11-17: only the kind word is bold');
 // Other states by Fleet's rule: a finished stage dim of its hue, a failed one the failure red, a waiting one dim.
 const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
 const failed=draw({...opt,height:60,routes:[{...route,stages:other,workers_live:[{...worker,stage_key:'lvl_r'}]}]});

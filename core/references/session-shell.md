@@ -487,10 +487,17 @@ popup; a request row the MESSAGES popup).
   `render_stages.route_stage_key`, the one table both screens use: stage `i` is `stg{i % 5}`, lit while it runs, dimmed
   once done or while it waits, the failure red when failed, the warning yellow on attention; the kind row's current
   stage the same; the folded one-row forms and mono, eight colors and `NO_COLOR` keep the body color), open tool and
-  target. A fourth row says which kind of route it is and where it stands, dim:
-  Fleet's kind word (`code`, `lab`, `frame`), then `one-shot` and what it is on now
-  (`Edit host.cjs 3m`), or `staged 3/7` with the current stage and its mark, or with no
-  stage running the next stage and what it waits for (`code · staged 3/7 · execute ●`).
+  target. A fourth row says which kind of route it is and where it stands (11-17, the person: "code, lab 등의 라우팅
+  종류를 볼드라, 그 뒤에 스테이지는 볼드 아니게끔 하고 code(staged 3/6): execute 이런식으로"): Fleet's kind word (`code`,
+  `lab`, `frame`) bold in the body color (the one bold word of the line, also in mono, eight colors and `NO_COLOR`),
+  then the shape in brackets, dim, and after a colon the stage with its mark: `code(staged 3/7): execute ●`, or with no
+  stage running the next stage and what it waits for; `code(one-shot) · Edit host.cjs 3m` (the owner does the work itself
+  and what it is on now; the values after the brackets keep their ` · `), a direct route `code(direct)` in the screen
+  language's own word, a route whose shape is unknown the kind alone. The stage's name keeps its color (Fleet's stage
+  color) but not its weight, and no ` · ` stands between kind, shape and stage. Short of cells the values go from the
+  back, whole, then the word `staged` (`code(3/7): execute ●`), then the stage. Fleet's ROUTES row (and the ROUTE popup,
+  the session page and OVERVIEW, one function) draws the same cell: `code(staged 2/4): execute ●`, short of cells the kind
+  goes, then `staged`, then the position (`staged 2/4: execute ●`, `2/4: execute ●`).
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
   closed), the other session's Fleet number, then that session's harness, model and effort in
@@ -512,7 +519,7 @@ popup; a request row the MESSAGES popup).
   has been seen (at most 7 days), and then only `show` lists it; a request whose message is
   not confirmed yet stays with `not confirmed`. The
   bottom layout keeps one row per route: title, harness·model·effort, context, then the
-  kind (`code · staged 3/7 execute ●`, a failed one `staged 2/3 execute ✕`), then the
+  kind (`code(staged 3/7): execute ●`, a failed one `code(staged 2/3): execute ✕`), then the
   open tool, and the elapsed time at the right edge (short of cells the kind word goes,
   then the tool, then the word `staged`). The box's line is the route line's color (the
   failure color while a current route has failed), its count pulses while a route
