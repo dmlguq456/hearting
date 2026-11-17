@@ -434,9 +434,11 @@ class ObligationStoreTest(unittest.TestCase):
         listed[0]["intent"]["mutated"] = True
         self.assertEqual(len(self.store.list(states={"pending"})), 2)
         metrics = self.store.discovery_metrics()
-        self.assertEqual(metrics["json_reads"], 2)
-        self.assertEqual(metrics["json_parses"], 2)
-        self.assertGreater(metrics["stat_calls"], 2)
+        # Each record is read once in total: by the first-use index rebuild
+        # (which now seeds the list cache) or by the list read itself.
+        self.assertEqual(metrics["json_reads"] + metrics["active_rebuild_reads"], 2)
+        self.assertEqual(metrics["json_parses"], metrics["json_reads"])
+        self.assertGreaterEqual(metrics["stat_calls"], 2)
 
         path = self.store._record_path(first["id"])
         old_mtime = path.stat().st_mtime_ns
@@ -585,14 +587,11 @@ class ObligationStoreTest(unittest.TestCase):
         self.store.update(unknown["id"], state="unknown", observer_error="unavailable")
         with mock.patch.object(obligations.time, "monotonic", return_value=0.0):
             result = self.store.prune_terminal_obligations(now=now)
-        self.assertLessEqual(result["examined"], 64)
-        self.assertEqual(result["removed"], 16)
-        self.assertEqual(sum(self.store.get(duty_id) is None for duty_id in old_ids), 16)
+        # The time budget, not a fixed count, ends the pass: all 20 go at once.
+        self.assertEqual(result["removed"], 20)
+        self.assertFalse(result["backlog"])
+        self.assertEqual(sum(self.store.get(duty_id) is None for duty_id in old_ids), 20)
         self.assertEqual(self.store.prune_terminal_obligations(now=now)["status"], "not-due")
-
-        with mock.patch.object(obligations.time, "monotonic", return_value=0.0):
-            next_pass = self.store.prune_terminal_obligations(now=now + 300)
-        self.assertEqual(next_pass["removed"], 4)
         self.assertIsNotNone(self.store.get(pending["id"]))
         self.assertEqual(self.store.get(unknown["id"])["state"], "unknown")
 
@@ -617,18 +616,251 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual(deadline_pass["examined"], 1)
         self.assertEqual(deadline_pass["removed"], 1)
         self.assertEqual(deadline_pass["cursor"], deadline_ids[0] + ".json")
+        self.assertTrue(deadline_pass["backlog"])
         self.assertIsNone(self.store.get(deadline_ids[0]))
         self.assertIsNotNone(self.store.get(deadline_ids[1]))
 
-        not_due = self.store.prune_terminal_obligations(now=now + 3601)
-        self.assertEqual(not_due["status"], "not-due")
-        self.assertEqual(not_due["cursor"], deadline_pass["cursor"])
+        # A backlog is caught up on the very next call, not after the 300 s rest.
         with mock.patch.object(obligations.time, "monotonic", return_value=0.0):
-            resumed = self.store.prune_terminal_obligations(now=now + 3900)
+            resumed = self.store.prune_terminal_obligations(now=now + 3601)
+        self.assertEqual(resumed["status"], "complete")
         self.assertEqual(resumed["removed"], 1)
+        self.assertFalse(resumed["backlog"])
+        self.assertEqual(resumed["cursor"], "")
+        self.assertEqual(self.store.prune_terminal_obligations(now=now + 3602)["status"],
+                         "not-due")
         self.assertIsNone(self.store.get(deadline_ids[1]))
         self.assertIsNotNone(self.store.get(pending["id"]))
         self.assertEqual(self.store.get(unknown["id"])["state"], "unknown")
+
+    def _age_readiness(self, duty_id, age_seconds, now):
+        path = self.store._record_path(duty_id)
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        persisted["terminal_at"] = now - age_seconds
+        path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    def test_retention_skips_young_terminal_records_without_locking(self):
+        now = time.time()
+        for index in range(5):
+            duty = self.store.create(f"young-{index}", "readiness-observation",
+                                     {"consumer": {"pid": 2_000_000_200 + index,
+                                                    "pid_start": "1"}}, {})
+            self.store.update(duty["id"], state="complete", result="consumer-exited")
+        self.store.create("live-pending", "message", {}, {})
+        with mock.patch.object(self.store, "_lock", wraps=self.store._lock) as locked:
+            result = self.store.prune_terminal_obligations(now=now)
+        self.assertEqual(locked.call_count, 0)
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(result["examined"], 6)
+        self.assertFalse(result["backlog"])
+        for index in range(5):
+            self.assertIsNotNone(self.store.get(f"young-{index}"))
+
+    def test_retention_reads_legacy_cursor_without_backlog(self):
+        now = time.time()
+        duty = self.store.create("legacy-cursor-old", "readiness-observation",
+                                 {"consumer": {"pid": 2_000_000_300, "pid_start": "1"}}, {})
+        self.store.update(duty["id"], state="complete", result="consumer-exited")
+        self._age_readiness(duty["id"], 2 * 86400, now)
+        cursor = self.store.root / "retention.cursor"
+        last = int(now * 1_000_000_000)
+        cursor.write_text(json.dumps({"last_pass_ns": last, "cursor": "zzz.json"}) + "\n",
+                          encoding="utf-8")
+        due = self.store.prune_terminal_obligations(now=now + 10)
+        self.assertEqual(due["status"], "not-due")
+        self.assertFalse(due["backlog"])
+        self.assertEqual(due["cursor"], "zzz.json")
+        self.assertIsNotNone(self.store.get(duty["id"]))
+        resumed = self.store.prune_terminal_obligations(now=now + 301)
+        self.assertEqual(resumed["status"], "complete")
+        self.assertEqual(resumed["removed"], 1)
+        self.assertIsNone(self.store.get(duty["id"]))
+        saved = json.loads(cursor.read_text(encoding="utf-8"))
+        self.assertIs(saved["backlog"], False)
+
+    def _fresh_rebuild_store(self, complete=40, pending=3):
+        for index in range(pending):
+            self.store.create(f"rb-pending-{index:03d}", "message", {},
+                              {"ref": "%032x" % index})
+        for index in range(complete):
+            duty = self.store.create(f"rb-done-{index:03d}", "message", {},
+                                     {"ref": "%032x" % (1000 + index)})
+            self.store.update(duty["id"], state="complete")
+        active = self.store.root / "active"
+        (active / ".rebuild").write_text("rebuild\n", encoding="utf-8")
+        return active
+
+    def _direct_active_ids(self):
+        found = set()
+        for path in self.store.root.glob("*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if self.store._active_record(record):
+                found.add(record["id"])
+        return found
+
+    def _index_ids(self):
+        return {path.name for path in (self.store.root / "active").iterdir()
+                if not path.name.startswith(".")}
+
+    def test_rebuild_finishes_while_lock_files_appear(self):
+        active = self._fresh_rebuild_store()
+        reader = obligations.ObligationStore(self.root)
+        real_collect = reader._rebuild_collect
+        calls = []
+
+        def collect_with_new_lock(root_fd):
+            if not calls:
+                # What a peer's first ``_lock`` does to the folder, without the
+                # index lock this very rebuild is holding.
+                os.close(os.open("fresh-lock-only.lock", os.O_CREAT | os.O_RDWR,
+                                 0o600, dir_fd=root_fd))
+            calls.append(1)
+            return real_collect(root_fd)
+
+        reader._rebuild_collect = collect_with_new_lock
+        reader.reset_discovery_metrics()
+        rows = reader.list()
+        self.assertEqual({row["id"] for row in rows}, self._direct_active_ids())
+        self.assertFalse((active / ".rebuild").exists())
+        root_fd = os.open(self.store.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            self.assertEqual(reader._read_active_generation(
+                os.open(active, os.O_RDONLY | os.O_DIRECTORY)),
+                reader._root_generation(root_fd))
+        finally:
+            os.close(root_fd)
+        reader._rebuild_collect = real_collect
+        reader.reset_discovery_metrics()
+        again = reader.list()
+        self.assertEqual(reader.discovery_metrics()["active_full_scans"], 0)
+        self.assertEqual({row["id"] for row in again}, self._direct_active_ids())
+        self.assertEqual(self._index_ids(), self._direct_active_ids())
+
+    def test_rebuild_rereads_a_record_changed_during_the_scan(self):
+        active = self._fresh_rebuild_store(complete=10, pending=4)
+        reader = obligations.ObligationStore(self.root)
+        real_collect = reader._rebuild_collect
+        calls = []
+
+        def collect_and_change(root_fd):
+            result = real_collect(root_fd)
+            if not calls:
+                calls.append(1)
+                # Outside the index lock: one active record becomes complete,
+                # another disappears (a prune-style unlink).
+                path = self.store._record_path("rb-pending-000")
+                record = json.loads(path.read_text(encoding="utf-8"))
+                record["state"] = "complete"
+                temporary = path.with_name(".swap.tmp")
+                temporary.write_text(json.dumps(record), encoding="utf-8")
+                os.replace(temporary, path)
+                self.store._record_path("rb-pending-001").unlink()
+            return result
+
+        reader._rebuild_collect = collect_and_change
+        reader.reset_discovery_metrics()
+        rows = reader.list()
+        metrics = reader.discovery_metrics()
+        self.assertEqual({row["id"] for row in rows}, {"rb-pending-002", "rb-pending-003"})
+        self.assertLessEqual(metrics["active_rebuild_reads"] - 14, 2)
+        self.assertEqual(metrics["active_rebuild_rechecks"], 2)
+        self.assertFalse((active / ".rebuild").exists())
+        reader._rebuild_collect = real_collect
+        self.assertEqual(self._index_ids(), {"rb-pending-002", "rb-pending-003"})
+
+    def test_rebuild_stays_marked_when_records_keep_changing(self):
+        active = self._fresh_rebuild_store(complete=5, pending=3)
+        reader = obligations.ObligationStore(self.root)
+        real_collect = reader._rebuild_collect
+        serial = []
+
+        def collect_always_different(root_fd):
+            result = real_collect(root_fd)
+            serial.append(1)
+            name, signature = next(iter(sorted(result.items())))
+            result[name] = signature[:2] + (signature[2] + len(serial),) + signature[3:]
+            return result
+
+        reader._rebuild_collect = collect_always_different
+        rows = reader.list()
+        self.assertTrue((active / ".rebuild").exists())
+        self.assertEqual({row["id"] for row in rows}, self._direct_active_ids())
+
+    def test_repeated_rebuild_reads_only_changed_records(self):
+        active = self._fresh_rebuild_store(complete=50, pending=2)
+        reader = obligations.ObligationStore(self.root)
+        reader.list()
+        self.assertFalse((active / ".rebuild").exists())
+        (active / ".rebuild").write_text("rebuild\n", encoding="utf-8")
+        self.store.update("rb-pending-000", state="complete")
+        (active / ".rebuild").write_text("rebuild\n", encoding="utf-8")
+        reader.reset_discovery_metrics()
+        rows = reader.list()
+        metrics = reader.discovery_metrics()
+        self.assertEqual(metrics["active_full_scans"], 1)
+        self.assertEqual(metrics["active_rebuild_reads"], 1)
+        self.assertEqual({row["id"] for row in rows}, {"rb-pending-001"})
+        self.assertFalse((active / ".rebuild").exists())
+
+    def test_index_matches_store_under_concurrent_writers(self):
+        for index in range(12):
+            self.store.create(f"cc-seed-{index:02d}", "message", {},
+                              {"ref": "%032x" % index})
+        self.store.list()
+        stop = threading.Event()
+        errors = []
+
+        def writer(tag):
+            mine = obligations.ObligationStore(self.root)
+            serial = 0
+            try:
+                while not stop.is_set():
+                    serial += 1
+                    duty_id = f"cc-{tag}-{serial:04d}"
+                    kind = "retire" if serial % 3 == 0 else "message"
+                    mine.create(duty_id, kind, {}, {"ref": "%032x" % (serial + 5000 * (tag == "b"))}
+                                if kind == "message" else {"target": duty_id})
+                    os.close(mine._lock(f"cc-lock-{tag}-{serial:04d}"))
+                    if serial % 2:
+                        if kind == "retire":
+                            mine.update(duty_id, state="complete", result="normal-exit")
+                            mine.update(duty_id, observation={"terminal_followup": "complete"})
+                        else:
+                            mine.update(duty_id, state="complete")
+            except Exception as exc:  # surfaced by the main thread
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(tag,), daemon=True)
+                   for tag in ("a", "b")]
+        reader = obligations.ObligationStore(self.root)
+        for thread in threads:
+            thread.start()
+        loops = 0
+        full_scans = 0
+        deadline = time.monotonic() + 0.5
+        try:
+            while time.monotonic() < deadline:
+                reader.reset_discovery_metrics()
+                reader.begin_read_pass()
+                try:
+                    rows = reader.list()
+                finally:
+                    reader.end_read_pass()
+                ids = {row["id"] for row in rows}
+                for seed in range(12):
+                    self.assertIn(f"cc-seed-{seed:02d}", ids)
+                full_scans += reader.discovery_metrics()["active_full_scans"]
+                loops += 1
+        finally:
+            stop.set()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(errors, [])
+        self.assertGreater(loops, 3)
+        self.assertLessEqual(full_scans, max(1, loops // 2 + 1))
+        final = {row["id"] for row in reader.list()}
+        self.assertEqual(final, self._direct_active_ids())
+        self.assertEqual(self._index_ids(), self._direct_active_ids())
 
     def test_pruned_registered_delivery_source_does_not_reaccept_a_duty(self):
         from types import SimpleNamespace
