@@ -34,11 +34,11 @@ INSTALL_CMD = (
 )
 INSTALL_CLAUDE_CMD = INSTALL_CMD + " -s -- --runtime claude"
 
-# The public pages' headline and the three lines under it are written here and nowhere else in this file:
+# The public pages' headline and the lines under it are written here and nowhere else in this file:
 # the home page's h1, its title, meta and og text, and its lede all follow these values, so a new headline
 # is a one-line change. (README.md and README.ko.md keep their own copy, one place each.)
-HEADLINE = ("Different agents.", "One way of working.")
-THREE_LINES = (
+HEADLINE = ("Different agents.", "A consistent way of working.")
+KEY_LINES = (
     ("Your way.", "Before work you ask for starts it confirms what you meant. What you corrected and decided is "
                   "remembered and offered to your next sessions, on any of the three agents (Claude Code, Codex, "
                   "OpenCode)."),
@@ -48,11 +48,13 @@ THREE_LINES = (
                                   "session can start workers on any of them. Every step shows in the panel and "
                                   "in Fleet (a terminal view of all your sessions), so you can correct it at "
                                   "any point."),
+    ("Sound fundamentals, your own way.", "Hearting holds to the fundamentals each field agrees on and leaves "
+                                          "the rest to you."),
 )
 
 
 def headline_plain() -> str:
-    """``Different agents, one way of working`` (the headline as one clause, for title and meta)."""
+    """``Different agents, a consistent way of working`` (the headline as one clause, for title and meta)."""
     return ", ".join(part.rstrip(".") for part in HEADLINE).lower().capitalize()
 
 
@@ -900,8 +902,8 @@ def kinds_table() -> str:
             'project.</p>')
 
 
-def three_lines() -> str:
-    return "<br>\n  ".join(f"<b>{html.escape(label)}</b> {html.escape(text)}" for label, text in THREE_LINES)
+def key_lines() -> str:
+    return "<br>\n  ".join(f"<b>{html.escape(label)}</b> {html.escape(text)}" for label, text in KEY_LINES)
 
 
 def opening() -> str:
@@ -1482,7 +1484,7 @@ def render_index(d: dict) -> str:
 <section class="hero"><div class="wrap">
   <span class="eyebrow"><i></i>For Claude Code, Codex, and OpenCode</span>
   <h1>{HEADLINE[0]} <span class="grad">{HEADLINE[1]}</span></h1>
-  <p class="lede">{three_lines()}</p>
+  <p class="lede">{key_lines()}</p>
 
   <div class="install" id="install">
     <span class="p">$</span>

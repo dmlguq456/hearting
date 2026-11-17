@@ -8,12 +8,13 @@
 
 <h1 align="center">Hearting</h1>
 
-<p align="center"><strong>Different agents. One way of working.</strong></p>
+<p align="center"><strong>Different agents. A consistent way of working.</strong></p>
 
 <p align="center">
 <strong>Your way.</strong> Before work you ask for starts it confirms what you meant. What you corrected and decided is remembered and offered to your next sessions, on any of the three agents (Claude Code, Codex, OpenCode).<br>
 <strong>The same everywhere.</strong> Hearting is a layer on top of all three, so the work runs with the same requests, stages, and checks.<br>
-<strong>Across sessions, in view.</strong> Sessions on Claude Code, Codex, and OpenCode hand work to each other, and any session can start workers on any of them. Every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.
+<strong>Across sessions, in view.</strong> Sessions on Claude Code, Codex, and OpenCode hand work to each other, and any session can start workers on any of them. Every step shows in the panel and in Fleet (a terminal view of all your sessions), so you can correct it at any point.<br>
+<strong>Sound fundamentals, your own way.</strong> Hearting holds to the fundamentals each field agrees on and leaves the rest to you.
 </p>
 
 <p align="center">
@@ -380,7 +381,7 @@ None of these is needed for the basic workflow.
 
 ## Design principles
 
-Three more commitments sit behind the three lines at the top.
+Three more commitments sit behind the four lines at the top.
 
 - **A crutch for low-cost agents.** Hearting cannot make a weak model smarter.
   It lets one carry out your intent anyway: a capable model settles the intent
