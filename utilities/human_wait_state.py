@@ -5317,6 +5317,25 @@ def _timed_refresh():
     return (generation or None), duration
 
 
+def _follow_installed_release(fd: int) -> None:
+    """Hand the shared producer to the installed release in place (OPERATIONS §5.9a).
+
+    The producer keeps the code of the window that started it. Where nothing is
+    half done, it becomes the same script of the installed release under the
+    same PID, so the held single-flight lock stays held. A steady release only
+    reads the pointer; anything undecidable keeps this code.
+    """
+    try:
+        from parent_next_directive import release_moved
+        if not release_moved(Path(__file__).resolve().parents[1]):
+            return
+        import peer_obligations
+        os.set_inheritable(fd, True)  # the flock descriptor survives exec under the same number
+        peer_obligations.follow_installed_release(__file__, ["--refresh-cache", "--lock-fd", str(fd)])
+    except Exception:  # noqa: BLE001 -- a failed move keeps refreshing with this code
+        pass
+
+
 def _producer_loop(fd: int) -> None:
     global _producer_root
     root = state_root()
@@ -5324,8 +5343,10 @@ def _producer_loop(fd: int) -> None:
     try:
         if not root.is_dir():
             return
+        _follow_installed_release(fd)
         generation, duration = _timed_refresh()
         while True:
+            _follow_installed_release(fd)
             now = time.time()
             try:
                 demand = (root / ".demand").stat().st_mtime

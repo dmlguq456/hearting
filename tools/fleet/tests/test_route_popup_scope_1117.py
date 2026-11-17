@@ -56,6 +56,9 @@ class ScopedCollectionFixture(unittest.TestCase):
         self.root = root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.work = root / "work"
         self.work.mkdir()
+        # Each folder is its own repository root, so the project test does not
+        # depend on whether some parent of the temp dir (e.g. /tmp) is a repository.
+        (self.work / ".git").mkdir()
         self.jobs = root / "jobs.log"
         self.index = root / "resource-index.json"
         self.config = root / "claude"
@@ -112,6 +115,7 @@ class ScopedCollectionFixture(unittest.TestCase):
         base = {**identity, "cwd": str(self.work), "status": "running"}
         other = self.root / "other-project"
         other.mkdir()
+        (other / ".git").mkdir()
         registry = self.root / "resource-runs.json"
         registry.write_text(json.dumps({"schema_version": 1, "runs": {
             "by-attempt": {**base, "parent_attempt_id": "att-popup"},
