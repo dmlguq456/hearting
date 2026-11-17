@@ -790,7 +790,7 @@ SHOTS = {
              "conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report "
              "from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model "
              "Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the "
-             "Rate limiting route at 2/4 execute, its owner and its execute worker, and, under a thin rule, the peer request Test run to [b2] "
+             "Rate limiting route at 2/4 execute, its owner and its execute worker under the dispatch rule, and, under the request rule, the peer request Test run to [b2] "
              "at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a "
              "global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line "
              "the working folder and hearting v4.46.0."),
@@ -824,9 +824,9 @@ SHOTS = {
                        "session's head, the 2 QUESTIONS box with a rose border, the first question, its three choices "
                        "as text, the first recommended, and answer, Ctrl+] at the right; then messages and the usage "
                        "of the three agents."),
-    "requests": (764, 830, "Two panels side by side. Left, the session [4f] that asked: in its route box, under a thin rule, an arrow to "
+    "requests": (764, 830, "Two panels side by side. Left, the session [4f] that asked: in its route box, under the request rule, an arrow to "
                  "[b2] with its harness, model, and effort, Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and "
-                 "a note to [9c]. Right, the session [b2] that was asked: in its PEER REQUEST box, an arrow from [4f] with its harness, model, and effort, Test "
+                 "a note to [9c]. Right, the session [b2] that was asked: in its route box, under the request rule, an arrow from [4f] with its harness, model, and effort, Test "
                  "run, partial answer; under it its reply to [4f]."),
 }
 # The picture the README and the home page open with, with its one line.
@@ -876,14 +876,14 @@ KINDS = (
     ("QUESTIONS", "A question waiting for your answer or approval", "An agent that needs you",
      "When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where",
      "Panel: the rose-bordered box &middot; Fleet: QUESTIONS"),
-    ("ROUTE", "The work this session started: its stages, who runs each, and how each is checked",
+    ("ROUTE", "The work this session started: its stages, who runs each, and how each is checked (what the session does itself stands in the box&rsquo;s <code>direct</code> zone, what it started in <code>dispatch</code>)",
      "This session, once a request needs a route (the route then starts its owner)",
      "When the route finishes; its result stays one line until your next input or ten minutes",
      "Panel: the route box &middot; Fleet: ROUTES"),
     ("PEER REQUEST", "Work handed to another session, with a number, revisions, and reports", "The session that asks",
      "By the other session&rsquo;s final report or rejection, or the asker&rsquo;s cancel; a partial report keeps it open",
-     "Panel: rows in the route box, under a thin rule when a route and a request both show and there is room, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
-     "<code>&#10003;</code> finished, <code>&#10005;</code> rejected or cancelled), whole in the MESSAGES popup &middot; Fleet: the session page&rsquo;s PEER REQUEST rows and a PEERS link"),
+     "Panel: rows in the route box&rsquo;s <code>request</code> zone, under its own named rule, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
+     "<code>&#10003;</code> finished, <code>&#10005;</code> rejected or cancelled), whole in the MESSAGES popup &middot; Fleet: the session page&rsquo;s <code>request</code> rows and a PEERS link"),
     ("MESSAGES", "A short note, read and done", "Any session", "Nothing to close",
      "Panel: MESSAGES &middot; Fleet: the session page and PEERS"),
     ("PEERS", "The sessions linked by messages, requests, supervision, or a handover", "Those links themselves",
@@ -1809,8 +1809,8 @@ def render_fleet(d: dict) -> str:
   <div class="split" style="margin-top:26px">
     <div>
       <h3>What it shows</h3>
-      <p class="t">Project and Git, model and context, the title and what the session is doing now; then a few
-      rows each of the questions waiting for you, this session&rsquo;s routes and requests in one box, messages, and
+      <p class="t">Project and Git (with a PEERS row when the session supervises or is supervised), model and context, the title and what the session is doing now; then a few
+      rows each of the questions waiting for you, this session&rsquo;s routes and requests in one box of three zones (direct, dispatch, request), messages, and
       saved memory with its scope and kind; then the usage windows of the three agents. The <b>STATUS &rsaquo;</b>
       button opens the project&rsquo;s status document. Press the questions, the route box, or MESSAGES and its whole table opens in a popup in the
       middle of the window, the rest gray behind it; MEM and USAGE open nothing.</p>
@@ -1830,7 +1830,7 @@ def render_fleet(d: dict) -> str:
       <h3>Sessions hand each other work</h3>
       <p class="t">A session can hand another session work as a <b>request</b>: it gets a number, the other session
       opens the body itself, partial reports keep it open, and a final report closes it and wakes the session
-      that asked. Both panels list it as a PEER REQUEST until it closes &mdash; <code>&rarr;</code> handed
+      that asked. Both panels list it in the route box&rsquo;s <code>request</code> zone until it closes &mdash; <code>&rarr;</code> handed
       out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished.</p>
       <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet lists a
       session&rsquo;s requests on its session page and shows the newest as a PEERS link; it has no list of every

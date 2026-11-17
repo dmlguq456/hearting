@@ -46,10 +46,11 @@ motion, or none, under [Settings](#settings)). From the top:
 | Rows | What they say |
 |---|---|
 | `REPO`, `GIT` | The repository and its linked-worktree count (`web-api · wt 1`); the branch, then `✓` when it is level with its upstream or `↑N`/`↓N`, then any merge or rebase warning. The **STATUS ›** button at the right end of the REPO row (the screen's language word) opens this session's campaign status document whole in a popup: Fleet's status lines for the project first, markdown tables as aligned columns. It is dim when there is no document yet and absent where the project keeps no artifact root |
+| `PEERS` | Directly under `GIT`, the sessions tied by supervision: `[c7] ⚑ ─ [d4] [3b]`, the supervising session, its flag, a dash, then the sessions it supervises, in that order in every window. A supervised window shows only its own group (`[c7] ⚑ ─ [d4]`); a window that is both shows two groups joined by ` · `. Numbers wear their session's harness color (this window's own bold), the flag is Fleet's steward pink, and no session state is shown. Short of cells the last numbers become `+N`; a window with no such relation has no row. The numbers are plain text here; Fleet's session page has the same line, where they open that session's page |
 | `MODEL`, `CTX` | The model and effort, and the context gauge and percent |
 | `TITLE`, `NOW` | Fleet's title for the session and what it is doing now, under a thin rule. The NOW row ends in `›` like the section heads: a press opens this session's story in a popup (below). The `›` takes the last line's room only when there is some, otherwise it replaces the end of that line (`…›`), so the rows around it keep their size |
 | `N QUESTIONS` | The questions waiting for you, in one thin rounded box. The line is rose where this window has a question to answer, dim where only an answer on its way or a wait answered elsewhere stands. Inside, in the body color: the first line, the choices as text (`1 label · 2 label`), and `↵ answer · Ctrl+]` at the right. An answer on its way reads `✓ answer sent · Public only` for ten minutes, the first words green. Nothing else in the panel is red but that border and a wait answered elsewhere's `◑` and count; in mono, eight colors, or `NO_COLOR` the border's weight tells the two apart |
-| `N ROUTE │ N PEER REQUEST` | The route box (`REQUEST` where the whole title does not fit). Every route: who works on it now (role, runtime, model, effort), its `CTX` gauge with the time after it, its kind and intensity first (`● code(standard)`, after the kinds it continues: `frame ✓ → code(standard)`), its title, and where it stands (`staged 2/4: execute`, the stage name blinking), its live workers hung under it by `↳`; then, under one thin rule when both stand and rows allow, the requests this session sent (`→`) or received (`◂`, `✓` closed): the first row names the other session (`[6c] claude Opus 5.5 xhigh`, its age at the right), then the title, then the status. A failed route colors only its own line. A finished route stays with its result until your next input or ten minutes |
+| `N ROUTE` | The route box, one box in three zones under named rules drawn inside it (the names are English in every language): `─ direct ───` (what this session does itself; its line has no `(direct)` bracket: `● code  title`), `─ dispatch ───` (the routes this session started) and `─ request ───` (the requests it sent or received). The title counts the routes alone (`2 ROUTE`, `ROUTE` when only requests stand). A zone's name and mark have their own color: direct orange, dispatch green, request yellow. A zone with no rows has no rule. A route in `dispatch`: who works on it now (role, runtime, model, effort), its `CTX` gauge with the time after it, its kind and intensity first (`● code(standard)`, after the kinds it continues: `frame ✓ → code(standard)`), its title, and where it stands (`staged 2/4: execute`, the stage name blinking), its live workers hung under it by `↳`. In `request`, the requests this session sent (`→`) or received (`◂`, `✓` closed): the first row names the other session (`[6c] claude Opus 5.5 xhigh`, its age at the right), then the title, then the status. A route a request opened stands in `direct` or `dispatch` like any other. A failed route colors only its own line. A finished route stays with its result until your next input or ten minutes |
 | `MESSAGES +N` | Up to five messages, each its head (who, runtime, time, kind) and its first line; see [Requests and messages](#requests-and-messages) |
 | `MEM` | Up to five of the newest saved memory records of this repository and global ones, each a dim head (`◆` durable or `◇` working, its scope, kind, and age) over its headline |
 | `USAGE` | One row each for Claude, Codex, and OpenCode with the 5h, 7d, and model windows each reports, from the usage records Fleet already keeps; nothing is fetched. A harness with none reported reads `?` |
@@ -59,7 +60,7 @@ Each section head reads `N NAME counts ─── ›` (the route box carries its
 in its top line); `MEM` and `USAGE` open nothing. Experiments and the
 machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. A
 40-row window keeps two or three rows per section; short of rows the other
-sections step down to one row first, then the route box folds its routes
+sections step down to one row first, then the route box drops its zone rules and folds its routes
 (context into the first row, then the kind row, then one row each) and scrolls
 in place under the wheel, its border counting what it hides. A press on a
 section's head or rows opens its popup (below); a press on any row of a route
@@ -174,7 +175,7 @@ it open. A report is not approval, release, or a user answer. A request
 follows the other session to a successor only when Hearting's lineage confirms
 the handover.
 
-In the panel, every open request has rows in the route box, after the routes and a thin rule:
+In the panel, every open request has rows in the route box's `request` zone, under its own rule:
 `→ [b2] codex gpt-5.5 high   2m`, its title, then `partial answer`; a request row opens the MESSAGES popup. The
 popup shows it whole, requests first: the
 parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`; `awaiting delivery` and why while the other window has not taken it in, as `peer-steward show` says), `WORK`
@@ -185,7 +186,7 @@ stays longer until its last answer has been seen.
 A message you sent that has not gone into the other window reads the same in `MESSAGES` (`→ [b2] · awaiting delivery · text stands in its input …`): the first words always show, the reason as far as the row reaches, and the `MESSAGES` popup shows it whole.
 
 <p align="center">
-  <img src="fleet/requests.png" alt="Two panels: in its route box, under a thin rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; in its PEER REQUEST box, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
+  <img src="fleet/requests.png" alt="Two panels: in its route box, under the request rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; in its route box, under the request rule, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
 </p>
 
 **Messages** are short notes, sent with
@@ -212,7 +213,7 @@ How an idle session is reached differs by runtime
   a command to wait on (`bounded-wait` with a `join`) instead of promising a
   wake.
 
-Fleet lists a session's requests on its session page and shows the newest as a PEERS
+Fleet lists a session's requests on its session page, in the `request` zone of its route list, and shows the newest as a PEERS
 link; it has no list of every request across sessions, and you cannot send a request or
 message from Fleet yet.
 

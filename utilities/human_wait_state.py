@@ -1220,6 +1220,21 @@ def _valid_doers(value):
     return kept
 
 
+def _valid_peers(value):
+    """The bounded ``session_peers`` map (who supervises whom, by Fleet number and harness), or {}."""
+    if not isinstance(value, dict) or len(value) > _SESSION_DOERS:
+        return {}
+    pair = lambda item: (isinstance(item, list) and len(item) == 2 and all(isinstance(x, str) and len(x) <= 32 and x.isprintable() for x in item))
+    kept = {}
+    for key, entry in value.items():
+        if (isinstance(key, str) and "\0" in key and len(key) <= 300 and isinstance(entry, dict)
+                and isinstance(entry.get("tag"), str) and len(entry["tag"]) <= 32
+                and all(isinstance(entry.get(name), list) and len(entry[name]) <= 16 and all(pair(i) for i in entry[name])
+                        for name in ("supervisors", "targets"))):
+            kept[key] = {"tag": entry["tag"], "supervisors": entry["supervisors"], "targets": entry["targets"]}
+    return kept
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -1265,6 +1280,7 @@ def publish_cache(result: dict) -> bool:
              "route_status": result.get("route_status", {}),
              "route_panels": panels,
              "session_doers": _valid_doers(result.get("session_doers")),
+             "session_peers": _valid_peers(result.get("session_peers")),
              "route_sessions": result.get("route_sessions", []),
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
@@ -1486,6 +1502,7 @@ def cached_view(*, now=None, request=True):
             "health": value.get("health", []), "complete": bool(value.get("complete")),
             "route_panels": value.get("route_panels", {}),
             "session_doers": _valid_doers(value.get("session_doers")),
+            "session_peers": _valid_peers(value.get("session_peers")),
             "observed_at": value["observed_at"]}
 
 
@@ -4837,6 +4854,9 @@ def _refresh_cache() -> bool:
                     # The displayed sessions' own model and effort from this same pass: a panel names
                     # the other session of a peer request with them (no second read or collection).
                     result["session_doers"] = session_doers(snapshot)
+                    # Who supervises whom (the steward records this pass already holds): the panel's PEERS line.
+                    from tools.fleet.explorer.live import session_peers
+                    result["session_peers"] = session_peers(snapshot)
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):

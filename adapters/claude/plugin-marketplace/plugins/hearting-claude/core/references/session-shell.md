@@ -362,7 +362,15 @@ parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
 warnings and `💀merged`; no Git row when nothing is left; no folder or branch
-glyph. Only `↑N` and `↓N` take a color, Fleet's own (`lvl_g` green, `lvl_r`
+glyph. Directly under `GIT` stands `PEERS` (11-17, the person's PEERS sketch; the label column of
+`REPO`/`GIT`): `PEERS  [c7] ⚑ ─ [d4] [3b]`, the supervising session, its flag, a dash, then the sessions it
+supervises, in that order from every window; a supervised window shows only its own group
+(`[c7] ⚑ ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
+harness color (this window's own bold), the flag is Fleet's steward pink, the dash and the dot dim; it shows no
+session state. Short of cells the last numbers become `+N`; a window with no relation has no row. The relation
+is the one Fleet already uses (registered steward relations between live sessions of the same repository), handed
+over by the shared cache producer as `session_peers`: no new read and no new file. The numbers are plain text, no
+press. The bottom layout carries the row after Git and gives it up with the optional rows. Only `↑N` and `↓N` take a color, Fleet's own (`lvl_g` green, `lvl_r`
 red), on the Git row, the bottom layout's head and Claude's statusline alike;
 mono and eight colors paint them dim as the other Git words, and `NO_COLOR`
 keeps the words with no color. The bottom layout and Claude's statusline keep the repository name
@@ -371,7 +379,7 @@ parentheses (`(main ✓ 🚧 3)`, the same branch cut and `✓`; Claude's status
 cuts at the width its lines are shown at, its bash fallback by `COLUMNS`),
 cut with `…` within that row and absent without a Git reading; Fleet's own Git
 words are unchanged. Beside the
-native area one empty row then parts the repository and Git from the model
+native area one empty row then parts the repository, Git and peers from the model
 (without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (two rows beside
 the native area, one `│`-separated row with the repo row at the bottom). Beside
@@ -417,10 +425,9 @@ state, a thin rule, and `›` (`3 QUESTIONS ──── ›`,
 `MESSAGES +3 ──── ›`; `MEM ────` has no popup and no `›`; under the native area
 `messages` keeps its word). The routes stand in the one thin rounded box, as
 v4.36.4 drew it (restored 11-15: the person had asked for the routes to open a
-popup, not for the box to go), its title in its top line (`╭─ 4 ROUTE │ 2 PEER REQUEST ─╮`,
-under the native area `route 4 │ peer request 2`; 11-16, the person: "PEER REQUEST라고 할까?": the
-word list's `PEER REQUEST`, its `REQUEST` only where the whole title does not fit, before any word
-of it goes). Nothing opens in place: a press on a
+popup, not for the box to go), its title in its top line (`╭─ 2 ROUTE ─╮`,
+under the native area `route 2`; 11-17: the title counts the routes alone, `ROUTE` where only requests
+stand, and the `PEER REQUEST` word is gone from it, the requests being a zone of the box, below). Nothing opens in place: a press on a
 head or on any row of its section opens its popup (any row of a route, its workers'
 box too, the routes popup with that route unfolded; the box's top line the routes
 popup; a request row the MESSAGES popup).
@@ -458,9 +465,21 @@ popup; a request row the MESSAGES popup).
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
   this session sent (→) or received (◂, `✓` closed) with their status and age, every
-  one of them shown (no `+N more`); laid out at the box's inner width. Where routes and
-  requests both stand, one thin rule of the box's own line (`├────┤`) parts them (11-16, the
-  person: "블록 안에서 구분선을 하나 긋고"); short of rows it goes before any content row, and a
+  one of them shown (no `+N more`); laid out at the box's inner width. 11-17: the box is one box
+  of three zones, each under a named rule drawn inside it (`─ direct ───`, `─ dispatch ───`,
+  `─ request ───`, in this order; the names are English in every language; it replaces the one
+  `├────┤` rule that parted routes from requests since 11-16). `direct` is what this session does
+  itself (its route line has no `(direct)` bracket: `● code  title`), `dispatch` the routes this
+  session started (lines as before: owner, stage line, workers), `request` the peer requests it sent
+  or received (lines and presses as before). A zone's name and its mark (dot or arrow) have their own
+  color: direct orange, dispatch green, request yellow, none a harness color or the steward pink. A
+  zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
+  direct or dispatch like any other. Fleet's session page lists its routes in the same zones and order
+  (` ─ direct ─`, ` ─ dispatch ─`, ` ─ request ─`; its section head counts routes alone), has the PEERS
+  line directly under its title row, before MODEL (the numbers of other sessions open that session's page;
+  the panel's are plain text), where its old bottom `PEERS … steward` line stood, and reads a route staged
+  into a single stage as the panel does (`code(standard) · staged 1/1: execute`, was `code (execute ●)`);
+  Fleet's ROUTES and OVERVIEW tables are unchanged. Short of rows the rules go before any content row, and a
   box that scrolls draws none. Beside the
   native area a route reads, by who set each row (11-17, the person's route row sketch 5):
   its first row is a state mark and the kind of work with its intensity (`● code(standard)`: the
@@ -596,7 +615,7 @@ then its summary keeps one row and the guidance line goes); the
 structural rows (the empty row inside the metadata, the head's rule); then every message takes the
 one-row form (`← [e7] text`; 11-16, v4.36.4's places and order: a body keeps its one row, then the one-row
 form, then fewer messages); then the
-route box's own steps, every route at the same step (v4.36.4, spec rules 34 (b), 38,
+route box's own steps (its zone rules first, 11-17), every route at the same step (v4.36.4, spec rules 34 (b), 38,
 48 (c)): the context rows fold into the first rows (percent and time at the right,
 no gauge) and the workers take one row each, the workers go (the kind row ends with
 `· worker N`), the kind rows go, every route takes one row; then fewer messages show, the
@@ -650,7 +669,7 @@ stands with the same space on both sides (inside, one cell between the frame
 and the text on every row, in every harness); a native on the terminal's own
 background keeps them plain. The panel's own background does not change.
 The route box's count is the producer's whole current-route count (`4 ROUTE`,
-under the native area `route 4`; the producer's own label alone, with Fleet's
+under the native area `route 4`; routes alone, never the requests, 11-17; the producer's own label alone, with Fleet's
 running, waiting and stopped counts after it, `4 ROUTE ⠏2 ●1 ✕1`, over a `Checking`
 row while its rows are not read yet; a count the producer sent no rows for stands
 in the box's lower line). Each current route (the ones the statusline counts) and

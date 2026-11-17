@@ -781,6 +781,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
                        "shape": (ui_text("fleet.session_panel.shape_direct") if row.get("shape") == "direct"
                                  else clean(row.get("shape"))[:32]), "owner_model": clean(row.get("owner_model"))[:64],
                        "doer_worker": row.get("doer_worker") is True,
+                       # 11-17 (route zones): `direct` is what this session does itself, `dispatch` the route it started.
+                       "zone": "direct" if row.get("shape") == "direct" else "dispatch",
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     if now is not None:

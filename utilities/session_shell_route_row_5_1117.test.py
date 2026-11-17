@@ -48,9 +48,9 @@ const render=(routes,width,height,{side=true,model={},configuration={},harness='
 const text=r=>r.map(p=>p.text).join('');
 const plain=v=>v.rows.map(text);
 const draw=(routes,width,height,o)=>plain(render(routes,width,height,o));
-// The box's rows, the frame and the box's own sides taken off.
+// The box's rows, the frame and the box's own sides taken off (and the zone rules `─ dispatch ───`: this test reads the routes).
 const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s)),z=rows.findIndex((s,i)=>i>a&&s.startsWith('│ ╰'));
-  return rows.slice(a+1,z).map(s=>s.replace(/^│ │ ?/,'').replace(/ ?│ │$/,'').replace(/\s+$/,''));};
+  return rows.slice(a+1,z).map(s=>s.replace(/^│ │ ?/,'').replace(/ ?│ │$/,'').replace(/\s+$/,'')).filter(s=>!/^─ (direct|dispatch|request) ─+$/.test(s));};
 const only=(route,width=44,o={})=>box(draw([route],width,60,o));
 const rowParts=(v,re)=>v.rows.find(r=>re.test(text(r)));
 // (The box's title `1 ROUTE` pulses while a route runs; it is not a route's line.)

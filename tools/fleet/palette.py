@@ -35,6 +35,11 @@ _HUE_OF = {
     # F-100c: a STEWARD session (depth −1: `steward on`, or it watched/started a session) wears
     # bright pink text: distinct from white/yellow, without a special background.
     "tag_steward": ("p", _A_B),
+    # 11-17 (route zones): the ROUTE box's three zone names and their marks, each its own color, none a harness
+    # hue (cyan, magenta, blue) or the steward pink: direct orange, dispatch green, request yellow.
+    "zone_direct": ("o", 0), "zone_dispatch": ("g", 0), "zone_request": ("y", 0),
+    # This window's own number on the PEERS line: its harness hue, bold.
+    "hbb_claude": ("c", _A_B), "hbb_codex": ("m", _A_B), "hbb_opencode": ("l", _A_B), "hbb_other": ("d", _A_B),
     "tag_steward_dim": ("p", _A_D),
     # Badge text, NOT the glyph: plain yellow, distinct from the dim g_unused glyph so the
     # ●>○>◌ ink-weight gradient still reads.

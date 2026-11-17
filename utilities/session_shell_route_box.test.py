@@ -59,16 +59,22 @@ for(const c of golden.cases){
  // 11-16: the request rows, the rule above them and the title/bottom lines that count them are drawn anew (peer
  // requests read as a route's doer: `peer-request-1116`); the route rows are the golden's (drawn again 11-17) cell for
  // cell, and so are their press cells. A scene without requests is compared whole.
+ // 11-17 (route zones): the named rules (`─ dispatch ───`, `─ request ───`) are drawn anew too: the comparison is made
+ // with those rule rows (they have no press of their own) taken out of the drawn box, the golden having none.
  const drawn=model.requests&&model.requests.length;
+ const zoneRule=r=>/^│ ─ (?:direct|dispatch|request) ─+\s*│$/.test(txt(r.map(([t])=>({text:t}))));
+ const unzone=(rows,hs)=>{const keep=rows.map(r=>!zoneRule(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
+  return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));
   const keep=rows.map((r,i)=>i>0&&i<rows.length-1&&!own.has(i)&&!txt(r.map(([t])=>({text:t}))).includes('├'));
   const at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  if(!drawn){
-  assert.deepEqual(v.rows.slice(b.a,b.b+1).map(runs),want,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
-  assert.deepEqual(hits,c.hits,label);
+  const got=unzone(v.rows.slice(b.a,b.b+1).map(runs),hits);
+  assert.deepEqual(got.rows,want,label+'\n'+v.rows.slice(b.a,b.b+1).map(txt).join('\n'));
+  assert.deepEqual(got.hits,c.hits,label);
  }else{
-  const got=mine(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),exp=mine(want,c.hits);
+  const own=unzone(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),got=mine(own.rows,own.hits),exp=mine(want,c.hits);
   // The requests now take more rows than the one row v4.36.4 gave each, so a short box folds its routes one step
   // sooner: where it still draws the routes in the same form, they are v4.36.4's rows cell for cell (and their
   // press cells); where it folds them, the golden's rows no longer apply (the fold's own tests are below).
@@ -97,15 +103,16 @@ for(const [side,width,height] of [[true,40,60],[true,54,46],[false,120,20]]){
  assert.deepEqual(act(b.a),['popup:ROUTE'],label);assert.deepEqual(act(b.b),[],label);
  for(let i=b.a+1;i<b.b;i++){
   const a=act(i);
-  // (11-16: the thin rule between the routes and the requests has no press of its own; a request is three rows, all of them the request's.)
-  if(rows[i].includes('├')){assert.equal(a.length,0,i+label);continue;}
+  // (11-17: the named zone rules (`─ dispatch ───`) have no press of their own; a request is three rows, all of them the request's, under the `request` rule.)
+  const rule=s=>/^│ │ ─ (?:direct|dispatch|request) ─+ │ │$/.test(s),requestAt=rows.findIndex(s=>/^│ │ ─ request ─+ │ │$/.test(s));
+  if(rule(rows[i])){assert.equal(a.length,0,i+label);continue;}
   assert.equal(a.length,1,i+label);
-  if(i>rows.findIndex(s=>s.includes('├'))&&rows.some(s=>s.includes('├')))assert.equal(a[0],'popup:MESSAGES',i+label);
+  if(requestAt>=0&&i>requestAt)assert.equal(a[0],'popup:MESSAGES',i+label);
   else assert(['popup:ROUTE:rt-1111111111111111','popup:ROUTE:rt-2222222222222222'].includes(a[0]),i+' '+a[0]+label);
  }
  // Each route's rows, from its first to its last (the workers' box with it), open that route.
  const first=id=>v.hits.find(h=>h.action==='popup:ROUTE:'+id).row,last=id=>v.hits.filter(h=>h.action==='popup:ROUTE:'+id).at(-1).row;
- assert(first('rt-1111111111111111')===b.a+1&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
+ assert(first('rt-1111111111111111')===b.a+2&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
  assert(v.hits.filter(h=>h.action==='popup:MESSAGES'&&h.row>b.a&&h.row<b.b).length>=2,label);
  assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length===2,label);
  // Nothing opens in place any more.
@@ -145,7 +152,7 @@ assert.equal(down.routeArea.offset,2);
 """)
 
     def test_the_requests_stand_once_in_the_route_box(self):
-        # Item 3: the requests stand in the route box (after the routes, `N REQUEST` in its top line), and
+        # Item 3: the requests stand in the route box (after the routes, under the `request` rule), and
         # MESSAGES draws the messages alone (its `+N` counts messages); the MESSAGES popup still reads the
         # requests whole (their numbers, reports and body) before the messages.
         self.node(self.HEAD + r"""
@@ -153,8 +160,11 @@ const scene=golden.scenes.na;
 for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const v=pv.render({width,height,side,fill:side,model:scene,state:'working',configuration:{}});
  const rows=v.rows.map(txt),b=boxOf(v),label=side+' '+width+'\n'+rows.join('\n');
- // (`PEER REQUEST` whole where the title's line holds it, `REQUEST` where it does not: 32 cells' panel.)
- assert(rows[b.a].includes(side?(width>=40?'│ 2 PEER REQUEST':'│ 2 REQUEST'):'│ peer request 2'),label);
+ // (11-17: the title counts the routes alone, the requests are the box's `request` zone, named by its rule.)
+ assert(rows[b.a].includes(side?'╭─ 2 ROUTE':'╭─ route 2')&&!/REQUEST|request \d/.test(rows[b.a]),label);
+ // (Short of rows the rules go first: the 32-cell panel here draws none, the others the one `request` rule.)
+ const rules=rows.slice(b.a+1,b.b).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length;
+ assert(rules<=1&&(width!==40&&width!==120||rules===1),label);
  // The two request rows stand in the box, once each (`◂ [e7] 검토 요청…`, `→ [52] frames…`).
  const requestRow=s=>/^│ │ (◂ \[e7\]|→ \[52\])/.test(s);
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);

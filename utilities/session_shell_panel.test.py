@@ -624,7 +624,7 @@ const frame={id:'f',title:'셸 다듬기 방향 잡기',kind:'working',state:'wo
  stages:[{name:'frame',mark:'●',current:true},{name:'frame-alternative',mark:'●'},{name:'frame-review',mark:''}],
  paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}};
 const four=[one,stg,wait,frame];
-const box=rows=>rows.filter(s=>s.startsWith('│ │ '));
+const box=rows=>rows.filter(s=>s.startsWith('│ │ ')&&!/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s));// (11-17: the zone rules `─ dispatch ───` are no route's row)
 // (a) The owner row stands two cells in: its mark, the role word (the route's own column), then the harness, model, effort
 // (and the one-step route's open tool at the end of the row).
 const r50=draw(four,48,50),who=box(r50).filter(s=>/│ │   [⠋●] /.test(s));
@@ -699,7 +699,7 @@ const one={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:
  workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'utilities/panel.py'})]};
 const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:false,owner_paint:undefined,paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','61%','━━━━')},
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m'})]};
-const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1);};
+const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1).filter(s=>!/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s));};// (11-17: without the zone rules `─ dispatch ───`)
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: the kind / title / owner (its open tool at the end of its row) / CTX with the route's time after its
 // percent; no stage line, no `↳`.
@@ -725,7 +725,7 @@ const ownerRow=rowOf(/● owner/),workerRow=rowOf(/↳ ⠋ worker/);
 assert(ownerRow.find(p=>p.text==='●').dim&&ownerRow.find(p=>p.text==='owner ').dim&&ownerRow.some(p=>p.text==='Opus 5.5'),JSON.stringify(ownerRow));
 assert(workerRow.find(p=>p.text==='↳ ').dim&&workerRow.find(p=>p.text==='worker').dim&&workerRow.some(p=>p.text==='Sonnet 5.5'),JSON.stringify(workerRow));
 // Every row of the route opens it (11-15: the routes popup with it unfolded), the worker's as the owner's.
-const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),routeRows=v1.rows.map((r,i)=>/^│ │ /.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);
+const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),routeRows=v1.rows.map((r,i)=>/^│ │ /.test(r.map(p=>p.text).join(''))&&!/^│ │ ─ dispatch ─+ │ │$/.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);// (11-17: the zone rule `─ dispatch ───` opens nothing)
 assert.equal(routeRows.length,8,JSON.stringify(routeRows));
 for(const i of routeRows)assert(area.includes(i),i+' '+JSON.stringify(area));
 // Two workers: each hangs by its own `↳`; 3N rows, the last row the route box's bottom line.
@@ -1591,7 +1591,7 @@ for(const height of [50,70,90]){
  assert(r>0&&/^│ 1 QUESTIONS /.test(rows[r-1])&&blank(rows[r-2]),height+'\n'+rows.join('\n'));
  // MESSAGES keeps its rows (five at most, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
  const last=rows.findLastIndex(s=>/^│ [←→] /.test(s));
- assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+8&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
+ assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+9&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
  assert(blank(rows[m-1])&&rows.slice(rb+1,m).every(blank)&&rows.slice(r+1,rb).every(s=>/^│ │ /.test(s)),height+'\n'+rows.join('\n'));
  // The press targets went with their rows.
  const v=view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged],route_count:2},state:'idle',configuration:{},questions:()=>[]});
@@ -1709,8 +1709,12 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS
  // the box's top line the route popup and a route's rows the popup with that route unfolded; MEM opens nothing.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
  for(let i=sec.QUESTIONS.head;i<=sec.QUESTIONS.head+sec.QUESTIONS.rows.length;i++)assert.deepEqual(act(i),['question'],'question '+i+label);
- assert.deepEqual(act(sec.ROUTE.head),['popup:ROUTE']);assert.deepEqual(act(sec.ROUTE.from),['popup:ROUTE:a']);
- if(height===46)assert.deepEqual(box.slice(0,-1).map((_,k)=>act(sec.ROUTE.from+k)[0]),['a','a','a','b','b','c','c','d','d'].map(id=>'popup:ROUTE:'+id),label);
+ assert.deepEqual(act(sec.ROUTE.head),['popup:ROUTE']);
+ // (11-17: with room the box's first row is the zone rule `─ dispatch ───`, which opens nothing; a window of fewer rows draws none.)
+ assert.equal(/^│ │ ─ dispatch ─+ │ │$/.test(box[0]),height===46,label);
+ const first=sec.ROUTE.from+(height===46?1:0);assert.deepEqual(act(first),['popup:ROUTE:a']);
+ if(height===46){assert.deepEqual(act(sec.ROUTE.from),[],label);
+  assert.deepEqual(box.slice(1,-1).map((_,k)=>act(first+k)[0]),['a','a','a','b','b','c','c','d','d'].map(id=>'popup:ROUTE:'+id),label);}
  assert.deepEqual(act(sec.ROUTE.from+box.length-1),[],'the bottom line opens nothing');
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);sec.MESSAGES.rows.forEach((_,k)=>assert.deepEqual(act(sec.MESSAGES.from+k),['popup:MESSAGES']));
  assert.deepEqual(act(sec.MEM.head),[]);sec.MEM.rows.forEach((_,k)=>assert.deepEqual(act(sec.MEM.from+k),[]));
@@ -2580,13 +2584,14 @@ const render=(width,height,extra={},model=base)=>view.render({width,height,side:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_the_title_counts_routes_then_requests_and_no_hourglass_stands_anywhere(self):
-        # Restored 11-15 from v4.36.4: `N ROUTE │ M REQUEST` in the route box's top line, the request
-        # rows in the box after the routes; MESSAGES keeps the messages alone and draws no request.
+        # Restored 11-15 from v4.36.4, 11-17: `N ROUTE` in the route box's top line (the requests no tab of it), the request
+        # rows in the box after the routes, under the `request` rule; MESSAGES keeps the messages alone and draws no request.
         self.node(r"""
 for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
  const lines=text(render(width,height));
- // (11-16: `PEER REQUEST` whole where the title's line holds it, `REQUEST` where it does not.)
- assert(lines.some(s=>width<80?(width>=37?s.includes('1 ROUTE │ 3 PEER REQUEST'):s.includes('1 ROUTE │ 3 REQUEST')):s.includes('route 1 │ peer request 3')),lines.join('\n'));
+ // (11-17, route zones: the title counts the routes alone, the requests are the box's `request` zone.)
+ assert(lines.some(s=>width<80?/^│ ╭─ 1 ROUTE ─+╮ │$/.test(s):/^│ ╭─ route 1 ─+╮ │$/.test(s)),lines.join('\n'));
+ assert(!lines.some(s=>/REQUEST|request \d/.test(s)),lines.join('\n'));
  for(const mark of ['◂','→','✓'])assert(lines.filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
  assert(!lines.join('').includes('⏳')&&!lines.join('').includes('⌛'));
  assert(lines.some(s=>s.includes('MSG_KEPT')),'messages stay at '+width);
@@ -2597,13 +2602,15 @@ for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
 }
 const none=text(render(37,30,{},{...base,requests:[]}));
 assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
-// Spec rules 57, 58: `REQUEST` is a dark gray name tag (as MESSAGES and MEM), never the route
-// count's state color.
+// Spec rules 57, 58 (11-17: the tag is gone, the title is the route count in its state color): the box's
+// `request` zone is named by a dim rule of its own.
+const rows0=v=>text(v).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s));
 const styled={...base,routes:[{...routes[0],state:'idle',kind:'idle'}],styles:{dim:{dim:true},g_idle:{fg:186}}};
 for(const width of [32,38]){
  const v=render(width,30,{},styled),parts=v.rows.flat();
- const tag=parts.find(p=>/^\d+ (PEER )?REQUEST$/.test(p.text));
- assert(tag&&tag.dim===true&&tag.fg===undefined,JSON.stringify(tag));
+ assert(!parts.some(p=>/REQUEST/.test(p.text)),'no request tab in the title');
+ const rule=parts.find(p=>p.text==='request'&&p.role==='zone');
+ assert(rows0(v).length===1&&rule,JSON.stringify(parts.filter(p=>/request/.test(p.text))));
  const count=parts.find(p=>/^\d+ ROUTE$/.test(p.text));
  assert(count&&count.fg===186,JSON.stringify(count));
  // A press on a request's row opens the MESSAGES popup (as the request rows of MESSAGES did).
@@ -2650,9 +2657,9 @@ assert(whole.some(s=>s.includes('짧은 일 · final answer')),whole.join('\n'))
         self.node(r"""
 const lone=text(render(32,24,{},{...base,routes:[],route_count:0,requests:[
  q('rq-dddddd','→','[52]','https://example.com/'+'a'.repeat(80),'전달됨','request-out')]}));
-// (11-16: `REQUEST` where `PEER REQUEST` does not fit the title's line; no thin rule: no route stands above.)
-assert(lone.some(s=>s.includes('1 PEER REQUEST')||s.includes('1 REQUEST')),lone.join('\n'));
-assert(!lone.some(s=>s.includes('├')),lone.join('\n'));
+// (11-17, route zones: a request alone reads `ROUTE` in the title; the one `request` rule stands, no `dispatch` one: no route stands above.)
+assert(lone.some(s=>/^│ ╭─ ROUTE ─+╮ │$/.test(s))&&!lone.some(s=>/REQUEST/.test(s)),lone.join('\n'));
+assert(lone.filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length===1&&!lone.some(s=>/─ (dispatch|direct) ─/.test(s))&&!lone.some(s=>s.includes('├')),lone.join('\n'));
 const at=lone.findIndex(s=>s.includes('→ [52]'));
 assert(at>0&&lone[at+1].includes('…')&&lone[at+2].includes('전달됨'),lone.join('\n'));
 assert(lone.every(s=>[...s].length<=32));

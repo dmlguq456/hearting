@@ -108,6 +108,7 @@ def snapshot(now=None, workdir=None):
           title="Checkpoint eval", model="Opus 5.5", effort="high",
           ctx_pct=38, elapsed_min=54, branch="exp/checkpoint-eval", liveness="working",
           session_tag="d1", herdr_attached=True, steward=True, mtime=now - 90,
+          steward_targets=[{"harness": "opencode", "session_id": "readme-oc-ml", "name": "e8"}],
           summary="Waiting on the ASR eval"),
         S(harness="opencode", pid=71005, cwd=ml, session_id="readme-oc-ml",
           title="Loader workers", model="glm-5.2", effort="high",

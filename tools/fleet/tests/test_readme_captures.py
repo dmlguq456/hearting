@@ -93,7 +93,10 @@ class ReadmeDemoRows(unittest.TestCase):
         # The session page's MESSAGES (the note it sent [e8]) and the session it is linked with.
         self.assertIn("MESSAGES", text["session"])
         self.assertIn("Profile 4, 8 and 16 loader workers", text["session"])
-        self.assertRegex(text["session"], r"PEERS  \[\w+\]")
+        # 11-17: the PEERS line sits under the page title (supervisor, flag, dash, supervised), and the routes stand
+        # under a named zone rule.
+        self.assertRegex(text["session"], r"PEERS +\[d1\] ⚑ ─ \[e8\]")
+        self.assertRegex(text["session"], r"─ dispatch ─+")
         # The README's opening pictures: one moment, the request and the route [4f]'s panel shows,
         # each Fleet list whole (nothing cut off below it).
         # PEERS lists the newest link of each kind: the request [4f] sent [b2] stands as a PEER REQUEST link.

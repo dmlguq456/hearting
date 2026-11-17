@@ -2064,6 +2064,53 @@ def _peer_session_views(session_rows, session_index, now, snapshot):
     return views
 
 
+def _steward_targets(session_rows, session_index, tag_by_sid):
+    """``{steward tag: [watched tags]}``: the registered steward relations between two live sessions of
+    one repository, the one reading of "who supervises whom" (the steward columns and the panel's PEERS line)."""
+    harness_of = {row["tag"]: row["harness"] for row in session_rows}
+    repo_of = {row["tag"]: row["repo"] for row in session_rows}
+    steward_targets = {}
+    for row in session_rows:
+        tag = row["tag"]
+        session = session_index[tag]["session"]
+        targets = []
+        for target in (_get(session, "steward_targets") or ()):
+            sid = _text(_get(target, "session_id"))
+            other = tag_by_sid.get(sid)
+            if (other and other in harness_of and other != tag
+                    and repo_of.get(other) == row["repo"] and other not in targets):
+                targets.append(other)
+        if targets:
+            steward_targets[tag] = targets
+    return steward_targets
+
+
+def session_peers(snapshot, now=None):
+    """``{"<harness>\\0<session id>": {"tag", "supervisors": [[tag, harness]], "targets": [[tag, harness]]}}`` for each
+    session in a supervision relation, from the steward records the snapshot already holds (no read of its own)."""
+    clock = time.time() if now is None else now
+    rows, index = _session_records(snapshot, clock, _resolver(snapshot))
+    tag_by_sid = {known: tag for tag, info in index.items() for known in info["ids"]}
+    joined = _get(_get(snapshot, "observations", default={}) or {}, "replay_sources", default={}) or {}
+    tag_by_sid.update(_get(joined, "historical_tags", default={}) or {})
+    targets = _steward_targets(rows, index, tag_by_sid)
+    harness_of = {row["tag"]: row["harness"] for row in rows}
+    supervisors = {}
+    for steward, watched in targets.items():
+        for tag in watched:
+            supervisors.setdefault(tag, []).append(steward)
+    found = {}
+    for tag, info in index.items():
+        above, below = supervisors.get(tag, []), targets.get(tag, [])
+        if not (above or below):
+            continue
+        entry = {"tag": tag, "supervisors": [[t, harness_of.get(t) or ""] for t in above[:8]],
+                 "targets": [[t, harness_of.get(t) or ""] for t in below[:16]]}
+        for sid in info["ids"]:
+            found[str(_get(info["session"], "harness")) + "\0" + sid] = entry
+    return found
+
+
 def _peer_records(session_rows, session_index, now, snapshot=None):
     tag_by_sid = {known: tag for tag, info in session_index.items() for known in info["ids"]}
     observations = _get(snapshot, "observations", default={}) or {}
@@ -2186,19 +2233,7 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
     by_repo = {}
     for row in session_rows:
         by_repo.setdefault(row["repo"], []).append(row["tag"])
-    steward_targets = {}
-    for row in session_rows:
-        tag = row["tag"]
-        session = session_index[tag]["session"]
-        targets = []
-        for target in (_get(session, "steward_targets") or ()):
-            sid = _text(_get(target, "session_id"))
-            other = tag_by_sid.get(sid)
-            if (other and other in harness_of and other != tag
-                    and repo_of.get(other) == row["repo"] and other not in targets):
-                targets.append(other)
-        if targets:
-            steward_targets[tag] = targets
+    steward_targets = _steward_targets(session_rows, session_index, tag_by_sid)
     mutual = {(a, b) for (a, b) in sent if (b, a) in sent}
     nodes, steward_columns, ordered_lanes = [], [], []
     for repo, tags in by_repo.items():
@@ -2250,7 +2285,8 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
                 if (upper, lower) in mutual or (lower, upper) in mutual:
                     ordered_lanes.append([upper, lower])
     return nodes, {"links": unique, "cross": [cross] if cross else [],
-                   "side_lanes": ordered_lanes, "steward_columns": steward_columns}
+                   "side_lanes": ordered_lanes, "steward_columns": steward_columns,
+                   "supervision": steward_targets}
 
 
 # -- hosts / compute / usage / memory / system / events ------------------------------------

@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자, 가는 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자(dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. route는 이 세션이 띄운 단계별 일입니다. 데모 데이터이며 대화는 예시입니다.</sub></p>
 
@@ -49,9 +49,9 @@
 ### 세션 옆 패널
 
 새 설치에서는 새로 여는 Claude Code, Codex, OpenCode 터미널마다 오른쪽에 40칸
-패널이 열립니다. 프로젝트와 Git 상태, 모델과 문맥, 세션 제목과 지금 하는 일 아래로
-구획마다 몇 줄씩 보입니다: 사용자의 답을 기다리는 질문, 이 세션의 route와 요청을 한
-상자에, 메시지, 저장된 기억(`MEM`), 세 에이전트의 사용량 창(`USAGE`). 질문,
+패널이 열립니다. 프로젝트와 Git 상태(세션이 감독하거나 감독받으면 `PEERS` 줄: `[c7] ⚑ ─ [d4]`), 모델과 문맥, 세션 제목과 지금 하는 일 아래로
+구획마다 몇 줄씩 보입니다: 사용자의 답을 기다리는 질문, 이 세션의 route와 요청을 세 영역(`direct`, `dispatch`, `request`)으로
+나눈 한 상자에, 메시지, 저장된 기억(`MEM`), 세 에이전트의 사용량 창(`USAGE`). 질문,
 route 상자, `MESSAGES`를 누르면 그 표 전부가 창 가운데 팝업으로 뜨고, 뒤는 회색으로 가라앉습니다.
 `MEM`과 `USAGE`는 누르면 열리는 것이 없습니다.
 여기서 답할 질문은 장미색 테두리 상자에 섭니다. **Ctrl+]** 키는 늘 팝업을 열고 그
@@ -81,8 +81,8 @@ Fleet를 열고, **p**는 패널을 에이전트 화면 아래 띠로 접으며,
 | | 무엇인가 | 누가 여나 | 언제 닫히나 | 어디에 보이나 |
 |---|---|---|---|---|
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 질문 | 사용자가 필요한 에이전트 | 사용자가 답할 때(패널이나 Fleet에서), 또는 일이 끝날 때. 다른 자리에서 답할 질문은 그 자리를 알려 줍니다 | 패널: 장미색 테두리 상자 · Fleet: QUESTIONS |
-| **ROUTE** | 이 세션이 띄운 일: 단계, 단계마다 맡은 쪽, 검증 | 요청이 route를 필요로 할 때 이 세션(route가 owner를 띄움) | route가 끝날 때. 결과는 다음 입력이나 10분까지 한 줄로 남습니다 | 패널: route 상자 · Fleet: ROUTES |
-| **PEER REQUEST** | 다른 세션에 맡긴 일. 번호, 판, 보고가 붙습니다 | 맡기는 세션 | 상대 세션의 최종 보고나 거절, 또는 맡긴 쪽의 취소로. 일부 보고는 열어 둡니다 | 패널: route 상자의 줄(route와 요청이 함께 있고 줄이 남으면 가는 선 아래. 상대 세션의 번호·하네스·모델·effort가 붙고, `→` 맡긴 일, `◂` 받은 일, `✓` 끝난 일, `✕` 거절·취소), MESSAGES 팝업에 전문 · Fleet: 세션 페이지의 `PEER REQUEST` 줄과 PEERS의 연결 |
+| **ROUTE** | 이 세션이 띄운 일: 단계, 단계마다 맡은 쪽, 검증(세션이 직접 하는 일은 상자의 `direct` 영역, 띄운 일은 `dispatch` 영역) | 요청이 route를 필요로 할 때 이 세션(route가 owner를 띄움) | route가 끝날 때. 결과는 다음 입력이나 10분까지 한 줄로 남습니다 | 패널: route 상자 · Fleet: ROUTES |
+| **PEER REQUEST** | 다른 세션에 맡긴 일. 번호, 판, 보고가 붙습니다 | 맡기는 세션 | 상대 세션의 최종 보고나 거절, 또는 맡긴 쪽의 취소로. 일부 보고는 열어 둡니다 | 패널: route 상자의 `request` 영역(이름 붙은 선 아래. 상대 세션의 번호·하네스·모델·effort가 붙고, `→` 맡긴 일, `◂` 받은 일, `✓` 끝난 일, `✕` 거절·취소), MESSAGES 팝업에 전문 · Fleet: 세션 페이지의 `request` 줄과 PEERS의 연결 |
 | **MESSAGES** | 읽고 끝나는 짧은 글 | 어느 세션이든 | 닫을 것이 없습니다 | 패널: MESSAGES · Fleet: 세션 페이지와 PEERS |
 | **PEERS** | 메시지, 요청, 감독, 이어받음으로 이어진 세션들 | 그 이어짐 자체 | — | Fleet: PEERS |
 
@@ -100,7 +100,7 @@ API 시험을 다시 돌리고 보고해 달라고 해줘.” 상대 세션은 �
 승인이나 사용자의 답이 아닙니다.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자의 가는 선 아래에 [b2]로 가는 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 끝난 검토. 그 아래 MESSAGES에 [b2]의 답과 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: PEER REQUEST 상자에 [4f]에서 온 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 그 아래 [4f]에 보낸 답." width="80%">
+  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자의 request 선 아래에 [b2]로 가는 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 끝난 검토. 그 아래 MESSAGES에 [b2]의 답과 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: route 상자의 request 선 아래에 [4f]에서 온 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 그 아래 [4f]에 보낸 답." width="80%">
 </p>
 <p align="center"><sub>같은 요청이 맡긴 세션(<code>[4f]</code>)과 맡은 세션(<code>[b2]</code>)의 패널에 보입니다. 데모 데이터.</sub></p>
 

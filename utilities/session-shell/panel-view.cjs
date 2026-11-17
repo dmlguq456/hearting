@@ -571,7 +571,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const live=r=>!stale&&r?.kind==='working';
   // A route's glyph: a working route spins on the frame like Fleet's route mark.
   // A finished result that did not pass (its `outcome_key` is the failure's) takes the failure's mark and hue.
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')};};
+  // 11-17 (route zones, the person: "그래도 컬러는 전부 달라야하지 않을까"): the `●` and the spinner of a route of the `direct` zone
+  // wear that zone's color (a lit beat in it, a dark beat dimmed); a `dispatch` route's are the working green they were, a
+  // request's arrow the request color (`requestForms`). A failure's, a result's and a wait's mark keep the state's own.
+  const zonePaint=(r,part)=>{
+    const look=r&&r.zone==='direct'?styles.zone_direct:null;
+    return look&&(part.spin||part.text==='●'||/^[\u2800-\u28ff]$/.test(String(part.text)))?{...part,...look,dim:part.dim===true||look.dim===true}:part;
+  };
+  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
   // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
   const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
@@ -677,6 +684,33 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
+    // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑ ─ [d4] [3b]`: the supervising session, its flag, a dash, then the
+    // ones it supervises; the same order from every window. Each number is its harness's color (this window's own bold),
+    // the flag alone Fleet's steward pink, the dash and the `·` between two groups dim. No state of any session. Short of
+    // cells the last sessions go as `+N` (a group left with none goes whole); a window with no relation has no row.
+    const peerRow=room=>{
+      const peers=model.peers&&typeof model.peers==='object'&&Array.isArray(model.peers.groups)?model.peers:null;
+      const groups=(peers?peers.groups:[]).filter(g=>g&&g.steward&&Array.isArray(g.members)&&g.members.length);
+      if(!groups.length)return [];
+      const number=e=>({...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true}:{}),role:'peer'});
+      const flag={...text('⚑','tag_steward'),role:'steward',...(model.no_color===true||cfg.theme==='mono'?{bold:true,dim:false}:{})};
+      const build=keep=>{
+        const out=[];let rest=keep;
+        for(const g of groups){
+          const take=Math.min(rest,g.members.length);rest-=take;
+          if(!take)break;
+          if(out.length)out.push(text(' · ','dim'));
+          out.push(number(g.steward),text(' '),flag,text(' '),text('─','dim'),...g.members.slice(0,take).flatMap((e,i)=>[text(' '),number(e)]));
+        }
+        return out;
+      };
+      const total=groups.reduce((n,g)=>n+g.members.length,0);
+      for(let keep=total;keep>=1;keep--){
+        const row=[...build(keep),...(keep<total?[text(' +'+(total-keep),'dim')]:[])];
+        if(size(row)<=room)return row;
+      }
+      return cut(build(1),room);
+    };
     // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
     // button `현황 ›` (`STATUS ›`, Fleet's `fleet.repo.status`) at the right end of the REPO row: the word in
     // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
@@ -730,6 +764,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
       };
       if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
+      {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
       if(top.length){metaGaps.add(top.length);top.push([]);}
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
@@ -785,6 +820,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const joinJobs=jobs.length&&size(top.at(-1))+3+size(jobs)<=inner;
       if(joinJobs){top[top.length-1]=joined([top.at(-1),jobs]);mark(top.length-1,'jobs');}
       putGit();
+      {const peerParts=peerRow(inner-6);if(peerParts.length){optional.add(top.length);top.push([text('PEERS ','dim'),...peerParts]);}}
       if(jobs.length&&!joinJobs){optional.add(top.length);jobRows.add(top.length);top.push(cut(jobs,inner));mark(top.length-1,'jobs');}
       // The repo's open work gives way with the running jobs.
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
@@ -937,11 +973,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const kindText=word=>({text:clean(word),foreground:null,bold:true,dim:false});
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
-    const intensityOf=r=>{
+    const intensityRaw=r=>{
       const word=clean(r.intensity||'').trim();
       if(word||framed(r))return word;
       const shape=clean(r.shape||'').trim(),stages=Array.isArray(r.stages)?r.stages:[];
       return shape&&!/^(staged|one-shot-owner|unknown)/.test(shape)&&!stages.length?shape:'';
+    };
+    // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
+    // gives) is left out of the line; a real intensity (`quick`) stays.
+    const intensityOf=r=>{
+      const word=intensityRaw(r);
+      return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
     const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
       return word?[kindText(word),...(inten?[text('('+inten+')','dim')]:[])]:[];};
@@ -1261,7 +1303,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
       const room=inner-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
       return blink=>{
-        const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?(blink?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
+        const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,blink?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
         for(const tail of wait.length?[wait,[]]:[[]])for(const chain of chains)if(size(chain)+size(tail)<=room)return [mark,text(' '),...chain,...tail];
         return [mark,text(' '),...cut(chains.at(-1),room)];
       };
@@ -1278,7 +1320,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const supervising=workers.length>0,E=r.elapsed?[text(r.elapsed)]:[];
         const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
         const running=stages.find(stage=>stage.current||stage.mark==='✕');
-        routeRows.push({parts:folded(r),two:side,first:side?headRow(r):null,
+        routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,first:side?headRow(r):null,
           who:side&&!open?whoRow(r,supervising):null,lead:side&&!open?leadRow(r,supervising):null,
           ctx:side&&!open?(tree?(()=>{const g=ctxTimed(leadPaint(r),E,inner-4);return g?[text('    '),...g]:null;})():ctxRow(r)):null,
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
@@ -1289,11 +1331,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const q of requestList){
         // A request row opens the MESSAGES popup, where the requests read whole (as their MESSAGES rows did).
         // 11-16: beside the native area its rows read as a route's (`requestForms`, the one drawing of them).
-        const key='popup:MESSAGES',f=requestForms(q,{text,measure,width:inner});
-        routeRows.push({parts:f.one,two:side,head:f.head,titleRow:f.title,statusRow:f.status,titled:f.titled,
+        const key='popup:MESSAGES',f=requestForms(q,{text,measure,width:inner,arrow:'zone_request'});
+        routeRows.push({zone:'request',parts:f.one,two:side,head:f.head,titleRow:f.title,statusRow:f.status,titled:f.titled,
           action:key,kind:q.kind||'request-out',request:true});
       }
     });
+    // 11-17 (route zones): the rows stand in their zones' order, `direct`, `dispatch`, `request`, each zone's own order kept.
+    const ZONES=['direct','dispatch','request'],zoneIndex=x=>ZONES.indexOf(x.zone);
+    routeRows.sort((a,b)=>zoneIndex(a)-zoneIndex(b));
     // No rows yet: the producer's own label stands alone; a known empty list draws no box.
     // Spec rule 45 (a): beside the native area the count leads its upper-case word (`2 ROUTE`),
     // the producer's label too (`route 3 ⠏2` → `3 ROUTE ⠏2`); the bottom layout keeps `route N`.
@@ -1301,18 +1346,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const label=upper(clean(model.route_label||'').trim());
     // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
     const running=shown.some(live);
-    // `N ROUTE │ M REQUEST`: the request count follows the route count in the same title. The
-    // route count keeps its state color; `REQUEST` is a name tag like `MESSAGES`, `MEM` and the
-    // info labels: dark gray upper case (spec rules 57, 58), never a state color.
-    const routeHead=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:[];
-    // 11-16 (the person: "PEER REQUEST라고 할까?"): the tag is `PEER REQUEST` (the word list's), `REQUEST` only where
-    // the whole title does not fit in the top line (the title's first step, before a word of it goes).
-    const requestTag=word=>side?requestList.length+' '+word:word.toLowerCase()+' '+requestList.length;
-    const requestHead=requestList.length?[text(requestTag(t('peer_request','PEER REQUEST')),'dim')]:[];
-    const requestShort=requestList.length?[text(requestTag(t('peer_request_short','REQUEST')),'dim')]:[];
-    const titleOfBox=tag=>routeHead.length||tag.length?[...routeHead,...(routeHead.length&&tag.length?[text(' │ ','dim')]:[]),...tag]:null;
-    const routeTitle=titleOfBox(requestHead),routeTitleShort=requestHead.length?titleOfBox(requestShort):null;
-    const routeTitleAlt=requestHead.length?[routeTitleShort,...(routeHead.length?[routeHead]:[])]:[];
+    // 11-17 (route zones): the box's title is the route count alone (the requests are a zone of the box, not a tab);
+    // a box with requests and no route reads `ROUTE`.
+    const routeHead=shown.length?[running?pulse(upper('route '+total)):text(upper('route '+total),'g_idle')]:label?[text(label,'g_idle')]:requestList.length?[text(upper('route'),'g_idle')]:[];
+    const routeTitle=routeHead.length?routeHead:null,routeTitleAlt=[];
     const routeChecking=!routeRows.length&&label?[{parts:[text(t('checking','Checking'))],action:'popup:ROUTE'}]:[];
     // The route box's own steps short of rows (below): its title's second rows (`keepMulti`), the
     // context rows (and the workers' box) fold into the first rows, the workers go, the kind rows go,
@@ -1351,14 +1388,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the rows of its tallest window, so wheeling it moves nothing else (11-15: v4.36.4 measured the
     // first routes in their own order, and a taller window took a head row's place).
     const rank={working:0,'request-in':0,blocked:1,'request-rejected':1,idle:2,'request-out':2,dead:3,done:4,'request-done':4,stale:4};
-    const routeOrder=()=>routeLimit<routeRows.length?routeRows.map((x,i)=>[x,i]).sort((a,b)=>((rank[a[0].kind]??2)-(rank[b[0].kind]??2))||a[1]-b[1]).map(([x])=>x):routeRows;
+    // (Short of rows the window keeps the zones in their order, and within a zone the most important first.)
+    const routeOrder=()=>routeLimit<routeRows.length?routeRows.map((x,i)=>[x,i]).sort((a,b)=>(zoneIndex(a[0])-zoneIndex(b[0]))||((rank[a[0].kind]??2)-(rank[b[0].kind]??2))||a[1]-b[1]).map(([x])=>x):routeRows;
     const routeWindows=()=>{const list=routeOrder().map(routeSize),n=Math.max(1,list.length-routeLimit+1);
       return Math.max(...Array.from({length:n},(_,at)=>list.slice(at,at+routeLimit).reduce((a,b)=>a+b,0)));};
-    // 11-16 (the person: "블록 안에서 구분선을 하나 긋고"): one thin rule of the box's own line (`├──┤`) parts the routes
-    // from the requests, only where both stand and the box shows all of them; short of rows it goes before any content row.
+    // 11-17 (route zones, the person: "나로 하고 direct / 그 아래는 dispatch 라고 쓰고, 다시 그 아래에 request"): a named rule
+    // (`─ direct ───`) opens each zone that has rows, in the zone's own color; a zone with no row has no rule. Short of rows
+    // the rules go before any content row (the box is then as it was), and a box scrolled to fewer rows draws none.
     let keepRouteRule=true;
-    const routeRule=()=>keepRouteRule&&listed.length>0&&requestList.length>0&&routeLimit>=routeRows.length;
-    const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows()+(routeRule()?1:0):routeChecking.length):0;
+    const zoneNames=()=>ZONES.filter(z=>routeRows.some(x=>x.zone===z));
+    const routeRule=()=>keepRouteRule&&routeRows.length>0&&routeLimit>=routeRows.length;
+    const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows()+(routeRule()?zoneNames().length:0):routeChecking.length):0;
+    const zoneRow=(zone,key)=>{
+      const room=Math.max(0,inner-box),head=[{...text('─ ','dim'),role:'messages'},{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
+      return boxRow({parts:[...head,{...text('─'.repeat(Math.max(0,room-size(head))),'dim'),role:'messages'}]},key);
+    };
     const routeBlockOf=()=>{
       const key=tone.route;
       // Spec rule 23: rows short, the box shows a window of the routes and scrolls
@@ -1376,7 +1420,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt}),groups:['route']}];
       let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
-        if(routeRule()&&item.request&&before&&!before.request)block.push({parts:[L('├',key),L('─'.repeat(Math.max(0,inner-2)),key),L('┤',key)]});
+        if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
         before=item;
         // A press on any row of a route opens the route popup with it unfolded.
         for(const parts of item.two?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
@@ -1910,7 +1954,7 @@ function veil(configuration={},{colors=256,noColor=false,background=''}={}){
 // row stands. `titled` is the title and the status on one row (the kind rows gone), `one` the one-row form. Short of
 // cells the age goes first, then the effort, then the model; then the title is cut with `…` (past that the harness goes,
 // then the title); the other session and the status stay.
-function requestForms(q,{text,measure,width}){
+function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const size=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
   const clip=(parts,limit)=>{const out=[];let used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return out;};
@@ -1918,7 +1962,7 @@ function requestForms(q,{text,measure,width}){
   const pad=n=>text(' '.repeat(Math.max(0,n)));
   const paint=q.paint&&typeof q.paint==='object'?q.paint:{};
   const piece=p=>p&&typeof p==='object'&&clean(p.text).trim()?[{...p,text:clean(p.text)}]:[];
-  const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':'loc_repo');
+  const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':arrow);
   const who=q.who?[text(String(q.who),'dim')]:[];
   const H=piece(paint.harness),M=piece(paint.model_text),F=piece(paint.effort);
   const title=[text(String(q.title||q.id),'loc_repo')];
