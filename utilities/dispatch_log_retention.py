@@ -679,7 +679,8 @@ def _pass(jobs, root, layout, state, now_ns, started):
         candidate_kinds[name] = "prompt"
     unknown_names.update(unknown_prompt_names)
     referenced_names = set(candidate_rows)
-    ordered = sorted(referenced_names)
+    # A name whose file is already gone is never removable: examining it would spend the budget on nothing.
+    ordered = sorted(name for name in referenced_names if name in stamps)
     cursor = state.get("cursor", "")
     after = [name for name in ordered if name > cursor]
     selected_names = (after + [name for name in ordered if name <= cursor])[:EXAMINE_LIMIT]

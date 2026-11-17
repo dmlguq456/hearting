@@ -354,6 +354,19 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual((first["examined"], second["examined"]), (64, 64))
         self.assertEqual(set(seen), set(attempts))
 
+    def test_gone_log_names_do_not_use_the_examine_budget(self):
+        for index in range(200):   # rows whose log is already gone sort before the live ones
+            self.add_row(f"att-gone-{index:03d}", self.logs / f"a-gone-{index:03d}.jsonl",
+                         ended=self.now - 30 * DAY)
+        live = []
+        for index in range(5):
+            path = self.log(f"z-live-{index}.jsonl")
+            self.add_row(f"att-live-{index}", path, ended=self.now - 30 * DAY)
+            live.append(path)
+        result = self.sweep()
+        self.assertEqual((result["removed"], result["examined"]), (5, 5))
+        self.assertFalse(any(path.exists() for path in live))
+
     def test_examination_stops_once_the_removal_budget_is_full(self):
         count = R.REMOVE_LIMIT + 4
         paths = []
