@@ -131,7 +131,7 @@ what they started with. Updates keep your choice. To keep the panel but give
 the native area more room, press **▾** at the right end of the panel's last row to fold it into
 a strip under the native area, which gets the whole width back, or change its
 width and position under **⚙**
-([docs/session-panel.md](docs/session-panel.md#narrow-windows-and-folding)).
+([docs/session-panel.md](session-panel.md#narrow-windows-and-folding)).
 
 ## How do sessions pass work and messages to each other?
 
@@ -152,7 +152,7 @@ and OpenCode at its next idle or tool callback; the request stays open and
 listed meanwhile. Fleet lists a session's requests on its session page and shows the newest as a PEERS
 link; it has no list of every request across sessions, and you cannot send one from Fleet
 yet. Details:
-[docs/session-panel.md](docs/session-panel.md#requests-and-messages).
+[docs/session-panel.md](session-panel.md#requests-and-messages).
 
 ## Does the language setting translate every label?
 
