@@ -47,6 +47,41 @@ class ExchangeError(RuntimeError):
     status = "hard-failure"
     exit_code = 2
 
+    def __init__(self, message: str = "", *, check: str | None = None,
+                 where: Path | str | None = None):
+        super().__init__(message)
+        # ``check`` is a fixed vocabulary token naming the environment check
+        # that failed; ``where`` is the path it failed on. Only these two ever
+        # reach status and notices, never the free-form message.
+        self.check = check
+        self.where = where
+
+
+def _short_where(path: Path | str | None) -> str | None:
+    """Reduce a path to a fixed, name-free form: home, a top-level dir, or ``…``."""
+    if path is None:
+        return None
+    target = Path(path)
+    try:
+        home = Path.home().resolve(strict=False)
+        if target.resolve(strict=False) == home or target == Path.home():
+            return "~"
+        for base in (Path.home(), home):
+            if target != base and base in target.parents:
+                return "~/…"
+    except (OSError, RuntimeError):
+        pass
+    return str(target) if len(target.parts) <= 2 else "/…"
+
+
+def failure_label(exc: ExchangeError) -> str:
+    """Fixed-form reason for an environment failure: ``<check> at <short path>``."""
+    check = getattr(exc, "check", None)
+    if not check:
+        return ""
+    where = _short_where(getattr(exc, "where", None))
+    return f"{check} at {where}" if where else str(check)
+
 
 class ExchangeUnavailable(ExchangeError):
     status = "offline"
@@ -107,7 +142,7 @@ class GitExchange:
         self.ref = str(ref)
         self.max_objects = int(max_objects)
         if guard_tip is not None and not re.fullmatch(r"[0-9a-f]{40,64}", guard_tip):
-            raise ExchangeError("persistent remote guard tip is invalid")
+            raise ExchangeError("persistent remote guard tip is invalid", check="guard-tip-invalid")
         self.guard_tip = guard_tip
         self._forbidden_roots = [Path(item).expanduser() for item in forbidden_roots]
         self._prepared = False
@@ -119,13 +154,13 @@ class GitExchange:
             or "//" in self.ref
             or self.ref.endswith(("/", ".", ".lock"))
         ):
-            raise ExchangeError("MEM_SYNC_REF must be a full refs/heads/* ref")
+            raise ExchangeError("MEM_SYNC_REF must be a full refs/heads/* ref", check="ref-invalid")
         if (
             not self.remote
             or self.remote.startswith("-")
             or any(char in self.remote for char in ("\x00", "\n", "\r"))
         ):
-            raise ExchangeError("remote URL is missing or invalid")
+            raise ExchangeError("remote URL is missing or invalid", check="remote-invalid")
         self._validate_location()
 
     def set_forbidden_roots(self, roots: Iterable[Path | str]) -> None:
@@ -140,35 +175,56 @@ class GitExchange:
             return False
 
     @staticmethod
-    def _git_worktree_ancestor(path: Path) -> Path | None:
+    def _git_marker_valid(marker: Path) -> bool:
+        """True when ``marker`` is something Git itself would open as a repository.
+
+        A ``.git`` directory counts only with a ``HEAD``; a ``.git`` file only
+        when it points somewhere with ``gitdir:``; a symlink counts by what it
+        points at. An empty directory (or one holding only ``config.worktree``)
+        is leftover debris, not a project marker.
+        """
+        try:
+            info = marker.stat()
+            if stat.S_ISDIR(info.st_mode):
+                (marker / "HEAD").lstat()
+                return True
+            if stat.S_ISREG(info.st_mode):
+                with marker.open("rb") as handle:
+                    return handle.read(512).startswith(b"gitdir:")
+            return False
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError as exc:
+            raise ExchangeError(
+                "cannot inspect synchronized project marker",
+                check="marker-unreadable", where=marker.parent,
+            ) from exc
+
+    @classmethod
+    def _git_worktree_ancestor(cls, path: Path) -> Path | None:
         """Return a containing Git worktree root without invoking Git."""
         for candidate in (path, *path.parents):
-            marker = candidate / ".git"
-            try:
-                marker.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise ExchangeError(
-                    f"cannot inspect synchronized project marker: {marker}"
-                ) from exc
-            return candidate
+            if cls._git_marker_valid(candidate / ".git"):
+                return candidate
         return None
 
     def _validate_location(self) -> None:
         if not self.root.is_absolute():
-            raise ExchangeError("MEM_SYNC_DIR must be absolute")
+            raise ExchangeError("MEM_SYNC_DIR must be absolute",
+                                check="exchange-dir-relative")
         probe = Path(self.root.anchor)
         for part in self.root.parts[1:]:
             probe = probe / part
             if probe.exists() and probe.is_symlink():
-                raise ExchangeError(f"exchange path contains symlink: {probe}")
+                raise ExchangeError(f"exchange path contains symlink: {probe}",
+                                    check="exchange-dir-symlink", where=probe)
         resolved = self.root.resolve(strict=False)
         containing_worktree = self._git_worktree_ancestor(resolved)
         if containing_worktree is not None:
             raise ExchangeError(
                 "exchange path is inside a Git project tree: "
-                f"{containing_worktree}"
+                f"{containing_worktree}",
+                check="exchange-in-git-tree", where=containing_worktree,
             )
         config_home = Path(
             os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
@@ -177,22 +233,26 @@ class GitExchange:
         forbidden.extend(item.resolve(strict=False) for item in self._forbidden_roots)
         for item in forbidden:
             if resolved == item or self._within(resolved, item):
-                raise ExchangeError(f"exchange path is inside a forbidden root: {item}")
+                raise ExchangeError(f"exchange path is inside a forbidden root: {item}",
+                                    check="exchange-in-forbidden-root")
         remote_path = self._local_remote_path()
         if remote_path is not None:
             if not remote_path.is_absolute():
-                raise ExchangeError("local remote path must be absolute")
+                raise ExchangeError("local remote path must be absolute",
+                                    check="remote-path-relative")
             remote_resolved = remote_path.resolve(strict=False)
             remote_worktree = self._git_worktree_ancestor(remote_resolved)
             if remote_worktree is not None:
                 raise ExchangeError(
                     "local remote is inside a Git project tree: "
-                    f"{remote_worktree}"
+                    f"{remote_worktree}",
+                    check="remote-in-git-tree", where=remote_worktree,
                 )
             for item in forbidden:
                 if remote_resolved == item or self._within(remote_resolved, item):
                     raise ExchangeError(
-                        f"local remote is inside a forbidden root: {item}"
+                        f"local remote is inside a forbidden root: {item}",
+                        check="remote-in-forbidden-root",
                     )
 
     def _local_remote_path(self) -> Path | None:
