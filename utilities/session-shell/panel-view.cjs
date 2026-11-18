@@ -1086,10 +1086,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const kinds=listed.map(kindCell);
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
       const longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
-      for(const level of widths.kind>widths.full?['kind','full','short']:['full','short']){
+      const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
+      for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
-        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds};
+        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds,top:level===order[0]};
       }
       return {level:''};
     };
@@ -1097,12 +1098,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // unit's name counted only where every route of the box is a unit route). Where a unit route is drawn among other routes its
     // name stands in front of its doer cell when the column holds it (see doerCell), and the column is widened to the whole named
     // cell only where that changes nothing else in the box: the same stage form, the same title width (so beside a stage cell with
-    // room to spare); widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    // room to spare), and only from the richest stage form the box can have (the first of the order), so a width that widens it
+    // widens it at every wider width; widened or not, every row's columns stand at the same cells and no row lends another its cells.
     let bottomSet;
     const bottomLayout=()=>{
       if(bottomSet)return bottomSet;
-      const gw=columnWidth(x=>leadPaint(x).gauge5||[]),base=columnWidth(x=>owner(x,listed.every(y=>y.unit_route===true))),named=columnWidth(x=>owner(x)),plan=planBottom(base,gw);
-      if(named>base&&plan.level){const wide=planBottom(named,gw);if(wide.level===plan.level&&wide.title===plan.title)return bottomSet={ow:named,gw,plan:wide};}
+      const gw=columnWidth(x=>leadPaint(x).gauge5||[]),named=columnWidth(x=>doerCell(x,Infinity)),
+        base=listed.every(y=>y.unit_route===true)?named:columnWidth(x=>owner(x,false)),plan=planBottom(base,gw);
+      if(named>base&&plan.level&&plan.top){const wide=planBottom(named,gw);if(wide.level===plan.level&&wide.title===plan.title)return bottomSet={ow:named,gw,plan:wide};}
       return bottomSet={ow:base,gw,plan};
     };
     // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
