@@ -970,6 +970,52 @@ def _pending_endpoint(endpoint, state, *, sender=False, producer_binding=None, r
             and (endpoint.get("name") is None or isinstance(endpoint.get("name"), str)))
 
 
+_PARKED_MEMO = {}
+_PARKED_MEMO_SECONDS = 1.0
+
+
+def _parked_link(key, sid):
+    """``parked_successor`` (``key="successor"``) or ``parked_origin`` (``"origin"``) of a Claude
+    session, or None.
+
+    The link between a window's viewer and the background session that holds its conversation
+    is read live from the running processes and never stored. A scan asks about every row it
+    looks at, so the live records are read ONCE into a table (``session_registry.parked_links``)
+    that this process reuses for a second; each row then costs one lookup, and an empty table
+    (no window has a held conversation) costs nothing more."""
+    now = time.monotonic()
+    held = _PARKED_MEMO.get("table")
+    if held is None or now - held[0] >= _PARKED_MEMO_SECONDS:
+        try:
+            tools = str(Path(__file__).resolve().parents[1] / "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from fleet import session_registry
+            table = session_registry.parked_links("claude")
+        except Exception:
+            table = {}
+        held = _PARKED_MEMO["table"] = (now, table)
+    return (held[1].get(key) or {}).get(sid.lower()) if isinstance(sid, str) else None
+
+
+def _parked_recipient(original, created):
+    """The background session that took over this plain row's recipient, or ``original``.
+
+    A sender that still addressed the window's old session id after its conversation went to
+    the background reaches the new one, but only a row made after that process started: what
+    came earlier was written to the old conversation, and one that is never delivered must
+    stay where it is. The row is delivered once, by whichever session it is now bound to."""
+    if (not isinstance(original, dict) or original.get("harness") != "claude"
+            or type(created) not in (int, float) or not math.isfinite(created)
+            or not _valid_transfer_endpoint(original)):
+        return original
+    found = _parked_link("successor", original["session_id"])
+    if (not found or type(found.get("started_at")) not in (int, float)
+            or created < found["started_at"]):
+        return original
+    return {**original, "session_id": found["session_id"], "name": None}
+
+
 def pending_delivery_binding(row, *, include_acked=False):
     """The current delivery binding without changing the immutable transfer target."""
     if not isinstance(row, dict):
@@ -1006,8 +1052,15 @@ def pending_delivery_binding(row, *, include_acked=False):
             return {"recipient": dict(bound), "watches": []}
         return None
     original = row.get("to")
-    return ({"recipient": dict(original), "watches": []}
-            if _valid_transfer_endpoint(original) else None)
+    if not _valid_transfer_endpoint(original):
+        return None
+    held = _parked_recipient(original, row.get("created"))
+    if held is original:
+        return {"recipient": dict(original), "watches": []}
+    # `parked_from` names the id the row still carries, so a receipt for this binding can be
+    # told from a row that was addressed to its receiver (see `acknowledge_message_receipt`).
+    return {"recipient": dict(held), "watches": [],
+            "parked_from": {"harness": original["harness"], "session_id": original["session_id"]}}
 
 
 def pending_delivery_recipient(row):
@@ -1806,6 +1859,7 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
     except (OSError, ValueError):
         roots = None
     groups = {}
+    withheld = set()
     scanned = 0
     verified_all = True
     for name in names:
@@ -1831,7 +1885,12 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
             continue
         if not row or row.get("state") == "received":
             continue
-        recipient_key = _index_key(pending_delivery_recipient(row))
+        binding = pending_delivery_binding(row)
+        recipient_key = _index_key((binding or {}).get("recipient"))
+        if (binding or {}).get("parked_from"):
+            # The row names the window's old id but a background session took it: the old id's
+            # index would omit it and look current once the link ends, so it is not published.
+            withheld.add(_index_key(binding["parked_from"]))
         sender_key = _index_key(row.get("from"))
         if recipient_key is None and sender_key is None:
             continue
@@ -1848,6 +1907,8 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
         return result
     recipients = senders = 0
     for (harness, session_id), lists in groups.items():
+        if (harness, session_id) in withheld:
+            continue
         if _publish_recipient_index(
                 pending, {"harness": harness, "session_id": session_id}, lists["rows"], names,
                 sent=lists["sent"], dispatch_root=dispatch_root,
@@ -2053,6 +2114,22 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
     # falls back to that same full scan below.
     use_index = (recipient is not None and not strict and ref is None
                  and (sender is None or _same_transfer_session(sender, recipient)))
+    # A background session that holds a window's conversation also takes the rows still
+    # addressed to that window's old session id which were made after it started
+    # (`_parked_recipient`). Those rows name the old id, not this one: they are neither in
+    # this session's index nor among its scan markers, so this scan looks for them itself.
+    origin = (_parked_link("origin", recipient["session_id"])
+              if recipient is not None and not strict and ref is None
+              and isinstance(recipient, dict) and recipient.get("harness") == "claude"
+              and isinstance(recipient.get("session_id"), str) else None)
+    if origin:
+        use_index = False
+    if (use_index and recipient.get("harness") == "claude" and isinstance(recipient.get("session_id"), str)
+            and _parked_link("successor", recipient["session_id"])):
+        # While this window's conversation is held elsewhere, the rows it still names but its
+        # background session took are not in this scan; an index published now would look
+        # current after the link ends and keep hiding them. Neither read nor publish one.
+        use_index = False
     if use_index:
         indexed = _indexed_pending_rows(pending, recipient, roots=roots,
                                         read_context=read_context,
@@ -2076,6 +2153,8 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
     # that cost most of a prompt once hundreds of live rows had accumulated.
     # Malformed rows still take the full read below, which quarantines them.
     markers = None if strict else _scan_markers(recipient, sender)
+    if markers is not None and origin:
+        markers += (origin["viewer_sid"].encode("ascii"),)
     wanted_ref = ref  # `ref` is reused below for a quarantine diagnostic
     if wanted_ref is not None:
         if recipient is not None or sender is not None:
@@ -3096,7 +3175,8 @@ def parse_peer_trailer(text, recipient=None, *, include_ref=False):
                             and (pending is None or not isinstance(transfer_refs, list)
                                  or transfer_refs == pending_refs)):
                         current = pending_delivery_binding(
-                            {"to": target, "refs": refs}, include_acked=True)
+                            {"to": target, "refs": refs, "created": (pending or {}).get("created")},
+                            include_acked=True)
                         target_matches = bool(current and _same_transfer_session(
                             current.get("recipient"), recipient))
             elif _valid_pane_bound_endpoint(target) or _unresolved_target(target):
@@ -3830,7 +3910,9 @@ def _exact_receiver_evidence(ref, transfer, pending, recipient, *, roots=None):
     target = transfer.get("to") or {}
     binding = (pending_delivery_binding(pending, include_acked=True)
                if (_valid_pane_bound_endpoint(target) or _unresolved_target(target)) and pending is not None
-               else pending_delivery_binding({"to": target, "refs": refs}, include_acked=True))
+               else pending_delivery_binding(
+                   {"to": target, "refs": refs, "created": (pending or {}).get("created")},
+                   include_acked=True))
     if not isinstance(binding, dict):
         return None
     effective = binding.get("recipient") or {}
