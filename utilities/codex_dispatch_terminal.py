@@ -1101,13 +1101,30 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
 
 
 def _declares_negative_judgment(path) -> bool:
-    """Whether the report opens on a closed negative review verdict (`closed_review_kind`: `수정 후 병합` or
-    `hold`, the same reading an audit owner's FAIL needs). A report that declares nothing, a pass or an
-    empty file does not. One that also heads itself `verdict: FAIL`/`BLOCKED` does not either: the
-    completion gates read that heading as evidence that is not a pass, so it keeps the failed end."""
-    if path is None or closed_review_kind(path) not in {"fix", "hold"}:
+    """Whether the report opens on a closed negative review verdict (`수정 후 병합`/`changes requested` or
+    `hold`/`보류`). An audit owner's FAIL needs `closed_review_kind` (the verdict line with its `— head <sha>`);
+    a unit leg also takes the same names without the head (no repository), with the dash written `-` or `–`,
+    or the whole line in backticks. A report that declares nothing, a pass or an empty file does not. One
+    that also heads itself `verdict: FAIL`/`BLOCKED` does not either: the completion gates read that
+    heading as evidence that is not a pass, so it keeps the failed end."""
+    if path is None or not _opens_on_negative_verdict(path):
         return False
     return artifact_declared_verdict(Path(path)) not in {"FAIL", "BLOCKED"}
+
+
+def _opens_on_negative_verdict(path) -> bool:
+    if closed_review_kind(path) in {"fix", "hold"}:
+        return True
+    line = _opening_line(path)
+    if line is None:
+        return False
+    line = line.replace("**", "").replace("__", "").strip()
+    if len(line) > 1 and line.startswith("`") and line.endswith("`"):
+        line = line[1:-1].strip()
+    line = line[:-1].rstrip() if line.endswith(".") else line
+    import work_intent
+    match = work_intent._VERDICT_LINE.match(line)
+    return bool(match and _UNIT_NEGATIVE_VERDICT.fullmatch(match["verdict"].strip()))
 
 
 def _sealed_route(binding):
@@ -1161,14 +1178,18 @@ _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
                 for kind, label in _AUDIT_VERDICT_FORMS}
 
 
-def closed_review_kind(path):
-    """``merge``, ``fix`` or ``hold`` when the report opens on a closed review verdict.
+# A unit leg's closed negative verdict, with or without the commit it reviewed: a read-only unit also
+# runs where there is no repository to take a head from. The names are the closed ones above; the verdict
+# line is the one the summary reads (`work_intent._VERDICT_LINE`).
+_UNIT_NEGATIVE_VERDICT = re.compile(
+    r"(?P<name>" + "|".join(_audit_form_pattern(label.split(":", 1)[-1].strip())
+                            for kind, label in _AUDIT_VERDICT_FORMS if kind != "merge")
+    + r")(?:\s+[—–-]\s+head\s+`?(?:[0-9a-f]{7,40}|<sha>)`?)?", re.I)
 
-    Reads only the first nonblank, non-heading line, like pr-chain.py. The body is
-    not an authority source: no prose, fence, history or conflicting later verdict
-    interpretation. A missing, unreadable or differently shaped opening is ``None``,
-    as is anything but a regular file (a pipe or device is never opened).
-    """
+
+def _opening_line(path):
+    """The report's first nonblank, non-heading line (stripped), or None for a missing, unreadable or
+    non-regular file (a pipe or device is never opened) or one with no such line in its opening."""
     if path is None:
         return None
     try:
@@ -1183,18 +1204,31 @@ def closed_review_kind(path):
                 remaining -= len(raw)
                 for line in raw.decode("utf-8").splitlines():
                     line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    line = line.replace("**", "").replace("__", "").strip()
-                    line = line[:-1].rstrip() if line.endswith(".") else line
-                    match = _AUDIT_CLOSED.fullmatch(line)
-                    if not match:
-                        return None
-                    label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
-                    return _AUDIT_KINDS[label]
+                    if line and not line.startswith("#"):
+                        return line
     except (OSError, UnicodeError):
         pass
     return None
+
+
+def closed_review_kind(path):
+    """``merge``, ``fix`` or ``hold`` when the report opens on a closed review verdict.
+
+    Reads only the first nonblank, non-heading line, like pr-chain.py. The body is
+    not an authority source: no prose, fence, history or conflicting later verdict
+    interpretation. A missing, unreadable or differently shaped opening is ``None``,
+    as is anything but a regular file (a pipe or device is never opened).
+    """
+    line = _opening_line(path)
+    if line is None:
+        return None
+    line = line.replace("**", "").replace("__", "").strip()
+    line = line[:-1].rstrip() if line.endswith(".") else line
+    match = _AUDIT_CLOSED.fullmatch(line)
+    if not match:
+        return None
+    label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
+    return _AUDIT_KINDS[label]
 
 
 def _completed_negative_audit_report(path):

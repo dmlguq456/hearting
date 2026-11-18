@@ -263,6 +263,14 @@ class BlockingReviewEndTest(UnitLegBase):
             "changes requested": self.REPORT,
             "changes requested, Korean": "# 검토\n\n최종 판정: 수정 후 병합 — head abc1234\n\n- 빈 목록을 무시한다\n",
             "a held review": "# R\n\nFinal verdict: hold — head abc1234\n\n- A: bad\n",
+            # Where there is no repository the review has no head to name; a unit leg's report still counts.
+            "no head named": "# R\n\nFinal verdict: changes requested\n\n- A: bad\n",
+            "no head named, Korean": "# R\n\n최종 판정: 수정 후 병합\n\n- A: bad\n",
+            "a held review, no head": "# R\n\n최종 판정: 보류.\n\n- A: bad\n",
+            "a hyphen for the dash": "# R\n\nFinal verdict: changes requested - head abc1234\n\n- A: bad\n",
+            "an en dash for the dash": "# R\n\nFinal verdict: changes requested – head abc1234\n\n- A: bad\n",
+            "the whole line in backticks": "# R\n\n`Final verdict: changes requested — head abc1234`\n\n- A: bad\n",
+            "the placeholder left as written": "# R\n\nFinal verdict: changes requested — head <sha>\n\n- A: bad\n",
         }
         for name, text in promoted.items():
             with self.subTest(name):
@@ -281,7 +289,9 @@ class BlockingReviewEndTest(UnitLegBase):
             "a verdict of its own tokens only": "# Review\n\nFinal verdict: issues\n\n- A: bad\n",
             "a heading verdict that the completion gates read as no pass":
                 "# R\n\n## verdict: FAIL\n\nFinal verdict: changes requested — head abc1234\n\n- A: bad\n",
-            "no head named": "# R\n\nFinal verdict: changes requested\n\n- A: bad\n",
+            "a mergeable verdict without a head": "# R\n\nFinal verdict: mergeable\n\n- fine\n",
+            "a verdict with a note after it": "# R\n\nFinal verdict: changes requested (2 blocking)\n\n- A: bad\n",
+            "a line that is not a verdict": "# R\n\nI think this needs changes requested.\n\n- A: bad\n",
         }
         for name, text in stays.items():
             with self.subTest(name):
@@ -291,6 +301,12 @@ class BlockingReviewEndTest(UnitLegBase):
                 self.assertEqual(view["verdict"], "FAIL")
                 self.assertNotEqual(view["failure_class"], "pass")
                 self.assertEqual(view["failure_note"], TERMINAL.REVIEW_BLOCKING_NOTE)
+
+    def test_an_audit_owner_still_needs_the_head(self):
+        self.write("# R\n\nFinal verdict: changes requested\n\n- A: bad\n")
+        self.assertIsNone(TERMINAL.closed_review_kind(self.report))
+        self.write("# R\n\nFinal verdict: changes requested — head abc1234\n\n- A: bad\n")
+        self.assertEqual(TERMINAL.closed_review_kind(self.report), "fix")
 
     def test_the_verdict_conflict_check_still_runs_for_an_end_that_is_not_promoted(self):
         self.write("# Review\n\n## verdict: FAIL\n\n- A: bad\n")
@@ -344,6 +360,21 @@ class BlockingReviewEndTest(UnitLegBase):
         self.assertNotIn("inspect-done-failure", body)
         for frame_word in ("current frame results", "a failed frame", "start --route"):
             self.assertNotIn(frame_word, body)
+
+    def test_a_review_that_is_not_promoted_names_its_report_and_no_frame(self):
+        self.write("# Review\n\nCould not perform the review: the diff was not available.\n")
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="done", log_file=str(self.log())))
+        body = JOIN.completion_followup_text(
+            {"children": [{"attempt_id": self.attempt, "required_action": "inspect-done-failure"}]}, jobs=str(self.jobs))
+        self.assertIn(f"Report: {self.report}", body)
+        self.assertIn("start --route", body)            # the same handle as before
+        for frame_word in ("current frame results", "a failed frame"):
+            self.assertNotIn(frame_word, body)
+        meta = DC.parse_registry_metadata(self.leg_row(self.route, self.path, status="done",
+                                                        log_file=str(self.log())).split("\t")[5].strip())
+        self.assertEqual(JOIN.unit_leg_report_line(meta), f"Report: {self.report}")
+        self.assertEqual(JOIN.unit_leg_report_line({**meta, "worker_type": "owner"}), "")
+        self.assertEqual(JOIN.unit_leg_report_line({**meta, "workflow_completion": ""}), "")
 
     def test_a_dead_leg_still_offers_the_same_work_again(self):
         self.jobs.write_text(self.leg_row(self.route, self.path, status="done", note="dead-worker-fail"))
@@ -560,6 +591,7 @@ class UnitPromptTest(UnitLegBase):
         self.assertIn("`Final verdict: changes requested — head <sha>`", prompt)   # the form the runtime reads
         self.assertLess(prompt.index("Final verdict: changes requested"), prompt.index("For the terminal final response"))
         import worker_bootstrap as wb
+        self.assertIn("where there is no git repository, leave out ` — head <sha>`", prompt)
         self.assertEqual(wb.unit_verdict_prompt("support"), "")      # only a review's judgment is read
         self.assertNotIn("dispatch another worker", prompt)     # a later route lets a worker call this one
         for owner_only in ("Portable Worker Kernel", "Worker Type", "supervised owner", "owner-execution",

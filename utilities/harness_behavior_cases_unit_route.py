@@ -28,6 +28,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -103,8 +105,10 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                 wrote = any("report.md" in str(r["reply"].get("shell") or "") for r in earlier)
                 if record["last_kind"] != "tool" and not wrote:
                     run.evidence["worker_first_request_chars"] = len(text)
-                    return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && cat > '{target}' <<'HB_EOF'\n"
-                                       f"{REPORT.format(head=self.report_head)}HB_EOF\n")
+                    # printf, not a here-document: the shell makes a temp file for one, which a worker's
+                    # sandbox refuses where the folder is not a repository.
+                    return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && printf %s "
+                                       f"{shlex.quote(REPORT.format(head=self.report_head))} > '{target}'")
                 return self.final_reply(target)
             if record["last_kind"] == "tool":
                 return Reply("The unit route runs; I will continue when its result arrives.")
@@ -304,4 +308,15 @@ class UnitRouteBlockingScenario(UnitRouteScenario):
     report_head = FAIL_HEAD
 
 
-SCENARIOS = [UnitRouteScenario, UnitRouteBlockingScenario]
+class UnitRouteNoGitScenario(UnitRouteBlockingScenario):
+    name = "unit-route-no-git"
+    summary = ("The same blocking review run in a folder that is not a git repository: its closed verdict line has "
+               "no head to name, and the end is still finished work (the route closes, the summary arrives).")
+    report_head = "Final verdict: changes requested"
+
+    def prepare(self, run):
+        super().prepare(run)
+        shutil.rmtree(run.home.workspace / ".git")   # the folder the review reads is no repository
+
+
+SCENARIOS = [UnitRouteScenario, UnitRouteBlockingScenario, UnitRouteNoGitScenario]

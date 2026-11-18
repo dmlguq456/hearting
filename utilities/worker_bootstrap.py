@@ -2181,14 +2181,15 @@ def unit_verdict_prompt(worker_type: str) -> str:
 
     The runtime treats a `verdict: FAIL` end as finished work (a review that found blocking issues) only
     when the report opens on a closed review verdict line (`codex_dispatch_terminal.closed_review_kind`,
-    the one an audit report carries); the units name their own verdict tokens (clean/issues,
+    the one an audit report carries, a unit's also without its head); the units name their own verdict tokens (clean/issues,
     CLEAN/FINDINGS), which that reading does not know."""
     if worker_type != "review":
         return ""
     return ("Open the report (its first line that is not a heading) with the review's closed verdict, as "
             "`Final verdict: changes requested — head <sha>` when you found blocking issues, or "
             "`Final verdict: mergeable — head <sha>` when you found none (`hold` for a held review); "
-            "<sha> is the commit you reviewed (`git rev-parse HEAD`). Then say what you found. "
+            "<sha> is the commit you reviewed (`git rev-parse HEAD`); where there is no git repository, leave out "
+            "` — head <sha>` and keep the verdict wording. Then say what you found. "
             "If you could not do the review, end `BLOCKED` and say what stopped you.\n")
 
 

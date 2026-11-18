@@ -1356,6 +1356,21 @@ SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES = {
 }
 
 
+def unit_leg_report_line(metadata, *, jobs=None) -> str:
+    """`Report: <path>` for a unit route's one leg whose end was not read as finished work (a failed
+    review the caller must inspect), so the caller finds the report without reading the leg's log.
+    "" for any other row, a leg that named no readable report, or an unreadable route."""
+    if not finishes_route(metadata) or metadata.get("worker_type") in {"owner", "frame"}:
+        return ""
+    try:
+        import worker_bootstrap
+        route = json.loads(Path(metadata.get("owner_route_file") or metadata["route_file"]).read_text())
+        artifact = worker_bootstrap.attempt_outcome(route, metadata).get("artifact")
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    return f"Report: {artifact}" if artifact else ""
+
+
 def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -1368,6 +1383,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     completed_work = set()
     summaries = []
     parked_notes = []
+    unit_reports, other_work = [], False
     if jobs:
         from route_identity import route_hash
         for child in receipt["children"]:
@@ -1397,6 +1413,11 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                 from parent_next_directive import resume_command
                 work_commands[child["attempt_id"]] = resume_command(
                     path, jobs, agent_home=Path(__file__).resolve().parents[1])
+                report = unit_leg_report_line(meta)
+                if meta["worker_type"] not in {"owner", "frame"}:
+                    unit_reports.append(report)
+                else:
+                    other_work = True
                 if meta["worker_type"] == "owner" and child["required_action"] == "inspect-done-failure":
                     import dispatch_replacement
                     parked = dispatch_replacement.owner_parked_gate(Path(jobs), child["attempt_id"])
@@ -1418,6 +1439,15 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
                       "Nothing starts it from receipt alone; obtain approval only for work outside the existing scope." if notes else "")))
+    if work_commands and not other_work and unit_reports and len(unit_reports) == len(work_commands):
+        # A unit route's review that ended failed and was not read as finished work: no frame is
+        # involved, so say what the handle returns and where the report is.
+        return ("\n".join(dict.fromkeys(report for report in unit_reports if report))
+                + ("\n" if any(unit_reports) else "")
+                + "Continue the existing work with its exact handle:\n"
+                + "\n".join(dict.fromkeys(command for command in commands if command))
+                + "\nThis reuses registered attempts and the shared outcome/cleanup controller. "
+                  "No replacement launch or manual workflow/cycle finalization is implied.")
     if work_commands:
         text = "\n".join(dict.fromkeys(command for command in commands if command))
         return ("\n".join(parked_notes) + ("\n" if parked_notes else "")
