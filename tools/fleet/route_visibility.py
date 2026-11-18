@@ -423,9 +423,11 @@ def _next_step(record, stages, verification, outcome, owner, inline, view):
         return {"kind": "closed", "text": "closed · nothing pending"}
     if outcome is not None and verification["closed_at"] and not verification["terminal_gate_proven"]:
         return {"kind": "attention", "text": "closed without a proven terminal gate"}
+    # A unit route has no owner: the one worker it called is what ended or runs.
+    who = "worker" if _is_unit_route(record) else "owner"
     if owner and owner.get("liveness") in ("dead", "done", "stale") and not verification["closed_at"]:
-        return {"kind": "attention", "text": "owner %s ended (%s) · route not closed" % (
-            owner.get("attempt_id") or "·", owner.get("reason") or owner.get("liveness"))}
+        return {"kind": "attention", "text": "%s %s ended (%s) · route not closed" % (
+            who, owner.get("attempt_id") or "·", owner.get("reason") or owner.get("liveness"))}
     by_id = {s["id"]: s for s in stages}
     active = [s for s in stages if s["state"] in ("active", "reconciling", "recovering")]
     if _no_response(view, verification):
@@ -447,8 +449,8 @@ def _next_step(record, stages, verification, outcome, owner, inline, view):
     if owner and owner.get("liveness") in _LIVE:
         since = _clock(owner.get("started_at"))
         return {"kind": "wait", "node": owner.get("node"), "harness": owner.get("harness"),
-                "text": "wait · owner %s %s%s" % (
-                    owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
+                "text": "wait · %s %s %s%s" % (
+                    who, owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
     if inline and _shape(record) == "direct":
         return {"kind": "start" if inline != "finished" else "close",
                 "text": "inline finish %s in the main session" % inline}

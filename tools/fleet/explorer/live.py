@@ -776,8 +776,10 @@ def _is_unit_node(node):
 def _chain_links(node, earlier, frames):
     """Whether ``earlier`` is tied to ``node`` by what the routes themselves recorded: the route it
     continues (``source_route_id``), a leg of the same approved plan (``route_plan``) or the frame that
-    opened that plan, or the next step of a declared ``--plan``. A route that only sits in the same
-    session or campaign is not tied. A unit route is nobody's leg and has no legs of its own."""
+    opened that plan, or the next step of a declared ``--plan``. One tie needs no record: a route opened
+    right after a frame route (``frames``) belongs to that frame, since a frame that ends with nothing to
+    choose leaves the next route to be composed by hand. A route that only sits in the same session or
+    campaign is not otherwise tied. A unit route is nobody's leg and has no legs of its own."""
     if _is_unit_node(node) or _is_unit_node(earlier):
         return False
     plan, before = node.get("route_plan"), earlier.get("route_plan")
@@ -785,12 +787,10 @@ def _chain_links(node, earlier, frames):
         return True
     if node.get("planned") and earlier.get("planned"):
         return True
-    if isinstance(plan, Mapping):
-        if isinstance(before, Mapping):
-            return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
-                    and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
-        return earlier.get("capability") == "route-frame" and earlier.get("route_id") == frames.get(node.get("route_id"))
-    return False
+    if isinstance(plan, Mapping) and isinstance(before, Mapping):
+        return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
+                and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
+    return earlier.get("capability") == "route-frame" and earlier.get("route_id") == frames.get(node.get("route_id"))
 
 
 def _chain_legs(nodes, rid, own, status, progress):
@@ -800,12 +800,23 @@ def _chain_legs(nodes, rid, own, status, progress):
     index = _chain_position(nodes, rid)
     if index is None:
         return [[own, status, progress]] if own else []
-    # The frame that opened a plan leg is the nearest frame route before it.
-    frames = {}
+    # ``frames[route]``: the frame a route belongs to without anyone having recorded it. A plan leg's is the
+    # frame that opened its plan (the nearest frame before the plan's first leg, so a frame opened between two
+    # legs is not theirs); any other route's is the route right before it when that is a frame route (unit
+    # routes between are skipped; a frame or unit route has none: frame -> frame needs a record).
+    frames, plan_frame = {}, {}
     for i, node in enumerate(nodes[:index + 1]):
-        if isinstance(node.get("route_plan"), Mapping):
-            frames[node.get("route_id")] = next((nodes[j].get("route_id") for j in range(i - 1, -1, -1)
-                                                 if nodes[j].get("capability") == "route-frame"), None)
+        plan = node.get("route_plan")
+        if isinstance(plan, Mapping):
+            key = (plan.get("decision"), plan.get("digest"))
+            if key not in plan_frame:
+                plan_frame[key] = next((nodes[j].get("route_id") for j in range(i - 1, -1, -1)
+                                        if nodes[j].get("capability") == "route-frame"), None)
+            frames[node.get("route_id")] = plan_frame[key]
+        elif node.get("capability") != "route-frame" and not _is_unit_node(node):
+            before = next((nodes[j] for j in range(i - 1, -1, -1) if not _is_unit_node(nodes[j])), None)
+            if before is not None and before.get("capability") == "route-frame":
+                frames[node.get("route_id")] = before.get("route_id")
     tied, pending = {index}, [index]
     while pending:
         later = pending.pop()

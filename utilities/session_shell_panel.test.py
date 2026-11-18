@@ -1150,6 +1150,42 @@ assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code/.test(s)&&!
         self.node(script, "panel-view.cjs")
 
 
+    def test_a_unit_routes_narrow_worker_line_gives_up_its_values_and_keeps_its_name_last(self):
+        # 11-19 (independent review of #1736): the effort goes first, then the harness, then the model, and the unit's name is the last
+        # word on the line; a narrower line never shows a word a wider one lacks. Only a name with no room goes (whole), and the line is
+        # then drawn as one with no name is. Under the route, a unit's name does not change the row of another route in the box.
+        script = self.FIXTURE + r'''
+const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
+ stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
+const words=rows=>{const row=rows.find(s=>/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(s)&&s.includes('code-review'));return row?row.replace(/[│╭╮╰╯─]/g,' ').trim().split(/\s+/).filter(w=>!/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●]$/.test(w)):null;};
+for(const rows of [60,22]){
+  let wider=null;
+  for(let width=60;width>=23;width--){   // (below 23 even the name has no room: it goes whole, see the long name below)
+    const got=words(draw([unit],width,rows));
+    assert(got&&got.includes('code-review'),'name stays at '+width+'x'+rows+': '+JSON.stringify(got));
+    if(wider)for(const w of got)assert(wider.includes(w),'width '+width+'x'+rows+' shows `'+w+'` that '+(width+1)+' lacks: '+JSON.stringify(got)+' / '+JSON.stringify(wider));
+    wider=got;
+  }
+}
+// The order the values go in, at the widths where each form stands.
+const seen=new Set();
+for(let width=60;width>=23;width--){const got=words(draw([unit],width,60));seen.add(got.filter(w=>w!=='code-review').join(' '));}
+for(const form of ['claude Opus 5.5 xhigh','claude Opus 5.5','Opus 5.5',''])assert(seen.has(form),'a form is missing: `'+form+'`: '+[...seen].join(' | '));
+// A name with no room goes whole, and the line is then the bare harness and model as before.
+const longName={...unit,unit_word:'research-survey-with-a-very-long-name'};
+const narrow=draw([longName],26,60);
+assert(!narrow.some(s=>/research-s/.test(s))&&narrow.some(s=>/⠋ .*Opus 5\.5/.test(s)),narrow.join('\n'));
+// Under the route: the owner route's row reads the same with and without a unit route beside it.
+const own={...oneShot,id:'o',title:'Fix the governor cap',kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
+const ownRow=rows=>rows.find(s=>/^│ │ [⠋●✓] Fix/.test(s));
+for(let width=55;width<=89;width++){
+  const alone=ownRow(draw([own],width,20,{side:false})),beside=ownRow(draw([own,unit],width,20,{side:false}));
+  assert(alone&&alone===beside,'width '+width+': `'+alone+'` vs `'+beside+'`');
+}
+'''
+        self.node(script, "panel-view.cjs")
+
+
     def test_owners_and_their_workers_fold_together_and_every_route_takes_the_same_step(self):
         # Spec E9 rule 48 (c) (it replaces the #1579 review follow-up (가)), 11-18: short of rows the steps of the route box are, in
         # order: the worker box's closing border, every session's second NOW row, then in one step every session's CTX row folds into

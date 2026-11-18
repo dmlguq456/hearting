@@ -386,21 +386,23 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 self.assertIn("frame ✕", row)
 
     def test_framed_progress_marks_the_routes_own_frame_leg_after_a_predecessor(self):
-        # The second frame route records the first as the route it continues; a frame route with no such record stands alone.
-        chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
-                 {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active", "source_route_id": "rt-prev"}]
-        for kwargs, expected in (({"running": True}, "frame → ??"),
-                                 ({"node_state": "failed"}, "frame ✕")):
-            with self.subTest(expected=expected):
-                _view_value, _record_value, route, vm = _vm(chain=chain, **kwargs)
-                self.assertEqual([leg[0] for leg in route["legs"]], ["frame", "frame"])
-                for cols in (120, 180):
-                    text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
-                                          cols, 60).text_rows())
-                    row = next(line for line in text.splitlines()
-                               if "[z9]" in line and "frame" in line)
-                    self.assertIn(expected, row)
-                    self.assertNotIn("frame ✓", row)
+        # A frame route after another frame is tied to it only by a record (`source_route_id`); a record that names none is what
+        # happens in practice, and the route then stands alone (no `frame → frame`).
+        for source, legs in (({"source_route_id": "rt-prev"}, ["frame", "frame"]), ({}, ["frame"])):
+            chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
+                     {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active", **source}]
+            for kwargs, expected in (({"running": True}, "frame → ??"),
+                                     ({"node_state": "failed"}, "frame ✕")):
+                with self.subTest(expected=expected, source=bool(source)):
+                    _view_value, _record_value, route, vm = _vm(chain=chain, **kwargs)
+                    self.assertEqual([leg[0] for leg in route["legs"]], legs)
+                    for cols in (120, 180):
+                        text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                              cols, 60).text_rows())
+                        row = next(line for line in text.splitlines()
+                                   if "[z9]" in line and "frame" in line)
+                        self.assertIn(expected, row)
+                        self.assertNotIn("frame ✓", row)
 
     def test_the_legacy_synthetic_frame_shape_draws_the_same_progress_suffix(self):
         # Render-only unit case: the pre-collector synthetic shape is not a record the
