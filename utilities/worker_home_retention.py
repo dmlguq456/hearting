@@ -651,11 +651,13 @@ def _pruned_delivery_binding(value: dict, digest: str, delivery: str,
 def _delivery_state(root: Path, meta: dict, *, legacy_empty_tombstone: bool = False):
     """(state, activity_ns): none | resolved | open | pending | unknown.
 
-    ``legacy_empty_tombstone``: the 2026-09 pruner left a zero-byte
-    ``<record>.json.pruned`` only for a terminal (acked/expired) record, written
-    before the record was removed. A caller that opts in reads such a tombstone,
-    with its record gone, as resolved. Off by default: worker-home retention keeps
-    refusing it (its folders can hold credentials and evidence)."""
+    ``legacy_empty_tombstone``: the pruner of 2026-09-06 to 10-15 left a
+    zero-byte ``<record>.json.pruned`` only for a terminal (acked/expired/rejected)
+    record, written before the record was removed. A caller that opts in reads such
+    a tombstone, with its record gone, as resolved. Only log retention opts in.
+    Worker-home retention keeps refusing it (its folders can hold credentials and
+    evidence), and so does the registry archive: moving the row would let the
+    orphan-home path retire the home this tombstone still protects."""
     if meta.get("delivery_intent") != "1":
         return "none", 0
     digest, delivery = meta.get("delivery_recipient_digest", ""), meta.get("delivery_id", "")
