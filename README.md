@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route at 2/4 execute, its owner and its execute worker, each with its context and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.46.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="A Claude Code session in project web-api, session [4f]. On the left an illustrative conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the Rate limiting route (code(standard) in blue, its time at the right end of the first line) at 2/4 execute: its owner with a context gauge row and what it is doing now, and the execute worker in a box under the stage text, with its own context row and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a global lesson, and a correction; RESOURCES with the two hosts' CPU and memory and the busy GPU of each with the session that holds it; USAGE with Claude, Codex, and OpenCode; and on the window's last line the working folder and hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub>Session <code>[4f]</code> at work, with its Hearting panel on the right. A route is the staged work this session started. Demo data; the conversation is illustrative.</sub></p>
 
@@ -50,12 +50,12 @@ records, so what one session's panel says is what Fleet says about it.
 ### The panel beside each session
 
 New installations open a 40-column panel on the right of every new Claude Code,
-Codex, and OpenCode terminal. Under the project and Git state (and, when the session supervises or is supervised, a `PEERS` row: `[c7] ⚑ ─ [d4]`), the model and
+Codex, and OpenCode terminal. Under the project and Git state (and, when the session supervises or is supervised, a `PEERS` row: `[c7] ⚑  ─ [d4]`), the model and
 context, and the session's title and what it is doing now, each section keeps a
 few rows: questions waiting for you, this session's routes and requests in one
-box of three zones (`direct`, `dispatch`, `request`), messages, saved memory (`MEM`), and the usage windows of the three agents
+box of three zones (`direct`, `dispatch`, `request`; a route's first line reads its kind in the color of its field, `code` blue, `lab` amber, `design` rose, `docs` sand, `research` sky, with the intensity after it in the same color, dim for `quick` up to bold for `strong` and beyond, and its time at the right end; each session in it, the owner and every worker, reads as its harness and model, its `CTX` gauge row, and what it is doing now on up to two rows; a stage's workers stand in a box under the stage text, `closed`, `open` or none as the `worker box` setting says), messages, saved memory (`MEM`), what the machine's GPUs are doing and which session holds each (`RESOURCES`), and the usage windows of the three agents
 (`USAGE`). Press the questions, the route box, or `MESSAGES` and its whole table opens in a popup in the middle
-of the window, the rest gray behind it; `MEM` and `USAGE` open nothing. A question you can answer here stands
+of the window, the rest gray behind it; `MEM`, `RESOURCES` and `USAGE` open nothing. A question you can answer here stands
 in a rose-bordered box. **Ctrl+]** always opens a popup, that question first:
 answer with **Tab**, **1–9**, and **Enter**, and the popup closes with
 `✓ answer sent`. The **STATUS ›** button on the REPO row opens the project's
@@ -85,7 +85,7 @@ waiting on whom. Each has its own place in the panel and in Fleet.
 |---|---|---|---|---|
 | **QUESTIONS** | A question waiting for your answer or approval | An agent that needs you | When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where | Panel: the rose-bordered box · Fleet: QUESTIONS |
 | **ROUTE** | The work this session started: its stages, who runs each, and how each is checked (what the session does itself stands in the box's `direct` zone, what it started in `dispatch`) | This session, once a request needs a route (the route then starts its owner) | When the route finishes; its result stays one line until your next input or ten minutes | Panel: the route box · Fleet: ROUTES |
-| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box's `request` zone, under its own named rule, each with the other session's number, harness, model, and effort (`→` handed out, `◂` handed to you, `✓` finished, `✕` rejected or cancelled), whole in the MESSAGES popup · Fleet: the session page's `request` rows and a PEERS link |
+| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box's `request` zone, under its own named rule, each with the other session's number, its repository's name when that is another one, harness, model, and effort (`→` handed out, `◂` handed to you, `✓` finished, `✕` rejected or cancelled), whole in the MESSAGES popup · Fleet: the session page's `request` rows and a PEERS link |
 | **MESSAGES** | A short note, read and done | Any session | Nothing to close | Panel: MESSAGES · Fleet: the session page and PEERS |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover | Those links themselves | — | Fleet: PEERS |
 

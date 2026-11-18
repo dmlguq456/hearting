@@ -145,6 +145,29 @@ class PublishedFiles(unittest.TestCase):
         self.assertEqual(gif.read_bytes()[:6], b"GIF89a")
         self.assertLess(gif.stat().st_size, GIF_LIMIT)
 
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed (the pictures are drawn by a developer's tool)")
+    def test_quantising_keeps_the_named_colours_as_they_are(self):
+        """Median-cut once turned code blue into claude's teal and lab amber into the status yellow: the five fields' hues
+        and the three zones' stay exact, and a picture of them alone keeps each as its own palette entry."""
+        from PIL import Image
+        from tools.fleet.tests import readme_captures
+        named = readme_captures.named_colours()
+        wanted = [(95, 135, 255), (255, 175, 0), (255, 95, 175), (215, 175, 135), (0, 175, 215),
+                  (255, 135, 0), (135, 95, 255), (0, 215, 175)]
+        for colour in wanted:
+            self.assertIn(colour, named)
+        # The neighbours that carried the wrong meaning: claude's teal, the status yellow (xterm 186), a muted blue.
+        neighbours = [(88, 185, 177), (215, 215, 135), (112, 189, 191), (218, 218, 129), (133, 215, 202)]
+        image = Image.new("RGB", (len(wanted) + len(neighbours) + 200, 1), (16, 16, 16))
+        for x, colour in enumerate(wanted + neighbours):
+            image.putpixel((x, 0), colour)
+        for x in range(len(wanted) + len(neighbours), image.size[0]):       # many other colours, to force the merge
+            image.putpixel((x, 0), ((x * 37) % 256, (x * 91) % 256, (x * 53) % 256))
+        out = readme_captures.quantised(image).convert("RGB")
+        self.assertLessEqual(len({c for _n, c in out.getcolors()}), readme_captures.COLOURS)
+        for x, colour in enumerate(wanted):
+            self.assertEqual(out.getpixel((x, 0)), colour)
+
     def test_no_private_path_or_address_on_public_pages(self):
         for relative in ("docs/fleet.svg", "docs/index.html", "docs/fleet.html", "docs/map.html",
                          "tools/render-landing.py"):

@@ -474,7 +474,17 @@ def main(argv=None):
         refresh_remote=True, fast_local=True)
     # F-83: SSH/GPU polling has its own slower pump in render. Never put it in
     # the 2-second process snapshot producer or on the curses thread.
-    live_collector.compute_hosts_refresh = compute_hosts.collect
+    def shared_compute_hosts(*args, **kwargs):
+        # The sample Fleet's pump takes (every ten seconds while Fleet is open) is also left for the panels' shared producer, so a
+        # side panel's RESOURCES need no probe of their own while Fleet runs.
+        snapshot = compute_hosts.collect(*args, **kwargs)
+        try:
+            import human_wait_state
+            human_wait_state.share_resource_sample(snapshot)
+        except Exception:
+            pass
+        return snapshot
+    live_collector.compute_hosts_refresh = shared_compute_hosts
     live_collector.restart_argv = argv
 
     try:

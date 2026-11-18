@@ -102,7 +102,7 @@ _LOOPS_KEYS = ("oncall", "note", "study", "drill")
 
 # fg color_key → (hue, attr) decomposition (spec §5.2) — the basis for composing (fg, tint_bg)
 # pairs. hue: d=default w=soft white g=green y=yellow v=vanilla r=red c=cyan
-# m=magenta l=blue k=Claude's harness orange.
+# m=magenta l=blue cl=Claude's harness orange.
 # Keys absent here render as default-hue plain text under tint (safe degradation).
 _A_B, _A_D = _A_BOLD, _A_DIM
 
@@ -111,7 +111,7 @@ _A_B, _A_D = _A_BOLD, _A_DIM
 # distinguishable from its harness cell, which several consumers (`_stack_split`, the
 # width suites) resolve by color key alone. Bright = a live top-level session, dim =
 # a dispatch row or lost telemetry — the same brightness axis the harness cell uses.
-_NAME_HUE = {"claude": "k", "codex": "m", "opencode": "l"}
+_NAME_HUE = {"claude": "cl", "codex": "m", "opencode": "l"}
 _NAME_KEY = {h: "nm_" + h for h in _NAME_HUE}
 _NAME_KEY_DIM = {h: "nmd_" + h for h in _NAME_HUE}
 # Every key a row's NAME zone can carry. Consumers that locate the name segment by color
@@ -133,6 +133,10 @@ _HDR_BAR_PAIR = 19
 _HDR_WARN_PAIR = 20
 _HDR_BLK_PAIR = 21
 _TINT_PAIR_START = 22
+# The tint pairs take 22 + 6 levels × the hue count (19 hues: 22..135); the pairs below stay clear of them (`_init_colors` turns the tints
+# off rather than let them reach these, and a test holds the two ranges apart).
+_KIND_PAIR_START = 160       # the five field hues
+_ZONE_PAIR_START = 165       # the three zone names (direct, dispatch, request)
 
 
 def _live_key(state):

@@ -427,8 +427,8 @@ for(const [frame,key] of [[0,'tag_steward'],[10,'tag_steward_dim']]){
  assert(!number.beat&&number.foreground===219&&number.bold&&!number.dim,frame+' '+JSON.stringify(number));
  assert(v.animated,'an idle steward still keeps the beat');
 }
-// Narrow: the steward mark goes first, then the harness, then the number; the glyph stays.
-for(const [width,want] of [[20,'┌ ● [e9] claude ⚑ ─'],[19,'┌ ● [e9] claude ─'],[17,'┌ ● [e9] ─']]){
+// Narrow: (11-18: two cells stand after the flag) the steward mark goes first, then the harness, then the number; the glyph stays.
+for(const [width,want] of [[21,'┌ ● [e9] claude ⚑  ─'],[20,'┌ ● [e9] claude ─'],[17,'┌ ● [e9] ─']]){
  const row=text(view.render({width,height:12,side:true,sid:'s',harness:'claude',configuration:{},model:{tag:'[e9]',steward:true},state:'idle',questions:()=>[]}))[0];
  assert(row.startsWith(want),width+' '+row);
 }
@@ -463,8 +463,8 @@ assert(box.length===4&&box.every(x=>x.foreground===217&&x.bold===false),JSON.str
 assert(failed.rows[0][0].foreground==null&&failed.rows[0][0].dim===true);
 // Repo row, then Git on its own row; the route box high; MESSAGES (no box) keeps to the bottom, right
 // above the quota row, the rows left over standing between the box and it (11-15).
-// (32 rows: every structural row of spec rule 35 stands with three routes in their full form.)
-let rows=text(paint({state:'idle',height:32}));
+// (35 rows: every structural row of spec rule 35 stands with three routes in their full form, each now four rows: who, CTX row, NOW and title.)
+let rows=text(paint({state:'idle',height:35}));
 assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
 // Spec rule 29 (b), 30 (a), 35 (b): the metadata block is two groups parted by one empty row
 // ([repository, Git] / [model, context]), then a thin rule, then the session's content with
@@ -473,11 +473,11 @@ assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].sta
 assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ 3 ROUTE'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES')),rb=rows.findIndex(s=>s.startsWith('│ ╰'));
 assert(r>0&&m>rb&&rb>r&&rows.slice(r,rb).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
-// Spec rules 24, 38 (11-17, route row 5; the CTX beside the harness and the NOW row under it): beside the native area a route
-// reads its title (with the route's mark; this fixture names no kind), then who two cells in (the glyph with its harness, then
-// `CTX 72% · 42m`, no gauge), then its NOW four cells in.
+// Spec rules 24, 38 (11-18, route row 5; the CTX row under the who row, then the NOW row): beside the native area a route
+// reads its title (with the route's mark; this fixture names no kind), then who two cells in (the glyph with its harness: no
+// context, no time), then its CTX row (`CTX 72%`, this fixture has no gauge) four cells in, then its NOW four cells in.
 const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
-assert(/^│ │ \S ROUTE_0 +│ │$/.test(rows[t0])&&/^│ │   \S codex  CTX 72% · 42m +│ │$/.test(rows[t0+1])&&/^│ │ {5}DOING_0 +│ │$/.test(rows[t0+2]),rows.join('\n'));
+assert(/^│ │ \S ROUTE_0 +│ │$/.test(rows[t0])&&/^│ │   \S codex +│ │$/.test(rows[t0+1])&&/^│ │ {5}CTX 72% +│ │$/.test(rows[t0+2])&&/^│ │ {5}DOING_0 +│ │$/.test(rows[t0+3]),rows.join('\n'));
 // Each message takes two rows (a head `← [e7]`, the text two cells in), the head `MESSAGES` carries no count of rows shown.
 assert(rows.at(-2).includes('7d 60%')&&/^│ MESSAGES ─+ › │$/.test(rows[m]),rows.join('\n'));
 assert(rows[m+1].startsWith('│ ← [e7]')&&rows[m+2].startsWith('│   MESSAGE_1')&&rows[m+3].startsWith('│ ← [e7]')&&rows[m+4].startsWith('│   MESSAGE_2')&&rows[m+5].startsWith('│ ← [e7]')&&rows[m+6].startsWith('│   MESSAGE_3'),rows.join('\n'));
@@ -486,7 +486,7 @@ for(const s of rows)assert.equal(cells(s),40,s);
 // The questions section sits first, above the route box (11-15; 11-16 a thin rounded box like the route's): its top
 // line carries the count in the question's rose and the name tag dim, `›` at its end, then the question's summary
 // in the rows inside; messages are dim, the route box plain. (No question answerable here: the box's line is dim.)
-const asked=paint({state:'working',q:question,model:{answerable:true},height:36});rows=text(asked);
+const asked=paint({state:'working',q:question,model:{answerable:true},height:39});rows=text(asked);
 const qTop=rows.findIndex(s=>/^│ ╭─ 1 QUESTIONS › ─+╮ │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 assert(qTop>0&&rows[qTop+1].startsWith('│ │ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(rows[qTop+3])&&ra===qTop+4&&mq>ra&&rows.at(-2).includes('7d 60%')
  &&rows.some(s=>/^│ │ \S ROUTE_0 {24}│ │$/.test(s)),rows.join('\n'));
@@ -532,8 +532,10 @@ assert(!view.render({width:40,height:30,side:true,sid:'s',configuration:{},model
         self.node(script, "panel-view.cjs")
 
     def test_route_rows_follow_the_route_line_setting_and_open_their_popup(self):
-        # Restored 11-15 from v4.36.4 (`..._and_open_in_place`): the `route line` choice keeps its
-        # meaning; a press on any row of a folded route opens the route popup with it unfolded.
+        # Restored 11-15 from v4.36.4 (`..._and_open_in_place`): a press on any row of a folded route opens the route popup with it
+        # unfolded. 11-18: an owner has no time of its own (the route's stands on its first line, where a route has a kind word), so
+        # the `route line` choice (time or model, kept when the one-row form is short of cells) no longer changes an owner's row:
+        # both read its percent beside its model.
         script = r"""
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const p=t=>({text:t});
@@ -545,35 +547,35 @@ const model={route_count:2,routes:[
 const paint=(cfg,width=40,height=30)=>view.render({width,height,side:width<80,model,configuration:cfg,questions:()=>[]}).rows.map(r=>r.map(s=>s.text).join(''));
 const time=paint({}),byModel=paint({route_line:'model'});
 const at=(rows,title)=>rows.findIndex(s=>s.includes(title.slice(0,5)));
-// Spec rules 24, 38 (11-17, route row 5; CTX beside the model, no gauge, the NOW under it): the title (with the route's
-// mark), then who two cells in (glyph, harness, model, effort, then the context; this width has no room for the word `CTX` or
-// the time), then its NOW four cells in; the `route line` choice does not touch this full form.
+// Spec rules 24, 38 (11-18, route row 5; the CTX row with its gauge under the who row, the NOW under it): the title (with the route's
+// mark), then who two cells in (glyph, harness, model, effort: no context, no time), then its CTX row four cells in (`CTX`, the backend's
+// five-cell gauge and the percent), then its NOW four cells in; the `route line` choice does not touch this full form.
 for(const rows of [time,byModel]){const i=at(rows,'셸 표기');
- assert(/^│ │ \S 셸 표기 통일 +│ │$/.test(rows[i])&&!rows[i].includes('codex')&&/^│ │   ⠋ codex gpt-6\.1-sol high 72% +│ │$/.test(rows[i+1])&&/^│ │ {5}패치 적용 중 +│ │$/.test(rows[i+2]),rows.join('\n'));
- assert(!rows.join('').includes('━'),'no gauge row any more\n'+rows.join('\n'));}
-// Where the row has room the word and the time join the context: `CTX 72% · 42m`, and a route with no context keeps its time alone.
+ assert(/^│ │ \S 셸 표기 통일 +│ │$/.test(rows[i])&&!rows[i].includes('codex')&&/^│ │   ⠋ codex gpt-6\.1-sol high +│ │$/.test(rows[i+1])&&/^│ │ {5}CTX ━+─+ 72% +│ │$/.test(rows[i+2])&&/^│ │ {5}패치 적용 중 +│ │$/.test(rows[i+3]),rows.join('\n'));
+ assert(rows.filter(s=>s.includes('━')).every(s=>/^│ │ {5}CTX /.test(s)),'the gauge stands on the CTX row alone\n'+rows.join('\n'));}
+// Where the row has room nothing joins the who row: no time on an owner (a route with no context has no CTX row either).
 const roomy=paint({},60);
-assert(roomy.some(s=>/^│ │   ⠋ codex gpt-6\.1-sol high  CTX 72% · 42m +│ │$/.test(s))&&roomy.some(s=>/^│ │   ✕ claude  1h 27m +│ │$/.test(s)),roomy.join('\n'));
-// Short of rows the context row folds into the first row (percent and time at the right,
-// right-aligned in their columns), effort going first. (13 rows: spec rule 49 (b)'s last row stays.)
+assert(roomy.some(s=>/^│ │   ⠋ codex gpt-6\.1-sol high +│ │$/.test(s))&&roomy.some(s=>/^│ │ {5}CTX ━+─+ 72% +│ │$/.test(s))&&roomy.some(s=>/^│ │   ✕ claude +│ │$/.test(s))&&!roomy.some(s=>/42m|1h 27m/.test(s)),roomy.join('\n'));
+// Short of rows the CTX row folds into the who row (its percent at the right edge, no time: an owner has none; at 40 cells the effort fits
+// beside it). (13 rows: spec rule 49 (b)'s last row stays.)
 const low=paint({},40,13),lowRow=low[at(low,'셸 표기')+1];
-assert(/⠋ codex gpt-6\.1-sol +72% +42m │/.test(lowRow)&&lowRow.indexOf('72%')+3===lowRow.indexOf('    42m'),low.join('\n'));
-assert(low.some(s=>/✕ claude +1h 27m │/.test(s)),low.join('\n'));
-// Narrower, spec rule 36 (a): the harness goes before the model; then the `route line`
-// choice keeps its value (time: elapsed, model: context) and the other goes, whole.
-// (30 cells: the owner's row stands two cells in now, so the time still fits its row at 30, not at 28.)
+assert(/⠋ codex gpt-6\.1-sol high +72% │/.test(lowRow)&&!lowRow.includes('42m')&&!low.some(s=>s.includes('CTX')),low.join('\n'));
+assert(low.some(s=>/✕ claude +│ │$/.test(s))&&!low.some(s=>s.includes('1h 27m')),low.join('\n'));
+// Narrower, spec rule 36 (a): the harness goes before the model, the percent stays beside it whole. The `route line` choice (kept for a
+// time column that only a worker fills) does not change an owner's row: both settings read alike.
+// (30 cells: the owner's row stands two cells in, so the percent still fits its row at 30, not at 26.)
 const narrowTime=paint({},30,13),narrowModel=paint({route_line:'model'},30,13);
 const lead=rows=>rows[at(rows,'셸 표기')+1];
-assert(/⠋ gpt-6\.1-sol +42m │/.test(lead(narrowTime))&&!lead(narrowTime).includes('codex')&&!lead(narrowTime).includes('72%'),narrowTime.join('\n'));
-assert(/⠋ gpt-6\.1-sol +72% │/.test(lead(narrowModel))&&!lead(narrowModel).includes('42m'),narrowModel.join('\n'));
+assert(/⠋ gpt-6\.1-sol +72% │/.test(lead(narrowTime))&&!lead(narrowTime).includes('codex')&&!lead(narrowTime).includes('42m'),narrowTime.join('\n'));
+assert.equal(lead(narrowModel),lead(narrowTime),narrowModel.join('\n'));
 // Spec rule 29 (c), 36 (c): a long title goes on to its second row (two cells in) instead
-// of `…`; who keeps its row under the title, the time beside it (a route with no context draws no `CTX`).
+// of `…`; who keeps its row under the title (a route with no context draws no `CTX` row, and no time stands on it).
 const long=time.findIndex(s=>s.includes('제목만'));
-assert(!time[long].includes('…')&&time[long+1].includes('│ │   ')&&time.slice(long,long+2).join('').includes('잘림')&&time[long+2].includes('claude')&&time[long+2].includes('1h 27m')&&!time[long+2].includes('CTX')&&time[long+3].startsWith('│ ╰'),time.join('\n'));
+assert(!time[long].includes('…')&&time[long+1].includes('│ │   ')&&time.slice(long,long+2).join('').includes('잘림')&&time[long+2].includes('claude')&&!time[long+2].includes('1h 27m')&&!time[long+2].includes('CTX')&&time[long+3].startsWith('│ ╰'),time.join('\n'));
 // Every row of a folded route opens the route popup with it unfolded (11-15: nothing opens in place).
 const v=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]});
 const hitRows=v.hits.filter(h=>h.action==='popup:ROUTE:a').map(h=>h.row);
-assert.equal(hitRows.length,3);assert.deepEqual(hitRows,[hitRows[0],hitRows[0]+1,hitRows[0]+2]);
+assert.equal(hitRows.length,4);assert.deepEqual(hitRows,[hitRows[0],hitRows[0]+1,hitRows[0]+2,hitRows[0]+3]);   // (title, who, CTX row, NOW)
 assert(v.hits.some(h=>h.action==='popup:ROUTE')&&!v.hits.some(h=>/^(route|request|message)[:-]/.test(h.action)),JSON.stringify(v.hits));
 // Unreported context is left out, never `?`.
 assert(!time.join('\n').includes('?'));
@@ -586,9 +588,10 @@ for(const rows of [time,byModel,paint({},80)])for(const s of rows)assert([...s].
 
     def test_a_folded_one_step_route_adds_its_tool_only_where_the_row_has_room(self):
         # Supervisor 2026-11-12 had a one-step route's owner row add its open tool; 11-17 (the person: CTX beside the model, the NOW
-        # under it) took the tool off the owner row for good: the row reads who and `CTX 24% · 47m`, the session's NOW stands under
-        # it, and the tool and its file name are drawn nowhere in the side layout. Short of cells the time goes first, then the
-        # word `CTX` (the number stays), then the harness.
+        # under it) took the tool off the owner row for good, and 11-18 (the person: the CTX row under the first row) moved the
+        # context down: the owner's first row reads who only (mark, role, harness, model), under it a `CTX 24%` row two cells further
+        # in, then the session's NOW; the owner never carries a time (the route's time stands at the right end of its first line),
+        # at any width, and the tool and its file name are drawn nowhere in the side layout.
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const P=(c)=>({glyph:{text:'⠋'},harness:{text:'claude'},model_text:{text:'Opus 5.5'},ctx:{text:c},now:'running the tests'});
@@ -597,29 +600,31 @@ const staged={...one,id:'b',title:'staged',flow:'plan ✓ › execute ● › re
 const paint=(width)=>view.render({width,height:30,side:true,model:{routes:[one,staged],route_count:2,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 const narrow=paint(34),wide=paint(40),roomy=paint(52);
-// The owner row: who, then the word and the context (the time does not fit 40 cells); the title above it, the NOW under it.
-const at=wide.findIndex(x=>/│ │   ⠋ claude Opus 5\.5  CTX 24% +│/.test(x));
-assert(at>0&&/│ │     running the tests +│ │/.test(wide[at+1])&&wide[at-1].includes('│ │ ⠋ one step'),wide.join('\n'));
+// The owner's blocks: who (title above it), the CTX row two cells further in, then the NOW under it.
+const at=wide.findIndex(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x));
+assert(at>0&&/│ │     CTX 24% +│ │/.test(wide[at+1])&&/│ │     running the tests +│ │/.test(wide[at+2])&&wide[at-1].includes('│ │ ⠋ one step'),wide.join('\n'));
 // No tool and no file name on any row, at any width: the owner row no longer carries them.
 for(const rows of [narrow,wide,roomy])assert(!rows.some(x=>x.includes('python3')||x.includes('>_')||x.includes('run-tests.py')),rows.join('\n'));
-// With room the route's time joins the context.
-assert(roomy.some(x=>/│ │   ⠋ claude Opus 5\.5  CTX 24% · 47m +│/.test(x))&&roomy.some(x=>/│ │     running the tests +│/.test(x)),roomy.join('\n'));
-// A route with a kind word has a first line of its own above the title; the owner row and its NOW follow.
+// An owner shows no time at any width (the route's is on its first line): with room the CTX row still reads the percent alone.
+for(const rows of [narrow,wide,roomy])assert(!rows.some(x=>/47m/.test(x)),rows.join('\n'));
+assert(roomy.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&roomy.some(x=>/│ │     CTX 24% +│ │/.test(x))&&roomy.some(x=>/│ │     running the tests +│/.test(x)),roomy.join('\n'));
+// A route with a kind word has a first line of its own above the title with its time at the right end; the owner's who, its CTX row and its NOW follow.
 const kinded=view.render({width:40,height:30,side:true,model:{routes:[{...one,kind_word:'code'}],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
-const ki=kinded.findIndex(x=>/│ │   ⠋ claude Opus 5\.5  CTX 24% +│/.test(x));
-assert(ki>2&&/^│ │ ● code +│ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step')&&kinded[ki+1].includes('│     running the tests'),kinded.join('\n'));
-// Narrower, the word `CTX` goes (the number stays); there is still no tool, and the NOW keeps its row.
-assert(narrow.some(x=>/│ │   ⠋ claude Opus 5\.5 24% +│/.test(x))&&!narrow.some(x=>x.includes('CTX')||x.includes('47m'))&&narrow.some(x=>/│ │     running the tests +│/.test(x)),narrow.join('\n'));
+const ki=kinded.findIndex(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x));
+assert(ki>2&&/^│ │ ● code(?: · staged \d+\/\d+)? +47m │ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step')&&/│ │     CTX 24% +│ │/.test(kinded[ki+1])&&kinded[ki+2].includes('│     running the tests'),kinded.join('\n'));
+// Narrower the CTX row stays on its own row (the word `CTX` and the percent), and the NOW keeps its row; no tool, no time.
+assert(narrow.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&narrow.some(x=>/│ │     CTX 24% +│ │/.test(x))&&narrow.some(x=>/│ │     running the tests +│/.test(x)),narrow.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
 
     def test_a_folded_route_reads_who_context_what_and_kind(self):
-        # Spec E9 rules 36 and 38, 11-17 (route row 5; CTX beside the model, no gauge, the NOW under it): the kind word (bold)
-        # on the first line / what (two rows at most, two cells in) / who (the recorded role in the route's own column,
-        # harness, model, effort, then `CTX 38% · 41m`) / the session's NOW (four cells in; none, no row) / the stage line
-        # (four in); the one-row form adds neither role nor kind.
+        # Spec E9 rules 36 and 38, 11-18 (the person: the CTX row with its gauge under the first row, the NOW on two rows): the kind
+        # word (bold) and the route's time at the right end on the first line / what (two rows at most, two cells in) / who (the
+        # recorded role in the route's own column, harness, model, effort: no CTX, no time) / its CTX row (four cells in: `CTX`, the
+        # gauge and the percent; none for a session with no context and no time of its own) / the session's NOW (four in; none, no
+        # row) / the stage line (four in); the one-row form adds neither role nor kind.
         script = self.FIXTURE + r'''
 const one={...oneShot,role:'owner',kind_word:'code',paint:{...oneShot.paint,now:'editing host.cjs'}};
 const stg={...staged,role:'worker',kind_word:'code',paint:{...staged.paint,now:'editing peer-message.py'}};
@@ -629,44 +634,48 @@ const frame={id:'f',title:'셸 다듬기 방향 잡기',kind:'working',state:'wo
  paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh'),now:'framing'}};
 const four=[one,stg,wait,frame];
 const box=rows=>rows.filter(s=>s.startsWith('│ │ ')&&!/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s));// (11-17: the zone rules `─ dispatch ───` are no route's row)
-// (a) The owner row stands two cells in: its mark, the role word (the route's own column), then the harness, model, effort and
-// `CTX` with its percent (the one-step route's open tool is not on the row any more). Short of cells the time goes first, then
-// the word `CTX` (the number stays): 48 cells hold the word for the owner alone, and a session with no context shows its time.
+// (a) The who row stands two cells in: its mark, the role word (the route's own column), then the harness, model and effort
+// (the one-step route's open tool is not on the row, nor `CTX`, nor a time: the context is the row under it, the time is the route's
+// and stands on the first line).
 const r50=draw(four,48,50),who=box(r50).filter(s=>/│ │   [⠋●] /.test(s));
-assert.deepEqual(who.map(s=>s.slice(4,-4).trimEnd()),['  ⠋ owner claude Opus 5.5 xhigh  CTX 38%','  ⠋ worker claude Sonnet 5.5 high 12%',
- '  ● owner claude Opus 5.5 xhigh  7h 0m','  ⠋ frame claude Opus 5.5 xhigh  3m'],r50.join('\n'));
-// Wider, the word and the time join the context (`CTX 38% · 41m`); a worker's time is its route's.
-const r64=box(draw(four,64,50)).filter(s=>/│ │   [⠋●] /.test(s)).map(s=>s.slice(4,-4).trimEnd());
-assert.deepEqual(r64,['  ⠋ owner claude Opus 5.5 xhigh  CTX 38% · 41m','  ⠋ worker claude Sonnet 5.5 high  CTX 12% · 1h 0m',
- '  ● owner claude Opus 5.5 xhigh  7h 0m','  ⠋ frame claude Opus 5.5 xhigh  3m'],r64.join('\n'));
+const whoWant=['  ⠋ owner claude Opus 5.5 xhigh','  ⠋ worker claude Sonnet 5.5 high','  ● owner claude Opus 5.5 xhigh','  ⠋ frame claude Opus 5.5 xhigh'];
+assert.deepEqual(who.map(s=>s.slice(4,-4).trimEnd()),whoWant,r50.join('\n'));
+// Wider, the who rows stay the same (no time joins them) and each CTX row is `CTX`, the gauge and the percent, four cells in; a session
+// with no context (the waiting owner, the frame leg) and no time of its own has no CTX row.
+const r64=box(draw(four,64,50)),ctxRows=rows=>rows.filter(s=>/^│ │     CTX /.test(s)).map(s=>s.slice(4,-4).trimEnd());
+assert.deepEqual(r64.filter(s=>/│ │   [⠋●] /.test(s)).map(s=>s.slice(4,-4).trimEnd()),whoWant,r64.join('\n'));
+assert.deepEqual(ctxRows(r64),['    CTX ━━─── 38%','    CTX ━──── 12%'],r64.join('\n'));
+assert.deepEqual(ctxRows(box(r50)),['    CTX ━━─── 38%','    CTX ━──── 12%'],r50.join('\n'));
+assert(!r64.some(s=>/ · \d/.test(s)),'a session with no time of its own shows none\n'+r64.join('\n'));
 // An unrecorded role leaves no column; nothing is made up.
 const unnamed=box(draw([one,{...stg,role:undefined}],48,50));
 assert(unnamed.some(s=>s.startsWith('│ │   ⠋ claude Sonnet 5.5 high'))&&!unnamed.join('').includes('worker'),unnamed.join('\n'));
 // Short of cells effort goes, then the harness; the role and the model stay.
 const r32=box(draw(four,32,50));
 assert(r32.some(s=>s.startsWith('│ │   ⠋ worker Sonnet 5.5'))&&r32.some(s=>s.startsWith('│ │   ⠋ owner Opus 5.5'))&&!r32.join('').includes('xhigh'),r32.join('\n'));
-// (38) No gauge row stands any more; the context is the owner row's, an unknown one leaves no `CTX` and the time stands alone;
+// (38) The gauge stands on the CTX row only (never on a who row); an unknown context leaves no `CTX` row and no time stands in its place;
 // the NOW is a row of its own, only where the session has one (none: no row, never an empty one).
-assert(!box(r50).some(s=>/[━]/.test(s)),r50.join('\n'));
-assert(!/CTX/.test(box(r50).find(s=>s.includes('● owner'))),'an unknown context draws no CTX\n'+r50.join('\n'));
+assert(!box(r50).some(s=>/[━]/.test(s)&&/│ │   [⠋●] /.test(s)),r50.join('\n'));
+const waitAt=box(r50).findIndex(s=>s.includes('● owner'));
+assert(!/CTX/.test(box(r50)[waitAt])&&!/CTX/.test(box(r50)[waitAt+1])&&box(r50)[waitAt-2].includes('staged 4/7: host-run'),'an unknown context draws no CTX\n'+r50.join('\n'));
 assert(!box(draw([one,{...frame,elapsed:''}],48,50)).some(s=>/^│ │ +│ │$/.test(s)),'no empty row');
 const noNow=box(draw([{...frame,paint:{...frame.paint,now:''}}],48,50));
 assert(box(draw([frame],48,50)).some(s=>/^│ │     framing +│ │$/.test(s))&&!noNow.some(s=>/^│ │     \S/.test(s)&&!s.includes('staged'))&&!noNow.some(s=>/^│ │ +│ │$/.test(s)),'a session with no NOW has no NOW row\n'+noNow.join('\n'));
-// The order: the kind word, what, who, its NOW, then the stage line.
-const at=box(r50).findIndex(s=>s.includes('owner claude Opus 5.5 xhigh  CTX 38%'));
-assert(/^│ │ ● code +│ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&/^│ │     editing host\.cjs +│ │$/.test(box(r50)[at+1]),r50.join('\n'));
-assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high 12%')&&/^│ │     editing peer-message\.py +│ │$/.test(box(r50)[i+1])&&box(r50)[i+2].includes('│ │     staged 3/7: execute')),r50.join('\n'));
-// (b) Fleet's kind word leads the first line (bold, in the body color), the stage line carries no kind word; the mode and
-// intensity stay in the opened KIND. A route with no stage line (one-shot) has none: its NOW ends it.
-for(const want of ['│ │ ● code ','│ │ ● frame ','│ │     staged 3/7: execute','│ │     staged 4/7: host-run','│ │     staged 1/3: frame'])
+// The order: the kind word, what, who, its CTX row, its NOW, then the stage line.
+const at=box(r50).findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
+assert(/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&/^│ │     CTX ━━─── 38% +│ │$/.test(box(r50)[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(box(r50)[at+2]),r50.join('\n'));
+assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high')&&/^│ │     CTX ━──── 12% +│ │$/.test(box(r50)[i+1])&&/^│ │     editing peer-message\.py +│ │$/.test(box(r50)[i+2])&&!/^│ │     staged/.test(box(r50)[i+3])&&box(r50).some(t=>t.includes('● code · staged 3/7: execute'))),r50.join('\n'));   // (the stage is on the first line)
+// (b) Fleet's kind word leads the first line (bold, in the body color) and, with it, the stage (`code · staged 3/7: execute`: where the
+// width allows, no stage row stands apart); the mode and intensity stay in the opened KIND. A route with no stage line (one-shot) has none: its NOW ends it.
+for(const want of ['│ │ ● code ','│ │ ● frame ','│ │ ● code · staged 3/7: execute','│ │ ● code · staged 4/7: host-run','│ │ ● frame · staged 1/3: frame'])
  assert(r50.some(s=>s.includes(want)),want+'\n'+r50.join('\n'));
-assert(!r50.join('').includes('(dev')&&!r50.some(s=>/one-shot|code ·/.test(s)),r50.join('\n'));
+assert(!r50.join('').includes('(dev')&&!r50.some(s=>/one-shot/.test(s)),r50.join('\n'));
 const r80=draw(four,80,50).join('\n');
-assert(r80.includes('⠋ owner claude Opus 5.5 xhigh  CTX 38% · 41m')&&r80.includes('editing host.cjs')&&!r80.includes('· Edit')&&r80.includes('staged 3/7: execute · owner Opus 5.5'),r80);
+assert(r80.includes('⠋ owner claude Opus 5.5 xhigh')&&r80.includes('CTX ━━─── 38%')&&!r80.includes('CTX ━━─── 38% · 41m')&&r80.includes('editing host.cjs')&&!r80.includes('· Edit')&&r80.includes('staged 3/7: execute · owner Opus 5.5'),r80);
 // The bottom layout's kind column: the kind leads it (`code · staged 3/7: execute`) and goes first, before the tool.
 const kindAt=w=>draw([one,stg,wait,{...failed,role:'owner',kind_word:'code'}],w,20,{side:false}).find(s=>s.startsWith('│ │ ')&&s.includes('세션 간'));
-assert(/│ code · staged 3\/7: execute +│ >_ Edit/.test(kindAt(140)),kindAt(140));
-assert(!kindAt(100).includes('code ·')&&/│ staged 3\/7: execute +│ >_ Edit/.test(kindAt(100)),kindAt(100));
+assert(/│ code · staged 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(140))&&!kindAt(140).includes('>_'),kindAt(140));   // (11-18: no command column)
+assert(/│ code · staged 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(100))&&!kindAt(90).includes('code ·')&&/│ staged 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(90)),kindAt(90)+'\n'+kindAt(100));
 // (c) A title takes two rows at most, the second ending in `…`; short of rows, one.
 const long={...one,id:'l',title:'아주 긴 route 이름 — 셸 패널의 접힌 route 줄에서 이름이 세 줄을 넘으면 둘째 줄 끝에 줄임 표시가 붙는지 확인하는 이름'};
 const lr=box(draw([one,long],40,50)),li=lr.findIndex(s=>s.includes('아주 긴'));
@@ -676,13 +685,16 @@ const nine=[...Array(9)].map((_,i)=>({...[one,stg,wait][i%3],id:'n'+i,title:[one
 const r30=box(draw(nine,40,30)),flat=r30.filter(s=>/│ │ [⠋●] \S/.test(s));
 assert(flat.length>0&&flat.every(s=>!/owner|worker|code/.test(s))&&!r30.some(s=>/^│ │   /.test(s)),r30.join('\n'));
 // Short of rows: a title's second row, then the NOW rows go and the owner's row takes the one-row fold
-// (percent and time at the right edge), then the stage line, then the one-row form.
+// (the percent at the right edge, and no time: a session with no time of its own has none; the routes' times stand on their first lines),
+// then the stage line, then the one-row form.
 const r44=box(draw(nine,40,50));
-assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+m │ │$/.test(s)).length===9&&r44.filter(s=>/^│ │ ● code +│ │$/.test(s)).length===9&&!r44.some(s=>s.includes('staged')),r44.join('\n'));
+assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+% │ │$/.test(s)).length===6&&!r44.some(s=>/│ │   [⠋●] .* \d+m │ │$/.test(s))&&r44.filter(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/.test(s)).length===9&&!r44.some(s=>/^│ │ +staged/.test(s)),r44.join('\n'));   // (11-18: the stage text is on the first line, never a row apart)
 for(let h=16;h<=80;h++){
- const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │     staged /.test(s)).length;
+ const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │ .*staged \d/.test(s)).length;
+ // (11-18, round 5: a stage name the first line has no room for stands on a stage row under the owner, the first of the steps after the NOW rows to go.)
+ const apart=rows.filter(s=>/^│ │ {4,5}staged \d/.test(s)).length;
  const second=rows.some(s=>/^│ │   \d +│ │$/.test(s));
- if(nows)assert(stages===6,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
+ if(nows)assert(stages===12&&apart===6,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
  if(second)assert(nows===6,h+' a title keeps its second row only while the NOW rows stand\n'+rows.join('\n'));
 }
 '''
@@ -690,13 +702,14 @@ for(let h=16;h<=80;h++){
 
 
     def test_a_route_shows_its_owner_first_and_its_live_workers_in_a_box_under_it(self):
-        # Spec E9 rules 43, 48, 57, 11-17 (route row 5; the person: CTX beside the harness and model, no gauge, the NOW under
-        # it): beside the native area a route's rows are its kind (first line), its title, its owner (two cells in, no branch,
-        # no `│` guide) with `CTX 52% · 2h 10m` beside its who, the owner's NOW (four in; none, no row) and the stage line; its
-        # stage workers running now hang under the stage line by a `↳` (four in, no box), each worker's who on the `↳` row
-        # with its own `CTX` and time beside it, then its NOW (eight in): N workers take 2N rows at most. The open tool and
-        # the stage name are not drawn on a worker, nor the tool on the owner. The title takes its rows whole. An older
-        # backend's row (no `workers_live`) keeps its one doer.
+        # Spec E9 rules 43, 48, 57, 11-18 (the person: the CTX row with its gauge under the first row, the NOW on two rows, the
+        # stage's workers in a box): beside the native area a route's rows are its kind and time (first line), its title, its owner
+        # (two cells in, no branch: mark, role, harness, model, effort), the owner's CTX row (`CTX`, the gauge, the percent; no time),
+        # the owner's NOW (four in; none, no row) and the stage box: the workers running now stand in one box under the owner whose
+        # top line is the stage text (`┌ staged 3/7: execute ──┐`, the stage row apart is not drawn), each worker's who row, its CTX
+        # row with its own time (`CTX ━━ 22% · 12m`) and its NOW two cells inside the box's side. The open tool and the stage name are
+        # not drawn on a worker, nor the tool on the owner. The title takes its rows whole. An older backend's row (no
+        # `workers_live`) keeps its one doer.
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 const doer=(h,m,e,pct,bar,now)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)],...(now?{now}:{})});
@@ -710,100 +723,118 @@ const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:fals
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash',now:'running the codex review'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m',now:'waiting for the owner'})]};
 const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1).filter(s=>!/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s));};// (11-17: without the zone rules `─ dispatch ───`)
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-// No worker: the kind / title / owner (its context beside its model, no open tool) / its NOW; no stage line, no `↳`, no gauge.
-let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 38%'));
-assert(at>0&&/^│ │ ● code +│ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+1])&&b.length===at+3,b.join('\n'));
-assert.equal(col(b[at+1],'editing'),col(b[at],'owner'));
-assert(!/[└├]─|╭─ [⠋●]|↳|━|Edit |CTX/.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at-1].includes('41m'),b.join('\n'));
-// Where the row has room the word `CTX` and the route's time join it: `CTX 38% · 41m`, beside the effort.
-b=box(draw([solo],64,60));at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh  CTX 38% · 41m'));
-assert(at>0&&/^│ │     editing host\.cjs +│ │$/.test(b[at+1])&&!b[at-1].includes('41m'),b.join('\n'));
-// One worker: the kind, the title and the owner's rows (no guide), the owner's NOW, the stage line, then the worker hanging by a `↳` four
-// cells in: who and its context on its row, its NOW eight cells in. The owner stands as a dim `●`.
-b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('● owner  claude Opus 5.5 52%'));
-for(const [i,want] of [[-2,/^│ │ ● code +│ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     waiting for the worker +│ │$/],[2,/^│ │     staged 3\/7: execute +│ │$/],
- [3,/^│ │     ↳ ⠋ worker Sonnet 5\.5 22% +│ │$/],[4,/^│ │         editing utilities\/panel… +│ │$/],[5,/^│ ╰─+╯ │$/]])
+// No worker: the kind / title / owner (who only) / its CTX row / its NOW; no stage box, no `↳`, no time on the owner.
+let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
+assert(at>0&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&b.length===at+4,b.join('\n'));
+assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+2],'editing'),col(b[at],'owner'));
+assert(!/[└├]─|╭─ [⠋●]|↳|Edit /.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at-1].includes('41m')&&!/CTX|━|41m/.test(b[at]),b.join('\n'));
+// Where the row has room nothing joins the owner's rows: its CTX row has no time (the route's stands on the first line).
+b=box(draw([solo],64,60));at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
+assert(at>0&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&!/41m/.test(b[at]+b[at+1])&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-2]),b.join('\n'));
+// One worker: the kind, the title and the owner's rows (no guide), its CTX row and NOW, then the stage box two cells in: the stage text on its top
+// line, the worker's who, its CTX row with its own time and its NOW (here on two rows, wrapped between words) inside the box's side. The
+// owner stands as a dim `●`.
+b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('● owner  claude Opus 5.5 xhigh'));
+for(const [i,want] of [[-2,/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     CTX ━━━━─+ 52% +│ │$/],[2,/^│ │     waiting for the worker +│ │$/],
+ [3,/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   editing +│ │ │$/],[7,/^│ │   │   utilities\/panel\.py +│ │ │$/],
+ [8,/^│ │   └─+┘ │ │$/],[9,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
-// Spec rule 57 (c): the `↳` and the stage line stand under the owner's NOW, the worker's own NOW eight cells in, under its role word.
-assert.equal(col(b[at+3],'↳'),col(b[at+1],'waiting'));assert.equal(col(b[at+2],'staged'),col(b[at+1],'waiting'));
-// (Where the row has room the whole NOW shows, and no tool, no target and no stage name stand on the worker's rows.)
-assert(box(draw([one],52,60)).some(s=>/^│ │         editing utilities\/panel\.py +│ │$/.test(s)),box(draw([one],52,60)).join('\n'));
+// Spec rule 57 (c): the box's corner stands under the owner's mark, the worker's mark two cells in, its CTX row and NOW under its role word.
+assert.equal(col(b[at+3],'┌'),col(b[at],'●'));assert.equal(col(b[at+4],'⠋'),col(b[at+3],'┌')+2);
+assert.equal(col(b[at+5],'CTX'),col(b[at+4],'worker'));assert.equal(col(b[at+6],'editing'),col(b[at+4],'worker'));
+assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+2],'waiting'),col(b[at],'owner'));
+// (Where the row has room the whole NOW shows on one row, and no tool, no target and no stage name stand on the worker's rows.)
+assert(box(draw([one],52,60)).some(s=>/^│ │   │   editing utilities\/panel\.py +│ │ │$/.test(s)),box(draw([one],52,60)).join('\n'));
 assert(!/execute · |Edit |Bash/.test(box(draw([one],52,60)).join('\n')),box(draw([one],52,60)).join('\n'));
-assert.equal(col(b[at+4],'editing'),col(b[at+3],'worker'));assert.equal(col(b[at+1],'waiting'),col(b[at],'owner'));
-assert(!b.join('').includes('owner Opus')&&!b.join('').includes('CTX'),b.join('\n'));
+assert(!b.join('').includes('owner Opus'),b.join('\n'));
 const v1=view.render({width:40,height:60,side:true,model:{...head,routes:[one],route_count:1},configuration:{},questions:()=>[]});
 const rowOf=re=>v1.rows.find(r=>re.test(r.map(p=>p.text).join('')));
-const ownerRow=rowOf(/● owner/),workerRow=rowOf(/↳ ⠋ worker/);
+const ownerRow=rowOf(/● owner/),workerRow=rowOf(/│ ⠋ worker/);
 assert(ownerRow.find(p=>p.text==='●').dim&&ownerRow.find(p=>p.text==='owner ').dim&&ownerRow.some(p=>p.text==='Opus 5.5'),JSON.stringify(ownerRow));
-assert(workerRow.find(p=>p.text==='↳ ').dim&&workerRow.find(p=>p.text==='worker').dim&&workerRow.some(p=>p.text==='Sonnet 5.5'),JSON.stringify(workerRow));
-// A NOW is bright while its session works or waits on an answer, dim otherwise (the route's kind, a worker's own kind).
-assert.equal(rowOf(/waiting for the worker/).find(p=>p.text==='waiting for the worker').dim,false);
-assert.equal(rowOf(/editing utilities/).find(p=>p.text.startsWith('editing')).dim,false);
+assert(workerRow.find(p=>p.text==='worker').dim&&workerRow.some(p=>p.text==='Sonnet 5.5'),JSON.stringify(workerRow));
+// A NOW is bright while its session works or waits on an answer, dim otherwise (the route's kind, a worker's own kind); its words are
+// drawn one by one, so the first word stands for the row.
+assert.equal(rowOf(/waiting for the worker/).find(p=>p.text==='waiting').dim,false);
+assert.equal(rowOf(/^│ │   │   editing/).find(p=>p.text==='editing').dim,false);
 const idleRoute=view.render({width:40,height:60,side:true,model:{...head,routes:[{...solo,kind:'idle',state:'idle'}],route_count:1},configuration:{},questions:()=>[]});
-assert.equal(idleRoute.rows.find(r=>/editing host/.test(r.map(p=>p.text).join(''))).find(p=>p.text==='editing host.cjs').dim,true);
-// Every row of the route opens it (11-15: the routes popup with it unfolded), the worker's as the owner's.
+assert.equal(idleRoute.rows.find(r=>/editing host/.test(r.map(p=>p.text).join(''))).find(p=>p.text==='editing').dim,true);
+// Every row of the route opens it (11-15: the routes popup with it unfolded), the worker's and the box's as the owner's.
 const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),routeRows=v1.rows.map((r,i)=>/^│ │ /.test(r.map(p=>p.text).join(''))&&!/^│ │ ─ dispatch ─+ │ │$/.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);// (11-17: the zone rule `─ dispatch ───` opens nothing)
-assert.equal(routeRows.length,7,JSON.stringify(routeRows));
+assert.equal(routeRows.length,11,JSON.stringify(routeRows));
 for(const i of routeRows)assert(area.includes(i),i+' '+JSON.stringify(area));
-// Two workers: each hangs by its own `↳`; 2N rows, the last row the route box's bottom line.
-b=box(draw([two],40,60));const top=b.findIndex(s=>/^│ │     ↳ ⠋ worker codex gpt-5\.5 34% +│ │$/.test(s));
-assert(top>0&&/^│ │         running the codex review +│ │$/.test(b[top+1])&&/^│ │     ↳ ● worker glm-5\.2 71% +│ │$/.test(b[top+2])
- &&/^│ │         waiting for the owner +│ │$/.test(b[top+3])&&b[top+4].startsWith('│ ╰'),b.join('\n'));
+// Two workers: each its who, its CTX row and its NOW in the same box; the box's bottom line, then the route box's.
+b=box(draw([two],40,60));const top=b.findIndex(s=>/^│ │   │ ⠋ worker codex gpt-5\.5 +│ │ │$/.test(s));
+assert(top>0&&/^│ │   │   CTX ━━─+ 34% · 12m +│ │ │$/.test(b[top+1])&&/^│ │   │   running the codex review +│ │ │$/.test(b[top+2])&&/^│ │   │ ● worker opencode glm-5\.2 +│ │ │$/.test(b[top+3])
+ &&/^│ │   │   CTX ━+─+ 71% · 8m +│ │ │$/.test(b[top+4])&&/^│ │   │   waiting for the owner +│ │ │$/.test(b[top+5])&&/^│ │   └─+┘ │ │$/.test(b[top+6])&&b[top+7].startsWith('│ ╰'),b.join('\n'));
 // A worker's NOW is dim when the worker is not working (its own kind), bright while it works.
 const v2=view.render({width:40,height:60,side:true,model:{...head,routes:[two],route_count:1},configuration:{},questions:()=>[]});
-const nowOf=word=>v2.rows.find(r=>r.some(p=>p.text===word)).find(p=>p.text===word);
-assert.equal(nowOf('running the codex review').dim,false);assert.equal(nowOf('waiting for the owner').dim,true);
-// No role recorded anywhere: no role column, one space before the context.
+const nowOf=(re,word)=>v2.rows.find(r=>re.test(r.map(p=>p.text).join(''))).find(p=>p.text===word);
+assert.equal(nowOf(/running the codex review/,'running').dim,false);assert.equal(nowOf(/waiting for the owner/,'waiting').dim,true);
+// No role recorded anywhere: no role column, one space before the model.
 b=box(draw([{...solo,role:undefined}],40,60));
-assert(b.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh 38%'))&&b.some(s=>/^│ │     editing host\.cjs +│ │$/.test(s)),b.join('\n'));
-// An unknown context: no CTX label (owner or worker); the times follow the who where the row has room (56 cells).
+assert(b.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │     CTX ━━━─+ 38% +│ │$/.test(s))&&b.some(s=>/^│ │     editing host\.cjs +│ │$/.test(s)),b.join('\n'));
+// An unknown context: no CTX label (owner or worker). The owner, with no context and no time of its own, has no CTX row at all; a worker's
+// own time ends its first row (no CTX row of only a time) where it has one (56 cells).
 const noCtx=[{...one,owner_paint:{harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')},workers_live:[{...worker('claude','Sonnet 5.5','high','22%','━━'),paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5')}}]}];
-b=box(draw(noCtx,56,60));
-assert(!b.join('').includes('CTX')&&b.some(s=>/^│ │   ● owner  claude Opus 5\.5 xhigh  2h 10m +│ │$/.test(s))&&b.some(s=>/^│ │     ↳ ⠋ worker claude Sonnet 5\.5  12m +│ │$/.test(s))&&!b.some(s=>/속도 3단계 +2h/.test(s)),b.join('\n'));
-// A session with no NOW has no NOW row (none empty): the owner's, then the stage line straight under it.
+b=box(draw(noCtx,56,60));at=b.findIndex(s=>s.includes('● owner'));
+assert(!b.join('').includes('CTX')&&/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/.test(b[at])&&/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/.test(b[at+1])&&b.some(s=>/^│ │   │ ⠋ worker claude Sonnet 5\.5 +12m +│ │ │$/.test(s))&&!b.some(s=>/^│ │   │   12m +│ │ │$/.test(s))&&!b.some(s=>/owner.*2h/.test(s)&&!/code/.test(s)),b.join('\n'));
+// A session with no NOW has no NOW row (none empty): the owner's CTX row, then the stage box straight under it.
 b=box(draw([{...one,owner_paint:{...one.owner_paint,now:''}}],40,60));at=b.findIndex(s=>s.includes('● owner'));
-assert(/^│ │     staged 3\/7: execute +│ │$/.test(b[at+1])&&!b.some(s=>/^│ │ +│ │$/.test(s)),b.join('\n'));
-// A title on two rows: both rows the title's; the time on the owner's row, its NOW under it.
+assert(/^│ │     CTX /.test(b[at+1])&&/^│ │   ┌ staged 3\/7: execute /.test(b[at+2])&&!b.some(s=>/^│ │ +│ │$/.test(s)),b.join('\n'));
+// A title on two rows: both rows the title's; the time on the first line, never on the owner's rows, its CTX row and NOW under it.
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code +│ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('editing host.cjs'),b.join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('CTX ━')&&b[at+4].includes('editing host.cjs'),b.join('\n'));
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],64,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at+2].includes('⠋ owner')&&b[at+2].includes('CTX 38% · 41m'),b.join('\n'));
-// Hangul in the owner's title and the worker's NOW: every line keeps its cells.
-for(const width of [32,34,38,40,44])for(const s of draw([{...one,title:'한글 제목이 길게 이어지는 경우',workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',now:'문서/한글 파일 고치는 중'})]},two],width,60))
- assert.equal(cells(s),width,width+' '+s);
-// Short of cells (rule 48 (d)): on the worker's row the time goes, then the word `CTX`, then the effort and the harness; role and
-// model stay, and the percent stays while it fits.
-assert(box(draw([one],52,60)).some(s=>/│ │     ↳ ⠋ worker claude Sonnet 5\.5 high 22% +│ │$/.test(s)),box(draw([one],52,60)).join('\n'));
-assert(box(draw([one],44,60)).some(s=>/│ │     ↳ ⠋ worker claude Sonnet 5\.5 22% +│ │$/.test(s)),box(draw([one],44,60)).join('\n'));
-assert(box(draw([one],36,60)).some(s=>/│ │     ↳ ⠋ worker Sonnet 5\.5 +│ │$/.test(s)),box(draw([one],36,60)).join('\n'));
-assert(box(draw([one],34,60)).some(s=>/│ │     ↳ ⠋ worker Sonnet 5\.5 +│ │$/.test(s)),box(draw([one],34,60)).join('\n'));
-assert(box(draw([one],32,60)).some(s=>/│ │     ↳ ⠋ worker Sonnet 5…/.test(s)),box(draw([one],32,60)).join('\n'));
-// A NOW longer than its row is cut with `…`, never wrapped: the row count stays.
-assert(box(draw([one],34,60)).some(s=>/^│ │         editing utilities… +│ │$/.test(s))&&box(draw([one],32,60)).length===box(draw([one],52,60)).length,box(draw([one],34,60)).join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at+2].includes('⠋ owner')&&!b[at+2].includes('CTX')&&b[at+3].includes('CTX ━━━')&&!b[at+3].includes('41m'),b.join('\n'));
+// Hangul in the owner's title and the worker's NOW: every line keeps its cells, in each form of the box.
+for(const configuration of [{},{worker_box:'open'},{worker_box:'none'}])for(const width of [32,34,38,40,44])
+ for(const s of view.render({width,height:60,side:true,fill:true,model:{...head,routes:[{...one,title:'한글 제목이 길게 이어지는 경우',workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',now:'문서/한글 파일 고치는 중'})]},two],route_count:2},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')))
+  assert.equal(cells(s),width,width+' '+s);
+// Short of cells (rule 48 (d)): the worker's who row (inside the box) loses its effort, then its harness; role and model stay and a model longer
+// than the row is cut with `…`. The CTX row under it has its percent whole and its time.
+const whoAt=w=>box(draw([one],w,60)).find(s=>/│ [⠋●] worker/.test(s));
+assert(/│ │   │ ⠋ worker claude Sonnet 5\.5 high +│ │ │$/.test(whoAt(52)),box(draw([one],52,60)).join('\n'));
+assert(/│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/.test(whoAt(44))&&/│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/.test(whoAt(40)),box(draw([one],44,60)).join('\n'));
+assert(/│ │   │ ⠋ worker Sonnet 5\.5 +│ │ │$/.test(whoAt(38))&&/│ │   │ ⠋ worker Sonnet 5\.5 +│ │$/.test(whoAt(36))&&/│ │   │ ⠋ worker Sonnet 5\.5 +│ │$/.test(whoAt(32)),box(draw([one],36,60)).join('\n'));
+assert(box(draw([one],32,60)).some(s=>/^│ │   │   CTX 22% · 12m +│ │$/.test(s))&&box(draw([one],36,60)).some(s=>/^│ │   │   CTX ━━─+ 22% · 12m +│ │$/.test(s)),box(draw([one],32,60)).join('\n'));
+// A NOW longer than its row goes on a second row at a word boundary, the last row ending in `…` where it still goes on: no row is wider than the box.
+b=box(draw([one],34,60));
+assert(b.some(s=>/^│ │   │   editing +│ │$/.test(s))&&b.some(s=>/^│ │   │   utilities\/panel\.py +│ │$/.test(s)),b.join('\n'));
+b=box(draw([{...one,workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{now:'editing utilities/panel.py and then running every test of the suite twice'})]}],40,60));
+assert(b.some(s=>/^│ │   │   utilities\/panel\.py and… +│ │ │$/.test(s))&&b.filter(s=>/^│ │   │   \S/.test(s)&&!/CTX/.test(s)).length===2,b.join('\n'));
 b=box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],40,60));
-assert(b.some(s=>/│ │     ↳ ⠋ worker deepseek-v4\.1-\S*… +│ │$/.test(s))&&b.some(s=>s.includes('● owner  claude Opus 5.5 52%')),b.join('\n'));
-assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],48,60)).some(s=>/↳ ⠋ worker deepseek-v4\.1-flash 22% +│ │$/.test(s)));
-// (Room for the word, not yet for the time.)
-assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],64,60)).some(s=>/↳ ⠋ worker opencode deepseek-v4\.1-flash max  CTX 22% +│ │$/.test(s)&&!s.includes('12m')),box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],64,60)).join('\n'));
-// An older backend's row: one doer, its who row keeps the context and the time, its NOW, no `↳`, no gauge.
+assert(b.some(s=>/│ │   │ ⠋ worker deepseek-v4\.1-\S*… +│ │ │$/.test(s))&&b.some(s=>s.includes('● owner  claude Opus 5.5')),b.join('\n'));
+assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],48,60)).some(s=>/│ │   │ ⠋ worker deepseek-v4\.1-flash +│ │ │$/.test(s)));
+// (Room for the harness and the effort too.)
+assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],64,60)).some(s=>/│ │   │ ⠋ worker opencode deepseek-v4\.1-flash max +│ │ │$/.test(s)),box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','max','22%','━━')]}],64,60)).join('\n'));
+// The same worker in the `none` form hangs by a `↳` four cells in under the stage row, its CTX row and NOW eight in (no box is drawn).
+const flat=view.render({width:40,height:60,side:true,fill:true,model:{...head,routes:[one],route_count:1},state:'working',configuration:{worker_box:'none'},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+b=box(flat);at=b.findIndex(s=>s.includes('● owner'));
+for(const [i,want] of [[3,/^│ │     staged 3\/7: execute +│ │$/],[4,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │         CTX ━━─+ 22% · 12m +│ │$/],[6,/^│ │         editing +│ │$/],[7,/^│ │         utilities\/panel\.py +│ │$/],[8,/^│ ╰─+╯ │$/]])
+ assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
+assert.equal(col(b[at+3],'staged'),col(b[at+2],'waiting'));assert.equal(col(b[at+4],'↳'),col(b[at+2],'waiting'));assert.equal(col(b[at+6],'editing'),col(b[at+4],'worker'));
+// An older backend's row: one doer, its who row, its CTX row (no time: the route's is on the first line), its NOW, the stage row; no `↳`, no box.
 const older={...one,owner_paint:undefined,workers_live:undefined};
 b=box(draw([older],60,60));
-assert(!/↳|└─|━/.test(b.join(''))&&b.some(s=>/⠋ worker claude Sonnet 5\.5 high  CTX 22% · 2h 10m +│ │$/.test(s))&&b.some(s=>/^│ │     writing the worker side +│ │$/.test(s))
+assert(!/↳|└─|┌/.test(b.join(''))&&b.some(s=>/⠋ worker claude Sonnet 5\.5 high +│ │$/.test(s))&&b.some(s=>/^│ │     CTX ━━─+ 22% +│ │$/.test(s))&&b.some(s=>/^│ │     writing the worker side +│ │$/.test(s))
  &&b.some(s=>s.includes('owner Opus 5.5')),b.join('\n'));
 // The bottom layout keeps its rows whatever the route carries.
-assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},older,{...two,workers_live:undefined}],120,20,{side:false}));
+// (11-18: under the native area a route's row reads its owner, as the NOW under it does, so what a worker holds changes nothing there.)
+assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},{...older,owner_paint:one.owner_paint},{...two,workers_live:undefined}],120,20,{side:false}));
 """
         self.node(script, "panel-view.cjs")
 
 
     def test_a_route_box_carries_its_time_on_the_ctx_row_and_its_workers_two_cells_further_in(self):
-        # Spec E9 rule 57, 11-17 (route row 5; the person: CTX beside the harness and model, no gauge, the NOW under it): owners
-        # and workers carry `CTX 38% · 41m` (the word, the percent, the time right after it, dim) beside their who on the
-        # first row, not at the right edge; the title, the NOW and the stage row carry no time. The workers hang by a `↳` four
-        # cells in (their NOW eight in, no box). Short of cells the time goes first, then the word `CTX` (the percent stays),
-        # then the effort, then the harness. Widths 32-48 with the rows running short: every row keeps the panel's width, the
-        # steps of rule 48 (c) hold (the NOW rows go first and owners and workers fold together; folded, percent and time
-        # end the owner row).
+        # Spec E9 rule 57, 11-18 (the person: the CTX row with its gauge under the first row; the stage's workers in a box): a
+        # session is its who row (mark, role, harness, model, effort), under it its CTX row two cells further in (`CTX`, the gauge,
+        # the percent), then its NOW. The time stands on that CTX row (`CTX ━━ 22% · 12m`) only when it is the session's own, a
+        # worker's; an owner never shows one (the route's time stands at the right end of the route's first line), and neither a
+        # title, a NOW nor a stage row carries one. The workers stand in the stage box two cells in under the owner (`closed`, the
+        # default); `worker_box: none` keeps the `↳` form, four cells in, their rows eight in. Short of cells the CTX row loses its
+        # gauge's width, the word `CTX` and then the time; widths 32-48 with the rows running short: every row keeps the panel's
+        # width, the steps of rule 48 (c) hold (the box closes, the NOW's second row, the CTX row folds into the who row, the NOW
+        # goes; folded, the percent ends the row).
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 const doer=(h,m,e,pct,bar,now)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)],...(now?{now}:{})});
@@ -814,45 +845,66 @@ const one={id:'w',title:'한글 제목 — 속도 3단계의 남은 재계산',k
  paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','52%','━━━━','owner step')},workers_live:[worker('claude','Sonnet 5.5','22%',{target:'문서/한글 파일.md'})]};
 const two={...one,id:'t',title:'검토 두 갈래',workers_live:[worker('codex','gpt-5.5','34%'),worker('opencode','glm-5.2','71%',{elapsed:'8m'})]};
 const text=r=>r.map(p=>p.text).join('');
-for(let width=32;width<=48;width++){
+for(const none of [false,true])for(let width=32;width<=48;width++){
  for(let h=60;h>=12;h--){
-  const v=view.render({width,height:h,side:true,fill:true,model:{...head,routes:[solo,one,two],route_count:3},state:'working',configuration:{},questions:()=>[]});
-  const rows=v.rows.map(text),where=width+'x'+h+'\n'+rows.join('\n');
+  const v=view.render({width,height:h,side:true,fill:true,model:{...head,routes:[solo,one,two],route_count:3},state:'working',configuration:none?{worker_box:'none'}:{},questions:()=>[]});
+  const rows=v.rows.map(text),where=(none?'none ':'box ')+width+'x'+h+'\n'+rows.join('\n');
   for(const s of rows)assert.equal(cells(s),width,where);
-  // (a), (b) The time follows a percent after `CTX` on a who row, never ends a title, a NOW or a stage row.
-  for(const s of rows.filter(s=>/^│ │ +\S.* CTX /.test(s))){if(/ · \d/.test(s))assert(/CTX \d+% · (\d+h )?\d+m +│ │$/.test(s),where);}
+  // (a), (b) The time follows a percent after `CTX`, on a worker's CTX row alone (an owner has none, 11-18); it never ends a who row,
+  // a title, a NOW or a stage row.
+  for(const s of rows.filter(s=>/^│ │ +\S.* CTX /.test(s))){if(/ · \d/.test(s))assert(/CTX .*\d+[%K] · (\d+h )?\d+m +(│ )?│ │$/.test(s)&&!/^│ │ {5}CTX /.test(s),where);}
   assert(!rows.some(s=>/(고치기|재계산|두 갈래|solo step|owner step|worker step|execute) +(\d+h )?\d+m +│ │$/.test(s)),where);
-  // (c) The worker hangs four cells in, under the owner's NOW, with no box around it: each `↳` row (whole or folded)
-  // starts there; its NOW stands four cells further in, the owners' NOW and stage line four in. No gauge row stands.
-  for(const s of rows.filter(s=>s.includes('↳')))assert(/^│ │     ↳ [⠋●] /.test(s),where);
-  for(const s of rows.filter(s=>/^│ │ +worker step/.test(s)))assert(/^│ │ {9}worker step/.test(s),where);
+  assert(!rows.some(s=>/^│ │ +[⠋●] (owner|frame|worker) .* (\d+h )?\d+m +(│ )?│ │$/.test(s)&&/owner/.test(s)),'an owner shows no time of its own\n'+where);
+  // (c) The owner's NOW stands four cells in, under its CTX row. A worker stands in the stage box two cells in (its mark, then its CTX
+  // row and NOW inside the box's side), or, in the `none` form, hangs four cells in by a `↳`, its NOW eight in. The stage text is
+  // the top line of the box (`┌ staged 3/7: execute`) or, in the `none` form and where the workers went, a row four in.
   for(const s of rows.filter(s=>/^│ │ +(owner|solo) step/.test(s)))assert(/^│ │ {5}(owner|solo) step/.test(s),where);
   for(const s of rows.filter(s=>/^│ │ +(staged )?\d+\/\d+: /.test(s)))assert(/^│ │ {5}(staged )?\d+\/\d+: /.test(s),where);
-  assert(!rows.some(s=>/^│ │ +CTX /.test(s)||/^│ │ .*[━]/.test(s))&&!rows.some(s=>/[╭├]─ [⠋●]/.test(s)),where);
+  if(none){
+   for(const s of rows.filter(s=>s.includes('↳')))assert(/^│ │     ↳ [⠋●] /.test(s),where);
+   for(const s of rows.filter(s=>/^│ │ +worker step/.test(s)))assert(/^│ │ {9}worker step/.test(s),where);
+   assert(!rows.some(s=>/^│ │   [┌│└]/.test(s)),where);
+  }else{
+   for(const s of rows.filter(s=>/^│ │ .*┌/.test(s)))assert(/^│ │   ┌ (staged )?\d+\/\d+: /.test(s),where);
+   for(const s of rows.filter(s=>/^│ │ +│ +worker step/.test(s)))assert(/^│ │   │ {3}worker step/.test(s),where);
+   for(const s of rows.filter(s=>/^│ │ +│ +[⠋●] worker/.test(s)))assert(/^│ │   │ [⠋●] worker/.test(s),where);
+   assert(!rows.some(s=>s.includes('↳')),where);
+  }
+  // The gauge stands on a CTX row only, and that row has the word first, four cells in for an owner.
+  for(const s of rows.filter(s=>/^│ │ /.test(s)&&/━/.test(s.slice(2,-2))))assert(/^│ │ +(│ +)?CTX /.test(s),where);
+  for(const s of rows.filter(s=>/^│ │ +CTX /.test(s)))assert(/^│ │ {5}CTX /.test(s)||none&&/^│ │ {9}CTX /.test(s),where);
+  assert(!rows.some(s=>/[╭├]─ [⠋●]/.test(s)),where);
  }
 }
-// At 40 cells, the picture of rule 57.
+// At 40 cells, the picture of rule 57 (the stage box closed): the owner's who, its CTX row two cells further in with no time, its NOW,
+// then the stage box with the worker's who, CTX row (with its own time) and NOW; every right `│` of the box in one column.
 const b=draw([one],40,60),at=b.findIndex(s=>s.includes('● owner'));
-for(const [i,want] of [[-3,/^│ │ ● code +│ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[0,/^│ │   ● owner  claude Opus 5\.5 52% +│ │$/],[1,/^│ │     owner step +│ │$/],
- [2,/^│ │     staged 3\/7: execute +│ │$/],[3,/^│ │     ↳ ⠋ worker Sonnet 5\.5 22% +│ │$/],[4,/^│ │         worker step +│ │$/],[5,/^│ ╰─+╯ │$/]])
+for(const [i,want] of [[-3,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[0,/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/],[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],
+ [3,/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   worker step +│ │ │$/],[7,/^│ │   └─+┘ │ │$/],[8,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
-// With room, the whole `CTX 52% · 2h 10m` stands beside the owner's who and `CTX 22% · 12m` beside the worker's.
+// The `none` form is the older one: the stage row four cells in, the worker hanging by a `↳` four cells in, its CTX row and NOW eight in.
+const old=draw([one],40,60).length&&view.render({width:40,height:60,side:true,fill:true,model:{...head,routes:[one],route_count:1},state:'working',configuration:{worker_box:'none'},questions:()=>[]}).rows.map(text);
+const oat=old.findIndex(s=>s.includes('● owner'));
+for(const [i,want] of [[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],[3,/^│ │     staged 3\/7: execute +│ │$/],[4,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │         CTX ━━─+ 22% · 12m +│ │$/],[6,/^│ │         worker step +│ │$/],[7,/^│ ╰─+╯ │$/]])
+ assert(want.test(old[oat+i]),i+'\n'+old.join('\n'));
+// With room, the owner's CTX row has no time and `CTX ━━ 22% · 12m` stands under the worker's who.
 const wide=draw([one],72,60);
-assert(wide.some(s=>/^│ │   ● owner  claude Opus 5\.5 xhigh  CTX 52% · 2h 10m +│ │$/.test(s))&&wide.some(s=>/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 high  CTX 22% · 12m +│ │$/.test(s)),wide.join('\n'));
-// (d) Short of cells: the time goes first, then the word `CTX` (the percent stays), then the effort, then the harness.
-const ownerRow=w=>draw([solo],w,60).find(s=>/^│ │   ⠋ /.test(s));
-for(let w=32;w<=72;w++){const row=ownerRow(w);
- if(/ · \d/.test(row))assert(/xhigh  CTX 38% · 41m/.test(row),w+' '+row);          // the time only with the word and the effort
- if(row.includes('CTX'))assert(row.includes('xhigh')&&row.includes('38%'),w+' '+row);     // the word only while the effort stays
- if(!row.includes('xhigh'))assert(!/CTX|41m/.test(row)&&row.includes('Opus 5.5'),w+' '+row);   // the effort goes after them, the model stays
- if(!row.includes('claude'))assert(!row.includes('xhigh')&&row.includes('Opus 5.5'),w+' '+row);   // the harness goes after the effort
+assert(wide.some(s=>/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/.test(s))&&wide.some(s=>/^│ │     CTX ━━━━──── 52% +│ │$/.test(s))&&wide.some(s=>/^│ │   │ ⠋ worker claude Sonnet 5\.5 high +│ │ │$/.test(s))&&wide.some(s=>/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/.test(s)),wide.join('\n'));
+// (d) Short of cells the who row loses its effort, then its harness (the role and the model stay); it carries neither the context nor
+// a time at any width, the CTX row under it keeps its percent whole.
+const ownerRows=w=>{const rows=draw([solo],w,60),i=rows.findIndex(s=>/^│ │   ⠋ /.test(s));return [rows[i],rows[i+1]];};
+for(let w=32;w<=72;w++){const [row,ctx]=ownerRows(w);
+ assert(!/CTX|41m|38%/.test(row)&&row.includes('Opus 5.5'),w+' '+row);      // the model stays, nothing of the context or the time
+ if(!row.includes('xhigh')||!row.includes('claude'))assert(row.includes('Opus 5.5'),w+' '+row);
+ if(!row.includes('claude'))assert(!row.includes('xhigh'),w+' '+row);   // the harness goes after the effort
+ assert(/^│ │     CTX ━━━─+ 38% +│ │$/.test(ctx)&&!ctx.includes('41m'),w+' '+ctx);
 }
-assert(ownerRow(32).includes('⠋ owner Opus 5.5 38%')&&ownerRow(40).includes('⠋ owner claude Opus 5.5 38%')&&ownerRow(48).includes('⠋ owner claude Opus 5.5 xhigh  CTX 38%')&&ownerRow(64).includes('xhigh  CTX 38% · 41m'),[32,40,48,64].map(ownerRow).join('\n'));
+assert(ownerRows(32)[0].includes('⠋ owner Opus 5.5')&&ownerRows(38)[0].includes('⠋ owner claude Opus 5.5')&&!ownerRows(38)[0].includes('xhigh')&&ownerRows(48)[0].includes('⠋ owner claude Opus 5.5 xhigh'),[32,38,48].map(w=>ownerRows(w)[0]).join('\n'));
 const at32=draw([one],32,60);
-assert(at32.some(s=>/^│ │   ● owner  Opus 5\.5 52% +│ │$/.test(s))&&at32.some(s=>/^│ │     ↳ ⠋ worker Sonnet 5… +│ │$/.test(s))&&!at32.join('').includes('2h 10m'),at32.join('\n'));
-// Folded (rule 48 (c)): the NOW rows are gone, percent and time end the owner's row together, as before.
+assert(at32.some(s=>/^│ │   ● owner  Opus 5\.5 +│ │$/.test(s))&&at32.some(s=>/^│ │     CTX ━━━━──── 52% +│ │$/.test(s))&&at32.some(s=>/^│ │   │ ⠋ worker Sonnet 5\.5 +│ │$/.test(s))&&at32.some(s=>/^│ │   │   CTX .*22%.* · 12m +│ │$/.test(s))&&!at32.some(s=>/owner|worker/.test(s)&&s.includes('2h 10m')),at32.join('\n'));   // (the time stands on the first line)
+// Folded (rule 48 (c)): the NOW rows are gone and the CTX row has folded into the who row, the percent ending it (no time: an owner has none).
 const folded=view.render({width:40,height:26,side:true,fill:true,model:{...head,routes:[one,two],route_count:2},state:'working',configuration:{},questions:()=>[]}).rows.map(text);
-assert(folded.some(s=>/^│ │   [⠋●] owner .* 52% +2h 10m │ │$/.test(s))&&!folded.some(s=>/^│ │ .*CTX/.test(s))&&!folded.some(s=>/owner step|worker step/.test(s)),folded.join('\n'));
+assert(folded.some(s=>/^│ │   [⠋●] owner .* 52% +│ │$/.test(s))&&!folded.some(s=>/^│ │ .*CTX/.test(s))&&!folded.some(s=>/owner step|worker step/.test(s))&&!folded.some(s=>/^│ │   [⠋●] owner .*(\d+h )?\d+m +│ │$/.test(s)),folded.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
@@ -860,40 +912,179 @@ assert(folded.some(s=>/^│ │   [⠋●] owner .* 52% +2h 10m │ │$/.test(s
     def test_a_four_cell_context_keeps_the_worker_box_line_at_the_narrowest_panel(self):
         # #1583 review follow-up (가): at 32 cells a four-cell percent (`100%`, or a token count
         # `250K` with no window) made the worker's `CTX` row one cell too wide and its route's right `│`
-        # fell off (11-17, route row 5: the worker hangs by a `↳`, with no box of its own, so the line
-        # that must hold is the route box's). 11-17 (CTX beside the model, the NOW under it): short of cells the worker's row
-        # lets the time, the word `CTX` and then a percent that does not fit go whole (never a cut `10…`), as the owner's row
-        # does; every row of the worker (its who and its NOW) keeps the panel's width and its right line.
+        # fell off. 11-18 (the person: the CTX row under the first row, the workers in a box): the worker's rows are its who, its
+        # CTX row (`CTX`, the gauge, the percent, ` · 12m`) and its NOW, in the stage box under the owner (the default `closed`
+        # gives way to the open one where the text inside is under 24 cells, as at these widths; `none` keeps the `↳` form); short
+        # of cells the CTX row lets the time, the gauge's width, then the word `CTX` go, and a percent that does not fit goes whole
+        # (never a cut `10…`); every row of the worker keeps the panel's width and its route's right line.
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 // The gauge at the panel's width, as the backend lays it out (`max(5, min(10, (width-8)//4))` cells).
 const gauge=(width,pct)=>{const n=Math.max(5,Math.min(10,Math.floor((width-8)/4)));
  if(!pct.endsWith('%'))return [D(pct)];const on=Math.round(n*parseInt(pct)/100);return [P('━'.repeat(on)),D('─'.repeat(n-on)),D(' '),P(pct)];};
-for(let width=32;width<=36;width++)for(const pct of ['100%','250K','9%']){
+// `top` is the worker's who row, then its CTX row and its NOW row; `ctx` and `now` are where they start in each form.
+for(const [name,configuration,top,ctx,now] of [['box',{},/^│ │   │ ⠋ worker/,/^│ │   │   CTX /,/^│ │   │   running the/],
+ ['none',{worker_box:'none'},/^│ │     ↳ ⠋ worker/,/^│ │         CTX /,/^│ │         running the/]])
+for(let width=32;width<=38;width++)for(const pct of ['100%','250K','9%']){
  const route={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
   paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh'),ctx:P('52%'),gauge_row:gauge(width,'52%')},
   workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',tool:'Edit',
    paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high'),ctx:P(pct),gauge_row:gauge(width,pct),now:'running the tests'}}]};
- const rows=draw([route],width,60),seen=width+' '+pct+'\n'+rows.join('\n');
+ const rows=view.render({width,height:60,side:true,fill:true,model:{...head,routes:[route],route_count:1},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')),seen=name+' '+width+' '+pct+'\n'+rows.join('\n');
  for(const s of rows)assert.equal(cells(s),width,seen);
- const top=rows.findIndex(s=>/^│ │     ↳ ⠋ worker/.test(s)),bottom=rows.findIndex(s=>/^│ ╰─+╯ │$/.test(s));
- assert(top>0&&bottom>top+1,seen);
- for(const s of rows.slice(top,bottom))assert(/^│ │ .* │ │$/.test(s),seen);
- for(const s of rows.slice(top+1,bottom))assert(/^│ │         running the t/.test(s),seen);
- // The percent stands whole beside the worker's who or not at all, never cut (`10…`), and no gauge row stands.
- assert((rows[top].match(/\d+[%K]/g)||[]).every(g=>g===pct)&&!/\d+[%K]…|[1-9]0…/.test(rows[top]),seen);
- if(width===36&&pct==='9%')assert(rows[top].includes('9%'),seen);
- assert(!rows.some(s=>/^│ │ +CTX /.test(s)||/━/.test(s.slice(2,-2))&&/^│ │ /.test(s)),seen);
+ const at=rows.findIndex(s=>top.test(s)),bottom=rows.findIndex(s=>/^│ ╰─+╯ │$/.test(s));
+ assert(at>0&&bottom>at+2&&ctx.test(rows[at+1])&&now.test(rows[at+2]),seen);
+ for(const s of rows.slice(at,bottom))assert(/^│ │ .* │ │$/.test(s),seen);
+ // The percent stands whole on the worker's CTX row or not at all, never cut (`10…`); the who row carries none.
+ assert((rows[at+1].match(/\d+[%K]/g)||[]).every(g=>g===pct)&&!/\d+[%K]…|[1-9]0…/.test(rows[at+1])&&!/\d+[%K]/.test(rows[at]),seen);
+ if(width>=36&&pct==='9%')assert(rows[at+1].includes('9%'),seen);
 }
 """
         self.node(script, "panel-view.cjs")
 
 
-    def test_a_bottom_route_row_names_its_kind_before_its_tool(self):
-        # Spec E9 rule 34 (d), 11-17 (route row 5): after model and context, before the tool, the side
-        # layout's and Fleet's words: the kind with its intensity (`lab(quick)`, `code(standard) · staged
-        # 3/7: execute`), a failed `staged 2/3: execute ✕`; short of cells the kind word goes, then the
-        # tool, then `staged`, then the whole column.
+    def test_a_session_now_wraps_to_two_rows_and_the_second_ends_in_an_ellipsis(self):
+        # 11-18 (the person: "NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)"): an owner's and a worker's NOW take up to two rows,
+        # wrapped between words (Hangul too); where it goes on past the second row that row ends in `…`; a NOW that fits takes one
+        # row, none takes none. Whatever the width no row is wider than the panel, and a closed box keeps its right line.
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+const doer=(h,m,pct,now)=>({harness:P(h),model_text:P(m),ctx:P(pct),gauge_row:[P('━━'),D('────'),D(' '),P(pct)],...(now?{now}:{})});
+const LONG='한글로 적은 아주 긴 작업 설명이 두 줄을 넘어서 세 줄째로 이어지는 경우 finally done',SHORT='짧은 작업 설명';
+const route=(ownerNow,workerNow)=>({id:'w',title:'속도',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
+ paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','52%',ownerNow)},workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',paint:{glyph:P('⠋'),...doer('codex','gpt-5.5','34%',workerNow)}}]});
+const plain=(routes,width,configuration={})=>view.render({width,height:80,side:true,fill:true,model:{...head,routes,route_count:routes.length},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+// The rows of a session's NOW: from the row under its CTX row to the next row that is not a NOW row (the stage row, the next who row, the box's line, the route's end).
+const nowOf=(rows,from)=>{const i=rows.findIndex((s,k)=>k>=from&&/CTX /.test(s)),out=[];
+ for(let k=i+1;k<rows.length&&/^│ │ +(│ +)?\S/.test(rows[k])&&!/^│ │ +(│ +)?(CTX |[⠋●✕] |[┌└↳]|\d+\/\d+: |staged )/.test(rows[k]);k++)out.push(rows[k]);return out;};
+const words=s=>s.replace(/[│ ]+$/,'').replace(/^[│ ]+/,'').trim();
+for(const width of [30,32,34,36,40,44,52]){
+ for(const configuration of [{},{worker_box:'open'},{worker_box:'none'}]){
+  const rows=plain([route(LONG,LONG)],width,configuration),where=width+' '+JSON.stringify(configuration)+'\n'+rows.join('\n');
+  for(const s of rows)assert.equal(cells(s),width,where);
+  const owner=nowOf(rows,rows.findIndex(s=>/⠋ owner|● owner/.test(s))),worker=nowOf(rows,rows.findIndex(s=>/worker/.test(s)));
+  for(const [name,list] of [['owner',owner],['worker',worker]]){
+   // At most two rows; this NOW is longer than two rows at every width here, so exactly two, the second ending in `…`, the first not.
+   assert.equal(list.length,2,name+' '+where);
+   const [first,second]=list.map(words);
+   assert(second.endsWith('…')&&!first.endsWith('…'),name+' '+where);
+   // The first row breaks between words: its words are the NOW's first words, whole.
+   assert(LONG.startsWith(first+' ')&&LONG.split(' ').length>first.split(' ').length,name+' '+where);
+  }
+ }
+}
+// A NOW that fits one row takes one row and ends in no `…`; a NOW of exactly two rows keeps both whole; none takes no row.
+for(const width of [36,44]){
+ const rows=plain([route(SHORT,SHORT)],width),where=width+'\n'+rows.join('\n');
+ assert(nowOf(rows,rows.findIndex(s=>/owner/.test(s))).length===1&&!rows.some(s=>s.includes('…')&&/설명/.test(s)),where);
+ const none=plain([route('',undefined)],width),at=none.findIndex(s=>/owner/.test(s));
+ assert(/CTX /.test(none[at+1])&&/^│ │   ┌ /.test(none[at+2]),'no NOW, no NOW row\n'+none.join('\n'));
+}
+{const rows=plain([route('가나다라 마바사아 자차카타 파하',SHORT)],32),list=nowOf(rows,rows.findIndex(s=>/owner/.test(s)));
+ assert.equal(list.length,2,rows.join('\n'));assert(!list.some(s=>s.includes('…'))&&words(list[0]).startsWith('가나다라')&&words(list[1]).endsWith('파하'),rows.join('\n'));}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_the_worker_box_is_closed_open_or_none_as_the_setting_says(self):
+        # 11-18 (the person: "박스 여부는 내가 골라가면서 볼 수 있게 그냥 옵션에 좀 넣어줘"): `worker_box` is `closed` (the default and what
+        # an unknown value reads as), `open` or `none`. A route with workers and a stage line puts the workers of the stage in a box
+        # under the owner, the stage text on its top line (`┌ staged 3/7: execute ──┐`): closed it has all four borders, open the top
+        # line and the left side only, `none` the stage row and the `↳` indent as before. The closed box's right line stands in one
+        # column for every row whatever its text (Hangul two cells, ASCII one); where its text would be under 24 cells wide it is open.
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+const doer=(h,m,e,pct,now)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P('━━'),D('────'),D(' '),P(pct)],...(now?{now}:{})});
+const worker=(h,m,pct,now,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',...o,paint:{glyph:P('⠋'),...doer(h,m,'high',pct,now)}});
+const route={id:'w',title:'한글 제목 — 속도 3단계의 남은 재계산',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
+ paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','52%','owner 한글 step')},
+ workers_live:[worker('claude','Sonnet 5.5','22%','문서/한글 파일 editing'),worker('codex','gpt-5.5','34%','ASCII only now'),worker('opencode','glm-5.2','71%','혼합 mixed 설명 text',{elapsed:'8m'})]};
+const plain=(width,configuration)=>view.render({width,height:80,side:true,fill:true,model:{...head,routes:[route],route_count:1},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+// The route box's rows from the stage text (the box's top line, or the stage row in the `none` form) to the end of the workers.
+const part=rows=>{const a=rows.findIndex(s=>/^│ │ +(┌ )?(staged )?\d+\/\d+: /.test(s)),b=rows.findIndex(s=>/^│ ╰/.test(s));return rows.slice(a,b);};
+// The column of a box's right line: the cells before the last `│` of the box, with the route's `│ │` closing the row.
+const edge=s=>cells(s.replace(/ │ │$/,'').replace(/[│┘┐]$/,''));
+for(const width of [38,40,44,52,60]){
+ const closed=part(plain(width,{})),where=width+'\n'+closed.join('\n');
+ // The default is `closed`, and so is a value the setting does not know.
+ assert.deepEqual(plain(width,{worker_box:'bogus'}),plain(width,{}),where);assert.deepEqual(plain(width,{worker_box:'closed'}),plain(width,{}),where);
+ assert(/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/.test(closed[0])&&/^│ │   └─+┘ │ │$/.test(closed.at(-1)),where);
+ // Every row of the box (the top, the workers' rows with Hangul and ASCII, the bottom) puts its right line in the one column.
+ assert.equal(closed.filter(s=>/^│ │   │ [⠋●] worker/.test(s)).length,3,where);
+ for(const s of closed.slice(1))assert(/^│ │   [│└]/.test(s),where);
+ assert.equal(new Set(closed.map(edge)).size,1,'one right-line column\n'+where);
+ for(const s of plain(width,{}))assert.equal(cells(s),width,where);
+ // `open` has the top line and the left side, no right line and no bottom line; its text starts where the closed box's does, and has the
+ // room of the right line besides.
+ const open=part(plain(width,{worker_box:'open'})),owhere=width+' open\n'+open.join('\n');
+ assert(/^│ │   ┌ staged 3\/7: execute ─+ │ │$/.test(open[0])&&!open.some(s=>/[┐┘└]/.test(s))&&open.slice(1).every(s=>/^│ │   │ /.test(s)),owhere);
+ // `none` is the older form: the stage row four cells in, the workers hanging by `↳`, no border line at all.
+ const flat=part(plain(width,{worker_box:'none'})),nwhere=width+' none\n'+flat.join('\n');
+ assert(/^│ │ {5}staged 3\/7: execute +│ │$/.test(flat[0])&&flat.filter(s=>/^│ │ {5}↳ [⠋●] worker/.test(s)).length===3&&!flat.some(s=>/[┌┐└┘]|^│ │   │/.test(s)),nwhere);
+}
+// Where the text inside would be under 24 cells wide (here under 38 cells in all) the closed box gives way to the open one.
+for(const width of [32,34,36]){const rows=plain(width,{}),box=part(rows);
+ assert(/^│ │   ┌ /.test(box[0])&&!box.some(s=>/[┐┘└]/.test(s))&&box.slice(1).every(s=>/^│ │   │ /.test(s)),width+'\n'+rows.join('\n'));
+ for(const s of rows)assert.equal(cells(s),width,s);}
+// A route with no workers draws no box. Its stage text is on the first line, `staged 3/7: execute` where the width has room for it (the
+// name goes first short of cells, then the whole text); where the name is not on the first line the stage row `staged 3/7: execute` stands
+// under the owner (11-18, round 5), and where it is, none does.
+for(const [width,first,apart] of [[40,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/,true],[52,/^│ │ ● code · staged 3\/7: execute +2h 10m │ │$/,false],[32,/^│ │ ● code +2h 10m │ │$/,true]]){
+ const rows=view.render({width,height:80,side:true,fill:true,model:{...head,routes:[{...route,workers_live:[]}],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+ const lines=rows.filter(s=>/^│ │ {5}staged 3\/7: execute +│ │$/.test(s));
+ assert(rows.some(s=>first.test(s))&&!rows.some(s=>/^│ │ +[┌│└]/.test(s))&&lines.length===(apart?1:0),width+'\n'+rows.join('\n'));}
+// Several stages at once (review C2): the workers stand in the box of their own stage, each box titled with that stage's position and name.
+{const parallel={...route,stages:[...seven(2).slice(0,2),{name:'eval-asr',mark:'●',current:true},{name:'eval-sep',mark:'●',current:true},...seven(2).slice(4)],
+  workers_live:[worker('claude','Sonnet 5.5','22%','ASR step',{stage:'eval-asr'}),worker('opencode','glm-5.2','9%','SEP step',{stage:'eval-sep'}),worker('codex','gpt-5.5','34%','ASR two',{stage:'eval-asr'})]};
+ for(const configuration of [{},{worker_box:'open'},{worker_box:'none'}]){
+  const rows=view.render({width:44,height:80,side:true,fill:true,model:{...head,routes:[parallel],route_count:1},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')),where=JSON.stringify(configuration)+'\n'+rows.join('\n');
+  const asr=rows.findIndex(s=>s.includes('staged 3/7: eval-asr')),sep=rows.findIndex(s=>s.includes('staged 4/7: eval-sep'));
+  assert(asr>0&&sep>asr,where);
+  const between=(a,b)=>rows.slice(a,b).filter(s=>/worker/.test(s)).map(s=>s.replace(/[^\w. -]/g,' ').replace(/\s+/g,' ').trim());
+  assert(between(asr,sep).length===2&&between(asr,sep)[0].includes('claude Sonnet 5.5')&&between(asr,sep)[1].includes('codex gpt-5.5'),where);
+  assert.equal(rows.slice(sep).filter(s=>/worker opencode glm-5\.2/.test(s)).length,1,where);
+  assert.equal(rows.filter(s=>/worker/.test(s)).length,3,where);
+ }}
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_an_owner_shows_no_time_and_a_worker_shows_its_own_on_its_ctx_row(self):
+        # 11-18 (the person: the route's time at the right end of its first line): the route's elapsed time stands only there. An owner
+        # has no time of its own, at any width, so neither its who row nor its CTX row carries one; a worker that has its own
+        # (`elapsed`, `12m`) shows it after the percent on its CTX row (`CTX ━━ 22% · 12m`), a worker with none shows none.
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+const doer=(h,m,pct)=>({harness:P(h),model_text:P(m),ctx:P(pct),gauge_row:[P('━━'),D('────'),D(' '),P(pct)],now:'step'});
+const route=workers=>({id:'w',title:'속도',kind:'working',state:'working',elapsed:'2h 10m',shape:'staged',stages:seven(2),kind_word:'code',role:'owner',
+ paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','52%')},workers_live:workers});
+const timed={kind:'working',role:'worker',stage:'execute',elapsed:'12m',paint:{glyph:P('⠋'),...doer('codex','gpt-5.5','34%')}};
+const untimed={kind:'working',role:'worker',stage:'execute',paint:{glyph:P('⠋'),...doer('opencode','glm-5.2','71%')}};
+const plain=(routes,width,configuration={})=>view.render({width,height:80,side:true,fill:true,model:{...head,routes,route_count:routes.length},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+for(const configuration of [{},{worker_box:'none'}])for(const width of [34,40,52,72]){
+ const rows=plain([route([timed,untimed])],width,configuration),where=width+' '+JSON.stringify(configuration)+'\n'+rows.join('\n');
+ const at=rows.findIndex(s=>/● owner/.test(s)),first=rows.findIndex(s=>/● code/.test(s));
+ // The route's time ends its first line and stands nowhere else but the workers' own.
+ assert(/^│ │ ● code(?: · staged \d+\/\d+)? +2h 10m │ │$/.test(rows[first])&&rows.filter(s=>s.includes('2h 10m')).length===1,where);
+ // The owner: its who row and its CTX row, no time.
+ assert(/^│ │   ● owner /.test(rows[at])&&/^│ │ {5}CTX /.test(rows[at+1])&&!/\d+[hm]\b/.test(rows[at]+rows[at+1].replace(/^│ │ +CTX [━─ ]*\d+% /,'')),where);
+ // The worker with its own time: `CTX ━━ 34% · 12m` (the gauge may go before the time in a narrow box); the one with none: the percent alone.
+ const timedCtx=rows.find(s=>/CTX .*34%/.test(s)),untimedCtx=rows.find(s=>/CTX .*71%/.test(s));
+ assert(/34% · 12m +(│ )?│ │$/.test(timedCtx)&&/71% +(│ )?│ │$/.test(untimedCtx)&&!/ · /.test(untimedCtx),where);
+ assert.equal(rows.filter(s=>/ · \d+m/.test(s)&&/CTX /.test(s)).length,1,where);
+ for(const s of rows)assert.equal(cells(s),width,where);
+}
+// A worker's time shows `· 12m` on its CTX row even where the percent has no gauge; an owner still has none at any width.
+for(let width=32;width<=72;width++){
+ const rows=plain([route([timed])],width),where=width+'\n'+rows.join('\n'),at=rows.findIndex(s=>/● owner/.test(s));
+ assert(rows.some(s=>/CTX .*34% · 12m/.test(s))&&!/ · \d/.test(rows[at+1]),where);
+}
+"""
+        self.node(script, "panel-view.cjs")
+
+
+    def test_a_bottom_route_row_names_its_kind_and_has_no_command_column(self):
+        # Spec E9 rule 34 (d), 11-17 (route row 5): after model and context, the side layout's and Fleet's words: the kind with
+        # its intensity (`lab(quick)`, `code(standard) · staged 3/7: execute`), a failed `staged 2/3: execute ✕`; short of
+        # cells the kind word goes, then `staged`, then the whole column. 11-18: the command column (`>_ Edit`) is gone.
         script = self.FIXTURE + r'''
 const four=[{...oneShot,kind_word:'lab',intensity:'quick'},{...staged,kind_word:'code',intensity:'standard'},waiting,failed];
 const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
@@ -903,31 +1094,32 @@ for(const [title,kind] of [['셸 상태','lab(quick)'],['세션 간','code(stand
  assert(s.indexOf('claude')<s.indexOf(kind),s);
  for(const s of r140)assert.equal(cells(s),140,s);
 }
-for(const [title,word] of [['셸 상태','lab('],['세션 간','code(']]){const s=row(r140,title);assert(s.indexOf(word)<s.indexOf('>_ Edit'),s);}
-assert(!r140.some(s=>/execute ✕ 2\/3/.test(s)),r140.join('\n'));
-// 100 cells: the kind word goes first (its intensity with it), the tool stays; the stage and its mark stay.
+assert(!r140.some(s=>/execute ✕ 2\/3/.test(s))&&!r140.some(s=>s.includes('>_')),r140.join('\n'));
+// 100 cells: the kind word goes first (its intensity with it); the stage and its mark stay.
 const r100=draw(four,100,20,{side:false});
-assert(row(r100,'세션 간').includes('│ staged 3/7: execute')&&row(r100,'세션 간').includes('>_ Edit')&&!r100.join('').includes('code(')&&!r100.join('').includes('lab('),r100.join('\n'));
-// 80 cells: the tool goes next, then the `staged` word; the stage and its mark stay.
+assert(row(r100,'세션 간').includes('│ staged 3/7: execute')&&!r100.join('').includes('code(')&&!r100.join('').includes('lab(')&&!r100.join('').includes('>_'),r100.join('\n'));
+// 80 cells: the `staged` word goes next; the stage and its mark stay.
 const r80=draw(four,80,20,{side:false});
-assert(row(r80,'세션 간').includes('│ 3/7: execute')&&row(r80,'PG-50').includes('│ 2/3: execute ✕')&&!r80.join('').includes('staged')&&!r80.join('').includes('>_'),r80.join('\n'));
+assert(row(r80,'세션 간').includes('│ 3/7: execute')&&row(r80,'PG-50').includes('│ 2/3: execute ✕')&&!r80.join('').includes('staged'),r80.join('\n'));
 // Narrower still the whole column goes; the earlier columns stay.
 const r64=draw(four,64,20,{side:false});
 assert(!r64.join('').includes('lab(')&&!r64.join('').includes('3/7')&&/claude Opus 5\.5 xhigh +│ ━━─── 38%/.test(row(r64,'셸')),r64.join('\n'));
-// At every width the tool shows whole or not at all, and a route never reads the older `execute ✕ 2/3`.
+// At every width a route never reads the older `execute ✕ 2/3`, and no row carries a command.
 for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:false}).filter(s=>s.startsWith('│ │ ')))
- assert(!/>_ ?\S*…|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
+ assert(!/>_|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
 '''
         self.node(script, "panel-view.cjs")
 
 
     def test_owners_and_their_workers_fold_together_and_every_route_takes_the_same_step(self):
-        # Spec E9 rule 48 (c) (it replaces the #1579 review follow-up (가)): short of rows (1) every
-        # owner's NOW row goes, its first row takes the one-row form (percent and time at the right edge) and, in the
-        # same step, its workers take the one-row form two cells in (percent and time in the owners' columns), (2) the workers go
-        # and the kind row counts them, (3) the routes take one row. Never an owner in its whole
-        # form with a worker on one row, or the reverse; every route at the same step. The
-        # reviewer's case: 38 cells, heights 23-29, one staged route with a worker and three without.
+        # Spec E9 rule 48 (c) (it replaces the #1579 review follow-up (가)), 11-18: short of rows the steps of the route box are, in
+        # order: the worker box's closing border, every session's second NOW row, then in one step every session's CTX row folds into
+        # its who row (the old one-row form: the percent, and a worker's time, at the right edge) the workers taking the one-row form in
+        # their box too, then every first NOW row, then the workers go and the stage row counts them (`· worker 2`), the stage row
+        # goes, the owner's row stands alone, the routes take one row. Never an owner in its whole form with a worker folded, or the
+        # reverse; every route at the same step. (A row given back goes to the most important item, so the box may close again once
+        # the NOW rows are gone: the border is not a step of its own in the order.) The same holds for `worker_box: none`. The
+        # reviewer's case: 38 cells, one staged route with a worker and three without.
         script = self.FIXTURE + r"""
 const D=t=>({text:t,dim:true});
 const doer=(h,m,e,pct,bar,now)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),gauge_row:[P(bar),D('─'.repeat(8-bar.length)),D(' '),P(pct)],...(now?{now}:{})});
@@ -938,31 +1130,46 @@ const one={id:'w',title:'속도 3단계 — 남은 재계산',kind:'working',sta
  paint:{glyph:P('⠋'),...doer('claude','Sonnet 5.5','high','22%','━━','owner step')},owner_paint:doer('claude','Opus 5.5','xhigh','52%','━━━━','owner step'),workers_live:[worker('claude','Sonnet 5.5','22%')]};
 const two={...one,id:'t',title:'검토 두 갈래',workers_live:[worker('codex','gpt-5.5','34%'),worker('opencode','glm-5.2','71%',{elapsed:'8m'})]};
 const reviewer=[one,...[1,2,3].map(i=>({...solo,id:'s'+i}))];
-const order=['box','one','counted','stage','owner','flat'];let checked=0;
+const order=['whole','fold','nonow','counted','stage','owner','flat'];let checked=0;
+for(const configuration of [{},{worker_box:'none'}])
 for(const [width,routes,model] of [[38,reviewer,{}],[38,reviewer,{messages:[],wait:'',now:''}],[40,reviewer,{}],[40,[two,solo],{}],[34,[one,two],{}],[32,[one],{}]]){
- const seen=[];
- for(let h=40;h>=12;h--){
-  const rows=view.render({width,height:h,side:true,fill:true,model:{...head,...model,routes,route_count:routes.length},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-  // (11-17, route row 5: the owner's lines stand two cells in, its NOW and stage line four; a worker hangs by `↳` four cells
-  // in, its own NOW eight; no box.) The steps: the whole form (the NOW rows), the one-row workers, the workers gone with the
-  // stage line counting them, the stage line alone, the owner's row alone, then the routes in one row.
-  const all=rows.join('\n'),ctx=rows.filter(s=>/^│ │ {5}(owner|solo) step/.test(s)).length,owners=rows.filter(s=>/^│ │   [⠋●] owner /.test(s)).length;
-  const hung=rows.filter(s=>/^│ │ {5}↳ [⠋●] worker/.test(s)),wholeWorker=rows.filter(s=>/^│ │ {9}worker step/.test(s)).length,stageRows=rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length;
-  const oneRow=wholeWorker?[]:hung,counted=/· worker \d/.test(all);
-  const state=wholeWorker?'box':oneRow.length?'one':counted?'counted':stageRows?'stage':owners?'owner':'flat';
-  const where=width+'x'+h+'\n'+all;
-  assert(!rows.some(s=>/^│ │ +[╭├╰]─/.test(s)),where);   // no worker box any more
-  // Never a middle form: the whole workers only with every owner's NOW row, the one-row workers only without any.
-  if(wholeWorker)assert(ctx>0&&ctx===owners&&!counted,where);
-  if(oneRow.length)assert(ctx===0&&!counted,where);
-  if(counted)assert(ctx===0&&!hung.length,where);
-  if(ctx)assert.equal(ctx,owners,where);
-  // The one-row worker: four cells in, its percent and time in the owners' columns.
-  for(const s of oneRow){const owner=rows.find(r=>/^│ │   [⠋●] owner .*%/.test(r));if(owner&&/%/.test(s))assert.equal(s.lastIndexOf('%'),owner.lastIndexOf('%'),where);}
+ const seen=[],boxes=new Set();
+ for(let h=90;h>=12;h--){
+  const rows=view.render({width,height:h,side:true,fill:true,model:{...head,...model,routes,route_count:routes.length},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+  // (11-18: the owner's lines stand two cells in, its CTX row and NOW four; a worker stands in the stage box two cells in or, with
+  // `worker_box: none`, hangs by `↳` four cells in, its own rows eight.) The steps: the whole form (the CTX rows and the NOW rows), the
+  // CTX rows folded into the who rows, the NOW rows gone, the workers gone with the stage line counting them, the stage line
+  // alone, the owner's row alone, then the routes in one row.
+  const all=rows.join('\n'),count=re=>rows.filter(s=>re.test(s)).length,none=!!configuration.worker_box;
+  const ctx=count(/^│ │ +(│ +)?CTX /),nows=count(/^│ │ +(│ +)?(owner|solo|worker) step/),owners=count(/^│ │   [⠋●] owner /),ownerPct=count(/^│ │   [⠋●] owner .*\d+%/);
+  const workers=count(none?/^│ │ {5}↳ [⠋●] worker/:/^│ │   │ [⠋●] worker/),stageRows=count(/^│ │ {5}(staged )?\d+\/\d+: /)+count(/^│ │   ┌ (staged )?\d+\/\d+: /);
+  const counted=/· worker \d/.test(all),sessions=owners+workers;
+  const state=nows&&ctx?'whole':nows?'fold':workers?'nonow':counted?'counted':stageRows?'stage':owners?'owner':'flat';
+  const where=(none?'none ':'box ')+width+'x'+h+'\n'+all;
+  // Never a middle form: the whole form only with every session's CTX row and NOW row, the folded one only with every owner's percent at the
+  // right and no CTX row, and so on.
+  if(state==='whole')assert(ctx===sessions&&nows===sessions&&!counted&&!ownerPct,where);
+  // (Where the owners' rows are narrow the percent column goes for the workers' time column, so the owners' percent is only held from 38 cells.)
+  const pct=width>=38?ownerPct===owners:true;
+  if(state==='fold')assert(ctx===0&&nows===sessions&&pct&&!counted,where);
+  if(state==='nonow')assert(ctx===0&&nows===0&&pct&&!counted,where);
+  if(state==='counted')assert(ctx===0&&nows===0&&workers===0&&pct,where);
+  // The one-row worker in the `none` form: four cells in, its percent in the owners' column (in the box the columns are the box's own, four cells in).
+  if(none)for(const s of rows.filter(s=>/│ [⠋●] worker .*\d+%/.test(s)||/^│ │ {5}↳ [⠋●] worker .*\d+%/.test(s))){const owner=rows.find(r=>/^│ │   [⠋●] owner .*%/.test(r));if(owner)assert.equal(s.lastIndexOf('%'),owner.lastIndexOf('%'),where);}
+  // The box (the default form): closed, it has its bottom line and every right `│` stands in one column; open, only its top line and its
+  // left side; with `none`, no border line at all.
+  const tops=rows.filter(s=>/^│ │   ┌/.test(s)),inside=rows.filter(s=>/^│ │   [│└]/.test(s));
+  if(none)assert(!tops.length&&!inside.length,where);
+  else if(tops.length){
+   const closed=tops.every(s=>/┐ │ │$/.test(s));boxes.add(closed?'closed':'open');
+   if(closed)assert(inside.every(s=>/[│┘] │ │$/.test(s))&&inside.filter(s=>s.startsWith('│ │   └')).length===tops.length,where);
+   else assert(tops.every(s=>!/┐/.test(s))&&!inside.some(s=>/^│ │   └/.test(s)),where);
+  }
   if(!seen.includes(state))seen.push(state);checked++;
  }
  assert.deepEqual(seen,order.filter(x=>seen.includes(x)),width+' '+JSON.stringify(seen));
- assert(seen.includes('box')&&seen.includes('one'),width+' '+JSON.stringify(seen));
+ assert(seen.includes('whole')&&seen.includes('fold'),width+' '+JSON.stringify(seen));
+ if(!configuration.worker_box&&width>=38)assert(boxes.has('closed')&&boxes.has('open'),width+' '+[...boxes]);
 }
 assert(checked>0);
 """
@@ -1320,18 +1527,20 @@ const draw=(routes,width,height,{side=true,open=[]}={})=>view.render({width,heig
 '''
 
     def test_a_value_breaks_only_between_tokens_after_its_lesser_pieces_go(self):
-        # Spec E9 rule 34 (a), 36 (11-15: the route box again, nothing opens in place; 11-17 route row 5: the
-        # title, the owner row two cells in, the stage line four in): a folded route keeps each value whole (a
-        # model name with its version) and lets the lesser pieces go first (the time, the word `CTX`, the effort, the harness); TITLE and NOW
+        # Spec E9 rule 34 (a), 36 (11-15: the route box again, nothing opens in place; 11-18 route row 5: the
+        # title, the who row two cells in, its CTX row and the stage line four in): a folded route keeps each value whole (a
+        # model name with its version) and lets the lesser pieces go first (the effort, the harness); TITLE and NOW
         # fold only between tokens.
         script = self.FIXTURE + r"""
 const rows=draw([oneShot,staged,failed],40,76),all=rows.join('\n');
 for(const s of rows)assert.equal(cells(s),40,s);
-// (11-17: the open tool is not on the owner's row any more; the row ends with its context, and with room the word `CTX` and the time join it.)
-for(const want of ['│ │   ⠋ claude Opus 5.5 xhigh 38% ','│ │   ⠋ claude Sonnet 5.5 high 12% ','│ │     staged 3/7: execute ','│ │     staged 2/3: execute ✕ '])
+// (11-17: the open tool is not on the owner's row; 11-18: nor its context, which is the row under it: `CTX`, the gauge and the percent.)
+for(const want of ['│ │   ⠋ claude Opus 5.5 xhigh ','│ │     CTX ━━─── 38% ','│ │   ⠋ claude Sonnet 5.5 high ','│ │     CTX ━──── 12% ','│ │     staged 3/7: execute ','│ │     staged 2/3: execute ✕ '])
  assert(all.includes(want),want+'\n'+all);
 assert(!/· Edit|>_/.test(all),'no tool on a side row\n'+all);
-assert(draw([oneShot,staged,failed],52,76).some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh  CTX 38% · 41m ')),'the context takes its word and the time where the row has room');
+// An owner shows no time wherever the row has room: the route's own stands at the right end of its first line (a route with a kind word).
+const roomy=draw([{...oneShot,kind_word:'code'},staged,failed],52,76);
+assert(roomy.some(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(s))&&roomy.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh '))&&roomy.some(s=>/^│ │     CTX ━━─── 38% +│ │$/.test(s))&&!roomy.some(s=>/· \d+m/.test(s)),'the owner takes no time where the row has room\n'+roomy.join('\n'));
 // No model name, version or path is cut apart, and nothing opens in place under a route.
 for(const s of rows)assert(!/\((Opus|Sonnet) *│|│ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
 for(const gone of ['OWNER','DOER','KIND','┆','impl-review','lines ›'])assert(!all.includes(gone),gone+'\n'+all);
@@ -1347,7 +1556,8 @@ assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TIT
  '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음 ›'],all);
 // With room the whole values stand on one row each.
 const wide=draw([oneShot,staged,failed],140,76,{side:false}).join('\n');
-for(const want of ['PG-50 휠 입력','staged 2/3: execute ✕','54m','staged 3/7: execute','>_ Edit','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
+for(const want of ['PG-50 휠 입력','staged 2/3: execute ✕','54m','staged 3/7: execute','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
+assert(!wide.includes('>_'),'no command column\n'+wide);   // 11-18
 """
         self.node(script, "panel-view.cjs")
 
@@ -1531,7 +1741,7 @@ for(const o of [{model:{selected:[P('opencode-go/deepseek-v4.1-flash'),D(' '),P(
 assert(text(paint(34))[5].startsWith('│ CTX    ━━━━'),text(paint(34)).join('\n'));
 const r33=text(paint(33));
 assert(r33[1].startsWith('│ hearting · wt 12')&&r33[2].startsWith('│ fix/fleet-opencode-… ✓')&&r33[4].startsWith('│ claude-fable-5-2 high')
- &&r33[5].startsWith('│ context ━━━━────── 41%')&&!/REPO|GIT |MODEL|CTX/.test(r33.join('')),r33.join('\n'));
+ &&r33[5].startsWith('│ context ━━━━────── 41%')&&!/REPO|GIT |MODEL|CTX/.test(r33.slice(0,8).join('')),r33.join('\n'));   // (the route box's own `CTX` rows are below the head)
 // (d) A model not known yet.
 assert(text(paint(38,{model:{selected:[]}}))[4].startsWith('│ MODEL  Checking '),text(paint(38,{model:{selected:[]}})).join('\n'));
 // (e) OpenCode's MCP count stays on the CTX row; the MODEL row carries none.
@@ -1613,7 +1823,7 @@ const v=at(),rows=plain(v),all=rows.join('\n');
 assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s))&&!/\broute \d|messages/.test(all),all);
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
 // (11-17, route row 5: the kind stands alone in the route's first line, `● code`; the owner's line under its title.)
-assert(all.includes('⠋ owner')&&rows.some(s=>/^│ │ \S code +│ │$/.test(s))&&!all.includes('code · one-shot'),all);
+assert(all.includes('⠋ owner')&&rows.some(s=>/^│ │ \S code +\d+m │ │$/.test(s))&&!all.includes('code · one-shot'),all);
 // The producer's label alone (no rows yet): its count first too.
 const label=plain(at({model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}}));
 assert(label.some(s=>s.includes('╭─ 3 ROUTE ⠏2 ─')),label.join('\n'));
@@ -1640,9 +1850,9 @@ for(const height of [50,70,90]){
  // (11-16: with no row to show inside it, the section stays its head row: an empty box is no box.)
  assert(r>0&&/^│ 1 QUESTIONS /.test(rows[r-1])&&blank(rows[r-2]),height+'\n'+rows.join('\n'));
  // MESSAGES keeps its rows (five at most, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
- // (11-17: the route box is its top line, the `dispatch` rule, the first route's title and who, the second's title, who and stage line, then its bottom: `r+7`; no NOW, no row.)
+ // (11-18: the route box is its top line, the `dispatch` rule, the first route's title, who and CTX row, the second's title, who, CTX row and stage line, then its bottom: `r+9`; no NOW, no row.)
  const last=rows.findLastIndex(s=>/^│ [←→] /.test(s));
- assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+7&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
+ assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+9&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
  assert(blank(rows[m-1])&&rows.slice(rb+1,m).every(blank)&&rows.slice(r+1,rb).every(s=>/^│ │ /.test(s)),height+'\n'+rows.join('\n'));
  // The press targets went with their rows.
  const v=view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged],route_count:2},state:'idle',configuration:{},questions:()=>[]});

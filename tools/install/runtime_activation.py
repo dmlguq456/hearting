@@ -1617,6 +1617,13 @@ def _read_json_object(path: Path, label: str) -> dict:
     return data
 
 
+def _claude_global_config_path() -> Path:
+    """Claude's global config file: `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`."""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return paths.runtime_home("claude") / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
 def _claude_managed_values(source: dict) -> dict:
     statusline = source.get("statusLine")
     if (
@@ -2011,6 +2018,17 @@ def _merge_claude_settings(
     if changed:
         _atomic_json(config, data)
     context_previous = context_before if context_present else None
+    report_lines = []
+    if config_path is None:
+        # Claude reads this key only from its global config file, not settings.json.
+        import claude_settings_config
+        owned, notice = claude_settings_config.apply_left_arrow_default(
+            _claude_global_config_path(),
+            owned=previous_values.get(claude_settings_config.LEFT_ARROW_KEY) is False)
+        if owned:
+            managed_values[claude_settings_config.LEFT_ARROW_KEY] = False
+        if notice:
+            report_lines.append(notice)
     native_context = {"claude": {"keys": {"idleCompaction": idle_record}}}
     if context_window is not None:
         from native_context import _native_key_record
@@ -2027,7 +2045,7 @@ def _merge_claude_settings(
         "previous_context_window": context_previous,
         "context_changed": context_window is not None and context_previous != str(context_window),
         "native_context": native_context,
-        "report_lines": ([f"context window: claude {context_previous or 'unset'} -> {context_window} tokens",
+        "report_lines": report_lines + ([f"context window: claude {context_previous or 'unset'} -> {context_window} tokens",
                           f"settings: {config}"] if context_window is not None and context_previous != str(context_window) else []),
     }
 
@@ -4796,6 +4814,22 @@ def refresh(
 
 
 def _unmerge_claude_settings(
+    state: dict, scope: str, dry_run: bool = False, *, config_path: Path | None = None
+) -> List[str]:
+    """Remove the settings.json entries and the global-config default Hearting still owns."""
+    restored = _unmerge_claude_settings_file(state, scope, dry_run, config_path=config_path)
+    managed_config = state.get("managed_config", {})
+    values = managed_config.get("claude_values", {}) if isinstance(managed_config, dict) else {}
+    import claude_settings_config
+    if (config_path is None and isinstance(values, dict)
+            and values.get(claude_settings_config.LEFT_ARROW_KEY) is False):
+        target = _claude_global_config_path()
+        if claude_settings_config.release_left_arrow_default(target, dry_run=dry_run):
+            restored = [*restored, str(target)]
+    return restored
+
+
+def _unmerge_claude_settings_file(
     state: dict, scope: str, dry_run: bool = False, *, config_path: Path | None = None
 ) -> List[str]:
     """Remove what the activation record still proves it owns.

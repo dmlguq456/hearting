@@ -52,7 +52,7 @@ const brief=()=>({count:1,answerable:true,choices:2,label:'QUESTIONS',
   one:[[t('◑ ','g_blocked'),t('MESSAGES 몇 건까지 보일까요?','loc_repo')]],line:'MESSAGES 몇 건까지 보일까요?'});
 const draw=(o={})=>view.render({width:o.width??50,height:o.height??46,side:o.side??true,model:model(o),state:o.state||'working',harness:o.harness||'claude',
   frame:o.frame??1000,since:o.since??990,brief:o.question===false?undefined:(o.brief||brief),sent:()=>o.sent||[],cellWidth:cells,
-  configuration:{side_width:o.width??50,rule_motion:o.motion||'rule',theme:o.theme||'terminal'},background:o.background||''});
+  configuration:{side_width:o.width??50,rule_motion:o.motion||'rule',theme:o.theme||'terminal',...(o.configuration||{})},background:o.background||''});
 const lines=v=>v.rows.map(str);
 const inside=v=>lines(v).map(l=>l.slice(2,-2));
 const at=(v,head)=>inside(v).findIndex(l=>l.startsWith(head));
@@ -426,11 +426,11 @@ const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
 // (11-17, route row 5: the first line names the kind with its intensity in brackets, the title two cells in.)
 const rows=box.split('\n');
 // (11-17, route zones: a route with no zone is a `dispatch` one, its rule the box's first row.)
-assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ─ dispatch ─+ │$/.test(rows[1])&&/^│ ● code\(직접\) +│$/.test(rows[2])&&/^│   작은 수정 +│$/.test(rows[3])&&!/code · 직접/.test(box),box);
+assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ─ dispatch ─+ │$/.test(rows[1])&&/^│ ● code\(직접\) +3m │$/.test(rows[2])&&/^│   작은 수정 +│$/.test(rows[3])&&!/code · 직접/.test(box),box);
 // In the `direct` zone the zone's name says it: the word `(직접)` (the shape's) is left out of the kind.
 const own=draw({routes:[{...direct,zone:'direct'}],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),M=inside(own),c=M.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l)),
  zoned=M.slice(c,M.findIndex((l,i)=>i>c&&/^╰/.test(l))+1);
-assert(/^│ ─ direct ─+ │$/.test(zoned[1])&&/^│ ● code +│$/.test(zoned[2])&&!zoned.join('\n').includes('직접')&&!zoned.some(l=>/dispatch/.test(l)),zoned.join('\n'));
+assert(/^│ ─ direct ─+ │$/.test(zoned[1])&&/^│ ● code +3m │$/.test(zoned[2])&&!zoned.join('\n').includes('직접')&&!zoned.some(l=>/dispatch/.test(l)),zoned.join('\n'));
 """)
 
 
@@ -514,18 +514,23 @@ const v=draw({...opt,height:60});
 const L=lines(v);
 // 11-17 (route row 5, the two-row session lines): a worker's `execute · Edit` stage row is gone, so the stage's name stands
 // only on the owner's stage line `staged 3/6: execute`: in the color Fleet gives the stage `execute` (its 3rd, running:
-// index 2, lit), four cells in, no kind word.
-const stageRow=(vv,name)=>vv.rows.find(r=>new RegExp('^│ │ {5}\\S* ?\\d/\\d+: '+name).test(str(r)));
+// index 2, lit), no kind word. 11-18: with workers the default `worker_box` draws that line as the top line of the box the
+// workers sit in (`┌ staged 3/6: execute ──┐`, two cells in); `worker_box: none` draws it as its own row, four cells in.
+const stageRow=(vv,name)=>vv.rows.find(r=>new RegExp('^│ │ {3}┌ \\S* ?\\d/\\d+: '+name).test(str(r)));
 assert(!v.rows.some(r=>/│ +execute · Edit/.test(str(r))),'the worker no longer has a stage row\n'+L.join('\n'));
-const kind=v.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
+const kind=v.rows.find(r=>/^│ │ {3}┌ staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
+const flat=draw({...opt,height:60,configuration:{worker_box:'none'}}),flatKind=flat.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));
+assert(flatKind&&!lines(flat).some(l=>/[┌└]/.test(l.slice(4))),lines(flat).join('\n'));
+assert.equal(flatKind.find(p=>p.text==='execute').foreground,150);
 const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true,'lit like Fleet\'s running stage');
 // Other states by Fleet's rule: a finished stage dim of its hue, a failed one the failure red, a waiting one dim.
 const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
 const failed=draw({...opt,height:60,routes:[{...route,stages:other}]});
 const f=stageRow(failed,'execute').find(p=>p.text==='execute');assert.equal(f.foreground,217);assert.equal(f.bold,true);
 const allDone=stages.map(s=>({...s,mark:'✓',current:false}));   // nothing running: the line stands on the last stage, finished
-const done=draw({...opt,height:60,routes:[{...route,stages:allDone}]});
-const d=stageRow(done,'report').find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
+// (11-18, review C2: a worker's box is titled by the stage the worker runs; with no worker running the stage text is on the route's first line.)
+const done=draw({...opt,height:60,routes:[{...route,stages:allDone,workers_live:[]}]});
+const d=done.rows.find(r=>/^│ │ ● code · staged 6\/6: report/.test(str(r))).find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
 // No key sent (an older backend): the body color as before.
 const old=draw({...opt,height:60,routes:[{...route,stages:stages.map(s=>({...s,key:undefined}))}]});
 assert.equal(stageRow(old,'execute').find(p=>p.text==='execute').foreground,253);

@@ -470,7 +470,7 @@ class CommonSessionLineTest(unittest.TestCase):
                          [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""},
                           {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": ""},
                           {"kind": "decision", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""}])
-        self.assertEqual(len(session_panel.session_memory_items({"memory_recent": recent * 3}, now)), 5)
+        self.assertEqual(len(session_panel.session_memory_items({"memory_recent": recent * 3}, now)), 3)   # (11-18: the newest three)
         # 11-15 (panel polish 5): the record's own tier and scope names; any other value is none.
         named = [{**row, "tier": "durable", "scope": "project"}, {**row, "tier": "working", "scope": "global"},
                  {**row, "tier": "permanent", "scope": "repo"}]

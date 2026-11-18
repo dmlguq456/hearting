@@ -91,4 +91,7 @@ def recede_key(key):
         return "famd_" + canonical[4:]
     if canonical.startswith("eff_"):
         return "effd_" + canonical[4:]
+    # 11-18: a finished route's kind word and bracket keep their field's hue, one rung down (dim).
+    if canonical.startswith(("kind_", "kinds_", "kindb_")):
+        return "kindq_" + canonical.split("_", 1)[1]
     return canonical

@@ -41,7 +41,7 @@ _HUE_OF = {
     # still apart from every status and harness color; the names say which zone it is.)
     "zone_direct": ("zd", 0), "zone_dispatch": ("zv", 0), "zone_request": ("zq", 0),
     # This window's own number on the PEERS line: its harness hue, bold.
-    "hbb_claude": ("k", _A_B), "hbb_codex": ("m", _A_B), "hbb_opencode": ("l", _A_B), "hbb_other": ("d", _A_B),
+    "hbb_claude": ("cl", _A_B), "hbb_codex": ("m", _A_B), "hbb_opencode": ("l", _A_B), "hbb_other": ("d", _A_B),
     "tag_steward_dim": ("p", _A_D),
     # Badge text, NOT the glyph: plain yellow, distinct from the dim g_unused glyph so the
     # ●>○>◌ ink-weight gradient still reads.
@@ -61,8 +61,8 @@ _HUE_OF = {
     "eff_xhigh": ("m", _A_B), "eff_max": ("r", _A_B),
     "effd_low": ("d", _A_D), "effd_medium": ("d", _A_D), "effd_high": ("l", _A_D),
     "effd_xhigh": ("m", _A_D), "effd_max": ("r", _A_D),
-    "h_claude": ("k", _A_D), "h_codex": ("m", _A_D), "h_opencode": ("l", _A_D),
-    "hb_claude": ("k", 0), "hb_codex": ("m", 0), "hb_opencode": ("l", 0), "hb_other": ("d", 0),
+    "h_claude": ("cl", _A_D), "h_codex": ("m", _A_D), "h_opencode": ("l", _A_D),
+    "hb_claude": ("cl", 0), "hb_codex": ("m", 0), "hb_opencode": ("l", 0), "hb_other": ("d", 0),
     "fam_opus": ("c", 0), "fam_sonnet": ("l", 0), "fam_haiku": ("g", 0),
     "fam_fable": ("m", 0), "fam_sol": ("y", 0), "fam_astra": ("o", 0),
     "fam_luna": ("w", 0), "fam_gpt": ("y", 0), "fam_other": ("d", 0),
@@ -117,6 +117,15 @@ _HUE_OF = {
 for _h, _hue_ch in _NAME_HUE.items():
     _HUE_OF["nm_" + _h] = (_hue_ch, 0)
     _HUE_OF["nmd_" + _h] = (_hue_ch, _A_D)
+# 11-18 (route kind color): a route's kind word (`kind_<field>`, bold) wears the hue of its field, and the intensity in
+# brackets the same hue stepped by weight: `kindq_<field>` dim (quick), `kinds_<field>` plain (standard), `kindb_<field>`
+# bold (strong, thorough, adversarial). Only the five fields below have a hue; any other route keeps the body color.
+KIND_FIELDS = ("code", "lab", "design", "docs", "research")
+for _f in KIND_FIELDS:
+    _HUE_OF["kind_" + _f] = ("k" + _f, _A_B)
+    _HUE_OF["kindq_" + _f] = ("k" + _f, _A_D)
+    _HUE_OF["kinds_" + _f] = ("k" + _f, 0)
+    _HUE_OF["kindb_" + _f] = ("k" + _f, _A_B)
 _HUE_OF["nm_other"] = ("w", _A_B)      # unknown harness keeps the historical white name
 _HUE_OF["nmd_other"] = ("w", _A_D)
 
@@ -125,9 +134,10 @@ _HUE_OF["nmd_other"] = ("w", _A_D)
 _HUE_PALETTE = {
     "d": (None, -1), "w": ("soft", 7), "g": ("green", 2),
     "y": ("yellow", 3), "v": ("vanilla", 3), "r": ("red", 1),
-    "c": ("cyan", 6), "k": ("claude", 6), "m": ("magenta", 5), "o": ("orange", 3),
+    "c": ("cyan", 6), "cl": ("claude", 6), "m": ("magenta", 5), "o": ("orange", 3),
     "p": ("steward_pink", 5), "l": ("blue", 4),
     "zd": ("zone_direct", -1), "zv": ("zone_dispatch", 7), "zq": ("zone_request", 7),
+    **{"k" + _f: ("kind_" + _f, -1) for _f in KIND_FIELDS},
 }
 
 
@@ -136,9 +146,45 @@ _HUE_PALETTE = {
 # they stand outside the muted set above and are more saturated than it is: orange, violet and aqua.
 _ZONE_256 = {"zone_direct": 208, "zone_dispatch": 99, "zone_request": 43}
 
+# 11-18 (route kind color): the five fields' hues, in the same place and way as the zones' (more saturated than the muted
+# set; none a status, harness, zone or steward number): code blue, lab amber, design rose, docs sand, research sky.
+# Under 256 colors they have none (-1: the word keeps its plain weight).
+_KIND_256 = {"kind_code": 69, "kind_lab": 214, "kind_design": 205, "kind_docs": 180, "kind_research": 38}
+
+# The intensity words by weight (`light` is `quick`'s rung, as `qa_light`): dim, plain, bold. Fleet's short forms too.
+_INTENSITY_WEIGHT = {"quick": "q", "q": "q", "light": "q", "lt": "q", "standard": "s", "std": "s",
+                     "strong": "b", "thorough": "b", "thr": "b", "adversarial": "b", "adv": "b"}
+
+
+def route_field(field, kind):
+    """The one of the five fields a route's kind word takes its hue from, else None (the body color).
+
+    The route's recorded field when it is one of the five; a route that records none (an older one) by its kind's name
+    when that is a field's own name (``code``, ``lab``, ``design``, ``research``)."""
+    field = str(field or "").strip()
+    if field:
+        return field if field in KIND_FIELDS else None
+    kind = str(kind or "").strip()
+    return kind if kind in KIND_FIELDS and kind != "docs" else None
+
+
+def kind_word_key(field):
+    return "kind_" + field if field in KIND_FIELDS else None
+
+
+def kind_intensity_key(field, word):
+    """The key of the whole bracket after a kind word (``(standard)``, ``(dev·q)``): the field's hue at the weight of the
+    intensity it holds (the last of its ``·``-joined words that names one); a bracket with none (a mode alone) is plain."""
+    if field not in KIND_FIELDS:
+        return None
+    weight = "s"
+    for piece in str(word or "").strip("() ").split("·"):
+        weight = _INTENSITY_WEIGHT.get(piece.strip().casefold(), weight)
+    return {"q": "kindq_", "s": "kinds_", "b": "kindb_"}[weight] + field
+
 
 def hue_colors(colors=256):
-    named = {**_MUTED_256, **_HARNESS_256, **_ZONE_256}
+    named = {**_MUTED_256, **_HARNESS_256, **_ZONE_256, **_KIND_256}
     return {hue: (named[name] if colors >= 256 and name else fallback)
             for hue, (name, fallback) in _HUE_PALETTE.items()}
 
