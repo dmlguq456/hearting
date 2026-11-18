@@ -66,3 +66,11 @@ the units/_voice or were resolved with a judgment call.
    user-facing plan mirrors"). Surfaces are preserved as scope guidance in `_voice.md`;
    the ROUTING behavior (when a pipeline appends an editorial node) must be realized by
    entry recipes (WS B) — units themselves never route.
+
+## Two-layer pilot (2026-11-18) — placement log: editorial/report
+
+The body is split into `## 지킬 것` and `## 참고`. **No line was removed**; the `## Contract`
+heading became `### Contract`. 지킬 것: the purpose paragraph and every Contract bullet except
+voice (source description carried into summaries, no new QA, status as a read projection,
+remaining risk, format follows precedent, write to the assigned path). 참고: the voice bullet
+only (`_voice.md` is not carried by the runtime, so the path is a pointer, not a must).
