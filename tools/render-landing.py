@@ -786,13 +786,13 @@ TRACK_COLOR = {
 
 SHOTS = {
     # The README's pictures: one moment of one demo world (readme_captures.py).
-    "seat": (1128, 830, "A Claude Code session in project web-api, session [4f]. On the left an illustrative "
+    "seat": (1128, 1154, "A Claude Code session in project web-api, session [4f]. On the left an illustrative "
              "conversation: a request for a rate limit, the intent card, Proceed, the route line, and a partial report "
              "from session [b2]. On the right the Hearting panel: project and Git state with the STATUS button, model "
              "Opus 5.5 xhigh and context 46%, the title Rate limiting and what it is doing now; the route box with the "
-             "Rate limiting route at 2/4 execute, its owner and its execute worker, each with its context and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] "
+             "Rate limiting route (code(standard) in blue, its time at the right end of the first line) at 2/4 execute: its owner with a context gauge row and what it is doing now, and the execute worker in a box under the stage text, with its own context row and what it is doing now, under the dispatch rule, and, under the request rule, the peer request Test run to [b2] "
              "at a partial answer; MESSAGES with a reply from [b2] and a note to [9c]; MEM with a project decision, a "
-             "global lesson, and a correction; USAGE with Claude, Codex, and OpenCode; and on the window's last line "
+             "global lesson, and a correction; RESOURCES with the two hosts' CPU and memory and the busy GPU of each with the session that holds it; USAGE with Claude, Codex, and OpenCode; and on the window's last line "
              "the working folder and hearting v4.46.0."),
     "overview": (1440, 810, "Fleet's OVERVIEW at the same moment: eight sessions in four projects across Claude Code, "
                  "Codex, and OpenCode. Session [4f] runs Rate limiting at 46%, the Codex session [b2] runs the Test run "

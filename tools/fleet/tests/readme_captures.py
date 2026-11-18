@@ -58,7 +58,7 @@ COLOURS = 96
 FRAME_MS = 2600
 PANEL_COLS = 40
 # The first picture: the [4f] window (conversation columns + two + the panel).
-SEAT_TALK, SEAT_ROWS = 80, 43
+SEAT_TALK, SEAT_ROWS = 80, 61
 # The answering GIF: the [9c] window, its panel and the question popup over both.
 FOCUS_TALK, FOCUS_ROWS = 80, 30
 # The status button pressed: the [4f] window with the status popup (as wide as the first picture).
@@ -118,9 +118,42 @@ def image_of(render, capture, frame):
     return image, unknown
 
 
+def named_colours():
+    """The RGB of the colours that carry a meaning, in the cell painter's own terms: the five fields' hues of a route's kind
+    word (and their dim rung, the ``quick`` bracket), and the three zones' (``tools/fleet/palette.py``). A picture keeps each
+    exactly: median-cut alone merges them into a neighbour with another meaning (code blue into claude's teal, lab amber into
+    the status yellow)."""
+    from tools.fleet import render
+    from tools.fleet.palette import _KIND_256, _ZONE_256
+    from tools.fleet.tests import explorer_capture as capture
+    hues, _tints = capture.palette(render)
+
+    def rgb(index):
+        if index >= 232:
+            level = 8 + 10 * (index - 232)
+            return (level, level, level)
+        index -= 16
+        steps = (0, 95, 135, 175, 215, 255)
+        return (steps[index // 36], steps[(index // 6) % 6], steps[index % 6])
+
+    colours = [rgb(index) for index in (*_KIND_256.values(), *_ZONE_256.values())]
+    colours += [capture.blend(rgb(index), capture.BACKGROUND, 0.42) for index in _KIND_256.values()]
+    assert all(hues["k" + name] in colours for name in ("code", "lab", "design", "docs", "research"))
+    return list(dict.fromkeys(colours))
+
+
 def quantised(image):
+    """The image in at most ``COLOURS`` palette colours, the named ones among them exactly: median-cut the rest, then map every
+    pixel to its nearest palette colour (a named colour's own pixels are at distance 0, so they stay)."""
     from PIL import Image
-    return image.quantize(colors=COLOURS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    pinned = named_colours()
+    cut = image.quantize(colors=COLOURS - len(pinned), method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    flat = cut.getpalette()[:3 * (max(cut.getdata()) + 1)]
+    cut_colours = [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)]
+    palette = list(dict.fromkeys([*pinned, *cut_colours]))[:COLOURS]
+    table = Image.new("P", (1, 1))
+    table.putpalette([channel for colour in palette for channel in colour])
+    return image.quantize(palette=table, dither=Image.Dither.NONE)
 
 
 def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), expanded=(),
@@ -135,7 +168,8 @@ def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), exp
     columns = readme_panel.popup_width(window["cols"]) if window else None
     payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state,
                                       popup_columns=columns)
-    table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160, "table") - 4))
+    table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160,
+                                                           "route" if table == "ROUTE" else "table") - 4))
     job_table = None
     if table:
         job_table = {"kind": table}
@@ -192,8 +226,8 @@ def panel_pictures(render, capture, with_gif):
     """``{file name: PIL image or [GIF frames]}`` for the session panel's README pictures."""
     from tools.fleet.tests import readme_demo
     from tools.fleet.tests import readme_panel as panel
-    snapshot, _hosts = readme_demo.snapshot()
-    world = panel.World(snapshot, readme_demo.NOW)
+    snapshot, hosts = readme_demo.snapshot()
+    world = panel.World(snapshot, readme_demo.NOW, hosts)
     pictures = {"seat.png": seat(world)}
     # The REPO row's status button pressed: [4f]'s project status document opens in a popup in the
     # middle of the window, everything behind it in one gray.

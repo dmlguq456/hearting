@@ -157,12 +157,16 @@ class SessionPageZones(unittest.TestCase):
             self.assertFalse(any(re.search(r"─ (direct|dispatch|request) ─", line) for line in rows), scope)
 
     def test_the_direct_word_is_not_a_bracket_and_a_real_intensity_stays(self):
-        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "direct"}), [("code", "grp")])
-        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": ""}), [("code", "grp")])
+        # (11-18: `code` is a field's own name, so its word and bracket wear the field's hue.)
+        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "direct"}), [("code", "kind_code")])
+        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": ""}), [("code", "kind_code")])
         self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "quick"}),
-                         [("code", "grp"), ("(quick)", "dim")])
+                         [("code", "kind_code"), ("(quick)", "kindq_code")])
         self.assertEqual(tables._kind_cell({"capability": "code", "shape": "staged", "intensity": "standard"}),
-                         [("code", "grp"), ("(standard)", "dim")])
+                         [("code", "kind_code"), ("(standard)", "kinds_code")])
+        # A route with no field hue keeps the bold body word and the dim bracket.
+        self.assertEqual(tables._kind_cell({"capability": "spec", "shape": "staged", "intensity": "standard"}),
+                         [("spec", "grp"), ("(standard)", "dim")])
 
 
 class SinglestageStaged(unittest.TestCase):
