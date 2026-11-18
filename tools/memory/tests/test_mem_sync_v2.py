@@ -258,7 +258,9 @@ class MemTwoServerSyncTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["reason"], "exchange-validation-failed")
+        self.assertEqual(
+            payload["reason"],
+            "exchange-validation-failed:exchange-in-git-tree at /…")
         self.assertNotIn(str(self.project), result.stdout)
         self.assertFalse(unsafe.exists())
 
@@ -281,7 +283,8 @@ class MemTwoServerSyncTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertEqual(
-            json.loads(result.stdout)["reason"], "exchange-validation-failed"
+            json.loads(result.stdout)["reason"],
+            "exchange-validation-failed:exchange-in-forbidden-root",
         )
         self.assertFalse(unsafe.exists())
 
