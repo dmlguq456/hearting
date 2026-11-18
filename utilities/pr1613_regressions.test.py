@@ -41,13 +41,13 @@ class LegReadersTest(unittest.TestCase):
         record = {'route_id': 'rt-fixture', 'work_request': {'text': self.wrapped}}
         self.assertEqual(live._route_subject('rt-fixture', record, {}, {}, {}, []), 'Original training request')
 
-    def test_review_request_is_unwrapped_before_both_limits(self):
+    def test_review_request_is_unwrapped_before_the_limit(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(review.cycle_titles, '_route_text', return_value=self.wrapped), \
              patch.object(review.producer, 'cycle_dir', side_effect=OSError('no manifest')):
             view = review._view(Path(tmp), 'fixture', {'cycle_id': 'cycle'}, {})
         self.assertEqual(view.request, self.request.strip())
-        self.assertIn('Run E on device zero only.', view.request[:review.CONTEXT_REQUEST_CHARS])
+        self.assertIn('Run E on device zero only.', view.request[:review.REQUEST_MAX])
 
     def test_nonhuman_intent_preserves_base_bytes(self):
         for actor in ('automatic', 'supervisor', 'unknown'):

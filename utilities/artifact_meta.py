@@ -506,7 +506,6 @@ class Workspace:
         self.warnings: List[str] = []
         self.metas: Dict[str, MetaDoc] = {}
         self.invalid: Dict[str, str] = {}
-        self.extra_targets: List[Tuple[str, Optional[bytes], bytes]] = []  # (rel, before, after)
         self.load_project()
         self.load_state()
         self.load_metas()
@@ -885,8 +884,6 @@ def _targets(ws: Workspace) -> List[Tuple[str, Optional[bytes], bytes, int]]:
         project = {k: ws.project[k] for k in ("schema_version", "contract", "artifact_root_id", "display_name", "branches")}
         project.update({k: v for k, v in ws.project.items() if k not in project})
         rows.append((PROJECT_REL, ws.project_raw, _bytes(project), 0o644))
-    for rel, before, after in ws.extra_targets:
-        rows.append((rel, before, after, 0o644))
     state_after = _bytes(ws.state)
     if ws.state_raw != state_after and (rows or ws.state["issued"] or ws.state["project_source"]):
         rows.append((STATE_REL, ws.state_raw, state_after, 0o600))
@@ -1233,24 +1230,8 @@ def op_branch_remove(ws: Workspace, code: str) -> Dict[str, Any]:
 # -- the background judgement's write ---------------------------------------
 
 
-def _group_events(ws: Workspace, ready: Mapping[str, Any]) -> None:
-    def groups(raw: Optional[bytes]) -> Dict[str, Any]:
-        doc = json.loads(raw.decode("utf-8")) if raw else {}
-        return {row["group_id"]: row for row in doc.get("groups", [])}
-
-    rel = Path(ready["path"]).relative_to(ws.root).as_posix()
-    old, new = groups(ready["before_raw"]), groups(ready["after_raw"])
-    for group_id, row in new.items():
-        if old.get(group_id) != row:
-            ws.event(kind="group", target_type="group", target_id=group_id, target_path=rel,
-                     operation="add" if group_id not in old else "update", field_path=f"groups.{group_id}",
-                     before=H.value_ref(old.get(group_id)), after=H.value_ref(row),
-                     reason="새 사이클 묶음 판정", actor_by="model")
-    ws.extra_targets.append((rel, ready["before_raw"], ready["after_raw"]))
-
-
 def op_judgement(ws: Workspace, campaign_id: str, *, campaign: Mapping[str, Any], cycles: Mapping[str, Mapping[str, Any]],
-                 new_branches: Sequence[Mapping[str, str]], group_plan: Optional[Mapping[str, Any]],
+                 new_branches: Sequence[Mapping[str, str]],
                  protect_title: bool, replace_legacy_titles: bool = False) -> Dict[str, Any]:
     """Merge one validated model answer into the current files: protected fields, the vocabulary,
     and the 12-branch cap are judged here, against what is on disk now."""
@@ -1315,26 +1296,18 @@ def op_judgement(ws: Workspace, campaign_id: str, *, campaign: Mapping[str, Any]
             if name not in locked:
                 ws.put(meta, cycle_id, name, wanted[name], by="model")
     ws.normalize_ids(campaign_id)
-    group: Dict[str, Any] = {"status": "none"}
-    if group_plan is not None:
-        if not ws.locked:
-            raise MetaError("admission-lock-required")
-        ready = W._validated_apply_locked(ws.root, group_plan)
-        group = {"status": ready["status"], "sha256": ready["sha256"]}
-        if ready["status"] == "ready":
-            _group_events(ws, ready)
-    return {"campaign_id": campaign_id, "group": group}
+    return {"campaign_id": campaign_id}
 
 
 def apply_judgement(root: Path, campaign_id: str, *, campaign: Mapping[str, Any],
                     cycles: Mapping[str, Mapping[str, Any]], new_branches: Sequence[Mapping[str, str]] = (),
-                    group_plan: Optional[Mapping[str, Any]] = None, protect_title: bool = False,
+                    protect_title: bool = False,
                     replace_legacy_titles: bool = False,
                     dry_run: bool = False, now: Optional[float] = None, lock_timeout: Optional[float] = None
                     ) -> Dict[str, Any]:
     def mutate(ws: Workspace) -> Dict[str, Any]:
         return op_judgement(ws, campaign_id, campaign=campaign, cycles=cycles, new_branches=new_branches,
-                            group_plan=None if dry_run else group_plan, protect_title=protect_title,
+                            protect_title=protect_title,
                             replace_legacy_titles=replace_legacy_titles)
 
     return run_write(root, mutate, dry_run=dry_run, actor_by="model", now=now, lock_timeout=lock_timeout,
