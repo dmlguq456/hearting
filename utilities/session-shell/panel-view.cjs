@@ -1702,43 +1702,59 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
-    // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): RESOURCES stands
-    // right above USAGE: one row for each host (its name, `CPU 34%  MEM 61%`), under it one row for each GPU a process runs on
-    // (`GPU0 ━━━━━━━━─ 92%  21/24G  [3b]`: the gauge, the use, the memory, and the number of the session that holds it, left out where
-    // the backend does not know it) and one for the count of those nothing runs on (`idle GPU 6`). The values are the sample the shared
-    // producer already took. Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the
-    // last; the name row goes with the last of them), so USAGE and the sections above it stand as they did without it.
+    // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
+    // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
+    // right above USAGE. One row for each host: its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs nothing runs
+    // on (`idle GPU 6`). Under it the GPUs a process runs on, side by side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G`), onto the next
+    // row where they do not fit; one GPU's group is never split between rows. No gauge: the use is its number, in the level's color.
+    // The values are the sample the shared producer already took. Short of cells on a host row the last value goes first (the idle
+    // count, then MEM, then CPU) and a long name is cut with `…`; short of cells for one GPU's group the memory goes first, then the use,
+    // and the session's number stays (who holds the GPU is what the section is for). Short of rows it gives way before everything else:
+    // the GPU rows (from the last), the host rows (from the last; the name row goes with the last of them), so USAGE and the sections
+    // above it stand as they did without it.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
     const resourceHostRow=h=>{
-      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length);
-      for(let n=stats.length;n>=0;n--){
-        const row=[...painted(h.host),...stats.slice(0,n).flatMap(x=>[text('  '),...painted(x)])];
-        if(size(row)<=inner)return row;
+      const idle=h.idle>0?[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]:[];
+      const values=[...painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted),...(idle.length?[idle]:[])];
+      const name=painted(h.host),least=Math.min(size(name),12);
+      for(let n=values.length;n>=0;n--){
+        const tail=values.slice(0,n).flatMap(x=>[text('  '),...x]),room=inner-size(tail);
+        if(room>=least)return [...(size(name)<=room?name:cut(name,room)),...tail];
       }
-      return cut(painted(h.host),inner);
+      return cut(name,inner);
     };
-    const resourceGpuRow=g=>{
-      const tries=[[g.gauge9,g.mem,g.users],[g.gauge5,g.mem,g.users],[g.gauge5,g.users],[g.pct,g.users],[g.pct]];
-      if(!g.gauge9&&!g.pct)tries.splice(0,tries.length,[g.mem,g.users],[g.users],[]);
-      for(const gap of ['  ',' '])for(const parts of tries){
-        const row=[text('  '),...painted(g.label),...parts.filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(gap===' '?' ':gap),...painted(x)])];
-        if(size(row)<=inner)return row;
+    // One GPU's group at a form (0 whole; 1 without the memory; 2 without the use too; 3 the label alone).
+    const resourceGpuGroup=(g,form)=>{
+      const sets=[[g.pct,g.mem,g.users],[g.pct,g.users],[g.users],[]];
+      return [...painted(g.label),...sets[form].filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(' '),...painted(x)])];
+    };
+    // The host's GPU rows: groups side by side, two cells in, two cells between; every group in the first form that lets the widest stand alone.
+    const resourceGpuRows=h=>{
+      const gpus=painted(h.gpus);
+      if(!gpus.length)return [];
+      let form=0;
+      while(form<3&&gpus.some(g=>2+size(resourceGpuGroup(g,form))>inner))form++;
+      const rows=[];let row=[];
+      for(const g of gpus){
+        const group=resourceGpuGroup(g,form);
+        if(row.length&&size(row)+2+size(group)>inner){rows.push(row);row=[];}
+        row=row.length?[...row,text('  '),...group]:[text('  '),...group];
       }
-      return cut([text('  '),...painted(g.label)],inner);
+      rows.push(row);
+      return rows.map(r=>cut(r,inner));
     };
     const resourceLines=()=>{
       const out=[];let room=resGpus;
       resourceData.slice(0,resHosts).forEach(h=>{
         out.push(resourceHostRow(h));
-        const lines=[...painted(h.gpus).map(resourceGpuRow),...(h.idle>0?[[text('  '),text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[])];
-        for(const line of lines){if(room<=0)break;out.push(cut(line,inner));room--;}
+        for(const line of resourceGpuRows(h)){if(room<=0)break;out.push(line);room--;}
       });
       return out;
     };
     const resourceHead=()=>sectionHead([],'RESOURCES',[],[[]],false);
     const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
-    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+painted(h.gpus).length+(h.idle>0?1:0),0);
+    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
     // The last row beside the buttons: that harness's row when its values fit there.
     const usageShared=u=>u&&usageFit(u,quotaRoom).values;
     const footBase=()=>{

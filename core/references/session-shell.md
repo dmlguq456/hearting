@@ -622,11 +622,13 @@ popup; a request row the MESSAGES popup).
   whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES ────` (no `›`: it opens nothing), then for each host (this
-  machine first, then the configured hosts, eight at most) one row, its name and `CPU 34%  MEM 61%`, and under it one row for each
-  GPU a process runs on (`  GPU0  ━━━━━━━━─ 92%  21/24G  [3b]`: the use as a gauge, the memory, and the Fleet numbers of the
-  sessions that hold it, empty where the producer does not know them) and one for the count of the GPUs nothing runs on
-  (`  idle GPU 6`, `빈 GPU 6` in Korean); a host that could not be reached keeps its name alone. Short of cells a GPU row gives up its
-  gauge's width, then the memory, and keeps the session number; a host row gives up `MEM`, then `CPU`. The values are Fleet's own
+  machine first, then the configured hosts, eight at most) one row, its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs
+  nothing runs on (`idle GPU 6`, `빈 GPU 6` in Korean), and under it the GPUs a process runs on side by side (`  GPU0 92% 21/24G [3b]  GPU3 58%
+  14/24G [c7]`: no gauge since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
+  from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them), two cells in and two cells
+  apart, onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
+  GPU in use is its one row. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
+  form that lets the widest stand alone); a host row gives up the idle count, then `MEM`, then `CPU`, and a long name is cut with `…`. The values are Fleet's own
   compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
   resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
   `panel_projection` then touches `.resources-wanted`, at most every 20 seconds, and the producer reads no host once it is 90 seconds old),
@@ -657,7 +659,7 @@ popup; a request row the MESSAGES popup).
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
-RESOURCES (11-18: its GPU rows, then its host rows and name); empty rows and a value's further rows (title, NOW, a route's title); every other
+RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes with its host row); empty rows and a value's further rows (title, NOW, a route's title); every other
 section down to two rows, then to one, the lowest first (MEM: its headlines one row each, then
 down to two records and to one; the question's action row,
 then its summary keeps one row and the guidance line goes); the

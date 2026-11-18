@@ -1,8 +1,9 @@
 """11-18 (round 3 of PR #1715): the panel's RESOURCES section and the repository name on a request line, from the producer to the panel.
 
-  * RESOURCES stands above USAGE: one row for each host (`host-a  CPU 34%  MEM 61%`), under it one row for each GPU a process runs
-    on (`GPU0  ━━━━━━━━─ 92%  21/24G  [3b]`: the number of the session that holds it, left out where it is not known) and the count
-    of the GPUs nothing runs on. The values are the compute-host sample the shared producer keeps; the panel reads the cache only.
+  * RESOURCES stands above USAGE: one row for each host (`host-a  CPU 34%  MEM 61%  idle GPU 6`: the count of the GPUs nothing runs on
+    ends the row), under it the GPUs a process runs on side by side (`GPU0 92% 21/24G [3b]  GPU3 58% 14/24G [c7]`: no gauge, the use in its
+    level's color, the number of the session that holds it, left out where it is not known), onto the next row where they do not fit and
+    never splitting one GPU's group. The values are the compute-host sample the shared producer keeps; the panel reads the cache only.
     Short of rows it gives way before everything else, so the other sections and the route box stand as they do without it.
   * A request line names the other session's repository after its number (`[c2] other-repo`), not for a session of the window's
     own repository and not where Fleet does not know it; the title goes before the repository name does.
@@ -28,9 +29,9 @@ FIXTURE = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]+'/panel-view.cjs');
 const P=t=>({text:t}),D=t=>({text:t,dim:true});
 const text=r=>r.map(p=>p.text).join('');
-const STYLES={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:114},g_work:{foreground:150},g_work_off:{foreground:150,dim:true}};
-const gpu=(i,pct,mem,users)=>({label:[D('GPU'+i)],gauge9:[P('━'.repeat(Math.round(pct*9/100))),D('─'.repeat(9-Math.round(pct*9/100))),D(' '),P(pct+'%')],
-  gauge5:[P('━'.repeat(Math.round(pct*5/100))),D('─'.repeat(5-Math.round(pct*5/100))),D(' '),P(pct+'%')],pct:[P(pct+'%')],mem:[D(mem)],...(users?{users:[P(users)]}:{})});
+const STYLES={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:114},lvl_y:{foreground:186},lvl_r:{foreground:217},g_work:{foreground:150},g_work_off:{foreground:150,dim:true}};
+const level=pct=>pct>=80?'lvl_r':pct>=50?'lvl_y':'lvl_g';
+const gpu=(i,pct,mem,users)=>({label:[D('GPU'+i)],pct:[{text:pct+'%',...STYLES[level(pct)]}],mem:[D(mem)],...(users?{users:[P(users)]}:{})});
 const host=(name,cpu,mem,gpus,idle)=>({host:[P(name)],stats:[[D('CPU '),P(cpu+'%')],[D('MEM '),P(mem+'%')]],gpus,idle});
 const A=host('host-a',34,61,[gpu(0,92,'21/24G','[3b]'),gpu(3,58,'14/24G','[c7]')],6);
 const B=host('host-b',12,40,[gpu(1,71,'18/24G','[d4]')],0);
@@ -57,34 +58,49 @@ const rows=plain(render(44,50,{resources:[A,B]}));
 const at=rows.findIndex(s=>/^│ RESOURCES ─+ │$/.test(s)),us=rows.findIndex(s=>/^│ USAGE ─+ │$/.test(s));
 assert(at>0&&us>at,rows.join('\n'));
 const body=rows.slice(at+1,us).map(s=>s.slice(2,-2).trimEnd());
-assert.deepEqual(body,['host-a  CPU 34%  MEM 61%','  GPU0  ━━━━━━━━─ 92%  21/24G  [3b]','  GPU3  ━━━━━──── 58%  14/24G  [c7]','  idle GPU 6',
- 'host-b  CPU 12%  MEM 40%','  GPU1  ━━━━━━─── 71%  18/24G  [d4]'],rows.join('\n'));
+// (44 cells: the two groups of host-a are 20 wide each, 2 in and 2 apart: 44 inside 40 is too much, so each stands on a row.)
+assert.deepEqual(body,['host-a  CPU 34%  MEM 61%  idle GPU 6','  GPU0 92% 21/24G [3b]','  GPU3 58% 14/24G [c7]',
+ 'host-b  CPU 12%  MEM 40%','  GPU1 71% 18/24G [d4]'],rows.join('\n'));
+// Wider, they stand side by side; the level's color is the use's: 92 red, 58 yellow, 71 yellow.
+const wide=plain(render(60,50,{resources:[A,B]})),w=wide.findIndex(s=>/^│ RESOURCES/.test(s));
+assert.deepEqual(wide.slice(w+1,w+4).map(s=>s.slice(2,-2).trimEnd()),['host-a  CPU 34%  MEM 61%  idle GPU 6','  GPU0 92% 21/24G [3b]  GPU3 58% 14/24G [c7]','host-b  CPU 12%  MEM 40%'],wide.join('\n'));
+const coloured=render(60,50,{resources:[A,B]}).rows.flat().filter(p=>/^\d+%$/.test(p.text)&&['92%','58%','71%'].includes(p.text));
+assert.deepEqual(coloured.map(p=>[p.text,p.foreground]),[['92%',217],['58%',186],['71%',186]]);
+assert(!render(60,50,{resources:[A,B]}).rows.flat().some(p=>/[━─]{2}/.test(p.text)&&p.foreground===114),'no gauge');
 assert(rows.every(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)===44),'every row keeps the width');
 // A session that is not known leaves its number cell empty; a GPU whose use is not known keeps its memory.
 const odd=plain(render(44,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/24G',null),{label:[D('GPU1')],mem:[D('3/24G')]}],0)]}));
 const o=odd.findIndex(s=>/^│ RESOURCES/.test(s));
-assert.deepEqual(odd.slice(o+1,o+4).map(s=>s.slice(2,-2).trimEnd()),['host-a  CPU 34%  MEM 61%','  GPU0  ━━━━━━━━─ 92%  21/24G','  GPU1  3/24G'],odd.join('\n'));
+assert.deepEqual(odd.slice(o+1,o+3).map(s=>s.slice(2,-2).trimEnd()),['host-a  CPU 34%  MEM 61%','  GPU0 92% 21/24G  GPU1 3/24G'],odd.join('\n'));
 // No resources, no section; a panel beside the native area only.
 assert(!plain(render(44,50,{})).some(s=>/RESOURCES/.test(s)));
 assert(!plain(render(100,24,{resources:[A]},{side:false})).some(s=>/RESOURCES/.test(s)));
 """)
 
-    def test_narrow_rows_drop_the_gauge_then_the_memory_and_keep_the_number_of_the_session(self):
+    def test_narrow_groups_drop_the_memory_then_the_use_and_keep_the_number_of_the_session(self):
         self.node(r"""
-for(const width of [32,36,40,44]){
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+for(const width of [18,20,22,24,26,28,32,36,40,44,60]){
  const rows=plain(render(width,50,{resources:[A]}));
- assert(rows.every(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)===width),width+'\n'+rows.join('\n'));
- const g=rows.filter(s=>/GPU[03]/.test(s));
- assert.equal(g.length,2,width+'\n'+rows.join('\n'));
- assert(g[0].includes('[3b]')&&g[1].includes('[c7]'),'the session number stays at '+width+'\n'+rows.join('\n'));
+ assert(rows.every(s=>cells(s)===width),width+'\n'+rows.join('\n'));
+ const g=rows.filter(s=>/GPU[03]/.test(s)).join(' ');
+ assert(g.includes('[3b]')&&g.includes('[c7]'),'the session numbers stay at '+width+'\n'+rows.join('\n'));
+ assert(/GPU0/.test(g)&&/GPU3/.test(g),width);
 }
-const w32=plain(render(32,50,{resources:[A]})).filter(s=>/GPU0/.test(s))[0];
-assert(!w32.includes('21/24G')||w32.includes('━'),w32);
+// One GPU's group is whole or in a shorter form, never split between rows; every group takes the form that lets the widest stand alone.
+const at=w=>plain(render(w,50,{resources:[A]})).filter(s=>/GPU[03]/.test(s)).map(s=>s.slice(2,-2).trimEnd());
+assert.deepEqual(at(32),['  GPU0 92% 21/24G [3b]','  GPU3 58% 14/24G [c7]']);
+assert.deepEqual(at(24),['  GPU0 92% [3b]','  GPU3 58% [c7]']);          // 20 inside: the memory goes first
+assert.deepEqual(at(20),['  GPU0 92% [3b]','  GPU3 58% [c7]']);          // 16 inside: still the use
+assert.deepEqual(at(18),['  GPU0 [3b]','  GPU3 [c7]']);                // 14 inside: then the use; the number stays
+// A GPU whose session is not known keeps its use and memory.
+const unknown=plain(render(24,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/24G',null)],0)]})).filter(s=>/GPU0/.test(s))[0].slice(2,-2).trimEnd();
+assert.equal(unknown,'  GPU0 92% 21/24G');
 """)
 
     def test_short_of_rows_it_gives_way_first_gpu_rows_then_host_rows_and_the_rest_stands_as_without_it(self):
         self.node(r"""
-const kinds=rows=>({gpu:rows.filter(s=>/GPU\d/.test(s)).length,host:rows.filter(s=>/host-[ab] /.test(s)).length,idle:rows.filter(s=>/idle GPU/.test(s)).length,
+const kinds=rows=>({gpu:rows.filter(s=>/GPU\d/.test(s)).length,host:rows.filter(s=>/host-[ab]/.test(s)).length,idle:rows.filter(s=>/idle GPU/.test(s)&&!/host-[ab]/.test(s)).length,
   head:rows.some(s=>/^│ RESOURCES/.test(s)),usage:rows.filter(s=>/^│ (claude|codex|opencode) /.test(s)||/^│ USAGE/.test(s)).length});
 const routeBox=rows=>{const a=rows.findIndex(s=>/╭─/.test(s)),z=rows.findIndex(s=>/╰─/.test(s));return a<0?null:rows.slice(a,z+1).join('\n');};
 let seen=new Set();
