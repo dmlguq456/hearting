@@ -126,7 +126,7 @@ gate, input, flag, state store or recovery command is introduced.
 
 ## Background review of newly sealed cycles
 
-A cycle that has no metadata yet is reviewed in the background right after it seals.
+A newly sealed cycle with no judgement record yet is reviewed in the background right after it seals.
 This is the one background judgement: **one model call per campaign per sweep**
 decides the title, summary, branches, and kinds of the campaign and of every target
 cycle ([ARTIFACT_META.md](ARTIFACT_META.md)). It neither reads nor writes
@@ -137,13 +137,14 @@ seal. A seal starts no other judgement job.
 
 - **Targets (auto).** Sealed cycles with no judgement record that sealed at or after
   the record's `enrolled_at`; failed cycles with fewer than 3 hard failures
-  (`invalid-response`, `apply-failed`); and cycles judged while open that have since
+  (`invalid-response`, `apply-failed`); and cycles judged while open, of any verdict, that have since
   sealed (once). Enrollment is written by the first automatic sweep that receives a
   trigger cycle, before any model call. Without it, only the trigger cycles are
   reviewed; historical cycles are reviewed only by an explicit `sweep --cycle` or
   `--since`. A cycle in a group is judged like any other; a record written before this
-  change (`joined`, `new-group`, `unassigned`, `member`) is read but never selected
-  again, so past cycles are not judged retroactively. A campaign whose `meta.json`
+  change with `joined`, `new-group` or `member` is never selected again, so past cycles
+  are not judged retroactively, and an `unassigned` one judged while open is selected
+  once after it seals. A campaign whose `meta.json`
   breaks the contract is skipped whole, with a warning, before any model call.
 - **One call.** Each campaign is asked once per sweep with at most 16 targets and
   the existing input budgets; targets beyond them are not marked handled and wait
