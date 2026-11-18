@@ -826,6 +826,9 @@ function tableParts(result){
 // stands at once; Fleet's lines are read one at a time and fill the popup standing when they arrive
 // (its width and generation as asked), and are not kept when either changed.
 let fleetAsking=false,fleetAgain=false,fleetWidth=0,fleetGeneration=0;
+// A collection the held backend made is drawn again by a key for as long as it is fresher than this many seconds; an older
+// one is drawn at once with the words that it is not this reading's, and read again behind them.
+const HELD_READ_AGE=60;
 function askTable(){
   const t=table;if(!t||!POPUP_KIND[t.kind])return;
   if(tableAsking){tableAgain=true;return;}
@@ -838,7 +841,9 @@ function askTable(){
   const routeTable=t.kind==='ROUTE',pageAsked=!!t.page;
   // The routes popup's held backend draws a route unfolded or its page from the collection it already made while the
   // panel's route rows are the ones that collection was read for (`reuse`); else it collects (a first read, a changed key).
-  const reuse=routeTable&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
+  const collect=!!t.collect;t.collect=false;
+  const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
+  const aged=reuse&&Date.now()/1000-(t.readAt||0)>=HELD_READ_AGE;
   const ask=extra=>{
     const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
       ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{}),...(reuse?{reuse:true}:{})};
@@ -880,7 +885,11 @@ function askTable(){
     }
     const anchor=route?routeAnchor(t):null;
     t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
-    if(t.kind==='ROUTE'){t.stale=null;t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;}
+    if(t.kind==='ROUTE'){
+      t.stale=null;t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;
+      // A collection older than a minute is drawn with the words (its time is when it was collected) and collected again behind them.
+      if(aged){t.stale={at:t.readAt,failed:false};t.collect=true;tableAgain=true;}
+    }
     if(status){
       // The document first (it waits on nothing of Fleet's); Fleet's lines come after and stand above it.
       t.title=typeof result.title==='string'?result.title:'';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
@@ -895,6 +904,8 @@ function askTable(){
     }
     if(Array.isArray(result.routes))t.routes=result.routes;
     if(t.kind==='ROUTE'&&t.page&&pageAsked&&result.page!==true)t.page=false;
+    // A page asked for while the table was being read opens at its top, not where the table's own scroll followed the row to.
+    if(t.kind==='ROUTE'&&result.page===true&&t.pageTop){t.scroll=0;t.pageTop=false;}
     if(route)routePopup={sid,width,open:openAsked,key:keyAsked,rows:t.rows,hits:t.hits,routes:t.routes,at:t.readAt};
     queueDisplay();
   }).finally(()=>{
@@ -1047,7 +1058,7 @@ function moveRow(delta){
 function enterRow(){
   const t=table;if(!t)return;
   if(t.kind==='NOW'){enterNow(t);return;}
-  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;askTable();}
+  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;t.pageTop=t.page;askTable();}
 }
 // Enter in the NOW popup: a prompt or NOW row reads its part of the conversation here (Enter again is back at
 // the list, on that row); a route, question or message row opens that section's popup. No key goes to the window.
@@ -1510,6 +1521,7 @@ function rawRelay() {
   // before that one is told to read; a `retire` already sent still arrives and ends this host.
   if(succeeding){succeeding=false;try{successionChannel?.end();}catch{}try{child.resume();process.stdin.resume();}catch{}}
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
+  heldStop();
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
   try{terminal.dispose();}catch{}
@@ -1918,9 +1930,10 @@ async function lifecycle(req) {
       ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];
     // A popup reads one session's values: another selection closes it; the same session selected again
-    // with no key between (an OpenCode plugin reload) keeps it, read again for the session as it is now.
+    // with no key between (an OpenCode plugin reload) keeps it, read again for the session as it is now. The popup's held
+    // backend ends with it either way (its collection is not this session's).
     const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
-    table=again?unselected.table:null;routeScroll=again?unselected.routeScroll:0;unselected=null;if(table)setImmediate(askTable);
+    heldStop();table=again?unselected.table:null;routeScroll=again?unselected.routeScroll:0;unselected=null;if(table)setImmediate(askTable);
     if(routePopup&&routePopup.sid!==req.sid)routePopup=null;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
