@@ -23,7 +23,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "explorer"
 NAMES = ("plan", "execute", "review", "test", "report")
 STATES = ("done", "active", "active", "todo", "failed")
 # The stage palette's second hue is the cyan of Opus, not the Claude harness orange (11-18).
-DIM_KEYS = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "h_codex")
+DIM_KEYS = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "famd_fable")
 
 
 def blink_view_model():
@@ -253,7 +253,7 @@ class StagePhaseTests(BlinkAssertions):
                         self.assertEqual(on.rows_text()[0].count("execute"), 1)
                         self.assert_structure(on, off)
                         x = on.rows_text()[0].index("execute")
-                        bright = normalize_style("hb_opencode" if status == "active" else "title_dim")[0]
+                        bright = normalize_style("fam_sonnet" if status == "active" else "title_dim")[0]
                         self.assertEqual([on.cells[0][col][1] for col in range(x, x + 7)],
                                          [bright] * 7)
                         expected = {(0, col): DIM_KEYS[0] for col in range(x, x + 7)} if status == "active" else {}
@@ -481,7 +481,7 @@ class FramePhaseTests(BlinkAssertions):
                         expected.update(route_count_spans(on))
                         if status == "active":
                             expected.update({(y, col): DIM_KEYS[0] for col in range(x, x + 7)})
-                            self.assertEqual(on.cells[y][x][1], "hb_opencode")
+                            self.assertEqual(on.cells[y][x][1], "fam_sonnet")
                         self.assertEqual({pos: pair[1] for pos, pair in _changes(on, off).items()}, expected)
                         self.assert_hues(on, off)
                         self.assertEqual(draw(current_vm, state, cols, 45, beat=0), off)

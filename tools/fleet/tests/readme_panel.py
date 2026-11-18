@@ -672,7 +672,7 @@ CONVERSATION = {
     ),
 }
 _CONVERSATION_STYLE = {"you": {"fg": 253, "bold": True}, "body": {"fg": None}, "dim": {"dim": True},
-                       "claude": {"fg": 173}, "codex": {"fg": 176}, "opencode": {"fg": 147}}
+                       "claude": {"fg": 173}, "codex": {"fg": 147}, "opencode": {"fg": 153}}
 
 
 # The window's last line under the native screen is the shell's one line in every harness (spec rule 60):

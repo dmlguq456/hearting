@@ -124,11 +124,12 @@ def _history_recede_delta(expected_cells):
 
 
 def _stage_cyan_delta(actual_cells, expected_cells):
-    """The approved 2026-11-18 delta (Claude's harness color is orange now): the stage palette's second hue was drawn with
-    the Claude harness keys in the reference (`h_claude`/`hb_claude`); it stays the cyan it was, now on Opus's keys. Only a
-    cell with the same glyph whose frozen key is a Claude key and whose drawn key is exactly its cyan twin may differ; a
-    real Claude harness cell (drawn `hb_claude`) is still compared as captured."""
-    twin = {"h_claude": "famd_opus", "hb_claude": "fam_opus"}
+    """The approved 2026-11-18 delta (the harness colors are their own now): the stage palette's hues (blue, cyan, magenta)
+    were drawn with the harness keys in the reference (`h_`/`hb_` claude, codex, opencode); they stay the hues they were, now
+    on the model families' keys. Only a cell with the same glyph whose frozen key is a harness key and whose drawn key is
+    exactly its family twin may differ; a real harness cell (drawn `hb_claude`) is still compared as captured."""
+    twin = {"h_claude": "famd_opus", "hb_claude": "fam_opus", "h_codex": "famd_fable", "hb_codex": "fam_fable",
+            "hb_opencode": "fam_sonnet"}
     normalized = [list(row) for row in expected_cells]
     for y, row in enumerate(normalized):
         if y >= len(actual_cells):

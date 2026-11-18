@@ -266,7 +266,7 @@ def _init_colors():
     except Exception:
         pass
     # color discipline (design review 2026-07-01): one meaning per color.
-    #   green/yellow/red = status + level ONLY · orange (Claude)/magenta/blue = harness identity ONLY (cyan: the Opus family)
+    #   green/yellow/red = status + level ONLY · Claude orange/Codex lavender/OpenCode sky = harness identity ONLY (the families keep cyan/magenta/blue)
     #   soft-white bold = the row's single focal point (session name) · dim = all metadata
     fallback_spec = {
         "green": curses.COLOR_GREEN, "yellow": curses.COLOR_YELLOW, "red": curses.COLOR_RED,
@@ -275,7 +275,7 @@ def _init_colors():
         "orange": curses.COLOR_YELLOW,
     }
     palette_name = {
-        "h_claude": "claude", "h_codex": "magenta", "h_opencode": "blue",
+        "h_claude": "claude", "h_codex": "codex", "h_opencode": "opencode",
     }
     spec = {
         key: _palette_fg(palette_name.get(key, key), fallback)
@@ -356,9 +356,9 @@ def _init_colors():
     # Idle summaries stay DIM; exact current process evidence promotes the same
     # hue to normal intensity (F-93). Text remains the primary identifier.
     for fam, hue_name in {
-        "rtx6000": "h_opencode", "rtx4090": "fam_opus", "rtx5090": "green",
-        "blackwell": "green", "hopper": "h_codex", "ada": "fam_opus",
-        "ampere": "h_opencode", "turing": "yellow", "legacy": "orange",
+        "rtx6000": "fam_sonnet", "rtx4090": "fam_opus", "rtx5090": "green",
+        "blackwell": "green", "hopper": "fam_fable", "ada": "fam_opus",
+        "ampere": "fam_sonnet", "turing": "yellow", "legacy": "orange",
     }.items():
         hue = _COLOR.get(hue_name, 0)
         _COLOR["gpu_" + fam] = hue | curses.A_DIM
@@ -379,7 +379,7 @@ def _init_colors():
         curses.init_pair(_STEWARD_PAIR, _palette_fg("steward_pink", curses.COLOR_MAGENTA), bg)
         _COLOR["tag_steward"] = curses.color_pair(_STEWARD_PAIR) | curses.A_BOLD
     except Exception:
-        _COLOR["tag_steward"] = (_COLOR.get("h_codex", 0) & ~curses.A_DIM) | curses.A_BOLD
+        _COLOR["tag_steward"] = (_COLOR.get("fam_fable", 0) & ~curses.A_DIM) | curses.A_BOLD
     _COLOR["tag_steward_dim"] = (_COLOR["tag_steward"] & ~curses.A_BOLD) | curses.A_DIM
     _COLOR["herdr_on"] = _COLOR.get("soft", 0)
     _COLOR["grp"] = _COLOR.get("soft", 0) | curses.A_BOLD  # group card title
@@ -393,7 +393,7 @@ def _init_colors():
     # Hearting identity is persistent metadata, not the screen's focal point.  Keep the
     # release in a quiet blue-grey and make checkout/build details recede further.  Dirty
     # remains barely warm so it is discoverable without reading like an alert.
-    _COLOR["version_release"] = _COLOR.get("h_opencode", 0) | curses.A_DIM
+    _COLOR["version_release"] = _COLOR.get("fam_sonnet", 0) | curses.A_DIM
     _COLOR["version_build"] = curses.A_DIM
     _COLOR["version_dirty"] = _COLOR.get("yellow", 0) | curses.A_DIM
     _COLOR["version_method"] = curses.A_DIM
@@ -415,8 +415,8 @@ def _init_colors():
     # (bold, the one true alarm — unchanged). No yellow anywhere in the ramp.
     _COLOR["eff_low"] = curses.A_DIM
     _COLOR["eff_medium"] = 0
-    _COLOR["eff_high"] = _COLOR.get("h_opencode", 0) & ~curses.A_DIM   # plain blue
-    _COLOR["eff_xhigh"] = (_COLOR.get("h_codex", 0) & ~curses.A_DIM) | curses.A_BOLD  # bold magenta
+    _COLOR["eff_high"] = _COLOR.get("fam_sonnet", 0) & ~curses.A_DIM   # plain blue (the family hue, not OpenCode's sky)
+    _COLOR["eff_xhigh"] = (_COLOR.get("fam_fable", 0) & ~curses.A_DIM) | curses.A_BOLD  # bold magenta (not Codex's lavender)
     _COLOR["eff_max"] = _COLOR.get("red", 0) | curses.A_BOLD
     # dispatch-row effort: the SAME hue ramp at dim weight (user 2026-07-20: 분사 행에도
     # 컬러 — a flat grey effort read as part of the grey subtitle). Bold is stripped so a
@@ -483,8 +483,8 @@ def _init_colors():
         _TINT_PAIR.clear()
     # stage breadcrumb — each pipeline stage a DISTINCT color (user); the CURRENT stage is BOLD
     # Bright current stages stand out; past and pending stages use the same hue dimmed.
-    _stage_raw = [_hue.get("opencode", 0), _COLOR.get("fam_opus", 0), _COLOR.get("green", 0),
-                  _COLOR.get("yellow", 0), _hue.get("codex", 0)]  # blue · cyan · green · yellow · magenta
+    _stage_raw = [_COLOR.get("fam_sonnet", 0), _COLOR.get("fam_opus", 0), _COLOR.get("green", 0),
+                  _COLOR.get("yellow", 0), _COLOR.get("fam_fable", 0)]  # blue · cyan · green · yellow · magenta
     for i, base in enumerate(_stage_raw):
         _COLOR["stg%d_on" % i] = base | curses.A_BOLD
         _COLOR["stg%d_off" % i] = base | curses.A_DIM

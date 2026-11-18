@@ -76,31 +76,33 @@ const FACES={
     // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
     waitBlink:[217,95],
     // 11-16 (the person: "usage에서 하네스 이름도 어둡게 원래 테마 컬러를 넣어주고"): the harness names of the USAGE rows, each in
-    // its Fleet hue (`hb_*`: claude orange, codex magenta, opencode blue) one step down (L* 48.6, 52.3, 59.3; the lit hues
-    // 173, 176, 147 are L* 63.8, 67, 74), so a name reads as a label and never louder than its numbers.
-    // 11-18 (Claude's harness color teal 116 → orange 173, the mock-up's #e59a6f): its name was 66, now 130.
-    harnessName:{claude:130,codex:133,opencode:104}},
+    // its Fleet hue (`hb_*`: claude orange 173, codex lavender 147, opencode sky 153) one step down (L* 48.6, 59.3, 70.0; the lit hues
+    // are L* 63.8, 74.2, 84.4), so a name reads as a label and never louder than its numbers.
+    // 11-18 (the harness colors follow the products' own themes): Claude's name was 66, now 130; Codex's was 133, now 104
+    // (the step under 147); OpenCode's was 104, now 110 (the step under 153). Each pair is 13 or more apart (CIEDE2000).
+    harnessName:{claude:130,codex:104,opencode:110}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
     veil:250,bright:232,popup:254,popupLine:137,popupTitle:232,popupFloor:241,chosen:223,waitBlink:[88,167],
     rgb:{popup:'#f1e7dc',popupLine:'#9c8571',popupTitle:'#342a23',chosen:'#fecca4'},
-    // (The light face: the deep hues 166, 60, 25 (L* 54.7, 42, 40); the names one step lighter for Codex and OpenCode: L* 45.7, 56.7.
-    // Claude's deep orange is already the lightest that reads on white (166, 3.3), so its name is the head's own hue; was 23 -> 30.)
-    harnessName:{claude:166,codex:96,opencode:68}},
+    // (The light face: the deep hues 166, 25, 31 (L* 54.7, 40, 52.3). Codex's name is the step lighter, 68 (L* 56.7); Claude's deep orange
+    // and OpenCode's deep sky are already the lightest that read on white (166, 3.3; 31, 4.1), so their names are the head's own hue.)
+    harnessName:{claude:166,codex:68,opencode:31}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
 // instead of the earlier strong substitutes; the dark face changes only the
 // failure red, and only on a shade.
+// 11-18 (OpenCode's sky 153 -> 31, #0087af, 4.1 on white; Codex's 147 shares Sonnet's, so its deep pair is 25: the person chose the same color.)
 // 11-18 (Claude's harness orange 173 -> 166, #d75f00, 3.3 on white: the deep orange nearest its hue (56°; 130 is 64° and is the
 // direct zone's and lab's own deep hue here), 9.4 from that 130 by CIEDE2000: see PR text).
 // 11-18: the three zone hues (orange, violet, aqua) and the five field hues (code blue, lab amber, design rose, docs sand,
 // research sky) take their dark counterparts on the light face: the same hue at a contrast of 4.5 or more on white
 // (130 4.7, 55 10, 29 4.5; 26 5.8, 130 4.7, 162 5.0, 94 5.7, 24 7.0), set apart from each other and the state hues
 // (Lab distance 20 or more; lab 130 and docs 94 are the closest pair, as amber and sand are in the dark set).
-const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,173:166,176:60,147:25,230:22,219:132,137:94,
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,173:166,176:60,147:25,153:31,230:22,219:132,137:94,
   208:130,99:55,43:29,69:26,214:130,205:162,180:94,38:24}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}

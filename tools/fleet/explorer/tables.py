@@ -384,8 +384,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                     not branch_tail or tail.startswith(branch_tail) and branch_tail == " (%s)" % branch))
                 title_text = _clip(title, room)
                 bold_key = ("dim" if session.get("title_wait") and not session.get("title") else
-                            {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
-                             "opencode": ("l", 1, 0)}.get(harness, "unknown"))
+                            {"claude": "hb_claude", "codex": "hbb_codex",
+                             "opencode": "hb_opencode"}.get(harness, "unknown"))
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:
@@ -1210,7 +1210,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 
 
 # 11-17 (route row 5): the kind word is the one bold word of a route's cell; a lit stage name keeps its hue at plain weight.
-_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
+_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "fam_fable"}
 
 
 def _kind_cell(route):
@@ -1419,14 +1419,14 @@ def _stage_hue(route, step):
 
 
 def _stage_items(stages, lit=True):
-    # The stage palette's second hue is cyan (it is not the Claude harness hue, which is orange).
-    bright_hues = ("hb_opencode", "fam_opus", "grp_live", "g_idle", "hb_codex")
-    dim_hues = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "h_codex")
+    # The stage palette is blue, cyan, green, yellow, magenta (the family hues): none of them is a harness color.
+    bright_hues = ("fam_sonnet", "fam_opus", "grp_live", "g_idle", "fam_fable")
+    dim_hues = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "famd_fable")
     result = []
     for index, stage in enumerate(stages):
         status = stage.get("st")
         if status == "active" and lit:
-            name_key = {0: "hb_opencode", 1: "fam_opus", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
+            name_key = {0: "fam_sonnet", 1: "fam_opus", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
         elif status == "failed":
             name_key = bright_hues[index % len(bright_hues)]
         else:
@@ -1852,7 +1852,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 # the weight every family-coloured model name has here.
                 if index == 0 and isinstance(style, str) and style.startswith("hb_"):
                     style = {"hb_claude": "h_claude", "hb_codex": "h_codex",
-                             "hb_opencode": "version_release"}.get(style, style)
+                             "hb_opencode": "h_opencode"}.get(style, style)
                 elif style == "eff_medium":
                     style = "branch_s"
                 if link and worker_owner_limit < owner_limit:
