@@ -5606,6 +5606,21 @@ def _resume_ordinary_notice_obligation(duty, store):
     _resume_session_notice_obligations([duty], store)
 
 
+def _pass_native_sessions(read_context):
+    """This read pass's one native-session table for ``presence``, else None.
+
+    None (no pass context, or an unreadable table) lets ``presence`` read for
+    itself, exactly as before. The table is a live-process observation of one
+    pass; whoever acts on absence still proves the recorded process's death."""
+    if read_context is None:
+        return None
+    try:
+        import peer_address
+        return read_context.native_sessions(lambda: peer_address.native_sessions())
+    except Exception:
+        return None
+
+
 def _resume_registered_obligation(duty, store, *, read_context=None,
                                   settlement_context=None):
     """Wake an exact restored recipient through the existing durable peer courier."""
@@ -5823,7 +5838,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
         import peer_address
         # The parent's presence comes from Hearting's own records (shell attachment,
         # native process); positive death is still proven by the expiry rule below.
-        presence = peer_address.presence(recipient_harness, recipient_sid)
+        presence = peer_address.presence(recipient_harness, recipient_sid,
+                                         sessions=_pass_native_sessions(read_context))
         if presence != "present":
             fresh = fresh_recipient_row()
             if fresh is None:
@@ -5840,6 +5856,10 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                         return
                     closed = _closed_registered_route_outcome(final_row, jobs)
                     if closed is not None:
+                        # Dropping the notice rests on the parent's absence alone, and the
+                        # pass's session table can be a pass old: re-read it fresh here.
+                        if peer_address.presence(recipient_harness, recipient_sid) != "absent":
+                            return
                         store.update(duty["id"], state="complete", delivery="not-required",
                             cleanup="complete", observation={**observation, "reason": "route-closed",
                                 **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
@@ -6964,7 +6984,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
         # session: a shell attachment's host takes it only when idle and empty, Codex
         # uses its exact queue, and any other session receives it at its next callback.
         target = harness + ":" + recipient_sid
-        if attachment is None and peer_address.presence(harness, recipient_sid) != "present":
+        if attachment is None and peer_address.presence(
+                harness, recipient_sid, sessions=_pass_native_sessions(read_context)) != "present":
             answers = [item for item in batch
                        if "answer_binding" in (item[4].get("receipt") or {})]
             if answers:
