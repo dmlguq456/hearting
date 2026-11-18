@@ -749,6 +749,7 @@ class DispatchJob:
     legacy_read_only: bool = False
     attempt_contract_status: Optional[str] = None
     parent_slug: Optional[str] = None   # parent dispatch slug for dispatch-depth-2 rows
+    caller_attempt_id: Optional[str] = None  # the worker that started this unit leg (a called unit; not an owner link)
     intensity: Optional[str] = None     # direct|quick|standard|strong|thorough|adversarial
     worker_type: Optional[str] = None   # owner | stage | review | support bootstrap overlay
     assigned_contract: Optional[str] = None  # exact portable Skill/contract assigned to worker

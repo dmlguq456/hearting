@@ -320,6 +320,39 @@ def doer_paint(row, cells=None):
     return shown
 
 
+def called_rows(items, now, depth=0):
+    """The unit legs a row's attempt started and still runs, painted as a worker's row is: its mark, the unit's short
+    name, its harness, model and effort, its time; the ones it started in turn under it."""
+    from .session_line import route_glyph, elapsed_text, _number
+    out = []
+    for item in (items if isinstance(items, list) else ())[:8]:
+        if not isinstance(item, dict):
+            continue
+        unit = sanitize_title(str(item.get("unit") or ""))[:48]
+        if not unit:
+            continue
+        marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked") else "idle"
+        glyph, key = route_glyph(marker)
+        shown = {"glyph": glyph, "glyph_key": key, "kind": marker, "unit_word": unit, **doer_paint(item, None)}
+        # Under the route the unit is a row of its own: its title and its kind (its field: `code`, `docs`), as a unit route's.
+        title = sanitize_title(str(item.get("title") or ""))[:160]
+        if title:
+            shown["title"] = title
+        from .palette import route_field, ROUTE_FIELDS
+        word = sanitize_title(str(item.get("kind") or item.get("field") or ""))[:16]
+        if word in ROUTE_FIELDS:
+            shown["kind_word"] = word
+            if route_field(word, word):
+                shown["kind_field"] = route_field(word, word)
+        if _number(item.get("since")) is not None:
+            shown["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+        below = called_rows(item.get("called"), now, depth + 1) if depth < 3 else []
+        if below:
+            shown["called"] = below
+        out.append(shown)
+    return out
+
+
 def route_row(row, now=None, *, cells=None):
     """A route row's painted values (spec rules 5-7); an unreported value is left out."""
     import time
@@ -397,7 +430,11 @@ def route_row(row, now=None, *, cells=None):
                     for i, node in enumerate(n for n in (row.get("stages") or ())[:16] if isinstance(n, dict))}
             if worker["stage"] in keys:
                 worker["stage_key"] = keys[worker["stage"]]
+            if item.get("called"):
+                worker["called"] = called_rows(item["called"], now)
             shown["workers_live"].append(worker)
+    if row.get("called"):
+        shown["called"] = called_rows(row["called"], now)
     # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
     tool = sanitize_title(str(row.get("tool") or ""))[:48]
     if tool:

@@ -1355,7 +1355,62 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
-    return routes, nodes
+    return _stand_called_units(routes, collected), nodes
+
+
+def _stand_called_units(routes, collected):
+    """A unit leg a worker started stands below its caller's route, not as a route of its own.
+
+    The registry row names the calling worker (``caller_attempt_id``); this follows it to that worker's row and
+    its route, and on while that route is itself a called unit's. A leg whose chain ends at a route that is no
+    called unit's is listed on that route as ``called``, in the order they were called (``caller`` names the
+    attempt each hangs under, so a called unit's own calls nest under it); it is no route in this list, so no
+    count of routes holds it. A chain that breaks (the calling row is not read) or turns back on itself leaves
+    the leg as the route it is. Only the rows already read are followed."""
+    at, called = {}, {}
+    for rid, slot in collected.items():
+        for job in slot["jobs"]:
+            attempt = _text(_get(job, "attempt_id"))
+            if attempt is None:
+                continue
+            at.setdefault(attempt, rid)
+            caller = _text(_get(job, "caller_attempt_id"))
+            if caller is not None:
+                called.setdefault(attempt, (rid, job, caller))
+    if not called:
+        return routes
+    by_id = {route["id"]: route for route in routes}
+
+    def root(attempt):
+        seen = set()
+        while attempt in called and attempt not in seen:
+            seen.add(attempt)
+            own, _job, caller = called[attempt]
+            if caller not in at or at[caller] == own:
+                return None
+            if caller not in called:
+                return at[caller]
+            attempt = caller
+        return None
+    gone, listed = set(), {}
+    for attempt, (rid, job, caller) in called.items():
+        top = root(attempt)
+        if top is None or top not in by_id or rid not in by_id or top == rid:
+            continue
+        gone.add(rid)
+        if _get(job, "liveness") not in ("working", "idle", "blocked"):
+            continue
+        shown, harness = by_id[rid], _text(_get(job, "harness"))
+        order = _num(_get(job, "registry_order"))
+        listed.setdefault(top, []).append((order if order is not None else len(listed.get(top, ())), {
+            "id": rid, "attempt": attempt, "caller": caller, "title": shown.get("title"),
+            "unit": (_text(_get(job, "unit")) or "").rsplit("/", 1)[-1] or None,
+            "kind": shown.get("tree_label"), "field": shown.get("field"), "marker": _get(job, "liveness"),
+            "harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
+            "effort": _effort(_get(job, "effort")), "elapsed_min": _num(_get(job, "elapsed_min"))}))
+    for top, items in listed.items():
+        by_id[top]["called"] = [item for _order, item in sorted(items, key=lambda pair: pair[0])]
+    return [route for route in routes if route["id"] not in gone]
 
 
 def _direct_routes(routes, session_rows, session_index, now=None):

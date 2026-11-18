@@ -5061,7 +5061,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
     latest = derived["latest_jobs"]
     selected, alive_keys, expired, observed_identities = _job_selection(
         derived, live_attempt_ids, include_stall=include_stall)
-    # A unit worker a worker started (`caller_attempt_id`) hangs below that worker's own row.
+    # A unit worker a worker started (`caller_attempt_id`) hangs below that worker's own row. Its `parent_slug` is
+    # only that hang for the older job list; the route readers follow `caller_attempt_id` itself (the job's own
+    # field), and the owner-child link (`projection._owner_children`) ignores a called row.
     slug_of_attempt = {value[2].get("attempt_id"): value[1][4] for value in latest.values()
                        if value[2].get("attempt_id")}
     for key in selected:
@@ -5191,6 +5193,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             caller_pane=meta.get("caller_pane") or None, caller_cwd=meta.get("caller_cwd") or None,
             parent_managed_dir=parent_managed_dir,
             parent_slug=parent_slug,
+            caller_attempt_id=meta.get("caller_attempt_id") or None,
             is_child=bool(parent_slug or parent_sid or parent_cwd or parent_managed_dir),
             qa_source=qsrc, source="jobs", status=status,
             harness=harness, model=meta.get("model"), resolved_model=meta.get("resolved_model"),
