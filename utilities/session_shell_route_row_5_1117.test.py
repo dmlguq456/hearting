@@ -240,7 +240,8 @@ assert.deepEqual(only(R.failed),[
  '  패널 route 줄 다시 짜기',
  '  ✕ owner claude Opus 5.5 xhigh',
  '    CTX 40%',
-]);   // (11-18: the stage text is on the first line where it fits; here, beside the chain, it does not, and no stage row stands apart)
+ '    staged 2/3: execute ✕',
+]);   // (11-18: the stage text is on the first line where it fits; here, beside the chain, the name does not fit, so the stage row stands under the owner)
 assert.equal(only(R.failed,72)[0],tm('✕ frame ✓ → code(standard) · staged 2/3: execute ✕','42m',72));
 const done=only(R.done);
 assert.equal(done[0],tm('✓ code(quick)','18m'));assert.equal(done[1],'  PASS · 보류된 메시지 조사');
@@ -287,26 +288,27 @@ for(const s of [...wide,...mid])assert([140,80].includes(cells(s)),s);
         self.node(r"""
 const three=['search','analyze','report'].map((n,i)=>i<1?{name:n,mark:'✓'}:i===1?{name:n,mark:'●',current:true,key:'stg2_on'}:{name:n,mark:''});
 const mk=(shape,o={})=>({...R.staged,id:'m',shape,stages:three,kind_word:'research',chain:[{name:'research',state:'active'}],workers_live:[],paint:{...R.staged.paint,now:'Reading the sources'},...o});
-// 11-18 (review C3): with no worker running the stage text is on the first line (the shape word, the position, then the stage's name where the
-// width has room: the name goes first, then the whole text), and no stage row stands apart.
+// 11-18 (review C3, round 5): with no worker running the stage text is on the first line (the shape word, the position, then the stage's name where the
+// width has room: the name goes first, then the whole text); where the name is not there the stage row `<shape> 2/3: analyze` stands under the owner.
 const want=(shape,first,o,width=50)=>{const rows=only(mk(shape,o),width);
- assert.deepEqual(rows,[tm(first,'42m',width),'  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh','    CTX 40%','    Reading the sources'],rows.join('\n'));};
+ const apart=first.includes(': analyze')?[]:['    '+first.split(' · ').at(-1)+': analyze'];
+ assert.deepEqual(rows,[tm(first,'42m',width),'  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh','    CTX 40%','    Reading the sources',...apart],rows.join('\n'));};
 want('map-reduce','● research(standard) · map-reduce 2/3');
 want('map-reduce','● research(standard) · map-reduce 2/3: analyze',{},64);
 want('transactional-owner','● research(standard) · transactional-owner 2/3: analyze',{},80);
 want('resource+verification','● research(standard) · resource+verification 2/3: analyze',{chain:[{name:'research',state:'active'}]},84);
 want('unknown','● research(standard) · 2/3: analyze',{},64);
-// One blinking thing, the stage's name where it stands on the first line (the first line's dot stands still); where the width leaves no room for the
-// name the dot is the one thing that blinks (it pulses, it is no beat part).
+// One blinking thing, the stage's name where it stands (on the first line, or on the stage row under the owner); the first line's dot stands still.
 for(const shape of ['map-reduce','transactional-owner','resource+verification']){
  const own=render([mk(shape)],84,60).rows.flat().filter(p=>p.beat===true&&!/ROUTE$/.test(p.text));assert.equal(own.length,1,shape);assert.equal(own[0].text,'analyze',shape);
- assert.deepEqual(beats(mk(shape)).map(p=>p.text),['●'],shape+' (no room for the name)');
+ assert.deepEqual(beats(mk(shape)).map(p=>p.text),['analyze'],shape+' (the stage row)');
 }
-// Short of cells the stage's name goes first, then the stage text whole (the first line's chain and kind stay); every row keeps its width and
-// no stage row stands apart (the `none` form with workers keeps one: below).
+// Short of cells the stage's name goes first, then the stage text whole (the first line's chain and kind stay); every row keeps its width, and
+// the stage row stands under the owner exactly where the first line has not got the name.
 for(const width of [22,26,30,36,44])for(const shape of ['map-reduce','transactional-owner','resource+verification']){
  const rows=draw([mk(shape)],width,60);assert(rows.every(s=>cells(s)===width),width+shape+'\n'+rows.join('\n'));
- assert(!box(rows).some(s=>/^\s+\S*\s*2\/3: /.test(s)),width+shape+'\n'+rows.join('\n'));
+ const apartRows=box(rows).filter(s=>/^\s+\S*\s*2\/3: /.test(s));
+ assert.equal(apartRows.length,/: analyze/.test(box(rows)[0])?0:1,width+shape+'\n'+rows.join('\n'));
  assert(/^● research/.test(box(rows)[0]),width+shape+'\n'+rows.join('\n'));
 }
 // A frame route and a route its owner does alone keep no stage line.
@@ -314,6 +316,37 @@ assert(!only(R.frame,50).some(s=>/\d\/\d/.test(s))&&!only(R.solo,50).some(s=>/\d
 // The bottom layout names the shape word in its one cell.
 const wide=draw([mk('map-reduce'),mk('transactional-owner')],140,16,{side:false});
 assert(wide.some(s=>/research\(standard\) · map-reduce 2\/3: analyze/.test(s))&&wide.some(s=>/transactional-owner 2\/3: analyze/.test(s)),wide.join('\n'));
+""")
+
+    def test_a_route_with_no_worker_has_its_stage_name_on_the_first_line_or_on_a_stage_row_under_its_owner(self):
+        # 11-18 (round 5): the stage's name is never lost at the default width. Where the first line has no room for `· staged N/M: name` the
+        # stage row `staged N/M: name` stands under the owner (what the box's top line does for a route with workers); where the name is on the
+        # first line there is no such row. A taller panel never shows less of it.
+        self.node(r"""
+const three=['search','analyze','report'].map((n,i)=>i<1?{name:n,mark:'✓'}:i===1?{name:n,mark:'●',current:true,key:'stg2_on'}:{name:n,mark:''});
+const mk=(o={})=>({...R.staged,id:'m',shape:'staged',stages:three,kind_word:'code',chain:[{name:'code',state:'active'}],workers_live:[],paint:{...R.staged.paint,now:'Reading the sources'},...o});
+for(const elapsed of ['1h 52m','23h 59m'])for(const width of [32,36,40,44,50,60]){
+ const rows=draw([mk({elapsed})],width,80),inner=box(rows),first=inner[0],apart=inner.filter(s=>/^\s+staged 2\/3: analyze/.test(s));
+ assert(rows.every(s=>cells(s)===width),width+'\n'+rows.join('\n'));
+ assert.equal(first.includes('staged 2/3: analyze'),apart.length===0,elapsed+' '+width+'\n'+rows.join('\n'));
+ assert(first.includes('staged 2/3: analyze')||apart.length===1&&apart[0].includes('analyze'),elapsed+' '+width+'\n'+rows.join('\n'));
+}
+// The default width (40) puts the name on the stage row, the name never twice, and the first line keeps its place and the time.
+const at40=box(draw([mk({elapsed:'1h 52m'})],40,80));
+assert.equal(at40.filter(s=>/analyze/.test(s)).length,1,at40.join('\n'));
+assert(/^● code(\(standard\))?( · staged 2\/3)? +1h 52m$/.test(at40[0]),at40[0]);
+// A route with workers (its box carries the name), `worker box = none` and a route with no kind word keep the round 4 form.
+const worked=mk({workers_live:[{kind:'working',role:'worker',stage:'analyze',elapsed:'12m',paint:R.staged.paint}]});
+assert(!box(draw([worked],40,80)).some(s=>/^\s+staged 2\/3: analyze/.test(s)),box(draw([worked],40,80)).join('\n'));
+// The stage row is the first of its steps to go when rows are short (the NOW rows go before it), and a taller panel never shows less of it.
+let seen=0,prev=null;
+for(let h=10;h<=70;h++){
+ const rows=box(draw([mk({elapsed:'1h 52m'}),mk({id:'n',elapsed:'23h 59m'})],40,h)),n=rows.filter(s=>/^\s+staged 2\/3: analyze/.test(s)).length,nows=rows.filter(s=>/Reading the sources/.test(s)).length;
+ if(prev!==null)assert(n>=prev,h+' a taller panel shows no less of the stage row\n'+rows.join('\n'));
+ if(nows)assert.equal(n,2,h+' the NOW rows go before the stage row\n'+rows.join('\n'));
+ prev=n;seen=Math.max(seen,n);
+}
+assert.equal(seen,2);
 """)
 
     def test_a_route_with_no_known_owner_keeps_its_time_and_context_and_a_resting_owner_has_no_tool(self):
@@ -325,7 +358,7 @@ const none=(o={})=>({id:'n',title:'소유자를 모르는 route',kind:'working',
 const a=only(none(),50);assert.deepEqual(a.slice(1),['  소유자를 모르는 route','  ⠋ CTX 40%'],a.join('\n'));assert.equal(a[0],tm('● code(quick)','23m',50));
 const b=only(none({paint:{glyph:P('⠋')}}),50);assert.equal(b[0],tm('● code(quick)','23m',50),b.join('\n'));assert(!b.some(s=>/^\s+23m$/.test(s)),b.join('\n'));
 const c=only(none({shape:'map-reduce',stages:[{name:'search',mark:'✓'},{name:'analyze',mark:'●',current:true}],paint:{glyph:P('⠋')}}),50);
-assert(c[0]===tm('● code(quick) · map-reduce 2/2','23m',50)&&!c.some(s=>/^\s+map-reduce/.test(s)),c.join('\n'));
+assert(c[0]===tm('● code(quick) · map-reduce 2/2','23m',50)&&c.filter(s=>/^\s+map-reduce 2\/2: analyze$/.test(s)).length===1,c.join('\n'));   // (the name is not on the first line: the stage row stands under the title)
 // Its NOW, where it has one, stands under the first line (the time is on that line); no NOW, no empty row.
 const d=only(none({paint:{glyph:P('⠋'),now:'Bash run-tests.py'}}),50);
 assert.equal(d[2],'    Bash run-tests.py',d.join('\n'));assert(!d.some(s=>/^\s+23m$/.test(s)),d.join('\n'));

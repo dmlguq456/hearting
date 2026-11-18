@@ -1345,8 +1345,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const finish=(body,named=false)=>{
           const dot=blink&&!(named&&stage&&stage.blinks);
           const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,dot?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
-          const row=[mark,text(' '),...body];
-          return time?[...row,pad(Math.max(1,width-size(row)-measure(time))),text(time,'dim')]:row;
+          const row=[mark,text(' '),...body],out=time?[...row,pad(Math.max(1,width-size(row)-measure(time))),text(time,'dim')]:row;
+          out.named=named;       // (whether the stage's name stands on this line: the caller draws the stage line apart when it does not)
+          return out;
         };
         for(const chain of chains){
           const left=room-end-size(chain);
@@ -1471,9 +1472,16 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // 11-18 (review C3): the stage text stands on the first line unless a stage row stands apart (the `none` form, or the workers'
       // count form); beside a box it is the position alone (the box's top line has the name), with no workers the name too.
       // (A route with no first line, no kind word, has no place for it: its stage row stands as it did.)
-      const some=!!(x.tree&&x.workers.length),apart=showPlace&&!boxed&&(some||!x.first),headStage=x.first&&x.place&&!apart?{name:!some}:null;
-      const nameElsewhere=!!boxed||apart;
-      if(x.first){out.push(x.first(!(nameElsewhere&&x.stageBlinks),headStage&&{...headStage,blinks:x.stageBlinks}));out.push(...names.map(row=>[indent,...row]));}
+      // 11-18 (round 5): a route with no workers (so no box) whose stage name did not fit on its first line gets the stage row back under the
+      // owner (`staged 3/6: execute`), the one the box's top line carries where workers stand; with the name on the first line there is none.
+      const some=!!(x.tree&&x.workers.length);
+      let apart=showPlace&&!boxed&&(some||!x.first);
+      if(x.first){
+        const headStage=x.place&&!apart?{name:!some,blinks:x.stageBlinks}:null;
+        let head=x.first(!((boxed||apart)&&x.stageBlinks),headStage);
+        if(headStage&&headStage.name&&showPlace&&!head.named){apart=true;head=x.first(!x.stageBlinks,headStage);}
+        out.push(head);out.push(...names.map(row=>[indent,...row]));
+      }
       else out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[indent,...row]));
       // A route whose owner is not known keeps its time and `CTX` row under the title all the same.
       const owner=x.session?sessionRowsOf(x.session).filter(Boolean):[];

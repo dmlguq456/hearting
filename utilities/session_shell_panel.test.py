@@ -691,8 +691,10 @@ const r44=box(draw(nine,40,50));
 assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+% │ │$/.test(s)).length===6&&!r44.some(s=>/│ │   [⠋●] .* \d+m │ │$/.test(s))&&r44.filter(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/.test(s)).length===9&&!r44.some(s=>/^│ │ +staged/.test(s)),r44.join('\n'));   // (11-18: the stage text is on the first line, never a row apart)
 for(let h=16;h<=80;h++){
  const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │ .*staged \d/.test(s)).length;
+ // (11-18, round 5: a stage name the first line has no room for stands on a stage row under the owner, the first of the steps after the NOW rows to go.)
+ const apart=rows.filter(s=>/^│ │ {4,5}staged \d/.test(s)).length;
  const second=rows.some(s=>/^│ │   \d +│ │$/.test(s));
- if(nows)assert(stages===6,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
+ if(nows)assert(stages===12&&apart===6,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
  if(second)assert(nows===6,h+' a title keeps its second row only while the NOW rows stand\n'+rows.join('\n'));
 }
 '''
@@ -1023,11 +1025,13 @@ for(const width of [38,40,44,52,60]){
 for(const width of [32,34,36]){const rows=plain(width,{}),box=part(rows);
  assert(/^│ │   ┌ /.test(box[0])&&!box.some(s=>/[┐┘└]/.test(s))&&box.slice(1).every(s=>/^│ │   │ /.test(s)),width+'\n'+rows.join('\n'));
  for(const s of rows)assert.equal(cells(s),width,s);}
-// A route with no workers draws no box and no stage row apart (11-18, review C3): its stage text is on the first line, `staged 3/7: execute` where the
-// width has room for it (the name goes first short of cells, then the whole text).
-for(const [width,want] of [[40,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/],[52,/^│ │ ● code · staged 3\/7: execute +2h 10m │ │$/],[32,/^│ │ ● code +2h 10m │ │$/]]){
+// A route with no workers draws no box. Its stage text is on the first line, `staged 3/7: execute` where the width has room for it (the
+// name goes first short of cells, then the whole text); where the name is not on the first line the stage row `staged 3/7: execute` stands
+// under the owner (11-18, round 5), and where it is, none does.
+for(const [width,first,apart] of [[40,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/,true],[52,/^│ │ ● code · staged 3\/7: execute +2h 10m │ │$/,false],[32,/^│ │ ● code +2h 10m │ │$/,true]]){
  const rows=view.render({width,height:80,side:true,fill:true,model:{...head,routes:[{...route,workers_live:[]}],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
- assert(rows.some(s=>want.test(s))&&!rows.some(s=>/^│ │ +[┌│└]/.test(s)||/^│ │ +(staged )?\d+\/\d+: /.test(s)),width+'\n'+rows.join('\n'));}
+ const lines=rows.filter(s=>/^│ │ {5}staged 3\/7: execute +│ │$/.test(s));
+ assert(rows.some(s=>first.test(s))&&!rows.some(s=>/^│ │ +[┌│└]/.test(s))&&lines.length===(apart?1:0),width+'\n'+rows.join('\n'));}
 // Several stages at once (review C2): the workers stand in the box of their own stage, each box titled with that stage's position and name.
 {const parallel={...route,stages:[...seven(2).slice(0,2),{name:'eval-asr',mark:'●',current:true},{name:'eval-sep',mark:'●',current:true},...seven(2).slice(4)],
   workers_live:[worker('claude','Sonnet 5.5','22%','ASR step',{stage:'eval-asr'}),worker('opencode','glm-5.2','9%','SEP step',{stage:'eval-sep'}),worker('codex','gpt-5.5','34%','ASR two',{stage:'eval-asr'})]};

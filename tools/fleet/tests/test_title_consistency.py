@@ -484,6 +484,38 @@ class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
         for bad in ("진행 중 제목 갱신", "제목 없음", "알 수 없습니다", "Awaiting worker result"):
             self.assertIsNone(rt.validate_title(bad, "Korean"))
 
+    def test_a_spaced_korean_title_is_not_refused_for_its_word_count(self):
+        # 11-18 (round 5): a Korean, Japanese or Chinese title is bounded by its characters (30) and the word-boundary mark, not by a
+        # word count: 21-30 characters of seven or eight spaced words used to be refused whole, and the earlier title (a silent
+        # 20-character cut, in the field) stayed. English keeps its word count.
+        for raw, want in (
+                ("로그인 시도 횟수 제한을 API 키별로 나누기", "로그인 시도 횟수 제한을 API 키별로 나누기"),
+                ("작업자 상자 옵션과 단계별 상자 그리기 정리", "작업자 상자 옵션과 단계별 상자 그리기 정리"),
+                ("README 그림 색 양자화 고치기와 시험 추가", "README 그림 색 양자화 고치기와 시험 추가"),
+                ("계산 호스트 탐침 비용을 측면 패널 기준으로 줄이기", "계산 호스트 탐침 비용을 측면 패널 기준으로 줄이기"),
+                ("route 이름 잘림 고치고 MEM 세 개로 줄이기", "route 이름 잘림 고치고 MEM 세 개로 줄이기"),
+                ("🚀 배포 준비 🚀 체크리스트 정리와 롤백 계획 수립 및 공지 초안 작성", "🚀 배포 준비 🚀 체크리스트 정리와 롤백 계획 수립…"),
+                ("패널 하단에 RESOURCES 구획과 GPU 세션 번호 표시", "패널 하단에 RESOURCES 구획과 GPU 세션…")):
+            with self.subTest(raw=raw):
+                for given in ("TITLE: %s\nNOW: 작업 중" % raw, raw):
+                    out = rt.validate_title(given, "Korean")
+                    self.assertEqual(out, want)
+                    self.assertLessEqual(len(out), rt.TITLE_MAXLEN_CJK)
+                    if out != raw:                      # (past 30 characters: the cut is at a word boundary, marked)
+                        self.assertTrue(out.endswith("…"))
+                        self.assertTrue(raw.startswith(out[:-1]) and raw[len(out) - 1] == " ")
+        # The language is found from the text where the setting follows the conversation; Japanese and Chinese are spaced the same way.
+        for language in ("Japanese", "Chinese", "the conversation's own language"):
+            self.assertEqual(rt.validate_title("ログイン 試行 回数 の 制限 を API キー ごと に 分ける", language),
+                             "ログイン 試行 回数 の 制限 を API キー ごと に…")
+        self.assertEqual(rt.validate_title("로그인 시도 횟수 제한을 API 키별로 나누기", "the conversation's own language"),
+                         "로그인 시도 횟수 제한을 API 키별로 나누기")
+        # English is unchanged: seven words are refused. The instruction to the small model gives Korean, Japanese and Chinese a
+        # character count and no word count.
+        self.assertIsNone(rt.validate_title("one two three four five six seven", "English"))
+        self.assertEqual(rt.validate_title("one two three four five six", "English"), "one two three four five six")
+        self.assertRegex(rt.PROMPT_TEMPLATE, r"Korean, Japanese or Chinese,\s+use a compact subject phrase of at most 30 characters")
+
     def test_auto_uses_user_task_language_under_english_locale_not_worker_delta(self):
         with mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8", "LC_ALL": "",
                                           "LC_MESSAGES": "", "FLEET_NOW_LANG": ""}):

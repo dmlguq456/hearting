@@ -523,7 +523,7 @@ popup; a request row the MESSAGES popup).
   under the owner, two cells in, the stage text (`staged 3/6: execute`, the current stage's name blinking as it did) on its top
   line and no stage row apart: `closed` has four dim borders (the right one in one column whatever the text's widths), `open`
   only the top line and the left side, `none` the stage row and the workers hung by `↳` four cells in (their `CTX` and NOW eight
-  cells in), as before. A route with no workers has no box (its stage row stays), nor does a frame route's legs. Where the closed
+  cells in), as before. A route with no workers has no box: its stage text is on its first line (`· staged 3/6: execute`) where the name has room there, and where it does not (the default width among them) its stage row `staged 3/6: execute` stands under the owner (11-18, round 5); a frame route's legs have none either. Where the closed
   box's text would be under 24 cells wide it is the open one; short of rows its closing line goes first. A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
   `frame-alt`) hung straight under it two cells in, and, once both are done and the direction
   is asked for, `◑ frame → ?? · waiting for direction` (not blinking); the person's choice

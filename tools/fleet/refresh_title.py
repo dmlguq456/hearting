@@ -61,6 +61,8 @@ TITLE_MAXLEN = 40
 # A Korean, Japanese or Chinese title: as many characters as the side panel's two name rows hold (at its default width of 40: two rows of
 # 30 cells, a character two cells wide). A title is never cut mid-word without a mark: past its limit it ends at a word boundary with `…`.
 TITLE_MAXLEN_CJK = 30
+# English titles are also capped by word count; a Korean/Japanese/Chinese title is spaced (or not) by its own grammar, so its length is the
+# character limit above plus the word-boundary `…` of `clip_title`.
 TITLE_MAX_WORDS = 6
 SUMMARY_MAXLEN = 120
 # Tool-heavy native transcripts can put the most recent dialogue beyond 1 MiB.
@@ -1151,7 +1153,7 @@ def validate_title(raw, language="English"):
     script = scripts.get(language.lower())
     if ((english and (ascii_ratio < 0.8 or len(line.split()) < 3))
             or (script and not re.search(script, line))
-            or len(line.split()) > TITLE_MAX_WORDS or _META_RE.match(line)
+            or (not cjk and len(line.split()) > TITLE_MAX_WORDS) or _META_RE.match(line)
             or re.match(r"^(제목 없음|알 수 없|죄송|오류|대기\s*중|진행\s*중|실행\s*중|준비\s*중|작업\s*중)", line)
             or _STATUS_TITLE_RE.match(line)):
         return None
