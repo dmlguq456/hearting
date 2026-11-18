@@ -974,6 +974,46 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
                 self.assertEqual(events[0]["responsible"], "supervision-controller")
                 self.assertEqual(self.jobs.read_bytes(), before)
 
+    def _error_round_run(self, **extra):
+        from dispatch_completion_join import CompletionDeferred
+        failure = ValueError("fixture join failure")
+        join = mock.Mock(side_effect=[failure, {"state": "timeout"},
+                                      CompletionDeferred("fixture-deferred"), {"state": "ready"}])
+        events, stops = [], []
+        with mock.patch.object(supervision.time, "sleep"):
+            result = supervision.wait_for_batch(
+                join=join, attempts={"att-child"}, jobs=self.jobs, parent_attempt_id="att-owner",
+                emit=events.append, stop_check=lambda: stops.append(1) or "", **extra)
+        return failure, result, events, len(stops)
+
+    def test_error_round_hook_sees_only_error_rounds_and_changes_nothing_else(self):
+        self._notice_rows()
+        seen = []
+        failure, result, events, stops = self._error_round_run(on_observer_error=seen.append)
+        self.assertEqual(seen, [failure])  # not the timeout round, not the deferred round
+        _same, plain_result, plain_events, plain_stops = self._error_round_run()
+        # every other caller passes no hook: an error round still skips stop_check
+        self.assertEqual(stops, plain_stops)
+        self.assertEqual(plain_stops, 2)
+        self.assertEqual((result, events), (plain_result, plain_events))
+        self.assertEqual(plain_events[0]["observer_error"], "fixture join failure")
+
+    def test_error_round_hook_may_stop_the_wait_and_its_own_failure_is_an_ordinary_round(self):
+        self._notice_rows()
+        class Halt(supervision.StopWaiting):
+            pass
+        def halt(_exc):
+            raise Halt("fixture-halt")
+        join = mock.Mock(side_effect=ValueError("fixture join failure"))
+        with mock.patch.object(supervision.time, "sleep"), self.assertRaises(Halt):
+            supervision.wait_for_batch(join=join, attempts={"att-child"}, jobs=self.jobs,
+                                       on_observer_error=halt)
+        join.assert_called_once()
+        def broken(_exc):
+            raise RuntimeError("hook failure")
+        self.assertEqual(self._error_round_run(on_observer_error=broken)[1:],
+                         self._error_round_run()[1:])
+
     def test_wait_owns_more_than_old_seven_checkpoints_without_model_resume(self):
         self._notice_rows()
         join = mock.Mock(side_effect=[{"state": "timeout"} for _ in range(9)] + [{"state": "ready"}])

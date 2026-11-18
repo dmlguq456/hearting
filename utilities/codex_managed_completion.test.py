@@ -1656,6 +1656,67 @@ class ObserverGenerationEndTest(unittest.TestCase):
                     extra=(self._timeout_then_ownership_lost([]),))
                 self.assertEqual(result["status"], "expired")
 
+    # --- a join that fails every round still reaches the expiry judgment ----------------------
+
+    def _join_fails_then_ownership_lost(self, joins, failures=3):
+        def join(_args, _attempts):
+            joins.append(1)
+            if len(joins) > failures:
+                raise self.module.ObserverOwnershipLost("fixture-stop")
+            raise RuntimeError("fixture join failure")
+        return mock.patch.object(self.module, "run_join", side_effect=join)
+
+    def _no_pause(self):
+        import dispatch_supervision
+        return mock.patch.object(dispatch_supervision.time, "sleep")
+
+    def test_observer_whose_join_fails_every_round_ends_on_the_expiry_judgment(self):
+        duty_id = self._observing_duty("batch-join-fails")
+        self._age(duty_id, 15)
+        joins = []
+        result, code = self._run_with(
+            self._expiry_patches(absent=True), duty_id,
+            extra=(self._join_fails_then_ownership_lost(joins), self._no_pause()))
+        self.assertEqual((code, result["status"], result["reason"]),
+                         (0, "expired", "expired-no-codex-execution"))
+        self.assertEqual(len(joins), 1)  # ended on the first error round
+        record = self.batch.read(self.jobs, duty_id)
+        self.assertEqual((record["state"], record["reason"]),
+                         ("expired", "expired-no-codex-execution"))
+        self.assertEqual({key: record["observer_error"][key] for key in ("type", "text")},
+                         {"type": "RuntimeError", "text": "fixture join failure"})
+
+    def test_observer_whose_join_fails_every_round_keeps_waiting_when_not_expirable(self):
+        for name, days, absent in (("inside retention", 13, True),
+                                   ("execution left", 15, False)):
+            with self.subTest(name):
+                self._release_leases()
+                duty_id = self._observing_duty("batch-join-fails-" + name.replace(" ", "-"))
+                self._age(duty_id, days)
+                joins = []
+                patches = self._expiry_patches(absent=absent)
+                with contextlib.ExitStack() as stack:
+                    judged = stack.enter_context(patches[0])
+                    for patch in patches[1:-1]:
+                        stack.enter_context(patch)
+                    stack.enter_context(mock.patch.object(self.batch, "request_runner"))
+                    writes = stack.enter_context(mock.patch.object(
+                        self.module, "_update_duty", wraps=self.module._update_duty))
+                    stack.enter_context(self._join_fails_then_ownership_lost(joins))
+                    stack.enter_context(self._no_pause())
+                    result, code = self._resume(duty_id)
+                self.assertEqual((code, result["reason"]),
+                                 (75, "completion-observer-ownership-lost"))
+                self.assertEqual(len(joins), 4)  # three error rounds, then the fixture stop
+                record = self.batch.read(self.jobs, duty_id)
+                self.assertEqual(record["state"], "observing")
+                self.assertEqual(record["observer_error"]["type"], "RuntimeError")
+                causes = [call for call in writes.call_args_list
+                          if "observer_error" in call.kwargs]
+                self.assertEqual(len(causes), 1)  # the same cause is written once
+                # inside retention costs no judgment; past it, one judgment per probe window
+                self.assertEqual(judged.call_count, 0 if days < 14 else 1)
+
     def test_inside_retention_costs_no_judgment(self):
         duty_id = self._observing_duty()
         self._age(duty_id, 13)
