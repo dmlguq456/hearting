@@ -26,6 +26,9 @@ except ImportError:  # a partial tree without it (e.g. a fixture release): no re
 _ID_RE = re.compile(r"batch-[0-9a-f]{32}\Z")
 _MAX_BYTES = 128 * 1024
 _PENDING = {"observing", "delivery-pending", "unknown"}
+_EXPIRED = "expired"
+_EXPIRY_REASON = "expired-no-codex-execution"
+_EXECUTION_ENDED_STATUSES = frozenset({"done", "killed", "cancelled"})
 _SETTLED_DEPENDENCY_CHECKS_PER_PASS = 64
 _UNSETTLED_OWNERS_LIMIT = 4096
 _OWNER_RETRY_FIRST_SECONDS = 60.0  # the unknown-obligation retry cap in peer-steward
@@ -118,6 +121,10 @@ def _observer_backoff_launched(key: str, progress, attempts: int):
     _OBSERVER_RETRY[key] = (progress, None, attempts)
     while len(_OBSERVER_RETRY) > _UNSETTLED_OWNERS_LIMIT:
         _OBSERVER_RETRY.pop(next(iter(_OBSERVER_RETRY)))
+
+
+# Process memory only: record path -> next time the expiry judgment may run again.
+_EXPIRY_PROBE: dict[str, float] = {}
 
 
 def _root(jobs: str | Path) -> Path:
@@ -675,6 +682,163 @@ def _spawn_observer(jobs: Path, duty_id: str, fd: int, launch, *, expected_obser
         os.close(lock_fd)
 
 
+def _retention_seconds():
+    """The obligation retention peers already use; None when it cannot be read."""
+    try:
+        import peer_obligations
+        return peer_obligations._OBLIGATION_RETENTION_NS / 1e9
+    except Exception:
+        return None
+
+
+def _expiry_candidate(record: dict, now: float) -> bool:
+    """Cheap first test: pending, past the retention, and a parent session to tell."""
+    if record.get("state") not in _PENDING:
+        return False
+    accepted = record.get("accepted_at")
+    if isinstance(accepted, bool) or not isinstance(accepted, (int, float)):
+        return False
+    retention = _retention_seconds()
+    if retention is None or not now - accepted > retention:
+        return False
+    parent = (record.get("identity") or {}).get("parent_session_id")
+    return isinstance(parent, str) and bool(parent)
+
+
+def _codex_execution_absent(jobs: str | Path, record: dict) -> bool:
+    """True only when every attempt of the batch is proven ended and process-quiescent.
+
+    This is the registry row plus exact process evidence that the completion
+    join and ``dispatch_supervision._pending`` already use. A read that fails,
+    times out, finds no tool, finds no row, or cannot tell is "not confirmed",
+    never "absent".
+    """
+    try:
+        import dispatch_supervision
+        identity = record.get("identity") or {}
+        attempts = sorted({*(record.get("effective_attempts") or []),
+                           *(identity.get("attempt_ids") or [])})
+        if not attempts or not all(isinstance(aid, str) and aid for aid in attempts):
+            return False
+        rows = dispatch_supervision._rows(Path(jobs), attempts)
+        for aid in attempts:
+            row = rows.get(aid)
+            if row is None:
+                return False
+            status, meta = row
+            if status not in _EXECUTION_ENDED_STATUSES:
+                return False
+            proof, _decision = dispatch_supervision._settlement_decision(status, meta)
+            if getattr(proof, "state", None) != "terminal":
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _notify_expired(jobs: str | Path, record: dict) -> str | None:
+    """Tell the parent session through the existing notice path; None = not told."""
+    try:
+        import session_notice
+        identity = record.get("identity") or {}
+        duty_id = record["id"]
+        attempts = ", ".join(sorted({*(record.get("effective_attempts") or []),
+                                     *(identity.get("attempt_ids") or [])}))
+        settled = ("its result was already settled"
+                   if record.get("outcome") is not None else "no result was settled")
+        text = (f"Completion watch {duty_id} (attempts: {attempts}) was closed as expired: "
+                f"older than 14 days and no Codex-side execution remains; {settled}. "
+                "The record is kept; nothing was cancelled, retried or deleted.")
+        notice = session_notice.notify(
+            "codex", identity["parent_session_id"], key=f"batch-expired:{duty_id}",
+            subject="Expired completion watch", text=text, jobs=Path(jobs))
+        if not isinstance(notice, dict):
+            return None
+        delivery_id = notice.get("delivery_id")
+        return delivery_id if isinstance(delivery_id, str) and delivery_id else None
+    except Exception:
+        return None
+
+
+def _write_expired(jobs: str | Path, duty_id: str, fd: int, observer, notice_id: str) -> bool:
+    """Close one pending duty as expired while this process holds its exact lease.
+
+    Only additive fields are written; ``identity``, ``arguments``, ``outcome``
+    and the attempt lineage stay, and ``expired_from`` keeps what a revival
+    needs to put the previous state back.
+    """
+    path = _record_path(jobs, duty_id)
+    update_lock = path.with_suffix(".update.lock")
+    if update_lock.is_symlink():
+        raise BatchObligationError("batch-obligation-update-lock-symlink")
+    lock_fd = os.open(update_lock, os.O_RDWR | os.O_CREAT
+                      | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if not _fd_holds_lease(fd, _root(jobs) / (duty_id + ".lease")):
+            return False
+        record = _read(path)
+        if record is None or record.get("state") not in _PENDING:
+            return False
+        if observer is not None and record.get("observer") != observer:
+            return False
+        now = time.time()
+        record["expired_from"] = {"state": record.get("state"),
+                                  "reason": record.get("reason"),
+                                  "delivery": record.get("delivery")}
+        record["state"] = _EXPIRED
+        record["reason"] = _EXPIRY_REASON
+        record["expired_at"] = now
+        record["expiry_notice"] = notice_id
+        record["updated_at"] = now
+        _write(path, record)
+        return True
+    finally:
+        os.close(lock_fd)
+
+
+def expire_if_due(jobs: str | Path, duty_id: str, fd: int | None = None, *,
+                  observer: dict | None = None, now: float | None = None) -> bool:
+    """Close a pending duty that is past retention with no Codex-side execution left.
+
+    One judgment for the runner and for a long-lived observer. It closes only on a
+    positive proof; anything unconfirmed leaves the duty pending. The parent is told
+    first, through the existing session notice, and the record is kept.
+    """
+    owned = False
+    try:
+        path = _record_path(jobs, duty_id)
+        key = str(path)
+        clock = _OBSERVER_CLOCK()
+        next_at = _EXPIRY_PROBE.get(key)
+        if next_at is not None and clock < next_at:
+            return False
+        record = _read(path)
+        wall = time.time() if now is None else now
+        if not record or not _expiry_candidate(record, wall):
+            return False
+        _EXPIRY_PROBE.pop(key, None)  # re-insert last so the oldest key trims first
+        _EXPIRY_PROBE[key] = clock + _OWNER_RETRY_MAX_SECONDS
+        while len(_EXPIRY_PROBE) > _UNSETTLED_OWNERS_LIMIT:
+            _EXPIRY_PROBE.pop(next(iter(_EXPIRY_PROBE)))
+        if fd is None:
+            fd = acquire(jobs, duty_id)
+            if fd is None:
+                return False
+            owned = True
+        if not _codex_execution_absent(jobs, record):
+            return False
+        notice_id = _notify_expired(jobs, record)
+        if notice_id is None:
+            return False
+        return _write_expired(jobs, duty_id, fd, observer, notice_id)
+    except Exception:
+        return False
+    finally:
+        if owned and fd is not None:
+            release(fd)
+
+
 def ensure_observers(jobs: str | Path | None = None, *, service_current=None,
                      observer_snapshot=None, settlement_context=None) -> int:
     """Resume unfinished exact batches through the existing completion sidecar."""
@@ -733,6 +897,9 @@ def ensure_observers(jobs: str | Path | None = None, *, service_current=None,
                 # exact durable row before acquiring or replacing its owner.
                 record = _read(path)
                 if not record or record.get("state") not in _PENDING:
+                    _OBSERVER_RETRY.pop(str(path), None)
+                    continue
+                if expire_if_due(jobs_path, record["id"]):
                     _OBSERVER_RETRY.pop(str(path), None)
                     continue
                 if (record.get("state") == "unknown"
