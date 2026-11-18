@@ -411,7 +411,7 @@
     "release-setup": "5ac999289585bb51342d",
     "security-review": "3a713a36ce62774b1b45"
    },
-   "card": "[경로] autopilot-ship · staged(standard) release-setup→security-review→release-review→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(standard) release-setup→security-review→release-review→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "f33e71ea8f68a70600b1",
    "composed_recipe": "4326258b062590dab580",
    "conditional_extensions": "4f53cda18c2baa0c0354",
@@ -440,7 +440,7 @@
    "briefs": {
     "package": "c0934e18d94dbc42b3a4"
    },
-   "card": "[경로] autopilot-ship · staged(standard) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-ship · staged(standard) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업",
    "completion_gates": "e449a08ec812d99fb510",
    "composed_recipe": "56c2c054e6bd76b8e517",
    "conditional_extensions": "4f53cda18c2baa0c0354",
@@ -1851,7 +1851,7 @@
     "release-setup": "5ac999289585bb51342d",
     "security-review": "3a713a36ce62774b1b45"
    },
-   "card": "[경로] autopilot-ship · staged(standard) release-setup→security-review→release-review→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(standard) release-setup→security-review→release-review→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "aedc0f6552c23e404645",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1885,7 +1885,7 @@
     "security-review": "f9e039ccc64b1e6ba411",
     "security-review-alternative": "4f90a1a186a22809fcb3"
    },
-   "card": "[경로] autopilot-ship · staged(strong) release-setup→security-review→security-review-alternative→release-review→release-review-alternative→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(strong) release-setup→security-review→security-review-alternative→release-review→release-review-alternative→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "aedc0f6552c23e404645",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1923,7 +1923,7 @@
     "security-review": "9d97ea803c93f39e9b0e",
     "security-review-alternative": "3cfc2cd80ebbf13814d6"
    },
-   "card": "[경로] autopilot-ship · staged(thorough) release-setup→security-review→security-review-alternative→release-review→release-review-alternative→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(thorough) release-setup→security-review→security-review-alternative→release-review→release-review-alternative→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "aedc0f6552c23e404645",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1955,7 +1955,7 @@
    "briefs": {
     "package": "c0934e18d94dbc42b3a4"
    },
-   "card": "[경로] autopilot-ship · staged(standard) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-ship · staged(standard) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업",
    "completion_gates": "e449a08ec812d99fb510",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1975,7 +1975,7 @@
    "briefs": {
     "package": "9353c190d5090b736875"
    },
-   "card": "[경로] autopilot-ship · staged(strong) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-ship · staged(strong) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업",
    "completion_gates": "e449a08ec812d99fb510",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1995,7 +1995,7 @@
    "briefs": {
     "package": "de5e845e866998313e85"
    },
-   "card": "[경로] autopilot-ship · staged(thorough) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-ship · staged(thorough) package · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field code (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  방향 잡기 권함: autopilot-ship 작업",
    "completion_gates": "e449a08ec812d99fb510",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",

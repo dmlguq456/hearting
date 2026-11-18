@@ -110,6 +110,12 @@ class FrameAdviceTest(F.FramedBase):
         route = {**self.route(PROTECTED), "route_plan": {"record": "x", "leg": 0}}
         self.assertEqual(SCOPE.frame_advice(route), [])
 
+    def test_a_route_that_carries_its_own_frame_legs_gets_no_advice(self):
+        route = self.route(PROTECTED, capability="autopilot-spec", shape="staged")
+        self.assertTrue(SCOPE.frame_advice(route))                  # composed without the recipe's frame pair
+        leg = {"id": "frame", "worker_type": "frame", "dispatch_depth": 1, "launch_authority": "depth-0"}
+        self.assertEqual(SCOPE.frame_advice({**route, "nodes": [leg, *route["nodes"]]}), [])
+
     def test_a_route_sealed_before_the_work_request_was_kept_gets_no_advice(self):
         route = self.route(PROTECTED)
         route = {key: value for key, value in route.items() if key != "work_request"}
