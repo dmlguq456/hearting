@@ -85,8 +85,8 @@ def draw_compute(grid: CellGrid, vm, state=None, x=34, y=3):
                                  "dead": ("✕", "dead")}.get(status, ("·", "dim")))
             grid.put(x + 11, y, mark, status_key)
             grid.put(x + 13, y, "·" if idx is None else str(idx), "dim")
-            gpu_styles = {"gpu_ada": "h_claude", "gpu_5090": "g_work_off",
-                          "gpu_4090": "h_claude", "gpu_legacy": "unknown"}
+            gpu_styles = {"gpu_ada": "gpu_ada", "gpu_5090": "g_work_off",
+                          "gpu_4090": "gpu_rtx4090", "gpu_legacy": "unknown"}
             grid.put(x + 16, y, "·" if model is None else str(model), gpu_styles.get(model_key, model_key or "dim"))
             grid.put(x + 31, y, " · " if util is None else f"{int(util):3d}%",
                      "soft" if status == "working" else "dim")

@@ -98,7 +98,7 @@ from .render_cells import (  # noqa: F401
     _MW, _NAME2_MAX, _NAME_COL, _NAME_GAP, _NAME_HUE, _NAME_KEY, _NAME_KEY_DIM, _NAME_WIDE_MAX,
     _NARROW_CUTOFF, _NARROW_L2_STAGE_COL, _narrow_session_cell_budget, _native_context_gauge,
     _NW_S, _OPTW, _pad, _pad_to_column, _palette_fg, _pct_key, _PIPE_STAGES, _QA_INT,
-    _resolved_alias_model, _resolved_alias_models, _RICHER_RGB_1000, _ROLE_MODEL_NAME,
+    _resolved_alias_model, _resolved_alias_models, _RICHER_RGB_1000, _HARNESS_256, _HARNESS_RGB_1000, _ROLE_MODEL_NAME,
     _route_current_index, _ROUTE_STAGE_ZONE_MAX, _route_zone_width, _SESSION_CELL_MAX,
     _session_routing_column, _short_model_id, _shorten_model_suffix, _SPIN, _STAGE_RESERVE,
     _STAGE_ROLE, _stage_role_label, _STAGE_ZONE_MAX, _state_key, _STEWARD_PAIR, _TAG_W,
@@ -258,12 +258,14 @@ def _init_colors():
         if curses.COLORS >= 256 and curses.can_change_color():
             for name, rgb in _RICHER_RGB_1000.items():
                 curses.init_color(_MUTED_256[name], *rgb)
+            for name, rgb in _HARNESS_RGB_1000.items():
+                curses.init_color(_HARNESS_256[name], *rgb)
             for index, rgb in _TINT_RGB_1000.items():
                 curses.init_color(index, *rgb)
     except Exception:
         pass
     # color discipline (design review 2026-07-01): one meaning per color.
-    #   green/yellow/red = status + level ONLY · cyan/magenta/blue = harness identity ONLY
+    #   green/yellow/red = status + level ONLY · orange (Claude)/magenta/blue = harness identity ONLY (cyan: the Opus family)
     #   soft-white bold = the row's single focal point (session name) · dim = all metadata
     fallback_spec = {
         "green": curses.COLOR_GREEN, "yellow": curses.COLOR_YELLOW, "red": curses.COLOR_RED,
@@ -272,7 +274,7 @@ def _init_colors():
         "orange": curses.COLOR_YELLOW,
     }
     palette_name = {
-        "h_claude": "cyan", "h_codex": "magenta", "h_opencode": "blue",
+        "h_claude": "claude", "h_codex": "magenta", "h_opencode": "blue",
     }
     spec = {
         key: _palette_fg(palette_name.get(key, key), fallback)
@@ -353,8 +355,8 @@ def _init_colors():
     # Idle summaries stay DIM; exact current process evidence promotes the same
     # hue to normal intensity (F-93). Text remains the primary identifier.
     for fam, hue_name in {
-        "rtx6000": "h_opencode", "rtx4090": "h_claude", "rtx5090": "green",
-        "blackwell": "green", "hopper": "h_codex", "ada": "h_claude",
+        "rtx6000": "h_opencode", "rtx4090": "fam_opus", "rtx5090": "green",
+        "blackwell": "green", "hopper": "h_codex", "ada": "fam_opus",
         "ampere": "h_opencode", "turing": "yellow", "legacy": "orange",
     }.items():
         hue = _COLOR.get(hue_name, 0)
@@ -477,7 +479,7 @@ def _init_colors():
         _TINT_PAIR.clear()
     # stage breadcrumb — each pipeline stage a DISTINCT color (user); the CURRENT stage is BOLD
     # Bright current stages stand out; past and pending stages use the same hue dimmed.
-    _stage_raw = [_hue.get("opencode", 0), _hue.get("claude", 0), _COLOR.get("green", 0),
+    _stage_raw = [_hue.get("opencode", 0), _COLOR.get("fam_opus", 0), _COLOR.get("green", 0),
                   _COLOR.get("yellow", 0), _hue.get("codex", 0)]  # blue · cyan · green · yellow · magenta
     for i, base in enumerate(_stage_raw):
         _COLOR["stg%d_on" % i] = base | curses.A_BOLD

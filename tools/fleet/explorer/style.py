@@ -25,7 +25,8 @@ REFERENCE_STYLES = {
     ("w", 0, 0): "loc_repo", ("w", 0, 1): "name_dim", ("w", 1, 0): "section_head",
     ("r", 0, 0): "g_blocked", ("r", 0, 1): "lvl_r_dim", ("r", 1, 0): "g_dead",
     ("g", 0, 0): "grp_live", ("g", 0, 1): "g_work_off", ("g", 1, 0): "g_work",
-    ("c", 0, 0): "hb_claude", ("c", 0, 1): "h_claude", ("c", 1, 0): "hb_claude",
+    # "c" here is the stage palette's cyan (`_stage_hue`), not the Claude harness hue (orange, 11-18).
+    ("c", 0, 0): "fam_opus", ("c", 0, 1): "famd_opus", ("c", 1, 0): "fam_opus",
     ("m", 0, 0): "hb_codex", ("m", 0, 1): "h_codex", ("m", 1, 0): "eff_xhigh",
     ("l", 0, 0): "hb_opencode", ("l", 0, 1): "version_release", ("l", 1, 0): "hb_opencode",
     ("v", 0, 0): "g_spin", ("v", 0, 1): "g_spin_dim", ("v", 1, 0): "hearting_name",

@@ -462,7 +462,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
         for gpu in gpu_rows:
             cursor = x + 3
             for text, key in gpu:
-                key = {"host": "loc_repo", "gpu_ada": "h_claude"}.get(str(key), key)
+                key = {"host": "loc_repo"}.get(str(key), key)
                 cursor = grid.put(cursor, y, str(text), key, limit=right - 1)
             y += 1
     pane_lines = tuple(session.get("pane_lines") or ())

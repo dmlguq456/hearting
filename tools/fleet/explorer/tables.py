@@ -1413,13 +1413,14 @@ def _stage_hue(route, step):
 
 
 def _stage_items(stages, lit=True):
-    bright_hues = ("hb_opencode", "hb_claude", "grp_live", "g_idle", "hb_codex")
-    dim_hues = ("version_release", "h_claude", "g_work_off", "lvl_y_dim", "h_codex")
+    # The stage palette's second hue is cyan (it is not the Claude harness hue, which is orange).
+    bright_hues = ("hb_opencode", "fam_opus", "grp_live", "g_idle", "hb_codex")
+    dim_hues = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "h_codex")
     result = []
     for index, stage in enumerate(stages):
         status = stage.get("st")
         if status == "active" and lit:
-            name_key = {0: "hb_opencode", 1: "hb_claude", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
+            name_key = {0: "hb_opencode", 1: "fam_opus", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
         elif status == "failed":
             name_key = bright_hues[index % len(bright_hues)]
         else:

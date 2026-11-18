@@ -1,5 +1,5 @@
 """Fleet's shared semantic palette, usable without initializing a screen."""
-from .render_cells import _A_B, _A_D, _A_REVERSE, _NAME_HUE, _MUTED_256
+from .render_cells import _A_B, _A_D, _A_REVERSE, _NAME_HUE, _MUTED_256, _HARNESS_256
 
 _HUE_OF = {
     None: ("d", 0), "dim": ("d", _A_D), "head": ("d", _A_D),
@@ -36,12 +36,12 @@ _HUE_OF = {
     # bright pink text: distinct from white/yellow, without a special background.
     "tag_steward": ("p", _A_B),
     # 11-17 (route zones): the ROUTE box's three zone names and their marks, each its own color, none a status color
-    # (green, yellow, red), a harness hue (cyan, magenta, blue) or the steward pink: direct orange, dispatch violet,
+    # (green, yellow, red), a harness hue (Claude orange 173, magenta, blue) or the steward pink: direct orange (208), dispatch violet,
     # request aqua. (An 8-color terminal has no color left over: there the zones read in the default color and the white,
     # still apart from every status and harness color; the names say which zone it is.)
     "zone_direct": ("zd", 0), "zone_dispatch": ("zv", 0), "zone_request": ("zq", 0),
     # This window's own number on the PEERS line: its harness hue, bold.
-    "hbb_claude": ("c", _A_B), "hbb_codex": ("m", _A_B), "hbb_opencode": ("l", _A_B), "hbb_other": ("d", _A_B),
+    "hbb_claude": ("k", _A_B), "hbb_codex": ("m", _A_B), "hbb_opencode": ("l", _A_B), "hbb_other": ("d", _A_B),
     "tag_steward_dim": ("p", _A_D),
     # Badge text, NOT the glyph: plain yellow, distinct from the dim g_unused glyph so the
     # ●>○>◌ ink-weight gradient still reads.
@@ -61,8 +61,8 @@ _HUE_OF = {
     "eff_xhigh": ("m", _A_B), "eff_max": ("r", _A_B),
     "effd_low": ("d", _A_D), "effd_medium": ("d", _A_D), "effd_high": ("l", _A_D),
     "effd_xhigh": ("m", _A_D), "effd_max": ("r", _A_D),
-    "h_claude": ("c", _A_D), "h_codex": ("m", _A_D), "h_opencode": ("l", _A_D),
-    "hb_claude": ("c", 0), "hb_codex": ("m", 0), "hb_opencode": ("l", 0), "hb_other": ("d", 0),
+    "h_claude": ("k", _A_D), "h_codex": ("m", _A_D), "h_opencode": ("l", _A_D),
+    "hb_claude": ("k", 0), "hb_codex": ("m", 0), "hb_opencode": ("l", 0), "hb_other": ("d", 0),
     "fam_opus": ("c", 0), "fam_sonnet": ("l", 0), "fam_haiku": ("g", 0),
     "fam_fable": ("m", 0), "fam_sol": ("y", 0), "fam_astra": ("o", 0),
     "fam_luna": ("w", 0), "fam_gpt": ("y", 0), "fam_other": ("d", 0),
@@ -108,7 +108,7 @@ _HUE_OF = {
     # from prose and WEIGHT separates main (bold-dim `now_main`) from spawned.
     "now_sub": ("w", _A_D),
     # F-77: the product name. The palette reserves its hues by MEANING —
-    # green/yellow/red are status, cyan/magenta/blue are harness identity, soft-white
+    # green/yellow/red are status, Claude's orange/magenta/blue are harness identity (cyan is the Opus family), soft-white
     # bold is a row's focal point — so the board's own name takes `v` (vanilla), the one
     # hue on no such axis. It shares that hue with the working spinner, which is a
     # per-row glyph and can never be confused with a word on the first line.
@@ -125,7 +125,7 @@ _HUE_OF["nmd_other"] = ("w", _A_D)
 _HUE_PALETTE = {
     "d": (None, -1), "w": ("soft", 7), "g": ("green", 2),
     "y": ("yellow", 3), "v": ("vanilla", 3), "r": ("red", 1),
-    "c": ("cyan", 6), "m": ("magenta", 5), "o": ("orange", 3),
+    "c": ("cyan", 6), "k": ("claude", 6), "m": ("magenta", 5), "o": ("orange", 3),
     "p": ("steward_pink", 5), "l": ("blue", 4),
     "zd": ("zone_direct", -1), "zv": ("zone_dispatch", 7), "zq": ("zone_request", 7),
 }
@@ -138,7 +138,7 @@ _ZONE_256 = {"zone_direct": 208, "zone_dispatch": 99, "zone_request": 43}
 
 
 def hue_colors(colors=256):
-    named = {**_MUTED_256, **_ZONE_256}
+    named = {**_MUTED_256, **_HARNESS_256, **_ZONE_256}
     return {hue: (named[name] if colors >= 256 and name else fallback)
             for hue, (name, fallback) in _HUE_PALETTE.items()}
 

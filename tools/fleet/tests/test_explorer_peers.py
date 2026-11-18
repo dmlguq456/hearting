@@ -123,6 +123,22 @@ def _history_recede_delta(expected_cells):
     return normalized
 
 
+def _stage_cyan_delta(actual_cells, expected_cells):
+    """The approved 2026-11-18 delta (Claude's harness color is orange now): the stage palette's second hue was drawn with
+    the Claude harness keys in the reference (`h_claude`/`hb_claude`); it stays the cyan it was, now on Opus's keys. Only a
+    cell with the same glyph whose frozen key is a Claude key and whose drawn key is exactly its cyan twin may differ; a
+    real Claude harness cell (drawn `hb_claude`) is still compared as captured."""
+    twin = {"h_claude": "famd_opus", "hb_claude": "fam_opus"}
+    normalized = [list(row) for row in expected_cells]
+    for y, row in enumerate(normalized):
+        if y >= len(actual_cells):
+            break
+        for x, cell in enumerate(row):
+            if x < len(actual_cells[y]) and cell[1] in twin and actual_cells[y][x][:2] == [cell[0], twin[cell[1]]]:
+                row[x] = [cell[0], twin[cell[1]], *cell[2:]]
+    return normalized
+
+
 def _links_words_delta(frame, expected_cells):
     """The approved 2026-11-16 words delta (Fleet takes the shell panel's words and forms): the
     LINKS head leads with its count (``9 LINKS messages·requests · supervision · handover``), a
@@ -189,6 +205,7 @@ class PeerPaneReference(unittest.TestCase):
                     expected_cells = _arrow_glyph_delta(expected_cells)
                     expected_cells = _history_recede_delta(expected_cells)
                     expected_cells = _links_words_delta(frame, expected_cells)
+                    expected_cells = _stage_cyan_delta(actual_cells, expected_cells)
                     expected_hits = [[hit[0] - 5, hit[1] - SEPARATOR, hit[2] - SEPARATOR, hit[3]]
                                      for hit in expected_full_hits
                                      if hit[0] >= 5 and hit[1] >= SEPARATOR]

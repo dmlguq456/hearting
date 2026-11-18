@@ -82,7 +82,7 @@ class StageRule(unittest.TestCase):
         items = _stage_items([{"name": f"s{index}", "st": "active"} for index in range(6)])
         keys = [parts[0][1] for parts, _status in items]
         self.assertNotIn("unknown", keys)
-        self.assertEqual(keys[:2], ["hb_opencode", "hb_claude"])
+        self.assertEqual(keys[:2], ["hb_opencode", "fam_opus"])
 
     def test_harness_mix_counts_only_drawn_depth2_workers(self):
         base = dict(state="working", harness="claude",

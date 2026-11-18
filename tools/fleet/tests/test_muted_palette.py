@@ -37,6 +37,31 @@ class MutedPaletteTest(unittest.TestCase):
             self.assertNotEqual(render._palette_fg("steward_pink", 5), render._palette_fg("soft", 7))
             self.assertNotEqual(render._palette_fg("steward_pink", 5), render._palette_fg("yellow", 3))
 
+    def test_claude_harness_color_is_orange_apart_from_the_teal(self):
+        """11-18: the Claude harness keys wear orange 173 (the mock-up's #e59a6f); the teal 116 stays
+        in `_MUTED_256` for the Opus family and the stage palette, so the pinned table above is unchanged."""
+        self.assertEqual(render._HARNESS_256, {"claude": 173})
+        self.assertEqual(render._HARNESS_RGB_1000, {"claude": (898, 604, 435)})
+        self.assertEqual({k: v for k, v in render._HARNESS_256.items() if k in render._MUTED_256}, {})
+        with mock.patch.object(render.curses, "COLORS", 256, create=True):
+            self.assertEqual(render._palette_fg("claude", 6), 173)
+            self.assertEqual(render._palette_fg("cyan", 6), 116)
+        with mock.patch.object(render.curses, "COLORS", 8, create=True):
+            self.assertEqual(render._palette_fg("claude", 6), 6)       # 8 colors: still the native cyan
+        from fleet import palette
+        for colors, claude, opus in ((256, 173, 116), (8, 6, 6)):
+            hues = palette.hue_colors(colors)
+            self.assertEqual((hues["k"], hues["c"]), (claude, opus))
+        for key in ("hb_claude", "hbb_claude", "h_claude", "nm_claude", "nmd_claude"):
+            self.assertEqual(palette.style_components(key)["foreground"], 173, key)
+        self.assertTrue(palette.style_components("hbb_claude")["bold"])
+        self.assertTrue(palette.style_components("h_claude")["dim"])
+        for key in ("fam_opus", "famd_opus", "stg1_on", "gpu_ada", "gpu_rtx4090"):
+            self.assertEqual(palette.style_components(key)["foreground"], 116, key)
+        self.assertEqual(palette.style_components("hb_codex")["foreground"], 176)
+        self.assertEqual(palette.style_components("hb_opencode")["foreground"], 147)
+        self.assertEqual(palette.style_components("hb_claude", no_color=True)["foreground"], None)
+
     def test_low_color_terminal_keeps_native_fallback(self):
         with mock.patch.object(render.curses, "COLORS", 8, create=True):
             self.assertEqual(render._palette_fg("green", 2), 2)
@@ -89,6 +114,10 @@ class MutedPaletteTest(unittest.TestCase):
             mock.call(index, *rgb)
             for index, rgb in render._TINT_RGB_1000.items()
         )
+        expected[len(render._RICHER_RGB_1000):len(render._RICHER_RGB_1000)] = [
+            mock.call(render._HARNESS_256[name], *rgb)
+            for name, rgb in render._HARNESS_RGB_1000.items()
+        ]
         self.assertEqual(init_color.call_args_list, expected)
 
     def test_model_family_pairs_keep_default_background_after_all_pairs_init(self):
@@ -145,13 +174,13 @@ class MutedPaletteTest(unittest.TestCase):
         self.assertEqual(render._HUE_OF["g_idle"][0], "y")
         self.assertEqual(render._HUE_OF["g_dead"][0], "r")
         badge_hues = [render._HUE_OF[key][0] for key in render._BADGE_KEY.values()]
-        self.assertEqual(badge_hues, ["c", "m", "l"])
+        self.assertEqual(badge_hues, ["k", "m", "l"])
         # F-76b: the NAME zone moved onto the harness hue (own `nm_*` keys, same colors
         # as the badges above) so a row reads as one color system; only an unknown
         # harness keeps the historical soft white.
         name_hues = [render._HUE_OF[render._NAME_KEY[h]][0]
                      for h in ("claude", "codex", "opencode")]
-        self.assertEqual(name_hues, ["c", "m", "l"])
+        self.assertEqual(name_hues, ["k", "m", "l"])
         self.assertEqual(render._HUE_OF["nm_other"][0], "w")
 
 

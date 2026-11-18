@@ -44,6 +44,12 @@ _MUTED_256 = {
     "warning": 131,   # #af5f5f — warning-band background
 }
 
+# 11-18: Claude's harness color is orange, apart from `_MUTED_256`'s teal, which also means the Opus
+# family and the stage palette (and which a test pins). Only the Claude harness keys (`h_claude`,
+# `hb_claude`, `hbb_claude`, `nm_claude`, `nmd_claude`) read this one; 173 is the 256-color step nearest
+# the public mock-up's #e59a6f (CIEDE2000 5.4).
+_HARNESS_256 = {"claude": 173}
+
 # On terminals that allow palette redefinition, open the semantic hues by only
 # a few RGB points.  The xterm indices above remain the stable fallback, while
 # these values add a barely perceptible amount of saturation at equal brightness.
@@ -56,6 +62,9 @@ _RICHER_RGB_1000 = {
     "blue": (663, 663, 1000),    # #a9a9ff
 }
 
+# The Claude orange opened to the mock-up's own value, the same way the hues above are.
+_HARNESS_RGB_1000 = {"claude": (898, 604, 435)}    # #e59a6f
+
 # Keep each panel rung dark and restrained while giving the near-black
 # backgrounds a slightly richer shared slate cast.
 _TINT_RGB_1000 = {
@@ -67,7 +76,7 @@ _TINT_RGB_1000 = {
 
 def _palette_fg(name, fallback):
     if curses is not None and getattr(curses, "COLORS", 0) >= 256:
-        return _MUTED_256[name]
+        return _MUTED_256[name] if name in _MUTED_256 else _HARNESS_256[name]
     return fallback
 
 
@@ -93,7 +102,7 @@ _LOOPS_KEYS = ("oncall", "note", "study", "drill")
 
 # fg color_key → (hue, attr) decomposition (spec §5.2) — the basis for composing (fg, tint_bg)
 # pairs. hue: d=default w=soft white g=green y=yellow v=vanilla r=red c=cyan
-# m=magenta l=blue.
+# m=magenta l=blue k=Claude's harness orange.
 # Keys absent here render as default-hue plain text under tint (safe degradation).
 _A_B, _A_D = _A_BOLD, _A_DIM
 
@@ -102,7 +111,7 @@ _A_B, _A_D = _A_BOLD, _A_DIM
 # distinguishable from its harness cell, which several consumers (`_stack_split`, the
 # width suites) resolve by color key alone. Bright = a live top-level session, dim =
 # a dispatch row or lost telemetry — the same brightness axis the harness cell uses.
-_NAME_HUE = {"claude": "c", "codex": "m", "opencode": "l"}
+_NAME_HUE = {"claude": "k", "codex": "m", "opencode": "l"}
 _NAME_KEY = {h: "nm_" + h for h in _NAME_HUE}
 _NAME_KEY_DIM = {h: "nmd_" + h for h in _NAME_HUE}
 # Every key a row's NAME zone can carry. Consumers that locate the name segment by color

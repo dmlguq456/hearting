@@ -76,23 +76,24 @@ const FACES={
     // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
     waitBlink:[217,95],
     // 11-16 (the person: "usage에서 하네스 이름도 어둡게 원래 테마 컬러를 넣어주고"): the harness names of the USAGE rows, each in
-    // its Fleet hue (`hb_*`: claude cyan, codex magenta, opencode blue) one step down (L* 53.5, 52.3, 59.3; the lit hues
-    // 116, 176, 147 are L* 81, 67, 74), so a name reads as a label and never louder than its numbers.
-    harnessName:{claude:66,codex:133,opencode:104}},
+    // its Fleet hue (`hb_*`: claude orange, codex magenta, opencode blue) one step down (L* 48.6, 52.3, 59.3; the lit hues
+    // 173, 176, 147 are L* 63.8, 67, 74), so a name reads as a label and never louder than its numbers.
+    // 11-18 (Claude's harness color teal 116 → orange 173, the mock-up's #e59a6f): its name was 66, now 130.
+    harnessName:{claude:130,codex:133,opencode:104}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
     veil:250,bright:232,popup:254,popupLine:137,popupTitle:232,popupFloor:241,chosen:223,waitBlink:[88,167],
     rgb:{popup:'#f1e7dc',popupLine:'#9c8571',popupTitle:'#342a23',chosen:'#fecca4'},
-    // (The light face: the deep hues 23, 60, 25 (L* 36, 42, 40) one step lighter: L* 50.8, 45.7, 56.7.)
-    harnessName:{claude:30,codex:96,opencode:68}},
+    // (The light face: the deep hues 130, 60, 25 (L* 48.6, 42, 40) one step lighter: L* 54.7, 45.7, 56.7; Claude's was 23 → 30.)
+    harnessName:{claude:166,codex:96,opencode:68}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
 // instead of the earlier strong substitutes; the dark face changes only the
 // failure red, and only on a shade.
-const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,173:130,176:60,147:25,230:22,219:132,137:94}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
 // A moving frame cell's color: an arc or lit-frame shade from its face's ramp (0 the brightest); a wave

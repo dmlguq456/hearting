@@ -95,9 +95,14 @@ def palette(render):
         named[name] = rgb(index)
     for name, (r, g, b) in render._RICHER_RGB_1000.items():
         named[name] = (round(r * 255 / 1000), round(g * 255 / 1000), round(b * 255 / 1000))
+    # Claude's harness orange (hue "k"): its own 256-color step, opened to the same RGB the live board redefines it to.
+    for name, index in render._HARNESS_256.items():
+        named[name] = rgb(index)
+    for name, (r, g, b) in render._HARNESS_RGB_1000.items():
+        named[name] = (round(r * 255 / 1000), round(g * 255 / 1000), round(b * 255 / 1000))
     return {"d": DEFAULT_FG, "w": named["soft"], "g": named["green"], "y": named["yellow"],
             "v": named["vanilla"], "r": named["red"], "c": named["cyan"], "m": named["magenta"],
-            "l": named["blue"], "p": named["steward_pink"]}, {
+            "l": named["blue"], "p": named["steward_pink"], "k": named["claude"]}, {
         tint: tuple(round(v * 255 / 1000) for v in rgb1000)
         for tint, rgb1000 in render._TINT_RGB_1000.items()}
 

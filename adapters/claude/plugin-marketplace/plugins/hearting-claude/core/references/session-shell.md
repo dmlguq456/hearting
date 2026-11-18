@@ -475,7 +475,8 @@ popup; a request row the MESSAGES popup).
   itself (its route line has no `(direct)` bracket: `● code  title`), `dispatch` the routes this
   session started (lines as before: owner, stage line, workers), `request` the peer requests it sent
   or received (lines and presses as before). A zone's name and its mark (dot or arrow) have their own
-  color: direct orange, dispatch violet, request aqua, none a harness color, a status color of the box (working green,
+  color: direct orange (208), dispatch violet, request aqua, none a harness color (Claude's own is the softer clay orange 173, 13 apart
+  by CIEDE2000; its light-face pair is 130), a status color of the box (working green,
   idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
   the default color and the white there). A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
@@ -584,8 +585,8 @@ popup; a request row the MESSAGES popup).
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
   USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
   opens nothing; the thin rule that parted MEM from the last row became it), then one row per harness in Fleet's header
-  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 66, codex 133, opencode
-  104 on a dark or unknown face, 30, 96, 68 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
+  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 130, codex 133, opencode
+  104 on a dark or unknown face, 166, 96, 68 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
   them (`5h 12%(↻ 2h) │ 7d 66%`, Fleet's level colors; a window not reported is left out; a harness with none reported reads a
   dim `?`). The values are the usage records Fleet already keeps (`~/.local/state/agent-fleet/usage/<harness>.json`, read
   by `usage_cache`; this window's own harness keeps the values its panel observed, a Claude callback included); nothing is
