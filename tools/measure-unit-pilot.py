@@ -32,11 +32,20 @@ Items 2-4 read report text and are heuristics (`reports_read` / `reports_missing
 Reports of attempts that ended FAIL or BLOCKED (`dead-worker-fail`, `dead-worker-blocked`) are read too. A measure the
 unit's reports cannot carry by shape (a unit with no red-item list) is None (shown as a dash) with the reason in `notes`;
 None is "not measurable", never "zero".
+A report file is read as the report of the attempt that wrote it LAST. Attempts of one node (a send-back, a fix, a
+re-review) write the same file, so an earlier attempt's report is gone from it: that attempt is not read and is counted
+in `reports_overwritten`. The last writer is the latest row, with this unit's rows outside the window included, that
+names the file; a `completed-marker` row whose recorded evidence hash equals the file's hash today is its writer.
+So items 2-4 are measured from the last round of each node only; `red_reports` (`a/b`) says in how many of the b
+blocking reports read a red item was found, and a note says when the measure is partial. Limits: an earlier round's
+report is not recovered from the attempt log; a closure check started as a new unit route is always round 1 (the round
+number is counted within one route and node), so it is left out of item 2.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -166,6 +175,59 @@ def read_text(path: Path | None) -> str | None:
         return None
 
 
+def recorded_sha(meta: dict, root: Path) -> str | None:
+    """The evidence hash the runtime recorded when this attempt completed (`completion/<route>/<node>.json`)."""
+    route, attempt = meta.get("route_id"), meta.get("attempt_id")
+    folder = root / "completion" / route if route else None
+    if not (folder and attempt and folder.is_dir()):
+        return None
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(".json") and ".attempt." not in name:
+            try:
+                data = json.loads((folder / name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            evidence = data.get("evidence")
+            if data.get("attempt_id") == attempt and isinstance(evidence, dict) and evidence.get("sha256"):
+                return str(evidence["sha256"])
+    return None
+
+
+def file_sha(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def readable(meta: dict) -> bool:
+    note = meta.get("note", "")
+    return note.startswith("completed-") or note in READ_NOTES
+
+
+def last_writers(rows, unit, root: Path) -> dict:
+    """path -> attempt_id of the latest row of this unit (inside the window or not) that names that report file."""
+    latest: dict[Path, tuple] = {}
+    for number, (when, meta) in enumerate(rows):
+        if meta.get("unit") != unit or not readable(meta):
+            continue
+        path = report_path(meta, root)
+        if path and (path not in latest or (when, number) >= latest[path][:2]):
+            latest[path] = (when, number, meta.get("attempt_id"))
+    return {path: value[2] for path, value in latest.items()}
+
+
+def overwritten(meta: dict, path: Path | None, root: Path, writers: dict) -> bool:
+    """True when a later attempt wrote this file after the attempt in `meta`, so the file no longer holds its report."""
+    if path is None:
+        return False
+    if meta.get("note") == "completed-marker":
+        recorded, now = recorded_sha(meta, root), file_sha(path)
+        if recorded and now:
+            return recorded != now
+    return writers.get(path, meta.get("attempt_id")) != meta.get("attempt_id")
+
+
 _FENCE = re.compile(r"```.*?```", re.S)
 _BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _RED_HEAD = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?🔴")
@@ -177,8 +239,8 @@ _REPRO = re.compile(r"재현|repro|\b(?:when|if|given|whenever|once|after|with)\
 _UNRUN = re.compile(r"(?:could not|cannot|can't|unable to|not able to|did not|didn't)\s+(?:run|execute)|not run\b|"
                     r"미실행|실행하지 못|돌리지 못|실행 불가|확인하지 못", re.I)
 _HANDED = re.compile(r"(?im)^\s*(?:[-*+]\s*)?(?:\*\*)?handed-over(?:\*\*)?:")
-# An earlier item is named by a red marker + number, an r<N> tag, a file:line, or #<N>.
-_ITEM_ID = re.compile(r"🔴\s*#?\d+|\b[Rr]\d+\b|[\w./\-]+\.\w{1,8}:\d+|#\d+")
+# An earlier item is named by a red marker + number, an r<N> or capital+number tag (B1), a file:line, or #<N>.
+_ITEM_ID = re.compile(r"🔴\s*#?\d+|\b[Rr]\d+\b|\b[A-Z]\d+\b|[\w./\-]+\.\w{1,8}:\d+|#\d+")
 _STATUS_BAD = re.compile(r"\b(?:open|reopened|re-opened|regressed|unclosed)\b|\b(?:not|never)\s+(?:yet\s+)?closed\b|"
                          r"열림|열린|열려|되돌아(?:옴|온|감|간|왔|갔)|해소되지|해소하지|해소 안|미해소|닫히지|닫지 못", re.I)
 _STATUS_CLOSED = re.compile(r"\bclosed\b|닫힘|닫혔|닫음|해소(?!되지|하지|\s*안|\s*못)", re.I)
@@ -229,7 +291,7 @@ def _parse_red(text: str):
         starts_red = bool(_RED_BULLET.match(line))
         if in_red or starts_red:
             used.add(number)
-        if starts_red or (in_red and _BULLET.match(line) and not item_level):
+        if (starts_red or (in_red and _BULLET.match(line))) and not item_level:   # inside a heading item a red bullet belongs to it
             flush()
             current = [line.strip()]
         elif current is not None and line.strip():
@@ -307,7 +369,7 @@ def measure(rows, root: Path, cut, side, rendered, cap=MAX_ATTEMPTS) -> dict:
     verdict_order: dict[tuple, list] = {}
     for when, meta in rows:
         route = meta.get("route_id")
-        if route and sent_back(meta):
+        if route and sent_back(meta) and not (side == "before" and when > cut):   # a send-back after the cut is not the baseline's
             by_unit = sent_by_route.setdefault(route, {})
             by_unit[meta.get("unit", "?")] = by_unit.get(meta.get("unit", "?"), 0) + 1
         if route and meta.get("unit") in REVIEW_UNITS and (meta.get("note", "").startswith("completed-") or meta.get("note") == STAGE_FAIL):
@@ -322,30 +384,43 @@ def measure(rows, root: Path, cut, side, rendered, cap=MAX_ATTEMPTS) -> dict:
             for judged, count in sent_by_route.get(r, {}).items():
                 split[judged] = split.get(judged, 0) + count
         totals = {"red": 0, "place": 0, "repro": 0, "unrun": 0, "handed": 0, "closed_fail": 0}
-        read = missing = failing_read = failing_with_red = 0
+        read = missing = lost = failing_read = failing_with_red = failing_rows = failing_lost = 0
+        writers = last_writers(rows, unit, root)
         for when, meta in picked:
             note = meta.get("note", "")
-            if not (note.startswith("completed-") or note in READ_NOTES):
+            if not readable(meta):
                 continue
-            text = read_text(report_path(meta, root))
+            failing = note in (BLOCKING, STAGE_FAIL)   # a verdict that sent the work back; BLOCKED reached no verdict
+            failing_rows += failing
+            path = report_path(meta, root)
+            if overwritten(meta, path, root, writers):
+                lost += 1
+                failing_lost += failing
+                continue
+            text = read_text(path)
             if text is None:
                 missing += 1
                 continue
             read += 1
             order = sorted(verdict_order.get((meta.get("route_id"), meta.get("route_node"), unit), []))
             index = next((i for i, (_, a) in enumerate(order) if a == meta.get("attempt_id")), 0)
-            failing = note in (BLOCKING, STAGE_FAIL)   # a verdict that sent the work back; BLOCKED reached no verdict
             found = analyse_report(text, index, failing)
             failing_read += failing
             failing_with_red += failing and found["red"] > 0
             for key, value in found.items():
                 totals[key] += int(value)
         notes = []
-        red_measured = unit in REVIEW_UNITS and not (failing_read and not failing_with_red)
+        red_measured = unit in REVIEW_UNITS and not (failing_rows and not failing_with_red)
         if unit not in REVIEW_UNITS:
             notes.append("items 2-4 (red items): not a review unit, its reports carry no red-item list")
         elif not red_measured:
-            notes.append(f"items 2-4 (red items): not measurable here, {failing_read} FAIL/blocking reports read and none carries a red-item list (stage-form reports)")
+            why = (f"{failing_read} FAIL/blocking reports read and none carries a red-item list" if failing_read
+                   else "no FAIL/blocking report was left to read")
+            notes.append(f"items 2-4 (red items): not measurable here, {why} ({failing_lost} of {failing_rows} blocking attempts, {lost} reports in all, overwritten by a later attempt)")
+        elif lost or failing_with_red < failing_read:
+            notes.append(f"items 2-4 (red items): partial, from the last attempt of each node only; {lost} reports ({failing_lost} of the "
+                         f"{failing_rows} blocking ones) were overwritten by a later attempt and not read, a red item was read in "
+                         f"{failing_with_red} of {failing_read} blocking reports read")
         result[unit] = {
             "attempts": len(picked),
             "window": [picked[0][0].isoformat(), picked[-1][0].isoformat()] if picked else None,
@@ -361,7 +436,8 @@ def measure(rows, root: Path, cut, side, rendered, cap=MAX_ATTEMPTS) -> dict:
             "render_bytes": rendered.get(unit),
             "render_bytes_stage": rendered.get("qa/test@stage") if unit == "qa/test" else None,
             "invalid_envelope": sum(m.get("note") == INVALID for _, m in picked),
-            "reports_read": read, "reports_missing": missing,
+            "reports_read": read, "reports_missing": missing, "reports_overwritten": lost,
+            "red_reports": f"{failing_with_red}/{failing_read}" if unit in REVIEW_UNITS else None,
             "notes": notes,
         }
     return result
@@ -370,7 +446,7 @@ def measure(rows, root: Path, cut, side, rendered, cap=MAX_ATTEMPTS) -> dict:
 def format_table(result: dict) -> str:
     fields = ["attempts", "routes", "roundtrips_median", "roundtrips_p90", "closed_fail", "red_items", "red_with_place",
               "red_with_repro_cue", "unrun_as_red", "handed_over_lines", "render_bytes", "render_bytes_stage",
-              "invalid_envelope", "reports_read", "reports_missing"]
+              "invalid_envelope", "reports_read", "reports_missing", "reports_overwritten", "red_reports"]
     lines = ["field".ljust(20) + "".join(u.ljust(18) for u in UNITS)]
     for field in fields:
         lines.append(field.ljust(20) + "".join(("—" if result[u][field] is None else str(result[u][field])).ljust(18) for u in UNITS))

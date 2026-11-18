@@ -76,6 +76,17 @@ class ReportReadingTest(unittest.TestCase):
         self.assertTrue(M.analyse_report(unresolved.replace("해소되지 않음", "해소됨"), 1, True)["closed_fail"])
 
 
+    def test_a_red_bullet_inside_a_heading_item_stays_in_that_item(self):
+        text = ("## 🔴 Must-fix issues\n\n### a.py:3 — crash\n- Why it matters: x\n- 🔴1 earlier item: closed\n\n"
+                "### b.py:7 — leak\n- Why: y\n\n## 🟡 Suggested\n\n- naming\n")
+        self.assertEqual(M.analyse_report(text, 0, True)["red"], 2)
+
+    def test_a_letter_number_id_such_as_b1_names_an_earlier_item(self):
+        base = "- B1: closed (evidence)\n\n### 🔴 Must-fix issues\n\n- new.py:3 breaks when x is None\n"
+        self.assertTrue(M.analyse_report(base, 1, True)["closed_fail"])
+        self.assertFalse(M.analyse_report(base.replace("closed (evidence)", "open"), 1, True)["closed_fail"])
+
+
 class MeasureTest(Fixture):
     def test_roundtrips_leave_plan_review_out_count_stage_fail_and_split_by_unit(self):
         lines = [
@@ -103,6 +114,60 @@ class MeasureTest(Fixture):
         self.assertIsNone(test["unrun_as_red"])
         self.assertTrue(test["notes"])
 
+
+    def measure_before(self, lines, cut="2026-11-05T00:00:00Z"):
+        (self.root / "jobs.log").write_text("".join(lines), encoding="utf-8")
+        return M.measure(M.read_rows(self.root / "jobs.log"), self.root, M.parse_ts(cut), "before", {})
+
+    def test_an_overwritten_report_is_counted_not_read_and_handed_over_counts_once(self):
+        shared = self.report("shared.md", REVIEW)            # the pass attempt's text; the blocking attempt wrote this path first
+        log = str(self.log("l1", shared))
+        out = self.measure_before([
+            row("2026-11-01T00:00:00Z", "qa/code-review", "completed-review-blocking", attempt="a1", log=log),
+            row("2026-11-01T05:00:00Z", "qa/code-review", "completed-marker", attempt="a2", log=log)])["qa/code-review"]
+        self.assertEqual((out["reports_read"], out["reports_overwritten"], out["handed_over_lines"]), (1, 1, 1))
+        self.assertEqual(out["red_reports"], "0/0")
+        self.assertIsNone(out["red_items"])                  # the only blocking report was overwritten: not measurable, not zero
+        self.assertTrue(any("overwritten" in note for note in out["notes"]))
+
+    def test_a_later_row_outside_the_window_still_overwrites(self):
+        log = str(self.log("l1", self.report("shared.md", REVIEW)))
+        out = self.measure_before([
+            row("2026-11-01T00:00:00Z", "qa/code-review", "completed-review-blocking", attempt="a1", log=log),
+            row("2026-11-09T00:00:00Z", "qa/code-review", "completed-marker", attempt="a2", log=log)])["qa/code-review"]
+        self.assertEqual((out["attempts"], out["reports_overwritten"], out["reports_read"]), (1, 1, 0))
+
+    def test_a_partial_measure_says_so_and_a_full_one_does_not(self):
+        own = str(self.log("l1", self.report("own.md", REVIEW)))
+        shared = str(self.log("l2", self.report("shared.md", REVIEW)))
+        rows = [row("2026-11-01T00:00:00Z", "qa/code-review", "completed-review-blocking", route="rt-1", attempt="a1", log=own),
+                row("2026-11-02T00:00:00Z", "qa/code-review", "completed-review-blocking", route="rt-2", attempt="a2", log=shared),
+                row("2026-11-03T00:00:00Z", "qa/code-review", "completed-marker", route="rt-2", attempt="a3", log=shared)]
+        out = self.measure_before(rows)["qa/code-review"]
+        self.assertEqual((out["red_reports"], out["reports_overwritten"], out["red_items"]), ("1/1", 1, 2))
+        self.assertEqual(len(out["notes"]), 1)
+        self.assertIn("partial", out["notes"][0])
+        full = self.measure_before(rows[:1])["qa/code-review"]
+        self.assertEqual((full["red_reports"], full["notes"]), ("1/1", []))
+
+    def test_a_marker_row_whose_recorded_hash_matches_the_file_is_read(self):
+        text = "verdict: PASS\nhanded-over: `x` (reason: y)\n"
+        rep = self.report("m.md", text)
+        log = str(self.log("l1", rep))
+        folder = self.root / "completion" / "rt-1"
+        folder.mkdir(parents=True)
+        digest = lambda data: M.hashlib.sha256(data.encode()).hexdigest()
+        for sha, expect in ((digest(text), (1, 0)), (digest("other"), (0, 1))):
+            (folder / "node.json").write_text(json.dumps({"attempt_id": "a1", "evidence": {"path": str(rep), "sha256": sha}}), encoding="utf-8")
+            out = self.measure_before([row("2026-11-01T00:00:00Z", "qa/code-review", "completed-marker", attempt="a1", log=log),
+                                       row("2026-11-02T00:00:00Z", "qa/code-review", "completed-marker", attempt="a2", log=log)])["qa/code-review"]
+            self.assertEqual((out["reports_read"] - 1, out["reports_overwritten"]), expect)   # a2 is the last writer and always read
+
+    def test_a_send_back_after_the_cut_is_not_the_baseline(self):
+        out = self.measure_before([
+            row("2026-11-01T00:00:00Z", "dev/backend", "completed-marker", attempt="b1"),
+            row("2026-11-08T00:00:00Z", "qa/code-review", "completed-review-blocking", attempt="c1")])
+        self.assertEqual(out["dev/backend"]["roundtrips_median"], 0)
 
     def test_windows_roundtrips_invalid_envelope_and_missing_reports(self):
         rep = self.report("r1.md", REVIEW)
