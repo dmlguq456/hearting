@@ -705,6 +705,55 @@ def _expiry_candidate(record: dict, now: float) -> bool:
     return isinstance(parent, str) and bool(parent)
 
 
+_REPLACEMENT_LINK_KEYS = ("automatic_retry_of", "replacement_original_attempt_id",
+                          "prior_attempt_id")
+
+
+def _replacement_successors(jobs: Path, attempts) -> set[str]:
+    """Every registry attempt that continues one of ``attempts``, transitively.
+
+    A launched replacement or retry carries ``automatic_retry_of`` /
+    ``replacement_original_attempt_id`` / ``prior_attempt_id``; the batch record
+    may still name only the original. A replacement claimed but not yet in the
+    registry (``automatic-replacements/by-source``) may be launching: that, or any
+    read failure, raises so the caller treats the execution as not confirmed.
+    """
+    from dispatch_registry_cache import registry_view
+    links, known = {}, set()
+    for entry in registry_view(Path(jobs)).records:
+        meta = entry.completion_metadata()
+        aid = meta.get("attempt_id")
+        if not aid:
+            continue
+        known.add(aid)
+        for key in _REPLACEMENT_LINK_KEYS:
+            source = meta.get(key)
+            if source not in (None, "", "-"):
+                links.setdefault(source, set()).add(aid)
+    found, pending = set(), list(attempts)
+    while pending:
+        aid = pending.pop()
+        for successor in links.get(aid, ()):
+            if successor not in found and successor not in attempts:
+                found.add(successor)
+                pending.append(successor)
+    root = Path(jobs).parent / "automatic-replacements"
+    for aid in {*attempts, *found}:
+        index = root / "by-source" / f"{aid}.json"
+        try:
+            raw = index.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        family = json.loads(raw).get("family_id")
+        claim = json.loads((root / "claims" / f"{family}.json").read_text(encoding="utf-8"))
+        successor = claim.get("replacement_attempt_id")
+        if not isinstance(successor, str) or successor not in known:
+            raise BatchObligationError("batch-replacement-claimed-not-registered")
+        if successor not in attempts and successor not in found:
+            found.add(successor)
+    return found
+
+
 def _codex_execution_absent(jobs: str | Path, record: dict) -> bool:
     """True only when every attempt of the batch is proven ended and process-quiescent.
 
@@ -720,6 +769,9 @@ def _codex_execution_absent(jobs: str | Path, record: dict) -> bool:
                            *(identity.get("attempt_ids") or [])})
         if not attempts or not all(isinstance(aid, str) and aid for aid in attempts):
             return False
+        # The replacements and retries that continue these attempts count too: the
+        # completion join follows them, so a live successor keeps the batch open.
+        attempts = sorted({*attempts, *_replacement_successors(Path(jobs), set(attempts))})
         rows = dispatch_supervision._rows(Path(jobs), attempts)
         for aid in attempts:
             row = rows.get(aid)

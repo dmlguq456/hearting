@@ -3385,6 +3385,48 @@ class BatchExpiryTest(unittest.TestCase):
         self.assertFalse(obligations.expire_if_due(self.jobs, duty_id))
         self.assertEqual(self._record(duty_id)["state"], "observing")
 
+    def _registry(self, *rows):
+        self.jobs.write_text("".join(
+            f"2026-10-01T00:00:00Z\t{status}\t/repo\t/repo\tslug-{aid}\t"
+            + ",".join(f"{k}={v}" for k, v in {"attempt_id": aid, **meta}.items()) + "\n"
+            for aid, status, meta in rows), encoding="utf-8")
+
+    def test_a_replacement_the_record_does_not_name_keeps_the_batch_while_it_runs(self):
+        # RV-PR1718 B1: the record names only the original attempt; its launched
+        # replacement (outside the batch observer) is still running. The completion
+        # join follows it, so the batch is not "no Codex-side execution".
+        self._registry(("att-child", "done", {}),
+                       ("att-retry", "running", {"automatic_retry_of": "att-child"}))
+        self.rows = {"att-child": ("done", {"attempt_id": "att-child"}),
+                     "att-retry": ("running", {"attempt_id": "att-retry"})}
+        self._pass()
+        record = self._record()
+        self.assertNotEqual(record["state"], "expired")
+        self.assertIsNone(self._notice())
+        # Once the replacement (and its own retry) ended too, the batch expires.
+        self._registry(("att-child", "done", {}),
+                       ("att-retry", "done", {"automatic_retry_of": "att-child"}),
+                       ("att-retry2", "done", {"replacement_original_attempt_id": "att-retry"}))
+        self.rows = {aid: ("done", {"attempt_id": aid})
+                     for aid in ("att-child", "att-retry", "att-retry2")}
+        obligations._EXPIRY_PROBE.clear()
+        self._pass()
+        self.assertEqual(self._record()["state"], "expired")
+
+    def test_a_replacement_claimed_but_not_registered_keeps_the_batch(self):
+        self._registry(("att-child", "done", {}))
+        root = self.jobs.parent / "automatic-replacements"
+        (root / "by-source").mkdir(parents=True)
+        (root / "claims").mkdir()
+        (root / "by-source" / "att-child.json").write_text(json.dumps({"family_id": "f" * 64}))
+        (root / "claims" / ("f" * 64 + ".json")).write_text(json.dumps({"replacement_attempt_id": "att-new"}))
+        self._pass()
+        self.assertNotEqual(self._record()["state"], "expired")
+        (root / "claims" / ("f" * 64 + ".json")).write_text("{")
+        obligations._EXPIRY_PROBE.clear()
+        self._pass()
+        self.assertNotEqual(self._record()["state"], "expired", "an unreadable claim is not absence")
+
     def test_batch_without_parent_session_follows_the_current_rule(self):
         orphan = self._create("", "att-orphan")
         self._age(15, orphan)
