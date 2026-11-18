@@ -22,7 +22,8 @@ from tools.fleet.tests.explorer_capture import cell_style, palette
 FIXTURES = Path(__file__).parent / "fixtures" / "explorer"
 NAMES = ("plan", "execute", "review", "test", "report")
 STATES = ("done", "active", "active", "todo", "failed")
-DIM_KEYS = ("version_release", "h_claude", "g_work_off", "lvl_y_dim", "h_codex")
+# The stage palette's second hue is the cyan of Opus, not the Claude harness orange (11-18).
+DIM_KEYS = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "famd_fable")
 
 
 def blink_view_model():
@@ -252,7 +253,7 @@ class StagePhaseTests(BlinkAssertions):
                         self.assertEqual(on.rows_text()[0].count("execute"), 1)
                         self.assert_structure(on, off)
                         x = on.rows_text()[0].index("execute")
-                        bright = normalize_style("hb_opencode" if status == "active" else "title_dim")[0]
+                        bright = normalize_style("fam_sonnet" if status == "active" else "title_dim")[0]
                         self.assertEqual([on.cells[0][col][1] for col in range(x, x + 7)],
                                          [bright] * 7)
                         expected = {(0, col): DIM_KEYS[0] for col in range(x, x + 7)} if status == "active" else {}
@@ -345,7 +346,7 @@ class FramePhaseTests(BlinkAssertions):
     def expected_spans(self, frame, state):
         """Declare spans from fixed semantic labels, never from the observed off diff."""
         expected = route_count_spans(frame)
-        active = {"execute": "h_claude", "review": "g_work_off"}
+        active = {"execute": "famd_opus", "review": "g_work_off"}     # stage hues: Opus's cyan, not the Claude orange (11-18)
         for y, line in enumerate(frame.text_rows()):
             for x, glyph in enumerate(line):
                 if glyph == "⚑" and (x < 32 or state.view == "PEERS"):
@@ -354,7 +355,7 @@ class FramePhaseTests(BlinkAssertions):
             if state.view == "PEERS" and state.scope == "-":
                 strip = pane.find("✓●●·✕")
                 if strip >= 0:
-                    expected[(y, 34 + strip + 1)] = "h_claude"
+                    expected[(y, 34 + strip + 1)] = "famd_opus"
                     expected[(y, 34 + strip + 2)] = "g_work_off"
                 continue
             if "└ " in pane:
@@ -363,7 +364,7 @@ class FramePhaseTests(BlinkAssertions):
                     run = "running 3m"
                     length = next((size for size in range(len(run), len("running") - 1, -1)
                                    if line[x:x + size] == run[:size]), len("running"))
-                    expected.update({(y, col): "h_claude" for col in range(x, x + length)})
+                    expected.update({(y, col): "famd_opus" for col in range(x, x + length)})
                 continue  # KIND is a steady stage label
             for name, dim in active.items():
                 for match in re.finditer(name, pane):
@@ -436,7 +437,7 @@ class FramePhaseTests(BlinkAssertions):
                  if ": execute" in line[34:] and "staged" in line[34:])
         self.assertGreater(y, 25)
         x = on.text_rows()[y].index("execute", 34)
-        self.assertEqual((on.cells[y][x][1], off.cells[y][x][1]), ("hb_claude", "h_claude"))
+        self.assertEqual((on.cells[y][x][1], off.cells[y][x][1]), ("fam_opus", "famd_opus"))
         flag_y = next(y for y, line in enumerate(on.text_rows()) if "[c1] claude ⚑" in line[:32])
         flag_x = on.text_rows()[flag_y].index("⚑")
         self.assertEqual(off.cells[flag_y][flag_x][1], "tag_steward_dim")
@@ -480,7 +481,7 @@ class FramePhaseTests(BlinkAssertions):
                         expected.update(route_count_spans(on))
                         if status == "active":
                             expected.update({(y, col): DIM_KEYS[0] for col in range(x, x + 7)})
-                            self.assertEqual(on.cells[y][x][1], "hb_opencode")
+                            self.assertEqual(on.cells[y][x][1], "fam_sonnet")
                         self.assertEqual({pos: pair[1] for pos, pair in _changes(on, off).items()}, expected)
                         self.assert_hues(on, off)
                         self.assertEqual(draw(current_vm, state, cols, 45, beat=0), off)

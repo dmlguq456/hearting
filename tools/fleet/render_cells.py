@@ -44,6 +44,13 @@ _MUTED_256 = {
     "warning": 131,   # #af5f5f — warning-band background
 }
 
+# 11-18: the three harnesses' own colors, apart from `_MUTED_256`: Claude orange 173 (its teal 116 stays the Opus
+# family's and the stage palette's, and a test pins it), Codex 147 (#afafff, the Sonnet model color's own step on purpose
+# - the person chose "the Sonnet color, as in its logo"; kept as its own entry so either can move alone), OpenCode 153
+# (#afd7ff, a pale sky). Only the harness keys (`h_<harness>`, `hb_<harness>`, `hbb_<harness>`, `nm_<harness>`,
+# `nmd_<harness>`) read these; the muted magenta 176 and blue 147 keep the model families, effort and stage meanings.
+_HARNESS_256 = {"claude": 173, "codex": 147, "opencode": 153}
+
 # On terminals that allow palette redefinition, open the semantic hues by only
 # a few RGB points.  The xterm indices above remain the stable fallback, while
 # these values add a barely perceptible amount of saturation at equal brightness.
@@ -56,6 +63,11 @@ _RICHER_RGB_1000 = {
     "blue": (663, 663, 1000),    # #a9a9ff
 }
 
+# Claude's orange opened to the brand's own #d97757 (173 is #d7875f), the same way the hues above are. Codex and OpenCode
+# stay at their 256-color values (#afafff, #afd7ff): nothing to redefine. (Codex's 147 is also `blue`'s step, which the
+# table above opens to #a9a9ff, so on a terminal that allows it both read as that one slot.)
+_HARNESS_RGB_1000 = {"claude": (851, 467, 341)}    # #d97757
+
 # Keep each panel rung dark and restrained while giving the near-black
 # backgrounds a slightly richer shared slate cast.
 _TINT_RGB_1000 = {
@@ -67,7 +79,7 @@ _TINT_RGB_1000 = {
 
 def _palette_fg(name, fallback):
     if curses is not None and getattr(curses, "COLORS", 0) >= 256:
-        return _MUTED_256[name]
+        return _MUTED_256[name] if name in _MUTED_256 else _HARNESS_256[name]
     return fallback
 
 
@@ -93,7 +105,7 @@ _LOOPS_KEYS = ("oncall", "note", "study", "drill")
 
 # fg color_key → (hue, attr) decomposition (spec §5.2) — the basis for composing (fg, tint_bg)
 # pairs. hue: d=default w=soft white g=green y=yellow v=vanilla r=red c=cyan
-# m=magenta l=blue.
+# m=magenta l=blue cl=Claude's harness orange.
 # Keys absent here render as default-hue plain text under tint (safe degradation).
 _A_B, _A_D = _A_BOLD, _A_DIM
 
@@ -102,7 +114,7 @@ _A_B, _A_D = _A_BOLD, _A_DIM
 # distinguishable from its harness cell, which several consumers (`_stack_split`, the
 # width suites) resolve by color key alone. Bright = a live top-level session, dim =
 # a dispatch row or lost telemetry — the same brightness axis the harness cell uses.
-_NAME_HUE = {"claude": "c", "codex": "m", "opencode": "l"}
+_NAME_HUE = {"claude": "cl", "codex": "cx", "opencode": "oc"}
 _NAME_KEY = {h: "nm_" + h for h in _NAME_HUE}
 _NAME_KEY_DIM = {h: "nmd_" + h for h in _NAME_HUE}
 # Every key a row's NAME zone can carry. Consumers that locate the name segment by color

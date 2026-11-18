@@ -1798,6 +1798,14 @@
    "en": "Enter back to the table",
    "ko": "Enter 표로 돌아가기"
   },
+  "fleet.session_panel.popup_shown_at": {
+   "en": "as read at {time} · reading again",
+   "ko": "{time}에 읽은 내용 · 다시 읽는 중"
+  },
+  "fleet.session_panel.popup_shown_failed": {
+   "en": "as read at {time} · could not read again",
+   "ko": "{time}에 읽은 내용 · 다시 읽지 못함"
+  },
   "fleet.session_panel.popup_unfold": {
    "en": "p open panel",
    "ko": "p 패널 펼치기"

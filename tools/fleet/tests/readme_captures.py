@@ -165,7 +165,7 @@ def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), exp
     from tools.fleet.tests import readme_panel
     session = world.sessions[sid]
     state = state or {"working": "working", "blocked": "blocked"}.get(session.liveness, "idle")
-    columns = readme_panel.popup_width(window["cols"]) if window else None
+    columns = readme_panel.popup_width(window["cols"], "question") if window else None
     payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state,
                                       popup_columns=columns)
     table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160,

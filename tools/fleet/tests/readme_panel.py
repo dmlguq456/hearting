@@ -307,8 +307,9 @@ def popup_width(cols, kind="text"):
         return max(4, cols)
     if cols < 80:
         return cols - 4
-    # 11-18: the routes popup alone stands up to 148 cells, the other table popups up to 116.
-    return min(148, cols - 4) if kind == "route" else min(116, cols - 4) if kind == "table" else 76
+    # 11-18: the routes popup alone stands up to 196 cells, the question popup up to 132, the other table popups up to 116.
+    return (min(196, cols - 4) if kind == "route" else min(132, cols - 4) if kind == "question"
+            else min(116, cols - 4) if kind == "table" else 76)
 
 
 # The other harnesses' usage windows (demo values; the session's own harness takes ``World.values``).
@@ -491,7 +492,7 @@ function tableTitle(m,kind,table){
     let popup=null;
     const table=job.table||null;
     if(job.window&&(block.focused||table)){
-      const {cols,rows}=job.window,kind=table?(table.kind==='ROUTE'?'route':'table'):'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
+      const {cols,rows}=job.window,kind=table?(table.kind==='ROUTE'?'route':'table'):'question',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
       const names=sections(base,block,table),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
       let title,body;
       if(table){
@@ -553,8 +554,11 @@ def _xterm(index):
 
 def _richer():
     from tools.fleet import render_cells
-    return {index: tuple(round(v * 255 / 1000) for v in render_cells._RICHER_RGB_1000[name])
-            for name, index in render_cells._MUTED_256.items() if name in render_cells._RICHER_RGB_1000}
+    opened = {index: tuple(round(v * 255 / 1000) for v in render_cells._RICHER_RGB_1000[name])
+              for name, index in render_cells._MUTED_256.items() if name in render_cells._RICHER_RGB_1000}
+    opened.update({index: tuple(round(v * 255 / 1000) for v in render_cells._HARNESS_RGB_1000[name])
+                   for name, index in render_cells._HARNESS_256.items() if name in render_cells._HARNESS_RGB_1000})
+    return opened
 
 
 def _colour(value, default, richer):
@@ -669,7 +673,7 @@ CONVERSATION = {
     ),
 }
 _CONVERSATION_STYLE = {"you": {"fg": 253, "bold": True}, "body": {"fg": None}, "dim": {"dim": True},
-                       "claude": {"fg": 116}, "codex": {"fg": 176}, "opencode": {"fg": 147}}
+                       "claude": {"fg": 173}, "codex": {"fg": 147}, "opencode": {"fg": 153}}
 
 
 # The window's last line under the native screen is the shell's one line in every harness (spec rule 60):
