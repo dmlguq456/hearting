@@ -200,7 +200,7 @@ from capability_route_compose import (  # noqa: F401
 from capability_route_scope import (  # noqa: F401
     _bind_entry_execution_scope, _CAMPAIGN_ROWS_UNSET, _compose_campaign_line,
     _project_entry_scope_nodes, compose_campaign_hint, COMPOSE_CAMPAIGN_LIST_CAP,
-    compose_campaign_selection, compose_campaign_summaries, compose_card,
+    compose_campaign_selection, compose_campaign_summaries, compose_card, frame_advice, frame_advice_reason,
     compose_decision_lines, compose_default_slug, compose_observations, compose_omission_lines,
     compose_resolve_campaign_key, COMPOSE_SLUG_WORDS, cwd_campaign_keys,
     CWD_CAMPAIGN_KEYS_SHOWN, CWD_CAMPAIGN_SCAN_ROUTES, declared_start_approvals,
@@ -2227,6 +2227,9 @@ def main():
                 raise ValueError(f"{non_git_decision['cause']}; source-mutating worker route; "
                                  f"{non_git_decision['next']}")
             import work_intent
+            _advice = frame_advice(route)
+            if _advice:
+                print("frame_advice=" + frame_advice_reason(_advice), file=sys.stderr)
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                                campaign_selection=_campaign_for_card,
                                intent_original=(None if route.get("route_plan") else
@@ -2278,6 +2281,9 @@ def main():
         # Bookkeeping runs after the work has started: the start does not depend on it (the sweep
         # never closes this route, and a cycle it seals is never the one this route begins or continues).
         _route_autoclose(artifact_root,"compose",route)
+        _advice = frame_advice(route)
+        if _advice:  # one machine-readable line beside the card's own; the route is already open
+            print("frame_advice=" + frame_advice_reason(_advice), file=sys.stderr)
         print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
                            non_git_decision=non_git_decision,
