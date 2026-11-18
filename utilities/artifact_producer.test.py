@@ -820,6 +820,15 @@ class ActivateAndBeginTest(ProducerTestBase):
         self.assertEqual(P.finalize(self.root, cycle_id=second["cycle_id"])["status"], "sealed")
         self.assertEqual(P.route_cycle_for(self.root, P.load_route(self.root, route_file))["cycle_id"],
                          second["cycle_id"])
+        # two turns that began in the same second (or in the opposite order): the chain still names the newer one
+        import artifact_producer_routes as routes_module
+        real_list = routes_module.list_cycle_records
+        def same_second(root, **kw):
+            rows = [dict(r, started_on="2026-01-01T00:00:00Z") for r in real_list(root, **kw)]
+            return sorted(rows, key=lambda r: r["cycle_id"] != first["cycle_id"])   # the older one listed last
+        with mock.patch.object(routes_module, "list_cycle_records", same_second):
+            self.assertEqual(P.route_cycle_for(self.root, P.load_route(self.root, route_file))["cycle_id"],
+                             second["cycle_id"])
         # a rebuilt index names the same newest cycle for the route as the incremental one
         import artifact_admission
         rebuilt = artifact_admission.rebuild_index(self.root)
