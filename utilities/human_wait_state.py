@@ -1266,7 +1266,8 @@ def _valid_resources(value):
 # the sample Fleet's RESOURCES view draws), asked at most once in RESOURCE_SAMPLE_S by a pass that is already running, in one short-lived
 # thread the pass never waits for: the pass uses the last sample it has, so a panel's refresh is never held behind a slow host.
 RESOURCE_SAMPLE_S = 30.0
-_resources = {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None}
+# `on` is set by the resident producer's own loop alone: a refresh anywhere else (a test, a one-shot) reads no host.
+_resources = {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None, "on": False}
 
 
 def _resource_sample(now):
@@ -4940,8 +4941,8 @@ def _refresh_cache() -> bool:
                     # (The session records the pass worked out for the route rows are used again, not worked out twice.)
                     from tools.fleet.explorer.live import session_peers
                     result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
-                    # The compute hosts' last sample (the resident producer only; a one-shot refresh has none): CPU, memory and each GPU's use.
-                    if _producer_root is not None and records:
+                    # The compute hosts' last sample (the resident producer's loop only; a one-shot refresh has none): CPU, memory and each GPU's use.
+                    if _resources["on"] and records:
                         sample, sampled_at = _resource_sample(time.time())
                         result["resources"] = resources_view(sample, sampled_at, records[0][1])
             except Exception:
@@ -5447,6 +5448,7 @@ def _producer_loop(fd: int) -> None:
     global _producer_root
     root = state_root()
     _producer_root = root
+    _resources["on"] = True
     try:
         if not root.is_dir():
             return
@@ -5500,6 +5502,7 @@ def _producer_loop(fd: int) -> None:
         return
     finally:
         _producer_root = None
+        _resources["on"] = False
         _stop_wake_events()
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)

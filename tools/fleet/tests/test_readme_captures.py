@@ -145,6 +145,7 @@ class PublishedFiles(unittest.TestCase):
         self.assertEqual(gif.read_bytes()[:6], b"GIF89a")
         self.assertLess(gif.stat().st_size, GIF_LIMIT)
 
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed (the pictures are drawn by a developer's tool)")
     def test_quantising_keeps_the_named_colours_as_they_are(self):
         """Median-cut once turned code blue into claude's teal and lab amber into the status yellow: the five fields' hues
         and the three zones' stay exact, and a picture of them alone keeps each as its own palette entry."""

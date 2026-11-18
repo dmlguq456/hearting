@@ -169,7 +169,7 @@ class ResourcesBackendTest(unittest.TestCase):
             def is_alive(self):
                 return False
         fake = mock.Mock(return_value={"configured": True, "hosts": [], "observed_at": 5.0})
-        with mock.patch.object(state, "_resources", {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None}), \
+        with mock.patch.object(state, "_resources", {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None, "on": False}), \
                 mock.patch.object(state.threading, "Thread", Quick), \
                 mock.patch("tools.fleet.collectors.compute_hosts.collect", fake):
             first = state._resource_sample(100.0)
@@ -178,6 +178,14 @@ class ResourcesBackendTest(unittest.TestCase):
             self.assertEqual(len(started), 1)                                                  # not again within the period
             state._resource_sample(100.0 + state.RESOURCE_SAMPLE_S + 1)
             self.assertEqual(len(started), 2)
+
+    def test_only_the_resident_producers_loop_samples_the_hosts(self):
+        import human_wait_state as state
+        self.assertFalse(state._resources["on"])          # a refresh in a test or a one-shot reads no host
+        import inspect
+        loop = inspect.getsource(state._producer_loop)
+        self.assertIn('_resources["on"] = True', loop)
+        self.assertIn('_resources["on"] = False', loop)
 
     def test_from_the_producers_cache_to_the_panels_rows_and_an_old_sample_is_not_drawn(self):
         import human_wait_state as state
