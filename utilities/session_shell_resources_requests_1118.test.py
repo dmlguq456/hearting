@@ -98,6 +98,37 @@ const unknown=plain(render(24,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/2
 assert.equal(unknown,'  GPU0 92% 21/24G');
 """)
 
+    def test_a_host_row_gives_way_mem_then_cpu_then_the_name_is_cut_and_the_idle_count_stays_last(self):
+        # 11-18 review: `idle GPU N` was the first value to go (a 7-letter host name lost it at the default width 40); it is now the last.
+        self.node(r"""
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const LONG='gpu-box-with-a-rather-long-hostname';
+const rowOf=(width,h)=>{const rows=plain(render(width,60,{resources:[h]})),at=rows.findIndex(s=>/^│ RESOURCES/.test(s));
+ assert(rows.every(s=>cells(s)===width),width+'\n'+rows.join('\n'));return rows[at+1].slice(2,-2).trimEnd();};
+for(const [name,idle] of [['devbox',3],['gpu-box',3],[LONG,3],['devbox',0],[LONG,0]]){
+ const h=host(name,31,39,[],idle);
+ for(let width=18;width<=64;width++){
+  const r=rowOf(width,h),inner=width-4,least=Math.min(name.length,12);
+  const has=x=>r.includes(x);
+  // The idle count is shown whenever the shortened name (12 cells at least) and the count fit together.
+  if(idle&&inner>=least+2+('idle GPU '+idle).length)assert(has('idle GPU '+idle),name+' '+width+': '+r);
+  // The order of leaving: MEM first, CPU next, the name's cut, and the count last: what stays is what the later ones need.
+  if(has('MEM'))assert(has('CPU')&&!r.includes('…')&&(!idle||has('idle GPU')),name+' '+width+': '+r);
+  if(has('CPU'))assert(!r.includes('…')&&(!idle||has('idle GPU')),name+' '+width+': '+r);
+  if(r.includes('…')&&has('idle GPU'))assert(r.indexOf('…')>=least-1,name+' '+width+': '+r);
+  // The order on the row is still the name, CPU, MEM, the idle count.
+  const at=['CPU','MEM','idle GPU'].map(x=>r.indexOf(x)).filter(i=>i>=0);
+  assert.deepEqual(at,[...at].sort((a,b)=>a-b),r);
+ }
+}
+// The widths the person looks at (inner 28, 36, 40, 56): the long name is cut, the idle count stays; at 60 the name is whole with CPU and idle.
+assert.equal(rowOf(32,host(LONG,12,8,[],3)),'gpu-box-with-a-…  idle GPU 3');
+assert.equal(rowOf(40,host(LONG,12,8,[],3)),'gpu-box-with-a-rather-l…  idle GPU 3');
+assert.equal(rowOf(44,host('gpu-box',12,38,[],3)),'gpu-box  CPU 12%  MEM 38%  idle GPU 3');
+assert.equal(rowOf(40,host('gpu-box',12,38,[],3)),'gpu-box  CPU 12%  idle GPU 3');   // 37 inside 36: MEM goes first
+assert.equal(rowOf(60,host(LONG,12,8,[],3)),LONG+'  CPU 12%  idle GPU 3');
+""")
+
     def test_short_of_rows_it_gives_way_first_gpu_rows_then_host_rows_and_the_rest_stands_as_without_it(self):
         self.node(r"""
 const kinds=rows=>({gpu:rows.filter(s=>/GPU\d/.test(s)).length,host:rows.filter(s=>/host-[ab]/.test(s)).length,idle:rows.filter(s=>/idle GPU/.test(s)&&!/host-[ab]/.test(s)).length,

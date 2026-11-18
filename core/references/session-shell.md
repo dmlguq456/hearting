@@ -371,10 +371,10 @@ glyph. Directly under `GIT` stands `PEERS` (11-17, the person's PEERS sketch; th
 `REPO`/`GIT`): `PEERS  [c7] ⚑  ─ [d4] [3b]`, the supervising session, its flag, two cells, a dash, then the sessions it
 supervises, in that order from every window; a supervised window shows only its own group
 (`[c7] ⚑  ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
-harness color: this window's own the lit color, bold; every other session's the same hue one step down and plain (11-18, "this window's
-number should show at a glance": the USAGE names' own values, `FACES.*.harnessName`, drawn as that face's fixed color, never the terminal's
-dim; on the light face Claude's and OpenCode's have no lighter step that still reads, so their weight alone sets them apart; with no color,
-weight alone, as before); the flag is Fleet's steward pink, the dash and the dot dim; it shows no
+harness color: this window's own the lit color, bold; every other session's the same hue one step back and plain (11-18, "this window's
+number should show at a glance": on the dark and unknown faces the USAGE names' own values, `FACES.*.harnessName`; on the light face
+`FACES.light.peerOther`, the lighter step, Claude 173, Codex 68, OpenCode 66, so it is never this window's deep hue; each drawn as that
+face's fixed color, never the terminal's dim; with no color, weight alone, as before); the flag is Fleet's steward pink, the dash and the dot dim; it shows no
 session state. Short of cells the last numbers go from the back and the count of the ones a group lost stands
 inside that group (`[3b] ⚑  ─ +2`), never after another group's; a group keeps its head (`[x] ⚑  ─`) while that fits, else the
 group goes whole and no count is put on the groups left; a window with no relation has no row. The relation

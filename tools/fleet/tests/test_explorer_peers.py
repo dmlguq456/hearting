@@ -124,19 +124,20 @@ def _history_recede_delta(expected_cells):
 
 
 def _stage_cyan_delta(actual_cells, expected_cells):
-    """The approved 2026-11-18 delta (the harness colors are their own now): the stage palette's hues (blue, cyan, magenta)
-    were drawn with the harness keys in the reference (`h_`/`hb_` claude, codex, opencode); they stay the hues they were, now
-    on the model families' keys. Only a cell with the same glyph whose frozen key is a harness key and whose drawn key is
-    exactly its family twin may differ; a real harness cell (drawn `hb_claude`) is still compared as captured."""
-    twin = {"h_claude": "famd_opus", "hb_claude": "fam_opus", "h_codex": "famd_fable", "hb_codex": "fam_fable",
-            "hb_opencode": "fam_sonnet"}
+    """The approved 2026-11-18 delta (the harness colors are their own now): the stage strip's hues (blue, cyan, magenta)
+    were drawn with the harness keys in the reference (`h_claude`, `h_codex`); they stay the hues they were, now on the model
+    families' keys. Only the moves this fixture shows may differ, and each by exactly its listed pair (the glyph, the frozen
+    key, the key now drawn): the strip's `✓` and `·` cells. Any other cell, a real harness cell (`hb_*`) included, is compared
+    as captured, so a harness cell that turned into a family key fails here."""
+    moves = {("✓", "h_claude"): "famd_opus", ("·", "h_claude"): "famd_opus", ("·", "h_codex"): "famd_fable"}
     normalized = [list(row) for row in expected_cells]
     for y, row in enumerate(normalized):
         if y >= len(actual_cells):
             break
         for x, cell in enumerate(row):
-            if x < len(actual_cells[y]) and cell[1] in twin and actual_cells[y][x][:2] == [cell[0], twin[cell[1]]]:
-                row[x] = [cell[0], twin[cell[1]], *cell[2:]]
+            if (x < len(actual_cells[y]) and (cell[0], cell[1]) in moves
+                    and actual_cells[y][x][:2] == [cell[0], moves[(cell[0], cell[1])]]):
+                row[x] = [cell[0], moves[(cell[0], cell[1])], *cell[2:]]
             # The approved 2026-11-18 spinner delta: a working spinner on a session card is drawn in its harness's color.
             elif (x < len(actual_cells[y]) and cell[1] in ("g_spin", "spin") and cell[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
                   and actual_cells[y][x][:2] in ([cell[0], "spin_claude"], [cell[0], "spin_codex"], [cell[0], "spin_opencode"])):

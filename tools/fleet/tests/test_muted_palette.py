@@ -37,8 +37,19 @@ class MutedPaletteTest(unittest.TestCase):
             self.assertNotEqual(render._palette_fg("steward_pink", 5), render._palette_fg("soft", 7))
             self.assertNotEqual(render._palette_fg("steward_pink", 5), render._palette_fg("yellow", 3))
 
+    def test_the_tint_pairs_have_room_below_the_kind_pairs(self):
+        """11-18 review: a hue added past the room makes `render` raise inside its tint block and every tint silently stands down.
+        The room is fixed here: with the hues of today the pairs end at `_TINT_PAIR_START + levels * hues`, `_KIND_PAIR_START` is the cap."""
+        hues = render.hue_colors(256)
+        used = len(render._TINT_LVL) * len(hues)
+        self.assertEqual((len(hues), len(render._TINT_LVL), render._TINT_PAIR_START), (22, 6, 22))
+        self.assertLessEqual(render._TINT_PAIR_START + used, render._KIND_PAIR_START)
+        # 22 + 6 * 22 = 154 of 160: six spare pairs, one more hue. A second added hue overflows: raise `_KIND_PAIR_START`'s room first
+        # (move the kind and zone pairs), then change this number with it.
+        self.assertEqual(render._KIND_PAIR_START - (render._TINT_PAIR_START + used), 6)
+
     def test_claude_harness_color_is_orange_apart_from_the_teal(self):
-        """11-18: the Claude harness keys wear orange 173 (the mock-up's #e59a6f); the teal 116 stays
+        """11-18: the Claude harness keys wear orange 173 (the mock-up's brand orange, now #d97757); the teal 116 stays
         in `_MUTED_256` for the Opus family and the stage palette, so the pinned table above is unchanged."""
         self.assertEqual(render._HARNESS_256, {"claude": 173, "codex": 147, "opencode": 153})
         self.assertEqual(render._HARNESS_RGB_1000, {"claude": (851, 467, 341)})      # #d97757; the others open nothing

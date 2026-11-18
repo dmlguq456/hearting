@@ -99,6 +99,10 @@ const FACES={
     // (The light face: the deep hues 166, 25, 31 (L* 54.7, 40, 52.3). Codex's name is the step lighter, 68 (L* 56.7); Claude's deep orange
     // and OpenCode's deep sky are already the lightest that read on white (166, 3.3; 31, 4.1), so their names are the head's own hue.)
     harnessName:{claude:166,codex:68,opencode:31},
+    // 11-18 (PEERS: this window's number is its deep hue bold, every other window's one step back, "나머지는 컬러도 조금 어둡게"):
+    // on white the step back is the lighter one. Claude 173 (2.8 on white, 12.4 from 166 by CIEDE2000), Codex 68 (its name's own,
+    // 16.8 from 25), OpenCode 66 (4.0 on white, 14.3 from 31, 23.5 from Codex's 68). Only PEERS reads it; the USAGE names keep `harnessName`.
+    peerOther:{claude:173,codex:68,opencode:66},
     // (The light face's ramps, the deep pairs 166, 25, 31 first, toward the light ground: the harness's own steps; `scan` dimmest first,
     // from the still frame's gray up to the deep color.)
     ramp:{claude:{orbit:[166,173,216,223],scan:[243,102,137,173,166],waveRGB:[[118,118,118],[215,95,0]]},
@@ -186,7 +190,7 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     else if(role==='steward'&&theme==='mono')dim=false;
     // Spec rule 47: the moving frame's cells take their step's tone on their face (an unknown face
     // the dark face's), at full strength; mono never moves (no tone).
-    else if(role==='harness-name'&&theme!=='mono'){foreground=F.harnessName[part.harness]??foreground;dim=false;}
+    else if(role==='harness-name'&&theme!=='mono'){foreground=((part.peer&&F.peerOther)||F.harnessName)[part.harness]??foreground;dim=false;}
     else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors,harness);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
@@ -603,6 +607,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // 11-17 (route zones, the person: "그래도 컬러는 전부 달라야하지 않을까"): the `●` and the spinner of a route of the `direct` zone
   // wear that zone's color (a lit beat in it, a dark beat dimmed); a `dispatch` route's are the working green they were, a
   // request's arrow the request color (`requestForms`). A failure's, a result's and a wait's mark keep the state's own.
+  // 11-18 (the harness spinner, below): a spinner on a line that names its harness (`routeGlyph` with `h`) turns in that harness's
+  // color before this, so a `direct` zone's working owner line spins in its harness's color; the zone's color stays on the `●`, on a
+  // spinner whose line names no harness, and on the zone's other marks.
   const zonePaint=(r,part)=>{
     const look=r&&r.zone==='direct'?styles.zone_direct:null;
     return look&&(part.spin||part.text==='●'||/^[\u2800-\u28ff]$/.test(String(part.text)))?{...part,...look,dim:part.dim===true||look.dim===true}:part;
@@ -728,10 +735,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const groups=(peers?peers.groups:[]).filter(g=>g&&g.steward&&Array.isArray(g.members)&&g.members.length);
       if(!groups.length)return [];
       // 11-18 (the person: "PEERS에서 볼드 여부만 해놓으니까 나의 세션이 뭔지 확 안오네, 나머지는 컬러도 조금 어둡게"): this window's number is its harness
-      // color, bold (the brightest); every other session's is its harness's one step down (`FACES.*.harnessName`, the USAGE names' own
-      // values, drawn as that face's fixed color, never the terminal's dim), plain. No color: weight alone tells them apart, as before.
+      // color, bold (the brightest); every other session's is its harness's one step back (the USAGE names' own `FACES.*.harnessName`;
+      // on the light face `FACES.light.peerOther`, the lighter step, so it never equals this window's deep hue), drawn as that
+      // face's fixed color, never the terminal's dim, plain. No color: weight alone tells them apart, as before.
       const number=e=>{const h=/^hb_(claude|codex|opencode)$/.exec(e.key||'');
-        return {...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true,role:'peer'}:h?{role:'harness-name',harness:h[1]}:{role:'peer'})};};
+        return {...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true,role:'peer'}:h?{role:'harness-name',harness:h[1],peer:true}:{role:'peer'})};};
       const flag={...text('⚑','tag_steward'),role:'steward',...(model.no_color===true||cfg.theme==='mono'?{bold:true,dim:false}:{})};
       const build=keep=>{
         const out=[];let rest=keep;
@@ -1707,21 +1715,24 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // right above USAGE. One row for each host: its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs nothing runs
     // on (`idle GPU 6`). Under it the GPUs a process runs on, side by side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G`), onto the next
     // row where they do not fit; one GPU's group is never split between rows. No gauge: the use is its number, in the level's color.
-    // The values are the sample the shared producer already took. Short of cells on a host row the last value goes first (the idle
-    // count, then MEM, then CPU) and a long name is cut with `…`; short of cells for one GPU's group the memory goes first, then the use,
+    // The values are the sample the shared producer already took. Short of cells on a host row the values go in this order: MEM,
+    // then CPU, then the name is cut with `…` (12 cells at least), the idle count last (11-18 review: the idle count was first to go); short of cells for one GPU's group the memory goes first, then the use,
     // and the session's number stays (who holds the GPU is what the section is for). Short of rows it gives way before everything else:
     // the GPU rows (from the last), the host rows (from the last; the name row goes with the last of them), so USAGE and the sections
     // above it stand as they did without it.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
     const resourceHostRow=h=>{
-      const idle=h.idle>0?[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]:[];
-      const values=[...painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted),...(idle.length?[idle]:[])];
+      const idle=h.idle>0?[[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[];
+      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted);
       const name=painted(h.host),least=Math.min(size(name),12);
-      for(let n=values.length;n>=0;n--){
-        const tail=values.slice(0,n).flatMap(x=>[text('  '),...x]),room=inner-size(tail);
-        if(room>=least)return [...(size(name)<=room?name:cut(name,room)),...tail];
+      const tailOf=vals=>vals.flatMap(x=>[text('  '),...x]);
+      // Giving way: MEM, then CPU (the last stat first), then the name is cut (12 cells at least), the idle count last.
+      for(let n=stats.length;n>=0;n--){
+        const tail=tailOf([...stats.slice(0,n),...idle]);
+        if(size(name)<=inner-size(tail))return [...name,...tail];
       }
+      if(idle.length){const tail=tailOf(idle),room=inner-size(tail);if(room>=least)return [...cut(name,room),...tail];}
       return cut(name,inner);
     };
     // One GPU's group at a form (0 whole; 1 without the memory; 2 without the use too; 3 the label alone).
