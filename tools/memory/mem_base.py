@@ -1945,6 +1945,7 @@ EXCHANGE_RECEIVE_RETRY_SECONDS = 120.0  # a dead remote is not retried per promp
 EXCHANGE_SPAWN_GRACE_SECONDS = 5.0    # a just-spawned worker has not taken its lock yet
 EXCHANGE_MAX_RUNS = 2                 # one run, plus at most one follow-up
 EXCHANGE_NOTICE_REPEAT_SECONDS = 6 * 60 * 60  # the same failure reason speaks once per this
+EXCHANGE_STALE_DAYS = 3               # unpushed this long with a backlog: show one line
 
 
 def _exchange_mode():
