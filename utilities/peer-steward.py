@@ -1596,9 +1596,24 @@ def _placement_result(*argv):
     return result
 
 
+def _project_start_hint():
+    """The window value in this process's environment as a lookup hint, else ``""``.
+
+    A session Claude's background daemon started carries the window value the daemon inherited
+    from whichever window first started it, not one a window gave this session: no hint."""
+    hint = os.environ.get("HERDR_PANE_ID", "")
+    if not hint:
+        return ""
+    try:
+        import peer_address
+        return "" if peer_address._service_hosted(os.getpid()) else hint
+    except Exception:
+        return ""
+
+
 def _project_start_workspace():
     """A directory match locates a workspace; it never proves caller ownership."""
-    hint = os.environ.get("HERDR_PANE_ID")
+    hint = _project_start_hint()
     if not hint:
         return None
     try:
@@ -1724,7 +1739,7 @@ def _start_request(args):
             args.project_workspace = _project_start_workspace()
     args.start_request.update(beside=args.beside,
                               project_workspace=getattr(args, "project_workspace", None),
-                              project_hint=os.environ.get("HERDR_PANE_ID", ""))
+                              project_hint=_project_start_hint())
     if terminal_surface.is_tmux_pane(args.beside or args.pane or ""):
         return _start_tmux_request(args)
     workspace = (args.beside.split(":")[0] if args.beside else
@@ -5247,7 +5262,8 @@ def _watch_publish_ready_receipt(target, native_state, arm, expected, server,
 def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=None, handoff_acceptance=False):
     """Persist exact transport ownership without copying the sealed message body."""
     sender = row.get("from") or {}
-    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
+    binding = peer_message.pending_delivery_binding(row)
+    recipient = (binding or {}).get("recipient") or row.get("to") or {}
     sid = recipient.get("session_id")
     harness = recipient.get("harness")
     identity = {"server": _HERDR_SESSION or "default", "pane": pane or "",
@@ -5259,7 +5275,10 @@ def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=Non
             identity["namespace"] = (_PEER_NAMESPACE or peer_address.caller_endpoint(
                 server=_HERDR_SESSION)["socket"])
     intent = {"ref": row.get("ref"), "body_digest": row.get("body_sha256"),
-              "target": target, "from": sender, "to": recipient,
+              "target": target, "from": sender,
+              # A row that went on to a background session still names the old id: the duty
+              # keeps the row's own target, and its receipt names who took it.
+              "to": row.get("to") if (binding or {}).get("parked_from") else recipient,
               "refs": list(row.get("refs") or []),
               "delay_notice_for": delay_notice_for or ""}
     if row.get("producer_binding") is not None:
