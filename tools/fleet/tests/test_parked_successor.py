@@ -36,6 +36,21 @@ class ParkedSuccessor(unittest.TestCase):
         (Path(self.home) / "sessions").mkdir()
         self.children = []
         self.addCleanup(self._reap)
+        self.addCleanup(self._table_agrees_with_the_single_answers)
+
+    def _table_agrees_with_the_single_answers(self):
+        """Whatever a test built, the one-read table (`parked_links`, what a scan of many rows uses)
+        gives, for every id in play, the answer the per-id calls give."""
+        table = sr.parked_links("claude", home=self.home)
+        ids = {OLD, NEW, OTHER, THIRD}
+        for path in (Path(self.home) / "sessions").glob("*.json"):
+            try:
+                ids.add(str(json.loads(path.read_text()).get("sessionId")).lower())
+            except (OSError, ValueError):
+                pass
+        for sid in ids:
+            self.assertEqual(table["successor"].get(sid), sr.parked_successor("claude", sid, home=self.home), sid)
+            self.assertEqual(table["origin"].get(sid), sr.parked_origin("claude", sid, home=self.home), sid)
 
     def _reap(self):
         for child in self.children:

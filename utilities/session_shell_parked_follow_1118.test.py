@@ -182,6 +182,37 @@ class ParkedPanel(unittest.TestCase):
             shell.panel_projection("claude", OLD, native_pid=other.pid, native_start=start, columns=100, rows=40)
         self.assertEqual(asked.call_args.args[1], OLD)
 
+    def test_the_supervision_mark_is_read_for_the_session_the_panel_shows(self):
+        """Beside NEW's number the mark is NEW's: OLD's supervision does not draw one, and NEW's does."""
+        from fleet.collectors import steward as steward_role
+        self.scene()
+        for marked, expected in ((OLD, False), (NEW, True)):
+            asked = []
+
+            def role(harness, sid, **kw):
+                asked.append(sid)
+                return sid == marked
+            with mock.patch.object(steward_role, "role_flag", side_effect=role):
+                out, _ = self.project()
+            self.assertEqual(asked, [NEW])
+            self.assertIs(out["panel"]["steward"], expected, marked)
+        # No link: the window's own session, as before.
+        self.bg.kill()
+        self.bg.wait()
+        asked = []
+        with mock.patch.object(steward_role, "role_flag", side_effect=lambda h, sid, **kw: asked.append(sid) or True):
+            out, _ = self.project()
+        self.assertEqual(asked, [OLD])
+        self.assertIs(out["panel"]["steward"], True)
+
+    def test_one_projection_reads_the_session_records_once(self):
+        """The panel decides the link once per projection, not once per value it draws."""
+        self.scene()
+        real = sr._live_claude_records
+        with mock.patch.object(sr, "_live_claude_records", side_effect=real) as read:
+            self.project()
+        self.assertEqual(read.call_count, 1)
+
     def test_other_harnesses_are_unchanged(self):
         self.scene()
         with mock.patch.object(human_wait_state, "cached_statusline", return_value=((0, 0), "")) as asked, \

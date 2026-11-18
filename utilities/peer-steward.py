@@ -5262,7 +5262,8 @@ def _watch_publish_ready_receipt(target, native_state, arm, expected, server,
 def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=None, handoff_acceptance=False):
     """Persist exact transport ownership without copying the sealed message body."""
     sender = row.get("from") or {}
-    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
+    binding = peer_message.pending_delivery_binding(row)
+    recipient = (binding or {}).get("recipient") or row.get("to") or {}
     sid = recipient.get("session_id")
     harness = recipient.get("harness")
     identity = {"server": _HERDR_SESSION or "default", "pane": pane or "",
@@ -5274,7 +5275,10 @@ def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=Non
             identity["namespace"] = (_PEER_NAMESPACE or peer_address.caller_endpoint(
                 server=_HERDR_SESSION)["socket"])
     intent = {"ref": row.get("ref"), "body_digest": row.get("body_sha256"),
-              "target": target, "from": sender, "to": recipient,
+              "target": target, "from": sender,
+              # A row that went on to a background session still names the old id: the duty
+              # keeps the row's own target, and its receipt names who took it.
+              "to": row.get("to") if (binding or {}).get("parked_from") else recipient,
               "refs": list(row.get("refs") or []),
               "delay_notice_for": delay_notice_for or ""}
     if row.get("producer_binding") is not None:

@@ -975,27 +975,27 @@ _PARKED_MEMO_SECONDS = 1.0
 
 
 def _parked_link(key, sid):
-    """``session_registry.parked_successor``/``parked_origin`` of a Claude session, or None.
+    """``parked_successor`` (``key="successor"``) or ``parked_origin`` (``"origin"``) of a Claude
+    session, or None.
 
     The link between a window's viewer and the background session that holds its conversation
-    is read live from the running processes and never stored. A scan asks it for every row
-    it looks at, so one answer is reused for a second inside this process."""
+    is read live from the running processes and never stored. A scan asks about every row it
+    looks at, so the live records are read ONCE into a table (``session_registry.parked_links``)
+    that this process reuses for a second; each row then costs one lookup, and an empty table
+    (no window has a held conversation) costs nothing more."""
     now = time.monotonic()
-    held = _PARKED_MEMO.get((key, sid))
-    if held is not None and now - held[0] < _PARKED_MEMO_SECONDS:
-        return held[1]
-    try:
-        tools = str(Path(__file__).resolve().parents[1] / "tools")
-        if tools not in sys.path:
-            sys.path.insert(0, tools)
-        from fleet import session_registry
-        found = getattr(session_registry, "parked_" + key)("claude", sid)
-    except Exception:
-        found = None
-    if len(_PARKED_MEMO) > 64:
-        _PARKED_MEMO.clear()
-    _PARKED_MEMO[(key, sid)] = (now, found)
-    return found
+    held = _PARKED_MEMO.get("table")
+    if held is None or now - held[0] >= _PARKED_MEMO_SECONDS:
+        try:
+            tools = str(Path(__file__).resolve().parents[1] / "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from fleet import session_registry
+            table = session_registry.parked_links("claude")
+        except Exception:
+            table = {}
+        held = _PARKED_MEMO["table"] = (now, table)
+    return (held[1].get(key) or {}).get(sid.lower()) if isinstance(sid, str) else None
 
 
 def _parked_recipient(original, created):
@@ -1052,8 +1052,15 @@ def pending_delivery_binding(row, *, include_acked=False):
             return {"recipient": dict(bound), "watches": []}
         return None
     original = row.get("to")
-    return ({"recipient": dict(_parked_recipient(original, row.get("created"))), "watches": []}
-            if _valid_transfer_endpoint(original) else None)
+    if not _valid_transfer_endpoint(original):
+        return None
+    held = _parked_recipient(original, row.get("created"))
+    if held is original:
+        return {"recipient": dict(original), "watches": []}
+    # `parked_from` names the id the row still carries, so a receipt for this binding can be
+    # told from a row that was addressed to its receiver (see `acknowledge_message_receipt`).
+    return {"recipient": dict(held), "watches": [],
+            "parked_from": {"harness": original["harness"], "session_id": original["session_id"]}}
 
 
 def pending_delivery_recipient(row):
@@ -1852,6 +1859,7 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
     except (OSError, ValueError):
         roots = None
     groups = {}
+    withheld = set()
     scanned = 0
     verified_all = True
     for name in names:
@@ -1877,7 +1885,12 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
             continue
         if not row or row.get("state") == "received":
             continue
-        recipient_key = _index_key(pending_delivery_recipient(row))
+        binding = pending_delivery_binding(row)
+        recipient_key = _index_key((binding or {}).get("recipient"))
+        if (binding or {}).get("parked_from"):
+            # The row names the window's old id but a background session took it: the old id's
+            # index would omit it and look current once the link ends, so it is not published.
+            withheld.add(_index_key(binding["parked_from"]))
         sender_key = _index_key(row.get("from"))
         if recipient_key is None and sender_key is None:
             continue
@@ -1894,6 +1907,8 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
         return result
     recipients = senders = 0
     for (harness, session_id), lists in groups.items():
+        if (harness, session_id) in withheld:
+            continue
         if _publish_recipient_index(
                 pending, {"harness": harness, "session_id": session_id}, lists["rows"], names,
                 sent=lists["sent"], dispatch_root=dispatch_root,
@@ -2108,6 +2123,12 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
               and isinstance(recipient, dict) and recipient.get("harness") == "claude"
               and isinstance(recipient.get("session_id"), str) else None)
     if origin:
+        use_index = False
+    if (use_index and recipient.get("harness") == "claude" and isinstance(recipient.get("session_id"), str)
+            and _parked_link("successor", recipient["session_id"])):
+        # While this window's conversation is held elsewhere, the rows it still names but its
+        # background session took are not in this scan; an index published now would look
+        # current after the link ends and keep hiding them. Neither read nor publish one.
         use_index = False
     if use_index:
         indexed = _indexed_pending_rows(pending, recipient, roots=roots,

@@ -166,6 +166,156 @@ class Parked(unittest.TestCase):
         _text, other = self.pend(OTHER, self.started + 5)
         self.assertEqual(peer_message.pending_delivery_recipient(peer_message._read_pending(other))["session_id"], OTHER)
 
+    # --- a scan asks about the processes once, however many rows it looks at ----------------
+    def reads(self):
+        real = sr._live_claude_records
+        return mock.patch.object(sr, "_live_claude_records", side_effect=real)
+
+    def test_a_scan_reads_the_session_records_once_for_every_row(self):
+        for linked in (False, True):
+            with self.subTest(linked=linked):
+                self.tearDown_children()
+                self.scene(parked=linked)
+                for index in range(40):
+                    self.pend(OLD if index % 2 else OTHER, self.started + index)
+                peer_message._PARKED_MEMO.clear()
+                with self.reads() as read:
+                    list(peer_message._pending_rows(strict=True))     # a send's duplicate check: every row
+                self.assertEqual(read.call_count, 1)
+                peer_message._PARKED_MEMO.clear()
+                with self.reads() as read:
+                    peer_message.pending_messages({"harness": "claude", "session_id": NEW})
+                    peer_message.pending_messages({"harness": "claude", "session_id": OLD})
+                self.assertEqual(read.call_count, 1)                  # the table is shared inside the second
+
+    def test_no_window_held_means_no_per_row_work(self):
+        self.scene(parked=False)
+        for index in range(10):
+            self.pend(OLD, self.started + index)
+        peer_message._PARKED_MEMO.clear()
+        with mock.patch.object(sr, "parked_successor") as one, mock.patch.object(sr, "parked_origin") as two, \
+                mock.patch.object(sr, "_parked_from_viewer", wraps=sr._parked_from_viewer) as judged:
+            list(peer_message._pending_rows(strict=True))
+        one.assert_not_called()
+        two.assert_not_called()
+        judged.assert_not_called()                                    # nothing holds a job: nothing to judge
+
+    def tearDown_children(self):
+        for child in self.children:
+            child.kill()
+            child.wait()
+        self.children.clear()
+        for path in (self.config / "sessions").iterdir():
+            path.unlink()
+
+    # --- what the held session received is received (the duty and the index) --------------
+    def steward(self):
+        spec2 = importlib.util.spec_from_file_location("peer_steward_parked_1118", HERE / "peer-steward.py")
+        module = importlib.util.module_from_spec(spec2)
+        sys.modules["peer_steward_parked_1118"] = module
+        spec2.loader.exec_module(module)
+        module.peer_message._PARKED_MEMO.clear()
+        self.addCleanup(module.peer_message._PARKED_MEMO.clear)
+        return module
+
+    def duty_after(self, steward, ref):
+        import peer_obligations
+        store = peer_obligations.ObligationStore()
+        with mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=None):
+            steward._resume_message_obligation(store.get("message-" + ref), store)
+        return store.get("message-" + ref) or {}
+
+    def test_a_row_the_held_session_received_closes_its_duty(self):
+        import peer_obligations
+        steward = self.steward()
+        self.scene()
+        steward.peer_message._PARKED_MEMO.clear()
+        sender = {"harness": "claude", "session_id": SENDER, "name": None}
+        text, ref = steward.peer_message.prepare_peer_message(
+            "duty across the split", sender, {"harness": "claude", "session_id": OLD, "name": None}, defer=True)
+        row = steward.peer_message._read_pending(ref)
+        row.update(created=self.started + 30)
+        steward.peer_message._save_pending(row)
+        row = steward.peer_message._read_pending(ref)
+        with mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=None):
+            duty = steward._schedule_message_obligation(row, "claude:" + OLD)
+        self.assertEqual(duty["intent"]["to"]["session_id"], OLD)    # the duty keeps the row's own target
+        self.assertEqual(duty["intent"]["identity"]["session_id"], NEW)         # and who is to take it now
+        steward.peer_message._PARKED_MEMO.clear()
+        self.assertEqual(self.hook(NEW), text)
+        self.assertEqual(self.state(ref), "received")
+        for duty in (peer_obligations.ObligationStore().get("message-" + ref), self.duty_after(steward, ref)):
+            self.assertEqual((duty["state"], duty["delivery"]), ("complete", "acknowledged"))
+            self.assertEqual(duty["observation"]["receiver_receipt"]["recipient"]["session_id"], NEW)
+
+    def test_a_duty_made_before_the_split_closes_when_the_held_session_receives(self):
+        import peer_obligations
+        steward = self.steward()
+        sender = {"harness": "claude", "session_id": SENDER, "name": None}
+        text, ref = steward.peer_message.prepare_peer_message(
+            "made before the split", sender, {"harness": "claude", "session_id": OLD, "name": None}, defer=True)
+        row = steward.peer_message._read_pending(ref)
+        with mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=None):
+            duty = steward._schedule_message_obligation(row, "claude:" + OLD)
+        self.assertEqual(duty["intent"]["to"]["session_id"], OLD)
+        self.scene()                                                  # the conversation goes to the background
+        steward.peer_message._PARKED_MEMO.clear()
+        row = steward.peer_message._read_pending(ref)
+        row.update(created=self.started + 30)
+        steward.peer_message._save_pending(row)
+        self.assertEqual(self.hook(NEW), text)
+        duty = peer_obligations.ObligationStore().get("message-" + ref)
+        self.assertEqual((duty["state"], duty["delivery"]), ("complete", "acknowledged"))
+
+    def test_a_receipt_without_the_link_is_not_accepted_for_another_session(self):
+        import peer_obligations
+        steward = self.steward()
+        sender = {"harness": "claude", "session_id": SENDER, "name": None}
+        _text, ref = steward.peer_message.prepare_peer_message(
+            "for the other one", sender, {"harness": "claude", "session_id": OTHER, "name": None}, defer=True)
+        row = steward.peer_message._read_pending(ref)
+        with mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=None):
+            steward._schedule_message_obligation(row, "claude:" + OTHER)
+        self.scene()
+        row = dict(steward.peer_message._read_pending(ref), state="received", receipt="exact-peer-ref")
+        proof = {"receipt_type": "exact-peer-ref", "transfer_ref": ref, "transfer_body_sha256": row["body_sha256"],
+                 "provenance": peer_obligations._MESSAGE_RECEIVER_PROVENANCE,
+                 "effective_recipient": {"harness": "claude", "session_id": NEW},
+                 "recipient_binding": {"recipient": {"harness": "claude", "session_id": NEW}, "watches": [],
+                                       "parked_from": {"harness": "claude", "session_id": OLD}}}
+        store = peer_obligations.ObligationStore()
+        self.assertFalse(store.acknowledge_message_receipt(
+            "message-" + ref, dict(row, exact_receiver_receipt=proof), {"harness": "claude", "session_id": NEW}))
+
+    def test_the_old_sessions_index_shows_the_row_as_soon_as_the_link_ends(self):
+        self.scene()
+        _text, ref = self.pend(OLD, self.started + 5, "after the split")
+        recipient = {"harness": "claude", "session_id": OLD}
+        peer_message._PARKED_MEMO.clear()
+        self.assertEqual(peer_message.pending_messages(recipient), [])     # NEW holds it now
+        index = peer_message.recipient_index_path(peer_message._recipient_index_write_root(), "claude", OLD)
+        self.assertFalse(index.is_file())                                  # nothing published while it is held
+        self.bg.kill()
+        self.bg.wait()
+        peer_message._PARKED_MEMO.clear()
+        self.assertEqual([row["ref"] for row in peer_message.pending_messages(recipient)], [ref])
+
+    def test_the_runner_does_not_publish_the_old_sessions_index_while_it_is_held(self):
+        self.scene()
+        _text, ref = self.pend(OLD, self.started + 5, "after the split")
+        _text, other = self.pend(OLD, self.started - 60, "before the split")
+        peer_message._PARKED_MEMO.clear()
+        root = peer_message._recipient_index_write_root()
+        result = peer_message.rebuild_recipient_index(root)
+        self.assertTrue(result["complete"])
+        self.assertFalse(peer_message.recipient_index_path(root, "claude", OLD).is_file())
+        self.assertTrue(peer_message.recipient_index_path(root, "claude", NEW).is_file())
+        self.bg.kill()
+        self.bg.wait()
+        peer_message._PARKED_MEMO.clear()
+        self.assertEqual(sorted(row["ref"] for row in peer_message.pending_messages(
+            {"harness": "claude", "session_id": OLD})), sorted([ref, other]))
+
     # --- M4: the sending side --------------------------------------------------------------
     def test_a_number_or_a_name_that_finds_the_viewer_reaches_the_held_session(self):
         self.scene()
@@ -190,6 +340,20 @@ class Parked(unittest.TestCase):
             self.assertEqual(peer_address.resolve("main-window")[0], {"harness": "claude", "session_id": NEW})
         # An exact `harness:session_id` names exactly that session.
         self.assertEqual(peer_address.resolve("claude:" + OLD)[0], {"harness": "claude", "session_id": OLD})
+
+    def test_resolving_a_number_or_a_name_reads_the_session_records_once(self):
+        self.scene()
+        from fleet import session_tags
+        with mock.patch.object(session_tags, "_read", return_value={("claude", OLD): {"tag": "c7"}}), \
+                mock.patch.object(session_tags, "_path", return_value="x"), \
+                mock.patch.object(session_tags, "assigned_tag", return_value="c7"), self.reads() as read:
+            peer_address.resolve("[c7]")
+        self.assertEqual(read.call_count, 1)
+        with mock.patch.object(peer_address, "native_sessions",
+                               return_value=[{"harness": "claude", "sid": OLD, "pid": self.viewer.pid, "env": {}}]), \
+                mock.patch.object(peer_address, "_registry_name", return_value="main-window"), self.reads() as read:
+            peer_address.resolve("main-window")
+        self.assertEqual(read.call_count, 1)
 
     def test_resolve_does_not_follow_without_the_link(self):
         self.scene(parked=False)

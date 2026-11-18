@@ -1211,10 +1211,11 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
     # Fleet's steward mark, from the same role evidence Fleet's collector reads (markers and
-    # relations); no collection pass. A failed read shows no mark.
+    # relations); no collection pass. A failed read shows no mark. It is read for the session
+    # the panel shows (``read_sid``): beside another session's number it would be that one's mark.
     try:
         from fleet.collectors import steward as steward_role
-        values["steward"] = bool(steward_role.role_flag(harness, sid, cwd=values.get("cwd")))
+        values["steward"] = bool(steward_role.role_flag(harness, read_sid, cwd=values.get("cwd")))
     except Exception:
         values["steward"] = False
     elsewhere = []

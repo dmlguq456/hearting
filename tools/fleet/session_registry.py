@@ -273,6 +273,38 @@ def parked_successor(harness, sid, *, viewer_pid=None, viewer_start=None, home=N
         return None
 
 
+def parked_links(harness="claude", *, home=None):
+    """Every link :func:`parked_successor` and :func:`parked_origin` would find, from ONE read of
+    the live process records: ``{"successor": {viewer_sid: link}, "origin": {held_sid: link}}``.
+
+    A caller that asks about many sessions in one pass (a scan of the pending rows) reads the
+    record folder once and looks each session up. Nothing is held and nothing is stored: the
+    table is as live as the read, and it is empty (so a lookup costs nothing more) unless some
+    live viewer holds a job. Any doubt or read failure gives an empty table."""
+    table = {"successor": {}, "origin": {}}
+    try:
+        if harness != "claude":
+            return table
+        records = _live_claude_records(home)
+        for item in records:
+            job = item.get("parkedJobId")
+            viewer_sid = _usable_sid(item.get("sessionId"))
+            if viewer_sid is None or item.get("kind") == "bg" or not isinstance(job, str) or not job:
+                continue
+            found = _parked_from_viewer(records, viewer_sid, None, None)
+            if found is None:
+                continue
+            held = found["session_id"]
+            if sum(1 for other in records if other.get("kind") == "bg"
+                   and _usable_sid(other.get("sessionId")) == held) != 1:
+                continue
+            table["successor"][viewer_sid] = found
+            table["origin"][held] = found
+    except Exception:
+        return {"successor": {}, "origin": {}}
+    return table
+
+
 def parked_origin(harness, sid, *, home=None):
     """The same link read from the background side: the viewer a background session ``sid`` is
     held by, as :func:`parked_successor` of that viewer (its ``viewer_sid`` is the original id)."""
