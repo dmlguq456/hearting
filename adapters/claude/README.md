@@ -255,3 +255,27 @@ New installations enable the shared session shell for new Claude, Codex and Open
 terminals. Updates preserve existing choices and older absent policies. Use
 `hearting session shell disable` to restore native launch behavior, or
 `hearting session shell enable` to enable it again. Existing sessions keep running.
+
+## Left arrow stays in the conversation
+
+Claude Code's `←` on an empty prompt sends the conversation to a background
+session under a new session id, which the Hearting shell, panel and message
+delivery do not follow. An install therefore adds `leftArrowOpensAgents: false`
+to Claude's global config file (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`;
+Claude ignores this key in `settings.json`) only when the key is absent, so a
+value you set yourself, `true` or `false`, is never overwritten. `/bg`,
+`/background` and `claude agents` still work. To undo it, set it to `true` in
+`/config` ("← opens agents") or in that file; later installs keep your value.
+Uninstall removes the key only while it is still the `false` the install wrote.
+New Claude sessions pick it up for certain; a session that is already open can
+pick it up shortly afterwards (it re-reads the file), so restart it if the arrow
+still sends it to the background.
+
+The file is rewritten under the same `<file>.lock` directory lock Claude takes
+for each of its own saves, so an open Claude's save is never overwritten. If
+Claude is saving at that moment the install waits about two seconds, then skips
+the key with a report line and the next install tries again. Hearting never
+breaks a lock it did not take, never creates the file when it is missing (Claude
+creates it; the next install adds the key), leaves a file it cannot rewrite
+exactly (for example a number outside the JSON range) as it is, and skips a file
+that belongs to another user.
