@@ -2290,6 +2290,37 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   }
   return out.length?out:[[text('·')]];
 }
+// 11-18: the ROUTE popup's first screen, before its own reading comes: the panel's route box (this same `render`'s
+// one drawing, from the routes the panel already holds) laid at the popup's width, its box sides and the panel's
+// own sides taken off. The requests and messages are left out of the model (the popup's table has no such rows);
+// the rows are the box's between its top and bottom lines. A press on a route's row is `['route', id]`, as the
+// popup's table gives it; the box's title press and any other are not the popup's. `null` where the box did not
+// draw (no routes) or its rows are not the shape this strips (the popup then keeps its own spinner).
+function routesBody({model={},columns=72,cellWidth,configuration,background=''}={}){
+  columns=Math.max(1,Math.min(200,Math.trunc(Number(columns))||72));
+  const v=render({frame:0,width:columns+8,height:200,side:true,fill:true,model:{...model,requests:[],messages:[]},configuration,cellWidth,background,state:'idle'});
+  const area=v&&v.routeArea;if(!area)return null;
+  const top=area.top+1,source=v.rows.slice(top,area.bottom);
+  if(!source.length)return null;
+  const rows=[];
+  for(const row of source){
+    if(!Array.isArray(row)||row.length<7)return null;
+    // The panel's own sides (`│`, ` `) and the box's (`│ `, ` │`) stand in these pieces; any other shape is not stripped.
+    if(row.slice(0,3).map(part=>part.text).join('')!=='│ │ '||row.slice(-3).map(part=>part.text).join('')!==' │ │')return null;
+    const inner=row.slice(3,-3).map(({beat,spin,blink,...part})=>part);
+    while(inner.length&&/^ *$/.test(inner[inner.length-1].text))inner.pop();
+    rows.push(inner);
+  }
+  const hits=[],routes=[];
+  for(const h of v.hits){
+    if(h.row<top||h.row>=area.bottom||typeof h.action!=='string')continue;
+    const m=/^popup:ROUTE:(.+)$/.exec(h.action);if(!m)continue;
+    hits.push({row:h.row-top,left:0,right:columns-1,action:['route',m[1]]});
+    if(!routes.includes(m[1]))routes.push(m[1]);
+  }
+  return {rows,hits,routes};
+}
 module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
+module.exports.routesBody=routesBody;

@@ -1317,6 +1317,11 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     native_owned = (native_badges or {}).get("owned", ()) if isinstance(native_badges, dict) else ()
     panel = presentation(values, view, harness, read_sid, columns, native_owned=native_owned,
                          display=display, now=time.time())
+    # 11-18: when the producer last read this session's routes (epoch seconds, down to the minute so the
+    # projection changes at most once a minute for it): the route popup's first screen says as of when it stands.
+    observed = view.get("observed_at")
+    panel["route_read_at"] = (int(observed) // 60 * 60
+                              if isinstance(observed, (int, float)) and not isinstance(observed, bool) and 0 < observed < 1e11 else 0)
     # A result line (a continue that was not sent) otherwise waits for the next hook,
     # which in a cleared window is the person's next input. Display only. Its own
     # field: Claude's `notice` below is the native status row's segments.
@@ -1432,6 +1437,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                        for key in PANEL_STYLE_KEYS}
     # A popup that could not be read says so in Fleet's own word (`fleet.output.unreadable`).
     panel.setdefault("labels", {})["popup_unread"] = ui_text("fleet.output.unreadable")
+    # The route popup's first screen (read before this one, a reading under way): its as-of words.
+    panel["labels"]["popup_shown_at"] = ui_text("fleet.session_panel.popup_shown_at")
+    panel["labels"]["popup_shown_failed"] = ui_text("fleet.session_panel.popup_shown_failed")
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     # The model name the host reads off the native's own screen, painted by the rule route rows
     # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
