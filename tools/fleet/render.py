@@ -501,8 +501,10 @@ def _init_colors():
         _COLOR["nm_" + h] = _COLOR.get("hb_" + h, 0)
         _COLOR["nmd_" + h] = _COLOR.get("h_" + h, 0)
         # 11-18: the working spinner of a line that names its harness, bright and receded.
+        _COLOR["hbb_" + h] = _COLOR.get("hb_" + h, 0) | curses.A_BOLD     # this window's own number on the PEERS line
         _COLOR["spin_" + h] = _COLOR.get("hb_" + h, 0)
         _COLOR["spind_" + h] = _COLOR.get("h_" + h, 0)
+    _COLOR["hbb_other"] = curses.A_BOLD
     _COLOR["nm_other"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["nmd_other"] = _COLOR.get("soft", 0) | curses.A_DIM
     _COLOR["head"] = curses.A_DIM

@@ -531,8 +531,10 @@ def _peers_line(grid, vm, tag, x, y, right):
     if not groups:
         return y, set(), False
     harness_of = {str(item.get("tag")): str(item.get("harness") or "") for item in vm.sessions}
-    key_of = lambda other: ("hbb_" if other == tag else "hb_") + (harness_of.get(other) if harness_of.get(other) in
-                                                                  ("claude", "codex", "opencode") else "other")
+    # 11-18: this window's number is its harness color, bold; the other sessions' are the same color a step down (`h_*`, the
+    # receded harness color) and plain, so this window's stands out at a glance.
+    key_of = lambda other: ("hbb_" if other == tag else "h_" if harness_of.get(other) in ("claude", "codex", "opencode") else "hb_") + (
+        harness_of.get(other) if harness_of.get(other) in ("claude", "codex", "opencode") else "other")
     value_x = _field(grid, x, y, "PEERS", right)
     total = sum(len(members) for _steward, members in groups)
 

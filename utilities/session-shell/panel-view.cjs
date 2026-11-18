@@ -727,7 +727,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const peers=model.peers&&typeof model.peers==='object'&&Array.isArray(model.peers.groups)?model.peers:null;
       const groups=(peers?peers.groups:[]).filter(g=>g&&g.steward&&Array.isArray(g.members)&&g.members.length);
       if(!groups.length)return [];
-      const number=e=>({...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true}:{}),role:'peer'});
+      // 11-18 (the person: "PEERS에서 볼드 여부만 해놓으니까 나의 세션이 뭔지 확 안오네, 나머지는 컬러도 조금 어둡게"): this window's number is its harness
+      // color, bold (the brightest); every other session's is its harness's one step down (`FACES.*.harnessName`, the USAGE names' own
+      // values, drawn as that face's fixed color, never the terminal's dim), plain. No color: weight alone tells them apart, as before.
+      const number=e=>{const h=/^hb_(claude|codex|opencode)$/.exec(e.key||'');
+        return {...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true,role:'peer'}:h?{role:'harness-name',harness:h[1]}:{role:'peer'})};};
       const flag={...text('⚑','tag_steward'),role:'steward',...(model.no_color===true||cfg.theme==='mono'?{bold:true,dim:false}:{})};
       const build=keep=>{
         const out=[];let rest=keep;
