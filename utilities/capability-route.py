@@ -1793,6 +1793,22 @@ def _route_autoclose(artifact_root, trigger, route=None):
         print(f"route_autoclose error={type(exc).__name__}",file=sys.stderr)
 
 
+def _close_unstarted_record_free(route, path, started):
+    """A record-free route a worker started and the governor refused has a route file and an open cycle and no
+    row; nothing will start it (no resume is armed for a worker, which is told not to ask again). Close it
+    the way the runtime closes any route nobody works on, so none is left open in the scratch root."""
+    if (started.get("state") != "waiting-capacity" or started.get("registered_attempts") or started.get("auto_resume")
+            or os.environ.get("AGENT_DISPATCH_CHILD") != "1"):
+        return
+    try:
+        import time
+        import route_autoclose
+        route_autoclose.close_one(Path(route["artifact_root"]), Path(path), route, "start-refused",
+                                  sys.modules[__name__], trigger="compose", now=time.time())
+    except Exception as exc:  # noqa: BLE001
+        print(f"route_close_unstarted error={type(exc).__name__}", file=sys.stderr)
+
+
 @compose_command_snapshot
 def main():
     from dispatch_parent_completion import default_parent_harness
@@ -2245,6 +2261,8 @@ def main():
             access_change=_record_access_change(route,jobs)
             print("\n".join(compose_decision_lines(route, non_git_decision)), file=sys.stderr, flush=True)
             started=start_work(route,path,jobs)
+            if a.ephemeral:
+                _close_unstarted_record_free(route,path,started)
             if access_change is not None:
                 started={**started,"access_change":access_change}
             if worktree is not None and worktree.get("cwd"):

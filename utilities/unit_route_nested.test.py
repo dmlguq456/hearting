@@ -254,6 +254,50 @@ class EphemeralRootTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.project.iterdir()), [])
         self.assertEqual(unit_ephemeral.scratch_root(self.project), root)    # one root for the project
 
+    def test_a_scratch_root_given_back_is_the_same_root_and_never_a_new_one(self):
+        root = unit_ephemeral.scratch_root(self.project)
+        self.assertEqual(unit_ephemeral.scratch_root(root), root)             # a worker that starts another
+        self.assertEqual(unit_ephemeral.scratch_root(unit_ephemeral.scratch_root(root)), root)
+        self.assertEqual(sorted(p.name for p in root.parent.iterdir()), [".agent_reports"])
+
+    def test_the_scratch_root_counts_under_the_projects_governor_and_no_other(self):
+        root = unit_ephemeral.scratch_root(self.project)
+        governor = self.project.resolve() / ".runtime" / "model-worker-governor"
+        self.assertEqual(unit_ephemeral.counted_root(root), self.project.resolve())
+        self.assertEqual(unit_ephemeral.counted_root(self.project), self.project)    # an ordinary root counts as itself
+        self.assertEqual(DC.resolve_model_governor_root(root, environ={}), governor)
+        self.assertEqual(DC.resolve_model_governor_root(self.project, environ={}), governor)
+        # The worker's own environment names the project's governor: the scratch root accepts it, as it must.
+        self.assertEqual(DC.resolve_model_governor_root(root, environ={"AGENT_MODEL_GOVERNOR_ROOT": str(governor)}), governor)
+        with self.assertRaises(DC.DispatchContractError):                  # a governor of its own is still refused
+            DC.resolve_model_governor_root(root, environ={"AGENT_MODEL_GOVERNOR_ROOT": str(root / ".runtime" / "model-worker-governor")})
+
+    def test_a_full_project_governor_stops_a_record_free_start_too(self):
+        root = unit_ephemeral.scratch_root(self.project)
+        governor = HERE / "model-worker-governor.py"
+        with mock.patch.dict(os.environ, {"AGENT_MODEL_WORKER_CLASS_LIMIT_DISPATCH": "2"}):
+            held = DC.resolve_model_governor_root(self.project, environ={})
+            tokens = [DC.reserve_governor_token(governor, held, "dispatch")[0] for _ in range(2)]
+            self.assertEqual(len(tokens), 2)
+            with self.assertRaises(DC.DispatchContractError) as raised:      # the scratch root has no pool of its own
+                DC.reserve_governor_token(governor, DC.resolve_model_governor_root(root, environ={}), "dispatch")
+            self.assertEqual(raised.exception.reason, "model-worker-governor-denied")
+        self.assertFalse((root / ".runtime" / "model-worker-governor").exists())
+
+    def test_a_marker_without_a_project_is_filled_in_and_the_governor_default_follows_it(self):
+        root = unit_ephemeral.scratch_root(self.project)
+        (root / ".ephemeral").write_text("scratch artifact root of ephemeral unit routes; nothing here is a record\n")
+        self.assertEqual(unit_ephemeral.counted_root(root), root)         # an old marker names no project
+        self.assertEqual(unit_ephemeral.scratch_root(self.project), root)
+        self.assertEqual(unit_ephemeral.counted_root(root), self.project.resolve())
+        governor = _load("model_worker_governor_for_nested", "model-worker-governor.py")
+        resolver = Path(self.tmp.name) / "artifact-root.sh"
+        resolver.write_text(f"#!/bin/sh\nprintf %s '{root}'\n")
+        resolver.chmod(0o755)
+        with mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_ROOT": ""}), \
+                mock.patch.object(governor.Path, "with_name", return_value=resolver):
+            self.assertEqual(governor.default_root(), self.project.resolve() / ".runtime" / "model-worker-governor")
+
     def test_the_answer_is_the_report_cut_with_the_place_to_read_the_rest(self):
         report = Path(self.tmp.name) / "report.md"
         route = {"capability": "unit", "route_id": "rt-1"}

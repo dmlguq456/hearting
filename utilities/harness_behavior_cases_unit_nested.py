@@ -20,6 +20,15 @@ The fixture model plays both workers from the markers their briefs carry.
     its own override) stops the chain: the start that no slot fits is refused in the governor's own
     refusal form, a worker that meets it reports it, and every worker ends.
 
+``unit-route-nested-ephemeral``
+    The first worker starts the second with the command its first instruction gives, `--ephemeral` and no
+    `--artifact-root`: the second runs in the scratch root, counts under the project's governor, and its answer
+    reaches the first as the `Answer:` text of the wait result.
+
+``unit-route-limit-ephemeral`` / ``unit-route-limit-ephemeral-only``
+    The runaway chain again, every start after the first (or every start) record-free: the project's one
+    governor stops it at the same cap, the scratch root is one root, and a refused start leaves nothing in it.
+
 The oracle reads the registry (rows, `caller_attempt_id`, end), the routes and the requests the fixture
 model received. Synthetic data stays under the fixture root.
 """
@@ -62,12 +71,25 @@ def _shells(earlier, mark):
     return [str(r["reply"].get("shell") or "") for r in earlier if mark in r["text"]]
 
 
-def _compose(run, brief, slug, *extra):
+def _compose(run, brief, slug, *extra, ephemeral=False):
+    """The compose command a session or worker runs; `ephemeral` is the first instruction's own form (nothing
+    about roots or cwd given), plus the pin and slug the oracle needs."""
+    where = (["--ephemeral"] if ephemeral else
+             ["--cwd", str(run.home.workspace), "--artifact-root", run.home.env["AGENT_ARTIFACT_ROOT"], "--unassigned"])
     return " ".join([
         sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
         "--unit", "qa/code-review", "--pin", f"worker={run.harness}", "--prompt-file", str(brief),
-        "--cwd", str(run.home.workspace), "--artifact-root", run.home.env["AGENT_ARTIFACT_ROOT"], "--unassigned",
-        "--slug", slug, *extra])
+        *where, "--slug", slug, *extra])
+
+
+def _route_roots(run, jobs):
+    """The project's artifact root, then every other root a row of the run names (a scratch root)."""
+    roots = [Path(run.home.env["AGENT_ARTIFACT_ROOT"])]
+    for row in registry_rows(jobs):
+        other = Path(row.get("artifact_root") or "/nonexistent")
+        if other.is_dir() and other not in roots:
+            roots.append(other)
+    return roots
 
 
 def _report_shell(record, head, body):
@@ -82,6 +104,7 @@ class NestedScenario(unit.UnitRouteScenario):
                "first (its wait result), and the resting session is woken once, with the first worker's summary.")
     first_waits = True     # the first worker waits for the second's result before it ends
     second_held = False    # the second worker's last answer is held until the driver releases it
+    child_ephemeral = False    # the first worker starts the second with --ephemeral (its first instruction's form)
 
     # -- the fixture model ------------------------------------------------------------------------
     def script(self, run):
@@ -99,7 +122,8 @@ class NestedScenario(unit.UnitRouteScenario):
             waited = any(" start --route " in s and "--wait" in s for s in shells)
             wrote = any("report.md" in s for s in shells)
             if not composed:
-                return Reply(shell=_compose(run, run.home.root / "brief-child.md", "hb-unit-child"))
+                return Reply(shell=_compose(run, run.home.root / "brief-child.md", "hb-unit-child",
+                                            ephemeral=self.child_ephemeral))
             refused = bool(run.evidence.get("compose_refused")) or (composed and not waited and not wrote and (
                 "quick-headless-unavailable" in last or "Process exited with code 64" in last))
             if refused and not run.evidence.get("compose_refused"):
@@ -168,18 +192,19 @@ class NestedScenario(unit.UnitRouteScenario):
         """Both rows ended (or the wait ran out), the resting session idle: then read everything."""
         wait_for(lambda: all(r["status"] in TERMINAL_STATES for r in registry_rows(self.jobs)) and len(registry_rows(self.jobs)) >= 2,
                  self.WAIT, 2)
-        routes_dir = Path(run.home.env["AGENT_ARTIFACT_ROOT"]) / ".runtime" / "routes"
-        wait_for(lambda: len(list(routes_dir.glob("rt-*.outcome.json"))) >= 2, 120, 2)
+        wait_for(lambda: sum(len(list((r / ".runtime" / "routes").glob("rt-*.outcome.json")))
+                             for r in _route_roots(run, self.jobs)) >= 2, 120, 2)
         wait_for(lambda: [r for r in unit.resting_session_requests(run)
                           if unit.BLOCKER in r["text"] and r["last_kind"] != "tool"], 120, 1)
         run.wait_idle(8, 60)
         rows = self.rows_by_slug()
         first, second = rows.get("hb-unit-route-unit"), rows.get("hb-unit-child-unit")
         keys = ("status", "attempt_id", "caller_attempt_id", "dispatch_depth", "worker_type", "route_id", "route_node",
-                "parent_completion_delivery", "note", "failure_class", "workflow_completion", "write_scope", "harness")
+                "parent_completion_delivery", "note", "failure_class", "workflow_completion", "write_scope", "harness",
+                "artifact_root")
         ev["first"] = {k: (first or {}).get(k) for k in keys}
         ev["second"] = {k: (second or {}).get(k) for k in keys}
-        routes = {p.stem: p for p in (Path(run.home.env["AGENT_ARTIFACT_ROOT"]) / ".runtime" / "routes").glob("rt-*.json")
+        routes = {p.stem: p for r in _route_roots(run, self.jobs) for p in (r / ".runtime" / "routes").glob("rt-*.json")
                   if not p.stem.endswith(".outcome")}
         ev["routes_closed"] = {rid: p.with_name(p.stem + ".outcome.json").exists() for rid, p in routes.items()}
         return first, second
@@ -200,6 +225,19 @@ class NestedScenario(unit.UnitRouteScenario):
                   and all(ev["routes_closed"].values()) and len(ev["routes_closed"]) == 2
                   and any(CHILD_FINDING in text for text in ev["wait_results"])
                   and wake)
+        if self.child_ephemeral:
+            scratch = Path((second or {}).get("artifact_root") or "/nonexistent")
+            project = Path(run.home.env["AGENT_ARTIFACT_ROOT"])
+            ev["scratch_marked"] = (scratch / ".ephemeral").is_file()
+            ev["scratch_counts_under"] = (scratch / ".ephemeral").read_text().splitlines()[0] if ev["scratch_marked"] else ""
+            ev["scratch_own_governor"] = (scratch / ".runtime" / "model-worker-governor").exists()
+            ev["answer_in_wait_result"] = any("Answer:" in t and CHILD_FINDING in t for t in ev["wait_results"])
+            ev["refused_for_root"] = any("noncanonical-model-governor-root" in t
+                                         for t in [ev.get("child_compose_result", ""), *ev["wait_results"]])
+            ok = bool(ok and ev["scratch_marked"] and scratch != project and ev["answer_in_wait_result"]
+                      and not ev["scratch_own_governor"] and not ev["refused_for_root"]
+                      and ev["scratch_counts_under"].endswith(str(project.resolve()))
+                      and sorted(p.name for p in scratch.parent.iterdir()) == [".agent_reports"])
         return ok
 
     def drive(self, run):
@@ -299,6 +337,13 @@ class CallerFirstScenario(NestedScenario):
         ev["first"] = {k: (first or {}).get(k) for k in keys}
         ev["second"] = {k: (second or {}).get(k) for k in keys}
         return first, second
+
+
+class NestedEphemeralScenario(NestedScenario):
+    name = "unit-route-nested-ephemeral"
+    summary = ("A unit worker starts a second one with `--ephemeral`, the way its first instruction says: the second "
+               "runs in the scratch root under the project's governor and its answer is the first's wait result.")
+    child_ephemeral = True
 
 
 ANSWER = "HB-EPHEMERAL-ANSWER-9"
@@ -438,6 +483,9 @@ class LimitScenario(NestedScenario):
     summary = ("Every unit worker starts one more, as a runaway chain would: the governor's dispatch cap stops it, the "
                "start no slot fits is refused in the governor's refusal form, and every worker still ends.")
 
+    first_ephemeral = False    # the depth-0 session's own start is record-free too
+    chain_ephemeral = False    # every start a worker makes is record-free
+
     def prepare(self, run):
         super().prepare(run)
         run.home.env["AGENT_MODEL_WORKER_CLASS_LIMIT_DISPATCH"] = str(CAP)
@@ -464,7 +512,7 @@ class LimitScenario(NestedScenario):
                 if not composed and not wrote and level < MAX_LEVELS:
                     brief = run.home.root / f"brief-l{level + 1}.md"
                     return Reply(shell=f"printf %s '{LEVEL}{level + 1}: go one level deeper' > '{brief}' && "
-                                       + _compose(run, brief, f"hb-unit-l{level + 1}"))
+                                       + _compose(run, brief, f"hb-unit-l{level + 1}", ephemeral=self.chain_ephemeral))
                 waits = [s for s in shells if " start --route " in s and "--wait" in s]
                 if waits and not wrote and '"state": "completed"' not in last and len(waits) < 8:
                     return Reply(shell=waits[-1])   # the wait ran out: wait again
@@ -486,9 +534,40 @@ class LimitScenario(NestedScenario):
                 return Reply("The unit route runs; I will continue when its result arrives.")
             if unit.START in last and not any(r["reply"].get("shell") for r in earlier):
                 return Reply(shell=f"printf %s '{LEVEL}1: start the chain' > '{run.home.root / 'brief-l1.md'}' && "
-                                   + _compose(run, run.home.root / "brief-l1.md", "hb-unit-l1"))
+                                   + _compose(run, run.home.root / "brief-l1.md", "hb-unit-l1", ephemeral=self.first_ephemeral))
             return Reply("Nothing new.")
         return answer
+
+    def record_free_chain(self, run, ev):
+        """One scratch root for the whole chain, no governor of its own, and nothing left open in it by the start the
+        governor refused: no route and no cycle is open without a row."""
+        project = Path(run.home.env["AGENT_ARTIFACT_ROOT"])
+        rows = [r for r in registry_rows(self.jobs) if "hb-unit-l" in r.get("slug", "")]
+        roots = sorted({r.get("artifact_root") for r in rows} - {str(project)})
+        ev["roots_of_rows"] = roots
+        ev["scratch_roots_made"] = []
+        ev["scratch_own_governor"] = ev["unrowed_routes"] = ev["project_governor_exists"] = None
+        if len(roots) != 1:
+            return False
+        scratch = Path(roots[0])
+        ev["scratch_roots_made"] = sorted(str(p) for p in scratch.parent.parent.rglob(".ephemeral"))
+        ev["scratch_own_governor"] = (scratch / ".runtime" / "model-worker-governor").exists()
+        ev["project_governor_exists"] = (project / ".runtime" / "model-worker-governor").is_dir()
+        row_routes = {r.get("route_id") for r in rows}
+        unrowed = [p for p in (scratch / ".runtime" / "routes").glob("rt-*.json")
+                   if not p.stem.endswith(".outcome") and p.stem not in row_routes]
+        ev["unrowed_routes"] = sorted(p.stem for p in unrowed)
+        ev["unrowed_routes_open"] = sorted(p.stem for p in unrowed if not p.with_name(p.stem + ".outcome.json").exists())
+        row_slugs = {r.get("slug") for r in rows}
+        cycles = [p for p in (scratch / "campaigns").glob("*/*") if (p / ".cycle.json").is_file()
+                  and p.name.split("_", 1)[-1] not in row_slugs]
+        ev["unrowed_cycles"] = sorted(p.name for p in cycles)
+        ev["cycles_of_open_cycle_state"] = sorted(
+            p.name for p in cycles if json.loads((scratch / ".runtime/artifact-producer/v1/cycles" / (
+                json.loads((p / ".cycle.json").read_text())["cycle_id"] + ".json")).read_text()).get("state") == "open")
+        return (len(ev["scratch_roots_made"]) == 1 and not ev["scratch_own_governor"]
+                and ev["project_governor_exists"] and not ev["unrowed_routes_open"]
+                and not ev["cycles_of_open_cycle_state"])
 
     def drive(self, run):
         ev = run.evidence
@@ -519,9 +598,24 @@ class LimitScenario(NestedScenario):
                   and all(r.get("failure_class") == "pass" for r in rows) and refused == [CAP]
                   and "waiting-capacity" in ev["levels"][CAP].get("refusal_text", "")
                   and chain.count(None) == 1 and not ev["leftover_processes"])
+            if self.chain_ephemeral:
+                ok = bool(ok and self.record_free_chain(run, ev))
             return "pass" if ok else "fail"
         finally:
             self.worker_end.set()
+
+
+class LimitEphemeralScenario(LimitScenario):
+    name = "unit-route-limit-ephemeral"
+    summary = ("The runaway chain with every start after the first record-free: record-free workers count with the "
+               "project's, so the chain stops at the same cap under the project's one governor.")
+    chain_ephemeral = True
+
+
+class LimitEphemeralOnlyScenario(LimitEphemeralScenario):
+    name = "unit-route-limit-ephemeral-only"
+    summary = "The runaway chain with every start record-free, the depth-0 session's own included: one cap, one scratch root."
+    first_ephemeral = True
 
 
 OWNER = "SCENARIO-OWNER-CALLS-UNIT"
@@ -619,5 +713,5 @@ class OwnerCallsScenario(OwnerPublishRegisteredScenario):
         return "pass" if ok else "fail"
 
 
-SCENARIOS = [NestedScenario, CallerFirstScenario, EphemeralScenario, EphemeralLongScenario, EphemeralEmptyScenario,
-             LimitScenario, OwnerCallsScenario]
+SCENARIOS = [NestedScenario, CallerFirstScenario, NestedEphemeralScenario, EphemeralScenario, EphemeralLongScenario,
+             EphemeralEmptyScenario, LimitScenario, LimitEphemeralScenario, LimitEphemeralOnlyScenario, OwnerCallsScenario]
