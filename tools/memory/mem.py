@@ -263,6 +263,44 @@ def _session_id_from_env():
             return ""
     return ""
 
+def _work_labels(tier, rtype):
+    """The field/unit labels of the session's one current route, for a work-style record (D-82).
+
+    Only a durable ``preference`` record (the work-style shape) gets them. No route, several
+    routes, direct work, a worker session, or any failure gives ``[]``: the write itself never
+    depends on this. The labels are only ever *added* (see ``_merge_auto_topics``).
+    """
+    if tier != "durable" or rtype != "preference":
+        return []
+    for base in (MEM_MODULE_DIR.parents[1] / "utilities", AGENT_HOME / "utilities"):
+        if not (base / "memory_work_labels.py").is_file():
+            continue
+        if str(base) not in sys.path:
+            sys.path.append(str(base))
+        try:
+            from memory_work_labels import labels_for_session
+            return [label for label in labels_for_session() if isinstance(label, str)]
+        except Exception:
+            return []
+    return []
+
+
+def _merge_auto_topics(base, auto):
+    """``base`` plus the automatic labels whose kind (``field``/``unit``) ``base`` lacks.
+
+    Never replaces or reorders what ``base`` holds: a label a person wrote, or one the record
+    already carries, stays, and a kind already present is left alone.
+    """
+    merged = list(base or [])
+    kinds = {str(item).strip().casefold().partition(":")[0] for item in merged if isinstance(item, str)}
+    for label in auto or []:
+        kind = label.strip().casefold().partition(":")[0]
+        if kind not in kinds:
+            kinds.add(kind)
+            merged.append(label)
+    return merged
+
+
 # Module-level FTS and CJK-shadow availability caches, initialized by get_con().
 _FTS_OK = None     # FTS5 unicode61 availability.
 _CJK_OK = None     # CJK bigram shadow index availability (audit W4).
@@ -1301,8 +1339,12 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                  source=None, quiet=False, requires_consume=False, journal_action=None,
                  journal_insert_only=False, journal_actor=None,
                  journal_cwd=_WRITE_EVENT_CWD_UNSET, headline=None, aliases=None,
-                 entities=None, topics=None, artifact_refs=None):
-    """DB write primitive: one write, one connection, one transaction."""
+                 entities=None, topics=None, artifact_refs=None, auto_topics=None):
+    """DB write primitive: one write, one connection, one transaction.
+
+    ``auto_topics`` are labels the runtime offers (not the caller's ``topics``): they are
+    merged into a record's topics, never replacing its existing or given ones.
+    """
     assert tier in TIERS and scope in SCOPES
     ok, why = quality_ok(body)
     if not ok:
@@ -1337,6 +1379,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             supplied = (aliases, entities, topics, artifact_refs)
             for idx, (raw, old) in enumerate(zip(supplied, current[1:])):
                 normalized = _normalize_capsule_list(raw if raw is not None else old)
+                if idx == 2 and auto_topics:  # topics slot: merge in, never replace
+                    had = _normalize_capsule_list(old)  # a kind the record had, or the caller gave, is not filled in
+                    lacking = _merge_auto_topics(had, auto_topics)[len(had):]
+                    normalized = _normalize_capsule_list(_merge_auto_topics(normalized, lacking))
                 if idx == 1:  # entities slot: merge in deterministic extraction
                     normalized = _merge_entities(normalized, _extracted)
                 values.append(json.dumps(normalized, ensure_ascii=False))
@@ -1434,7 +1480,8 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                     " delivery_state=CASE WHEN delivery_state='pending' OR ?='pending' "
                     "THEN 'pending' ELSE delivery_state END WHERE id=?",
                     (today(), requested_delivery, dup))
-            if any(value is not None for value in (headline, aliases, entities, topics, artifact_refs)) or _extracted:
+            if (any(value is not None for value in (headline, aliases, entities, topics, artifact_refs))
+                    or _extracted or auto_topics):
                 refresh_capsule(dup)
             _capture_v2_operation(
                 con, "put", post_ids=[dup], reason="dedup-reinforce"
@@ -1461,7 +1508,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             "injection_flag": 1 if "injection-pattern" in flags else 0,
             "delivery_state": requested_delivery,
             "headline": _normalize_headline(headline, body),
-            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": topics or [],
+            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": _merge_auto_topics(topics, auto_topics),
             "artifact_refs": artifact_refs or [], "status": "active",
             "canonical_id": sid, "superseded_by": None, "capsule_version": 1,
         }
@@ -8899,7 +8946,8 @@ def _cli_main():
             requires_consume=args.requires_consume,
             journal_action="add",
             headline=args.headline, aliases=args.alias, entities=args.entity,
-            topics=args.topic, artifact_refs=args.artifact_ref,
+            topics=args.topic, auto_topics=_work_labels(args.tier, args.type),
+            artifact_refs=args.artifact_ref,
         )
     elif args.cmd == "note":
         write_record("working", "project", args.type, args.body,
