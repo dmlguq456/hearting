@@ -8,13 +8,16 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
+import socket
+import threading
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from fleet import process_identity
+from fleet import pass_scope, process_identity
 from fleet.collectors import claude, herdr, procscan, _observation_health
 from fleet.explorer import live
 from fleet.explorer.runtime import ExplorerRuntime
@@ -111,9 +114,26 @@ class FailedReadIdentityTest(unittest.TestCase):
         self.assertEqual(restarted.session_identity_evidence["verdict"], "unobserved")
         dead = self.one_pass(complete=False, alive=False)
         self.assertIsNone(getattr(dead, "_pane_session_claim", None))
-        with mock.patch.object(herdr, "_PANE_CLAIM_CARRY_S", -1.0):
-            expired = self.one_pass(complete=False)
-        self.assertIsNone(expired.session_id)
+
+    def test_identity_has_no_age_limit_and_covers_a_row_whose_pane_was_never_matched(self):
+        self.one_pass(complete=True)
+        # An hour on, still reads failing: the same live process keeps what a complete read confirmed.
+        real = time.monotonic
+        with mock.patch.object(time, "monotonic", side_effect=lambda: real() + 3600.0):
+            for _ in range(3):
+                self.assertEqual(self.one_pass(complete=False).session_id, "current")
+        # The pane's cwd is not the process's cwd, so a failed read can neither bind the pane nor
+        # name it a candidate (no ``unobserved`` claim at all): the earlier identity still holds.
+        s = Session(harness="claude", pid=self.pid, proc_start=self.start, cwd=self.cwd)
+        other = [{"pane_id": PANE, "agent": "claude", "cwd": "/pane/root",
+                  "agent_session": {"agent": "claude", "value": "current"}}]
+        with mock.patch.object(procscan, "read_proc_start", return_value=self.start):
+            claims = herdr._session_claims([s], other, {}, complete=False)
+        self.assertEqual(claims[self.pid]["session_id"], "current")
+        # A complete read that finds no claim for the process ends it; a never-confirmed process has none.
+        with mock.patch.object(procscan, "read_proc_start", return_value=self.start):
+            herdr._session_claims([s], other, {}, complete=True)
+            self.assertNotIn(self.pid, herdr._session_claims([s], other, {}, complete=False))
 
     def test_changed_session_id_is_read_not_carried(self):
         self.one_pass(complete=True)
@@ -192,6 +212,183 @@ class FailureReasonTest(unittest.TestCase):
         recorded = ExplorerRuntime._source_freshness(readiness)["herdr"]
         self.assertEqual(recorded["state"], "failed")
         self.assertIn("process-info deadline", recorded["reason"])
+
+
+class FakeHerdrServer:
+    """A herdr stand-in on a unix socket: ``events.subscribe`` and ``session.snapshot`` only."""
+
+    def __init__(self, path, panes, latency=0.0):
+        self.path, self.panes, self.latency = path, panes, latency
+        self.server = socket.socket(socket.AF_UNIX)
+        self.server.bind(path)
+        self.server.listen(16)
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def close(self):
+        self.server.close()
+
+    def _accept(self):
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(client,), daemon=True).start()
+
+    def _serve(self, client):
+        buffer = b""
+        try:
+            while True:
+                while b"\n" not in buffer:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        return
+                    buffer += chunk
+                line, buffer = buffer.split(b"\n", 1)
+                request = json.loads(line)
+                time.sleep(self.latency)
+                if request["method"] == "events.subscribe":
+                    result = {"type": "subscribed"}
+                else:
+                    result = {"type": "session_snapshot", "snapshot": {
+                        "protocol": 22, "panes": self.panes,
+                        "agents": [dict(pane) for pane in self.panes if pane.get("agent")]}}
+                client.sendall((json.dumps({"id": request["id"], "result": result}) + "\n").encode())
+        except OSError:
+            pass
+
+
+class PassSharedViewTest(unittest.TestCase):
+    """Which reader of a pass starts the herdr read must not decide whether it sees a complete view.
+
+    A row's pane evidence used to be lost on every other pass: the reader that started the read got
+    the old view marked "refresh pending" although the read ended in milliseconds.
+    """
+
+    NAMES = ("_OBSERVATION_TRANSPORTS", "_OBSERVATION_FUTURES", "_OBSERVATION_VIEWS", "_OBSERVATION_ERRORS",
+             "_OBSERVATION_LAST_STARTED", "_OBSERVATION_REFRESH_PENDING", "_OBSERVATION_FIRST_WAIT_SPENT")
+
+    def setUp(self):
+        old = {name: getattr(herdr, name).copy() for name in self.NAMES}
+        for name in self.NAMES:
+            getattr(herdr, name).clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "h.sock")
+        env = mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH": self.path})
+        env.start()
+        gap = mock.patch.object(herdr, "_OBSERVATION_MIN_REFRESH_S", 0.03)
+        gap.start()
+
+        def restore():
+            gap.stop()
+            env.stop()
+            herdr.close_observations()
+            self.server.close()
+            self.tmp.cleanup()
+            for name, value in old.items():
+                getattr(herdr, name).update(value)
+
+        self.addCleanup(restore)
+        os.environ.pop("HERDR_SESSION", None)
+        os.environ.pop("AGENT_HERDR_SESSION", None)
+        self.panes = [{"pane_id": "w1:p%d" % i, "agent": "claude", "cwd": "/x",
+                       "agent_session": {"agent": "claude", "value": "s%d" % i}} for i in range(12)]
+        self.server = FakeHerdrServer(self.path, self.panes)
+
+    def passes(self, count, *, gap=0.06):
+        """Three readers per pass, the later two ``gap`` apart (a codex pass, enrich, the job inventory)."""
+        seen = []
+        for _ in range(count):
+            row = []
+            with pass_scope.collection_pass():
+                for index in range(3):
+                    if index:
+                        time.sleep(gap)
+                    view = herdr.observation_view(wait_timeout=0.0)
+                    row.append(None if view is None else view.complete)
+            seen.append(row)
+            time.sleep(0.1)
+        return seen
+
+    def test_every_reader_of_a_pass_sees_the_finished_read(self):
+        seen = self.passes(8)
+        # The very first pass has no finished read to report; afterwards no reader sees an unfinished one.
+        for number, row in enumerate(seen[1:], 2):
+            self.assertEqual(row, [True, True, True], "pass %d" % number)
+
+    def test_a_pass_shares_one_answer_and_starts_one_next_read(self):
+        self.passes(1)
+        time.sleep(0.2)
+        started = []
+        real = herdr.background_read
+        with mock.patch.object(herdr, "background_read",
+                               side_effect=lambda read: started.append(1) or real(read)):
+            with pass_scope.collection_pass():
+                first = herdr.observation_view(wait_timeout=0.0)
+                time.sleep(0.06)
+                second = herdr.observation_view(wait_timeout=0.0)
+                third = herdr.observation_view(wait_timeout=0.0)
+        self.assertIs(first, second)
+        self.assertIs(second, third)
+        self.assertEqual(len(started), 1)
+
+    def test_a_read_that_an_earlier_pass_started_and_has_not_finished_keeps_the_view_pending(self):
+        self.passes(2)
+        time.sleep(0.2)
+        self.server.latency = 0.6    # the next snapshot outlasts the pass that started it
+        with herdr._OBSERVATION_LOCK:
+            transport = next(iter(herdr._OBSERVATION_TRANSPORTS.values()))
+            transport._state.reconnect()   # an event invalidated the view: the next read takes a new snapshot
+        with pass_scope.collection_pass():
+            started = herdr.observation_view(wait_timeout=0.0)
+        self.assertTrue(started.complete)   # this pass reports the finished read
+        time.sleep(0.15)
+        with pass_scope.collection_pass():
+            later = herdr.observation_view(wait_timeout=0.0)
+        self.assertFalse(later.complete)    # the read is slow: that is a real incomplete pass
+        self.assertIn("read running", herdr._observation_cause() or "")
+        self.assertEqual(herdr._observation_error(), "herdr refresh pending")
+
+    def test_a_waiting_reader_still_gets_a_fresh_view_and_a_reader_outside_a_pass_is_unchanged(self):
+        self.passes(1)
+        time.sleep(0.2)
+        fresh = herdr.observation_view(wait_timeout=0.2)
+        self.assertTrue(fresh.complete)
+        time.sleep(0.2)
+        # No pass: the reader that starts the read keeps seeing it pending (the earlier meaning).
+        self.assertFalse(herdr.observation_view(wait_timeout=0.0).complete)
+
+
+class FailureCauseTest(unittest.TestCase):
+    """The observation record says in which step a failed read failed (``cause``), not a generic text."""
+
+    def enrich(self, *, pids, panes, observation_error=None):
+        with mock.patch.object(herdr, "_observation_error", return_value=observation_error), \
+                mock.patch.object(herdr, "_observation_cause", return_value=observation_error), \
+                mock.patch.object(herdr, "_session_claims", return_value={}):
+            return herdr.enrich([], agents=[], panes=panes, pids=pids, pane_bindings={})
+
+    def test_pane_process_info_failure_names_pane_and_step(self):
+        result = self.enrich(pids=_pids(1, complete=False), panes=[{"pane_id": PANE, "agent": "claude"}])
+        self.assertFalse(result["complete"])
+        self.assertIn("process-info deadline", result["cause"])
+        self.assertTrue(result["cause"].startswith("pane process-info failed for 1/1 panes"), result["cause"])
+        self.assertIn(PANE, result["cause"])
+        self.assertIn("process-info deadline", result["last_error"])   # the screen text is unchanged
+
+    def test_an_unexplained_incomplete_view_keeps_the_screen_text_and_records_a_specific_cause(self):
+        evidence = Observed((set(), set()))
+        evidence.complete, evidence.errors = False, ()
+        result = self.enrich(pids=evidence, panes=[])
+        self.assertEqual(result["last_error"], "pane 조회 불가")   # what the screen shows, unchanged
+        self.assertNotEqual(result["cause"], result["last_error"])
+        self.assertTrue(result["cause"])
+
+    def test_cause_reaches_the_record_while_the_screen_text_stays(self):
+        health = _observation_health("job", "herdr", "pane 조회 불가", "herdr refresh pending (read running 4.0s)")
+        self.assertEqual(health["last_error"], "pane 조회 불가")
+        self.assertEqual(health["reason"], "herdr refresh pending (read running 4.0s)")
+        self.assertEqual(_observation_health("job", "herdr", "x")["reason"], "x")
 
 
 if __name__ == "__main__":
