@@ -35,8 +35,11 @@ def _copy_job_observation_fallback(jobs, node_evidence, degradations,
     )
 
 
-def _observation_health(key, source, error=None):
-    """The same health vocabulary as RefreshPump, bound to this publication."""
+def _observation_health(key, source, error=None, cause=None):
+    """The same health vocabulary as RefreshPump, bound to this publication.
+
+    ``error`` is the short text shown on screen; ``cause`` (default: the same text) is the more
+    specific stage and reason the persisted observation record keeps."""
     now = _time.monotonic()
     cache_key = (key, source)
     if error is None:
@@ -46,7 +49,7 @@ def _observation_health(key, source, error=None):
     success = _OBSERVATION_SUCCESSES.get(cache_key)
     return {"state": "failed" if error else "idle", "last_error": error,
             # The persisted observation record carries ``reason``, not ``last_error``.
-            **({"reason": str(error)[:160]} if error else {}),
+            **({"reason": str(cause or error)[:160]} if error else {}),
             "last_success_at": success, "age": None if success is None else now - success}
 
 
@@ -623,8 +626,10 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         observed = _herdr.enrich(sessions, wait_timeout=0.0 if fast_first else 0.2)
         if isinstance(observed, dict):
             herdr_observed = observed
+            incomplete = not observed.get("complete")
             observations["herdr"] = _observation_health(
-                job_key, "herdr", observed.get("last_error") if not observed.get("complete") else None)
+                job_key, "herdr", observed.get("last_error") if incomplete else None,
+                observed.get("cause") if incomplete else None)
     except Exception as exc:
         observations["herdr"] = _observation_health(job_key, "herdr", "%s: %s" % (type(exc).__name__, exc))
     if not fast_first:
