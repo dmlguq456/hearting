@@ -2508,9 +2508,14 @@ def _work_style_labels(args) -> tuple[str, ...]:
         labels: list[str] = []
         if unit and unit not in RESERVED_UNITS and UNIT_REF_RE.match(unit) and worker_type in WORKER_TYPES[1:]:
             labels.append(f"unit:{unit}")
-        route_file = getattr(args, "route_file", None) or getattr(
-            getattr(args, "owner_route_binding", None), "route_file", None)
-        route = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else {}
+        route: dict = {}
+        try:   # an unreadable route costs only its own labels; the unit label stays
+            route_file = getattr(args, "route_file", None) or getattr(
+                getattr(args, "owner_route_binding", None), "route_file", None)
+            loaded = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else {}
+            route = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            route = {}
         nodes = route.get("nodes") or []
         if worker_type == "owner" and any(n.get("dispatch_depth") == 2 for n in nodes):
             return ()
@@ -2556,8 +2561,13 @@ def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None)
         memory = _bootstrap_memory_block(decl.get("memory", ()), task, getattr(args, "worktree", None),
                                          root=root, environ=environ, labels=labels)
         if memory:
-            head = ("Your user's working style and saved preferences from memory (those tagged for this unit "
-                    "or field come first; " if labels else "Saved preferences from memory (")
+            if labels and decl:
+                head = ("Your user's working style and saved preferences from memory (those tagged for this "
+                        "unit or field come first; ")
+            elif labels:
+                head = "Your user's working style for this work, from records tagged with its unit or field ("
+            else:
+                head = "Saved preferences from memory ("
             lines.append(f"- {head}reference only; apply only what fits your assignment; "
                          "do not write, curate, or sync memory):\n" + memory + "\n")
         if not lines:

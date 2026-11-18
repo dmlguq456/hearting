@@ -2355,13 +2355,43 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
             self.assertEqual(self._labels(cmds[0]), want)
             self.assertNotIn("--query", cmds[0])
             self.assertIn("short review comments", section)
-            self.assertIn("working style", section)
+            self.assertIn("Your user's working style for this work, from records tagged with its unit or field ("
+                          "reference only; apply only what fits your assignment; "
+                          "do not write, curate, or sync memory):\n", section)
+            self.assertNotIn("come first", section)
             self.assertNotIn("format follows", section)
 
     def test_labels_without_a_route_field_are_the_unit_only(self):
         for route in (self._route(field=None), self._route(field="Bad Value"), None):
             cmds, _ = self._cmds(self._args(route_file=route))
             self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report"])
+
+    def test_an_unreadable_route_costs_only_its_field_label(self):
+        broken = self.tmp / "route-broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        listlike = self.tmp / "route-list.json"
+        listlike.write_text("[1, 2]", encoding="utf-8")
+        for route in (str(broken), str(listlike), str(self.tmp / "no-such-route.json")):
+            cmds, _ = self._cmds(self._args(route_file=route))
+            self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report"], route)
+        cmds, _ = self._cmds(self._args(unit=None, worker_type="owner", route_file=str(broken)))
+        self.assertEqual(cmds, [])
+
+    def test_a_declared_unit_root_still_gives_frame_and_one_shot_owner_no_query_group(self):
+        root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")
+        one_shot = self._route(nodes=[{"id": "one-shot", "dispatch_depth": 1, "unit": "_kernel/owner"}])
+        body = "## [durable/preference] i (global)\nb\n"
+        scenes = (
+            (self._args(worker_type="frame", route_file=self._route()), ["unit:editorial/report", "field:code"]),
+            (self._args(worker_type="owner", route_file=one_shot), ["field:code"]),
+        )
+        for args, want in scenes:
+            cmds, section = self._cmds(args, body, root=root)
+            self.assertEqual(len(cmds), 1)
+            self.assertEqual(self._labels(cmds[0]), want)
+            self.assertNotIn("--query", cmds[0])
+            self.assertNotIn("format follows", section)
+            self.assertNotIn("come first", section)
 
     def test_one_shot_owner_gets_the_field_label_and_a_conductor_none(self):
         one_shot = self._route(nodes=[{"id": "one-shot", "dispatch_depth": 1, "unit": "_kernel/owner"}])
@@ -2382,6 +2412,9 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
         self.assertEqual(cmds[0].count("--query"), 2)
         self.assertEqual(section.count("## [durable/preference] i"), 1)
         self.assertIn("format follows", section)
+        self.assertIn("Your user's working style and saved preferences from memory (those tagged for this unit "
+                      "or field come first; reference only; apply only what fits your assignment; "
+                      "do not write, curate, or sync memory):\n", section)
 
     def test_failures_and_no_records_leave_the_prompt_unchanged(self):
         root = _fake_unit_root(self.tmp, "")

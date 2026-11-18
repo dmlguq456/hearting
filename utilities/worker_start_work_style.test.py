@@ -26,6 +26,7 @@ RECORDS = (   # (body, topics, headline)
     ("WS-UNIT keep review comments to blocking issues first.", ("unit:qa/code-review",), "review comment style"),
     ("WS-FIELD-CODE name the failing command before the fix.", ("field:code",), "code habit"),
     ("WS-FIELD-DOCS lead every section with its claim.", ("field:docs",), "docs habit"),
+    ("WS-FRAME-UNIT lead with the intent in one sentence.", ("unit:plan/frame",), "frame habit"),
     ("WS-UNTAGGED a preference carrying no label at all.", (), "untagged habit"),
     ("WS-REPORT-UNIT report layout: one table per result.", ("unit:editorial/report",), "report format layout"),
     ("WS-REPORT-QUERY report format: html tables, not prose.", (), "report format html"),
@@ -121,6 +122,12 @@ class WorkStylePromptTest(unittest.TestCase):
             self.assertNotIn("WS-UNIT", prompt)
             frame, _ = self.prompt(harness, unit=None, worker_type="frame", depth=1, node="frame", route=route)
             self.assertIn("WS-FIELD-CODE", frame, harness)
+            self.assertEqual(frame.count(SECTION), 1)
+            # a real frame route seals no field: only the unit-labelled record arrives
+            sealed = self.route(field=None)
+            frame, _ = self.prompt(harness, unit=None, worker_type="frame", depth=1, node="frame", route=sealed)
+            self.assertIn("WS-FRAME-UNIT", frame, harness)
+            self.assertNotIn("WS-FIELD-CODE", frame)
             self.assertEqual(frame.count(SECTION), 1)
 
     def test_a_one_shot_owner_gets_the_field_records_and_a_conductor_none(self):
