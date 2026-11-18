@@ -533,15 +533,15 @@ observation for its title and NOW. No setting or sidecar field is added.
 
 `artifact_workflow_group_review.py` (the existing job; see
 [WORKFLOW_GROUPS.md](WORKFLOW_GROUPS.md)) decides, with **one model call per campaign per
-sweep**, the workflow groups of new cycles and the title, summary, branches, and kinds of
-the campaign and of every target cycle. Code, not the model, owns IDs, sources, times,
-counters, the vocabulary check, and history. The model chooses tags from the vocabulary
-or proposes at most one new branch (up to twelve when the vocabulary is empty); a one-member
-group stays allowed. A cycle already in a group is sent only for its metadata, and only
-while it has none; past cycles are never filled in automatically.
+sweep**, the title, summary, branches, and kinds of the campaign and of every target
+cycle. Code, not the model, owns IDs, sources, times, counters, the vocabulary check, and
+history. The model chooses tags from the vocabulary or proposes at most one new branch (up
+to twelve when the vocabulary is empty). The review no longer reads or writes
+`workflow-groups.json`; existing declarations stay as they are. Past cycles are never
+filled in automatically.
 
 A failed call, an invalid answer, an unreadable `meta.json`, a conflict, or a busy lock writes
-no group, metadata, vocabulary, number state, or history line and is retried at a
+no metadata, vocabulary, number state, or history line and is retried at a
 later seal under the existing retry rules; the seal itself is never affected. (The review's
 own judgement record and counters keep working as before.) `--dry-run` writes nothing at all.
 `HEARTING_WORKFLOW_GROUP_REVIEW=off` disables the whole automatic job;
