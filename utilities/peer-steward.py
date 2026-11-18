@@ -7299,6 +7299,11 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
     return result
 
 
+# The last (pgid, log pass) whose group was seen still populated, and when: the
+# group is looked at again at most once a minute, not on every runner tick.
+_RETENTION_GROUP_SEEN: dict = {}
+
+
 def _log_retention_follow_up_due(jobs, state):
     """Whether the log retirement left more to do and the previous start has settled.
 
@@ -7319,11 +7324,22 @@ def _log_retention_follow_up_due(jobs, state):
         if pass_ns <= last:
             return False
         if "child_pgid" not in state:
+            # A start recorded before this rule (or a runner that died between its two
+            # writes) names no group; one overlapping start is harmless because each
+            # retention pass takes its own lock and an overlapping one returns busy.
             return True
         pgid = state["child_pgid"]
         if type(pgid) is not int or pgid <= 0:
             return False
-        return observe_group(pgid).state == "empty"
+        seen = _RETENTION_GROUP_SEEN.get("key") == (pgid, pass_ns) and (
+            time.monotonic() - _RETENTION_GROUP_SEEN.get("at", 0.0)
+            < dispatch_log_retention.BACKLOG_DUE_SECONDS)
+        if seen:
+            return False
+        if observe_group(pgid).state == "empty":
+            return True
+        _RETENTION_GROUP_SEEN.update(key=(pgid, pass_ns), at=time.monotonic())
+        return False
     except Exception:  # noqa: BLE001 -- unknown means the six-hour duty
         return False
 

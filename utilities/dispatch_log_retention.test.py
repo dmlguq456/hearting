@@ -701,7 +701,8 @@ class DispatchLogRetentionTest(unittest.TestCase):
 
     def test_a_removal_a_day_after_a_spent_round_arms_the_next_round(self):
         removing, following = self._late_removal(wait_ns=R.ROUND_REOPEN_SECONDS * 1_000_000_000)
-        self.assertEqual((removing["removed"], removing["more"], removing["round_left"]), (1, 0, 81))
+        # the reopened round is open, so the removing pass already keeps the short interval
+        self.assertEqual((removing["removed"], removing["more"], removing["round_left"]), (1, 1, 81))
         self.assertEqual((following["removed"], following["more"]), (0, 1))
         self.assertLess(following["round_left"], 81)
 
@@ -716,6 +717,39 @@ class DispatchLogRetentionTest(unittest.TestCase):
         state = self._state()
         self.assertEqual((state["round_left"], state["last_result"]["round_left"]), (0, 0))
         self.assertEqual(state["round_closed_ns"], state["last_pass_ns"])
+
+    def test_a_round_an_older_release_reopens_within_a_day_stays_closed(self):
+        # An older release has no daily rule: its removal after the round reopens it
+        # (round_left back to every name). The next current pass closes it again.
+        _removing, following = self._late_removal()
+        self.assertEqual((following["round_left"], following["more"]), (0, 0))
+        closed = self._state()["round_closed_ns"]
+        self._edit_state(round_left=81)
+        at = self._state()["last_pass_ns"] + 10 * R.DUE_SECONDS * 1_000_000_000
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            after = R.sweep(self.jobs, now_ns=at)
+        self.assertEqual((after["round_left"], after["more"]), (0, 0))
+        self.assertEqual(self._state()["round_closed_ns"], closed)   # not a new end
+        # a day after the recorded end the inherited round is honoured again
+        self._edit_state(round_left=81)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            later = R.sweep(self.jobs, now_ns=closed + R.ROUND_REOPEN_SECONDS * 1_000_000_000)
+        self.assertGreater(later["round_left"], 0)
+
+    def test_an_open_round_keeps_the_short_interval_after_a_pass_that_removes(self):
+        # Removing a few expired logs says nothing about the names not yet examined.
+        self._blocked(80)
+        expired = []
+        for index in range(3):
+            path = self.log(f"0-expired-{index:02d}.jsonl")
+            self.add_row(f"att-0-expired-{index:02d}", path, ended=self.now - 30 * DAY)
+            expired.append(path)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            summary = self._continue(self.now)
+        self.assertEqual(summary["removed"][0], 3)
+        self.assertEqual(summary["more"], [1, 1, 0])   # the whole round, then the normal interval
+        self.assertFalse(any(path.exists() for path in expired))
+        self.assertEqual(self._state()["round_left"], 0)
 
     def test_a_spent_round_without_a_recorded_end_opens_once_on_the_next_removal(self):
         for why, value in (("missing", KeyError), ("future", 2 ** 62), ("string", "yesterday"),
@@ -768,10 +802,12 @@ class DispatchLogRetentionTest(unittest.TestCase):
         with self.subTest(why="no state root"):
             self.assertEqual(R.follow_up_pass_ns(self.root / "nowhere" / "jobs.log", now_ns=self.now), 0)
 
-    def test_a_runner_chasing_more_stays_within_one_round_a_day(self):
+    def _chase_days(self, *, natural_minutes=120, older_natural=False):
         # The runner's rule, replayed on a simulated minute clock: start a pass when the
         # last one left `more`, a minute passed and a pass ran since its previous start.
-        # Natural callers add a pass every two hours. Logs keep expiring one by one.
+        # Natural callers add a pass every `natural_minutes`. Logs keep expiring one by
+        # one. With `older_natural`, every natural pass behaves like an older release:
+        # no daily rule, no end stamp, and a pass that removed some leaves more=0.
         minute = 60 * 1_000_000_000
         protected = 60
         for index in range(protected):
@@ -785,11 +821,15 @@ class DispatchLogRetentionTest(unittest.TestCase):
         names = protected + expiring
         one_round = -(-names // examine)
         days, starts_by_day, last_start, closed_day = 4, [0] * 4, 0, None
+        reopens_by_day = [0] * days
         with mock.patch.object(R, "EXAMINE_LIMIT", examine):
             for step in range(days * 24 * 60):
                 at = self.now + step * minute
-                if step % 120 == 0:
-                    R.sweep(self.jobs, now_ns=at)
+                if step % natural_minutes == 0:
+                    if older_natural:
+                        reopens_by_day[step // (24 * 60)] += self._older_pass(at)
+                    else:
+                        R.sweep(self.jobs, now_ns=at)
                     continue
                 passed = R.follow_up_pass_ns(self.jobs, now_ns=at)
                 if passed > last_start:
@@ -798,10 +838,45 @@ class DispatchLogRetentionTest(unittest.TestCase):
                     R.sweep(self.jobs, now_ns=at)
                 if closed_day is None and self._state().get("round_closed_ns"):
                     closed_day = step // (24 * 60)
-        self.assertEqual(closed_day, 0)                      # the first round is chased to its end
-        self.assertGreaterEqual(starts_by_day[0], one_round - 4)
-        self.assertTrue(all(count <= one_round + 3 for count in starts_by_day), starts_by_day)
-        self.assertLessEqual(sum(starts_by_day), days * (one_round + 3))
+        return {"closed_day": closed_day, "starts": starts_by_day, "reopens": reopens_by_day,
+                "one_round": one_round, "days": days}
+
+    def _older_pass(self, at):
+        # The current pass with the daily rule switched off, its end stamp undone and
+        # its `more` written as an older release would: returns 1 when it reopened.
+        before = self._state() if (self.root / R.STATE_NAME).exists() else {}
+        with mock.patch.object(R, "ROUND_REOPEN_SECONDS", 0):
+            result = R.sweep(self.jobs, now_ns=at)
+        if not isinstance(result, dict) or "round_left" not in result:
+            return 0
+        state = self._state()
+        if "round_closed_ns" in before:
+            state["round_closed_ns"] = before["round_closed_ns"]
+        else:
+            state.pop("round_closed_ns", None)
+        if 0 < result["removed"] < R.REMOVE_LIMIT and not result.get("over_limit_bytes"):
+            state["last_result"]["more"] = 0
+        (self.root / R.STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
+        return int(before.get("round_left") == 0 and result["round_left"] > 0)
+
+    def test_a_runner_chasing_more_stays_within_one_round_a_day(self):
+        days = self._chase_days()
+        one_round, starts = days["one_round"], days["starts"]
+        self.assertEqual(days["closed_day"], 0)              # the first round is chased to its end
+        self.assertGreaterEqual(starts[0], one_round - 4)
+        self.assertTrue(all(count <= one_round + 3 for count in starts), starts)
+        self.assertLessEqual(sum(starts), days["days"] * (one_round + 3))
+
+    def test_older_natural_callers_cost_the_runner_at_most_one_start_per_reopening(self):
+        # Every natural pass every half hour comes from an older release that reopens a
+        # spent round on any removal. The runner then starts once more per reopening, and
+        # the current pass closes the round again instead of chasing it.
+        days = self._chase_days(natural_minutes=30, older_natural=True)
+        one_round, starts, reopens = days["one_round"], days["starts"], days["reopens"]
+        self.assertGreater(sum(reopens[1:]), 0)             # the scene does reopen rounds
+        for day in range(days["days"]):
+            # at most the one round a day allows, plus one start per older reopening
+            self.assertLessEqual(starts[day], one_round + reopens[day] + 3, (starts, reopens))
 
     def test_unknown_bytes_is_split_into_three_disjoint_counts(self):
         self.add_row("att-a-unknown", self.log("a-unknown.jsonl", b"u" * 11), harness="other",

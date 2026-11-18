@@ -865,6 +865,24 @@ class ReconcileDutyTest(IsolatedCase):
             self.assertEqual(count, 1)
             group.assert_not_called()
 
+    def test_a_populated_previous_group_is_looked_at_again_at_most_once_a_minute(self):
+        peer_steward._RETENTION_GROUP_SEEN.clear()
+        self.addCleanup(peer_steward._RETENTION_GROUP_SEEN.clear)
+        self._runner_state(3600, child_pgid=4300)
+        self._log_state(61, more=1, round_left=10)
+        clock = [1000.0]
+        with mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: clock[0]):
+            first = self._maintenance(observation="populated")
+            within = self._maintenance(observation="empty")
+            clock[0] += 61
+            after = self._maintenance(observation="populated")
+            self._log_state(61, more=1, round_left=9)      # a newer log pass: look at once
+            newer = self._maintenance(observation="empty")
+        self.assertEqual((first[1], first[2].call_count), (0, 1))
+        self.assertEqual((within[1], within[2].call_count), (0, 0))   # no /proc walk this tick
+        self.assertEqual((after[1], after[2].call_count), (0, 1))
+        self.assertEqual((newer[1], newer[2].call_count), (1, 1))
+
     def test_an_unknown_log_state_leaves_the_six_hour_window_alone(self):
         states = {
             "no file": None,

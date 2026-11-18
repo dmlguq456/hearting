@@ -871,23 +871,29 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 unknown_names.add(name)
                 deferred += 1
     over_limit_bytes = max(0, total_bytes - removed_bytes - MAX_LOG_BYTES)
-    # A round is every name the rows point at, looked at once. A pass that found
-    # nothing to remove keeps the short interval until the round is spent; a
-    # removal after that opens the next round.
+    # A round is every name the rows point at, looked at once. While a round is
+    # open every pass keeps the short interval, whatever it removed: what it
+    # removed says nothing about the names not yet examined. A removal after the
+    # round is spent opens the next round, at most once a day.
     left = state.get("round_left")
     if type(left) is not int or left < 0:
         left = len(ordered)
+    closed = state.get("round_closed_ns")
+    recent = (type(closed) is int and 0 <= now_ns - closed < ROUND_REOPEN_SECONDS * 1_000_000_000)
+    if recent and left > 0:
+        # Within a day of the recorded end, an open round can only have been
+        # reopened by an older release that does not know the daily rule.
+        left = 0
     spent_now = bool(left)
     left = max(0, left - len(examined_names))
     if spent_now and not left:
         state["round_closed_ns"] = now_ns  # this pass ended the round
-    closed = state.get("round_closed_ns")
-    recent = (type(closed) is int and 0 <= now_ns - closed < ROUND_REOPEN_SECONDS * 1_000_000_000)
+        recent = True
     if removed and not left and not recent:
         # A new round opens only when the last one ended over a day ago or its
         # end time is unknown; otherwise each newly expired log would reopen it.
         left = len(ordered)
-    round_more = bool(examined_names) and not selected and left > 0
+    round_more = bool(examined_names) and left > 0
     state["round_left"] = left
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
